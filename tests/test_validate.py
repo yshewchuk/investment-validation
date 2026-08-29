@@ -48,12 +48,39 @@ class TestChainIntegrity:
         assert len(clean) == len(frame)
         assert report.rows_excluded == 0
 
-    def test_crossed_quotes_are_excluded(self):
+    def test_crossed_quotes_are_repaired_not_excluded(self):
+        # Dropping the row would drop the whole trade, and crossed quotes
+        # concentrate in the biggest movers — a selection bias larger than the
+        # effect being measured.
         frame = chain_frame()
-        frame.loc[0, "bid"] = 5.0  # bid > ask
+        frame.loc[0, "bid"] = 5.0  # bid 5.0 against ask 1.4
         clean, report = validate_chains(frame)
-        assert len(clean) == len(frame) - 1
-        assert not report.ok
+        assert len(clean) == len(frame)
+        row = clean.loc[0]
+        assert row["bid"] == pytest.approx(1.4)
+        assert row["ask"] == pytest.approx(1.4)
+        assert bool(row["quote_repaired"]) is True
+
+    def test_repaired_quotes_are_counted(self):
+        frame = chain_frame()
+        frame.loc[0:2, "bid"] = 5.0
+        _, report = validate_chains(frame)
+        check = next(c for c in report.checks if c.name == "crossed_quotes_repaired")
+        assert check.n_failed == 3
+
+    def test_untouched_rows_are_not_marked_repaired(self):
+        clean, _ = validate_chains(chain_frame(n=4))
+        assert not clean["quote_repaired"].any()
+
+    def test_a_repaired_quote_prices_without_raising(self):
+        from engine.fills import MID
+
+        frame = chain_frame(n=2)
+        frame.loc[0, "bid"] = 5.0
+        clean, _ = validate_chains(frame)
+        # The FillModel refuses crossed quotes by design; validation is what
+        # guarantees it never sees one.
+        assert MID.buy(clean.loc[0, "bid"], clean.loc[0, "ask"]) == pytest.approx(1.4)
 
     def test_negative_prices_are_excluded(self):
         frame = chain_frame()
@@ -111,11 +138,11 @@ class TestChainIntegrity:
 class TestQuarantinePolicy:
     """Routine row exclusions are counted; structural failures are flagged."""
 
-    def test_a_few_crossed_penny_quotes_do_not_flag_the_file(self, tmp_path):
-        # Deep-OTM 0.04/0.03 markets appear in most chain files. Flagging 19,000
-        # files for them would bury the cases that need a human.
+    def test_a_few_bad_rows_do_not_flag_the_file(self, tmp_path):
+        # A handful of unusable rows appear across most chain files. Flagging
+        # 19,000 files for them would bury the cases that need a human.
         frame = chain_frame(n=1000)
-        frame.loc[0, "bid"] = 5.0
+        frame.loc[0, "bid"] = -1.0
         _, report = validate_chains(
             frame, source_file="x.json.gz", quarantine_root=tmp_path
         )
@@ -125,7 +152,7 @@ class TestQuarantinePolicy:
 
     def test_a_high_exclusion_rate_flags_the_file(self, tmp_path):
         frame = chain_frame(n=100)
-        frame.loc[0:10, "bid"] = 5.0
+        frame.loc[0:10, "bid"] = -1.0
         _, report = validate_chains(
             frame, source_file="bad.json.gz", quarantine_root=tmp_path
         )
@@ -216,13 +243,13 @@ class TestReportAggregation:
         for i in range(3):
             frame = chain_frame(n=10)
             if i == 2:
-                frame.loc[0, "bid"] = 9.0
+                frame.loc[0, "bid"] = -1.0
             _, part = validate_chains(frame)
             total.merge(part)
         assert total.rows_in == 30
         assert total.rows_out == 29
         assert not total.ok
-        assert "bid_le_ask" in total.summary()["failed_checks"]
+        assert "bid_non_negative" in total.summary()["failed_checks"]
 
     def test_summary_is_serializable(self):
         _, report = validate_chains(chain_frame(n=5))

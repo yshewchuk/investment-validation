@@ -205,6 +205,7 @@ def validate_chains(
         report.rows_out = 0
         return df, report
 
+    df = df.copy()
     bad = pd.Series(False, index=df.index)
     reasons: list[str] = []
 
@@ -217,7 +218,42 @@ def validate_chains(
             bad = bad | mask
 
     quoted = df["bid"].notna() & df["ask"].notna()
-    flag(quoted & (df["bid"] > df["ask"]), "bid_le_ask", "crossed quote")
+
+    # -- crossed quotes are REPAIRED, not excluded ------------------------
+    #
+    # Dropping a crossed row looks conservative and is not. A structure needs
+    # every one of its legs, so losing one row loses the whole trade — and the
+    # trades that lose a leg are not a random sample. They are the big movers:
+    # after a large gap, one side of a now-worthless leg goes stale while the
+    # other reprices, e.g. ALGN 2018-10-25, where the 295 call quoted bid 9.80
+    # against ask 0.35. Excluding those rows removed 114 of 5,444 S2 trades
+    # whose mean return was +95%, dragging the measured edge from +3.5% to
+    # +1.8% — a selection bias larger than the effect being measured.
+    #
+    # The repair collapses the quote to `min(bid, ask)`. In every case observed
+    # the crossed pair is a stale high bid against a fresh low ask on a nearly
+    # worthless option, so the minimum is the economically sane value, and it is
+    # the choice that cannot manufacture value out of a data error. The row is
+    # flagged so a consumer can exclude or re-price it deliberately.
+    crossed = quoted & (df["bid"] > df["ask"])
+    df["quote_repaired"] = False
+    n_crossed = int(crossed.sum())
+    if n_crossed:
+        repaired = np.minimum(df.loc[crossed, "bid"], df.loc[crossed, "ask"])
+        df.loc[crossed, "bid"] = repaired
+        df.loc[crossed, "ask"] = repaired
+        df.loc[crossed, "mid"] = repaired
+        df.loc[crossed, "quote_repaired"] = True
+    report.add(
+        CheckResult(
+            "crossed_quotes_repaired",
+            True,  # a repair is a recorded outcome, not a failure
+            len(df),
+            n_crossed,
+            f"{n_crossed} crossed quote(s) collapsed to min(bid, ask) and flagged",
+        )
+    )
+
     flag(quoted & (df["bid"] < 0), "bid_non_negative")
     flag(quoted & (df["ask"] < 0), "ask_non_negative")
     flag(df["strike"] <= 0, "strike_positive")

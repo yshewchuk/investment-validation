@@ -209,6 +209,14 @@ OPTION_CHAINS = TableSchema(
         ("src", "string", True, "Source system"),
         ("src_file", "string", True, "Raw file this row was parsed from"),
         ("chain_kind", "string", True, "entry | exit | t14 | c2 — why it was pulled"),
+        (
+            "quote_repaired",
+            "bool",
+            True,
+            "The raw quote was crossed (bid > ask) and was collapsed to "
+            "min(bid, ask). Excluding these rows instead drops whole trades, "
+            "and they concentrate in the biggest movers — see validate.py",
+        ),
     ),
 )
 

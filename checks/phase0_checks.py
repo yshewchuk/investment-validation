@@ -293,13 +293,19 @@ def check_poison() -> str:
         tmp_path = Path(tmp)
         quarantine_root = tmp_path / "quarantine"
 
-        # (a) structurally broken rows in an otherwise-valid file
+        # (a) structurally broken rows in an otherwise-valid file.
+        #
+        # A crossed quote is deliberately NOT used as poison: it is repairable
+        # and is repaired (see validate.py). Poison has to be something no
+        # repair can rescue — a negative price and an expiry that predates the
+        # observation.
         doc = json.loads(gzip.open(source, "rt").read())
         rows = doc.get("rows", [])
         _require(len(rows) >= 10, "sample file too small to poison")
-        for row in rows[: max(1, len(rows) // 5)]:
-            row["callBidPrice"] = 999.0  # crossed against the ask
-            row["dte"] = -5
+        n_poison = max(1, len(rows) // 5)
+        for row in rows[:n_poison]:
+            row["putBidPrice"] = -5.0
+            row["expirDate"] = "1999-01-01"
         poisoned = tmp_path / source.name
         with gzip.open(poisoned, "wt") as fh:
             json.dump(doc, fh)
@@ -533,6 +539,29 @@ def check_fillmodel() -> str:
 # --------------------------------------------------------------------------
 
 
+@check("verdicts", description="published verdict numbers reproduce through the engine")
+def check_verdicts() -> str:
+    from checks.phase0_verdicts import PUBLISHED, TOLERANCE, TRADE_SETS, reproduce
+    import json as _json
+
+    _require(PUBLISHED.exists(), f"published results missing: {PUBLISHED}")
+    published = _json.loads(PUBLISHED.read_text())
+
+    lines = []
+    for label, (path, date_column) in TRADE_SETS.items():
+        result = reproduce(label, path, date_column)
+        _require("error" not in result, f"{label}: {result.get('error')}")
+        expected = published[label]["mid_mean"]
+        got = result["mid"]["mean"]
+        _require(
+            abs(got - expected) <= TOLERANCE,
+            f"{label}: engine mid {got:+.4f} vs published {expected:+.4f} "
+            f"(tolerance {TOLERANCE})",
+        )
+        lines.append(f"{label} {got:+.4f}~{expected:+.4f} (n={result['mid']['n']:,})")
+    return "; ".join(lines)
+
+
 @check("coverage_report", description="the audit renders with real numbers")
 def check_coverage_report() -> str:
     from engine.data import coverage as cov
@@ -717,6 +746,7 @@ ORDER = [
     "poison",
     "structures",
     "fillmodel",
+    "verdicts",
     "coverage_report",
     "hygiene_poison",
     "recovery_drill",
