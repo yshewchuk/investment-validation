@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from engine import calendar as cal
+from engine import paths
 from engine.calendar import (
     AMC,
     BMO,
@@ -38,6 +39,10 @@ class TestSessionMapping:
 class TestHolidayRules:
     """The generator has to reproduce real NYSE history to be trustworthy."""
 
+    @pytest.mark.skipif(
+        not paths.GSPC_DAILY.exists(),
+        reason="needs the cached S&P daily series; absent in a bare clone",
+    )
     def test_reproduces_the_index_series_except_unscheduled_closures(self):
         tc = cal.trading_calendar()
         observed = set(tc.days[tc.days <= tc.observed_through])
