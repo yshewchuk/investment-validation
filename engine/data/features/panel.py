@@ -176,6 +176,18 @@ def build_events(moves_dir: Path | None = None) -> pd.DataFrame:
             prior_implied.append(implied[k])
 
     _log(f"events: {len(rows)} rows from {len(files)} files ({skipped_empty} empty)")
+    if not rows:
+        # Shape matters even when empty: a caller that goes on to add regime and
+        # run-up features must not hit a KeyError instead of an empty result.
+        columns = ["ticker", "k", "date", "quarter", "move", "abs_move", "implied_move",
+                   "n_prior", "mean_prior_move", "mean_prior_abs_move",
+                   "mean_prior_implied_move", "year"]
+        columns += [f"ema{s}_prior_move" for s in SPANS]
+        columns += [f"ema{s}_prior_abs_move" for s in SPANS]
+        empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in columns})
+        empty["ticker"] = pd.Series(dtype="object")
+        empty["date"] = pd.Series(dtype="datetime64[ns]")
+        return empty
     out = pd.DataFrame(rows)
     out["date"] = pd.to_datetime(out["date"])
     return out.sort_values(["ticker", "date"]).reset_index(drop=True)
@@ -347,7 +359,7 @@ def add_orats_features(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> p
     # it says how stale the figure is, and it is what decides which ORATS unit
     # era the raw value came from — the event date is the wrong key for that
     # when an event sits on or just after an era boundary.
-    mcap_asof = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+    mcap_asof = np.full(n, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
 
     positions: dict[str, list[tuple[int, np.datetime64]]] = {}
     for i, (ticker, event_date) in enumerate(
