@@ -1,0 +1,103 @@
+# Allowlist .gitignore for the PUBLIC repo.
+#
+# Policy: everything is ignored by default. Code and build docs are allowed
+# back in explicitly. Hard blocks are listed LAST so they win over the allows
+# (git applies the last matching rule).
+#
+# Never in this repo: credentials, any data tier or cache, results / reports /
+# figures, research verdict documents, the ledger, and live watchlist configs.
+# See RECOVERY.md for what lives in the private mirror instead.
+
+# ── default-deny ─────────────────────────────────────────────────────────
+*
+!*/
+
+# ── allowed code + config extensions ─────────────────────────────────────
+!*.py
+!*.yaml
+!*.yml
+!*.toml
+!*.cfg
+!*.ini
+!*.js
+!*.css
+!*.html
+!.gitignore
+!.env.example
+
+# ── docs: allow-listed by exact path (research findings stay private) ────
+!/README.md
+!/RECOVERY.md
+!/EARNINGS_VOL_PROGRAM_PLAN.md
+!/guides/*.md
+!/engine/**/*.md
+!/checks/*.md
+!/tests/*.md
+!/tools/*.md
+
+# ── HARD BLOCKS (last rule wins — these override every allow above) ──────
+
+# credentials
+.env
+.env.*
+!.env.example
+
+# Loose exploratory scripts at the repo root: pre-engine research, with
+# findings embedded in comments and hardcoded result values. Code, but not
+# code this repo publishes — they go to the private mirror.
+/*.py
+
+# AGENTS.md carries the user's oquants account workspace/model IDs and the
+# decoded coefficients of a paid vendor's model. Operational and binding, but
+# private.
+/AGENTS.md
+
+# dashboard/shared.py hardcodes the thesis watchlist universe. That is position
+# intent, which never ships publicly — the guide names the same content as
+# off-limits when it lives in config/thesis/universe.yaml, and it is no more
+# publishable for being embedded in a module. Revisit when Phase 3 moves the
+# universe into config.
+/dashboard/
+
+# data tiers, caches, and the grandfathered research trees
+/data/
+/ledger/
+/reports/
+/polygon_cache/
+/earnings_predictions/
+/bt/
+/config/thesis/
+**/results/
+**/figures/
+**/models/
+**/cache/
+**/__pycache__/
+.venv/
+venv/
+.pytest_cache/
+
+# data + artifact file types (defence in depth behind the extension allowlist)
+*.csv
+*.csv.gz
+*.tsv
+*.parquet
+*.json.gz
+*.jsonl
+*.gz
+*.zip
+*.sqlite
+*.sqlite3
+*.db
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.npy
+*.npz
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.log
+*.done*
