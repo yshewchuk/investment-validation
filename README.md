@@ -121,6 +121,14 @@ read. All are documented in full in `reports/phase0_data_audit.md` and
    difference in one of the nine model features between training and live
    scoring. The panel definition is now pinned and reproduced exactly.
 
+4. **Crossed quotes carry real weight in the published numbers.** 0.076% of
+   chain rows quote a bid above the ask — a stale bid on a leg that just became
+   worthless, concentrated in the biggest movers. Handling matters more than the
+   frequency suggests: excluding those rows drops whole trades and pulls the S2
+   base exposure from +3.5% to +1.8%, while pricing them at a crossed mid pushes
+   it to +3.7%. Tier 2 repairs them to `min(bid, ask)` and flags them
+   (`quote_repaired`), giving +3.48%.
+
 ---
 
 ## Operating constraints
