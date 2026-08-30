@@ -1,7 +1,13 @@
 # Phase 4 Implementation Guide — Completing the Verification & Reporting Layer
 
 > **BUILT — 2026-08-30.** Every part of this guide is implemented and
-> `python3 checks/phase4_checks.py` is green (17/17). The evidence report is
+> `python3 checks/phase4_checks.py` is green (18/18, including a check the
+> guide did not ask for: **A12, the transaction log**. Every plotted equity
+> curve now ships `results/transactions_<hash>.csv` — one row per trade with
+> the quotes it was priced from, its sizing, and its contribution — reconciled
+> to the curve on every run, so a chart can be audited row by row instead of
+> taken on trust. Requested after the first build; §2 of every report announces
+> it and carries the recipe for re-deriving the curve by hand.) The evidence report is
 > `reports/phase4_reporting.md`; what remains open is listed there (chiefly:
 > the ledger has no forward rows until the Sep-1 pull refreshes the calendar).
 > The guide is kept as written — it is the specification the build was measured

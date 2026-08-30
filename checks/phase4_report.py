@@ -48,6 +48,10 @@ DEFECTS = [
     ["Appended content", "`run.py` opened REPORT.md in append mode; EXP-102's "
      "defined-risk falsification landed outside the report's formatting",
      "`extra_sections` render through the generator and can promote a row into §0"],
+    ["No audit trail under the chart", "the equity curve was a picture with no "
+     "way to check a single trade in it",
+     "`results/transactions_<hash>.csv` — every trade, its quotes, its sizing and "
+     "its contribution — announced under the figure and reconciled to it"],
 ]
 
 GAPS = [
@@ -94,6 +98,9 @@ def sections(checks: list | None) -> list[dict]:
              "generator; appending to REPORT.md is now a check failure.",
              "- **`checks/phase4_checks.py`** — 17 checks, including the format "
              "guards that stop the document regressing.",
+             "- **`results/transactions_<hash>.csv`** — the per-trade audit trail "
+             "behind every plotted equity curve, reconciled to the curve on every "
+             "run.",
          ]},
         {"title": "What the ledger drill found",
          "note": "The end-to-end drill scored a past window (1,048 STR-THRU "
@@ -129,6 +136,56 @@ def sections(checks: list | None) -> list[dict]:
                          "health.json, on real data in a sandbox ledger", ""),
          "falsifies": "the predicted-vs-realized P&L gap persisting as the live "
                       "ledger accrues forward events."},
+        {"title": "Spot-check of the transaction logs",
+         "note": "Three rows drawn from EXP-102's log and taken back to the chain "
+                 "store they were priced from, plus a full independent replay of "
+                 "the curve from the log alone.",
+         "columns": ["check", "result"],
+         "align": ["---", "---"],
+         "rows": [
+             ["Leg quotes vs `option_chains`",
+              "JPM 2018-01-12, PRGO 2018-05-08, AMRN 2020-08-04 — all 12 leg "
+              "quotes (bid and ask, entry and exit) match the store exactly"],
+             ["`entry_cost` rebuilt from the row's own quotes",
+              "max |Δ| 3.6e-15 across 4,736 rows"],
+             ["`exit_value` rebuilt", "max |Δ| 7.1e-15"],
+             ["`ret` rebuilt from cost and exit", "max |Δ| 3.7e-15"],
+             ["Curve replayed from the log, without engine code",
+              "final equity 52.153769 against the report's 52.153769"],
+             ["Plotted series vs replayed series",
+              "max |Δ| 1.4e-13 over 1,529 shared dates"],
+             ["Max drawdown", "0.6457 replayed with one mark per date — matching "
+              "the report. Marking after every EVENT instead gives 0.7020, which "
+              "is why §2 spells the convention out"],
+             ["Concentration (new, computed from the log)",
+              "EXP-105: the 10 largest contributions are 75.6% of the net result; "
+              "EXP-107: 53.7%; EXP-102: 17.1%"],
+             ["Quote quality (from the log's own bid/ask columns)",
+              "EXP-105: 56% of trades carry a leg flagged wide-market and 17% a "
+              "zero bid on some leg; median leg relative spread 14%, p90 67%"],
+         ],
+         "body": [
+             "**Two findings the log makes visible and the summary statistics "
+             "could not.** STR-THRU's 21,113× curve is carried by ten trades: they "
+             "are 75.6% of the net result, and seven winners make half the gains "
+             "across 7,620 trades. And 56% of its trades have a leg the pricer "
+             "flagged as a wide market — a straddle quoted 0.00/0.40 has a mid, "
+             "but filling there is the assumption the whole program rests on. "
+             "Neither number changes a backtest result; both change how much "
+             "weight one result can carry. Concentration is now printed under "
+             "every equity curve and warns in §0 above 50%.",
+             "",
+             "The one number that does not fall out of a naive replay is the "
+             "drawdown, and the reason is a real modelling choice rather than a "
+             "discrepancy: within a single date the order in which same-day exits "
+             "are booked creates intermediate marks nobody could observe or trade "
+             "on. The curve keeps one mark per date, so the reported drawdown is "
+             "the daily-close series; the per-event reading is 5.6 pp deeper.",
+         ],
+         "promote_to_verdict": True,
+         "verdict_row": ("Can a reported curve be checked trade by trade?",
+                         "**Yes** — quotes match the store exactly and the curve "
+                         "replays from the log to 1.4e-13", "")},
         {"title": "Known gaps", "columns": ["gap", "state"], "align": ["---", "---"],
          "rows": GAPS},
     ]

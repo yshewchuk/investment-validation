@@ -658,3 +658,82 @@ class TestPnlCalibration:
                                              realized_mean_pnl=0.019)
         md = report.write(tmp_path / "out").read_text()
         assert "**Expected P&L matches realized P&L:**" in md
+
+
+class TestTransactionLog:
+    """The chart's audit trail is announced where the chart is."""
+
+    def test_log_line_and_reconciliation_render(self, tmp_path):
+        result = _eval_result(tmp_path)
+        report = Report.from_eval(result)
+        md = report.write(tmp_path / "out").read_text()
+        section = md.split("## 2. Equity curve")[1].split("## 3.")[0]
+        assert "Transaction log" in section
+        assert "*Reconciled:" in section
+
+    def test_a_log_that_does_not_add_up_gets_a_banner(self, tmp_path):
+        result = _eval_result(tmp_path)
+        result.results["transaction_log"] = {
+            "rows": 80, "reconciles": False, "implied_final": 1.4,
+            "final_equity": 2.1, "abs_error": 0.7, "path": "results/x.csv"}
+        md = Report.from_eval(result).write(tmp_path / "out").read_text()
+        assert "does NOT reconcile" in md
+
+    def test_the_rederivation_recipe_is_printed(self, tmp_path):
+        # A spot-checker who marks per event instead of per date gets a deeper
+        # drawdown than the chart and thinks the report is wrong; the recipe is
+        # what stops that being a bug report.
+        result = _eval_result(tmp_path)
+        md = Report.from_eval(result).write(tmp_path / "out").read_text()
+        section = md.split("## 2. Equity curve")[1].split("## 3.")[0]
+        assert "exits before entries" in section
+        assert "one mark per date" in section
+        assert "figures/equity_drawdown.json" in section
+
+
+class TestCellEscaping:
+    def test_a_pipe_in_free_text_does_not_split_the_row(self, tmp_path):
+        from engine.report import cell
+
+        assert cell("max |Δ| 3.6e-15") == r"max \|Δ\| 3.6e-15"
+
+        result = _eval_result(tmp_path)
+        report = Report.from_eval(result, extra_sections=[
+            {"title": "escaping", "columns": ["check", "result"],
+             "rows": [["rebuilt", "max |Δ| 3.6e-15"]]},
+        ])
+        md = report.write(tmp_path / "out").read_text()
+        row = [ln for ln in md.splitlines() if ln.startswith("| rebuilt |")][0]
+        # Two columns declared, so exactly two separators inside the row.
+        assert row.count("|") - row.count(r"\|") == 3, row
+
+
+class TestConcentration:
+    """A mean return cannot say whether ten trades carried the curve."""
+
+    def _result(self, tmp_path, share=0.8):
+        result = _eval_result(tmp_path)
+        result.results["transaction_log"] = {
+            "rows": 500, "reconciles": True, "implied_final": 3.0,
+            "final_equity": 3.0, "abs_error": 0.0, "path": "results/x.csv",
+            "concentration": {"top10_net_share": share, "top1_net_share": share / 3,
+                              "trades_for_half_the_gains": 7, "n_winners": 210},
+        }
+        return result
+
+    def test_concentration_line_renders(self, tmp_path):
+        md = Report.from_eval(self._result(tmp_path)).write(tmp_path / "out").read_text()
+        section = md.split("## 2. Equity curve")[1].split("## 3.")[0]
+        assert "**Concentration:**" in section
+        assert "80.0% of the net result" in section
+        assert "7 of 210 winning trades" in section
+
+    def test_heavy_concentration_warns(self, tmp_path):
+        report = Report.from_eval(self._result(tmp_path))
+        md = report.write(tmp_path / "out").read_text()
+        assert "10 trades carry 80.0%" in md.split("## 1.")[0]
+
+    def test_spread_out_gains_do_not_warn(self, tmp_path):
+        report = Report.from_eval(self._result(tmp_path, share=0.2))
+        verdict_block = report.write(tmp_path / "out").read_text().split("## 1.")[0]
+        assert "trades carry" not in verdict_block

@@ -51,7 +51,7 @@ from engine import paths
 __all__ = ["GENERATOR_VERSION", "ChecklistItem", "Advisory", "accuracy_checklist",
            "advisories", "build_provenance", "Report", "Verdict", "verdict",
            "compute_warnings", "sample_funnel", "stress_state", "METRIC_SPEC",
-           "GLOSSARY", "SECTIONS_BY_KIND", "COMPOSITE_METRIC_KEYS", "fmt_metric", "metric_label", "MISSING",
+           "GLOSSARY", "SECTIONS_BY_KIND", "cell", "COMPOSITE_METRIC_KEYS", "fmt_metric", "metric_label", "MISSING",
            "MIN_STRESS_COVERAGE", "MIN_BRIER_SKILL",
            "pct", "prob", "ratio", "num", "count", "money_x", "pp"]
 
@@ -457,6 +457,19 @@ MIN_STRESS_COVERAGE = 0.05
 MIN_BRIER_SKILL = -0.05
 
 
+def cell(value: Any) -> str:
+    """One markdown table cell, safe to paste free text into.
+
+    A pipe inside a cell silently splits the row into extra columns, so a
+    caller writing a perfectly reasonable ``max |Δ| 3.6e-15`` would corrupt the
+    table it was documenting. Escaped here, once, rather than remembered at
+    every call site.
+    """
+    if value is None:
+        return ""
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
 def fmt_metric(key: str, value: Any) -> str:
     """Render a metric through its declared formatter."""
     formatter = METRIC_SPEC.get(key, (num, key, ""))[0]
@@ -618,6 +631,13 @@ def compute_warnings(results: Mapping[str, Any], calibration: Mapping[str, Any] 
     if inconclusive:
         warns.append(f"{len(inconclusive)} stress stage(s) INCONCLUSIVE "
                      f"({', '.join(inconclusive)})")
+
+    conc = ((results.get("transaction_log") or {}).get("concentration") or {})
+    share = _f(conc.get("top10_net_share"))
+    if share is not None and share > 0.5:
+        warns.append(f"10 trades carry {prob(share)} of the net result "
+                     f"({count(conc.get('trades_for_half_the_gains'))} winners make "
+                     "half the gains)")
 
     concurrency = _f(headline.get("max_concurrency"))
     if concurrency is not None and concurrency > 1 and (results.get("mc") or {}).get("by_fraction"):
@@ -1486,8 +1506,8 @@ class Report:
         add("|---|---:|---|")
         for row in funnel:
             marker = " ← **headline**" if row.get("headline") else ""
-            add(f"| {row['stage']}{marker} | {count(row.get('events'))} | "
-                f"{row.get('note', '')} |")
+            add(f"| {cell(row['stage'])}{marker} | {count(row.get('events'))} | "
+                f"{cell(row.get('note', ''))} |")
         add("")
         add("Every §1–§5 number is computed on the row marked **headline**; a drop "
             "between stages that carries no reason is a defect, not a rounding.")
@@ -1516,6 +1536,55 @@ class Report:
                    if cap else ", UNCAPPED — per-trade sizing times concurrency is "
                                "implicit leverage")
                 + ".")
+        log = (self.context.get("results", {}) or {}).get("transaction_log") or {}
+        if log.get("rows"):
+            add("")
+            add(f"**Transaction log — every trade behind this curve:** "
+                f"`{log.get('path', 'results/transactions_*.csv')}` "
+                f"({count(log.get('rows'))} rows"
+                + (f", sha256 `{str(log['sha256'])[:16]}…`" if log.get("sha256") else "")
+                + "). One row per trade in the order the equity engine processed it, "
+                "carrying the quotes it was priced from (per-leg bid/ask, strike, "
+                "expiry, DTE at both ends), the contracts bought, the equity it was "
+                "sized off, and what it contributed to the final number. A chart "
+                "nobody can audit row by row is an assertion, not evidence.")
+            add("")
+            if log.get("reconciles"):
+                add(f"*Reconciled: the {count(log.get('rows'))} contributions sum to "
+                    f"{ratio(log.get('implied_final'))} against the curve's "
+                    f"{ratio(log.get('final_equity'))} (error "
+                    f"{log.get('abs_error', 0):.2e}).*")
+                add("")
+                add("**To re-derive this curve from the log** (and get the same "
+                    "drawdown): process events chronologically, **exits before "
+                    "entries on the same date**; an exit credits "
+                    "`contracts × exit_value`, an entry debits "
+                    "`contracts × entry_cost`; mark equity as "
+                    "`cash + Σ contracts × entry_cost` over the still-open positions; "
+                    "and keep **one mark per date — the last one**. That last step is "
+                    "load-bearing: marking after every event instead of every date "
+                    "reads intra-day orderings as troughs and reports a deeper "
+                    "drawdown than the daily series the chart plots. The plotted "
+                    "series itself is in `figures/equity_drawdown.json`, so the chart "
+                    "can also be checked directly, without replaying anything.")
+            else:
+                add(f"> **⚠ The log does NOT reconcile with the curve:** contributions "
+                    f"imply {ratio(log.get('implied_final'))} against "
+                    f"{ratio(log.get('final_equity'))}. Treat both as suspect until "
+                    "this is explained — a log that does not add up is worse than no "
+                    "log, because it looks like evidence.")
+        conc = (log.get("concentration") or {}) if log else {}
+        if conc.get("trades_for_half_the_gains"):
+            add("")
+            share = conc.get("top10_net_share")
+            add(f"**Concentration:** the 10 largest contributions account for "
+                f"{prob(share) if share is not None else 'n/a'} of the net result, and "
+                f"{count(conc['trades_for_half_the_gains'])} of "
+                f"{count(conc.get('n_winners'))} winning trades make half the gains. "
+                "A mean return cannot say this; the transaction log can, and a curve "
+                "carried by a handful of trades is a different asset from one that is "
+                "not — the same edge, spread thinner, survives a bad week that this "
+                "one may not.")
         if "alpha" in figures:
             add("")
             add(f"Fill-quality degradation: ![alpha](figures/{figures['alpha'].name})")
@@ -1790,10 +1859,10 @@ class Report:
             rows = section.get("rows")
             if columns and rows is not None:
                 aligns = section.get("align") or ["---"] * len(columns)
-                add("| " + " | ".join(str(c) for c in columns) + " |")
+                add("| " + " | ".join(cell(c) for c in columns) + " |")
                 add("|" + "|".join(aligns) + "|")
                 for row in rows:
-                    add("| " + " | ".join("" if c is None else str(c) for c in row) + " |")
+                    add("| " + " | ".join(cell(c) for c in row) + " |")
                 add("")
             for line in section.get("body", []) or []:
                 add(str(line))

@@ -205,12 +205,21 @@ def check_path_policy(rel: str, report: Report) -> None:
             break
 
 
-def check_blob(rel: str, blob: bytes, needles: dict[bytes, str], report: Report) -> None:
-    if len(blob) > MAX_BYTES:
+def check_blob(rel: str, blob: bytes, needles: dict[bytes, str], report: Report,
+               max_bytes: int = MAX_BYTES) -> None:
+    """Size + secret scan on one blob.
+
+    ``max_bytes`` is a parameter, not a constant, for exactly one caller: the
+    private mirror, whose job is to preserve multi-megabyte evidence artifacts
+    (transaction logs, the ledger) that this repo must never carry. The secret
+    scan below is identical either way — a bigger allowance never means a
+    laxer search.
+    """
+    if len(blob) > max_bytes:
         report.add(
             rel,
             "oversize",
-            f"{len(blob):,} bytes exceeds the {MAX_BYTES:,}-byte limit",
+            f"{len(blob):,} bytes exceeds the {max_bytes:,}-byte limit",
         )
     for needle, label in needles.items():
         if needle in blob:

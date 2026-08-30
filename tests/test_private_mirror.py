@@ -59,9 +59,14 @@ class TestCollection:
     def test_it_finds_real_files_and_stays_small(self):
         files, _ = collect()
         assert files, "the mirror collected nothing"
+        logs = [p for p in files if p.name.startswith("transactions_")]
+        rest = sum(p.stat().st_size for p in files if p not in set(logs))
         total = sum(p.stat().st_size for p in files)
-        # Code and docs only. If this balloons, a data glob has crept in.
-        assert total < 20_000_000, f"mirror is {total:,} bytes — check the allowlist"
+        # Docs, code and result artifacts. The transaction logs are budgeted
+        # separately because they are legitimately a few MB each; everything
+        # else ballooning means a data glob has crept into the allowlist.
+        assert rest < 10_000_000, f"non-log payload is {rest:,} bytes — check the allowlist"
+        assert total < 40_000_000, f"mirror is {total:,} bytes"
 
     def test_no_market_data_files_are_collected(self):
         """No market data — but the irreplaceable non-code artifacts DO ship.
@@ -81,6 +86,10 @@ class TestCollection:
             str(p) for p in files
             if p.suffix.lower() in banned
             and Path(p) not in allowed
+            # transactions_*.csv — the per-trade audit trail behind a report's
+            # equity curve. Licensed quotes, so public is out; without it a
+            # published chart cannot be checked against anything.
+            and not p.name.startswith("transactions_")
             # ledger/predictions/*.jsonl + ledger/outcomes/*.jsonl — the
             # out-of-time validator; nothing can regenerate a frozen prediction.
             and paths.LEDGER not in Path(p).parents

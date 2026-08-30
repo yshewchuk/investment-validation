@@ -81,6 +81,8 @@ __all__ = [
     "alpha_sweep",
     "breakeven_alpha_from_sweep",
     "build_equity",
+    "transaction_log",
+    "reconcile_transaction_log",
     "walk_forward",
     "monte_carlo",
     "stress_regimes",
@@ -421,6 +423,7 @@ def build_equity(
     mode: str = "cashflow",
     ret_col: str = "ret",
     max_deployed: float | None = None,
+    record: bool = False,
 ) -> dict[str, Any]:
     """Equity curve of a fixed-fraction sizing rule over priced trades.
 
@@ -454,6 +457,12 @@ def build_equity(
     order — the EXP-050 reference construction. It ignores overlap, so a new
     experiment reporting it overstates compounding; evaluate() flags the mode
     in the report.
+
+    ``record=True`` additionally returns ``ledger``: one row per trade with the
+    contracts bought, the equity it was sized off, the cash and deployment
+    after it, and its contribution to the final equity. That is the audit trail
+    behind the plotted curve — without it the chart is an assertion, and a
+    reader who wants to check one trade has nowhere to look.
     """
     if mode not in ("cashflow", "sequential"):
         raise EvaluationError(f"unknown equity mode {mode!r}")
@@ -462,7 +471,8 @@ def build_equity(
     if trades.empty:
         return {"equity": pd.Series(dtype=float), "final": 1.0, "max_dd": 0.0,
                 "max_concurrency": 0, "mode": mode, "fraction": fraction,
-                "peak_deployment": 0.0, "worst_cash": 1.0, "constrained_entries": 0}
+                "peak_deployment": 0.0, "worst_cash": 1.0, "constrained_entries": 0,
+                "ledger": pd.DataFrame() if record else None}
 
     t = trades.sort_values(["entry_date", "exit_date"], kind="stable").reset_index(drop=True)
     entry_dates = pd.to_datetime(t["entry_date"])
@@ -472,8 +482,12 @@ def build_equity(
     if mode == "sequential":
         eq = 1.0
         marks: list[tuple[pd.Timestamp, float]] = [(entry_dates.iloc[0] - pd.Timedelta(days=1), 1.0)]
+        seq_before: list[float] = []
+        seq_after: list[float] = []
         for i, r in enumerate(rets):
+            seq_before.append(eq)
             eq *= 1.0 + fraction * r
+            seq_after.append(eq)
             marks.append((exit_dates.iloc[i], eq))
         curve = pd.Series(dict(marks)).sort_index()
         curve = curve[~curve.index.duplicated(keep="last")]
@@ -489,6 +503,19 @@ def build_equity(
             "peak_deployment": float(np.nan),
             "worst_cash": float(np.nan),
             "constrained_entries": 0,
+            "ledger": (pd.DataFrame({
+                "seq": np.arange(len(t)),
+                "equity_at_entry": seq_before,
+                "equity_after_exit": seq_after,
+                "pnl_contribution": np.asarray(seq_after) - np.asarray(seq_before),
+                # No position sizing exists in this mode; the columns stay so
+                # the log has one shape, and NaN says "not modelled" rather
+                # than implying a contract count nobody computed.
+                "contracts": np.nan, "notional_at_entry": np.nan,
+                "cash_after_entry": np.nan, "deployed_after_entry": np.nan,
+                "concurrency_at_entry": np.nan, "constrained": False,
+                "proceeds_at_exit": np.nan,
+            }, index=t.index) if record else None),
         }
 
     # cashflow mode: process exits before entries on the same day, so a closing
@@ -510,6 +537,17 @@ def build_equity(
     cash = 1.0
     open_pos: dict[int, float] = {}
     marks = [(events[0][0] - pd.Timedelta(days=1), 1.0)]
+    n = len(t)
+    # Per-trade accounting, filled as the event loop passes each trade. These
+    # are the columns that let a reader re-derive the plotted curve by hand.
+    rec_contracts = np.zeros(n)
+    rec_equity_entry = np.full(n, np.nan)
+    rec_cash_entry = np.full(n, np.nan)
+    rec_deployed_entry = np.full(n, np.nan)
+    rec_concurrency = np.zeros(n, dtype=int)
+    rec_constrained = np.zeros(n, dtype=bool)
+    rec_proceeds = np.zeros(n)
+    rec_equity_exit = np.full(n, np.nan)
     concurrency = 0
     max_concurrency = 0
     peak_deployment = 0.0
@@ -519,9 +557,11 @@ def build_equity(
         if kind == 0:  # exit
             contracts = open_pos.pop(i, 0.0)
             cash += contracts * exits[i]
+            rec_proceeds[i] = contracts * exits[i]
             concurrency -= 1
         else:  # entry — size off the marked equity, not the cash balance
             equity_now = mark(cash, open_pos)
+            rec_equity_entry[i] = equity_now
             if equity_now > 0 and costs[i] > 0:
                 contracts = fraction * equity_now / costs[i]
                 if max_deployed is not None:
@@ -530,18 +570,27 @@ def build_equity(
                     if headroom <= 0:
                         contracts = 0.0
                         constrained_entries += 1
+                        rec_constrained[i] = True
                     else:
                         capped = headroom / costs[i]
                         if capped < contracts:
                             contracts = capped
                             constrained_entries += 1
+                            rec_constrained[i] = True
                 if contracts > 0:
                     cash -= contracts * costs[i]
                     open_pos[i] = contracts
+                rec_contracts[i] = contracts
             concurrency += 1
+            rec_concurrency[i] = concurrency
         max_concurrency = max(max_concurrency, concurrency)
         equity_now = mark(cash, open_pos)
         deployed_now = sum(c * costs[j] for j, c in open_pos.items())
+        if kind == 0:
+            rec_equity_exit[i] = equity_now
+        else:
+            rec_cash_entry[i] = cash
+            rec_deployed_entry[i] = deployed_now
         if equity_now > 0:
             peak_deployment = max(peak_deployment, deployed_now / equity_now)
             worst_cash = min(worst_cash, cash / equity_now)
@@ -558,7 +607,160 @@ def build_equity(
         "peak_deployment": peak_deployment,
         "worst_cash": worst_cash,
         "constrained_entries": constrained_entries,
+        "ledger": (pd.DataFrame({
+            "seq": np.arange(n),
+            "contracts": rec_contracts,
+            "notional_at_entry": rec_contracts * costs,
+            "equity_at_entry": rec_equity_entry,
+            "cash_after_entry": rec_cash_entry,
+            "deployed_after_entry": rec_deployed_entry,
+            "concurrency_at_entry": rec_concurrency,
+            "constrained": rec_constrained,
+            "proceeds_at_exit": rec_proceeds,
+            "equity_after_exit": rec_equity_exit,
+            # What this trade added to (or took from) final equity, in units of
+            # starting equity. These sum to final - 1 by construction, which is
+            # the reconciliation the report prints.
+            "pnl_contribution": rec_proceeds - rec_contracts * costs,
+        }, index=t.index) if record else None),
     }
+
+
+#: Columns that identify a trade well enough to look it up in a chain file.
+_LOG_IDENTITY = ("trade_id", "event_id", "ticker", "event_date", "session", "strategy",
+                 "variant", "entry_date", "exit_date", "strike", "expiry", "dte_entry",
+                 "fill_alpha", "entry_cost", "exit_value", "ret", "provenance")
+
+
+def _flatten_legs(blob: Any, max_legs: int = 2) -> dict[str, Any]:
+    """One trade's legs blob → flat ``entry_leg1_bid`` style columns.
+
+    The point of the transaction log is that a person can take a row to the
+    chain file it came from, so the quotes travel WITH the row: right, strike,
+    expiry, dte, bid and ask for every leg at both ends. Recomputing
+    ``entry_cost`` from those columns at the row's own alpha is the spot check.
+    """
+    out: dict[str, Any] = {}
+    try:
+        doc = json.loads(blob) if isinstance(blob, str) else (blob or {})
+    except ValueError:
+        return out
+    for phase in ("entry", "exit"):
+        legs = list(doc.get(phase) or [])
+        for i in range(max_legs):
+            prefix = f"{phase}_leg{i + 1}_"
+            leg = legs[i] if i < len(legs) else {}
+            for field_name in ("name", "right", "side", "qty", "strike", "expiry",
+                               "dte", "bid", "ask", "price"):
+                out[prefix + field_name] = leg.get(field_name)
+            out[prefix + "wide"] = leg.get("wide_market")
+    return out
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _leg_count(blobs: Sequence[Any], cap: int = 8) -> int:
+    """Widest leg count in a trade set, so no leg is silently dropped.
+
+    Today's three structures are two-legged; Phase 6's put diagonals and
+    spreads need not be. Hard-coding 2 would drop a third leg from the log
+    while the file still looked complete — the failure mode a log must not
+    have.
+    """
+    widest = 0
+    for blob in blobs:
+        try:
+            doc = json.loads(blob) if isinstance(blob, str) else (blob or {})
+        except ValueError:
+            continue
+        widest = max(widest, len(doc.get("entry") or []), len(doc.get("exit") or []))
+        if widest >= cap:
+            return cap
+    return max(widest, 1)
+
+
+def transaction_log(trades: pd.DataFrame, equity: Mapping[str, Any],
+                    scores: pd.DataFrame | None = None,
+                    max_legs: int | None = None) -> pd.DataFrame:
+    """Every trade behind a plotted equity curve, one row each.
+
+    Identity + the quotes it was priced from + the equity accounting that put
+    it on the chart. Ordered exactly as the equity engine processed it, so the
+    curve can be re-derived from this file alone:
+    ``equity_after_exit`` of the last row equals the curve's final value, and
+    ``pnl_contribution`` sums to ``final - 1``.
+
+    ``scores`` (the walk-forward gate's out-of-sample probabilities) is joined
+    where present, because "why was this trade selected" is the second question
+    anyone spot-checking a gated curve asks.
+    """
+    ledger = equity.get("ledger")
+    if ledger is None:
+        raise EvaluationError("build_equity(record=True) is required for a transaction log")
+    ordered = trades.sort_values(["entry_date", "exit_date"], kind="stable")
+    keep = [c for c in _LOG_IDENTITY if c in ordered.columns]
+    log = ordered[keep].reset_index(drop=True)
+
+    if "legs" in ordered.columns:
+        legs = max_legs if max_legs is not None else _leg_count(ordered["legs"].to_numpy())
+        flat = pd.DataFrame([_flatten_legs(b, legs) for b in ordered["legs"]])
+        log = pd.concat([log, flat.reset_index(drop=True)], axis=1)
+
+    accounting = ledger.reset_index(drop=True)
+    log = pd.concat([log, accounting], axis=1)
+
+    if scores is not None and len(scores) and "event_id" in log.columns:
+        cols = [c for c in ("event_id", "proba") if c in scores.columns]
+        if len(cols) == 2:
+            log = log.merge(scores[cols].drop_duplicates("event_id").rename(
+                columns={"proba": "gate_proba"}), on="event_id", how="left")
+
+    log.insert(0, "row", np.arange(1, len(log) + 1))
+    return log
+
+
+def reconcile_transaction_log(log: pd.DataFrame, equity: Mapping[str, Any]) -> dict[str, Any]:
+    """Does the log reproduce the curve it claims to explain?
+
+    Computed and printed rather than assumed: a log that does not add up is
+    worse than no log, because it looks like evidence.
+    """
+    final = float(equity.get("final", np.nan))
+    series = log["pnl_contribution"] if "pnl_contribution" in log else pd.Series(dtype=float)
+    contributions = float(series.sum()) if len(series) else float(np.nan)
+    out = {
+        "rows": int(len(log)),
+        "final_equity": final,
+        "sum_pnl_contribution": contributions,
+        "implied_final": 1.0 + contributions,
+        "abs_error": float(abs(1.0 + contributions - final)),
+        "reconciles": bool(abs(1.0 + contributions - final) < 1e-6),
+    }
+
+    # Concentration, computed here because the log is the only place it CAN be
+    # computed: a mean return says nothing about whether ten trades carried the
+    # curve. Both readings are reported — the net share is the intuitive one
+    # and is unstable when the net is near zero, so the gross reading (how few
+    # trades make half the gains) is printed beside it.
+    if len(series):
+        ordered = series.reindex(series.abs().sort_values(ascending=False).index)
+        gains = series[series > 0].sort_values(ascending=False)
+        half = int((gains.cumsum() < gains.sum() / 2).sum() + 1) if len(gains) else 0
+        out["concentration"] = {
+            "top10_net_share": (float(ordered.head(10).sum() / contributions)
+                                if abs(contributions) > 1e-9 else None),
+            "top1_net_share": (float(ordered.head(1).sum() / contributions)
+                               if abs(contributions) > 1e-9 else None),
+            "trades_for_half_the_gains": half,
+            "n_winners": int(len(gains)),
+        }
+    return out
 
 
 def _max_concurrency(entry_dates: pd.Series, exit_dates: pd.Series) -> int:
@@ -1236,7 +1438,7 @@ def evaluate(
     base_mid = trades[np.isclose(trades["fill_alpha"], 0.5)] if len(trades) and "fill_alpha" in trades.columns else trades
 
     eq5 = build_equity(mid_sel, 0.05, mode=equity_mode,
-                       max_deployed=spec.get("max_deployed_fraction"))
+                       max_deployed=spec.get("max_deployed_fraction"), record=True)
     headline = trade_stats(mid_sel["ret"].to_numpy(), mid_sel["event_date"]) if len(mid_sel) else trade_stats([])
     headline["by_year"] = by_year_table(mid_sel)
     headline["breakeven_alpha"] = breakeven_alpha_from_sweep(
@@ -1330,6 +1532,16 @@ def evaluate(
         "date": [str(ts.date()) for ts in eq5["equity"].index],
         "equity": [float(v) for v in eq5["equity"].values],
     }
+    # The transaction log behind the plotted curve. Written next to the report
+    # so a chart can be audited row by row instead of taken on trust.
+    if len(mid_sel):
+        log = transaction_log(mid_sel, eq5, scores=wf.get("scores"))
+        results["transaction_log"] = reconcile_transaction_log(log, eq5)
+    else:
+        log = None
+        results["transaction_log"] = {"rows": 0, "reconciles": True,
+                                      "note": "no selected trades to log"}
+
     results["headline"] = headline
     results["headline_stage"] = "wf_oos"
 
@@ -1357,6 +1569,13 @@ def evaluate(
         run_dir = Path(run_dir)
         results_dir = run_dir / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
+        if log is not None:
+            log_path = results_dir / f"transactions_{sha[:12]}.csv"
+            log.to_csv(log_path, index=False)
+            results["transaction_log"]["path"] = str(
+                log_path.relative_to(paths.ROOT) if log_path.is_relative_to(paths.ROOT)
+                else log_path)
+            results["transaction_log"]["sha256"] = _file_sha256(log_path)
         (results_dir / f"metrics_{sha[:12]}.json").write_text(
             json.dumps(results, indent=1, default=str))
         append_run_log(run_dir, {

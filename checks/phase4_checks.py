@@ -18,6 +18,7 @@ by the completion pass because they are what stop the report format regressing:
  6. ``leak_poison``        future-dated evidence raises in all three paths
  7. ``calibration_trigger`` 50 scored rows regenerate the report + health.json
  8. ``numbers_preserved``  regenerated reports hold the committed reports' numbers
+ 8b ``transaction_log``   every plotted curve has a per-trade log that reconciles
  9. ``no_raw_json``        no JSON blob in a report body
 10. ``units_present``      no bare four-decimal floats in a report body
 11. ``no_bare_dashes``     every "—" carries an explanation token
@@ -564,6 +565,68 @@ def check_numbers_preserved() -> str:
 
 
 # --------------------------------------------------------------------------
+# 8b. the transaction log behind the plotted curve
+# --------------------------------------------------------------------------
+
+
+@check("transaction_log",
+       description="every plotted equity curve has a per-trade log that reconciles to it")
+def check_transaction_log() -> str:
+    """A chart nobody can audit row by row is an assertion, not evidence.
+
+    Three things are checked, per experiment: the log exists beside the report,
+    its contributions reproduce the curve's final value, and its quote columns
+    reproduce the row's own ``entry_cost`` at the row's alpha — the spot check
+    the file exists to make possible.
+    """
+    dirs = _experiment_dirs()
+    _require(bool(dirs), "no experiments to check")
+    details = []
+    for exp in dirs:
+        logs = sorted(exp.glob("results/transactions_*.csv"))
+        metrics = json.loads(sorted(exp.glob("results/metrics_*.json"))[0].read_text())
+        block = metrics.get("transaction_log") or {}
+        if not logs:
+            raise AssertionError(
+                f"{exp.name}: no transactions_*.csv beside the report — re-run the "
+                "experiment so the plotted curve carries its audit trail")
+        _require(block.get("reconciles") is True,
+                 f"{exp.name}: the recorded log does not reconcile: {block}")
+
+        log = pd.read_csv(logs[0])
+        _require(len(log) == block["rows"],
+                 f"{exp.name}: log has {len(log)} rows, metrics recorded {block['rows']}")
+
+        implied = 1.0 + float(log["pnl_contribution"].sum())
+        _require(abs(implied - float(block["final_equity"])) < 1e-6,
+                 f"{exp.name}: contributions imply {implied:.6f} vs curve "
+                 f"{block['final_equity']:.6f}")
+
+        # Prices travel with the row: rebuild entry_cost from the leg quotes.
+        priced = log[log["entry_leg1_bid"].notna() & log["entry_leg2_bid"].notna()]
+        _require(len(priced) > 0, f"{exp.name}: no rows carry leg quotes")
+        sample = priced.head(200)
+        alpha = sample["fill_alpha"].to_numpy(dtype=float)
+        rebuilt = np.zeros(len(sample))
+        for leg in (1, 2):
+            bid = sample[f"entry_leg{leg}_bid"].to_numpy(dtype=float)
+            ask = sample[f"entry_leg{leg}_ask"].to_numpy(dtype=float)
+            qty = sample[f"entry_leg{leg}_qty"].to_numpy(dtype=float)
+            side = sample[f"entry_leg{leg}_side"].to_numpy()
+            # alpha interpolates worst -> best: a buy pays ask at 0, bid at 1.
+            price = np.where(side == "buy", ask - alpha * (ask - bid),
+                             bid + alpha * (ask - bid))
+            rebuilt += np.where(side == "buy", 1.0, -1.0) * qty * price
+        cost = sample["entry_cost"].to_numpy(dtype=float)
+        worst = float(np.nanmax(np.abs(rebuilt - cost)))
+        _require(worst < 1e-6,
+                 f"{exp.name}: leg quotes do not reproduce entry_cost (worst {worst:.2e})")
+        details.append(f"{exp.name.split('_')[0]}: {len(log):,} rows, "
+                       f"quotes rebuild cost to {worst:.1e}")
+    return "; ".join(details)
+
+
+# --------------------------------------------------------------------------
 # 9-13. format guards
 # --------------------------------------------------------------------------
 
@@ -769,7 +832,7 @@ def check_figure_captions() -> str:
 ORDER = [
     "unittests", "golden_report", "regeneration", "checklist_honesty",
     "ledger_append_only", "outcome_idempotent", "leak_poison", "calibration_trigger",
-    "numbers_preserved", "no_raw_json", "units_present", "no_bare_dashes",
+    "numbers_preserved", "transaction_log", "no_raw_json", "units_present", "no_bare_dashes",
     "section_order", "glossary_complete", "verdict_derivable", "no_report_append",
     "figure_captions",
 ]

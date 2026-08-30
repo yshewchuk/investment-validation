@@ -140,7 +140,7 @@ acceptance check.
 | `python3 checks/phase1_replay.py` | The scorer reproduces the replayed trades' pricing to 1e-6, and the live feature path reproduces the panel path to 1e-9 |
 | `python3 checks/phase1_calibration.py` | Predicted win rates vs realized, out of sample |
 | `python3 checks/phase2_checks.py` | The Phase-2 suite, incl. the load-bearing EXP-050 harness regression |
-| `python3 checks/phase4_checks.py` | All 17 Phase-4 checks: golden report, regeneration, ledger append-only, leak poison, and the format guards |
+| `python3 checks/phase4_checks.py` | All 18 Phase-4 checks: golden report, regeneration, transaction-log reconciliation, ledger append-only, leak poison, and the format guards |
 | `python3 checks/phase4_report.py --checks-json …` | Phase 4's own evidence report |
 | `python3 -m engine.ledger snapshot --as-of YYYY-MM-DD` | Freeze today's scored board into the prediction ledger |
 | `python3 -m engine.ledger score --through YYYY-MM-DD` | Resolve predictions whose events have passed; recompute calibration at 50 new rows |
@@ -154,6 +154,18 @@ rather than left as an aspiration.
 The migration test is the load-bearing one. Every verdict in the plan rests on
 `events_with_orats_sum.csv`; the test reconciles all 115,500 rows and fails on
 any difference not covered by a **declared, independently verified** delta.
+
+**Spot-checking a reported equity curve.** Every plotted curve ships the trades
+behind it: `experiments/EXP-*/results/transactions_<spec-hash>.csv`, one row per
+trade in the order the equity engine processed it, carrying the quotes it was
+priced from (per-leg bid/ask, strike, expiry, DTE at entry and exit), the
+contracts bought, the equity it was sized off, and its contribution to the final
+number. `transaction_log` in the Phase-4 suite proves, on every experiment, that
+the contributions reproduce the curve's final value and that the leg quotes
+rebuild each row's `entry_cost` at its own alpha. The report's §2 carries the
+recipe for re-deriving the curve by hand (exits before entries; one mark per
+date). These logs are ORATS quotes, so they live in the working tree and the
+private mirror — never in this public repo.
 
 Phase 4 adds the format guards: `numbers_preserved` re-renders every committed
 experiment report from its saved artifacts and asserts the new document holds

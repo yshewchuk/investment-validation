@@ -771,3 +771,122 @@ class TestCalibrationStage:
         result = evaluate(spec, trades, gate=gate, mc_paths=30, stress=False,
                           write_report=False)
         assert not result.results["calibration"]["available"]
+
+
+class TestTransactionLog:
+    """The audit trail behind a plotted equity curve."""
+
+    def _trades(self, n=8):
+        dates = pd.date_range("2024-01-01", periods=n, freq="9D")
+        legs = json.dumps({
+            "entry": [{"name": "call", "right": "C", "side": "buy", "qty": 1.0,
+                       "expiry": "2024-02-16", "strike": 145.0, "dte": 23,
+                       "bid": 4.3, "ask": 4.5, "price": 4.4, "wide_market": False},
+                      {"name": "put", "right": "P", "side": "buy", "qty": 1.0,
+                       "expiry": "2024-02-16", "strike": 145.0, "dte": 23,
+                       "bid": 3.9, "ask": 4.1, "price": 4.0, "wide_market": False}],
+            "exit": [{"name": "call", "right": "C", "side": "sell", "qty": 1.0,
+                      "expiry": "2024-02-16", "strike": 145.0, "dte": 22,
+                      "bid": 0.25, "ask": 0.3, "price": 0.275, "wide_market": False},
+                     {"name": "put", "right": "P", "side": "sell", "qty": 1.0,
+                      "expiry": "2024-02-16", "strike": 145.0, "dte": 22,
+                      "bid": 13.3, "ask": 13.9, "price": 13.6, "wide_market": False}],
+        })
+        rets = np.array([0.2, -0.5, 0.1, -0.1, 0.3, 0.0, 0.4, -0.2])[:n]
+        return pd.DataFrame({
+            "event_id": [f"E{i}" for i in range(n)], "ticker": "T",
+            "event_date": dates, "entry_date": dates,
+            "exit_date": dates + pd.Timedelta(days=1),
+            "fill_alpha": 0.5, "entry_cost": 8.4, "exit_value": 8.4 * (1 + rets),
+            "ret": rets, "legs": legs, "strike": 145.0,
+        })
+
+    def test_contributions_reconcile_to_the_curve(self):
+        from engine.evaluate import (
+            build_equity, reconcile_transaction_log, transaction_log,
+        )
+
+        trades = self._trades()
+        equity = build_equity(trades, 0.05, record=True)
+        log = transaction_log(trades, equity)
+        check = reconcile_transaction_log(log, equity)
+        assert check["reconciles"], check
+        assert check["rows"] == len(trades)
+        assert check["abs_error"] < 1e-9
+
+    def test_quotes_travel_with_the_row(self):
+        from engine.evaluate import build_equity, transaction_log
+
+        trades = self._trades()
+        log = transaction_log(trades, build_equity(trades, 0.05, record=True))
+        for column in ("entry_leg1_bid", "entry_leg1_ask", "entry_leg1_strike",
+                       "entry_leg2_right", "exit_leg1_bid", "exit_leg2_price",
+                       "entry_leg1_dte"):
+            assert column in log.columns, f"{column} missing from the log"
+        # The spot check the log exists for: mid of the two legs' quotes at
+        # alpha 0.5 must reproduce entry_cost.
+        row = log.iloc[0]
+        mid = ((row["entry_leg1_bid"] + row["entry_leg1_ask"]) / 2
+               + (row["entry_leg2_bid"] + row["entry_leg2_ask"]) / 2)
+        assert mid == pytest.approx(row["entry_cost"], abs=1e-9)
+
+    def test_order_matches_the_equity_engine(self):
+        from engine.evaluate import build_equity, transaction_log
+
+        trades = self._trades().sample(frac=1.0, random_state=0)
+        log = transaction_log(trades, build_equity(trades, 0.05, record=True))
+        assert list(log["entry_date"]) == sorted(log["entry_date"])
+        assert list(log["row"]) == list(range(1, len(log) + 1))
+
+    def test_gate_probabilities_are_joined_when_present(self):
+        from engine.evaluate import build_equity, transaction_log
+
+        trades = self._trades()
+        scores = pd.DataFrame({"event_id": trades["event_id"], "proba": 0.42})
+        log = transaction_log(trades, build_equity(trades, 0.05, record=True),
+                              scores=scores)
+        assert "gate_proba" in log.columns and log["gate_proba"].notna().all()
+
+    def test_evaluate_emits_the_log_beside_the_report(self, tmp_path):
+        from engine.evaluate import evaluate
+
+        frames = []
+        for a in (0.0, 0.5, 1.0):
+            frame = self._trades()
+            frame["fill_alpha"] = a
+            frames.append(frame)
+        trades = pd.concat(frames, ignore_index=True)
+        spec = {"id": "EXP-LOG", "title": "log probe", "primary_spec": {"x": 1},
+                "walk_forward": {"min_train_years": 0},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        result = evaluate(spec, trades, run_dir=tmp_path, mc_paths=20, stress=False,
+                          write_report=False)
+        written = list((tmp_path / "results").glob("transactions_*.csv"))
+        assert written, "no transaction log written"
+        block = result.results["transaction_log"]
+        assert block["reconciles"] and block["rows"] == len(self._trades())
+        assert block["sha256"] and block["path"]
+
+        reread = pd.read_csv(written[0])
+        assert len(reread) == block["rows"]
+        assert "pnl_contribution" in reread.columns
+
+    def test_log_requires_a_recorded_curve(self):
+        from engine.evaluate import EvaluationError, build_equity, transaction_log
+
+        trades = self._trades()
+        with pytest.raises(EvaluationError, match="record=True"):
+            transaction_log(trades, build_equity(trades, 0.05))
+
+    def test_a_third_leg_is_not_silently_dropped(self):
+        from engine.evaluate import build_equity, transaction_log
+
+        trades = self._trades(2)
+        three = json.loads(trades.loc[0, "legs"])
+        extra = dict(three["entry"][0], name="wing", strike=150.0)
+        three["entry"].append(extra)
+        three["exit"].append(dict(three["exit"][0], name="wing", strike=150.0))
+        trades["legs"] = json.dumps(three)
+        log = transaction_log(trades, build_equity(trades, 0.05, record=True))
+        assert "entry_leg3_name" in log.columns
+        assert set(log["entry_leg3_name"]) == {"wing"}

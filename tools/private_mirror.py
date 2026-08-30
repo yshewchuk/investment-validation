@@ -54,6 +54,10 @@ INCLUDE = (
     ("experiments", "LEDGER.csv"),
     ("experiments", "**/REPORT.md"),
     ("experiments", "**/results/*.json"),
+    # The transaction logs behind the plotted equity curves: real ORATS quotes,
+    # so they can never reach the PUBLIC repo — and the reason a reported chart
+    # can be spot-checked at all, so they must reach this one.
+    ("experiments", "**/results/transactions_*.csv"),
     ("experiments", "**/figures/*.png"),
     ("earnings_predictions", "**/*.py"),
     ("earnings_predictions", "**/*.md"),
@@ -81,6 +85,19 @@ INCLUDE_ROOT_GLOBS = ("*.py",)
 
 EXCLUDE_PARTS = ("__pycache__", ".git", ".venv", "node_modules", ".pytest_cache")
 
+#: The 1 MB cap exists to keep a CODE repo from swallowing data. Two artifact
+#: kinds are deliberately exempt here, because they are the evidence the mirror
+#: exists for and they are useless truncated: the per-trade transaction logs
+#: behind the reported equity curves (a few MB each — a report's chart is only
+#: checkable if its rows travel with it) and the prediction ledger.
+LARGE_ARTIFACT_CAP = 25_000_000
+
+
+def _size_cap(path: Path) -> int:
+    if path.name.startswith("transactions_") or paths.LEDGER in path.parents:
+        return LARGE_ARTIFACT_CAP
+    return MAX_BYTES
+
 
 def collect() -> tuple[list[Path], list[str]]:
     """Files to mirror, and the reasons anything was skipped."""
@@ -92,8 +109,9 @@ def collect() -> tuple[list[Path], list[str]]:
             return
         if any(part in EXCLUDE_PARTS for part in path.parts):
             return
-        if path.stat().st_size > MAX_BYTES:
-            skipped.append(f"{path.relative_to(ROOT)} (>{MAX_BYTES:,} bytes)")
+        cap = _size_cap(path)
+        if path.stat().st_size > cap:
+            skipped.append(f"{path.relative_to(ROOT)} (>{cap:,} bytes)")
             return
         found.append(path)
 
@@ -119,7 +137,8 @@ def scan_for_secrets(files: list[Path]) -> Report:
     for path in files:
         report.checked += 1
         try:
-            check_blob(str(path.relative_to(ROOT)), path.read_bytes(), needles, report)
+            check_blob(str(path.relative_to(ROOT)), path.read_bytes(), needles, report,
+                       max_bytes=_size_cap(path))
         except OSError:
             continue
     # Size and secret findings block; the data-extension rule does not apply
