@@ -246,6 +246,11 @@ class AnalogMatcher:
                 [implied_ratio if implied_ratio is not None else np.nan],
                 self.implied_edges, ("low", "mid", "high"),
             )[0],
+            # The raw ratio travels with the buckets so match() can re-bucket
+            # it against CAUSAL tercile edges (derived from trades already
+            # closed at as_of) instead of the population edges above — which
+            # were fit on all years, future ones included.
+            "implied_ratio": implied_ratio,
         }
 
     # -- matching ----------------------------------------------------------
@@ -275,6 +280,26 @@ class AnalogMatcher:
             # Closed strictly before the decision: a trade still open on the day
             # we decide has not yet told us anything about how it went.
             pool = pool[pool["exit_date"] < pd.Timestamp(as_of).normalize()]
+            # Causal terciles: the implied-ratio bucket edges must come from the
+            # same closed-before-as_of pool, not from the whole population —
+            # population edges bake in future years (a 2019 request bucketed by
+            # thresholds derived partly from 2024 data is a look-ahead). Both
+            # the pool and the request are re-bucketed on the causal edges so
+            # the labels align.
+            ratio = buckets.get("implied_ratio")
+            if ratio is not None and "implied_ratio" in pool.columns and len(pool):
+                finite = pool["implied_ratio"][np.isfinite(pool["implied_ratio"])]
+                if len(finite) >= 30:
+                    edges = tuple(float(e) for e in np.quantile(finite, [1 / 3, 2 / 3]))
+                else:
+                    edges = (0.9, 1.1)
+                pool = pool.assign(
+                    implied_tercile=_bucket(pool["implied_ratio"], edges,
+                                            ("low", "mid", "high"))
+                )
+                buckets = dict(buckets)
+                buckets["implied_tercile"] = _bucket([ratio], edges,
+                                                     ("low", "mid", "high"))[0]
 
         active = ["mcap_bucket", *WIDENING_ORDER]
         dropped: list[str] = []

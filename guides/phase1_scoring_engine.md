@@ -57,7 +57,14 @@ structure (ATM, per-strategy expiry rules) and the top alternative strikes.
 ### Model layer
 1. Build the as-of feature vector from Tier 3 (leak-audited — every feature
    carries `feature_as_of`; `engine.audit.assert_causal(features, as_of)`
-   runs on EVERY call, not just in tests).
+   runs on EVERY call, not just in tests). Stamps are the true observation
+   dates where they are knowable — event-history features at the last prior
+   event, the live path's market block at the daily row actually read — and
+   the decision-close upper bound only where the source does not record the
+   observation date (the panel's market block). The deep guarantees are the
+   panel's causal construction (migration-tested) and
+   `assert_decision_causal`; the per-feature audit is the mechanical net
+   over both.
 2. Champion models → predicted |move|, predicted T−1 implied, gate score.
 3. Simulate the structure's payoff under the FillModel: predicted quantities
    → leg prices from the as-of chain snapshot → P&L distribution obtained by

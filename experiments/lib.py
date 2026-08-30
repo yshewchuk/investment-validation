@@ -80,6 +80,27 @@ def verify_append(before: bytes, after: bytes) -> bool:
 # --------------------------------------------------------------------------
 
 
+def ledger_ensure(path: Path | None = None) -> Path:
+    """Create a header-only ledger if none exists.
+
+    Called at import so the program ledger always exists: reports must be
+    able to distinguish "no experiments tried yet" (N/A) from "the ledger is
+    missing" (FAIL), and promotion rule (e) needs the file to be there from
+    the first experiment onward.
+    """
+    path = Path(path or LEDGER_PATH)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        buf = io.StringIO()
+        csv.DictWriter(buf, fieldnames=LEDGER_COLUMNS).writeheader()
+        path.write_bytes(buf.getvalue().encode())
+    return path
+
+
+# The program ledger exists from the moment the experiments package is used.
+ledger_ensure()
+
+
 def ledger_read(path: Path | None = None) -> pd.DataFrame:
     path = Path(path or LEDGER_PATH)
     if not path.exists():

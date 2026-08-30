@@ -84,15 +84,20 @@ Stages, in order:
 5. **Metrics dict** (canonical keys — identical across all strategies so the
    leaderboard is comparable): `n, mean, median, std, win_rate,
    profit_factor, sharpe_trade, sharpe_equity, sortino, max_dd, tail_ratio,
-   by_year{}, breakeven_alpha, mc{}` where
-   - `sharpe_trade` = mean(ret)/std(ret) × sqrt(avg trades/year),
-   - `sharpe_equity` = mean(daily eq ret)/std × sqrt(252) on the 5%-sized
-     walk-forward equity curve,
-   - `sortino` uses downside deviation vs 0,
-   - `tail_ratio` = |p95 win| / |p95 loss|.
-   Equity construction: chronological by entry date, fixed-fraction sizing,
-   overlapping positions allowed and counted (report max concurrency);
-   premium debited at entry, value credited at exit.
+   by_year{}, breakeven_alpha, capacity{}, mc{}` where
+    - `sharpe_trade` = mean(ret)/std(ret) × sqrt(avg trades/year),
+    - `sharpe_equity` = mean(daily eq ret)/std × sqrt(252) on the 5%-sized
+      walk-forward equity curve,
+    - `sortino` uses downside deviation vs 0,
+    - `tail_ratio` = |p95 win| / |p95 loss|,
+    - `capacity` = spread width at the traded strikes (relative spread, mean
+      and p95, wide-market fraction) with a note where the source carries no
+      volume — sizing decisions must not be made without it.
+    Equity construction: chronological by entry date, fixed-fraction sizing
+    off **marked equity** (cash + open positions at cost — net liquidation
+    value; a cash-only reading reports deployment as drawdown), overlapping
+    positions allowed and counted (report max concurrency); premium debited at
+    entry, value credited at exit, series marked at cost between events.
 6. **Report** via the Phase 4 generator — an experiment without REPORT.md
    does not exist.
 

@@ -5,7 +5,11 @@ Implementation of `EARNINGS_VOL_PROGRAM_PLAN.md`. This repository holds the
 that decide whether a phase is done. Market data, research findings, reports and
 the prediction ledger deliberately live elsewhere — see `RECOVERY.md`.
 
-**Status: Phases 0, 1, and 2 complete.** Phases 3–6 are specified in `guides/`.
+**Status: Phases 0 and 1 complete. Phase 2's harness is complete and verified
+(the EXP-050 regression reproduces through it); Phase 2's exit criteria are
+not met until the backlog experiments (EXP-101+) have run through the harness
+— backlog #1 waits on the Sep-1 ORATS pulls.** Phases 3–6 are specified in
+`guides/`.
 
 ---
 

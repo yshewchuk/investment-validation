@@ -7,6 +7,8 @@ The full end-to-end reproduction of EXP-050 lives in checks/phase2_checks.py.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -144,6 +146,30 @@ class TestBuildEquity:
         trades["exit_date"] = pd.Timestamp("2020-02-01")
         out = build_equity(trades, 0.1, mode="cashflow")
         assert out["max_concurrency"] == 3
+
+    def test_cashflow_overlapping_all_winners_has_zero_drawdown(self):
+        # The review's defect-1 probe: a set that CANNOT lose money must not
+        # report a drawdown. With 200 fully-overlapping +2% trades a cash-only
+        # curve reads deployment as loss (max_dd ~ 1.0); marking open positions
+        # at cost removes the artifact.
+        n = 200
+        trades = make_trades([0.02] * n, freq="40D")
+        trades["entry_date"] = pd.Timestamp("2020-01-01")
+        trades["exit_date"] = pd.Timestamp("2020-02-01")
+        out = build_equity(trades, 0.05, mode="cashflow")
+        assert out["max_dd"] == 0.0
+        assert out["max_concurrency"] == n
+        # Every trade sizes off marked equity 1.0, so pnl is exactly n·f·r.
+        assert out["final"] == pytest.approx(1.0 + n * 0.05 * 0.02)
+
+    def test_cashflow_sizes_off_marked_equity_not_remaining_cash(self):
+        # Two overlapping winners: the second trade must size off equity still
+        # marked at 1.0, not off cash already drained by the first debit.
+        trades = make_trades([0.10, 0.10], freq="40D")
+        trades["entry_date"] = pd.Timestamp("2020-01-01")
+        trades["exit_date"] = pd.Timestamp("2020-02-01")
+        out = build_equity(trades, 0.5, mode="cashflow")
+        assert out["final"] == pytest.approx(1.0 + 2 * 0.5 * 0.10)
 
     def test_unknown_mode_raises(self):
         with pytest.raises(EvaluationError):
@@ -457,3 +483,114 @@ class TestStressCoverageBranches:
     def test_annual_trades_single_event(self):
         s = trade_stats([0.1], pd.Series([pd.Timestamp("2020-01-01")]))
         assert s["n"] == 1
+
+
+class TestBootstrapReachability:
+    def test_final_block_is_reachable(self):
+        # Finding 8: rng.integers(0, n - block) made the last block (the most
+        # recent trades) unreachable. With a single huge win ONLY in the final
+        # block, some MC path must hit it.
+        n, block = 40, 20
+        rets = np.zeros(n)
+        rets[-1] = 5.0
+        out = monte_carlo(rets, fractions=(0.05,), block=block, paths=500, seed=3)
+        p95 = out["by_fraction"]["0.05"]["terminal_p95"]
+        # Without the final block no path can exceed 1.0; one visit to the
+        # 5.0 trade multiplies equity by 1.25.
+        assert p95 > 1.1
+
+
+class TestCapacity:
+    def _trades_with_legs(self):
+        legs = json.dumps({
+            "entry": [{"name": "call", "bid": 1.0, "ask": 1.2},
+                      {"name": "put", "bid": 0.9, "ask": 1.0}],
+        })
+        return make_trades([0.01, 0.02, -0.01]).assign(legs=legs)
+
+    def test_capacity_from_legs_blob(self):
+        from engine.evaluate import capacity_note
+
+        out = capacity_note(self._trades_with_legs())
+        assert out["available"]
+        assert out["n"] == 3
+        # Worst leg per trade: call spread 0.2/1.1 ~ 0.1818.
+        assert out["mean_rel_spread"] == pytest.approx((0.2 / 1.1), rel=1e-6)
+        assert "no volume" in out["note"]
+
+    def test_capacity_unavailable_without_legs(self):
+        from engine.evaluate import capacity_note
+
+        out = capacity_note(make_trades([0.01]))
+        assert not out["available"]
+
+    def test_headline_carries_capacity(self, tmp_path):
+        rng = np.random.default_rng(0)
+        trades = make_trades(rng.normal(0.01, 0.1, 60))
+        spec = {"id": "EXP-CAP", "title": "capacity probe", "primary_spec": {"x": 1},
+                "walk_forward": {"min_train_years": 1},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        result = evaluate(spec, trades, mc_paths=30, stress=False, write_report=False)
+        assert "capacity" in result.metrics
+
+
+class TestPathBands:
+    def test_bands_computed_for_requested_fraction(self):
+        rng = np.random.default_rng(2)
+        rets = rng.normal(0.01, 0.1, 80)
+        out = monte_carlo(rets, fractions=(0.05,), paths=100, seed=1,
+                          path_bands_for=(0.05,))
+        bands = out["path_bands"]["0.05"]
+        assert len(bands["p50"]) == len(rets) + 1
+        assert bands["p05"][0] == 1.0 and bands["p50"][0] == 1.0
+        assert all(lo <= mid <= hi for lo, mid, hi in
+                   zip(bands["p05"], bands["p50"], bands["p95"]))
+
+    def test_evaluate_stores_base_fraction_bands(self, tmp_path):
+        rng = np.random.default_rng(3)
+        trades = make_trades(rng.normal(0.01, 0.1, 60))
+        spec = {"id": "EXP-FAN", "title": "fan probe", "primary_spec": {"x": 1},
+                "walk_forward": {"min_train_years": 1},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        result = evaluate(spec, trades, mc_paths=30, stress=False, write_report=False)
+        assert "0.05" in result.results["mc"]["path_bands"]
+
+
+class TestSpecHashContinuity:
+    def _ledger_with_planned(self, tmp_path, exp_id, sha):
+        exp_dir = tmp_path / "experiments"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        (exp_dir / "LEDGER.csv").write_text(
+            "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted\n"
+            f"{exp_id},{sha},2026-08-30,planned,,,\n")
+        return exp_dir
+
+    def test_edited_spec_refused(self, tmp_path, monkeypatch):
+        import engine.evaluate as ev
+
+        self._ledger_with_planned(tmp_path, "EXP-901", "original_hash_value")
+        monkeypatch.setattr(ev.paths, "ROOT", tmp_path)
+        spec = {"id": "EXP-901", "primary_spec": {"changed": True},
+                "preregistered_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=1)).isoformat()}
+        with pytest.raises(PreregistrationError):
+            check_preregistration(spec, tmp_path / "exp")
+
+    def test_registered_spec_passes(self, tmp_path, monkeypatch):
+        import engine.evaluate as ev
+
+        spec = {"id": "EXP-901", "primary_spec": {"x": 1},
+                "preregistered_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=1)).isoformat()}
+        self._ledger_with_planned(tmp_path, "EXP-901", spec_hash(spec))
+        monkeypatch.setattr(ev.paths, "ROOT", tmp_path)
+        receipt = check_preregistration(spec, tmp_path / "exp")
+        assert receipt["spec_hash_checked"]
+
+    def test_grid_cell_exempt_by_label(self, tmp_path, monkeypatch):
+        import engine.evaluate as ev
+
+        self._ledger_with_planned(tmp_path, "EXP-901", "original_hash_value")
+        monkeypatch.setattr(ev.paths, "ROOT", tmp_path)
+        spec = {"id": "EXP-901", "primary_spec": {"x": 2}, "grid_cell": True,
+                "preregistered_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=1)).isoformat()}
+        receipt = check_preregistration(spec, tmp_path / "exp")
+        assert receipt.get("grid_cell") is True

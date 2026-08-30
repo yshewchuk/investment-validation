@@ -209,7 +209,7 @@ def check_synthetic_known() -> str:
         for _ in range(paths):
             idx: list[int] = []
             while len(idx) < n:
-                s = int(r.integers(0, n - block))
+                s = int(r.integers(0, n - block + 1))
                 idx.extend(range(s, s + block))
             if float(np.prod(1 + f * rets_seq[np.array(idx[:n])])) < 1.0:
                 losses += 1
@@ -611,7 +611,50 @@ def check_ledger_append_only() -> str:
 # --------------------------------------------------------------------------
 
 
-def _metrics(mean: float, sharpe: float, p_loss: float, regimes: dict | None = None) -> dict:
+def _eval_results(edge: float, seed: int = 5) -> dict:
+    """A REAL evaluate() results dict over synthetic trades with a given edge.
+
+    The promotion check drives decide() from this shape — the shape evaluate()
+    actually produces — because the defect this check exists to catch is an
+    integration seam: decide() reading fields where evaluate() never puts
+    them. Hand-built dicts papered over exactly that seam once already.
+    """
+    rng = np.random.default_rng(seed)
+    n = 240
+    base = rng.normal(0.0, 0.10, n)
+    dates = pd.date_range("2019-01-01", periods=n, freq="10D")
+    frames = []
+    for a in (0.0, 0.5, 1.0):
+        r = base + edge + (a - 0.5) * 0.10
+        frames.append(pd.DataFrame({
+            "event_id": [f"P{i}" for i in range(n)],
+            "ticker": "SYN",
+            "event_date": dates,
+            "entry_date": dates - pd.Timedelta(days=1),
+            "exit_date": dates + pd.Timedelta(days=1),
+            "fill_alpha": a,
+            "entry_cost": 1.0,
+            "exit_value": 1.0 + r,
+            "ret": r,
+        }))
+    trades = pd.concat(frames, ignore_index=True)
+    spec = {
+        "id": "EXP-902",
+        "title": "promotion probe",
+        "strategy": "STR-THRU",
+        "price_source": "orats (synthetic probe)",
+        "primary_spec": {"edge": edge},
+        "walk_forward": {"min_train_years": 1},
+        "has_short_leg": False,
+        "preregistered_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=1)).isoformat(),
+    }
+    return evaluate(spec, trades, mc_paths=200, stress=True,
+                    write_report=False).results
+
+
+def _flat_metrics(mean: float, sharpe: float, p_loss: float,
+                  regimes: dict | None = None) -> dict:
+    """The flat hand-written shape decide() must still accept for baselines."""
     return {
         "mean": mean,
         "sharpe_trade": sharpe,
@@ -622,49 +665,68 @@ def _metrics(mean: float, sharpe: float, p_loss: float, regimes: dict | None = N
 
 
 @check("promotion_dry_run", needs_data=False,
-       description="synthetic challenger better/worse -> promote/refuse")
+       description="decide() driven by real evaluate() output: better/worse -> promote/refuse")
 def check_promotion_dry_run() -> str:
-    champion = _metrics(0.03, 1.2, 0.10)
+    # Same noise seed, different edge: the challenger is the champion plus a
+    # constant per-trade edge, so every comparison direction is deterministic.
+    champion_results = _eval_results(0.00)
+    challenger_results = _eval_results(0.06)
 
-    better = _metrics(0.04, 1.5, 0.08)
-    promote, reasons = promote_mod.decide(better, champion, prereg_valid=True)
+    promote, reasons = promote_mod.decide(challenger_results, champion_results)
     _require(promote, f"better challenger refused: {reasons}")
+    _require(any("PASS (b)" in r for r in reasons),
+             "rule (b) did not PASS on a real evaluate() result — the MC shape "
+             "is being read from the wrong place")
+    _require(any(r.startswith("PASS (c)") and "no new red" in r for r in reasons),
+             "rule (c) did not genuinely PASS — the stress block is not being read")
 
-    worse_mean = _metrics(0.02, 1.5, 0.08)
-    promote, reasons = promote_mod.decide(worse_mean, champion, prereg_valid=True)
-    _require(not promote, "worse-mean challenger was promoted")
+    promote, reasons = promote_mod.decide(champion_results, challenger_results)
+    _require(not promote, "worse challenger was promoted")
 
-    worse_ploss = _metrics(0.04, 1.5, 0.20)
-    promote, _ = promote_mod.decide(worse_ploss, champion, prereg_valid=True)
-    _require(not promote, "worsened MC P(loss) was promoted")
+    # Rule (b) must fail closed when the champion baseline has no MC.
+    promote, reasons = promote_mod.decide(
+        challenger_results, {"headline": challenger_results["headline"]})
+    _require(any("WARN (b)" in r for r in reasons),
+             "missing champion MC was not surfaced")
 
-    no_prereg = _metrics(0.04, 1.5, 0.08)
-    promote, _ = promote_mod.decide(no_prereg, champion, prereg_valid=False)
+    # Rule (d): an invalidated pre-registration receipt refuses.
+    unregistered = dict(challenger_results)
+    unregistered["preregistration"] = {"valid": False}
+    promote, _ = promote_mod.decide(unregistered, champion_results)
     _require(not promote, "unregistered challenger was promoted")
 
-    short_no_tail = _metrics(0.04, 1.5, 0.08)
-    short_no_tail["stress"]["tail_injection"] = {}
-    promote, _ = promote_mod.decide(short_no_tail, champion, prereg_valid=True, short_leg=True)
+    # Rule (c2): a short-leg challenger without a tail-injection result refuses.
+    promote, reasons = promote_mod.decide(challenger_results, champion_results,
+                                          short_leg=True)
     _require(not promote, "short-leg challenger without tail injection was promoted")
 
-    red_regime = _metrics(0.04, 1.5, 0.08,
-                          regimes={"2022": {"n": 40, "mean": -0.03}})
-    promote, _ = promote_mod.decide(red_regime, champion, prereg_valid=True)
-    _require(not promote, "challenger with a new red stress cell was promoted")
+    # Rule (f): a challenger shipping anti-calibrated win rates refuses.
+    miscalibrated = dict(challenger_results)
+    miscalibrated["calibration"] = {"brier_skill": -0.10}
+    promote, reasons = promote_mod.decide(miscalibrated, champion_results)
+    _require(not promote, f"anti-calibrated challenger was promoted: {reasons}")
 
-    # End-to-end CLI dry-runs on a scaffolded experiment.
+    # The flat hand-written shape still works (baselines written before the
+    # champion had an evaluate() run of its own).
+    promote, _ = promote_mod.decide(_flat_metrics(0.04, 1.5, 0.08),
+                                    _flat_metrics(0.03, 1.2, 0.10), prereg_valid=True)
+    _require(promote, "flat-shape better challenger refused")
+    promote, _ = promote_mod.decide(_flat_metrics(0.02, 1.5, 0.08),
+                                    _flat_metrics(0.03, 1.2, 0.10), prereg_valid=True)
+    _require(not promote, "flat-shape worse challenger promoted")
+
+    # End-to-end CLI dry-runs on a scaffolded experiment, champion and
+    # challenger both real evaluate() results.
     with tempfile.TemporaryDirectory(prefix="promote_") as tmp:
         tmp_root = Path(tmp)
         folder = _scaffold_into(tmp_root / "experiments", "Promotion probe",
                                 "A probe.", number=101)
         spec = lib.load_spec(folder / "spec.yaml")
-        results = {"headline": better, "preregistration": {"valid": True},
-                   "spec_hash": lib.spec_hash(spec)}
         (folder / "results").mkdir(exist_ok=True)
         (folder / "results" / f"metrics_{lib.spec_hash(spec)[:12]}.json").write_text(
-            json.dumps(results))
+            json.dumps(challenger_results, default=str))
         champ_path = tmp_root / "champion.json"
-        champ_path.write_text(json.dumps(champion))
+        champ_path.write_text(json.dumps(champion_results, default=str))
 
         good = subprocess.run(
             [sys.executable, str(ROOT / "experiments" / "promote.py"), "EXP-101",
@@ -674,9 +736,9 @@ def check_promotion_dry_run() -> str:
         )
         _require(good.returncode == 0, f"dry-run of a better challenger failed: {good.stdout}{good.stderr}")
 
-        results["headline"] = worse_mean
+        # The champion entered against itself: a tie loses (rules a1/a2).
         (folder / "results" / f"metrics_{lib.spec_hash(spec)[:12]}.json").write_text(
-            json.dumps(results))
+            json.dumps(champion_results, default=str))
         bad = subprocess.run(
             [sys.executable, str(ROOT / "experiments" / "promote.py"), "EXP-101",
              "--champion-metrics", str(champ_path), "--dry-run"],
@@ -685,7 +747,8 @@ def check_promotion_dry_run() -> str:
         )
         _require(bad.returncode == 1, "dry-run of a worse challenger did not refuse")
 
-    return "6 rule cases + CLI dry-runs: better promoted, worse/worse-P(loss)/unregistered/red refused"
+    return ("real-evaluate() shapes: better promoted; worse/tie/unregistered/"
+            "short-no-tail/anti-calibrated refused; flat baselines still accepted")
 
 
 # --------------------------------------------------------------------------

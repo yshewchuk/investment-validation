@@ -165,6 +165,13 @@ def build_pairs(
     date, so this is a background job, not a per-run cost. The result is cached
     at :data:`PAIRS_PATH` and merged with any pairs already there (idempotent on
     ``event_id + strategy``).
+
+    Note on fill coverage: ``build_pairs`` scores only the single ``alpha`` it
+    is given (default 0.5 = mid fills). ``fit_recalibration`` therefore returns
+    ``None`` at every other fill, and the raw, uncalibrated probability ships
+    there unchanged. The calibration guarantee currently holds at mid fills
+    only — widening it means re-running this builder per alpha, not assuming
+    the mid map transfers.
     """
     from engine.fills import FillModel
     from engine.replay import load_chain_index
@@ -241,7 +248,13 @@ def build_pairs(
                     "ticker": str(row.ticker),
                     "event_date": pd.Timestamp(row.event_date),
                     "exit_date": pd.Timestamp(row.exit_date),
-                    "raw_win": float(result.win_model),
+                    # The RAW probability, not win_model: win_model is already
+                    # the recalibrated value whenever a map exists, and
+                    # recording it here would fit the next map on a mixture of
+                    # raw and once-calibrated values — a silently double-applied
+                    # calibration in the layer that exists to keep the shipped
+                    # win rate honest.
+                    "raw_win": float(result.win_model_raw),
                     "outcome": float(row.ret > 0),
                 }
             )

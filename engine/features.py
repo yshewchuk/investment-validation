@@ -239,16 +239,40 @@ _MARKET_BLOCK = tuple(panel_mod.ORATS_FEATURES.values()) + (
 )
 
 
-def _stamps(names: Iterable[str], as_of: pd.Timestamp) -> dict[str, pd.Timestamp]:
-    """Stamp every feature at the decision close.
+def _stamps(
+    names: Iterable[str],
+    as_of: pd.Timestamp,
+    *,
+    history_date: pd.Timestamp | None = None,
+    market_date: pd.Timestamp | None = None,
+) -> dict[str, pd.Timestamp]:
+    """Stamp each feature at the date its information was actually observed.
 
-    Every block resolves to information available at or before the last
-    pre-print close: history features come from strictly-earlier events and
-    market features from the last daily row before the event date. Stamping them
-    all at the decision date is therefore the honest upper bound — and an upper
-    bound is the right direction for an audit to err in.
+    Three blocks, three stamps:
+
+    - **Event-history features** (:data:`EVENT_HISTORY_FEATURES`) are computed
+      from the ticker's strictly-earlier events, so they are observed at the
+      last prior event's date (``history_date``). Stamping them there makes the
+      audit substantive: a history feature built from the current or a future
+      event fails ``assert_causal`` instead of passing a tautology.
+    - **Market/ORATS block** (:data:`_MARKET_BLOCK`) is read at the last daily
+      row on or before the decision close, so it is stamped at that row's date
+      (``market_date``) when the caller knows it.
+    - Anything else falls back to the decision close — the honest upper bound.
+
+    Callers that cannot know a block's true date pass ``None`` for it and get
+    the upper-bound stamp; the panel path does this for the market block (the
+    panel row does not record which daily row built it), and says so.
     """
-    return {name: as_of for name in names}
+    out: dict[str, pd.Timestamp] = {}
+    for name in names:
+        if history_date is not None and name in EVENT_HISTORY_FEATURES:
+            out[name] = history_date
+        elif market_date is not None and name in _MARKET_BLOCK:
+            out[name] = market_date
+        else:
+            out[name] = as_of
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -288,11 +312,18 @@ def panel_features(
         for name in PANEL_FEATURE_COLUMNS
         if name in row.index
     }
+    # Event-history features were observed at the last prior event; the market
+    # block's true daily row is not recorded on the panel row, so it keeps the
+    # decision-close upper bound (documented in _stamps).
+    prior_dates = rows.loc[rows["date"] < event_date, "date"]
     vector = FeatureVector(
         ticker=ticker,
         as_of=as_of,
         values=values,
-        feature_as_of=_stamps(values, as_of),
+        feature_as_of=_stamps(
+            values, as_of,
+            history_date=prior_dates.max().normalize() if len(prior_dates) else None,
+        ),
         event_date=event_date,
         session=session,
         meta={
@@ -439,15 +470,27 @@ def live_features(
         for name in PANEL_FEATURE_COLUMNS
         if name in row.index
     }
-    # `implied_move` is the oquants quoted implied move for this event, which the
-    # panel carries but which does not exist for an unrealized one. `or_implied`
-    # (ORATS, from daily_market at the last pre-print close) is the live
-    # equivalent and is present — so the model layer's feature lists use it.
+    # True observation dates, not the decision-close upper bound:
+    # - event-history features were fixed at the last prior event;
+    # - the market/ORATS block is read from the last daily row on or before
+    #   as_of, so that row's date is when it was actually observable.
+    # (`implied_move` is the oquants quoted implied move for this event, which
+    # the panel carries but which does not exist for an unrealized one.
+    # `or_implied` — ORATS, from daily_market at the last pre-print close — is
+    # the live equivalent and is present, so model feature lists use it.)
+    history_date = pd.Timestamp(prior.iloc[-1]["date"]).normalize()
+    market_date = None
+    if daily is not None and len(daily):
+        on_or_before = daily.loc[daily["date"] <= as_of, "date"]
+        if len(on_or_before):
+            market_date = pd.Timestamp(on_or_before.max()).normalize()
     vector = FeatureVector(
         ticker=ticker,
         as_of=as_of,
         values=values,
-        feature_as_of=_stamps(values, as_of),
+        feature_as_of=_stamps(
+            values, as_of, history_date=history_date, market_date=market_date
+        ),
         event_date=event_date,
         session=session,
         meta={"source": "live", "k": history["n_prior"], "mcap_asof": row.get("mcap_asof")},

@@ -1,12 +1,23 @@
 # Earnings-Vol Trading Program — Multi-Phase Implementation Plan
 
-**Version:** 1.1 · **Date:** 2026-08-29 · **Owner:** YS + Claude
+**Version:** 1.3 · **Date:** 2026-08-30 · **Owner:** YS + Claude
 **v1.1:** CAL-P corrected to the simultaneous spec (both legs opened together
 pre-print, closed together post-print); data layer expanded to an explicit
 three-tier raw/normalized/feature architecture.
 **v1.2:** source control & recovery added — all code in a public GitHub repo
 (no secrets, no market data); irreplaceable non-code artifacts (ledger,
 reports, research findings) mirrored to a private remote.
+**v1.3:** the EXP-050 5%-sizing row is corrected everywhere below from
+"2.4× / MC P(loss) 6%" to the reproducible **"2.83× / MC P(loss) 15%"**.
+The Phase 2 harness regression proved the old row reproduces from nothing
+(`reports/phase2_exp050_regression.md`); the 10% and 20% rows reproduce
+exactly, which is what makes the diagnosis certain. **This is a risk-posture
+change, not a typo fix:** 15% probability of final loss at the base sizing is
+materially worse than 6%. The Phase 5 go-live rules are re-anchored to the
+corrected numbers, and whether 5% sizing remains acceptable at P(loss) 15% is
+an explicit decision to revisit at the Phase 5 go/no-go memo (options: keep
+5% and accept 15%, drop to 2%, or require a fresh pre-registered gate run
+through `engine.evaluate` before any capital decision).
 **Scope:** the three core earnings-vol strategies, a continuous scoring/monitoring
 system, a continuous-improvement experiment framework, and the AI-correction
 long-put overlay.
@@ -39,8 +50,9 @@ read `guides/README.md` first; the guides are the how, this plan is the what.
   quoted implied move from T−j to T−1; MAE 3.3–4.0pp, r 0.60–0.72, top-vs-bottom
   decile realized spread 15–22pp, positive every year 2015–2026 (EXP-043).
 - **Mid-fill GBM gate** — trained on realized mid-fill returns; top-20% gate
-  +4.6%/trade; walk-forward equity 2.4× at 5% sizing with MC P(loss)=6%
-  (EXP-049/050).
+  +4.6%/trade; walk-forward equity 2.83× at 5% sizing with MC P(loss)=15%
+  (EXP-049/050; the original report's 2.4×/6% row was stale — see
+  `reports/phase2_exp050_regression.md`).
 - Direction remains unpredictable (AUC ceiling ~0.518 across 33 experiments) —
   no strategy in this program bets on direction at the event level.
 
@@ -58,7 +70,7 @@ read `guides/README.md` first; the guides are the how, this plan is the what.
 | Code | User's description | Existing evidence | Status |
 |---|---|---|---|
 | **CAL-P** | Put calendar: short ~1 DTE put + long ~20 DTE put (back DTE subject to optimization), both legs opened together shortly before the print and closed together after it — profits from front-leg IV crush | EXP-046b is the nearest evidence (+2.0%/trade at mid, 58% win, 8/9 yrs) but tested a DIFFERENT spec: straddle legs, T−14 entry, unwound PRE-print. `s5_put_calendar/` experiments touch put structures. The exact spec has NOT been isolated | Promising direction; exact-spec backtest is Phase 2 backlog #1 |
-| **STR-THRU** | Long straddle bought shortly before print, sold immediately after (mispriced expected move) | S2 exposure at mid fills +3.7%/trade 7/9 yrs (EXP-048); GBM gate +4.6% top-20% (EXP-049); equity 2.4×@5% sizing (EXP-050) | Best-evidenced strategy |
+| **STR-THRU** | Long straddle bought shortly before print, sold immediately after (mispriced expected move) | S2 exposure at mid fills +3.7%/trade 7/9 yrs (EXP-048); GBM gate +4.6% top-20% (EXP-049); equity 2.83×@5% sizing, MC P(loss) 15% (EXP-050, corrected by the Phase 2 regression) | Best-evidenced strategy |
 | **STR-RUNUP** | Long straddle bought early, sold immediately before print (IV run-up harvest) | S3 exposure at mid fills +3.9%/trade 6/9 yrs (EXP-048); OPF timing model is the edge — enter on predicted run-up, exit T−1 (EXP-043) | Promising; timing model is the differentiator |
 | **PUT-THESIS** | Long puts on AI-bubble casualties, timed | STRATEGY.md S1/S4 playbooks (semis dispersion, walk-forward validated); regime-timing research says event-level timing signals are null | Phase 6 overlay, thesis-driven with tripwires |
 
@@ -440,7 +452,10 @@ program — before real capital scales.
    moment):
    - Minimum one full earnings season (Q3 2026, mid-Oct→mid-Nov) of paper
      trades with α̂ ≥ breakeven alpha + margin, before any real order.
-   - Initial sizing from MC: 5% per trade (P(loss) 6% at current evidence);
+   - Initial sizing from MC: 5% per trade (P(loss) 15% at current evidence —
+     corrected from the stale 6% quote; see the v1.3 note and
+     `reports/phase2_exp050_regression.md`; the 5%-at-15% posture is an
+     explicit input to the go/no-go memo, not a settled fact);
      escalation to 10% only after a full season of live trades within MC
      bands; hard stop and post-mortem if drawdown exceeds the MC p95.
    - CAL-P trades (paper or real) only after its exact-spec backtest and
@@ -533,7 +548,7 @@ full forward-test dataset.
    fills at mid. Mitigation: breakeven-alpha reporting everywhere, Phase 5
    resting-limit measurement before capital, liquidity-bucket slicing.
 2. **Lumpy, regime-dependent edge.** 2021 and 2025 were negative; 2022/2024
-   carry the curve. Mitigation: MC sizing (5% ⇒ P(loss) 6%), regime stress
+   carry the curve. Mitigation: MC sizing (5% ⇒ P(loss) 15%, corrected), regime stress
    splits, no escalation without a live season inside MC bands.
 3. **Overfitting by iteration.** ~50 experiments have already touched this
    data. Mitigation: pre-registration, multiple-testing ledger, walk-forward

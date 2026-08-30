@@ -180,3 +180,96 @@ class TestDecide:
         ok, _ = promote_mod.decide(self._m(0.03, 1.2, 0.10),
                                    self._m(0.03, 1.2, 0.10), prereg_valid=True)
         assert not ok
+
+
+class TestDecideFullShape:
+    def _results(self, mean, sharpe=1.0, p_loss=0.1, prereg=True, checklist_fails=0,
+                 tail=None, brier=None):
+        doc = {
+            "headline": {"mean": mean, "sharpe_trade": sharpe, "n": 100},
+            "mc": {"by_fraction": {"0.05": {"p_loss": p_loss}}},
+            "stress": {"regimes": {"2022": {"n": 40, "mean": 0.05}},
+                       "tail_injection": tail if tail is not None else {"available": True}},
+            "preregistration": {"valid": prereg},
+            "checklist_fails": checklist_fails,
+        }
+        if brier is not None:
+            doc["calibration"] = {"brier_skill": brier}
+        return doc
+
+    def test_full_shape_better_promotes(self):
+        ok, reasons = promote_mod.decide(self._results(0.05, sharpe=1.5),
+                                         self._results(0.03, sharpe=1.0))
+        assert ok, reasons
+
+    def test_full_shape_worse_refused(self):
+        ok, _ = promote_mod.decide(self._results(0.02), self._results(0.03))
+        assert not ok
+
+    def test_full_shape_worse_ploss_refused(self):
+        ok, _ = promote_mod.decide(self._results(0.05, p_loss=0.3), self._results(0.03, p_loss=0.1))
+        assert not ok
+
+    def test_full_shape_checklist_fails_refused(self):
+        ok, reasons = promote_mod.decide(self._results(0.05, checklist_fails=2),
+                                         self._results(0.03))
+        assert not ok
+        assert any("(e)" in r for r in reasons)
+
+    def test_brier_skill_rule(self):
+        ok, reasons = promote_mod.decide(self._results(0.05, brier=-0.10),
+                                         self._results(0.03))
+        assert not ok
+        assert any("(f)" in r and "FAIL" in r for r in reasons)
+        ok, reasons = promote_mod.decide(self._results(0.05, sharpe=1.5, brier=0.01),
+                                         self._results(0.03, sharpe=1.0))
+        assert ok, reasons
+
+    def test_short_leg_tail_must_be_available(self):
+        ok, _ = promote_mod.decide(self._results(0.05, tail={"available": False}),
+                                   self._results(0.03), short_leg=True)
+        assert not ok
+
+    def test_missing_mc_key_fails_closed(self):
+        doc = self._results(0.05)
+        doc["mc"] = {}
+        ok, reasons = promote_mod.decide(doc, self._results(0.03))
+        assert not ok
+        assert any("(b)" in r and "FAIL" in r for r in reasons)
+
+
+class TestChampionFromRegistry:
+    def test_registry_baseline_fails_closed_on_missing_fields(self):
+        from experiments.promote import champion_from_registry
+
+        champ = champion_from_registry("gate_midfill_str_thru")
+        assert champ["mean"] is not None  # eval block carries gated_mean_ret
+        assert champ.get("sharpe_trade") is None  # registry cannot supply it
+        challenger = {"headline": {"mean": champ["mean"] + 0.05, "sharpe_trade": 1.5},
+                      "mc": {"by_fraction": {"0.05": {"p_loss": 0.05}}},
+                      "stress": {"regimes": {}, "tail_injection": {"available": True}},
+                      "preregistration": {"valid": True},
+                      "checklist_fails": 0}
+        ok, reasons = promote_mod.decide(challenger, champ)
+        assert not ok, "promotion against an incomplete baseline must fail closed"
+        assert any("(a)" in r for r in reasons)
+
+
+class TestPromotionReport:
+    def test_report_renders_through_engine_report(self, tmp_path):
+        from experiments.promote import render_promotion_report
+
+        spec = {"id": "EXP-101", "title": "probe", "hypothesis": "h.",
+                "primary_spec": {"x": 1}}
+        challenger = {"headline": {"mean": 0.05, "sharpe_trade": 1.5, "n": 100},
+                      "mc": {"by_fraction": {"0.05": {"p_loss": 0.05}}}}
+        champion = {"mean": 0.03, "sharpe_trade": 1.2, "mc": {"p_loss": 0.1}}
+        reasons = ["PASS (a1) probe"]
+        path = render_promotion_report("EXP-101", spec, challenger, champion,
+                                       reasons, tmp_path)
+        assert path.name == "REPORT.md"
+        md = path.read_text()
+        assert "Promotion report" in md
+        assert "Decision:" in md
+        assert "## Provenance" in md
+        assert "data snapshot" in md

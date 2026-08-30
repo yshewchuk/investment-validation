@@ -112,6 +112,10 @@ def main() -> None:
             cell = dict(spec)
             cell["primary_spec"] = dict(spec["primary_spec"])
             cell["primary_spec"][key] = value
+            # Grid cells legitimately differ from the registered primary spec;
+            # the label exempts them from the spec-hash continuity check —
+            # they are secondary results, never the headline.
+            cell["grid_cell"] = True
             cell_result = evaluate(cell, trades, run_dir=HERE)
             lib.record_evaluation(HERE, cell, cell_result.results)
 

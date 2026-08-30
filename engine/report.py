@@ -37,7 +37,8 @@ import pandas as pd
 
 from engine import paths
 
-__all__ = ["GENERATOR_VERSION", "ChecklistItem", "accuracy_checklist", "Report"]
+__all__ = ["GENERATOR_VERSION", "ChecklistItem", "accuracy_checklist",
+           "build_provenance", "Report"]
 
 GENERATOR_VERSION = "1.0.0"
 
@@ -101,6 +102,40 @@ def _file_fingerprint(path: Path) -> dict[str, Any]:
     return info
 
 
+def build_provenance(spec_hash: str | None = None,
+                     seeds: Mapping[str, Any] | None = None,
+                     input_files: Sequence[Path | str] = ()) -> dict[str, Any]:
+    """The regeneration contract, shared by evaluations and promotions.
+
+    Input files + hashes, the data snapshot, the seeds, the code state (sha256
+    of every engine module a report depends on), the quota state, and the
+    generator version. A report that cannot be regenerated from this block is
+    a bug — the acceptance suite proves it.
+    """
+    snapshot_hash = None
+    if paths.SNAPSHOT_FILE.exists():
+        try:
+            snapshot_hash = json.loads(paths.SNAPSHOT_FILE.read_text()).get("snapshot")
+        except (ValueError, OSError):
+            snapshot_hash = None
+
+    quota_state = None
+    if paths.QUOTA_LOG.exists():
+        lines = paths.QUOTA_LOG.read_text().splitlines()
+        quota_state = lines[-1] if len(lines) > 1 else None
+
+    return {
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "generator_version": GENERATOR_VERSION,
+        "spec_hash": spec_hash,
+        "data_snapshot": snapshot_hash,
+        "seeds": dict(seeds or {}),
+        "inputs": [_file_fingerprint(Path(p)) for p in input_files],
+        "code": {m: _sha256(paths.ROOT / m) for m in _CODE_MODULES if (paths.ROOT / m).exists()},
+        "quota_state": quota_state,
+    }
+
+
 # --------------------------------------------------------------------------
 # accuracy checklist
 # --------------------------------------------------------------------------
@@ -134,12 +169,14 @@ def accuracy_checklist(results: Mapping[str, Any], spec: Mapping[str, Any],
 
     # 2. Leak audit ran on this evaluation.
     audit = (results.get("walk_forward") or {}).get("audit")
-    if audit and audit.get("leak_free"):
-        seen = audit.get("fit_years_seen", [])
+    if audit and audit.get("fit_years_seen"):
         items.append(ChecklistItem("Leak audit ran", "PASS",
-                                   f"fits saw max year per fold: {seen}"))
+                                   f"fits saw max year per fold: {audit['fit_years_seen']}"))
     elif audit:
-        items.append(ChecklistItem("Leak audit ran", "FAIL", "audit receipt present but leak_free is false"))
+        # A receipt with no fits means no gate ran — there was nothing to
+        # audit. That is honestly N/A, not a PASS.
+        items.append(ChecklistItem("Leak audit ran", "N/A",
+                                   "no gate fitted in this evaluation"))
     else:
         items.append(ChecklistItem("Leak audit ran", "N/A", "no walk-forward audit receipt"))
 
@@ -159,14 +196,26 @@ def accuracy_checklist(results: Mapping[str, Any], spec: Mapping[str, Any],
         items.append(ChecklistItem("Fill sensitivity", "FAIL",
                                    f"only {len(sweep)} alpha(s) swept; breakeven={be}"))
 
-    # 5. Multiple-testing ledger cited.
+    # 5. Multiple-testing ledger cited — the spec itself must appear in it,
+    # not merely the file exist.
     sha = results.get("spec_hash", "")
     if ledger_path is not None and Path(ledger_path).exists():
-        rows = [ln for ln in Path(ledger_path).read_text().splitlines()[1:] if sha[:16] in ln]
-        total = max(len(Path(ledger_path).read_text().splitlines()) - 1, 0)
-        items.append(ChecklistItem(
-            "Multiple-testing ledger", "PASS" if total else "N/A",
-            f"spec {sha[:12]}… appears in {len(rows)} ledger row(s); {total} spec(s) tried overall"))
+        lines = Path(ledger_path).read_text().splitlines()
+        total = max(len(lines) - 1, 0)
+        if total == 0:
+            items.append(ChecklistItem(
+                "Multiple-testing ledger", "N/A", "no experiments tried yet (ledger empty)"))
+        else:
+            rows = [ln for ln in lines[1:] if sha[:16] in ln]
+            if rows:
+                items.append(ChecklistItem(
+                    "Multiple-testing ledger", "PASS",
+                    f"spec {sha[:12]}… appears in {len(rows)} ledger row(s); "
+                    f"{total} spec(s) tried overall"))
+            else:
+                items.append(ChecklistItem(
+                    "Multiple-testing ledger", "FAIL",
+                    f"spec {sha[:12]}… never registered in the ledger ({total} row(s) exist)"))
     else:
         items.append(ChecklistItem("Multiple-testing ledger", "FAIL", "no LEDGER.csv attached"))
 
@@ -318,6 +367,60 @@ def fig_stress_grid(regimes: Mapping[str, Mapping[str, float]], path: Path, titl
     return _save(fig, path)
 
 
+def fig_reliability(calibration: Mapping[str, Any], path: Path, title: str) -> Path:
+    """Reliability curve: predicted win rate vs realized, per decile.
+
+    ``calibration`` needs ``deciles``: a list of rows with ``predicted`` and
+    ``realized`` (and optionally ``n``). The diagonal is perfect calibration.
+    """
+    plt = _matplotlib()
+    deciles = calibration.get("deciles") or []
+    fig, ax = plt.subplots(figsize=(5.5, 5))
+    ax.plot([0, 1], [0, 1], "k--", lw=0.8, label="perfect")
+    if deciles:
+        pred = [float(d.get("predicted", np.nan)) for d in deciles]
+        real = [float(d.get("realized", np.nan)) for d in deciles]
+        counts = [float(d.get("n", 1)) for d in deciles]
+        ax.scatter(pred, real, s=[max(12, 4 * np.sqrt(c)) for c in counts],
+                   color="tab:blue", label="model")
+    ax.set_xlabel("predicted win rate")
+    ax.set_ylabel("realized win rate")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=8)
+    ax.set_title(title)
+    fig.text(0.01, 0.005,
+             "Falsified if: points stay off the diagonal as ledger events accrue "
+             "(then the shipped win rate is not the win rate).",
+             fontsize=7, color="gray")
+    return _save(fig, path)
+
+
+def fig_mc_fan_paths(bands: Mapping[str, Any], path: Path, title: str) -> Path:
+    """MC fan chart: percentile bands of the equity paths over the trade index.
+
+    ``bands`` needs ``p05``, ``p50``, ``p95`` arrays aligned on the trade index
+    — the true fan over the equity path, as distinct from the sizing curve
+    (terminal percentiles vs fraction).
+    """
+    plt = _matplotlib()
+    idx = np.arange(len(bands.get("p50", [])))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    if len(idx):
+        ax.fill_between(idx, bands["p05"], bands["p95"], color="tab:blue", alpha=0.2,
+                        label="p05-p95")
+        ax.plot(idx, bands["p50"], color="tab:blue", lw=1.2, label="p50")
+        ax.axhline(1.0, color="k", lw=0.8, ls="--")
+    ax.set_xlabel("trade sequence index (chronological)")
+    ax.set_ylabel("equity (× start)")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.text(0.01, 0.005,
+             "Falsified if: the realized forward-test equity path leaves the p05-p95 band.",
+             fontsize=7, color="gray")
+    return _save(fig, path)
+
+
 # --------------------------------------------------------------------------
 # the report
 # --------------------------------------------------------------------------
@@ -355,29 +458,12 @@ class Report:
         headline = results.get("headline", {})
         backtest = results.get("backtest", {})
 
-        snapshot_hash = None
-        if paths.SNAPSHOT_FILE.exists():
-            try:
-                snapshot_hash = json.loads(paths.SNAPSHOT_FILE.read_text()).get("snapshot")
-            except (ValueError, OSError):
-                snapshot_hash = None
-
-        quota_state = None
-        if paths.QUOTA_LOG.exists():
-            lines = paths.QUOTA_LOG.read_text().splitlines()
-            quota_state = lines[-1] if len(lines) > 1 else None
-
-        provenance = {
-            "generated_at": datetime.now(tz=timezone.utc).isoformat(),
-            "generator_version": GENERATOR_VERSION,
-            "spec_hash": results.get("spec_hash"),
-            "data_snapshot": snapshot_hash,
-            "seeds": {"monte_carlo": (results.get("mc") or {}).get("seed", 0),
-                      "equity_mode": results.get("equity_mode")},
-            "inputs": [_file_fingerprint(Path(p)) for p in input_files],
-            "code": {m: _sha256(paths.ROOT / m) for m in _CODE_MODULES if (paths.ROOT / m).exists()},
-            "quota_state": quota_state,
-        }
+        provenance = build_provenance(
+            spec_hash=results.get("spec_hash"),
+            seeds={"monte_carlo": (results.get("mc") or {}).get("seed", 0),
+                   "equity_mode": results.get("equity_mode")},
+            input_files=input_files,
+        )
 
         ledger_path = paths.ROOT / "experiments" / "LEDGER.csv"
         checklist = accuracy_checklist(results, spec, ledger_path=ledger_path)
@@ -405,7 +491,10 @@ class Report:
         (out_dir / "figures").mkdir(exist_ok=True)
 
         figures = self._render_figures(out_dir / "figures")
-        md = self._render_markdown(figures)
+        if self.context.get("kind") == "promotion":
+            md = self._render_promotion_markdown(figures)
+        else:
+            md = self._render_markdown(figures)
         path = out_dir / "REPORT.md"
         path.write_text(md)
         return path
@@ -444,7 +533,92 @@ class Report:
         if regimes:
             figures["stress"] = fig_stress_grid(regimes, fig_dir / "stress_grid.png",
                                                 "Regime replays: mean return per trade")
+
+        bands = ((results.get("mc") or {}).get("path_bands") or {}).get("0.05")
+        if bands and bands.get("p50"):
+            figures["mc_fan"] = fig_mc_fan_paths(bands, fig_dir / "mc_fan_paths.png",
+                                                 "MC equity fan (5% sizing, p05/p50/p95)")
+
+        cal = self.context.get("calibration") or {}
+        if cal.get("deciles"):
+            figures["reliability"] = fig_reliability(cal, fig_dir / "reliability.png",
+                                                     "Reliability: predicted vs realized win rate")
         return figures
+
+    def _render_promotion_markdown(self, figures: Mapping[str, Path]) -> str:
+        spec = self.context.get("spec", {})
+        results = self.context.get("results", {})
+        headline = self.context.get("headline", {})
+        champion = results.get("champion", {})
+        prov = self.context.get("provenance", {})
+        checklist: list[ChecklistItem] = self.context.get("checklist", [])
+        ctx = results.get("ledger_context", {})
+
+        def view(doc: Mapping[str, Any]) -> dict[str, Any]:
+            full = "headline" in doc
+            h = (doc.get("headline") if full else doc) or {}
+            mc = doc.get("mc") or {}
+            mc5 = (mc.get("by_fraction") or {}).get("0.05") or ({} if full else mc)
+            return {"n": h.get("n"), "mean": h.get("mean"), "win_rate": h.get("win_rate"),
+                    "sharpe_trade": h.get("sharpe_trade"), "sharpe_equity": h.get("sharpe_equity"),
+                    "max_dd": h.get("max_dd"), "p_loss_5": mc5.get("p_loss")}
+
+        c, h = view({"headline": headline}), view(champion)
+
+        lines: list[str] = []
+        add = lines.append
+        if self.any_fail:
+            add("> **⚠ ACCURACY CHECKLIST HAS FAILING ITEMS — diagnostic only.**")
+            add("")
+        add(f"# Promotion report — {spec.get('id', 'EXP-?')}")
+        add("")
+        add(f"*{results.get('decided_at', '')} by engine.report v{prov.get('generator_version')}.*")
+        add("")
+        tried = ctx.get("specs_tried", 0)
+        rows_here = ctx.get("this_spec_rows", 0)
+        add(f"**Decision: {results.get('decision', 'PROMOTED')}.** {tried} spec(s) were tried "
+            f"against this snapshot before this one (this spec appears in {rows_here} ledger "
+            "row(s)) — that count is the multiple-testing context this promotion was earned under.")
+        if spec.get("hypothesis"):
+            add("")
+            add(f"**Hypothesis:** {str(spec['hypothesis']).strip()}")
+        add("")
+        add("## Rules")
+        add("")
+        for r in results.get("reasons", []):
+            add(f"- {r}")
+        add("")
+        add("## Challenger vs champion (walk-forward OOS, mid fills)")
+        add("")
+        add("| metric | challenger | champion |")
+        add("|---|---|---|")
+        for key in ("n", "mean", "win_rate", "sharpe_trade", "sharpe_equity", "max_dd", "p_loss_5"):
+            label = "MC P(loss)@5%" if key == "p_loss_5" else key
+            add(f"| {label} | {_fmt(c.get(key))} | {_fmt(h.get(key))} |")
+        add("")
+        if "by_year" in figures:
+            add(f"![by year](figures/{figures['by_year'].name})")
+            add("")
+        if checklist:
+            add("## Accuracy-evidence checklist (challenger's evaluation)")
+            add("")
+            add("| check | status | evidence |")
+            add("|---|---|---|")
+            for item in checklist:
+                add(item.row())
+            add("")
+        add("## Provenance")
+        add("")
+        add(f"- spec hash: `{prov.get('spec_hash')}`")
+        add(f"- data snapshot: `{prov.get('data_snapshot')}`")
+        for f in prov.get("inputs", []):
+            detail = f.get("sha256") or f.get("first_mb_sha256") or "MISSING"
+            add(f"- input: `{f['path']}` — {detail}")
+        add("- code state (sha256):")
+        for module, digest in prov.get("code", {}).items():
+            add(f"  - `{module}` — {digest[:16]}…")
+        add("")
+        return "\n".join(lines) + "\n"
 
     def _render_markdown(self, figures: Mapping[str, Path]) -> str:
         spec = self.context.get("spec", {})
@@ -552,6 +726,9 @@ class Report:
         if "mc" in figures:
             add(f"![MC fan](figures/{figures['mc'].name})")
             add("")
+        if "mc_fan" in figures:
+            add(f"![MC equity fan](figures/{figures['mc_fan'].name})")
+            add("")
 
         # 5. Stress grid ------------------------------------------------------
         add("## 5. Stress battery")
@@ -604,6 +781,9 @@ class Report:
         cal = self.context.get("calibration")
         if cal:
             add(json.dumps(cal, indent=1, default=str))
+            if "reliability" in figures:
+                add("")
+                add(f"![reliability](figures/{figures['reliability'].name})")
         else:
             add("No calibration block for this evaluation (predicted-vs-realized win rate is")
             add("reported by the Phase 1 calibration reports once ledger events accrue).")

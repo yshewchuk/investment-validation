@@ -90,11 +90,12 @@ __all__ = [
 ]
 
 #: Canonical metric keys — identical across all strategies so the leaderboard
-#: is comparable. A results dict that misses one of these is a bug.
+#: is comparable. A results dict that misses one of these is a bug, and
+#: evaluate() asserts it rather than describing it.
 METRIC_KEYS = (
     "n", "mean", "median", "std", "win_rate", "profit_factor",
     "sharpe_trade", "sharpe_equity", "sortino", "max_dd", "tail_ratio",
-    "by_year", "breakeven_alpha", "mc",
+    "by_year", "breakeven_alpha", "capacity", "mc",
 )
 
 #: The fill alphas every result is reported at (worst/mid/best plus the quarter
@@ -240,6 +241,57 @@ def by_year_table(trades: pd.DataFrame, ret_col: str = "ret") -> dict[str, dict[
     return dict(sorted(out.items()))
 
 
+def capacity_note(trades: pd.DataFrame, alpha: float = 0.5) -> dict[str, Any]:
+    """Capacity notes: spread width at the traded strikes (§P2.2.5).
+
+    Sizing decisions must not be made on mean return alone: a +5%/trade edge
+    quoted through a 4% wide spread on a thinly-traded name is not the same
+    asset as the same edge through a 0.4% spread. This reports the relative
+    spread of the traded legs (the worst leg governs executability) and the
+    wide-market fraction. Volume at the traded strikes is NOT verifiable from
+    the chain source (ORATS /hist/strikes carries bid/ask but no volume), and
+    the note says so instead of implying otherwise.
+    """
+    rows = trades[np.isclose(trades["fill_alpha"], alpha)] if "fill_alpha" in trades.columns else trades
+    out: dict[str, Any] = {"available": False}
+    if rows.empty or "legs" not in rows.columns:
+        out["note"] = "no legs blob on this trade set; capacity not measurable"
+        return out
+
+    worst_rel: list[float] = []
+    for blob in rows["legs"].to_numpy():
+        if not isinstance(blob, str):
+            continue
+        try:
+            doc = json.loads(blob)
+        except ValueError:
+            continue
+        rels = []
+        for leg in (doc.get("entry") or []):
+            bid, ask = float(leg.get("bid", 0.0)), float(leg.get("ask", 0.0))
+            mid = (bid + ask) / 2.0
+            if mid > 0 and ask >= bid >= 0:
+                rels.append((ask - bid) / mid)
+        if rels:
+            worst_rel.append(max(rels))
+
+    if not worst_rel:
+        out["note"] = "legs blob carried no usable entry quotes"
+        return out
+    arr = np.asarray(worst_rel)
+    out.update({
+        "available": True,
+        "n": int(arr.size),
+        "mean_rel_spread": float(arr.mean()),
+        "p95_rel_spread": float(np.percentile(arr, 95)),
+        "wide_market_frac": float(rows["wide_market"].mean())
+        if "wide_market" in rows.columns else None,
+        "note": ("spread-based capacity only: the chain source carries no volume "
+                 "at the traded strikes"),
+    })
+    return out
+
+
 # --------------------------------------------------------------------------
 # fill-alpha sweep
 # --------------------------------------------------------------------------
@@ -301,11 +353,21 @@ def build_equity(
 ) -> dict[str, Any]:
     """Equity curve of a fixed-fraction sizing rule over priced trades.
 
-    ``cashflow`` (default): chronological by entry date; each entry commits
-    ``fraction × current equity`` (``contracts = fraction × equity /
-    entry_cost``), pays the debit at entry and credits the exit value at exit.
-    Overlapping positions are allowed; ``max_concurrency`` reports how many
-    were open at once.
+    ``cashflow`` (default): chronological by entry date; each entry sizes off
+    the current **marked** equity — ``cash + Σ contracts × entry_cost`` over
+    the positions still open — i.e. net liquidation value with open positions
+    marked at cost (the honest floor: no interpolation, no mid-life quotes
+    needed). The debit is paid at entry, the exit value credited at exit, and
+    the reported series is the marked equity, so drawdown measures P&L rather
+    than how much capital happens to be deployed. Overlapping positions are
+    allowed; ``max_concurrency`` reports how many were open at once.
+
+    Marking at cost, not just tracking cash, is load-bearing: with a hundred
+    concurrent positions a cash-only curve reports a ~100% "drawdown" on a
+    trade set that cannot lose money, because everything deployed reads as
+    money gone. It also fixes sizing — a broker sizes the next trade off net
+    liquidation value, not off whatever cash remains after the open trades'
+    debits.
 
     ``sequential``: ``equity *= (1 + fraction × ret)`` per trade in entry
     order — the EXP-050 reference construction. It ignores overlap, so a new
@@ -349,25 +411,32 @@ def build_equity(
         events.append((entry_dates.iloc[i], 1, i))
     events.sort(key=lambda e: (e[0], e[1]))
 
-    equity = 1.0
-    open_contracts: dict[int, float] = {}
+    costs = t["entry_cost"].to_numpy(dtype=float)
+    exits = t["exit_value"].to_numpy(dtype=float)
+
+    def mark(cash: float, open_pos: dict[int, float]) -> float:
+        # Net liquidation value with open positions marked at cost.
+        return cash + sum(c * costs[i] for i, c in open_pos.items())
+
+    cash = 1.0
+    open_pos: dict[int, float] = {}
     marks = [(events[0][0] - pd.Timedelta(days=1), 1.0)]
     concurrency = 0
     max_concurrency = 0
     for date, kind, i in events:
         if kind == 0:  # exit
-            contracts = open_contracts.pop(i, 0.0)
-            equity += contracts * float(t.loc[i, "exit_value"])
+            contracts = open_pos.pop(i, 0.0)
+            cash += contracts * exits[i]
             concurrency -= 1
-        else:  # entry
-            cost = float(t.loc[i, "entry_cost"])
-            if equity > 0 and cost > 0:
-                contracts = fraction * equity / cost
-                equity -= contracts * cost
-                open_contracts[i] = contracts
+        else:  # entry — size off the marked equity, not the cash balance
+            equity_now = mark(cash, open_pos)
+            if equity_now > 0 and costs[i] > 0:
+                contracts = fraction * equity_now / costs[i]
+                cash -= contracts * costs[i]
+                open_pos[i] = contracts
             concurrency += 1
         max_concurrency = max(max_concurrency, concurrency)
-        marks.append((date, equity))
+        marks.append((date, mark(cash, open_pos)))
     curve = pd.Series(dict(marks)).sort_index()
     curve = curve[~curve.index.duplicated(keep="last")]
     return {
@@ -534,6 +603,7 @@ def monte_carlo(
     seed: int = 0,
     mode: str = "sequential",
     draw_order: str = "shared",
+    path_bands_for: Sequence[float] = (),
 ) -> dict[str, Any]:
     """Block-bootstrap MC on a trade sequence → the sizing curve.
 
@@ -547,12 +617,16 @@ def monte_carlo(
     compares fractions on identical scenarios. ``draw_order="per_fraction"``
     consumes fresh draws per fraction in the order the fractions are given —
     the EXP-050 reference behaviour, kept for the regression.
+
+    ``path_bands_for`` lists the fractions for which the equity-path percentile
+    bands (p05/p50/p95 over the trade index) are computed — the data for the
+    report's MC fan chart, as distinct from the sizing curve.
     """
     r = np.asarray(rets, dtype=float)
     r = r[np.isfinite(r)]
     n = r.size
     out: dict[str, Any] = {"block": block, "paths": paths, "seed": seed, "n_trades": n,
-                           "mode": mode, "by_fraction": {}}
+                           "mode": mode, "by_fraction": {}, "path_bands": {}}
     if n == 0:
         return out
     if n <= block:
@@ -573,7 +647,9 @@ def monte_carlo(
     def draw_index() -> np.ndarray:
         idx: list[int] = []
         while len(idx) < n:
-            s = int(rng.integers(0, n - block))
+            # high is exclusive: +1 so the final block (the most recent trades,
+            # the ones most representative of the current regime) is reachable.
+            s = int(rng.integers(0, n - block + 1))
             idx.extend(range(s, s + block))
         return np.array(idx[:n])
 
@@ -581,14 +657,19 @@ def monte_carlo(
         raise EvaluationError(f"unknown draw_order {draw_order!r}")
     shared_indices = [draw_index() for _ in range(paths)] if draw_order == "shared" else None
 
+    bands_wanted = {float(f) for f in path_bands_for}
     for f in fractions:
         finals = np.empty(paths)
         dds = np.empty(paths)
+        collect = float(f) in bands_wanted
+        eq_paths = np.empty((paths, n + 1)) if collect else None
         for p in range(paths):
             idx = shared_indices[p] if shared_indices is not None else draw_index()
             eq = _compound(r[idx], f, mode)
             finals[p] = eq[-1]
             dds[p] = _max_drawdown(pd.Series(eq))
+            if collect:
+                eq_paths[p] = eq
         out["by_fraction"][f"{f:.2f}"] = {
             "p_loss": float((finals < 1.0).mean()),
             "terminal_p05": float(np.percentile(finals, 5)),
@@ -597,6 +678,12 @@ def monte_carlo(
             "dd_p50": float(np.percentile(dds, 50)),
             "dd_p95": float(np.percentile(dds, 95)),
         }
+        if collect:
+            out["path_bands"][f"{f:.2f}"] = {
+                "p05": [float(v) for v in np.percentile(eq_paths, 5, axis=0)],
+                "p50": [float(v) for v in np.percentile(eq_paths, 50, axis=0)],
+                "p95": [float(v) for v in np.percentile(eq_paths, 95, axis=0)],
+            }
     return out
 
 
@@ -827,11 +914,19 @@ def _run_log_path(run_dir: Path) -> Path:
 
 def check_preregistration(spec: Mapping[str, Any], run_dir: Path | None,
                           now_utc: pd.Timestamp | None = None) -> dict[str, Any]:
-    """Validate the spec's pre-registration against the run log.
+    """Validate the spec's pre-registration against the run log and the ledger.
 
     Returns a receipt. Raises :class:`PreregistrationError` when the OOS stage
-    must refuse: no ``preregistered_at``, or one later than the first recorded
-    run of this experiment (a spec stamped after results were seen).
+    must refuse:
+
+    - no ``preregistered_at`` at all;
+    - a stamp later than the first recorded run (a spec stamped after results
+      were seen);
+    - a PRIMARY spec whose hash no longer matches the PLANNED ledger row —
+      i.e. the spec was edited after registration. Run the result-disliked
+      loop (run, dislike, edit, re-run under the old stamp) and the receipt
+      refuses. Grid cells legitimately differ from the primary spec and are
+      exempted BY LABEL (``grid_cell: true``), not by omission.
     """
     stamp = spec.get("preregistered_at")
     if run_dir is None:
@@ -861,6 +956,30 @@ def check_preregistration(spec: Mapping[str, Any], run_dir: Path | None,
             f"{first_run_ts} — this spec was edited after results existed. "
             "Register a NEW spec for the changed hypothesis."
         )
+
+    # Spec-hash continuity: the registered hypothesis is the one that runs.
+    if not spec.get("grid_cell"):
+        ledger = paths.ROOT / "experiments" / "LEDGER.csv"
+        exp_id = spec.get("id")
+        if ledger.exists() and exp_id:
+            import csv
+
+            with open(ledger, newline="") as fh:
+                planned_hashes = [
+                    row["spec_hash"] for row in csv.DictReader(fh)
+                    if row.get("id") == exp_id and row.get("stage") == "planned"
+                ]
+            if planned_hashes and spec_hash(spec) not in planned_hashes:
+                raise PreregistrationError(
+                    f"{exp_id}: spec_hash {spec_hash(spec)[:12]}… does not match the "
+                    f"PLANNED ledger row(s) ({planned_hashes[-1][:12]}…). The spec was "
+                    "edited after registration — scaffold a NEW experiment for the "
+                    "changed hypothesis (grid cells are exempt via `grid_cell: true`)."
+                )
+            receipt["spec_hash_checked"] = bool(planned_hashes)
+    else:
+        receipt["spec_hash_checked"] = False
+        receipt["grid_cell"] = True
     return receipt
 
 
@@ -980,6 +1099,7 @@ def evaluate(
     headline["max_dd"] = eq5["max_dd"]
     headline["max_concurrency"] = eq5["max_concurrency"]
     headline["alpha_sweep"] = alpha_sweep(selected, alphas)
+    headline["capacity"] = capacity_note(selected)
     # Anti-selection guard (the S4 lesson): the unselected universe always
     # appears next to the selected one.
     headline["base_unselected"] = {
@@ -999,6 +1119,7 @@ def evaluate(
     results["mc"] = monte_carlo(
         rets, fractions=fractions, block=mc_block, paths=mc_paths, seed=seed,
         mode=equity_mode, draw_order=str(spec.get("mc_draw_order", "shared")),
+        path_bands_for=(0.05,) if 0.05 in fractions else (),
     )
     headline["mc"] = results["mc"]["by_fraction"]
 
@@ -1049,6 +1170,11 @@ def evaluate(
         for item in checklist
     ]
     results["checklist_fails"] = sum(1 for item in checklist if item.status == "FAIL")
+
+    # The canonical contract is asserted, not merely documented: a headline
+    # missing a key would otherwise pass silently and break the leaderboard.
+    missing_keys = [k for k in METRIC_KEYS if k not in headline]
+    _require(not missing_keys, f"headline metrics missing canonical keys: {missing_keys}")
 
     results["elapsed_s"] = round(time.time() - started, 2)
 

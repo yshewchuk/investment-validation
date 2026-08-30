@@ -238,3 +238,100 @@ class TestStressAndAppendixSections:
         report = Report.from_eval(result)
         path = report.write(tmp_path / "out")
         assert (path.parent / "figures" / "equity_drawdown.png").exists()
+
+
+class TestChecklistHonestyRound2:
+    def _results(self, audit):
+        return {"spec_hash": "abc", "headline": {"alpha_sweep": None},
+                "backtest": {"alpha_sweep": {"0.00": {"mean": -0.01},
+                                              "0.50": {"mean": 0.00},
+                                              "1.00": {"mean": 0.01}}},
+                "headline_stage": "wf_oos",
+                "walk_forward": {"audit": audit},
+                "preregistration": {"valid": True}}
+
+    def test_gateless_audit_is_na_not_pass(self, tmp_path):
+        from engine.report import accuracy_checklist
+
+        results = self._results({"years": [], "fit_years_seen": [], "leak_free": True})
+        items = accuracy_checklist(results, {"price_source": "orats"}, ledger_path=None)
+        by_name = {i.name: i for i in items}
+        assert by_name["Leak audit ran"].status == "N/A"
+
+    def test_fitted_audit_is_pass(self):
+        from engine.report import accuracy_checklist
+
+        results = self._results({"years": [2020, 2021], "fit_years_seen": [2020],
+                                 "leak_free": True})
+        items = accuracy_checklist(results, {"price_source": "orats"}, ledger_path=None)
+        by_name = {i.name: i for i in items}
+        assert by_name["Leak audit ran"].status == "PASS"
+
+    def test_empty_ledger_is_na(self, tmp_path):
+        from engine.report import accuracy_checklist
+
+        ledger = tmp_path / "LEDGER.csv"
+        ledger.write_text("id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted\n")
+        results = self._results(None)
+        items = accuracy_checklist(results, {"price_source": "orats"}, ledger_path=ledger)
+        by_name = {i.name: i for i in items}
+        assert by_name["Multiple-testing ledger"].status == "N/A"
+        assert "no experiments tried yet" in by_name["Multiple-testing ledger"].evidence
+
+    def test_spec_absent_from_ledger_is_fail(self, tmp_path):
+        from engine.report import accuracy_checklist
+
+        ledger = tmp_path / "LEDGER.csv"
+        ledger.write_text(
+            "id,spec_hash,date,stage,oos_mean_mid,sharpe_trade,promoted\n"
+            "EXP-101,ffff,2026-08-30,ran,,,False\n")
+        results = self._results(None)
+        items = accuracy_checklist(results, {"price_source": "orats"}, ledger_path=ledger)
+        by_name = {i.name: i for i in items}
+        assert by_name["Multiple-testing ledger"].status == "FAIL"
+        assert "never registered" in by_name["Multiple-testing ledger"].evidence
+
+
+class TestNewFigures:
+    def test_reliability_figure(self, tmp_path):
+        from engine.report import fig_reliability
+
+        cal = {"deciles": [{"predicted": 0.3, "realized": 0.28, "n": 50},
+                           {"predicted": 0.6, "realized": 0.55, "n": 40}]}
+        path = fig_reliability(cal, tmp_path / "rel.png", "reliability probe")
+        assert path.exists()
+
+    def test_mc_fan_paths_figure(self, tmp_path):
+        from engine.report import fig_mc_fan_paths
+
+        bands = {"p05": [1.0, 0.98, 0.95], "p50": [1.0, 1.01, 1.03],
+                 "p95": [1.0, 1.04, 1.09]}
+        path = fig_mc_fan_paths(bands, tmp_path / "fan.png", "fan probe")
+        assert path.exists()
+
+    def test_promotion_context_renders(self, tmp_path):
+        from engine.report import Report
+
+        context = {
+            "kind": "promotion",
+            "spec": {"id": "EXP-101", "title": "probe", "hypothesis": "h."},
+            "headline": {"mean": 0.05, "sharpe_trade": 1.5, "n": 100},
+            "results": {
+                "champion": {"headline": {"mean": 0.03, "sharpe_trade": 1.2},
+                             "mc": {"by_fraction": {"0.05": {"p_loss": 0.1}}}},
+                "reasons": ["PASS (a1) probe"],
+                "ledger_context": {"specs_tried": 3, "this_spec_rows": 2},
+                "decision": "PROMOTED",
+                "decided_at": "2026-08-30T00:00:00+00:00",
+                "spec_hash": "abc",
+            },
+            "checklist": [],
+            "provenance": {"generator_version": "1.0.0", "spec_hash": "abc",
+                           "data_snapshot": "snap", "inputs": [], "code": {}},
+            "survivorship_note": "",
+        }
+        path = Report(context).write(tmp_path / "out")
+        md = path.read_text()
+        assert "Promotion report" in md
+        assert "3 spec(s) were tried" in md
+        assert "| mean | 0.0500 | 0.0300 |" in md
