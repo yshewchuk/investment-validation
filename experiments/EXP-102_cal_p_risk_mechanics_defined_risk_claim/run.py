@@ -374,8 +374,7 @@ def appendix_sections(spec, result, m: dict) -> list[dict]:
         "promote_to_verdict": True,
         "verdict_row": ("Is CAL-P defined-risk?",
                         f"**No** — {d['n']:,} of {a['n']:,} trades ({d['share']:.1%}) "
-                        f"lost more than the debit; worst {d['worst_ret'] * 100:.1f}%",
-                        "§8.5.1"),
+                        f"lost more than the debit; worst {d['worst_ret'] * 100:.1f}%", ""),
         "falsifies": "every exceedance classifying as a data artifact rather than a "
                      "real loss.",
     })
@@ -405,7 +404,7 @@ def appendix_sections(spec, result, m: dict) -> list[dict]:
         "promote_to_verdict": True,
         "verdict_row": ("How exposed is the short leg to assignment?",
                         f"**{a['itm_at_post_print_close']:.1%}** ITM at the post-print "
-                        f"close ({a['itm_by_gt_10pct']:.1%} by more than 10%)", "§8.5.2"),
+                        f"close ({a['itm_by_gt_10pct']:.1%} by more than 10%)", ""),
     })
 
     if "zero_cost_dropped" in z:

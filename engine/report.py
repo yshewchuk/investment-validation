@@ -887,6 +887,7 @@ def _figure_data(path: Path, data: Mapping[str, Any]) -> None:
     """
     payload = {k: (list(v) if isinstance(v, (list, tuple, np.ndarray, pd.Series)) else v)
                for k, v in data.items()}
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.with_suffix(".json").write_text(json.dumps(payload, indent=1, default=str))
 
 
@@ -1232,8 +1233,8 @@ class Report:
         """
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "figures").mkdir(exist_ok=True)
-
+        # The figures directory is created by the savers, so a report with no
+        # figures (a data audit) does not leave an empty one behind.
         figures = self._render_figures(out_dir / "figures")
         if self.context.get("kind") == "promotion":
             md = self._render_promotion_markdown(figures)
@@ -1378,9 +1379,12 @@ class Report:
         rather than by evaluate() is a formatting accident, not a judgement.
         """
         rows = []
-        for section in (self.context.get("extra_sections") or []):
+        for i, section in enumerate(self.context.get("extra_sections") or [], start=1):
             if section.get("promote_to_verdict") and section.get("verdict_row"):
-                rows.append(tuple(section["verdict_row"]))
+                question, answer, *_where = section["verdict_row"]
+                # The pointer is computed, never quoted: a caller that hard-codes
+                # "§8.5.3" is wrong the moment a section is inserted above it.
+                rows.append((question, answer, f"§8.5.{i}"))
         return rows
 
     def _render_verdict(self, lines: list[str]) -> None:
@@ -1803,11 +1807,16 @@ class Report:
         results = self.context.get("results", {})
         backtest = self.context.get("backtest", {})
         add = lines.append
+        note = self.context.get("survivorship_note", SURVIVORSHIP_NOTE)
+        diagnostics = (results.get("walk_forward") or {}).get("diagnostics", [])
+        if not (note or diagnostics or backtest.get("by_year") or
+                self.context.get("grid_results")):
+            return          # an empty appendix is a heading, not a section
         add("## 9. Appendix")
         add("")
-        add(self.context.get("survivorship_note", SURVIVORSHIP_NOTE))
-        add("")
-        diagnostics = (results.get("walk_forward") or {}).get("diagnostics", [])
+        if note:
+            add(note)
+            add("")
         if diagnostics:
             add("Walk-forward diagnostics — how many rows each fold trained on, tested "
                 "and selected:")

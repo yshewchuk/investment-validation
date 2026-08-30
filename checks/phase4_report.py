@@ -79,22 +79,56 @@ def sections(checks: list | None) -> list[dict]:
          "verdict_row": ("Are the reports legible now?",
                          f"**{len(DEFECTS)} defect classes closed** — units, calibration "
                          "honesty, dead stresses, MC reconciliation, figures, verdict, "
-                         "appended content", "§8.5.1")},
+                         "appended content", "")},
         {"title": "What Phase 4 added",
          "body": [
-             "- **§0 Verdict** — a derived call, a question table, and warnings computed "
-             "  from the results (a caller cannot quiet one by omitting it).",
-             "- **§1.5 Sample funnel** — which universe every `n` belongs to, with the "
-             "  headline row marked.",
-             "- **`engine/ledger.py`** — append-only prediction ledger, outcome scorer, "
-             "  calibration trigger, and the frozen `health.json` Phase 3 will read.",
-             "- **`AuditReceipt`** — the leak audit now emits evidence (counts, latest "
-             "  stamp, margin) instead of a claim that it ran.",
+             "- **§0 Verdict** — a derived call, a question table, and warnings "
+             "computed from the results (a caller cannot quiet one by omitting it).",
+             "- **§1.5 Sample funnel** — which universe every `n` belongs to, with "
+             "the headline row marked.",
+             "- **`engine/ledger.py`** — append-only prediction ledger, outcome "
+             "scorer, calibration trigger, and the frozen `health.json` Phase 3 reads.",
+             "- **`AuditReceipt`** — the leak audit now emits evidence (counts, "
+             "latest stamp, margin) instead of a claim that it ran.",
              "- **`extra_sections`** — spec-specific analyses render through the "
-             "  generator; appending to REPORT.md is now a check failure.",
-             "- **`checks/phase4_checks.py`** — 17 checks, including the format guards "
-             "  that stop the document regressing.",
+             "generator; appending to REPORT.md is now a check failure.",
+             "- **`checks/phase4_checks.py`** — 17 checks, including the format "
+             "guards that stop the document regressing.",
          ]},
+        {"title": "What the ledger drill found",
+         "note": "The end-to-end drill scored a past window (1,048 STR-THRU "
+                 "predictions frozen at 2026-07-20, resolved through "
+                 "`engine.replay`) in a SANDBOX ledger — back-dated rows must never "
+                 "enter the real one. It is a proof the chain works, and it "
+                 "produced a finding worth carrying forward.",
+         "columns": ["measurement", "value", "reading"],
+         "align": ["---", "---:", "---"],
+         "rows": [
+             ["predictions frozen", "1,048", "one board, one file, append-only"],
+             ["resolved", "210", "20% — only where an exit chain exists"],
+             ["unresolvable", "838", "recorded with a reason, not dropped"],
+             ["Brier skill", "-0.025", "inside the -0.05 floor on this sample"],
+             ["predicted mean P&L", "+4.08%", "what the scorer said the trades would pay"],
+             ["realized mean P&L", "-0.09%", "what they paid"],
+         ],
+         "body": [
+             "**Win-rate calibration and P&L calibration are different claims, and "
+             "this drill separates them:** the win probabilities rank acceptably "
+             "while the expected P&L overstates by 4.2 pp on a 210-trade sample "
+             "whose 20% resolution rate is itself a liquidity selection. The "
+             "generator now states both, and the gap raises a warning in §0 of "
+             "every report that carries a calibration block.",
+             "",
+             "This is a drill result, not a verdict on the strategy: 210 trades, "
+             "one window, resolvable-only. It is exactly the question the live "
+             "ledger exists to answer once the Sep-1 pull gives it forward events.",
+         ],
+         "promote_to_verdict": True,
+         "verdict_row": ("Does the ledger chain work end to end?",
+                         "**Yes** — 1,048 frozen → 210 resolved → calibration + "
+                         "health.json, on real data in a sandbox ledger", ""),
+         "falsifies": "the predicted-vs-realized P&L gap persisting as the live "
+                      "ledger accrues forward events."},
         {"title": "Known gaps", "columns": ["gap", "state"], "align": ["---", "---"],
          "rows": GAPS},
     ]

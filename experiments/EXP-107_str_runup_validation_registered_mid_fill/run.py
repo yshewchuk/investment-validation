@@ -287,8 +287,7 @@ def appendix_sections(appendix: dict) -> list[dict]:
         "promote_to_verdict": True,
         "verdict_row": ("Does the plan's +3.9% reproduce?",
                         f"Engine replay gives {fmt_pct(ea['mean'])} on {ea['n']:,} "
-                        f"trades; the legacy figure is a different universe and spec",
-                        "§8.5.1"),
+                        f"trades; the legacy figure is a different universe and spec", ""),
     }
 
     coverage = {
