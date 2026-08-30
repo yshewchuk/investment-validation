@@ -121,6 +121,10 @@ ACCEPTANCE_COVERED = {
     "checks/phase1_calibration.py": "phase1 calibration",
     "checks/phase1_report.py": "renders the Phase 1 report over the real store",
     "checks/phase1_checks.py": "is the Phase 1 harness itself",
+    # Phase 2. The experiment harness drivers are covered by the Phase 2
+    # acceptance suite they belong to; the experiments/ scripts sit outside
+    # the coverage source on purpose (they are experiment drivers, not engine).
+    "checks/phase2_checks.py": "is the Phase 2 harness itself",
 }
 
 #: Minimum line coverage for `engine/` under the unit suite alone.

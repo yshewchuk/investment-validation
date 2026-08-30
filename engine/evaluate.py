@@ -1,0 +1,1081 @@
+"""The Phase 2 evaluation suite: one standardized path from candidate to evidence.
+
+Every candidate — a model, a gate, a structure variant, a parameter change —
+runs through the same stages in the same order, so two experiments' reports
+are comparable and a promotion decision is a diff, not an argument:
+
+1. **Backtest** — the candidate's trades at the fill-alpha grid
+   {0, 0.25, 0.5, 0.75, 1.0}; worst / mid / best side by side plus the
+   **breakeven alpha**, the margin of safety on the mid-fill assumption.
+2. **Walk-forward** — expanding window by calendar year. Anything tunable
+   refits inside the loop on years < Y only; year Y is traded once, OOS.
+   Headline numbers come from this stage and no other.
+3. **Monte Carlo** — block bootstrap (block = 20 trades, preserving
+   earnings-week clustering) on the walk-forward OOS sequence: P(final
+   loss), drawdown percentiles, terminal-equity distribution, and the sizing
+   curve at {2%, 5%, 10%, 20%} so position size is chosen from MC, not vibes.
+4. **Stress battery** — crisis replays, tail injection for short legs,
+   entry/exit slippage days, stale-earnings-date simulation, IV-regime split.
+5. **Metrics dict** — one set of canonical keys, identical across all
+   strategies, so the leaderboard is comparable.
+
+The entry point is :func:`evaluate`. It takes a *spec* (the pre-registered
+description of what is being tried, parsed from an experiment's ``spec.yaml``)
+and a *trade set* (a priced frame in :mod:`engine.replay` output shape, one
+row per event × fill alpha), runs the stages, writes the run artifacts under
+the experiment's ``results/`` directory when one is given, and renders the
+Phase 4 report. An experiment without a report does not exist.
+
+**Pre-registration is enforced here, not by convention.** When the run is
+attached to an experiment directory, every invocation is appended to
+``results/run_log.jsonl`` and the OOS stage refuses to run if the spec carries
+no ``preregistered_at`` or one later than the first recorded run — a spec
+edited after seeing results is a spec that has never been tested.
+
+**Equity construction.** Two documented modes:
+
+``cashflow`` (default)
+    Chronological by entry date; at each entry a fraction of *current* equity
+    is committed (``contracts = fraction × equity / entry_cost``), the debit is
+    paid at entry and the exit value credited at exit. Overlapping positions
+    are allowed and counted (max concurrency is reported). This is the mode
+    new experiments report.
+
+``sequential``
+    Each trade compounds equity by ``(1 + fraction × ret)`` in entry order,
+    ignoring overlap. This is how the pre-engine EXP-050 equity curve was
+    built; the mode exists so the harness can reproduce that evidence exactly
+    (the regression in ``checks/phase2_checks.py``). Using it for a new
+    experiment overstates compounding whenever trades overlap, so the report
+    flags it.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from engine import paths
+
+__all__ = [
+    "METRIC_KEYS",
+    "ALPHA_GRID",
+    "SIZING_FRACTIONS",
+    "MC_BLOCK",
+    "MC_PATHS",
+    "REGIME_WINDOWS",
+    "EvaluationError",
+    "PreregistrationError",
+    "Gate",
+    "EvalResult",
+    "spec_hash",
+    "trade_stats",
+    "alpha_sweep",
+    "breakeven_alpha_from_sweep",
+    "build_equity",
+    "walk_forward",
+    "monte_carlo",
+    "stress_regimes",
+    "stress_iv_regime",
+    "stress_tail_injection",
+    "stress_slippage",
+    "stress_stale_dates",
+    "evaluate",
+]
+
+#: Canonical metric keys — identical across all strategies so the leaderboard
+#: is comparable. A results dict that misses one of these is a bug.
+METRIC_KEYS = (
+    "n", "mean", "median", "std", "win_rate", "profit_factor",
+    "sharpe_trade", "sharpe_equity", "sortino", "max_dd", "tail_ratio",
+    "by_year", "breakeven_alpha", "mc",
+)
+
+#: The fill alphas every result is reported at (worst/mid/best plus the quarter
+#: points that make the degradation curve a lookup). Mirrors engine.replay.
+ALPHA_GRID: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+#: The sizing curve fractions. 5% is the program's base case (the plan's
+#: go-live sizing); 2/10/20% bracket it so the curve shape is visible.
+SIZING_FRACTIONS: tuple[float, ...] = (0.02, 0.05, 0.10, 0.20)
+
+#: Block length for the block bootstrap, in trades. Twenty trades is about one
+#: earnings week of a full-universe strategy — long enough that a block keeps
+#: the cross-name clustering a real print produces.
+MC_BLOCK = 20
+
+#: Bootstrap paths. 1,000 matches the existing evidence; P(loss) estimates
+#: below ~1% are noise at this resolution, and the reports say so.
+MC_PATHS = 1000
+
+#: Crisis windows for the regime-replay stress, keyed by name. Dates are
+#: inclusive. The 2018Q4 unwind, the 2020 crash, and the 2022 vol year are the
+#: three regimes the edge is most suspected of leaning on; the worst realized
+#: earnings weeks are computed from the SPY series at run time.
+REGIME_WINDOWS = {
+    "2018Q4": (pd.Timestamp("2018-10-01"), pd.Timestamp("2018-12-31")),
+    "2020-02_04": (pd.Timestamp("2020-02-01"), pd.Timestamp("2020-04-30")),
+    "2022": (pd.Timestamp("2022-01-01"), pd.Timestamp("2022-12-31")),
+}
+
+#: Column contract for the priced trade frame evaluate() consumes. This is the
+#: engine.replay output shape minus the legs blob; extra columns (features,
+#: realized_move, spy_vol20, source) are passed through to gates and stress.
+REQUIRED_TRADE_COLUMNS = (
+    "event_id", "ticker", "event_date", "entry_date", "exit_date",
+    "fill_alpha", "entry_cost", "exit_value", "ret",
+)
+
+
+class EvaluationError(ValueError):
+    """The candidate or the spec could not be evaluated as given."""
+
+
+class PreregistrationError(RuntimeError):
+    """The OOS stage refused to run: the spec was not pre-registered in time."""
+
+
+# --------------------------------------------------------------------------
+# specs
+# --------------------------------------------------------------------------
+
+
+def spec_hash(spec: Mapping[str, Any]) -> str:
+    """Stable identity of an evaluated spec, for the ledger and the cache.
+
+    Everything except ``id`` and ``preregistered_at`` goes into the hash: two
+    runs of the same hypothesis on the same snapshot are the same spec even if
+    the scaffolder stamped them on different days, and a grid cell differs from
+    the primary spec exactly when its parameters do.
+    """
+    doc = {k: v for k, v in spec.items() if k not in ("id", "preregistered_at")}
+    payload = json.dumps(doc, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise EvaluationError(message)
+
+
+# --------------------------------------------------------------------------
+# per-trade statistics
+# --------------------------------------------------------------------------
+
+
+def _annual_trades_per_year(event_dates: pd.Series) -> float:
+    """Average trades per year over the span actually covered.
+
+    The span is the time between the first and the last event, not the count of
+    distinct years: a strategy that traded two busy years out of eight is a
+    two-trades-per-year strategy for Sharpe purposes, and counting calendar
+    years it skipped would inflate its annualized Sharpe by 4x.
+    """
+    if len(event_dates) < 2:
+        return float(len(event_dates))
+    span_days = max((event_dates.max() - event_dates.min()).days, 1)
+    return len(event_dates) / (span_days / 365.25)
+
+
+def trade_stats(rets: Sequence[float], event_dates: pd.Series | None = None) -> dict[str, float]:
+    """The per-trade block of the canonical metrics dict.
+
+    ``event_dates`` is only needed for the trades-per-year annualization; when
+    absent, Sharpe is annualized assuming the trades span one year each.
+    """
+    r = np.asarray(rets, dtype=float)
+    r = r[np.isfinite(r)]
+    n = int(r.size)
+    out: dict[str, float] = {
+        "n": n,
+        "mean": float(np.nan) if n == 0 else float(r.mean()),
+        "median": float(np.nan) if n == 0 else float(np.median(r)),
+        "std": float(np.nan) if n < 2 else float(r.std(ddof=1)),
+        "win_rate": float(np.nan) if n == 0 else float((r > 0).mean()),
+    }
+    wins = r[r > 0]
+    losses = r[r < 0]
+    out["profit_factor"] = (
+        float(wins.sum() / abs(losses.sum())) if wins.size and losses.size and losses.sum() != 0
+        else float(np.nan)
+    )
+    tpy = _annual_trades_per_year(pd.Series(event_dates)) if event_dates is not None and len(event_dates) else 1.0
+    tpy = max(tpy, 1e-9)
+    if n >= 2 and r.std(ddof=1) > 0:
+        out["sharpe_trade"] = float(r.mean() / r.std(ddof=1) * np.sqrt(tpy))
+    else:
+        out["sharpe_trade"] = float(np.nan)
+    downside = r[r < 0]
+    if n >= 2 and downside.size and np.sqrt((downside ** 2).mean()) > 0:
+        out["sortino"] = float(r.mean() / np.sqrt((downside ** 2).mean()) * np.sqrt(tpy))
+    else:
+        out["sortino"] = float(np.nan)
+    if wins.size and losses.size:
+        out["tail_ratio"] = float(np.percentile(wins, 95) / abs(np.percentile(losses, 5)))
+    else:
+        out["tail_ratio"] = float(np.nan)
+    return out
+
+
+def by_year_table(trades: pd.DataFrame, ret_col: str = "ret") -> dict[str, dict[str, float]]:
+    """Per-year {n, mean, win_rate} — the lumpiness view every report carries."""
+    out: dict[str, dict[str, float]] = {}
+    if trades.empty:
+        return out
+    years = pd.to_datetime(trades["event_date"]).dt.year
+    for year, idx in years.groupby(years).groups.items():
+        r = trades.loc[idx, ret_col].to_numpy(dtype=float)
+        r = r[np.isfinite(r)]
+        out[str(int(year))] = {
+            "n": int(r.size),
+            "mean": float(r.mean()) if r.size else float(np.nan),
+            "win_rate": float((r > 0).mean()) if r.size else float(np.nan),
+        }
+    return dict(sorted(out.items()))
+
+
+# --------------------------------------------------------------------------
+# fill-alpha sweep
+# --------------------------------------------------------------------------
+
+
+def alpha_sweep(trades: pd.DataFrame, alphas: Sequence[float] = ALPHA_GRID) -> dict[str, dict]:
+    """Per-alpha per-trade stats on the full (unselected) trade set.
+
+    The anti-selection guard lives here: this sweep is computed on the whole
+    universe the candidate priced, so the report can show the unselected base
+    next to whatever subset the gate keeps — the S4 lesson, made structural.
+    """
+    out: dict[str, dict] = {}
+    if trades.empty or "fill_alpha" not in trades.columns:
+        return out
+    for alpha in alphas:
+        rows = trades[np.isclose(trades["fill_alpha"], float(alpha))]
+        if rows.empty:
+            continue
+        stats = trade_stats(rows["ret"].to_numpy(), rows["event_date"])
+        stats.pop("sharpe_trade", None)
+        stats.pop("sortino", None)
+        out[f"{float(alpha):.2f}"] = stats
+    return out
+
+
+def breakeven_alpha_from_sweep(sweep: Mapping[str, Mapping[str, float]]) -> float | None:
+    """Alpha at which the interpolated mean return crosses zero.
+
+    Per-trade P&L is linear in alpha for fixed legs, but the *return* (P&L over
+    a debit that also moves with alpha) is not, so this interpolates the swept
+    points rather than assuming the endpoints determine the curve — the guide's
+    "linear interpolation of mean return across the sweep". Returns None when
+    the curve never crosses zero inside the swept range (always positive or
+    always negative): the caller reports 0.0 or 1.0 semantics explicitly.
+    """
+    points = sorted((float(a), float(s["mean"])) for a, s in sweep.items() if np.isfinite(s.get("mean", np.nan)))
+    if len(points) < 2:
+        return None
+    for (a0, m0), (a1, m1) in zip(points, points[1:]):
+        if m0 == 0.0:
+            return a0
+        if (m0 < 0 < m1) or (m1 < 0 < m0):
+            return float(a0 + (0.0 - m0) * (a1 - a0) / (m1 - m0))
+    return None
+
+
+# --------------------------------------------------------------------------
+# equity curves
+# --------------------------------------------------------------------------
+
+
+def build_equity(
+    trades: pd.DataFrame,
+    fraction: float,
+    *,
+    mode: str = "cashflow",
+    ret_col: str = "ret",
+) -> dict[str, Any]:
+    """Equity curve of a fixed-fraction sizing rule over priced trades.
+
+    ``cashflow`` (default): chronological by entry date; each entry commits
+    ``fraction × current equity`` (``contracts = fraction × equity /
+    entry_cost``), pays the debit at entry and credits the exit value at exit.
+    Overlapping positions are allowed; ``max_concurrency`` reports how many
+    were open at once.
+
+    ``sequential``: ``equity *= (1 + fraction × ret)`` per trade in entry
+    order — the EXP-050 reference construction. It ignores overlap, so a new
+    experiment reporting it overstates compounding; evaluate() flags the mode
+    in the report.
+    """
+    if mode not in ("cashflow", "sequential"):
+        raise EvaluationError(f"unknown equity mode {mode!r}")
+    if trades.empty:
+        return {"equity": pd.Series(dtype=float), "final": 1.0, "max_dd": 0.0,
+                "max_concurrency": 0, "mode": mode, "fraction": fraction}
+
+    t = trades.sort_values(["entry_date", "exit_date"], kind="stable").reset_index(drop=True)
+    entry_dates = pd.to_datetime(t["entry_date"])
+    exit_dates = pd.to_datetime(t["exit_date"])
+    rets = t[ret_col].to_numpy(dtype=float)
+
+    if mode == "sequential":
+        eq = 1.0
+        marks: list[tuple[pd.Timestamp, float]] = [(entry_dates.iloc[0] - pd.Timedelta(days=1), 1.0)]
+        for i, r in enumerate(rets):
+            eq *= 1.0 + fraction * r
+            marks.append((exit_dates.iloc[i], eq))
+        curve = pd.Series(dict(marks)).sort_index()
+        curve = curve[~curve.index.duplicated(keep="last")]
+        return {
+            "equity": curve,
+            "final": float(curve.iloc[-1]),
+            "max_dd": _max_drawdown(curve),
+            "max_concurrency": int(_max_concurrency(entry_dates, exit_dates)),
+            "mode": mode,
+            "fraction": fraction,
+        }
+
+    # cashflow mode: process exits before entries on the same day, so a closing
+    # trade's credit is available to size an opening one — the conservative-
+    # capital reading, and the one that matches a broker account.
+    events: list[tuple[pd.Timestamp, int, int]] = []
+    for i in range(len(t)):
+        events.append((exit_dates.iloc[i], 0, i))
+        events.append((entry_dates.iloc[i], 1, i))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    equity = 1.0
+    open_contracts: dict[int, float] = {}
+    marks = [(events[0][0] - pd.Timedelta(days=1), 1.0)]
+    concurrency = 0
+    max_concurrency = 0
+    for date, kind, i in events:
+        if kind == 0:  # exit
+            contracts = open_contracts.pop(i, 0.0)
+            equity += contracts * float(t.loc[i, "exit_value"])
+            concurrency -= 1
+        else:  # entry
+            cost = float(t.loc[i, "entry_cost"])
+            if equity > 0 and cost > 0:
+                contracts = fraction * equity / cost
+                equity -= contracts * cost
+                open_contracts[i] = contracts
+            concurrency += 1
+        max_concurrency = max(max_concurrency, concurrency)
+        marks.append((date, equity))
+    curve = pd.Series(dict(marks)).sort_index()
+    curve = curve[~curve.index.duplicated(keep="last")]
+    return {
+        "equity": curve,
+        "final": float(curve.iloc[-1]),
+        "max_dd": _max_drawdown(curve),
+        "max_concurrency": max_concurrency,
+        "mode": mode,
+        "fraction": fraction,
+    }
+
+
+def _max_concurrency(entry_dates: pd.Series, exit_dates: pd.Series) -> int:
+    events = [(d, 1) for d in entry_dates] + [(d, -1) for d in exit_dates]
+    events.sort(key=lambda e: (e[0], e[1]))  # exits before entries on a tie
+    peak = cur = 0
+    for _, delta in events:
+        cur += delta
+        peak = max(peak, cur)
+    return peak
+
+
+def _max_drawdown(curve: pd.Series) -> float:
+    if curve.empty:
+        return 0.0
+    peak = curve.cummax()
+    dd = curve / peak - 1.0
+    return float(abs(dd.min()))
+
+
+def sharpe_equity(equity_curve: pd.Series) -> float:
+    """Annualized Sharpe of an event-driven equity curve, on a daily grid.
+
+    The curve only moves on entry/exit dates; between events it is flat, so the
+    daily series carries real zero-return days. Including them (rather than
+    pretending every day was an event day) is what keeps the annualization
+    honest for a sparse strategy — a straddle program trades ~1.3 days a week,
+    and Sharpe computed only on event days would read as if it traded daily.
+    """
+    if len(equity_curve) < 2:
+        return float(np.nan)
+    daily = equity_curve.reindex(
+        pd.date_range(equity_curve.index.min(), equity_curve.index.max(), freq="D")
+    ).ffill()
+    rets = daily.pct_change().dropna().to_numpy(dtype=float)
+    if rets.size < 2 or rets.std(ddof=1) == 0:
+        return float(np.nan)
+    return float(rets.mean() / rets.std(ddof=1) * np.sqrt(252))
+
+
+# --------------------------------------------------------------------------
+# walk-forward
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Gate:
+    """A walk-forward selector: ``fit`` on history, ``select`` the next year.
+
+    ``fit(train)`` sees ONLY rows from years strictly before the year being
+    traded — the harness enforces that, a gate cannot break it. ``select(rows)``
+    returns a boolean mask of the trades it keeps for the test year. Both get
+    the alpha = 0.5 view of the trades; fill convention is not a tunable.
+
+    ``seen`` is the audit hook: the harness appends the max year every ``fit``
+    received, and the leak-poison acceptance test asserts no fit ever saw the
+    year it was selecting.
+    """
+
+    fit: Callable[[pd.DataFrame], None]
+    select: Callable[[pd.DataFrame], pd.Series]
+    name: str = "gate"
+    seen: list = field(default_factory=list)
+
+
+def walk_forward(
+    trades: pd.DataFrame,
+    gate: Gate | None,
+    *,
+    min_train_years: int = 2,
+    alpha: float = 0.5,
+) -> dict[str, Any]:
+    """Expanding-window OOS evaluation. Train ≤ Y−1, trade Y, concatenate.
+
+    Without a gate every OOS year is kept — the stage still matters, because it
+    fixes the year-by-year accounting the headline numbers come from. Years
+    with fewer than ``min_train_years`` preceding years are traded ungated (a
+    gate with no training history has no business selecting) and are flagged as
+    ``ungated`` in the diagnostics so the report says so.
+
+    Returns ``{selected, diagnostics, audit}`` where ``selected`` carries the
+    kept rows at every alpha (selection is decided at mid and applied to the
+    whole alpha grid — the contracts a structure selects must not depend on the
+    fill assumption) and ``audit`` is the leak receipt the report checklist
+    cites.
+    """
+    if trades.empty:
+        return {"selected": trades, "diagnostics": [], "audit": {"years": [], "leak_free": True}}
+
+    mid = trades[np.isclose(trades["fill_alpha"], alpha)].copy()
+    mid["year"] = pd.to_datetime(mid["event_date"]).dt.year
+    years = sorted(mid["year"].unique())
+
+    kept_ids: list = []
+    diagnostics: list[dict] = []
+    fit_years_seen: list[int] = []
+
+    for year in years:
+        train = mid[mid["year"] < year]
+        test = mid[mid["year"] == year]
+        train_years = int(train["year"].nunique())
+        row: dict[str, Any] = {"year": int(year), "n_train": int(len(train)),
+                               "n_test": int(len(test)), "train_years": train_years}
+        if gate is None or train_years < min_train_years or test.empty:
+            row["n_selected"] = int(len(test))
+            row["ungated"] = gate is not None and train_years < min_train_years
+            kept_ids.extend(test["event_id"].tolist())
+            diagnostics.append(row)
+            continue
+
+        # The leak guard: fit receives only prior years, and the harness
+        # records what it handed over so the poison test can prove it. An
+        # empty train frame is legitimate (min_train_years=0 with a gate
+        # trained upstream) and carries no year to record.
+        if len(train):
+            assert int(train["year"].max()) < year, "walk-forward handed the test year to fit()"
+            fit_years_seen.append(int(train["year"].max()))
+            gate.seen.append(int(train["year"].max()))
+        gate.fit(train)
+        mask = gate.select(test)
+        mask = pd.Series(np.asarray(mask, dtype=bool), index=test.index)
+        row["n_selected"] = int(mask.sum())
+        row["ungated"] = False
+        kept_ids.extend(test.loc[mask, "event_id"].tolist())
+        diagnostics.append(row)
+
+    kept_set = set(kept_ids)
+    selected = trades[trades["event_id"].isin(kept_set)].copy()
+    # Leak discipline is enforced structurally — fit never receives the test
+    # year (the assert above) — and the receipt records the max year every fit
+    # saw so the poison test and the report auditor can verify it.
+    gated_years = [d["year"] for d in diagnostics if not d.get("ungated") and d["n_train"]]
+    leak_free = all(seen < year for seen, year in zip(fit_years_seen, gated_years))
+    audit = {"years": years, "fit_years_seen": fit_years_seen, "leak_free": bool(leak_free)}
+    if not leak_free:
+        raise EvaluationError(
+            f"walk-forward leak: a fit saw data from its own test year "
+            f"(fits saw {fit_years_seen}, test years {gated_years})"
+        )
+    return {"selected": selected, "diagnostics": diagnostics, "audit": audit}
+
+
+# --------------------------------------------------------------------------
+# Monte Carlo
+# --------------------------------------------------------------------------
+
+
+def monte_carlo(
+    rets: Sequence[float],
+    *,
+    fractions: Sequence[float] = SIZING_FRACTIONS,
+    block: int = MC_BLOCK,
+    paths: int = MC_PATHS,
+    seed: int = 0,
+    mode: str = "sequential",
+    draw_order: str = "shared",
+) -> dict[str, Any]:
+    """Block-bootstrap MC on a trade sequence → the sizing curve.
+
+    Blocks of ``block`` consecutive trades are drawn with replacement and
+    concatenated until the path is as long as the original sequence, which is
+    what preserves earnings-week clustering — an iid resample would scatter one
+    bad week across a year and understate ruin.
+
+    ``draw_order="shared"`` (default for new experiments) draws one bootstrap
+    sequence per path and prices every fraction on it, so the sizing curve
+    compares fractions on identical scenarios. ``draw_order="per_fraction"``
+    consumes fresh draws per fraction in the order the fractions are given —
+    the EXP-050 reference behaviour, kept for the regression.
+    """
+    r = np.asarray(rets, dtype=float)
+    r = r[np.isfinite(r)]
+    n = r.size
+    out: dict[str, Any] = {"block": block, "paths": paths, "seed": seed, "n_trades": n,
+                           "mode": mode, "by_fraction": {}}
+    if n == 0:
+        return out
+    if n <= block:
+        # A bootstrap needs at least two distinct block starts; below that the
+        # MC is degenerate and the honest output is the deterministic curve.
+        for f in fractions:
+            eq = _compound(r, f, mode)
+            out["by_fraction"][f"{f:.2f}"] = {
+                "p_loss": float(eq[-1] < 1.0), "terminal_p05": float(eq[-1]),
+                "terminal_p50": float(eq[-1]), "terminal_p95": float(eq[-1]),
+                "dd_p50": _max_drawdown(pd.Series(eq)), "dd_p95": _max_drawdown(pd.Series(eq)),
+                "degenerate": True,
+            }
+        return out
+
+    rng = np.random.default_rng(seed)
+
+    def draw_index() -> np.ndarray:
+        idx: list[int] = []
+        while len(idx) < n:
+            s = int(rng.integers(0, n - block))
+            idx.extend(range(s, s + block))
+        return np.array(idx[:n])
+
+    if draw_order not in ("shared", "per_fraction"):
+        raise EvaluationError(f"unknown draw_order {draw_order!r}")
+    shared_indices = [draw_index() for _ in range(paths)] if draw_order == "shared" else None
+
+    for f in fractions:
+        finals = np.empty(paths)
+        dds = np.empty(paths)
+        for p in range(paths):
+            idx = shared_indices[p] if shared_indices is not None else draw_index()
+            eq = _compound(r[idx], f, mode)
+            finals[p] = eq[-1]
+            dds[p] = _max_drawdown(pd.Series(eq))
+        out["by_fraction"][f"{f:.2f}"] = {
+            "p_loss": float((finals < 1.0).mean()),
+            "terminal_p05": float(np.percentile(finals, 5)),
+            "terminal_p50": float(np.percentile(finals, 50)),
+            "terminal_p95": float(np.percentile(finals, 95)),
+            "dd_p50": float(np.percentile(dds, 50)),
+            "dd_p95": float(np.percentile(dds, 95)),
+        }
+    return out
+
+
+def _compound(rets: np.ndarray, fraction: float, mode: str) -> np.ndarray:
+    """Compounded equity path. ``cashflow`` on a bare return sequence reduces
+    to sequential compounding — overlap information lives in the trade frame,
+    not in the returns, so MC paths use the sequential arithmetic in both
+    modes and the cashflow/sequential distinction is reported from the
+    deterministic curve."""
+    return np.concatenate([[1.0], np.cumprod(1.0 + fraction * rets)])
+
+
+# --------------------------------------------------------------------------
+# stress battery
+# --------------------------------------------------------------------------
+
+
+def stress_regimes(trades: pd.DataFrame, alpha: float = 0.5,
+                   spy_daily: pd.DataFrame | None = None) -> dict[str, dict]:
+    """Per-regime P&L: the fixed crisis windows plus the worst earnings weeks.
+
+    ``worst_earnings_weeks`` are the 10 ISO weeks with the worst SPY weekly
+    return inside the trade sample's date span — a market-wide stress definition
+    that needs no lookahead (the weeks are selected from the realized series and
+    the trades inside them are then measured, which is the replay question:
+    "what would this have done in those weeks", not "can we find the weeks").
+    """
+    rows = trades[np.isclose(trades["fill_alpha"], alpha)] if "fill_alpha" in trades.columns else trades
+    out: dict[str, dict] = {}
+    event_dates = pd.to_datetime(rows["event_date"])
+    for name, (start, end) in REGIME_WINDOWS.items():
+        hit = rows[(event_dates >= start) & (event_dates <= end)]
+        out[name] = _regime_stats(hit)
+
+    weeks_hit = _worst_week_trades(rows, spy_daily, n_weeks=10)
+    out["worst_earnings_weeks"] = weeks_hit
+    return out
+
+
+def _regime_stats(rows: pd.DataFrame) -> dict[str, float]:
+    r = rows["ret"].to_numpy(dtype=float)
+    r = r[np.isfinite(r)]
+    return {
+        "n": int(r.size),
+        "mean": float(r.mean()) if r.size else float(np.nan),
+        "win_rate": float((r > 0).mean()) if r.size else float(np.nan),
+    }
+
+
+def _worst_week_trades(rows: pd.DataFrame, spy_daily: pd.DataFrame | None,
+                       n_weeks: int = 10) -> dict[str, Any]:
+    if rows.empty or spy_daily is None or spy_daily.empty:
+        return {"n": 0, "mean": float(np.nan), "win_rate": float(np.nan),
+                "note": "no SPY series supplied; worst-week replay skipped"}
+    spy = spy_daily.sort_values("date").copy()
+    spy["date"] = pd.to_datetime(spy["date"])
+    span_lo = pd.to_datetime(rows["event_date"]).min()
+    span_hi = pd.to_datetime(rows["event_date"]).max()
+    spy = spy[(spy["date"] >= span_lo - pd.Timedelta(days=14)) & (spy["date"] <= span_hi)]
+    if len(spy) < 10:
+        return {"n": 0, "mean": float(np.nan), "win_rate": float(np.nan),
+                "note": "SPY series does not cover the trade span"}
+    spy["week"] = spy["date"].dt.to_period("W")
+    weekly = spy.groupby("week")["close"].agg(["first", "last"])
+    weekly["ret"] = weekly["last"] / weekly["first"] - 1.0
+    worst = weekly.nsmallest(n_weeks, "ret").index
+    event_dates = pd.to_datetime(rows["event_date"])
+    hit = rows[event_dates.dt.to_period("W").isin(worst)]
+    stats = _regime_stats(hit)
+    stats["weeks"] = [str(w) for w in sorted(worst)]
+    return stats
+
+
+def stress_iv_regime(trades: pd.DataFrame, alpha: float = 0.5,
+                     spy_daily: pd.DataFrame | None = None) -> dict[str, Any]:
+    """High-vol vs low-vol split, so the report quantifies how much of the edge
+    lives in 2022/2024-style regimes.
+
+    Uses the trades' own ``spy_vol20`` column when present (the panel carries
+    it); otherwise computes a per-year median 20-day SPY vol from the cached
+    index series and splits years at the median of those medians.
+    """
+    rows = trades[np.isclose(trades["fill_alpha"], alpha)] if "fill_alpha" in trades.columns else trades
+    if rows.empty:
+        return {"split_by": None, "high": _regime_stats(rows), "low": _regime_stats(rows)}
+
+    if "spy_vol20" in rows.columns and rows["spy_vol20"].notna().any():
+        med = rows["spy_vol20"].median()
+        high = rows[rows["spy_vol20"] >= med]
+        low = rows[rows["spy_vol20"] < med]
+        return {"split_by": "spy_vol20 (per trade)", "threshold": float(med),
+                "high": _regime_stats(high), "low": _regime_stats(low)}
+
+    if spy_daily is None or spy_daily.empty:
+        return {"split_by": None, "high": _regime_stats(rows), "low": _regime_stats(rows),
+                "note": "no spy_vol20 column and no SPY series; IV-regime split skipped"}
+
+    spy = spy_daily.sort_values("date").copy()
+    spy["date"] = pd.to_datetime(spy["date"])
+    spy["vol20"] = spy["close"].pct_change().rolling(20).std(ddof=1) * np.sqrt(252)
+    spy["year"] = spy["date"].dt.year
+    yearly = spy.groupby("year")["vol20"].median().dropna()
+    if yearly.empty:
+        return {"split_by": None, "high": _regime_stats(rows), "low": _regime_stats(rows)}
+    med = yearly.median()
+    high_years = set(yearly[yearly >= med].index)
+    years = pd.to_datetime(rows["event_date"]).dt.year
+    return {"split_by": "yearly median SPY vol20", "threshold": float(med),
+            "high_years": sorted(high_years),
+            "high": _regime_stats(rows[years.isin(high_years)]),
+            "low": _regime_stats(rows[~years.isin(high_years)])}
+
+
+def stress_tail_injection(
+    trades: pd.DataFrame,
+    shock: Callable[[pd.DataFrame], pd.DataFrame],
+    *,
+    alpha: float = 0.5,
+    fractions: Sequence[float] = SIZING_FRACTIONS,
+    block: int = MC_BLOCK,
+    paths: int = MC_PATHS,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Double the worst 1% of realized |moves| and re-price.
+
+    The harness does not know each structure's payoff, so the caller supplies
+    ``shock(trades) -> trades``: a function that applies the doubled-move
+    re-pricing and returns the frame with the shocked rows' ``ret`` updated.
+    This stage is MANDATORY for any structure with a short leg — the report
+    checklist fails a short-leg spec that arrives without it, because a
+    defined-risk claim that has never met a doubled tail is an assumption.
+    """
+    rows = trades[np.isclose(trades["fill_alpha"], alpha)] if "fill_alpha" in trades.columns else trades
+    shocked = shock(rows.copy())
+    base_rets = rows["ret"].to_numpy(dtype=float)
+    new_rets = shocked["ret"].to_numpy(dtype=float)
+    out = {
+        "base_worst_trade": float(np.nanmin(base_rets)) if base_rets.size else float(np.nan),
+        "shocked_worst_trade": float(np.nanmin(new_rets)) if new_rets.size else float(np.nan),
+        "n_shocked": int((np.abs(new_rets - base_rets) > 1e-12).sum()) if new_rets.size == base_rets.size else -1,
+        "mc": monte_carlo(new_rets, fractions=fractions, block=block, paths=paths, seed=seed)["by_fraction"],
+    }
+    return out
+
+
+def stress_slippage(
+    trades: pd.DataFrame,
+    repricer: Callable[[pd.DataFrame, int], pd.DataFrame] | None,
+    *,
+    alpha: float = 0.5,
+    days: Sequence[int] = (-1, 1),
+) -> dict[str, Any]:
+    """Shift entry/exit by ±1 trading day where the adjacent chain is cached.
+
+    ``repricer(trades, shift_days)`` returns the re-priced frame for the subset
+    of trades whose shifted chains exist — never fabricating a missing chain —
+    plus a ``coverage`` attr: the fraction of trades it could re-price. Without
+    a repricer (a pre-priced dataset with no chain access) the stage reports
+    N/A rather than inventing numbers.
+    """
+    if repricer is None:
+        return {"available": False,
+                "note": "no repricer supplied; slippage stress needs chain access"}
+    rows = trades[np.isclose(trades["fill_alpha"], alpha)] if "fill_alpha" in trades.columns else trades
+    base_mean = float(rows["ret"].mean()) if len(rows) else float(np.nan)
+    out: dict[str, Any] = {"available": True, "base_mean": base_mean, "shifts": {}}
+    for shift in days:
+        repriced = repricer(rows.copy(), int(shift))
+        coverage = float(getattr(repriced, "attrs", {}).get("coverage", np.nan))
+        r = repriced["ret"].to_numpy(dtype=float)
+        out["shifts"][f"{int(shift):+d}d"] = {
+            "coverage": coverage,
+            "n": int(r.size),
+            "mean": float(np.nanmean(r)) if r.size else float(np.nan),
+            "delta_mean": float(np.nanmean(r) - base_mean) if r.size else float(np.nan),
+        }
+    return out
+
+
+def stress_stale_dates(
+    trades: pd.DataFrame,
+    repricer: Callable[[pd.DataFrame, int], pd.DataFrame] | None,
+    *,
+    alpha: float = 0.5,
+    fraction: float = 0.01,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Mis-date 1% of events by one day — the stale-calendar failure mode.
+
+    Earnings dates move; a live system that trades yesterday's date buys the
+    wrong print. This mis-dates a random 1% of events (seeded) and re-prices
+    them through the same repricer the slippage stage uses, leaving the rest
+    untouched, then reports the P&L impact on the affected subset.
+    """
+    if repricer is None:
+        return {"available": False,
+                "note": "no repricer supplied; stale-date stress needs chain access"}
+    rows = trades[np.isclose(trades["fill_alpha"], alpha)] if "fill_alpha" in trades.columns else trades
+    if rows.empty:
+        return {"available": True, "n_misdated": 0}
+    rng = np.random.default_rng(seed)
+    k = max(int(round(len(rows) * fraction)), 1)
+    idx = rng.choice(rows.index.to_numpy(), size=min(k, len(rows)), replace=False)
+    subset = rows.loc[idx]
+    repriced = repricer(subset.copy(), 1)
+    base = subset["ret"].to_numpy(dtype=float)
+    new = repriced["ret"].to_numpy(dtype=float)
+    return {
+        "available": True,
+        "n_misdated": int(len(subset)),
+        "coverage": float(getattr(repriced, "attrs", {}).get("coverage", np.nan)),
+        "base_mean": float(np.nanmean(base)) if base.size else float(np.nan),
+        "misdated_mean": float(np.nanmean(new)) if new.size else float(np.nan),
+        "delta_mean": float(np.nanmean(new) - np.nanmean(base)) if new.size else float(np.nan),
+    }
+
+
+# --------------------------------------------------------------------------
+# pre-registration
+# --------------------------------------------------------------------------
+
+
+def _run_log_path(run_dir: Path) -> Path:
+    #: The guide places the log at ``results/run_log.jsonl`` under the
+    #: experiment folder, next to the metrics artifacts it annotates.
+    return Path(run_dir) / "results" / "run_log.jsonl"
+
+
+def check_preregistration(spec: Mapping[str, Any], run_dir: Path | None,
+                          now_utc: pd.Timestamp | None = None) -> dict[str, Any]:
+    """Validate the spec's pre-registration against the run log.
+
+    Returns a receipt. Raises :class:`PreregistrationError` when the OOS stage
+    must refuse: no ``preregistered_at``, or one later than the first recorded
+    run of this experiment (a spec stamped after results were seen).
+    """
+    stamp = spec.get("preregistered_at")
+    if run_dir is None:
+        return {"enforced": False, "valid": stamp is not None,
+                "reason": "no experiment dir attached" if stamp is None else "stamp present, unverified"}
+    if stamp is None:
+        raise PreregistrationError(
+            "spec carries no preregistered_at — the OOS stage refuses to run. "
+            "Scaffold the experiment (experiments/new_experiment.py) to stamp it."
+        )
+    prereg = pd.Timestamp(stamp)
+    if prereg.tzinfo is None:
+        prereg = prereg.tz_localize("UTC")
+    log = _run_log_path(run_dir)
+    first_run_ts = None
+    if log.exists():
+        for line in log.read_text().splitlines():
+            if not line.strip():
+                continue
+            first_run_ts = pd.Timestamp(json.loads(line)["ts"])
+            break
+    receipt = {"enforced": True, "valid": True, "preregistered_at": str(prereg),
+               "first_run_ts": str(first_run_ts) if first_run_ts else None}
+    if first_run_ts is not None and prereg > first_run_ts:
+        raise PreregistrationError(
+            f"preregistered_at {prereg} is after the first recorded run "
+            f"{first_run_ts} — this spec was edited after results existed. "
+            "Register a NEW spec for the changed hypothesis."
+        )
+    return receipt
+
+
+def append_run_log(run_dir: Path, entry: Mapping[str, Any]) -> None:
+    """Append one invocation record to the experiment's ``results/run_log.jsonl``."""
+    results_dir = Path(run_dir) / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    with open(_run_log_path(run_dir), "a") as fh:
+        fh.write(json.dumps(dict(entry), default=str) + "\n")
+
+
+# --------------------------------------------------------------------------
+# the entry point
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class EvalResult:
+    """Everything one evaluation produced, for the report and the ledger."""
+
+    spec: dict[str, Any]
+    results: dict[str, Any]
+    run_dir: Path | None = None
+    report_path: Path | None = None
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        return self.results["headline"]
+
+    def to_json(self) -> str:
+        return json.dumps(self.results, indent=1, default=str)
+
+
+def evaluate(
+    spec: Mapping[str, Any],
+    trades: pd.DataFrame,
+    *,
+    gate: Gate | None = None,
+    run_dir: Path | None = None,
+    repricer: Callable[[pd.DataFrame, int], pd.DataFrame] | None = None,
+    tail_shock: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+    spy_daily: pd.DataFrame | None = None,
+    alphas: Sequence[float] = ALPHA_GRID,
+    fractions: Sequence[float] = SIZING_FRACTIONS,
+    mc_paths: int = MC_PATHS,
+    mc_block: int = MC_BLOCK,
+    seed: int = 0,
+    stress: bool = True,
+    write_report: bool = True,
+    input_files: Sequence[Path | str] = (),
+    now_utc: pd.Timestamp | None = None,
+) -> EvalResult:
+    """Run one candidate through the full evaluation suite.
+
+    ``trades`` is the priced frame (engine.replay shape: one row per event ×
+    fill alpha). ``gate`` is the walk-forward selector, if the candidate has
+    one. ``run_dir`` attaches the run to an experiment folder — required for
+    promotion-eligible results, which is where pre-registration is enforced and
+    the artifacts land. ``repricer`` / ``tail_shock`` unlock the slippage,
+    stale-date, and tail-injection stresses; without them those stages report
+    N/A (tail injection then FAILs the checklist for short-leg specs, which is
+    the point).
+    """
+    started = time.time()
+    spec = dict(spec)
+    missing = [c for c in ("id", "primary_spec") if c not in spec]
+    _require(not missing, f"spec missing keys: {missing}")
+    if trades is not None and len(trades):
+        missing_cols = [c for c in REQUIRED_TRADE_COLUMNS if c not in trades.columns]
+        _require(not missing_cols, f"trades frame missing columns: {missing_cols}")
+        trades = trades.copy()
+        for col in ("event_date", "entry_date", "exit_date"):
+            trades[col] = pd.to_datetime(trades[col])
+
+    sha = spec_hash(spec)
+    prereg = check_preregistration(spec, run_dir, now_utc=now_utc)
+
+    wf_cfg = spec.get("walk_forward", {}) or {}
+    min_train_years = int(wf_cfg.get("min_train_years", 2))
+    equity_mode = str(spec.get("equity_mode", "cashflow"))
+    _require(equity_mode in ("cashflow", "sequential"), f"unknown equity_mode {equity_mode!r}")
+
+    results: dict[str, Any] = {
+        "spec_id": spec.get("id"),
+        "spec_hash": sha,
+        "preregistration": prereg,
+        "equity_mode": equity_mode,
+        "elapsed_s": 0.0,
+    }
+
+    # -- stage 1: backtest (unselected, all alphas) -------------------------
+    sweep = alpha_sweep(trades, alphas)
+    results["backtest"] = {
+        "alpha_sweep": sweep,
+        "breakeven_alpha": breakeven_alpha_from_sweep(sweep),
+        "by_year": by_year_table(
+            trades[np.isclose(trades["fill_alpha"], 0.5)] if "fill_alpha" in trades.columns else trades
+        ),
+        "n_events": int(trades["event_id"].nunique()) if len(trades) else 0,
+    }
+
+    # -- stage 2: walk-forward ----------------------------------------------
+    wf = walk_forward(trades, gate, min_train_years=min_train_years)
+    selected = wf["selected"]
+    # The OOS sequence is chronological; stable sort keeps the input's tie
+    # order, which the block bootstrap is sensitive to.
+    selected = selected.sort_values(["entry_date", "exit_date"], kind="stable")
+    mid_sel = selected[np.isclose(selected["fill_alpha"], 0.5)] if len(selected) and "fill_alpha" in selected.columns else selected
+    base_mid = trades[np.isclose(trades["fill_alpha"], 0.5)] if len(trades) and "fill_alpha" in trades.columns else trades
+
+    eq5 = build_equity(mid_sel, 0.05, mode=equity_mode)
+    headline = trade_stats(mid_sel["ret"].to_numpy(), mid_sel["event_date"]) if len(mid_sel) else trade_stats([])
+    headline["by_year"] = by_year_table(mid_sel)
+    headline["breakeven_alpha"] = breakeven_alpha_from_sweep(
+        alpha_sweep(selected, alphas)) if len(selected) else None
+    headline["sharpe_equity"] = sharpe_equity(eq5["equity"])
+    headline["max_dd"] = eq5["max_dd"]
+    headline["max_concurrency"] = eq5["max_concurrency"]
+    headline["alpha_sweep"] = alpha_sweep(selected, alphas)
+    # Anti-selection guard (the S4 lesson): the unselected universe always
+    # appears next to the selected one.
+    headline["base_unselected"] = {
+        "n": int(len(base_mid)),
+        "mean": float(base_mid["ret"].mean()) if len(base_mid) else float(np.nan),
+        "win_rate": float((base_mid["ret"] > 0).mean()) if len(base_mid) else float(np.nan),
+    }
+    headline["mc"] = {}
+    results["walk_forward"] = {
+        "diagnostics": wf["diagnostics"],
+        "audit": wf["audit"],
+        "headline_stage": "wf_oos",
+    }
+
+    # -- stage 3: Monte Carlo on the WF OOS sequence ------------------------
+    rets = mid_sel["ret"].to_numpy(dtype=float) if len(mid_sel) else np.array([])
+    results["mc"] = monte_carlo(
+        rets, fractions=fractions, block=mc_block, paths=mc_paths, seed=seed,
+        mode=equity_mode, draw_order=str(spec.get("mc_draw_order", "shared")),
+    )
+    headline["mc"] = results["mc"]["by_fraction"]
+
+    # -- stage 4: stress battery ---------------------------------------------
+    results["stress"] = {}
+    if stress:
+        results["stress"]["regimes"] = stress_regimes(selected, spy_daily=spy_daily)
+        results["stress"]["iv_regime"] = stress_iv_regime(selected, spy_daily=spy_daily)
+        has_short_leg = bool(spec.get("has_short_leg", False))
+        if tail_shock is not None and len(selected):
+            results["stress"]["tail_injection"] = stress_tail_injection(
+                selected, tail_shock, fractions=fractions, block=mc_block,
+                paths=mc_paths, seed=seed)
+        else:
+            results["stress"]["tail_injection"] = {
+                "available": False,
+                "required": has_short_leg,
+                "note": ("short-leg spec without a tail shock — checklist FAIL"
+                         if has_short_leg else "no short leg; tail injection N/A"),
+            }
+        results["stress"]["slippage"] = stress_slippage(selected, repricer)
+        results["stress"]["stale_dates"] = stress_stale_dates(
+            selected, repricer, seed=seed)
+
+    # -- headline + deterministic equity curves at all sizings ---------------
+    results["equity_curves"] = {
+        f"{f:.2f}": {
+            "final": build_equity(mid_sel, f, mode=equity_mode)["final"],
+        }
+        for f in fractions
+    }
+    # The 5%-sized curve the report plots (JSON-safe: dates as strings).
+    results["equity_curve_series"] = {
+        "date": [str(ts.date()) for ts in eq5["equity"].index],
+        "equity": [float(v) for v in eq5["equity"].values],
+    }
+    results["headline"] = headline
+    results["headline_stage"] = "wf_oos"
+
+    # The accuracy checklist, computed here (not taken from the report) so
+    # promote.py can refuse a challenger whose evidence has a FAIL item.
+    from engine.report import accuracy_checklist
+
+    checklist = accuracy_checklist(
+        results, spec, ledger_path=paths.ROOT / "experiments" / "LEDGER.csv")
+    results["checklist"] = [
+        {"name": item.name, "status": item.status, "evidence": item.evidence}
+        for item in checklist
+    ]
+    results["checklist_fails"] = sum(1 for item in checklist if item.status == "FAIL")
+
+    results["elapsed_s"] = round(time.time() - started, 2)
+
+    # -- artifacts -------------------------------------------------------------
+    if run_dir is not None:
+        run_dir = Path(run_dir)
+        results_dir = run_dir / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        (results_dir / f"metrics_{sha[:12]}.json").write_text(
+            json.dumps(results, indent=1, default=str))
+        append_run_log(run_dir, {
+            "ts": (now_utc or pd.Timestamp.now(tz="UTC")).isoformat(),
+            "spec_id": spec.get("id"),
+            "spec_hash": sha,
+            "n_events": results["backtest"]["n_events"],
+            "headline_mean_mid": headline.get("mean"),
+            "sharpe_trade": headline.get("sharpe_trade"),
+            "stage": "ran",
+        })
+
+    result = EvalResult(spec=spec, results=results, run_dir=run_dir)
+
+    if write_report:
+        from engine.report import Report
+
+        report = Report.from_eval(result, input_files=input_files)
+        out_dir = (Path(run_dir) if run_dir is not None else paths.REPORTS / str(spec.get("id")))
+        result.report_path = report.write(out_dir)
+
+    return result

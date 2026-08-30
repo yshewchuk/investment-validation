@@ -17,6 +17,9 @@ Layout::
     engine/calibrate.py   reliability curves, Brier scores, decile tables
     engine/models/        the registry and the champions it describes
 
+    engine/evaluate.py    Phase 2: backtest → walk-forward → MC → stress → metrics
+    engine/report.py      Phase 4: the one report generator every phase emits through
+
 ``engine/SCORING.md`` is the Phase 1 map.
 
 Import discipline: everything downstream reads Tier 2/3 through

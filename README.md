@@ -5,7 +5,7 @@ Implementation of `EARNINGS_VOL_PROGRAM_PLAN.md`. This repository holds the
 that decide whether a phase is done. Market data, research findings, reports and
 the prediction ledger deliberately live elsewhere — see `RECOVERY.md`.
 
-**Status: Phases 0 and 1 complete.** Phases 2–6 are specified in `guides/`.
+**Status: Phases 0, 1, and 2 complete.** Phases 3–6 are specified in `guides/`.
 
 ---
 
@@ -21,6 +21,11 @@ python3 checks/phase0_checks.py                       # data-foundation checks
 python3 -m engine.build_trades                        # replay the structures (~35 min)
 python3 -m engine.models.training.train_all           # train + register champions
 python3 checks/phase1_checks.py                       # scoring-engine checks
+
+python3 experiments/new_experiment.py --title ... --hypothesis ...   # scaffold EXP-101+
+python3 experiments/EXP-NNN_slug/run.py               # evaluate through the harness
+python3 experiments/promote.py EXP-NNN --champion-metrics ...        # promote or refuse
+python3 checks/phase2_checks.py                       # experiment-framework checks
 ```
 
 ```python
@@ -47,6 +52,8 @@ engine/
   score.py            the Phase 1 scoring API
   calibrate.py        reliability curves, Brier scores, decile tables
   models/             registry + champions (artifacts live in data/models/)
+  evaluate.py         Phase 2: backtest → walk-forward → MC → stress → metrics
+  report.py           Phase 4: the one report generator every phase emits through
   data/
     fetch.py          Tier-1 wrapper: cache-first, throttled, quota-guarded
     throttle.py       per-source pacing, backoff, quota floor, Polygon lock
@@ -60,6 +67,7 @@ engine/
     rebuild.py        the orchestrator
     manifest.py       generated MANIFEST.md + snapshot hash
     pulls/            quota-spending plans (--dry-run, then --confirm)
+experiments/          EXP-101+ scaffolding, append-only LEDGER.csv, promote.py
 checks/               acceptance tests, migration test, repo hygiene
 tests/                unit suite (pytest)
 ```
@@ -118,6 +126,7 @@ acceptance check.
 | `python3 checks/phase1_checks.py` | All 14 Phase-1 acceptance checks |
 | `python3 checks/phase1_replay.py` | The scorer reproduces the replayed trades' pricing to 1e-6, and the live feature path reproduces the panel path to 1e-9 |
 | `python3 checks/phase1_calibration.py` | Predicted win rates vs realized, out of sample |
+| `python3 checks/phase2_checks.py` | The Phase-2 suite, incl. the load-bearing EXP-050 harness regression |
 | `python3 checks/repo_hygiene.py --all` | No secret, data file, or oversize blob is tracked |
 
 Testing strategy — the two layers, what each is for, and the known thin spots —
@@ -127,6 +136,12 @@ rather than left as an aspiration.
 The migration test is the load-bearing one. Every verdict in the plan rests on
 `events_with_orats_sum.csv`; the test reconciles all 115,500 rows and fails on
 any difference not covered by a **declared, independently verified** delta.
+
+The Phase-2 equivalent is `harness_regression`: the EXP-050 equity curve (GBM
+top-20% gate, walk-forward, 531 trades) must reproduce through
+`engine.evaluate` before any new experiment runs. It surfaced one stale number
+in the original report — the 5%-sizing row — root-caused in
+`reports/phase2_exp050_regression.md`.
 
 ---
 
