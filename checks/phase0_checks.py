@@ -262,6 +262,152 @@ def csv_rows(path: Path):
 
 
 # --------------------------------------------------------------------------
+# 1b. fetch-store bridge (A1)
+# --------------------------------------------------------------------------
+
+
+class _StaticBodyAdapter:
+    """Replays one scripted body — the A1 pattern: the real Fetcher runs its
+    genuine persist path against a byte-faithful ORATS response, no network."""
+
+    name = "orats"
+
+    def __init__(self, body: bytes):
+        self.body = body
+        self.calls = 0
+
+    def request(self, endpoint, params, timeout):
+        self.calls += 1
+        return Response(200, self.body, {}, "https://api.orats.io/datav2/" + endpoint)
+
+    def quota_from(self, response):
+        return None
+
+    def is_auth_failure(self, response):
+        return False
+
+
+_CANONICAL_CHAIN_COLS = [
+    "ticker", "obs_date", "expiry", "dte", "strike", "right",
+    "bid", "ask", "mid", "iv", "delta", "spot",
+]
+
+
+@check("fetch_store_bridge",
+       description="a Fetcher-written body becomes Tier-2 chain rows (A1 offline proof)")
+def check_fetch_store_bridge() -> str:
+    """The standing contract: every byte the fetch wrapper persists must be
+    readable back into Tier 2. Proven offline with the real persist path and
+    the real rebuild code (run against a throwaway root in a subprocess), so a
+    16,000-call pull can never again land chains that no rebuild sees.
+    """
+    from engine.data.fetch import iter_cached
+    from engine.data.normalize.common import read_gz_json
+
+    # 1. Reconstruct a faithful raw body from a real legacy file: the rows
+    #    carry ORATS' own field names, so {"data": rows} is byte-faithful to
+    #    what the API returns.
+    legacy_files = n_chains.iter_chain_files()
+    _require(bool(legacy_files), "no legacy chain files to reconstruct a body from")
+    legacy_path = min(legacy_files, key=lambda p: p.stat().st_size)
+    doc = read_gz_json(legacy_path) or {}
+    rows = doc.get("rows") or []
+    _require(bool(rows), f"{legacy_path.name} carries no rows")
+    body = json.dumps({"data": rows}).encode()
+
+    with tempfile.TemporaryDirectory(prefix="fetch_bridge_") as tmp:
+        tmp_root = Path(tmp)
+
+        # 2. Drive the REAL Fetcher with a stub adapter: cache key, sha
+        #    naming, gzip, meta sidecar, fetch log — the genuine persist path.
+        adapter = _StaticBodyAdapter(body)
+        throttle = Throttle(
+            {"orats": SourceConfig("orats", 0.0, 0.0, 3, 10.0)}, sleep_fn=lambda s: None
+        )
+        fetch_root = tmp_root / "data" / "raw" / "fetch"
+        fetcher = Fetcher(fetch_root, throttle=throttle, adapters={"orats": adapter})
+        params = {"tradeDate": doc.get("entry_date", "2026-01-01")}
+        record = fetcher.fetch("orats", "hist/strikes", params)
+
+        _require(record.from_cache is False, "first fetch should be a network miss")
+        _require(record.body == body, "the persisted body is not the verbatim response")
+        _require(record.path.exists() and record.path.suffix == ".gz", "body not gzipped")
+        with gzip.open(record.path, "rb") as fh:
+            _require(fh.read() == body, "gzipped body does not round-trip")
+        meta = json.loads(fetcher.meta_path("orats", record.key).read_text())
+        _require(meta["endpoint"] == "hist/strikes" and meta["status"] == 200,
+                 "meta sidecar missing endpoint/status")
+        _require(len(csv_rows(fetcher.fetch_log)) == 1, "fetch log must record the call")
+
+        again = fetcher.fetch("orats", "hist/strikes", params)
+        _require(again.from_cache is True and adapter.calls == 1,
+                 "the repeated request touched the network")
+
+        # 3. Run the REAL rebuild code against a throwaway root (subprocess,
+        #    so this process's engine.paths stays untouched) and assert the
+        #    rows reach Tier 2 with fetch provenance.
+        env = {**os.environ, "INVESTING_PLAN_ROOT": str(tmp_root)}
+        result = subprocess.run(
+            [sys.executable, "-m", "engine.data.rebuild", "--table", "chains"],
+            cwd=ROOT, capture_output=True, text=True, env=env, timeout=600,
+        )
+        _require(result.returncode == 0,
+                 f"rebuild --table chains failed: {result.stderr[-400:]}")
+
+        partitions = sorted((tmp_root / "data" / "curated" / "option_chains").glob(
+            "year=*/part-*.parquet"))
+        _require(bool(partitions), "rebuild wrote no option_chains partitions")
+        out = pd.concat([pd.read_parquet(p) for p in partitions], ignore_index=True)
+        _require(len(out) > 0, "the fetch payload produced zero Tier-2 rows")
+        _require(set(out["chain_kind"]) == {"fetch"},
+                 f"chain_kind {set(out['chain_kind'])} != {{'fetch'}}")
+        _require(out["src_file"].astype(str).str.startswith("fetch:orats/hist/strikes/").all(),
+                 "src_file provenance does not point at the fetch payload")
+
+        # The values must equal the legacy normalization of the SAME rows,
+        # validated the same way — envelope differences must not reach Tier 2.
+        legacy_frame, _ = n_chains.normalize_file(legacy_path)
+        legacy_clean, _ = validate.validate_chains(
+            legacy_frame, source_file=legacy_path.name,
+            quarantine_root=tmp_root / "quarantine")
+        _require(len(out) == len(legacy_clean),
+                 f"fetch path landed {len(out)} rows, legacy validation {len(legacy_clean)}")
+        key = list(n_chains.PRIMARY_KEY)
+        string_cols = ["ticker", "right"]
+        date_cols = ["obs_date", "expiry"]
+        got = out.sort_values(key)[_CANONICAL_CHAIN_COLS].reset_index(drop=True)
+        want = legacy_clean.sort_values(key)[_CANONICAL_CHAIN_COLS].reset_index(drop=True)
+        for frame in (got, want):
+            for col in string_cols:
+                frame[col] = frame[col].astype(str)
+            for col in date_cols:
+                frame[col] = pd.to_datetime(frame[col]).astype("datetime64[ns]")
+        # Compare VALUES, not storage dtypes: the parquet round trip stores
+        # ints as nullable Int64 and strings as pyarrow-backed, which says
+        # nothing about the prices. Numeric columns go through float64.
+        numeric_cols = [c for c in _CANONICAL_CHAIN_COLS
+                        if c not in string_cols and c not in date_cols]
+        for frame in (got, want):
+            for col in numeric_cols:
+                frame[col] = pd.to_numeric(frame[col]).astype("float64")
+        pd.testing.assert_frame_equal(got, want, check_dtype=True)
+
+    # 4. The live store is scannable even before the Sep-1 pull writes to it:
+    #    the bridge must read the real fetch dir without raising.
+    real_entries = iter_cached("orats", "hist/strikes")
+    stats: dict = {}
+    n_chains.iter_fetch_sources(stats=stats)
+    _require(stats.get("unrecognized", 0) == 0 and stats.get("unreadable", 0) == 0,
+             f"the live fetch store carries unread payloads: {stats}")
+    return (
+        f"real Fetcher persisted {len(rows)} rows verbatim; rebuild --table chains "
+        f"landed {len(out)} Tier-2 rows with fetch provenance, values equal the "
+        f"legacy normalization; live fetch store scans clean "
+        f"({len(real_entries)} payload(s) today)"
+    )
+
+
+# --------------------------------------------------------------------------
 # 2. throttle
 # --------------------------------------------------------------------------
 
@@ -885,6 +1031,7 @@ ORDER = [
     "unittests",
     "test_policy",
     "cache_first",
+    "fetch_store_bridge",
     "throttle",
     "resume",
     "determinism",

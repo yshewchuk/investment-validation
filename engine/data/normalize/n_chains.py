@@ -177,11 +177,18 @@ def normalize_fetch_rows(source) -> tuple[pd.DataFrame, dict]:
     )
 
 
-def iter_fetch_sources():
-    """Every `hist/strikes` response the Tier-1 fetch wrapper has cached."""
+def iter_fetch_sources(stats: dict | None = None):
+    """Every `hist/strikes` response the Tier-1 fetch wrapper has cached.
+
+    ``stats``, when given, receives the payload accounting
+    (:func:`~engine.data.normalize.fetch_store.iter_orats_rows`): how many
+    bodies were scanned, how many were empty, and how many cost quota but
+    parsed to nothing (unrecognized/unreadable) — the numbers that turn a
+    silent zero-row rebuild into a visible one.
+    """
     from engine.data.normalize.fetch_store import iter_orats_rows
 
-    return list(iter_orats_rows("hist/strikes"))
+    return list(iter_orats_rows("hist/strikes", stats=stats))
 
 
 def iter_normalized(

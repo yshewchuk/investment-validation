@@ -173,6 +173,69 @@ class TestBothGenerationsProduceIdenticalRows:
         assert list(iter_orats_rows("hist/strikes", root=tmp_path)) == []
 
 
+class TestSilentFailureIsVisible:
+    """A3: a payload that cost quota but yields no rows must be counted and
+    flagged, not shrugged off — the failure mode of the Sep-1 pull is a
+    rebuild that produces zero rows and raises nothing."""
+
+    def test_unrecognized_envelopes_are_counted_and_flagged(self, tmp_root):
+        from engine import paths as paths_mod
+
+        write_entry(
+            paths_mod.RAW_FETCH, "orats", "hist/strikes", "ab" + "0" * 62,
+            {"error": "rate limit", "message": "not data"},
+        )
+        stats: dict = {}
+        assert list(iter_orats_rows("hist/strikes", stats=stats)) == []
+        assert stats["scanned"] == 1
+        assert stats["unrecognized"] == 1
+        assert stats["payloads"] == 0
+
+        flags = list(paths_mod.QUARANTINE.glob("*.flag.json"))
+        assert len(flags) == 1
+        flagged = json.loads(flags[0].read_text())
+        assert flagged[0]["reason"] == "unrecognized ORATS envelope"
+
+    def test_unreadable_bodies_are_counted_and_flagged(self, tmp_root):
+        from engine import paths as paths_mod
+
+        directory = paths_mod.RAW_FETCH / "orats" / "cd"
+        directory.mkdir(parents=True, exist_ok=True)
+        key = "cd" + "1" * 62
+        (directory / f"{key}.meta.json").write_text(
+            json.dumps({"key": key, "source": "orats", "endpoint": "hist/strikes"})
+        )
+        (directory / f"{key}.body.gz").write_bytes(b"this is not gzip")
+
+        stats: dict = {}
+        assert list(iter_orats_rows("hist/strikes", stats=stats)) == []
+        assert stats["unreadable"] == 1
+        assert len(list(paths_mod.QUARANTINE.glob("*.flag.json"))) == 1
+
+    def test_a_recognized_empty_payload_is_counted_but_not_flagged(self, tmp_root):
+        from engine import paths as paths_mod
+
+        write_entry(paths_mod.RAW_FETCH, "orats", "hist/strikes", "ab" + "0" * 62, {"data": []})
+        stats: dict = {}
+        assert list(iter_orats_rows("hist/strikes", stats=stats)) == []
+        assert stats["empty"] == 1
+        assert stats["unrecognized"] == 0
+        # A legitimate zero-row answer is not an offender.
+        assert not list(paths_mod.QUARANTINE.glob("*.flag.json"))
+
+    def test_payload_shape_classifies_the_envelopes(self):
+        from engine.data.normalize.fetch_store import payload_shape
+
+        assert payload_shape({"data": [{"a": 1}]})[0] == "data"
+        assert payload_shape({"rows": [{"a": 1}]})[0] == "rows"
+        assert payload_shape([{"a": 1}])[0] == "list"
+        assert payload_shape({"data": []}) == ("data", [])
+        assert payload_shape(None)[0] == "empty"
+        assert payload_shape({"error": "x"})[0] == "unrecognized"
+        assert payload_shape("text")[0] == "unrecognized"
+        assert payload_shape(42)[0] == "unrecognized"
+
+
 class TestDailyBridge:
     def test_the_fetch_index_groups_summaries_and_cores_by_ticker(self, tmp_path, monkeypatch):
         from engine import paths

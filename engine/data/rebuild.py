@@ -173,7 +173,8 @@ def build_chains_table(sample: int | None = None) -> dict:
     sources: list[tuple[str, object]] = [
         (path.name, ("legacy", path)) for path in n_chains.iter_chain_files()
     ]
-    fetch_sources = n_chains.iter_fetch_sources()
+    fetch_stats: dict = {}
+    fetch_sources = n_chains.iter_fetch_sources(stats=fetch_stats)
     sources += [(s.source_id, ("fetch", s)) for s in fetch_sources]
     if sample:
         sources = sources[:sample]
@@ -222,6 +223,9 @@ def build_chains_table(sample: int | None = None) -> dict:
         "sources": len(sources),
         "legacy_files": len(sources) - len(fetch_sources),
         "fetch_payloads": len(fetch_sources),
+        "fetch_empty": fetch_stats.get("empty", 0),
+        "fetch_unrecognized": fetch_stats.get("unrecognized", 0),
+        "fetch_unreadable": fetch_stats.get("unreadable", 0),
         "unreadable": len(unreadable),
         "duplicates_removed": removed,
         "rows": stats.rows,
