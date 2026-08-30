@@ -676,9 +676,66 @@ class TestCalibrationStage:
         assert cal["available"]
         assert cal["brier"] == pytest.approx(np.mean((p - y) ** 2))
         base = y.mean()
-        assert cal["brier_skill"] == pytest.approx(base * (1 - base) - cal["brier"])
+        assert cal["brier_base_rate"] == pytest.approx(base * (1 - base))
         # Higher predicted bins must realize higher win rates here.
         assert cal["deciles"][-1]["realized"] > cal["deciles"][0]["realized"]
+
+    def test_brier_skill_is_the_engine_calibrate_definition(self):
+        """One metric, one spelling — asserted across the module boundary.
+
+        The skill is a SKILL SCORE (`1 - brier/reference`), not the unnormalized
+        difference `reference - brier`. The two differ by a factor of
+        `base*(1-base)`, and promotion applies a fixed floor to whichever one it
+        gets: on the unnormalized scale the decision record's -0.05 floor is
+        really -0.21, which is looser than the worst anti-calibration the record
+        ever measured (-0.204). Pinning the two implementations together is what
+        stops that from coming back.
+        """
+        from engine.calibrate import brier_skill
+        from engine.evaluate import calibration_block
+
+        rng = np.random.default_rng(11)
+        for shift in (-0.25, -0.10, 0.0, 0.10, 0.25):
+            y = (rng.random(2000) < 0.4).astype(float)
+            p = np.clip(y.mean() + shift + rng.normal(0, 0.08, y.size), 0.01, 0.99)
+            cal = calibration_block(p, y)
+            assert cal["brier_skill"] == pytest.approx(brier_skill(p, y))
+            # And it is NOT the unnormalized difference, except where they
+            # coincide at zero skill.
+            unnormalized = cal["brier_base_rate"] - cal["brier"]
+            if abs(cal["brier_skill"]) > 1e-3:
+                assert abs(cal["brier_skill"] - unnormalized) > 1e-4
+
+    def test_anti_calibrated_challenger_is_refused_through_the_real_seam(self):
+        """probabilities -> calibration_block -> promote.decide, computed not injected.
+
+        Both existing promotion tests hand `decide` a literal `brier_skill`, so
+        neither could see a challenger whose skill was computed on a different
+        scale from the floor it is compared against. This drives the whole seam:
+        a forecaster over-confident by the same margin the decision record
+        measured must be REFUSED.
+        """
+        from experiments import promote as promote_mod
+        from engine.evaluate import calibration_block
+
+        rng = np.random.default_rng(3)
+        y = (rng.random(4000) < 0.377).astype(float)
+        p = np.clip(y.mean() + 0.16 + rng.normal(0, 0.06, y.size), 0.01, 0.99)
+        cal = calibration_block(p, y)
+        assert cal["brier_skill"] < promote_mod.MIN_BRIER_SKILL, (
+            f"skill {cal['brier_skill']:+.4f} should sit below the "
+            f"{promote_mod.MIN_BRIER_SKILL} floor on the normalized scale")
+
+        metrics = {
+            "headline": {"mean": 0.05, "sharpe_trade": 1.5},
+            "mc": {"by_fraction": {"0.05": {"p_loss": 0.10}}},
+            "stress": {}, "preregistration": {"valid": True}, "checklist_fails": 0,
+            "calibration": cal,
+        }
+        champion = {"mean": 0.01, "sharpe_trade": 0.5, "mc": {"p_loss": 0.20}}
+        ok, reasons = promote_mod.decide(metrics, champion)
+        assert not ok, reasons
+        assert any(r.startswith("FAIL (f)") for r in reasons), reasons
 
     def test_calibration_degenerate_or_small(self):
         from engine.evaluate import calibration_block

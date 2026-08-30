@@ -62,6 +62,8 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+from engine.calibrate import brier as brier_score
+from engine.calibrate import brier_skill as brier_skill_score
 
 __all__ = [
     "METRIC_KEYS",
@@ -297,10 +299,19 @@ def calibration_block(proba: Sequence[float], outcome: Sequence[float],
     """Reliability of a gate's P(win) against realized outcomes, OOS.
 
     ``proba`` and ``outcome`` (0/1) must already be out-of-sample — the
-    walk-forward collects them. The Brier skill uses the phase-1 definition
-    (``brier_base_rate - brier``, positive = better than the base-rate
-    forecaster); the decision record's floor (``MIN_BRIER_SKILL = -0.05``) is
-    applied in promotion, not here.
+    walk-forward collects them.
+
+    **The skill is imported, not re-derived.** ``engine.calibrate.brier_skill``
+    is the program's one definition — the SKILL SCORE ``1 - brier/reference``,
+    normalized by the base-rate forecaster's own Brier. An earlier version of
+    this function computed the unnormalized difference ``reference - brier``
+    instead, which is the same number scaled by ``base*(1-base) ~ 0.235``. That
+    matters because promotion applies the decision record's floor
+    (``MIN_BRIER_SKILL = -0.05``) to whatever this returns: on the unnormalized
+    scale that floor is really -0.21, and the worst anti-calibration the record
+    ever measured was -0.204 — so the gate would have passed the exact failure
+    it exists to block. Two spellings of one metric is the whole bug; there is
+    now one spelling, and it lives in engine.calibrate.
     """
     p = np.asarray(proba, dtype=float)
     y = np.asarray(outcome, dtype=float)
@@ -312,7 +323,9 @@ def calibration_block(proba: Sequence[float], outcome: Sequence[float],
                 "reason": f"only {n} OOS scored rows (< {min_n}); calibration not reliable"}
 
     base = float(y.mean())
-    brier = float(np.mean((p - y) ** 2))
+    brier = brier_score(p, y)
+    # The base-rate forecaster's Brier: mean((base - y)^2) == base*(1 - base)
+    # for 0/1 outcomes. This is the `reference` engine.calibrate divides by.
     brier_base = float(base * (1.0 - base))
 
     edges = np.unique(np.quantile(p, np.linspace(0, 1, n_bins + 1)))
@@ -343,7 +356,7 @@ def calibration_block(proba: Sequence[float], outcome: Sequence[float],
         "base_rate": base,
         "brier": brier,
         "brier_base_rate": brier_base,
-        "brier_skill": brier_base - brier,
+        "brier_skill": brier_skill_score(p, y),
         "reliability_monotonicity": monotonicity,
         "deciles": deciles,
     }
