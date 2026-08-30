@@ -89,10 +89,15 @@ acceptance check.
 | Command | What it proves |
 |---|---|
 | `python3 -m pytest tests -q` | Unit behaviour of every pure component |
+| `python3 checks/phase0_checks.py --only test_policy` | Every module is covered by unit tests or a *declared* acceptance check |
 | `python3 checks/phase0_checks.py` | The 11 Phase-0 acceptance tests |
 | `python3 checks/phase0_migration.py` | The rebuilt panel reproduces the legacy master panel |
 | `python3 checks/phase0_audit.py` | Coverage + price-sanity battery → `reports/phase0_data_audit.md` |
 | `python3 checks/repo_hygiene.py --all` | No secret, data file, or oversize blob is tracked |
+
+Testing strategy — the two layers, what each is for, and the known thin spots —
+is written up in `tests/README.md`, and enforced by the `test_policy` check
+rather than left as an aspiration.
 
 The migration test is the load-bearing one. Every verdict in the plan rests on
 `events_with_orats_sum.csv`; the test reconciles all 115,500 rows and fails on

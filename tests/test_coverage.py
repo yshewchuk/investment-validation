@@ -128,3 +128,95 @@ class TestSideCoverage:
         }
         out = side_coverage(pd.DataFrame(columns))
         assert (out[["call", "put", "both", "either"]] == 0).all().all()
+
+
+class TestRendering:
+    def test_a_table_renders_with_a_header_and_rows(self):
+        frame = pd.DataFrame(
+            {"1-10B": [0.5, 0.75], ">10B": [0.9, 0.95]},
+            index=pd.Index([2023, 2024], name="year"),
+        )
+        out = coverage._table(frame)
+        assert "| year | 1-10B | >10B |" in out
+        assert "0.500" in out and "0.950" in out
+
+    def test_an_empty_table_says_so_instead_of_rendering_nothing(self):
+        assert "no data" in coverage._table(pd.DataFrame())
+
+    def test_non_finite_cells_render_as_a_dash(self):
+        frame = pd.DataFrame({"a": [np.nan]}, index=pd.Index([2024], name="year"))
+        assert "—" in coverage._table(frame)
+
+    def test_integer_formatting_is_respected(self):
+        frame = pd.DataFrame({"n": [1234.0]}, index=pd.Index([2024], name="year"))
+        assert "1234" in coverage._table(frame, "{:.0f}")
+
+    def test_the_audit_carries_the_sections_the_plan_asks_for(self, monkeypatch):
+        events = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB"],
+                "year": [2024, 2024],
+                "mcap_bucket": ["1-10B", ">10B"],
+                "through_print_ready": [True, False],
+                "entry_both": [True, True],
+                **{
+                    f"{point}_{side}": [True, False]
+                    for point in ("entry", "exit", "t14")
+                    for side in ("call", "put", "both", "any")
+                },
+            }
+        )
+        monkeypatch.setattr(
+            coverage,
+            "manifest",
+            None,
+            raising=False,
+        )
+        body = coverage.render_audit(events, [])
+        for heading in (
+            "Phase 0 — Data Audit",
+            "Store inventory",
+            "Chain coverage",
+            "Call vs put coverage",
+        ):
+            assert heading in body
+
+    def test_sanity_results_are_tabulated_when_supplied(self):
+        from engine.data.validate import CheckResult
+
+        events = pd.DataFrame(
+            {
+                "ticker": ["AAA"],
+                "year": [2024],
+                "mcap_bucket": ["1-10B"],
+                "through_print_ready": [True],
+                "entry_both": [True],
+                **{
+                    f"{point}_{side}": [True]
+                    for point in ("entry", "exit", "t14")
+                    for side in ("call", "put", "both", "any")
+                },
+            }
+        )
+        checks = [CheckResult("spot_vs_yfinance", True, 100, 2, "median 0.3%")]
+        body = coverage.render_audit(events, checks)
+        assert "Price-sanity battery" in body
+        assert "spot_vs_yfinance" in body
+        assert "PASS" in body
+
+
+class TestCoverageMatrix:
+    def test_it_reports_rates_and_the_counts_behind_them(self):
+        events = pd.DataFrame(
+            {
+                "year": [2024, 2024, 2024],
+                "mcap_bucket": ["1-10B", "1-10B", ">10B"],
+                "through_print_ready": [True, False, True],
+            }
+        )
+        rates, counts = coverage.coverage_matrix(events)
+        assert rates.loc[2024, "1-10B"] == pytest.approx(0.5)
+        assert counts.loc[2024, "1-10B"] == 2
+
+    def test_an_empty_frame_yields_an_empty_matrix(self):
+        assert coverage.coverage_matrix(pd.DataFrame()).empty

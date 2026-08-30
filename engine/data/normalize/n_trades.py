@@ -92,12 +92,32 @@ def normalize_legacy_set(strategy: str, spec: dict | None = None) -> tuple[pd.Da
             "ret": pd.to_numeric(src.get("ret"), errors="coerce"),
         }
     )
+    if out.empty:
+        # Every row was filtered out (e.g. a set with no chain-priced exits).
+        # Building the string keys below on empty typed columns raises, so
+        # report the empty result rather than dying on the way to it.
+        return out, {
+            "strategy": strategy,
+            "rows_in": rows_in,
+            "rows_out": 0,
+            "dropped_non_chain_exit": dropped_non_chain,
+            "dropped_duplicate_ids": 0,
+            "mean_ret_worst_fill": None,
+        }
+
     out["event_id"] = out["ticker"] + "_" + event_date.dt.strftime("%Y-%m-%d")
     out["year"] = event_date.dt.year
     # These sets were built buying the ask and selling the bid.
     out["fill_alpha"] = 0.0
     out["legs"] = None
-    out["provenance"] = f"legacy:{path.relative_to(paths.ROOT)}"
+    # Repo-relative when the file lives under the repo, absolute otherwise.
+    # `relative_to` raises on any path outside ROOT, which is true in production
+    # but makes provenance a source of exceptions rather than a record of facts.
+    try:
+        where = path.relative_to(paths.ROOT)
+    except ValueError:
+        where = path
+    out["provenance"] = f"legacy:{where}"
     out["trade_id"] = (
         strategy
         + ":"

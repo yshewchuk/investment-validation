@@ -41,10 +41,11 @@ Python 3.14. From the system packages: `numpy`, `pandas`, `scipy`,
 Two more are needed and may require an override on a PEP-668 system:
 
 ```bash
-pip install --break-system-packages pyarrow pytest
+pip install --break-system-packages pyarrow pytest coverage
 ```
 
-`pyarrow` gives Parquet storage and `pytest` runs the suite. If `pyarrow`
+`pyarrow` gives Parquet storage, `pytest` runs the suite, and `coverage` backs
+the `test_policy` check (which skips cleanly if it is absent). If `pyarrow`
 genuinely cannot be installed, the store falls back to `csv.gz` automatically
 (`engine/data/store.py::HAVE_PARQUET`) — same contracts, slower.
 

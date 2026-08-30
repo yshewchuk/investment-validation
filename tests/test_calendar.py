@@ -258,3 +258,50 @@ class TestDateChangeDetection:
     def test_empty_inputs_are_handled(self):
         empty = self._frame([])
         assert detect_date_changes(empty, empty) == []
+
+
+class TestEventsNormalizer:
+    """The Tier-2 adapter over `build_calendar` (engine/data/normalize/n_events)."""
+
+    def test_it_shapes_the_calendar_to_the_tier_2_schema(self, monkeypatch):
+        from engine.data.normalize import n_events
+        from engine.data.schemas import SCHEMAS, assert_schema, coerce
+
+        cal = pd.DataFrame(
+            {
+                "event_id": ["AAA_2024-01-15", "BBB_2024-02-01"],
+                "ticker": ["AAA", "BBB"],
+                "event_date": pd.to_datetime(["2024-01-15", "2024-02-01"]),
+                "session": [AMC, BMO],
+                "annc_tod": ["1630", "0900"],
+                "src_orats": [True, True],
+                "src_oquants": [True, False],
+                "date_agree": [True, False],
+                "updated_at": [None, None],
+            }
+        )
+        monkeypatch.setattr(n_events, "build_calendar", lambda **kw: cal)
+        out, report = n_events.normalize()
+
+        assert_schema(coerce(out, "earnings_events"), "earnings_events")
+        assert report["rows"] == 2
+        assert report["both_sources"] == 1
+        assert report["orats_only"] == 1
+        assert set(out["year"]) == {2024}
+
+    def test_an_empty_calendar_reports_zero_rather_than_raising(self, monkeypatch):
+        from engine.data.normalize import n_events
+
+        monkeypatch.setattr(
+            n_events, "build_calendar", lambda **kw: pd.DataFrame(columns=["ticker"])
+        )
+        out, report = n_events.normalize()
+        assert out.empty and report["rows"] == 0
+
+    def test_session_coverage_counts_both_sessions_and_gaps(self, monkeypatch):
+        from engine.data.normalize import n_events
+
+        events = pd.DataFrame({"session": [AMC, AMC, BMO, None]})
+        counts = n_events.session_coverage(events)
+        assert counts["AMC"] == 2
+        assert counts["BMO"] == 1

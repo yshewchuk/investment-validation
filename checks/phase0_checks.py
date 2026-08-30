@@ -98,6 +98,104 @@ def check_unittests() -> str:
 
 
 # --------------------------------------------------------------------------
+# 0b. test policy
+# --------------------------------------------------------------------------
+
+#: Modules whose correctness is only meaningful against real data, a real store,
+#: or a real repo — so they are covered by the acceptance layer instead of by
+#: unit tests. Each entry names the check that covers it. Anything NOT in this
+#: map and NOT reached by pytest is an untested module and fails the policy.
+ACCEPTANCE_COVERED = {
+    "engine/data/rebuild.py": "determinism + migration + the real rebuild",
+    "checks/phase0_migration.py": "migration (delta logic in tests/test_migration_logic.py)",
+    "checks/phase0_verdicts.py": "verdicts",
+    "checks/phase0_audit.py": "coverage_report",
+    "checks/phase0_checks.py": "is the harness itself",
+}
+
+#: Minimum line coverage for `engine/` under the unit suite alone.
+MIN_ENGINE_COVERAGE = 0.80
+
+
+@check("test_policy", needs_data=False,
+       description="every module is covered by unit tests or a named acceptance check")
+def check_test_policy() -> str:
+    """Turn the two-layer testing strategy into an enforced invariant.
+
+    Without this, "covered by an acceptance check" is an assertion in a README
+    that decays the moment someone adds a module. Here it is a claim the suite
+    re-derives: measure what pytest actually reaches, and require anything it
+    misses to be explicitly declared — with the check that covers it named.
+    """
+    try:
+        import coverage  # noqa: F401
+    except ImportError:
+        return "SKIP: coverage not installed (pip install coverage)"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_file = Path(tmp) / ".coverage"
+        run = subprocess.run(
+            [
+                sys.executable, "-m", "coverage", "run",
+                f"--data-file={data_file}",
+                "--source=engine,checks,tools",
+                "-m", "pytest", str(ROOT / "tests"), "-q", "--no-header",
+            ],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        _require(run.returncode == 0, f"unit suite failed under coverage: {run.stdout[-300:]}")
+
+        report = subprocess.run(
+            [sys.executable, "-m", "coverage", "json",
+             f"--data-file={data_file}", "-o", str(Path(tmp) / "cov.json")],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        _require(report.returncode == 0, f"coverage json failed: {report.stderr[-300:]}")
+        data = json.loads((Path(tmp) / "cov.json").read_text())
+
+    files = data["files"]
+    untested = []
+    for path, stats in sorted(files.items()):
+        rel = path.replace("\\", "/")
+        if stats["summary"]["num_statements"] == 0:
+            continue  # __init__ files with only a docstring
+        if stats["summary"]["percent_covered"] > 0:
+            continue
+        if rel in ACCEPTANCE_COVERED:
+            continue
+        untested.append(rel)
+    _require(
+        not untested,
+        "module(s) reached by neither unit tests nor a declared acceptance "
+        f"check: {untested}. Add tests, or declare the covering check in "
+        "ACCEPTANCE_COVERED.",
+    )
+
+    # Every declaration must still hold: a module listed as acceptance-covered
+    # that has since gained unit coverage is fine, but one that has vanished is
+    # a stale claim.
+    stale = [p for p in ACCEPTANCE_COVERED if not (ROOT / p).exists()]
+    _require(not stale, f"ACCEPTANCE_COVERED names modules that no longer exist: {stale}")
+
+    engine_stmts = sum(
+        s["summary"]["num_statements"] for p, s in files.items() if p.startswith("engine/")
+    )
+    engine_covered = sum(
+        s["summary"]["covered_lines"] for p, s in files.items() if p.startswith("engine/")
+    )
+    ratio = engine_covered / engine_stmts if engine_stmts else 1.0
+    _require(
+        ratio >= MIN_ENGINE_COVERAGE,
+        f"engine/ line coverage {ratio:.1%} is below the {MIN_ENGINE_COVERAGE:.0%} floor",
+    )
+    return (
+        f"engine/ {ratio:.1%} line coverage under the unit suite; "
+        f"{len(ACCEPTANCE_COVERED)} module(s) covered by declared acceptance checks; "
+        "0 undeclared gaps"
+    )
+
+
+# --------------------------------------------------------------------------
 # 1. cache-first
 # --------------------------------------------------------------------------
 
@@ -738,6 +836,7 @@ def check_recovery_drill() -> str:
 
 ORDER = [
     "unittests",
+    "test_policy",
     "cache_first",
     "throttle",
     "resume",
