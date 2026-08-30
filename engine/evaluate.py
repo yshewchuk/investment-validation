@@ -708,7 +708,21 @@ def walk_forward(
     # saw so the poison test and the report auditor can verify it.
     gated_years = [d["year"] for d in diagnostics if not d.get("ungated") and d["n_train"]]
     leak_free = all(seen < year for seen, year in zip(fit_years_seen, gated_years))
-    audit = {"years": years, "fit_years_seen": fit_years_seen, "leak_free": bool(leak_free)}
+    # The receipt is what the report's checklist renders: counts, the latest
+    # information any fit saw, and the margin to the year it then traded — a
+    # statement OUT of the audit rather than about it.
+    receipt = None
+    if fit_years_seen and gated_years:
+        margin_years = min(year - seen for seen, year in zip(fit_years_seen, gated_years))
+        receipt = {
+            "n_rows_checked": int(len(mid)),
+            "n_folds_checked": len(gated_years),
+            "max_fit_year": int(max(fit_years_seen)),
+            "min_margin_years": int(margin_years),
+            "paths": ["evaluate.walk_forward"],
+        }
+    audit = {"years": years, "fit_years_seen": fit_years_seen,
+             "leak_free": bool(leak_free), "receipt": receipt}
     if not leak_free:
         raise EvaluationError(
             f"walk-forward leak: a fit saw data from its own test year "
@@ -1160,6 +1174,7 @@ def evaluate(
     stress: bool = True,
     write_report: bool = True,
     input_files: Sequence[Path | str] = (),
+    extra_sections: Sequence[Mapping[str, Any]] | Callable[["EvalResult"], Sequence[Mapping[str, Any]]] = (),
     now_utc: pd.Timestamp | None = None,
 ) -> EvalResult:
     """Run one candidate through the full evaluation suite.
@@ -1296,7 +1311,7 @@ def evaluate(
                 "available": False,
                 "required": has_short_leg,
                 "note": ("short-leg spec without a tail shock — checklist FAIL"
-                         if has_short_leg else "no short leg; tail injection N/A"),
+                         if has_short_leg else "the structure carries no short leg"),
             }
         results["stress"]["slippage"] = stress_slippage(selected, repricer)
         results["stress"]["stale_dates"] = stress_stale_dates(
@@ -1359,7 +1374,15 @@ def evaluate(
     if write_report:
         from engine.report import Report
 
-        report = Report.from_eval(result, input_files=input_files)
+        # Spec-specific analyses are rendered BY the generator, not appended to
+        # its output: an experiment's best content (EXP-102's defined-risk
+        # falsification) used to land outside the report's formatting,
+        # ordering, checklist and provenance because run.py opened REPORT.md in
+        # append mode. A callable is accepted because those analyses usually
+        # need the finished result to compute.
+        sections = extra_sections(result) if callable(extra_sections) else extra_sections
+        report = Report.from_eval(result, input_files=input_files,
+                                  extra_sections=sections or ())
         out_dir = (Path(run_dir) if run_dir is not None else paths.REPORTS / str(spec.get("id")))
         result.report_path = report.write(out_dir)
 

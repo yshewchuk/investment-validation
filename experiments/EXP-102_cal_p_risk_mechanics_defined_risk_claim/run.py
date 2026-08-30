@@ -46,20 +46,24 @@ def main() -> None:
     repricer = common.make_repricer(STRATEGY)
     input_files = sorted((paths.CURATED / "trades").glob("year=*/part-*.parquet"))
 
+    mid = trades[np.isclose(trades["fill_alpha"].astype(float), 0.5)].copy()
+
+    # The risk-mechanics analyses ARE the experiment; they render through the
+    # generator (Phase 4 §A8) rather than being appended to REPORT.md, so the
+    # defined-risk falsification carries the report's units and reaches §0.
+    def required_outputs(result):
+        mechanics = risk_mechanics(mid)
+        (HERE / "results" / "risk_mechanics.json").write_text(
+            json.dumps(mechanics, indent=1, default=str))
+        return appendix_sections(spec, result, mechanics)
+
     result = evaluate(
         spec, trades, gate=None, run_dir=HERE,
         repricer=repricer, tail_shock=common.calp_tail_shock, spy_daily=spy,
         input_files=input_files,
+        extra_sections=required_outputs,
     )
     lib.record_evaluation(HERE, spec, result.results)
-
-    mid = trades[np.isclose(trades["fill_alpha"].astype(float), 0.5)].copy()
-    mechanics = risk_mechanics(mid)
-    (HERE / "results" / "risk_mechanics.json").write_text(
-        json.dumps(mechanics, indent=1, default=str))
-
-    with open(HERE / "REPORT.md", "a") as fh:
-        fh.write(appendix_markdown(spec, result, mechanics))
     print(f"[{spec['id']}] report: {result.report_path}", flush=True)
 
 
@@ -334,97 +338,94 @@ def pin_risk_at_front_expiry(legs: pd.DataFrame) -> dict:
 # --------------------------------------------------------------------------
 
 
-def appendix_markdown(spec, result, m: dict) -> str:
+def appendix_sections(spec, result, m: dict) -> list[dict]:
+    """The pre-registered required outputs, as generator sections."""
     d = m["debit_exceeded"]
     a = m["assignment_exposure"]
     z = m["zero_cost"]
     head = result.results["headline"]
     tail = result.results["stress"].get("tail_injection", {})
+    sections: list[dict] = []
 
-    lines = [
-        "",
-        "---",
-        "",
-        "## Appendix — risk-mechanics analyses (pre-registered required outputs)",
-        "",
-        "*Appended by run.py after the generator wrote the body above.*",
-        "",
-        "### 1. Max-loss distribution vs net debit",
-        "",
-        f"Trades losing MORE than the net debit (ret < -100%): **{d['n']:,} of "
-        f"{a['n']:,} ({d['share']:.1%})** at mid fills. Worst realized trade: "
-        f"**{d['worst_ret'] * 100:.1f}%** "
-        f"({d['worst_trade'].get('ticker')} {str(d['worst_trade'].get('event_date'))[:10]}, "
-        f"paid {d['worst_trade'].get('entry_cost'):.3f}, close cost "
-        f"{-d['worst_trade'].get('exit_value'):.3f}).",
-        "",
-        "The defined-risk claim (max loss = net debit) is falsified unless every "
-        "exceedance below classifies as a data artifact:",
-        "",
-        "| classification | count |",
-        "|---|---:|",
-    ]
-    for k, v in sorted(d["classification"].items(), key=lambda kv: -kv[1]):
-        lines.append(f"| {k} | {v} |")
-    lines += [
-        "",
-        "Per mcap bucket:",
-        "",
-        "| bucket | n | exceeded | worst ret | p01 ret |",
-        "|---|---:|---:|---:|---:|",
-    ]
-    for bucket, row in d["by_mcap_bucket"].items():
-        lines.append(
-            f"| {bucket} | {row['n']:,} | {row['n_exceeded']:,} | "
-            f"{row['worst_ret'] * 100:.1f}% | {row['p01_ret'] * 100:.1f}% |")
-    lines += [
-        "",
-        f"Per-year exceedance counts: "
-        + ", ".join(f"{y}: {n}" for y, n in sorted(d["by_year"].items())),
-        "",
-        "### 2. Assignment exposure",
-        "",
-        f"Short front put ITM at the post-print close: **{a['itm_at_post_print_close']:.1%}** "
-        f"(ITM by >5%: {a['itm_by_gt_5pct']:.1%}, by >10%: {a['itm_by_gt_10pct']:.1%}; "
-        f"median depth {a['median_itm_depth'] * 100:.1f}%).",
-        "",
-        f"Front-leg DTE at entry: median "
-        f"{a['front_dte_at_entry'].get('50%')}, range "
+    sections.append({
+        "title": "Max-loss distribution vs net debit",
+        "note": (
+            f"Trades losing MORE than the net debit (ret < -100%): **{d['n']:,} of "
+            f"{a['n']:,} ({d['share']:.1%})** at mid fills. Worst realized trade: "
+            f"**{d['worst_ret'] * 100:.1f}%** "
+            f"({d['worst_trade'].get('ticker')} "
+            f"{str(d['worst_trade'].get('event_date'))[:10]}, paid "
+            f"{d['worst_trade'].get('entry_cost'):.3f}, close cost "
+            f"{-d['worst_trade'].get('exit_value'):.3f}). The defined-risk claim "
+            "(max loss = net debit) is falsified unless every exceedance below "
+            "classifies as a data artifact."),
+        "columns": ["classification", "count"],
+        "align": ["---", "---:"],
+        "rows": [[k, f"{v:,}"] for k, v in sorted(d["classification"].items(),
+                                                  key=lambda kv: -kv[1])],
+        "body": ["", "Per mcap bucket:", "",
+                 "| bucket | n | exceeded | worst ret | p01 ret |",
+                 "|---|---:|---:|---:|---:|"]
+                + [f"| {bucket} | {row['n']:,} | {row['n_exceeded']:,} | "
+                   f"{row['worst_ret'] * 100:.1f}% | {row['p01_ret'] * 100:.1f}% |"
+                   for bucket, row in d["by_mcap_bucket"].items()]
+                + ["", "Per-year exceedance counts: "
+                   + ", ".join(f"{y}: {n}" for y, n in sorted(d["by_year"].items()))],
+        "promote_to_verdict": True,
+        "verdict_row": ("Is CAL-P defined-risk?",
+                        f"**No** — {d['n']:,} of {a['n']:,} trades ({d['share']:.1%}) "
+                        f"lost more than the debit; worst {d['worst_ret'] * 100:.1f}%",
+                        "§8.5.1"),
+        "falsifies": "every exceedance classifying as a data artifact rather than a "
+                     "real loss.",
+    })
+
+    pin = a.get("pin_risk_at_front_expiry", {})
+    assignment_body = [
+        f"Front-leg DTE at entry: median {a['front_dte_at_entry'].get('50%')}, range "
         f"{a['front_dte_at_entry'].get('min')}-{a['front_dte_at_entry'].get('max')} "
         "— the structure as priced is a 2-4 DTE front, not a 1 DTE front.",
     ]
-    pin = a.get("pin_risk_at_front_expiry", {})
     if pin.get("n_measured"):
-        lines += [
+        assignment_body += [
             "",
             f"At the FRONT expiry (pin/assignment window, n={pin['n_measured']:,}): "
             f"ITM {pin['itm_at_front_expiry']:.1%}, within ±2% pin band "
             f"{pin['pin_within_2pct']:.1%}, ITM by >10% "
             f"{pin['itm_by_gt_10pct_at_expiry']:.1%}.",
         ]
-    lines += ["", "### 3. The zero_cost selection", ""]
+    sections.append({
+        "title": "Assignment exposure",
+        "note": (
+            f"Short front put ITM at the post-print close: "
+            f"**{a['itm_at_post_print_close']:.1%}** (ITM by >5%: "
+            f"{a['itm_by_gt_5pct']:.1%}, by >10%: {a['itm_by_gt_10pct']:.1%}; "
+            f"median depth {a['median_itm_depth'] * 100:.1f}%)."),
+        "body": assignment_body,
+        "promote_to_verdict": True,
+        "verdict_row": ("How exposed is the short leg to assignment?",
+                        f"**{a['itm_at_post_print_close']:.1%}** ITM at the post-print "
+                        f"close ({a['itm_by_gt_10pct']:.1%} by more than 10%)", "§8.5.2"),
+    })
+
     if "zero_cost_dropped" in z:
-        lines += [
+        zero_body = [
             f"`build_trades --strategy CAL-P --dry-run`: planned {z['planned']:,}, "
             f"with both chains {z['replayable']:,}, priced {z['priced']:,} — "
             f"**{z['zero_cost_dropped']:,} events dropped** because the calendar "
             "prices at a credit at some fill alpha. The priced universe is "
             "conditioned on surviving as a debit at the BEST fill — the cheapest "
-            "calendars are systematically excluded from every number in this report.",
-        ]
+            "calendars are systematically excluded from every number in this report."]
     else:
-        lines.append(z["note"])
-    lines += [
-        "",
-        "### 4. Tail injection (mandatory — has_short_leg)",
-        "",
-    ]
+        zero_body = [z["note"]]
+    sections.append({"title": "The zero-cost selection", "body": zero_body})
+
     if tail.get("available") is False:
-        lines.append(f"NOT RUN: {tail.get('note')}")
+        tail_body = [f"NOT RUN: {tail.get('note')}"]
     else:
         mc5 = tail.get("mc", {}).get("0.05", {})
         cb = m.get("crushed_back_ruin_bound", {})
-        lines += [
+        tail_body = [
             f"The {tail.get('n_shocked')} trades whose exit quotes changed after "
             f"re-pricing (of the worst-1%-by-move set): worst trade "
             f"{tail.get('base_worst_trade') * 100:.1f}% → "
@@ -433,36 +434,34 @@ def appendix_markdown(spec, result, m: dict) -> str:
             f"**{mc5.get('p_loss'):.3f}**, terminal p05 "
             f"{mc5.get('terminal_p05'):.2f}x.",
             "",
-            f"Mechanics note: the shock keeps each leg's quoted time value, and "
-            "for a SAME-STRIKE calendar the doubled intrinsic cancels between "
-            "the legs — the mechanical shock alone therefore does not compound "
-            "the loss. The ruin bound is the adverse variant in which the "
-            "doubled down move also crushes the back leg's time value to zero: "
-            f"loss = debit + front-leg time value, worst "
-            f"**{cb.get('worst_bound_ret', 0) * 100:.1f}%** of the debit "
+            "Mechanics note: the shock keeps each leg's quoted time value, and for a "
+            "SAME-STRIKE calendar the doubled intrinsic cancels between the legs — "
+            "the mechanical shock alone therefore does not compound the loss. The "
+            "ruin bound is the adverse variant in which the doubled down move also "
+            "crushes the back leg's time value to zero: loss = debit + front-leg time "
+            f"value, worst **{cb.get('worst_bound_ret', 0) * 100:.1f}%** of the debit "
             f"({cb.get('worst_bound_trade')}). The empirical tail "
-            f"({d['worst_ret'] * 100:.1f}%, already in the base distribution) "
-            "shows what real quote dynamics did without any shock.",
+            f"({d['worst_ret'] * 100:.1f}%, already in the base distribution) shows "
+            "what real quote dynamics did without any shock.",
         ]
-    lines += [
-        "",
-        "### 5. Breakeven alpha, deployment",
-        "",
-        f"Gated universe = full unselected set (no gate in this experiment). "
-        f"Breakeven alpha **{head.get('breakeven_alpha')}** vs the plan's quoted "
-        f"0.475. Peak deployment {head['deployment']['peak']:.2f}x (cap "
-        f"{head['deployment']['cap']}), worst cash "
-        f"{head['deployment']['worst_cash']:.2%}, max concurrency "
-        f"{head.get('max_concurrency')}.",
-        "",
-        "### Consequence for the Sep-1 spend",
-        "",
-        "If the debit-exceeding tail above is real (not artifact), the CAL-P "
-        "structure is NOT defined-risk in practice and the put-side chain budget "
-        "should move to exit-chain coverage per the experiment plan.",
-        "",
-    ]
-    return "\n".join(lines)
+    sections.append({"title": "Tail injection (mandatory — has_short_leg)",
+                     "body": tail_body})
+
+    sections.append({
+        "title": "Breakeven alpha, deployment, and the consequence for the Sep-1 spend",
+        "body": [
+            "Gated universe = full unselected set (no gate in this experiment). "
+            f"Breakeven alpha **{head.get('breakeven_alpha')}** vs the plan's quoted "
+            f"0.475. Peak deployment {head['deployment']['peak']:.2f}x (cap "
+            f"{head['deployment']['cap']}), worst cash "
+            f"{head['deployment']['worst_cash']:.2%}, max concurrency "
+            f"{head.get('max_concurrency')}.",
+            "",
+            "If the debit-exceeding tail above is real (not artifact), the CAL-P "
+            "structure is NOT defined-risk in practice and the put-side chain budget "
+            "should move to exit-chain coverage per the experiment plan.",
+        ]})
+    return sections
 
 
 if __name__ == "__main__":

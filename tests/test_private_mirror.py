@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from engine import paths  # noqa: E402
 from tools import private_mirror  # noqa: E402
 from tools.private_mirror import (  # noqa: E402
     EXCLUDE_PARTS,
@@ -62,11 +63,29 @@ class TestCollection:
         # Code and docs only. If this balloons, a data glob has crept in.
         assert total < 20_000_000, f"mirror is {total:,} bytes — check the allowlist"
 
-    def test_no_data_file_extensions_are_collected(self):
+    def test_no_market_data_files_are_collected(self):
+        """No market data — but the irreplaceable non-code artifacts DO ship.
+
+        The ban is on re-pullable market data (chain partitions, caches), not
+        on the two record files the mirror exists for: the multiple-testing
+        ledger and the prediction ledger. Those are append-only records that
+        cannot be regenerated at any price, which is the whole reason there is
+        a private mirror at all.
+        """
         files, _ = collect()
         banned = {".csv", ".parquet", ".gz", ".pkl", ".jsonl", ".sqlite", ".npy"}
-        offenders = [str(p) for p in files if p.suffix.lower() in banned]
-        assert not offenders, f"data files in the mirror: {offenders[:5]}"
+        allowed = {
+            paths.ROOT / "experiments" / "LEDGER.csv",   # multiple-testing record
+        }
+        offenders = [
+            str(p) for p in files
+            if p.suffix.lower() in banned
+            and Path(p) not in allowed
+            # ledger/predictions/*.jsonl + ledger/outcomes/*.jsonl — the
+            # out-of-time validator; nothing can regenerate a frozen prediction.
+            and paths.LEDGER not in Path(p).parents
+        ]
+        assert not offenders, f"market-data files in the mirror: {offenders[:5]}"
 
     def test_no_pycache_is_collected(self):
         files, _ = collect()

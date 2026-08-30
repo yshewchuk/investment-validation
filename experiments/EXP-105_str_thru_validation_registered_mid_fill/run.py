@@ -40,18 +40,22 @@ def main() -> None:
     repricer = common.make_repricer(STRATEGY)
 
     input_files = sorted((paths.CURATED / "trades").glob("year=*/part-*.parquet"))
+    # The required outputs render THROUGH the generator (Phase 4 §A8): they
+    # need the finished result to compute, so they arrive as a callable and
+    # land inside the report's section order, formatters and provenance.
+    def required_outputs(result):
+        appendix = build_appendix(spec, result, gate_state, trades)
+        (HERE / "results" / "appendix.json").write_text(
+            json.dumps(appendix, indent=1, default=str))
+        return appendix_sections(appendix)
+
     result = evaluate(
         spec, trades, gate=gate, run_dir=HERE,
         repricer=repricer, spy_daily=spy,
         input_files=input_files,
+        extra_sections=required_outputs,
     )
     lib.record_evaluation(HERE, spec, result.results)
-
-    appendix = build_appendix(spec, result, gate_state, trades)
-    (HERE / "results" / "appendix.json").write_text(
-        json.dumps(appendix, indent=1, default=str))
-    with open(HERE / "REPORT.md", "a") as fh:
-        fh.write(appendix_markdown(appendix))
     print(f"[{spec['id']}] report: {result.report_path}", flush=True)
 
 
@@ -132,45 +136,14 @@ def build_appendix(spec, result, gate_state, trades) -> dict:
     }
 
 
-def appendix_markdown(appendix: dict) -> str:
+def appendix_sections(appendix: dict) -> list[dict]:
+    """The pre-registered required outputs, as generator sections."""
     reg = appendix["registry_gate"]
     wf = appendix["independent_wf"]
-    lines = [
-        "",
-        "---",
-        "",
-        "## Appendix — required outputs beyond the standard report",
-        "",
-        "*Appended by run.py after the generator wrote the body above.*",
-        "",
-        "### Gate-lift reconciliation (required output 3)",
-        "",
-        f"Registry training eval ({reg['train_eval_window']}): base "
-        f"{fmt_pct(reg['train_eval_base_mean'])}, gated "
-        f"{fmt_pct(reg['train_eval_gated_mean'])}, lift "
-        f"{fmt_pct(reg['train_eval_lift'])} on {reg['train_eval_n_oos']:,} OOS rows "
-        f"({reg['train_eval_n_passed']:,} passed).",
-        "",
-        f"Independent walk-forward (this run), pooled over the gated years on the "
-        f"scored universe: base {fmt_pct(wf['pooled_scored_base_mean'])} on "
-        f"{wf['pooled_scored_base_n']:,} rows, gated "
-        f"{fmt_pct(wf['pooled_gated_mean'])} on {wf['pooled_gated_n']:,} rows — "
-        "the registered numbers reproduce when the same procedure re-runs "
-        "independently on the current pipeline.",
-        "",
-        "Per gated year:",
-        "",
-        "| year | n base | n selected | base mean | gated mean | lift |",
-        "|---|---:|---:|---:|---:|---:|",
-    ]
-    for y, row in sorted(wf["per_year_lift"].items()):
-        lines.append(
-            f"| {y} | {row['n_base']:,} | {row['n_selected']:,} | "
-            f"{fmt_pct(row['base_mean'])} | {fmt_pct(row['gated_mean'])} | "
-            f"{fmt_pct(row['lift'])} |")
     be_g, be_u = wf["breakeven_alpha_gated"], wf["breakeven_alpha_ungated"]
     dep = wf["deployment"]
     eq = wf.get("equity_curves_final", {})
+
     be_line = (
         f"Ungated baseline: **{fmt_alpha(be_u)}** (plan quotes 0.448); gated: "
         f"**{fmt_alpha(be_g)}**. The gate "
@@ -181,41 +154,53 @@ def appendix_markdown(appendix: dict) -> str:
         if (be_g is not None and be_u is not None) else
         f"Ungated baseline: {fmt_alpha(be_u)}; gated: {fmt_alpha(be_g)}."
     )
-    lines += [
-        "",
-        f"Headline OOS mean {fmt_pct(wf['headline_mean'])} vs unselected base "
-        f"{fmt_pct(wf['base_unselected_mean'])} — the headline includes the "
-        "ungated 2018-2019 years (all kept) by construction.",
-        "",
-        "### Breakeven alpha (required output 2)",
-        "",
-        be_line,
-        "",
-        "### Deployment (required output 6)",
-        "",
-        f"Peak deployed / equity: **{dep['peak']:.2f}x** (cap {dep['cap']}); "
-        f"worst cash: **{dep['worst_cash']:.2%}** of equity; "
-        f"constrained entries: {dep['constrained_entries']}; "
-        f"max concurrency {wf['max_concurrency']}. At {wf['max_concurrency']} "
-        "concurrent positions, 5% per trade without the cap would deploy "
-        f"~{wf['max_concurrency'] * 0.05:.1f}x equity — the cap is binding.",
-        "",
-        "### Sizing caveat (plan §8)",
-        "",
-        "Deterministic terminal equity (capped cashflow): "
-        + ", ".join(f"{float(f):.0%} → {v:,.0f}x" for f, v in sorted(eq.items()))
-        + ". MC's sequential compounding ignores simultaneous exposure, so its "
-        "terminal distribution overstates what 5% sizing delivers when 100+ "
-        "positions overlap; the deployment block above is the honest leverage "
-        "picture. The sizing/leverage decision belongs to the Phase 5 go/no-go.",
-        "",
-        "### Gate fold accounting",
-        "",
-        f"{len(appendix['gate_folds'])} fold interactions; "
-        + appendix["unscoreable_note"] + ".",
-        "",
+
+    return [
+        {"title": "Gate-lift reconciliation (required output 3)",
+         "note": (
+             f"Registry training eval ({reg['train_eval_window']}): base "
+             f"{fmt_pct(reg['train_eval_base_mean'])}, gated "
+             f"{fmt_pct(reg['train_eval_gated_mean'])}, lift "
+             f"{fmt_pct(reg['train_eval_lift'])} on {reg['train_eval_n_oos']:,} OOS "
+             f"rows ({reg['train_eval_n_passed']:,} passed). Independent walk-forward "
+             f"(this run), pooled over the gated years on the scored universe: base "
+             f"{fmt_pct(wf['pooled_scored_base_mean'])} on "
+             f"{wf['pooled_scored_base_n']:,} rows, gated "
+             f"{fmt_pct(wf['pooled_gated_mean'])} on {wf['pooled_gated_n']:,} rows — "
+             "the registered numbers reproduce when the same procedure re-runs "
+             "independently on the current pipeline."),
+         "columns": ["year", "n base", "n selected", "base mean", "gated mean", "lift"],
+         "align": ["---", "---:", "---:", "---:", "---:", "---:"],
+         "rows": [[y, f"{row['n_base']:,}", f"{row['n_selected']:,}",
+                   fmt_pct(row["base_mean"]), fmt_pct(row["gated_mean"]),
+                   fmt_pct(row["lift"])]
+                  for y, row in sorted(wf["per_year_lift"].items())],
+         "body": [
+             f"Headline OOS mean {fmt_pct(wf['headline_mean'])} vs unselected base "
+             f"{fmt_pct(wf['base_unselected_mean'])} — the headline includes the "
+             "ungated 2018-2019 years (all kept) by construction."],
+         "falsifies": "the independent lift failing to reproduce the registered one."},
+        {"title": "Breakeven alpha (required output 2)", "body": [be_line]},
+        {"title": "Deployment (required output 6)",
+         "body": [
+             f"Peak deployed / equity: **{dep['peak']:.2f}x** (cap {dep['cap']}); "
+             f"worst cash: **{dep['worst_cash']:.2%}** of equity; "
+             f"constrained entries: {dep['constrained_entries']}; "
+             f"max concurrency {wf['max_concurrency']}. At {wf['max_concurrency']} "
+             "concurrent positions, 5% per trade without the cap would deploy "
+             f"~{wf['max_concurrency'] * 0.05:.1f}x equity — the cap is binding."]},
+        {"title": "Sizing caveat (plan §8)",
+         "body": [
+             "Deterministic terminal equity (capped cashflow): "
+             + ", ".join(f"{float(f):.0%} → {v:,.0f}x" for f, v in sorted(eq.items()))
+             + ". MC's sequential compounding ignores simultaneous exposure, so its "
+             "terminal distribution overstates what 5% sizing delivers when 100+ "
+             "positions overlap; the deployment block above is the honest leverage "
+             "picture. The sizing/leverage decision belongs to the Phase 5 go/no-go."]},
+        {"title": "Gate fold accounting",
+         "body": [f"{len(appendix['gate_folds'])} fold interactions; "
+                  + appendix["unscoreable_note"] + "."]},
     ]
-    return "\n".join(lines)
 
 
 def fmt_pct(x) -> str:

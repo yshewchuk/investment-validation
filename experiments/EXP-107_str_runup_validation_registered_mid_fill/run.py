@@ -47,18 +47,23 @@ def main() -> None:
     repricer = common.make_repricer(STRATEGY)
 
     input_files = sorted((paths.CURATED / "trades").glob("year=*/part-*.parquet"))
+
+    def required_outputs(result):
+        # Rendered THROUGH the generator (Phase 4 §A8): the reconciliation is
+        # the point of this experiment, so it belongs inside the report's
+        # section order, formatters and provenance — not appended after them.
+        appendix = build_appendix(spec, result, gate_state, trades, dataset)
+        (HERE / "results" / "appendix.json").write_text(
+            json.dumps(appendix, indent=1, default=str))
+        return appendix_sections(appendix)
+
     result = evaluate(
         spec, trades, gate=gate, run_dir=HERE,
         repricer=repricer, spy_daily=spy,
         input_files=input_files,
+        extra_sections=required_outputs,
     )
     lib.record_evaluation(HERE, spec, result.results)
-
-    appendix = build_appendix(spec, result, gate_state, trades, dataset)
-    (HERE / "results" / "appendix.json").write_text(
-        json.dumps(appendix, indent=1, default=str))
-    with open(HERE / "REPORT.md", "a") as fh:
-        fh.write(appendix_markdown(appendix))
     print(f"[{spec['id']}] report: {result.report_path}", flush=True)
 
 
@@ -228,7 +233,8 @@ def build_appendix(spec, result, gate_state, trades, dataset) -> dict:
     }
 
 
-def appendix_markdown(appendix: dict) -> str:
+def appendix_sections(appendix: dict) -> list[dict]:
+    """The pre-registered required outputs, as generator sections."""
     rec = appendix["reconciliation"]
     reg = appendix["registry_gate"]
     wf = appendix["independent_wf"]
@@ -236,106 +242,109 @@ def appendix_markdown(appendix: dict) -> str:
     ls, ov, cb = rec["legacy_s3"], rec["legacy_engine_overlap"], rec["coverage_bias"]
     rg = rec["registry_gate_eval"]
     pm, um = cb["priced_mcap"], cb["unpriced_mcap"]
-
-    lines = [
-        "",
-        "---",
-        "",
-        "## Appendix — required outputs beyond the standard report",
-        "",
-        "*Appended by run.py after the generator wrote the body above.*",
-        "",
-        "### The three-number reconciliation (pre-registered required output)",
-        "",
-        "| source | universe | window | base mean/trade |",
-        "|---|---|---|---:|",
-        f"| plan citing EXP-048 (legacy S3, mid re-price) | scoped, calendar T-14, n={ls['n']:,} | {ls['years']} | **{fmt_pct(ls['mid_fill_mean_exp048'])}** |",
-        f"| engine replay (this run, unselected) | full engine universe, n={ea['n']:,} | 2018-2026 | **{fmt_pct(ea['mean'])}** |",
-        f"| registry gate eval | feature-complete subset, n={rg['n_oos']:,} | 2020-2026 | **{fmt_pct(rg['base_mean_ret'])}** |",
-        "",
-        "Decomposition, each line computed from the artifacts on disk:",
-        "",
-        f"1. **Window.** Engine base restricted to 2020+ (the gate's OOS window): "
-        f"{fmt_pct(e2['mean'])} on {e2['n']:,} trades vs {fmt_pct(ea['mean'])} on all years. "
-        "2018-2019 carry positive drift the 2020+ window does not see.",
-        f"2. **Universe (feature coverage).** Engine base further restricted to the "
-        f"gate's feature-complete rows: {fmt_pct(eg['mean'])} on {eg['n']:,} trades — "
-        f"vs the registry's recorded {fmt_pct(rg['base_mean_ret'])}. "
-        + ("The registry number reproduces on the current pipeline."
-           if eg["mean"] is not None and rg["base_mean_ret"] is not None
-           and abs(eg["mean"] - rg["base_mean_ret"]) < 0.005
-           else "DIVERGES from the registry number — investigate."),
-        f"3. **Legacy set.** The +3.9% comes from EXP-048's mid re-price of the "
-        f"legacy S3 set ({ls['n']:,} trades, {ls['tickers']:,} tickers, "
-        f"{ls['universe_note']}). The stored legacy returns are worst-fill "
-        f"({fmt_pct(ls['worst_fill_mean'])}); the mid number is not re-derivable "
-        "from the stored cost/exit_val columns — it exists only in the EXP-048 "
-        "artifact quoted above.",
-        f"4. **Overlap check.** {ov['n_overlap']:,} of the {ov['n_legacy']:,} legacy "
-        f"events match an engine event on (ticker, date). Engine mid mean on the "
-        f"overlap: {fmt_pct(ov['engine_mid_mean_on_overlap'])} — the engine spec "
-        "(trading-day T-14, engine strike/expiry selection) prices the same prints "
-        "differently than the legacy calendar-T-14 spec.",
-        "",
-        "### Coverage bias (required output)",
-        "",
-        f"Priced {cb['priced_events']:,} of {cb['planned_events']:,} planned events "
-        f"({cb['coverage']:.1%}). Mcap of priced vs unpriced events:",
-        "",
-        "| | n w/ mcap | median mcap | >10B | 1-10B | <1B |",
-        "|---|---:|---:|---:|---:|---:|",
-        f"| priced | {pm['n_with_mcap']:,} | ${pm['median_usd']/1e9:.1f}B | "
-        f"{pm['frac_above_10b']:.1%} | {pm['frac_1b_to_10b']:.1%} | {pm['frac_below_1b']:.1%} |",
-        f"| unpriced | {um['n_with_mcap']:,} | ${um['median_usd']/1e9:.1f}B | "
-        f"{um['frac_above_10b']:.1%} | {um['frac_1b_to_10b']:.1%} | {um['frac_below_1b']:.1%} |",
-        "",
-        "T-14 chains exist mainly where they were pulled for liquid names; the "
-        "strategy is validated only on that slice until the Sep pull enlarges it.",
-        "",
-        "### Gate-lift reconciliation",
-        "",
-        f"Registry training eval ({reg['train_eval_window']}): base "
-        f"{fmt_pct(reg['train_eval_base_mean'])}, gated "
-        f"{fmt_pct(reg['train_eval_gated_mean'])}, lift "
-        f"{fmt_pct(reg['train_eval_lift'])} on {reg['train_eval_n_oos']:,} OOS rows.",
-        "",
-        "Independent walk-forward (this run), per gated year:",
-        "",
-        "| year | n base | n selected | base mean | gated mean | lift |",
-        "|---|---:|---:|---:|---:|---:|",
-    ]
-    for y, row in sorted(wf["per_year_lift"].items()):
-        lines.append(
-            f"| {y} | {row['n_base']:,} | {row['n_selected']:,} | "
-            f"{fmt_pct(row['base_mean'])} | {fmt_pct(row['gated_mean'])} | "
-            f"{fmt_pct(row['lift'])} |")
     be_g, be_u = wf["breakeven_alpha_gated"], wf["breakeven_alpha_ungated"]
     dep = wf["deployment"]
-    lines += [
-        "",
-        f"Headline OOS mean {fmt_pct(wf['headline_mean'])} vs unselected base "
-        f"{fmt_pct(wf['base_unselected_mean'])}.",
-        "",
-        "### Breakeven alpha",
-        "",
-        f"Ungated baseline: **{fmt_alpha(be_u)}** (plan quotes 0.478 — a 2.2 pp "
-        f"margin under mid); gated: **{fmt_alpha(be_g)}**. If the gate does not "
-        "widen this, STR-RUNUP is not a capital candidate regardless of its mean.",
-        "",
-        "### Deployment",
-        "",
-        f"Peak deployed / equity: **{dep['peak']:.2f}x** (cap {dep['cap']}); "
-        f"worst cash: **{dep['worst_cash']:.2%}** of equity; "
-        f"constrained entries: {dep['constrained_entries']}; "
-        f"max concurrency {wf['max_concurrency']}.",
-        "",
-        "### Gate fold accounting",
-        "",
-        f"{len(appendix['gate_folds'])} fold interactions; rows without complete "
-        "features are unscoreable and not selected.",
-        "",
+
+    reconciliation = {
+        "title": "The three-number reconciliation (pre-registered required output)",
+        "columns": ["source", "universe", "window", "base mean/trade"],
+        "align": ["---", "---", "---", "---:"],
+        "rows": [
+            ["plan citing EXP-048 (legacy S3, mid re-price)",
+             f"scoped, calendar T-14, n={ls['n']:,}", ls["years"],
+             f"**{fmt_pct(ls['mid_fill_mean_exp048'])}**"],
+            ["engine replay (this run, unselected)",
+             f"full engine universe, n={ea['n']:,}", "2018-2026",
+             f"**{fmt_pct(ea['mean'])}**"],
+            ["registry gate eval", f"feature-complete subset, n={rg['n_oos']:,}",
+             "2020-2026", f"**{fmt_pct(rg['base_mean_ret'])}**"],
+        ],
+        "body": [
+            "Decomposition, each line computed from the artifacts on disk:",
+            "",
+            f"1. **Window.** Engine base restricted to 2020+ (the gate's OOS window): "
+            f"{fmt_pct(e2['mean'])} on {e2['n']:,} trades vs {fmt_pct(ea['mean'])} on "
+            "all years. 2018-2019 carry positive drift the 2020+ window does not see.",
+            f"2. **Universe (feature coverage).** Engine base further restricted to the "
+            f"gate's feature-complete rows: {fmt_pct(eg['mean'])} on {eg['n']:,} trades "
+            f"— vs the registry's recorded {fmt_pct(rg['base_mean_ret'])}. "
+            + ("The registry number reproduces on the current pipeline."
+               if eg["mean"] is not None and rg["base_mean_ret"] is not None
+               and abs(eg["mean"] - rg["base_mean_ret"]) < 0.005
+               else "DIVERGES from the registry number — investigate."),
+            f"3. **Legacy set.** The +3.9% comes from EXP-048's mid re-price of the "
+            f"legacy S3 set ({ls['n']:,} trades, {ls['tickers']:,} tickers, "
+            f"{ls['universe_note']}). The stored legacy returns are worst-fill "
+            f"({fmt_pct(ls['worst_fill_mean'])}); the mid number is not re-derivable "
+            "from the stored cost/exit_val columns — it exists only in the EXP-048 "
+            "artifact quoted above.",
+            f"4. **Overlap check.** {ov['n_overlap']:,} of the {ov['n_legacy']:,} legacy "
+            f"events match an engine event on (ticker, date). Engine mid mean on the "
+            f"overlap: {fmt_pct(ov['engine_mid_mean_on_overlap'])} — the engine spec "
+            "(trading-day T-14, engine strike/expiry selection) prices the same prints "
+            "differently than the legacy calendar-T-14 spec.",
+        ],
+        "promote_to_verdict": True,
+        "verdict_row": ("Does the plan's +3.9% reproduce?",
+                        f"Engine replay gives {fmt_pct(ea['mean'])} on {ea['n']:,} "
+                        f"trades; the legacy figure is a different universe and spec",
+                        "§8.5.1"),
+    }
+
+    coverage = {
+        "title": "Coverage bias (required output)",
+        "note": (f"Priced {cb['priced_events']:,} of {cb['planned_events']:,} planned "
+                 f"events ({cb['coverage']:.1%}). Mcap of priced vs unpriced events:"),
+        "columns": ["", "n w/ mcap", "median mcap", ">10B", "1-10B", "<1B"],
+        "align": ["---", "---:", "---:", "---:", "---:", "---:"],
+        "rows": [
+            ["priced", f"{pm['n_with_mcap']:,}", f"${pm['median_usd']/1e9:.1f}B",
+             f"{pm['frac_above_10b']:.1%}", f"{pm['frac_1b_to_10b']:.1%}",
+             f"{pm['frac_below_1b']:.1%}"],
+            ["unpriced", f"{um['n_with_mcap']:,}", f"${um['median_usd']/1e9:.1f}B",
+             f"{um['frac_above_10b']:.1%}", f"{um['frac_1b_to_10b']:.1%}",
+             f"{um['frac_below_1b']:.1%}"],
+        ],
+        "body": ["T-14 chains exist mainly where they were pulled for liquid names; the "
+                 "strategy is validated only on that slice until the Sep pull enlarges it."],
+        "falsifies": "the priced slice being representative of the planned universe.",
+    }
+
+    gate_lift = {
+        "title": "Gate-lift reconciliation",
+        "note": (f"Registry training eval ({reg['train_eval_window']}): base "
+                 f"{fmt_pct(reg['train_eval_base_mean'])}, gated "
+                 f"{fmt_pct(reg['train_eval_gated_mean'])}, lift "
+                 f"{fmt_pct(reg['train_eval_lift'])} on {reg['train_eval_n_oos']:,} OOS "
+                 "rows. Independent walk-forward (this run), per gated year:"),
+        "columns": ["year", "n base", "n selected", "base mean", "gated mean", "lift"],
+        "align": ["---", "---:", "---:", "---:", "---:", "---:"],
+        "rows": [[y, f"{row['n_base']:,}", f"{row['n_selected']:,}",
+                  fmt_pct(row["base_mean"]), fmt_pct(row["gated_mean"]),
+                  fmt_pct(row["lift"])]
+                 for y, row in sorted(wf["per_year_lift"].items())],
+        "body": [f"Headline OOS mean {fmt_pct(wf['headline_mean'])} vs unselected base "
+                 f"{fmt_pct(wf['base_unselected_mean'])}."],
+    }
+
+    return [
+        reconciliation,
+        coverage,
+        gate_lift,
+        {"title": "Breakeven alpha",
+         "body": [f"Ungated baseline: **{fmt_alpha(be_u)}** (plan quotes 0.478 — a 2.2 pp "
+                  f"margin under mid); gated: **{fmt_alpha(be_g)}**. If the gate does not "
+                  "widen this, STR-RUNUP is not a capital candidate regardless of its "
+                  "mean."]},
+        {"title": "Deployment",
+         "body": [f"Peak deployed / equity: **{dep['peak']:.2f}x** (cap {dep['cap']}); "
+                  f"worst cash: **{dep['worst_cash']:.2%}** of equity; "
+                  f"constrained entries: {dep['constrained_entries']}; "
+                  f"max concurrency {wf['max_concurrency']}."]},
+        {"title": "Gate fold accounting",
+         "body": [f"{len(appendix['gate_folds'])} fold interactions; rows without "
+                  "complete features are unscoreable and not selected."]},
     ]
-    return "\n".join(lines)
 
 
 def fmt_pct(x) -> str:

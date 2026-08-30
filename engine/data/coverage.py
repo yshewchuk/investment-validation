@@ -36,6 +36,7 @@ __all__ = [
     "side_coverage",
     "dte_availability",
     "render_audit",
+    "audit_sections",
 ]
 
 #: The plan's universe slices. ``1–10B`` is the claimed +5.3% pocket.
@@ -220,6 +221,34 @@ def _table(df: pd.DataFrame, floatfmt: str = "{:.3f}") -> str:
                 cells.append(f"{value:,}" if isinstance(value, (int, np.integer)) else str(value))
         lines.append("| " + " | ".join([str(idx)] + cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+def audit_sections(
+    events: pd.DataFrame,
+    sanity: list | None = None,
+    extra: dict[str, str] | None = None,
+) -> list[dict]:
+    """The audit's content as generator sections (Phase 4 ``extra_sections``).
+
+    The audit used to render its own complete markdown document. It is content,
+    not a format: the generator owns the frame (title, provenance, checklist,
+    glossary) so this report carries the same units and the same regeneration
+    contract as every other result in the program.
+    """
+    body = render_audit(events, sanity, extra)
+    sections: list[dict] = []
+    title = None
+    buffer: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("## "):
+            if title is not None:
+                sections.append({"title": title, "body": buffer})
+            title, buffer = line[3:].strip(), []
+        elif title is not None:
+            buffer.append(line)
+    if title is not None:
+        sections.append({"title": title, "body": buffer})
+    return sections
 
 
 def render_audit(

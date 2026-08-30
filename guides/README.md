@@ -1,9 +1,16 @@
 # Build Guides — Earnings-Vol Trading Program
 
-One guide per phase of `../EARNINGS_VOL_PROGRAM_PLAN.md` (v1.1). Each guide
+One guide per phase of `../EARNINGS_VOL_PROGRAM_PLAN.md` (v1.3). Each guide
 tells the implementing agent: build order, architecture, contracts/schemas,
 hard constraints, acceptance tests ("how we know it works"), and known failure
 modes. Read the plan first; read this file before any guide.
+
+**Build order is 0 → 1 → 2 → 4 → 3 → 5 → 6** (the plan's sequencing table):
+phases are numbered in the order they were specified, not built. Phase 3's
+nightly job writes the Phase 4 ledger, so Phase 4 comes first.
+**Current position: phases 0, 1, 2 and 4 complete. Phase 3 (dashboard) is the
+active phase — it reads `engine/score.py`, the report generator, and the
+ledger's `health.json`, all of which now exist.**
 
 | Guide | Phase | Depends on |
 |---|---|---|
@@ -11,7 +18,8 @@ modes. Read the plan first; read this file before any guide.
 | `phase1_scoring_engine.md` | Model registry + score API | Phase 0 |
 | `phase2_experiment_framework.md` | Experiment harness + evaluation suite | Phase 0; report format from Phase 4 |
 | `phase3_dashboard.md` | Monitoring dashboard + remote snapshot | Phases 1, 4 |
-| `phase4_verification_reporting.md` | Report generator, ledger, leak auditor | Phase 0 (build alongside Phase 2) |
+| `phase4_verification_reporting.md` | Report generator, ledger, leak auditor (the spec) | Phase 0 (build alongside Phase 2) |
+| `phase4_implementation.md` | **Phase 4 completion pass — report legibility, ledger, audit receipts (the how; wins where it disagrees with the spec guide)** | Phases 0–2 |
 | `phase5_forward_test.md` | Paper trading, fill-quality measurement | Phases 1–4 |
 | `phase6_thesis_overlay.md` | AI-correction overlay | Phases 2, 3 |
 

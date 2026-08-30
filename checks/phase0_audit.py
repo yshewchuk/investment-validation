@@ -123,14 +123,39 @@ def main(argv: list[str] | None = None) -> int:
         "DTE availability (rows by bucket)": coverage._table(dte_table, "{:.0f}"),
         "Quota ledger reconciliation": quota_reconciliation(),
     }
-    body = coverage.render_audit(events, sanity, extra)
 
-    path = paths.assert_writable(Path(args.report))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
-    print(f"\n  report → {path}  ({time.time()-started:.0f}s)", flush=True)
+    # Emitted through the Phase 4 generator, like every other result in the
+    # program: the audit supplies content, the generator owns the frame
+    # (provenance, checklist, glossary) so this report is regenerable and
+    # reads in the same units as the experiment reports.
+    from engine.report import Report, build_provenance  # noqa: E402
 
     ready = float(events["through_print_ready"].mean()) if len(events) else 0.0
+    path = paths.assert_writable(Path(args.report))
+    context = {
+        "kind": "audit",
+        "spec": {"id": "PHASE-0", "title": "Data audit — coverage, sanity, inventory",
+                 "type": "descriptive",
+                 "hypothesis": "The built store carries the chains the three "
+                               "structures need, and the prices in it survive the "
+                               "sanity battery."},
+        "results": {"headline": {}, "stress": {}, "mc": {}},
+        "headline": {}, "backtest": {},
+        "checklist": [],
+        "provenance": build_provenance(seeds={}, input_files=[]),
+        "survivorship_note": "",
+        "calibration": None,
+        "funnel": [{"stage": "events analysed", "events": int(len(events)),
+                    "note": f"{args.min_year}+ with a known session", "headline": True},
+                   {"stage": "through-print ready", "events": int(events["through_print_ready"].sum())
+                    if len(events) else 0,
+                    "note": "a chain on BOTH ends, on BOTH sides"}],
+        "extra_sections": coverage.audit_sections(events, sanity, extra),
+    }
+    # The plan pins this filename, so the generator renders straight to it.
+    Report(context).write(path.parent, filename=path.name)
+    print(f"\n  report → {path}  ({time.time()-started:.0f}s)", flush=True)
+
     print(f"  through-print-ready coverage (all slices, {args.min_year}+): {ready:.1%}")
     return 0
 

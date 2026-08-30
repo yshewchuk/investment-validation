@@ -5,11 +5,19 @@ Implementation of `EARNINGS_VOL_PROGRAM_PLAN.md`. This repository holds the
 that decide whether a phase is done. Market data, research findings, reports and
 the prediction ledger deliberately live elsewhere — see `RECOVERY.md`.
 
-**Status: Phases 0 and 1 complete. Phase 2's harness is complete and verified
+**Status: Phases 0, 1 and 4 complete. Phase 2's harness is complete and verified
 (the EXP-050 regression reproduces through it); Phase 2's exit criteria are
 not met until the backlog experiments (EXP-101+) have run through the harness
-— backlog #1 waits on the Sep-1 ORATS pulls.** Phases 3–6 are specified in
-`guides/`.
+— backlog #1 waits on the Sep-1 ORATS pulls. Phase 4 (verification & reporting)
+is built: one legible report format, the append-only prediction ledger, and
+audit receipts — see `reports/phase4_reporting.md`. The ledger holds no forward
+rows yet because the calendar ends 2026-08-27; it starts accruing when the Sep-1
+pull refreshes the forward calendar.** Phases 3, 5 and 6 are specified in
+`guides/` — Phase 3 (dashboard) is next, and reads `ledger/health.json`.
+
+Build order is **0 → 1 → 2 → 4 → 3 → 5 → 6** (the plan's sequencing table):
+the phases are numbered in the order they were specified, not built, and Phase
+3's nightly job is what writes the Phase 4 ledger.
 
 ---
 
@@ -58,6 +66,7 @@ engine/
   models/             registry + champions (artifacts live in data/models/)
   evaluate.py         Phase 2: backtest → walk-forward → MC → stress → metrics
   report.py           Phase 4: the one report generator every phase emits through
+  ledger.py           Phase 4: append-only prediction ledger + outcome scorer
   data/
     fetch.py          Tier-1 wrapper: cache-first, throttled, quota-guarded
     throttle.py       per-source pacing, backoff, quota floor, Polygon lock
@@ -131,6 +140,11 @@ acceptance check.
 | `python3 checks/phase1_replay.py` | The scorer reproduces the replayed trades' pricing to 1e-6, and the live feature path reproduces the panel path to 1e-9 |
 | `python3 checks/phase1_calibration.py` | Predicted win rates vs realized, out of sample |
 | `python3 checks/phase2_checks.py` | The Phase-2 suite, incl. the load-bearing EXP-050 harness regression |
+| `python3 checks/phase4_checks.py` | All 17 Phase-4 checks: golden report, regeneration, ledger append-only, leak poison, and the format guards |
+| `python3 checks/phase4_report.py --checks-json …` | Phase 4's own evidence report |
+| `python3 -m engine.ledger snapshot --as-of YYYY-MM-DD` | Freeze today's scored board into the prediction ledger |
+| `python3 -m engine.ledger score --through YYYY-MM-DD` | Resolve predictions whose events have passed; recompute calibration at 50 new rows |
+| `python3 -m engine.ledger status` | What the ledger holds |
 | `python3 checks/repo_hygiene.py --all` | No secret, data file, or oversize blob is tracked |
 
 Testing strategy — the two layers, what each is for, and the known thin spots —
@@ -140,6 +154,13 @@ rather than left as an aspiration.
 The migration test is the load-bearing one. Every verdict in the plan rests on
 `events_with_orats_sum.csv`; the test reconciles all 115,500 rows and fails on
 any difference not covered by a **declared, independently verified** delta.
+
+Phase 4 adds the format guards: `numbers_preserved` re-renders every committed
+experiment report from its saved artifacts and asserts the new document holds
+the old one's numbers, so a presentation change can never quietly move a value.
+It found one number that WAS wrong: the capacity line printed relative spread
+100× too small (`+0.3649%` for a 36.5% spread), because the old formatter
+appended `%` without scaling.
 
 The Phase-2 equivalent is `harness_regression`: the EXP-050 equity curve (GBM
 top-20% gate, walk-forward, 531 trades) must reproduce through
