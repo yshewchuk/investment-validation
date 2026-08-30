@@ -368,3 +368,29 @@ class TestCausalPoolCache:
         for as_of in ("2030-01-01", "2030-01-02", "2030-01-03"):
             matcher.match("STR-THRU", buckets, alpha=0.5, as_of=as_of)
         assert len(matcher._causal_pools) == 2
+
+    def test_cache_cap_is_sized_to_the_board_not_to_a_round_number(self):
+        """The cap is a memory ceiling with two sides, both measured.
+
+        A cached entry is not small: it holds a filtered, re-bucketed copy of
+        the (strategy, alpha) pool — 6.2 MB on average and ~9 MB for recent
+        dates, where few trades have been excluded yet.
+
+        LOWER bound: a full three-week board (3,120 rows) generates 34 distinct
+        (strategy, alpha, as_of) keys — 31 entry dates x 2 scoreable strategies.
+        A cap below that makes the cache evict entries the board is still using,
+        on the one path where the cache actually pays.
+
+        UPPER bound: the original 256 measured at 1.6 GB, which took the Scorer
+        from 2.5 GB to 4.1 GB on a 7.8 GB box. Those slots bought nothing: the
+        paths that would fill them (build_pairs, ~1,000 scattered decision
+        dates; the calibration sampler, 300) barely repeat an as_of and get
+        almost no hits regardless.
+
+        Raising this past the upper bound should mean the workload changed, not
+        that a bigger number looked safer.
+        """
+        cap = self._matcher().MAX_CAUSAL_CACHE
+        assert cap >= 40, "cap sits below the measured 34-key board working set"
+        assert cap <= 96, (
+            "256 entries measured at 1.6 GB on a 7.8 GB box; keep the ceiling bounded")

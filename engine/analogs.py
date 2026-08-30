@@ -226,11 +226,28 @@ class AnalogMatcher:
         # Causal pools: the as_of-filtered, causally re-bucketed pool depends
         # only on (strategy, alpha, as_of), and board rows share all three.
         # Without this cache the quantile + re-bucket cost is paid per row —
-        # ~19s on a 3,120-row board. Bounded: a multi-year backtest would
-        # otherwise accumulate one 10k-row frame per event.
+        # ~19s on a 3,120-row board.
         self._causal_pools: dict[tuple[str, float, pd.Timestamp],
                                  tuple[pd.DataFrame, tuple[float, float] | None]] = {}
-        self.MAX_CAUSAL_CACHE = 256
+        #: Cache ceiling, in entries. Sized from the workload, not from a round
+        #: number: a full three-week board (3,120 rows) generates **34** distinct
+        #: keys — 31 entry dates x 2 scoreable strategies — so 64 clears the
+        #: working set outright and the cap never binds where the cache pays.
+        #:
+        #: The ceiling matters because an entry is not small. Each one holds a
+        #: filtered, re-bucketed copy of the (strategy, alpha) pool — measured at
+        #: 6.2 MB on average and ~9 MB for recent dates, where few trades have
+        #: been excluded. At the previous 256 that is **1.6 GB**, which took the
+        #: Scorer from 2.5 GB to 4.1 GB on a 7.8 GB box — most of the headroom
+        #: the phase-1 suite had just recovered by not loading a second
+        #: FeatureContext.
+        #:
+        #: Nothing was gained for it. The paths that would fill 256 keys —
+        #: `recalibrate.build_pairs` (~1,000 scattered decision dates), the
+        #: calibration sampler (300) — barely repeat an as_of, so they get almost
+        #: no hits regardless; the slots above the board's working set are pure
+        #: cost. 64 keeps the whole benefit at ~575 MB worst case.
+        self.MAX_CAUSAL_CACHE = 64
 
     # -- request buckets ---------------------------------------------------
 
