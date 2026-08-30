@@ -6,7 +6,7 @@
     python3 checks/phase0_checks.py --only structures fillmodel
     python3 checks/phase0_checks.py --no-data    # only checks that need no store
 
-The eleven checks the Phase 0 guide specifies. Unit-level behaviour lives in
+The checks the Phase 0 guide specifies, plus a policy gate. Unit-level behaviour lives in
 ``tests/`` and runs here as check 0; the rest are integration checks that need
 the real cache, the real store, or a real git repo — the things a unit test with
 fixtures cannot prove.

@@ -12,7 +12,7 @@ the prediction ledger deliberately live elsewhere — see `RECOVERY.md`.
 ## Quick start
 
 ```bash
-pip install --break-system-packages pyarrow pytest    # the two non-system deps
+pip install --break-system-packages pyarrow pytest coverage   # non-system deps
 cp .env.example .env                                  # fill from the password manager
 
 python3 -m engine.data.rebuild                        # Tier 1 → Tier 2 → Tier 3
@@ -90,7 +90,7 @@ acceptance check.
 |---|---|
 | `python3 -m pytest tests -q` | Unit behaviour of every pure component |
 | `python3 checks/phase0_checks.py --only test_policy` | Every module is covered by unit tests or a *declared* acceptance check |
-| `python3 checks/phase0_checks.py` | The 11 Phase-0 acceptance tests |
+| `python3 checks/phase0_checks.py` | All 14 Phase-0 acceptance checks |
 | `python3 checks/phase0_migration.py` | The rebuilt panel reproduces the legacy master panel |
 | `python3 checks/phase0_audit.py` | Coverage + price-sanity battery → `reports/phase0_data_audit.md` |
 | `python3 checks/repo_hygiene.py --all` | No secret, data file, or oversize blob is tracked |
@@ -107,7 +107,7 @@ any difference not covered by a **declared, independently verified** delta.
 
 ## Data findings worth knowing
 
-Three things the pipeline turned up that change how the existing data should be
+Four things the pipeline turned up that change how the existing data should be
 read. All are documented in full in `reports/phase0_data_audit.md` and
 `reports/phase0_migration.md`.
 
