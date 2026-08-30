@@ -10,9 +10,15 @@ that the steps below are actually present in this file.
 
 | Location | Contents | Rationale |
 |---|---|---|
-| **Public GitHub repo** | `engine/`, `checks/`, `tests/`, `guides/`, `dashboard/` code, the master plan, `.env.example`, this file | Code survives the laptop. The strategy *logic* is disclosed by design; positions, findings, and data are not. |
-| **Private mirror repo** | `ledger/`, `reports/`, research findings (HANDOFF, VERDICT docs), `config/thesis/`, and the pre-engine research code under `earnings_predictions/` and `bt/` | Irreplaceable and not regenerable. Also position-revealing, so never public. |
+| **Public repo** — `github.com/yshewchuk/investment-validation` | `engine/`, `checks/`, `tests/`, `guides/`, the master plan, `.env.example`, this file | Code survives the laptop. The strategy *logic* is disclosed by design; positions, findings, and data are not. |
+| **Private mirror** — `github.com/yshewchuk/investment-strategies` | `ledger/`, `reports/`, research findings (HANDOFF, VERDICT, STRATEGY, ADVISOR_BRIEF), `config/thesis/`, `AGENTS.md`, `dashboard/`, and the pre-engine research code under `earnings_predictions/` and `bt/` | Irreplaceable and not regenerable. Also position-revealing, so never public. |
 | **Nowhere (deliberately)** | `.env`, all raw/curated/feature data, `polygon_cache/` | Secrets belong in a password manager. Market data is re-pullable at quota cost; ~57k files and ~1.2 GB do not belong in git. |
+
+Three things sit in the private mirror that a reader might expect to be public,
+each for a specific reason: `AGENTS.md` carries the oquants account workspace and
+model IDs plus a paid vendor's decoded coefficients; `dashboard/shared.py`
+hardcodes the thesis watchlist, which is position intent; and the loose
+root-level research scripts embed findings in comments and hardcoded values.
 
 The accepted residual gap: **raw market data is not backed up.** Losing the
 machine costs an ORATS quota cycle to re-pull, not the research.
@@ -22,7 +28,7 @@ machine costs an ORATS quota cycle to re-pull, not the research.
 ### 1. Clone the code
 
 ```bash
-git clone https://github.com/<user>/<public-repo>.git investing-plan
+git clone https://github.com/yshewchuk/investment-validation.git investing-plan
 cd investing-plan
 ```
 
@@ -62,8 +68,8 @@ print(len(load_secrets(paths.ENV_FILE)), 'secret patterns loaded')"
 ### 4. Restore the irreplaceable artifacts
 
 ```bash
-git clone https://github.com/<user>/<private-mirror-repo>.git /tmp/mirror
-rsync -a /tmp/mirror/ ./
+git clone https://github.com/yshewchuk/investment-strategies.git /tmp/mirror
+rsync -a --exclude .git /tmp/mirror/ ./
 ```
 
 This restores `ledger/`, `reports/`, the research findings docs, `config/thesis/`,
