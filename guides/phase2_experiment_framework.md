@@ -98,6 +98,10 @@ Stages, in order:
     value; a cash-only reading reports deployment as drawdown), overlapping
     positions allowed and counted (report max concurrency); premium debited at
     entry, value credited at exit, series marked at cost between events.
+    Per-trade sizing times concurrency is implicit leverage, so every curve
+    also reports **peak deployment and worst cash** next to the returns, and a
+    spec may set ``max_deployed_fraction`` to cap total deployed notional
+    (entries beyond the cap are skipped and counted, never levered).
 6. **Report** via the Phase 4 generator — an experiment without REPORT.md
    does not exist.
 

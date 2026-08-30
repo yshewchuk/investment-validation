@@ -95,7 +95,7 @@ __all__ = [
 METRIC_KEYS = (
     "n", "mean", "median", "std", "win_rate", "profit_factor",
     "sharpe_trade", "sharpe_equity", "sortino", "max_dd", "tail_ratio",
-    "by_year", "breakeven_alpha", "capacity", "mc",
+    "by_year", "breakeven_alpha", "capacity", "deployment", "mc",
 )
 
 #: The fill alphas every result is reported at (worst/mid/best plus the quarter
@@ -292,6 +292,63 @@ def capacity_note(trades: pd.DataFrame, alpha: float = 0.5) -> dict[str, Any]:
     return out
 
 
+def calibration_block(proba: Sequence[float], outcome: Sequence[float],
+                      n_bins: int = 10, min_n: int = 50) -> dict[str, Any]:
+    """Reliability of a gate's P(win) against realized outcomes, OOS.
+
+    ``proba`` and ``outcome`` (0/1) must already be out-of-sample — the
+    walk-forward collects them. The Brier skill uses the phase-1 definition
+    (``brier_base_rate - brier``, positive = better than the base-rate
+    forecaster); the decision record's floor (``MIN_BRIER_SKILL = -0.05``) is
+    applied in promotion, not here.
+    """
+    p = np.asarray(proba, dtype=float)
+    y = np.asarray(outcome, dtype=float)
+    ok = np.isfinite(p) & np.isfinite(y)
+    p, y = p[ok], y[ok]
+    n = int(p.size)
+    if n < min_n:
+        return {"available": False,
+                "reason": f"only {n} OOS scored rows (< {min_n}); calibration not reliable"}
+
+    base = float(y.mean())
+    brier = float(np.mean((p - y) ** 2))
+    brier_base = float(base * (1.0 - base))
+
+    edges = np.unique(np.quantile(p, np.linspace(0, 1, n_bins + 1)))
+    if len(edges) < 3:
+        return {"available": False,
+                "reason": "predicted probabilities degenerate (no spread to bin)"}
+    bin_idx = np.clip(np.searchsorted(edges, p, side="right") - 1, 0, len(edges) - 2)
+
+    deciles: list[dict[str, Any]] = []
+    for b in range(len(edges) - 1):
+        sel = bin_idx == b
+        if not sel.any():
+            continue
+        deciles.append({
+            "predicted": float(p[sel].mean()),
+            "realized": float(y[sel].mean()),
+            "n": int(sel.sum()),
+        })
+    preds = np.array([d["predicted"] for d in deciles])
+    reals = np.array([d["realized"] for d in deciles])
+    if len(deciles) >= 3 and preds.std() > 0 and reals.std() > 0:
+        monotonicity = float(np.corrcoef(preds, reals)[0, 1])
+    else:
+        monotonicity = float(np.nan)
+    return {
+        "available": True,
+        "n": n,
+        "base_rate": base,
+        "brier": brier,
+        "brier_base_rate": brier_base,
+        "brier_skill": brier_base - brier,
+        "reliability_monotonicity": monotonicity,
+        "deciles": deciles,
+    }
+
+
 # --------------------------------------------------------------------------
 # fill-alpha sweep
 # --------------------------------------------------------------------------
@@ -350,6 +407,7 @@ def build_equity(
     *,
     mode: str = "cashflow",
     ret_col: str = "ret",
+    max_deployed: float | None = None,
 ) -> dict[str, Any]:
     """Equity curve of a fixed-fraction sizing rule over priced trades.
 
@@ -369,6 +427,16 @@ def build_equity(
     liquidation value, not off whatever cash remains after the open trades'
     debits.
 
+    **Deployment cap.** Fixed-fraction sizing PER TRADE with many concurrent
+    positions deploys ``fraction × concurrency`` of equity — "5% per trade"
+    with 133 simultaneous positions is 665% notional financed by an implicit,
+    uncharged margin loan. ``max_deployed`` (a fraction of marked equity,
+    e.g. 1.0 = no leverage) caps total deployed notional: once the open
+    positions reach the cap, new entries are skipped (counted in
+    ``constrained_entries``) rather than levered up. The curve also reports
+    ``peak_deployment`` and ``worst_cash`` so the leverage a run actually used
+    is visible next to its returns — with or without the cap.
+
     ``sequential``: ``equity *= (1 + fraction × ret)`` per trade in entry
     order — the EXP-050 reference construction. It ignores overlap, so a new
     experiment reporting it overstates compounding; evaluate() flags the mode
@@ -376,9 +444,12 @@ def build_equity(
     """
     if mode not in ("cashflow", "sequential"):
         raise EvaluationError(f"unknown equity mode {mode!r}")
+    if max_deployed is not None and not 0 < max_deployed:
+        raise EvaluationError(f"max_deployed must be positive, got {max_deployed!r}")
     if trades.empty:
         return {"equity": pd.Series(dtype=float), "final": 1.0, "max_dd": 0.0,
-                "max_concurrency": 0, "mode": mode, "fraction": fraction}
+                "max_concurrency": 0, "mode": mode, "fraction": fraction,
+                "peak_deployment": 0.0, "worst_cash": 1.0, "constrained_entries": 0}
 
     t = trades.sort_values(["entry_date", "exit_date"], kind="stable").reset_index(drop=True)
     entry_dates = pd.to_datetime(t["entry_date"])
@@ -400,6 +471,11 @@ def build_equity(
             "max_concurrency": int(_max_concurrency(entry_dates, exit_dates)),
             "mode": mode,
             "fraction": fraction,
+            # Sequential compounding models no balance at all, so deployment
+            # accounting does not apply; the keys stay for a uniform shape.
+            "peak_deployment": float(np.nan),
+            "worst_cash": float(np.nan),
+            "constrained_entries": 0,
         }
 
     # cashflow mode: process exits before entries on the same day, so a closing
@@ -423,6 +499,9 @@ def build_equity(
     marks = [(events[0][0] - pd.Timedelta(days=1), 1.0)]
     concurrency = 0
     max_concurrency = 0
+    peak_deployment = 0.0
+    worst_cash = 1.0
+    constrained_entries = 0
     for date, kind, i in events:
         if kind == 0:  # exit
             contracts = open_pos.pop(i, 0.0)
@@ -432,11 +511,28 @@ def build_equity(
             equity_now = mark(cash, open_pos)
             if equity_now > 0 and costs[i] > 0:
                 contracts = fraction * equity_now / costs[i]
-                cash -= contracts * costs[i]
-                open_pos[i] = contracts
+                if max_deployed is not None:
+                    deployed = sum(c * costs[j] for j, c in open_pos.items())
+                    headroom = max_deployed * equity_now - deployed
+                    if headroom <= 0:
+                        contracts = 0.0
+                        constrained_entries += 1
+                    else:
+                        capped = headroom / costs[i]
+                        if capped < contracts:
+                            contracts = capped
+                            constrained_entries += 1
+                if contracts > 0:
+                    cash -= contracts * costs[i]
+                    open_pos[i] = contracts
             concurrency += 1
         max_concurrency = max(max_concurrency, concurrency)
-        marks.append((date, mark(cash, open_pos)))
+        equity_now = mark(cash, open_pos)
+        deployed_now = sum(c * costs[j] for j, c in open_pos.items())
+        if equity_now > 0:
+            peak_deployment = max(peak_deployment, deployed_now / equity_now)
+            worst_cash = min(worst_cash, cash / equity_now)
+        marks.append((date, equity_now))
     curve = pd.Series(dict(marks)).sort_index()
     curve = curve[~curve.index.duplicated(keep="last")]
     return {
@@ -446,6 +542,9 @@ def build_equity(
         "max_concurrency": max_concurrency,
         "mode": mode,
         "fraction": fraction,
+        "peak_deployment": peak_deployment,
+        "worst_cash": worst_cash,
+        "constrained_entries": constrained_entries,
     }
 
 
@@ -510,6 +609,12 @@ class Gate:
     select: Callable[[pd.DataFrame], pd.Series]
     name: str = "gate"
     seen: list = field(default_factory=list)
+    #: Optional P(win) ∈ [0, 1] per row. When present, the walk-forward
+    #: collects out-of-sample probabilities for every traded year and
+    #: evaluate() turns them into the calibration block — which is what makes
+    #: the promotion Brier-skill rule live instead of a permanent WARN. Gates
+    #: without one are still evaluated; their calibration reports unavailable.
+    predict_proba: Callable[[pd.DataFrame], np.ndarray] | None = None
 
 
 def walk_forward(
@@ -543,6 +648,7 @@ def walk_forward(
     kept_ids: list = []
     diagnostics: list[dict] = []
     fit_years_seen: list[int] = []
+    score_rows: list[pd.DataFrame] = []
 
     for year in years:
         train = mid[mid["year"] < year]
@@ -550,6 +656,15 @@ def walk_forward(
         train_years = int(train["year"].nunique())
         row: dict[str, Any] = {"year": int(year), "n_train": int(len(train)),
                                "n_test": int(len(test)), "train_years": train_years}
+        if gate is not None and gate.predict_proba is not None and len(test):
+            # OOS probabilities for the calibration block — collected for EVERY
+            # traded year (ungated ones included): calibration is measured on
+            # the whole out-of-sample universe, never on the selected subset.
+            score_rows.append(pd.DataFrame({
+                "event_id": test["event_id"].to_numpy(),
+                "proba": np.asarray(gate.predict_proba(test), dtype=float),
+                "year": int(year),
+            }))
         if gate is None or train_years < min_train_years or test.empty:
             row["n_selected"] = int(len(test))
             row["ungated"] = gate is not None and train_years < min_train_years
@@ -586,7 +701,9 @@ def walk_forward(
             f"walk-forward leak: a fit saw data from its own test year "
             f"(fits saw {fit_years_seen}, test years {gated_years})"
         )
-    return {"selected": selected, "diagnostics": diagnostics, "audit": audit}
+    scores = pd.concat(score_rows, ignore_index=True) if score_rows else None
+    return {"selected": selected, "diagnostics": diagnostics, "audit": audit,
+            "scores": scores}
 
 
 # --------------------------------------------------------------------------
@@ -1090,7 +1207,8 @@ def evaluate(
     mid_sel = selected[np.isclose(selected["fill_alpha"], 0.5)] if len(selected) and "fill_alpha" in selected.columns else selected
     base_mid = trades[np.isclose(trades["fill_alpha"], 0.5)] if len(trades) and "fill_alpha" in trades.columns else trades
 
-    eq5 = build_equity(mid_sel, 0.05, mode=equity_mode)
+    eq5 = build_equity(mid_sel, 0.05, mode=equity_mode,
+                       max_deployed=spec.get("max_deployed_fraction"))
     headline = trade_stats(mid_sel["ret"].to_numpy(), mid_sel["event_date"]) if len(mid_sel) else trade_stats([])
     headline["by_year"] = by_year_table(mid_sel)
     headline["breakeven_alpha"] = breakeven_alpha_from_sweep(
@@ -1098,6 +1216,16 @@ def evaluate(
     headline["sharpe_equity"] = sharpe_equity(eq5["equity"])
     headline["max_dd"] = eq5["max_dd"]
     headline["max_concurrency"] = eq5["max_concurrency"]
+    # The leverage the 5%-sized run actually used — visible whether or not a
+    # cap was set. Per-trade sizing with concurrent positions silently deploys
+    # fraction x concurrency of equity; this is where that becomes a number a
+    # sizing decision has to look at.
+    headline["deployment"] = {
+        "peak": eq5["peak_deployment"],
+        "worst_cash": eq5["worst_cash"],
+        "cap": spec.get("max_deployed_fraction"),
+        "constrained_entries": eq5["constrained_entries"],
+    }
     headline["alpha_sweep"] = alpha_sweep(selected, alphas)
     headline["capacity"] = capacity_note(selected)
     # Anti-selection guard (the S4 lesson): the unselected universe always
@@ -1113,6 +1241,23 @@ def evaluate(
         "audit": wf["audit"],
         "headline_stage": "wf_oos",
     }
+
+    # Calibration of the gate's OOS probabilities. Computed on the WHOLE
+    # out-of-sample universe, not the selected subset — measuring calibration
+    # on what the gate kept would condition on the very thing being measured.
+    scores = wf.get("scores")
+    if scores is not None and len(scores):
+        merged = scores.merge(
+            base_mid[["event_id", "ret"]], on="event_id", how="inner")
+        results["calibration"] = calibration_block(
+            merged["proba"].to_numpy(),
+            (merged["ret"] > 0).to_numpy(dtype=float),
+        )
+    else:
+        results["calibration"] = {
+            "available": False,
+            "reason": "gate provides no predict_proba; calibration not measured",
+        }
 
     # -- stage 3: Monte Carlo on the WF OOS sequence ------------------------
     rets = mid_sel["ret"].to_numpy(dtype=float) if len(mid_sel) else np.array([])
@@ -1147,7 +1292,8 @@ def evaluate(
     # -- headline + deterministic equity curves at all sizings ---------------
     results["equity_curves"] = {
         f"{f:.2f}": {
-            "final": build_equity(mid_sel, f, mode=equity_mode)["final"],
+            "final": build_equity(mid_sel, f, mode=equity_mode,
+                                  max_deployed=spec.get("max_deployed_fraction"))["final"],
         }
         for f in fractions
     }

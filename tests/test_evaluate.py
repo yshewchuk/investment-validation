@@ -594,3 +594,123 @@ class TestSpecHashContinuity:
                 "preregistered_at": (pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=1)).isoformat()}
         receipt = check_preregistration(spec, tmp_path / "exp")
         assert receipt.get("grid_cell") is True
+
+
+class TestDeploymentCap:
+    def _simultaneous(self, n, ret):
+        return pd.DataFrame({
+            "event_id": [f"E{i}" for i in range(n)], "ticker": "T",
+            "event_date": [pd.Timestamp("2020-01-01")] * n,
+            "entry_date": [pd.Timestamp("2020-01-01")] * n,
+            "exit_date": [pd.Timestamp("2020-02-01")] * n,
+            "fill_alpha": 0.5, "entry_cost": 1.0,
+            "exit_value": 1.0 + ret, "ret": [ret] * n,
+        })
+
+    def test_uncapped_concurrent_losers_wipe_out(self):
+        # The verification report's repro: 40 simultaneous -50% trades at a
+        # nominal 5% sizing deploy 2x equity and wipe the account.
+        out = build_equity(self._simultaneous(40, -0.5), 0.05, mode="cashflow")
+        assert out["final"] == pytest.approx(0.0, abs=1e-9)
+        assert out["peak_deployment"] == pytest.approx(2.0, rel=1e-6)
+        assert out["worst_cash"] < 0
+
+    def test_cap_limits_deployment(self):
+        out = build_equity(self._simultaneous(40, -0.5), 0.05, mode="cashflow",
+                           max_deployed=1.0)
+        assert out["peak_deployment"] <= 1.0 + 1e-9
+        # Exactly half the trades get funded at 5% each -> a 50% account loss.
+        assert out["final"] == pytest.approx(0.5, rel=1e-6)
+        assert out["constrained_entries"] > 0
+
+    def test_cap_above_needle_changes_nothing(self):
+        trades = self._simultaneous(3, 0.10)
+        free = build_equity(trades, 0.05, mode="cashflow")
+        capped = build_equity(trades, 0.05, mode="cashflow", max_deployed=10.0)
+        assert capped["final"] == pytest.approx(free["final"])
+        assert capped["constrained_entries"] == 0
+
+    def test_bad_cap_rejected(self):
+        with pytest.raises(EvaluationError):
+            build_equity(self._simultaneous(3, 0.1), 0.05, max_deployed=0.0)
+
+    def test_headline_carries_deployment(self, tmp_path):
+        rng = np.random.default_rng(1)
+        trades = make_trades(rng.normal(0.01, 0.1, 60), freq="4D")
+        spec = {"id": "EXP-DEP", "title": "deployment probe", "primary_spec": {"x": 1},
+                "walk_forward": {"min_train_years": 1},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        result = evaluate(spec, trades, mc_paths=30, stress=False, write_report=False)
+        dep = result.metrics["deployment"]
+        assert dep["cap"] is None and dep["peak"] >= 0
+
+
+class TestCalibrationStage:
+    def _gated(self, seed=0):
+        rng = np.random.default_rng(seed)
+        n = 400
+        dates = pd.date_range("2019-01-01", periods=n, freq="7D")
+        edge = rng.normal(0, 0.15, n)
+        rets = 0.02 + 0.5 * edge + rng.normal(0, 0.08, n)
+        trades = pd.DataFrame({
+            "event_id": [f"E{i}" for i in range(n)], "ticker": "T",
+            "event_date": dates,
+            "entry_date": dates - pd.Timedelta(days=1),
+            "exit_date": dates + pd.Timedelta(days=1),
+            "fill_alpha": 0.5, "entry_cost": 1.0,
+            "exit_value": 1.0 + rets, "ret": rets,
+        })
+        proba = 1 / (1 + np.exp(-2 * edge))
+        gate = Gate(fit=lambda tr: None,
+                    select=lambda rows: pd.Series(True, index=rows.index),
+                    predict_proba=lambda rows: proba[
+                        np.array([int(e[1:]) for e in rows["event_id"]])])
+        return trades, gate
+
+    def test_calibration_block_math(self):
+        from engine.evaluate import calibration_block
+
+        p = np.array([0.2, 0.3, 0.7, 0.8, 0.6, 0.4] * 20)
+        y = np.array([0, 0, 1, 1, 1, 0] * 20, dtype=float)
+        cal = calibration_block(p, y, n_bins=3)
+        assert cal["available"]
+        assert cal["brier"] == pytest.approx(np.mean((p - y) ** 2))
+        base = y.mean()
+        assert cal["brier_skill"] == pytest.approx(base * (1 - base) - cal["brier"])
+        # Higher predicted bins must realize higher win rates here.
+        assert cal["deciles"][-1]["realized"] > cal["deciles"][0]["realized"]
+
+    def test_calibration_degenerate_or_small(self):
+        from engine.evaluate import calibration_block
+
+        assert not calibration_block([0.5, 0.5], [1, 0])["available"]
+        assert not calibration_block([0.5] * 100, [1] * 100)["available"]
+
+    def test_evaluate_produces_calibration_and_report_uses_it(self, tmp_path):
+        trades, gate = self._gated()
+        spec = {"id": "EXP-CAL", "title": "cal probe", "primary_spec": {"x": 1},
+                "price_source": "orats (synthetic)",
+                "walk_forward": {"min_train_years": 1},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        result = evaluate(spec, trades, gate=gate, mc_paths=30, stress=False,
+                          write_report=False)
+        cal = result.results["calibration"]
+        assert cal["available"] and cal["n"] == 400
+        assert cal["brier_skill"] > 0  # the synthetic gate is genuinely predictive
+
+        from engine.report import Report
+
+        report = Report.from_eval(result)
+        assert report.context["calibration"] is not None
+        path = report.write(tmp_path / "out")
+        assert (path.parent / "figures" / "reliability.png").exists()
+
+    def test_gate_without_proba_reports_unavailable(self):
+        trades, gate = self._gated()
+        gate = Gate(fit=gate.fit, select=gate.select)  # no predict_proba
+        spec = {"id": "EXP-CAL2", "title": "cal probe", "primary_spec": {"x": 1},
+                "walk_forward": {"min_train_years": 1},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        result = evaluate(spec, trades, gate=gate, mc_paths=30, stress=False,
+                          write_report=False)
+        assert not result.results["calibration"]["available"]

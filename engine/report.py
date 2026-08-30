@@ -468,6 +468,7 @@ class Report:
         ledger_path = paths.ROOT / "experiments" / "LEDGER.csv"
         checklist = accuracy_checklist(results, spec, ledger_path=ledger_path)
 
+        calibration = results.get("calibration")
         return cls({
             "kind": "evaluation",
             "spec": spec,
@@ -477,6 +478,10 @@ class Report:
             "checklist": checklist,
             "provenance": provenance,
             "survivorship_note": SURVIVORSHIP_NOTE,
+            # Only a calibration that was actually measured reaches the report
+            # (and thus the reliability figure); an unavailable one renders as
+            # the section's plain-text note instead of a phantom plot.
+            "calibration": calibration if calibration and calibration.get("available") else None,
         })
 
     # -- rendering -----------------------------------------------------------
@@ -673,6 +678,18 @@ class Report:
         add("|" + "---|" * len(keys))
         add("| " + " | ".join(_fmt(headline.get(k)) for k in keys) + " |")
         add("")
+        capacity = headline.get("capacity") or {}
+        if capacity.get("available"):
+            wide = capacity.get("wide_market_frac")
+            add(f"**Capacity:** mean relative spread at the traded strikes "
+                f"{_fmt(capacity.get('mean_rel_spread'), pct=True)}, p95 "
+                f"{_fmt(capacity.get('p95_rel_spread'), pct=True)}"
+                + (f", wide-market fraction {_fmt(wide, pct=True)}" if wide is not None else "")
+                + f" — {capacity.get('note', '')}")
+        else:
+            add(f"**Capacity:** not measurable on this trade set"
+                + (f" — {capacity.get('note')}" if capacity.get("note") else "") + ".")
+        add("")
         if results.get("equity_mode") == "sequential":
             add("*Equity mode `sequential` (EXP-050 reference construction): overlap is ignored;*")
             add("*the `cashflow` construction is the default for new experiments.*")
@@ -689,6 +706,15 @@ class Report:
         add("")
         add(f"Max drawdown: {_fmt(headline.get('max_dd'))}. Max concurrent positions: "
             f"{headline.get('max_concurrency', '—')}.")
+        dep = headline.get("deployment") or {}
+        if dep:
+            cap = dep.get("cap")
+            add("")
+            add(f"Deployment at 5% sizing: peak {_fmt(dep.get('peak'))}× equity, worst cash "
+                f"{_fmt(dep.get('worst_cash'))}× equity"
+                + (f", capped at {cap}× ({dep.get('constrained_entries', 0)} entries constrained)"
+                   if cap else ", UNCAPPED — per-trade sizing times concurrency is implicit leverage")
+                + ".")
         if "alpha" in figures:
             add("")
             add(f"Fill-quality degradation: ![alpha](figures/{figures['alpha'].name})")
@@ -728,6 +754,13 @@ class Report:
             add("")
         if "mc_fan" in figures:
             add(f"![MC equity fan](figures/{figures['mc_fan'].name})")
+            add("")
+        if (headline.get("max_concurrency") or 0) > 1:
+            add("> **Caveat:** the block bootstrap compounds the trade SEQUENCE and preserves")
+            add("> earnings-week clustering, but it does not model SIMULTANEOUS exposure —")
+            add(f"> this set ran up to {headline.get('max_concurrency')} concurrent positions. P(loss) here is")
+            add("> the optimistic number for a levered book; read it together with the")
+            add("> deployment figures above.")
             add("")
 
         # 5. Stress grid ------------------------------------------------------

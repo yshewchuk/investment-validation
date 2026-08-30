@@ -13,9 +13,10 @@ A challenger is promoted only if ALL of:
   (d) its spec was pre-registered before the OOS evaluation,
   (e) its report's accuracy checklist has no FAIL.
 
-Any red → print why and exit nonzero. There is no partial promotion: the
-registry, the ledger, and the promotion report are written together at the
-end, or not at all.
+Any red → print why and exit nonzero. There is no partial promotion. When
+green, the writes land easiest-to-undo first: promotion report, then the
+ledger row, then the registry update LAST — the one change that is hard to
+reverse, so an earlier failure leaves the registry untouched.
 
 The decision itself is a pure function (:func:`decide`) of two canonical
 metrics dicts plus the receipts — the acceptance suite exercises it with
@@ -320,13 +321,10 @@ def main(argv: list[str] | None = None) -> int:
         print("\ndry-run: all rules green; nothing written.")
         return 0
 
-    if args.apply_registry and args.entry_json:
-        from engine.models.registry import RegistryEntry, register
-
-        entry = RegistryEntry(**json.loads(Path(args.entry_json).read_text()))
-        register(entry)  # demotes the incumbent for the same (strategy, role)
-        print(f"registry updated: {entry.id} is champion for {entry.key}")
-
+    # Write order = easiest to undo first. The report and the ledger row are
+    # plain files; the registry update is the one change that is hard to
+    # reverse, so it lands last — a failure in an earlier step leaves the
+    # registry untouched.
     report_dir = paths.REPORTS / f"promotion_{args.exp_id}"
     report_path = render_promotion_report(
         args.exp_id, spec, results, champion, reasons, report_dir,
@@ -344,6 +342,13 @@ def main(argv: list[str] | None = None) -> int:
         "sharpe_trade": headline.get("sharpe_trade", ""),
         "promoted": "True",
     }])
+
+    if args.apply_registry and args.entry_json:
+        from engine.models.registry import RegistryEntry, register
+
+        entry = RegistryEntry(**json.loads(Path(args.entry_json).read_text()))
+        register(entry)  # demotes the incumbent for the same (strategy, role)
+        print(f"registry updated: {entry.id} is champion for {entry.key}")
     return 0
 
 

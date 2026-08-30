@@ -338,3 +338,33 @@ class TestAnalogSet:
             alpha=0.5,
         )
         assert result.n == 0 and result.thin and result.mean is None
+
+
+class TestCausalPoolCache:
+    def _matcher(self):
+        frame = pd.concat([
+            trades(40, ret=0.05, mcap=5e9, dte=5, year=2020),
+            trades(40, ret=-0.05, mcap=5e9, dte=5, year=2021),
+        ], ignore_index=True)
+        return AnalogMatcher(bucket_frame(frame))
+
+    def test_same_as_of_reuses_the_cached_pool(self):
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        first = matcher.match("STR-THRU", buckets, alpha=0.5,
+                              as_of="2030-01-01")
+        assert len(matcher._causal_pools) == 1
+        again = matcher.match("STR-THRU", buckets, alpha=0.5,
+                              as_of="2030-01-01")
+        assert len(matcher._causal_pools) == 1
+        assert again.mean == first.mean and again.n == first.n
+
+    def test_cache_bounded_under_many_as_of(self):
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.MAX_CAUSAL_CACHE = 2
+        for as_of in ("2030-01-01", "2030-01-02", "2030-01-03"):
+            matcher.match("STR-THRU", buckets, alpha=0.5, as_of=as_of)
+        assert len(matcher._causal_pools) == 2

@@ -223,6 +223,14 @@ class AnalogMatcher:
         # The (strategy, alpha) pool is re-derived on every match otherwise; over
         # a full calendar that is a six-figure row scan per event. Cached once.
         self._pools: dict[tuple[str, float], pd.DataFrame] = {}
+        # Causal pools: the as_of-filtered, causally re-bucketed pool depends
+        # only on (strategy, alpha, as_of), and board rows share all three.
+        # Without this cache the quantile + re-bucket cost is paid per row —
+        # ~19s on a 3,120-row board. Bounded: a multi-year backtest would
+        # otherwise accumulate one 10k-row frame per event.
+        self._causal_pools: dict[tuple[str, float, pd.Timestamp],
+                                 tuple[pd.DataFrame, tuple[float, float] | None]] = {}
+        self.MAX_CAUSAL_CACHE = 256
 
     # -- request buckets ---------------------------------------------------
 
@@ -278,25 +286,40 @@ class AnalogMatcher:
         pool = base
         if as_of is not None:
             # Closed strictly before the decision: a trade still open on the day
-            # we decide has not yet told us anything about how it went.
-            pool = pool[pool["exit_date"] < pd.Timestamp(as_of).normalize()]
-            # Causal terciles: the implied-ratio bucket edges must come from the
-            # same closed-before-as_of pool, not from the whole population —
-            # population edges bake in future years (a 2019 request bucketed by
-            # thresholds derived partly from 2024 data is a look-ahead). Both
-            # the pool and the request are re-bucketed on the causal edges so
-            # the labels align.
+            # we decide has not yet told us anything about how it went. The
+            # causally filtered AND re-bucketed pool depends only on
+            # (strategy, alpha, as_of), so it is cached — many board rows share
+            # the triple, and recomputing the quantile + bucket per row cost
+            # ~19s on a 3,120-row board.
+            ts = pd.Timestamp(as_of).normalize()
+            cache_key = (strategy, round(float(alpha), 4), ts)
+            cached = self._causal_pools.get(cache_key)
+            if cached is not None:
+                pool, edges = cached
+            else:
+                pool = pool[pool["exit_date"] < ts]
+                edges = None
+                if "implied_ratio" in pool.columns and len(pool):
+                    finite = pool["implied_ratio"][np.isfinite(pool["implied_ratio"])]
+                    if len(finite) >= 30:
+                        edges = tuple(float(e) for e in np.quantile(finite, [1 / 3, 2 / 3]))
+                    else:
+                        edges = (0.9, 1.1)
+                    # Causal terciles: the implied-ratio bucket edges must come
+                    # from the same closed-before-as_of pool, not from the whole
+                    # population — population edges bake in future years (a 2019
+                    # request bucketed by thresholds derived partly from 2024
+                    # data is a look-ahead). Both the pool and the request are
+                    # bucketed on the causal edges so the labels align.
+                    pool = pool.assign(
+                        implied_tercile=_bucket(pool["implied_ratio"], edges,
+                                                ("low", "mid", "high"))
+                    )
+                if len(self._causal_pools) >= self.MAX_CAUSAL_CACHE:
+                    self._causal_pools.pop(next(iter(self._causal_pools)))
+                self._causal_pools[cache_key] = (pool, edges)
             ratio = buckets.get("implied_ratio")
-            if ratio is not None and "implied_ratio" in pool.columns and len(pool):
-                finite = pool["implied_ratio"][np.isfinite(pool["implied_ratio"])]
-                if len(finite) >= 30:
-                    edges = tuple(float(e) for e in np.quantile(finite, [1 / 3, 2 / 3]))
-                else:
-                    edges = (0.9, 1.1)
-                pool = pool.assign(
-                    implied_tercile=_bucket(pool["implied_ratio"], edges,
-                                            ("low", "mid", "high"))
-                )
+            if ratio is not None and edges is not None:
                 buckets = dict(buckets)
                 buckets["implied_tercile"] = _bucket([ratio], edges,
                                                      ("low", "mid", "high"))[0]

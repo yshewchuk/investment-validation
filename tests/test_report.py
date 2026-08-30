@@ -7,6 +7,7 @@ complete enough to regenerate the report.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -335,3 +336,43 @@ class TestNewFigures:
         assert "Promotion report" in md
         assert "3 spec(s) were tried" in md
         assert "| mean | 0.0500 | 0.0300 |" in md
+
+
+class TestCapacityAndDeploymentRendering:
+    def _result(self):
+        import numpy as np
+        import pandas as pd
+        from engine.evaluate import evaluate
+
+        rng = np.random.default_rng(0)
+        n = 80
+        dates = pd.date_range("2020-01-01", periods=n, freq="5D")
+        rets = rng.normal(0.02, 0.1, n)
+        legs = json.dumps({"entry": [{"name": "call", "bid": 1.0, "ask": 1.2}]})
+        frames = []
+        for a in (0.0, 0.5, 1.0):
+            r = rets + (a - 0.5) * 0.06
+            frames.append(pd.DataFrame({
+                "event_id": [f"E{i}" for i in range(n)], "ticker": "T",
+                "event_date": dates,
+                "entry_date": dates - pd.Timedelta(days=1),
+                "exit_date": dates + pd.Timedelta(days=1),
+                "fill_alpha": a, "entry_cost": 1.0,
+                "exit_value": 1.0 + r, "ret": r, "legs": legs,
+            }))
+        trades = pd.concat(frames, ignore_index=True)
+        spec = {"id": "EXP-REND", "title": "render probe", "primary_spec": {"x": 1},
+                "walk_forward": {"min_train_years": 1},
+                "preregistered_at": "2020-01-01T00:00:00+00:00"}
+        return evaluate(spec, trades, mc_paths=30, stress=False, write_report=False)
+
+    def test_capacity_and_deployment_reach_the_markdown(self, tmp_path):
+        from engine.report import Report
+
+        result = self._result()
+        path = Report.from_eval(result).write(tmp_path / "out")
+        md = path.read_text()
+        assert "**Capacity:**" in md
+        assert "mean relative spread" in md
+        assert "Deployment at 5% sizing" in md
+        assert "UNCAPPED" in md

@@ -362,11 +362,19 @@ def check_determinism() -> str:
 
 @check("poison", description="a leaked feature or a late decision raises, not warns")
 def check_poison() -> str:
-    """Guide acceptance test 3, exercised through the real scoring path."""
-    from engine.audit import assert_causal
-    from engine.features import FeatureContext, panel_features
+    """Guide acceptance test 3, exercised through the real scoring path.
 
-    context = FeatureContext.load()
+    Reuses the module-level Scorer's context instead of loading a second
+    FeatureContext: the context holds the full panel plus daily_market, and on
+    a 7.8 GB box two of them alive at once gets the whole suite killed by the
+    OOM killer partway through (which is how a one-shot Phase 1 receipt became
+    impossible). The read-only context is exactly what check_determinism
+    already shares for the same reason.
+    """
+    from engine.audit import assert_causal
+    from engine.features import panel_features
+
+    context = scorer().context
     panel = context.panel
     row = panel.iloc[-1]
     vector = panel_features(
