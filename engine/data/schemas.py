@@ -69,12 +69,20 @@ CONVENTIONS = {
         "naming and `.done*` markers; kinds are S2 entry, post-print exit, and "
         "T-14 (`_t14_`), plus the `_c2_` calendar pull."
     ),
+    "polygon_options_window": (
+        "Polygon options on this plan start 2024-08-19 and cover daily "
+        "aggregates only (plus reference and live snapshots). Tick trades, "
+        "NBBO quotes and intraday bars are not entitled (probed 2026-08-30), "
+        "so option_daily exists only from that date and carries no bid/ask — "
+        "real traded prices, not quotes."
+    ),
 }
 
 #: Which source wins where two disagree. Written down because it is a decision,
 #: not a fact, and every consumer must make the same one.
 SOURCE_PRIORITY = {
     "option_chains": "orats",
+    "option_daily": "polygon (real traded bars; 2024-08-19+ only on this plan)",
     "realized_moves": "oquants (OHLCV-validated panel)",
     "calendar": "orats (anncTod, 99.52% agreement — EXP-038)",
     "spot": "orats, cross-checked against yfinance close (1.3% tolerance)",
@@ -237,6 +245,37 @@ OPTION_CHAINS = TableSchema(
     ),
 )
 
+OPTION_DAILY = TableSchema(
+    name="option_daily",
+    doc=(
+        "Real traded bars per contract per day — Polygon daily aggregates. "
+        "Close/VWAP/volume/trade-count are actual fills, the evidence the "
+        "option_chains quotes and the fill model are calibrated against. "
+        "Exists only from 2024-08-19 (the start of Polygon options on this "
+        "plan); no bid/ask here by construction — see the "
+        "polygon_options_window convention."
+    ),
+    primary_key=("contract_ticker", "obs_date"),
+    columns=_cols(
+        ("contract_ticker", "string", False, "OCC id, e.g. O:TSLA240906C00210000"),
+        ("ticker", "string", False, "Underlying symbol"),
+        ("obs_date", "datetime64[ns]", False, "Trade date of the bar (UTC date)"),
+        ("year", "int64", False, "Partition year of obs_date"),
+        ("expiry", "datetime64[ns]", False, "Parsed from the OCC id"),
+        ("strike", "float64", False, ""),
+        ("right", "string", False, "C | P"),
+        ("open", "float64", True, ""),
+        ("high", "float64", True, ""),
+        ("low", "float64", True, ""),
+        ("close", "float64", True, "Last traded price of the day"),
+        ("vwap", "float64", True, "Volume-weighted average of real fills"),
+        ("volume", "float64", True, "Contracts traded on the day"),
+        ("n_trades", "int64", True, "Number of fills that built the bar"),
+        ("src", "string", True, "Source system"),
+        ("src_file", "string", True, "Tier-1 payload this row was parsed from"),
+    ),
+)
+
 TRADES = TableSchema(
     name="trades",
     doc="Simulated, paper, and live trades in one schema.",
@@ -264,7 +303,8 @@ TRADES = TableSchema(
 )
 
 SCHEMAS: dict[str, TableSchema] = {
-    s.name: s for s in (SECURITIES, EARNINGS_EVENTS, DAILY_MARKET, OPTION_CHAINS, TRADES)
+    s.name: s
+    for s in (SECURITIES, EARNINGS_EVENTS, DAILY_MARKET, OPTION_CHAINS, OPTION_DAILY, TRADES)
 }
 
 

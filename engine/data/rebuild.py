@@ -29,13 +29,13 @@ import pandas as pd
 from engine import paths
 from engine.data import manifest, store, validate
 from engine.data.features import panel as panel_mod
-from engine.data.normalize import n_chains, n_daily, n_events, n_securities, n_trades
+from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
 
 __all__ = ["rebuild", "RebuildResult", "TABLE_ORDER"]
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
-TABLE_ORDER = ("events", "daily", "securities", "chains", "trades", "panel")
+TABLE_ORDER = ("events", "daily", "securities", "chains", "option_daily", "trades", "panel")
 
 
 @dataclass
@@ -234,6 +234,79 @@ def build_chains_table(sample: int | None = None) -> dict:
     }
 
 
+def build_option_daily_table(sample: int | None = None) -> dict:
+    """Build ``option_daily`` from every cached Polygon daily-aggs payload.
+
+    Real traded bars (close/VWAP/volume/trade count) for the contracts the
+    simulated trades touch, 2024-08-19 onward — the evidence the fill model is
+    calibrated against. Independent of every other table, so it rebuilds in
+    isolation with ``--table option_daily``.
+    """
+    _banner("option_daily")
+    fetch_stats: dict = {}
+    sources = list(n_option_daily.iter_aggs_sources(stats=fetch_stats))
+    if sample:
+        sources = sources[:sample]
+    print(
+        f"  sources: {len(sources):,} aggs payload(s) "
+        f"({fetch_stats.get('other', 0)} other polygon payload(s) skipped)",
+        flush=True,
+    )
+
+    progress = _Progress("option_daily", len(sources))
+    failed: list[str] = []
+    excluded_total = 0
+
+    with store.PartitionedWriter("option_daily") as writer:
+        for i, entry in enumerate(sources, 1):
+            try:
+                frame, report = n_option_daily.normalize_entry(entry)
+            except (ValueError, OSError, EOFError) as exc:
+                failed.append(entry.source_id)
+                validate.quarantine(
+                    entry.source_id, f"unreadable raw payload: {type(exc).__name__}: {exc}"
+                )
+                progress.tick(i)
+                continue
+            if not frame.empty:
+                excluded_total += int(report.get("excluded", 0))
+                if report.get("excluded"):
+                    validate.quarantine(
+                        entry.source_id,
+                        "option_daily row validation",
+                        {"excluded": int(report["excluded"]), "rows_in": report.get("rows_in", 0)},
+                    )
+                writer.add(frame)
+            elif report.get("reason") and report["reason"] != "empty results":
+                # A payload that parsed to nothing for a reason worth naming —
+                # unreadable body, unrecognized envelope, unparseable contract.
+                # A genuine zero-trade contract ("empty results") costs nothing
+                # extra and is only counted.
+                failed.append(entry.source_id)
+                validate.quarantine(
+                    entry.source_id,
+                    f"option_daily payload parsed to nothing: {report['reason']}",
+                )
+            progress.tick(i, f"rows={writer.rows_written:,}")
+        progress.done(len(sources), f"rows={writer.rows_written:,}")
+
+        print("  deduplicating on the primary key …", flush=True)
+        removed = writer.finalize(dedupe=True)
+        print(f"  removed {removed:,} duplicate-key row(s)", flush=True)
+
+    stats = store.table_stats("option_daily")
+    print(f"  wrote {stats.rows:,} rows / {len(stats.years)} partitions", flush=True)
+    return {
+        "sources": len(sources),
+        "scanned": fetch_stats.get("scanned", 0),
+        "other_payloads_skipped": fetch_stats.get("other", 0),
+        "failed_payloads": len(failed),
+        "rows_excluded_by_validation": excluded_total,
+        "duplicates_removed": removed,
+        "rows": stats.rows,
+    }
+
+
 def build_trades_table() -> dict:
     _banner("trades")
     frame, reports = n_trades.normalize_all()
@@ -277,6 +350,7 @@ def rebuild(tables: tuple[str, ...] = TABLE_ORDER, sample: int | None = None) ->
         "daily": lambda: build_daily_table(sample),
         "securities": build_securities_table,
         "chains": lambda: build_chains_table(sample),
+        "option_daily": lambda: build_option_daily_table(sample),
         "trades": build_trades_table,
         "panel": build_panel_table,
     }

@@ -33,12 +33,13 @@ def _minimal_chain_frame(n: int = 2) -> pd.DataFrame:
 
 
 class TestSchemaDefinitions:
-    def test_all_five_tables_are_declared(self):
+    def test_all_six_tables_are_declared(self):
         assert set(SCHEMAS) == {
             "securities",
             "earnings_events",
             "daily_market",
             "option_chains",
+            "option_daily",
             "trades",
         }
 
@@ -62,7 +63,9 @@ class TestSchemaDefinitions:
         # These are decisions, not facts; the point of writing them down is that
         # every consumer makes the same one.
         assert "orats_mktcap_units" in CONVENTIONS
+        assert "polygon_options_window" in CONVENTIONS
         assert "option_chains" in SOURCE_PRIORITY
+        assert "option_daily" in SOURCE_PRIORITY
 
 
 class TestCoercion:
