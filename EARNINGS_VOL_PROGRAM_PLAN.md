@@ -165,6 +165,17 @@ for daily operation; the Sep 1 quota spent deliberately.
      (n=359 → ~3.5k) and the gate sample similarly.
    - Put-side chains specifically (CAL-P needs puts; much of the cache was
      pulled straddle-centric).
+   - **Liquidity fields on every new chain row** (added 2026-08-30): the pull
+     now requests `callVolume, callOpenInterest, callBidSize, callAskSize` and
+     the put equivalents. ORATS bills per CALL, not per field, so this costs
+     nothing — and the existing 19,061-file cache has none of them, because the
+     field list never asked. They are the first evidence in the program that
+     bears directly on the mid-fill assumption every headline rests on: open
+     interest, whether a contract traded at all, and the size actually resting
+     at the touch. Back-filling them later costs the same 16k calls again, so
+     the window is this pull. Landing nullable in Tier 2 (`volume`,
+     `open_interest`, `bid_size`, `ask_size`); pre-Sep rows stay NULL, because
+     "never asked" and "no size" are different facts.
    - Reserve ~3k calls/month for daily live operation (Phase 3).
 4. Refresh of dailies/summaries to current date for live scoring.
 5. **Source control & recovery (public GitHub repo) — set up FIRST, before

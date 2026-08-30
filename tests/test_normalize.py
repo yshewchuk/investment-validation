@@ -314,3 +314,63 @@ class TestSecurities:
         out, _ = n_securities.normalize_from_daily(daily)
         assert len(out) == 1
         assert pd.isna(out.iloc[0]["mcap_usd"])
+
+
+class TestChainLiquidityFields:
+    """The 2026-09 pull asks for size; the older cache never did."""
+
+    def _raw(self, extra: dict | None = None) -> dict:
+        row = {
+            "ticker": "AMD", "tradeDate": "2026-09-02", "expirDate": "2026-09-19",
+            "dte": 17, "strike": 150.0, "stockPrice": 151.0, "spotPrice": 151.0,
+            "callBidPrice": 4.3, "callAskPrice": 4.5, "putBidPrice": 3.9,
+            "putAskPrice": 4.1, "callMidIv": 0.42, "putMidIv": 0.41, "delta": 0.52,
+        }
+        row.update(extra or {})
+        return {"entry_date": "2026-09-02", "tickers": ["AMD"], "rows": [row]}
+
+    def test_liquidity_lands_in_tier_2_when_present(self):
+        from engine.data.normalize.n_chains import rows_to_frame
+
+        raw = self._raw({"callVolume": 1200, "callOpenInterest": 8400,
+                         "callBidSize": 30, "callAskSize": 2,
+                         "putVolume": 300, "putOpenInterest": 5100,
+                         "putBidSize": 0, "putAskSize": 16})
+        frame, _meta = rows_to_frame(raw["rows"], source_id="probe", chain_kind="entry")
+        call = frame[frame["right"] == "C"].iloc[0]
+        put = frame[frame["right"] == "P"].iloc[0]
+        assert call["volume"] == 1200 and call["open_interest"] == 8400
+        assert call["bid_size"] == 30 and call["ask_size"] == 2
+        assert put["volume"] == 300 and put["bid_size"] == 0
+
+    def test_absent_liquidity_is_null_not_zero(self):
+        """The distinction the whole fill question turns on."""
+        import numpy as np
+
+        from engine.data.normalize.n_chains import rows_to_frame
+
+        frame, _meta = rows_to_frame(self._raw()["rows"], source_id="legacy", chain_kind="entry")
+        for column in ("volume", "open_interest", "bid_size", "ask_size"):
+            assert frame[column].isna().all(), (
+                f"{column} must be NaN when the pull never requested it — a zero "
+                "would assert there was no size")
+            assert not (frame[column] == 0).any()
+
+    def test_a_true_zero_survives(self):
+        from engine.data.normalize.n_chains import rows_to_frame
+
+        raw = self._raw({"callVolume": 0, "callOpenInterest": 0,
+                         "callBidSize": 0, "callAskSize": 0})
+        frame, _meta = rows_to_frame(raw["rows"], source_id="probe", chain_kind="entry")
+        call = frame[frame["right"] == "C"].iloc[0]
+        assert call["volume"] == 0 and call["bid_size"] == 0
+
+
+class TestPullRequestsLiquidity:
+    def test_the_sep_pull_asks_for_size_and_open_interest(self):
+        from engine.data.pulls.sep2026_plan import FIELDS, LIQUIDITY_FIELDS
+
+        for field in LIQUIDITY_FIELDS:
+            assert field in FIELDS, f"{field} missing from the pull's field list"
+        # ORATS bills per call, not per field: this costs nothing to ask for.
+        assert len(FIELDS.split(",")) == 23

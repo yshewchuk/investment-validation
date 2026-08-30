@@ -108,10 +108,23 @@ def rows_to_frame(
     # ORATS reports the CALL delta; the put delta at the same strike is delta-1.
     call_delta = mask_sentinels(src["delta"]) if "delta" in src else np.full(len(src), np.nan)
 
+    def optional(key: str) -> np.ndarray:
+        """A field the older cache never requested.
+
+        NaN where absent, and deliberately not zero: "we never asked for size"
+        and "there was no size" are different facts, and a zero would assert
+        the second one for 19,061 files that only support the first.
+        """
+        if key not in src.columns:
+            return np.full(len(src), np.nan)
+        return mask_sentinels(src[key])
+
     frames = []
-    for right, bid_key, ask_key, iv_key in (
-        ("C", "callBidPrice", "callAskPrice", "callMidIv"),
-        ("P", "putBidPrice", "putAskPrice", "putMidIv"),
+    for right, bid_key, ask_key, iv_key, vol_key, oi_key, bs_key, as_key in (
+        ("C", "callBidPrice", "callAskPrice", "callMidIv",
+         "callVolume", "callOpenInterest", "callBidSize", "callAskSize"),
+        ("P", "putBidPrice", "putAskPrice", "putMidIv",
+         "putVolume", "putOpenInterest", "putBidSize", "putAskSize"),
     ):
         if bid_key not in src.columns or ask_key not in src.columns:
             continue
@@ -132,6 +145,11 @@ def rows_to_frame(
                     "iv": iv,
                     "delta": call_delta if right == "C" else call_delta - 1.0,
                     "spot": spot,
+                    # Liquidity — present from the 2026-09 pull onward.
+                    "volume": optional(vol_key),
+                    "open_interest": optional(oi_key),
+                    "bid_size": optional(bs_key),
+                    "ask_size": optional(as_key),
                 }
             )
         )

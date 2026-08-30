@@ -218,6 +218,14 @@ OPTION_CHAINS = TableSchema(
         ("src", "string", True, "Source system"),
         ("src_file", "string", True, "Raw file this row was parsed from"),
         ("chain_kind", "string", True, "entry | exit | t14 | c2 — why it was pulled"),
+        # Liquidity, present only on chains pulled from 2026-09 onward: the
+        # earlier 19,061-file cache did not request these fields. Nullable on
+        # purpose — "we never asked" and "there was no size" must not read
+        # alike, and a zero would say the second.
+        ("volume", "float64", True, "Contracts traded on obs_date, this side"),
+        ("open_interest", "float64", True, "Open interest, this side"),
+        ("bid_size", "float64", True, "Contracts resting at the bid"),
+        ("ask_size", "float64", True, "Contracts resting at the ask"),
         (
             "quote_repaired",
             "bool",

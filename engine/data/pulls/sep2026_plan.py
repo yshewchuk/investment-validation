@@ -43,7 +43,8 @@ from engine.data import coverage, store
 from engine.data.fetch import Fetcher
 from engine.data.throttle import QuotaExhausted
 
-__all__ = ["PullJob", "PullPlan", "build_plan", "execute", "BATCH", "BUDGET_CALLS"]
+__all__ = ["PullJob", "PullPlan", "build_plan", "execute", "BATCH", "BUDGET_CALLS",
+           "FIELDS", "LIQUIDITY_FIELDS"]
 
 #: Tickers per ``/hist/strikes`` call. Five is the verified-safe batch: ten
 #: tickers on ``/hist/cores`` returned 502 (payload too large for the gateway),
@@ -53,11 +54,34 @@ BATCH = 5
 #: Total calls this plan may spend, against the 20,000/month allowance.
 BUDGET_CALLS = 16_000
 
-#: Fields requested per strike — the same slim set the cached chains carry, so
-#: new pulls normalize through exactly the same path as the existing ones.
+#: Fields requested per strike.
+#:
+#: The first fifteen are the slim set every cached chain already carries, so new
+#: pulls normalize through the same path as the old ones. The eight after them
+#: are **liquidity**, and they are the reason this constant is worth reading
+#: twice: ORATS bills per CALL, not per field, so open interest, volume and the
+#: size resting at the touch cost exactly nothing to add — while the existing
+#: 19,061-file cache has none of them, because this list did not ask.
+#:
+#: That matters more than it sounds. Every headline in this program assumes a
+#: mid fill, the ungated STR-THRU edge lives entirely in the widest-quoted
+#: names (reports/exp-105_log_diagnostics.md), and nothing in the store can say
+#: whether a single contract had size at the touch. These eight fields are the
+#: first real evidence for or against the assumption the whole program rests
+#: on, and a pull that omits them cannot be cheaply repeated: back-filling them
+#: costs the same 16,000 calls again.
 FIELDS = (
     "ticker,tradeDate,expirDate,dte,strike,stockPrice,callBidPrice,callAskPrice,"
-    "putBidPrice,putAskPrice,callMidIv,putMidIv,smvVol,delta,spotPrice"
+    "putBidPrice,putAskPrice,callMidIv,putMidIv,smvVol,delta,spotPrice,"
+    "callVolume,callOpenInterest,callBidSize,callAskSize,"
+    "putVolume,putOpenInterest,putBidSize,putAskSize"
+)
+
+#: The liquidity fields, split out so the normalizer and the tests agree on one
+#: list. Confirmed against the ORATS datav2 field reference, not assumed.
+LIQUIDITY_FIELDS = (
+    "callVolume", "callOpenInterest", "callBidSize", "callAskSize",
+    "putVolume", "putOpenInterest", "putBidSize", "putAskSize",
 )
 
 DTE_RANGE = "1,45"

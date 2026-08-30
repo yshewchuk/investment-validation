@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 
 from engine import paths
@@ -314,11 +315,36 @@ def table_years(name: str) -> list[int]:
 
 
 def _read_part(path: Path, columns: Sequence[str] | None) -> pd.DataFrame:
+    """Read one partition, tolerating a partition older than the schema.
+
+    A column added to a Tier-2 schema does not exist in partitions written
+    before it — the option_chains liquidity fields (volume, open interest, bid
+    and ask size) are the first case, present only from the 2026-09 pull. A
+    reader asking for one used to get ``ArrowInvalid`` from every earlier
+    partition, which would have forced a full rebuild of a 15M-row table to
+    read a column that is NaN there anyway. Missing columns are filled with
+    NaN instead, so "this partition predates the field" reads the same as
+    "this row has no value" — which is exactly what it means.
+    """
+    wanted = list(columns) if columns else None
     if HAVE_PARQUET:
-        return pd.read_parquet(path, columns=list(columns) if columns else None)
-    with gzip.open(path, "rt") as fh:
-        frame = pd.read_csv(fh)
-    return frame[list(columns)] if columns else frame
+        if wanted is None:
+            return pd.read_parquet(path)
+        import pyarrow.parquet as pq
+
+        available = set(pq.ParquetFile(path).schema.names)
+        present = [c for c in wanted if c in available]
+        frame = pd.read_parquet(path, columns=present)
+    else:
+        with gzip.open(path, "rt") as fh:
+            frame = pd.read_csv(fh)
+        if wanted is None:
+            return frame
+        present = [c for c in wanted if c in frame.columns]
+        frame = frame[present]
+    for missing in [c for c in wanted if c not in frame.columns]:
+        frame[missing] = np.nan
+    return frame[wanted]
 
 
 def iter_table(

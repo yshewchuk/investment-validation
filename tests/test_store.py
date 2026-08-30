@@ -265,3 +265,36 @@ class TestFinalizeDedupe:
             removed = writer.finalize(dedupe=True)
         assert removed == 0
         assert store.table_stats("option_chains").rows == len(frame)
+
+
+class TestSchemaEvolution:
+    """A partition older than the schema must still be readable."""
+
+    def test_a_column_added_after_a_partition_was_written_reads_as_null(self, tmp_path, monkeypatch):
+        import numpy as np
+        import pandas as pd
+
+        from engine import paths
+        from engine.data import store
+
+        monkeypatch.setattr(paths, "DATA", tmp_path)
+        monkeypatch.setattr(paths, "CURATED", tmp_path / "curated")
+
+        # Write a partition WITHOUT the liquidity columns, as every pre-2026-09
+        # chain partition was.
+        legacy = pd.DataFrame({
+            "ticker": ["AMD"], "obs_date": [pd.Timestamp("2024-05-01")], "year": [2024],
+            "expiry": [pd.Timestamp("2024-05-17")], "dte": [16], "strike": [150.0],
+            "right": ["C"], "bid": [4.3], "ask": [4.5], "mid": [4.4], "iv": [0.4],
+            "delta": [0.5], "spot": [151.0], "src": ["orats"], "src_file": ["x"],
+            "chain_kind": ["entry"], "quote_repaired": [False],
+        })
+        store.write_partition(legacy, "option_chains", 2024)
+
+        out = store.read_table("option_chains", years=[2024],
+                               columns=["ticker", "bid", "volume", "bid_size"])
+        assert len(out) == 1
+        assert out["bid"].iloc[0] == 4.3
+        # Missing because the pull never asked, not because size was zero.
+        assert np.isnan(out["volume"].iloc[0])
+        assert np.isnan(out["bid_size"].iloc[0])
