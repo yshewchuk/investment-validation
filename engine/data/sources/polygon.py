@@ -30,6 +30,18 @@ BASE_URL = "https://api.polygon.io"
 _SENTINEL = "\n__HTTP_STATUS__:"
 
 
+def _config_escape(text: str) -> str:
+    """Encode a value for a curl ``-K`` config file.
+
+    curl 8.18 rejects a literal newline inside a quoted config value with the
+    misleading error ``option --config: is unknown`` — which is how a sentinel
+    carrying a real newline must be written as the two characters ``\\n`` that
+    curl then expands back into a newline when it applies the value. Backslash
+    and double-quote get the same treatment for the same reason.
+    """
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 def option_ticker(symbol: str, expiry: str, right: str, strike: float) -> str:
     """OCC contract id: ``O:{SYM}{YYMMDD}{C|P}{strike*1000:08d}``."""
     yymmdd = "".join(expiry.split("-"))[2:]
@@ -52,19 +64,25 @@ class PolygonAdapter:
         url = f"{self.base_url}/{path}"
         return f"{url}?{urllib.parse.urlencode(query, doseq=True)}" if query else url
 
-    def request(self, endpoint: str, params: dict[str, Any], timeout: float) -> Response:
-        if not self._key:
-            raise CredentialRotated("POLYGON_API_KEY is unset — cannot call Polygon")
-        url = self.build_url(endpoint, params)
-        # The bearer token goes in via `curl --config -` (stdin) rather than an
-        # argv element, so it never appears in the process table.
-        config = (
+    def build_config(self, url: str, timeout: float) -> str:
+        """The curl ``-K`` config text for one request.
+
+        The bearer token goes in via stdin config rather than an argv element,
+        so it never appears in the process table.
+        """
+        return (
             f'header = "Authorization: Bearer {self._key}"\n'
             f'url = "{url}"\n'
             f"silent\nshow-error\n"
             f"max-time = {int(timeout)}\n"
-            f'write-out = "{_SENTINEL}%{{http_code}}"\n'
+            f'write-out = "{_config_escape(_SENTINEL)}%{{http_code}}"\n'
         )
+
+    def request(self, endpoint: str, params: dict[str, Any], timeout: float) -> Response:
+        if not self._key:
+            raise CredentialRotated("POLYGON_API_KEY is unset — cannot call Polygon")
+        url = self.build_url(endpoint, params)
+        config = self.build_config(url, timeout)
         started = time.monotonic()
         proc = subprocess.run(
             ["curl", "--config", "-"],

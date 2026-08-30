@@ -171,6 +171,30 @@ class TestPolygonAdapter:
         assert a == b and a.endswith("?a=1&b=2")
 
 
+class TestPolygonCurlConfig:
+    """curl 8.18 rejects a literal newline inside a quoted -K value with the
+    misleading error 'option --config: is unknown'. The first live pull through
+    the wrapper died on exactly that; these tests keep the fix in place."""
+
+    def test_no_quoted_value_carries_a_raw_newline(self):
+        config = PolygonAdapter(api_key="k").build_config("https://api.polygon.io/x", 30.0)
+        for line in config.splitlines():
+            if '"' in line:
+                quoted = line.split('"')[1::2]  # every quoted span on the line
+                assert all("\n" not in span for span in quoted)
+
+    def test_the_sentinel_newline_is_written_as_an_escape(self):
+        config = PolygonAdapter(api_key="k").build_config("https://api.polygon.io/x", 30.0)
+        write_out = next(l for l in config.splitlines() if l.startswith("write-out"))
+        assert "\\n__HTTP_STATUS__:" in write_out
+        assert "__HTTP_STATUS__:%{http_code}" in write_out.replace("\\n", "")
+
+    def test_the_key_is_in_the_config_not_the_argv(self):
+        # The config travels over stdin; a ps of the process shows only flags.
+        config = PolygonAdapter(api_key="sekrit").build_config("https://api.polygon.io/x", 30.0)
+        assert "Bearer sekrit" in config
+
+
 class TestOquantsPnlBan:
     """The standing rule: model-fitted marks never reach a P&L path."""
 
