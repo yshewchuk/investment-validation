@@ -37,8 +37,7 @@ from experiments import lib  # noqa: E402
 SPEC_TEMPLATE = """\
 id: {id}
 title: {title}
-hypothesis: >
-  {hypothesis}
+hypothesis: {hypothesis}
 strategy: {strategy}
 price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
 primary_spec:
@@ -157,8 +156,13 @@ def scaffold(title: str, hypothesis: str, *, exp_id: str | None = None,
     (folder / "results").mkdir()
     (folder / "figures").mkdir()
 
+    # Titles and hypotheses are free prose and routinely contain YAML-breaking
+    # characters (colons, percents). Emit them as JSON-quoted scalars, which
+    # are valid YAML double-quoted strings, so the spec always parses.
     spec_text = SPEC_TEMPLATE.format(
-        id=exp_id, title=title, hypothesis=hypothesis.strip().replace("\n", " "),
+        id=exp_id,
+        title=json.dumps(title),
+        hypothesis=json.dumps(hypothesis.strip().replace("\n", " ")),
         strategy=strategy, snapshot=snapshot or "UNKNOWN", preregistered_at=stamp,
     )
     (folder / "spec.yaml").write_text(spec_text)

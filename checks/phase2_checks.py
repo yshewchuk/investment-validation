@@ -667,10 +667,31 @@ def _flat_metrics(mean: float, sharpe: float, p_loss: float,
 @check("promotion_dry_run", needs_data=False,
        description="decide() driven by real evaluate() output: better/worse -> promote/refuse")
 def check_promotion_dry_run() -> str:
-    # Same noise seed, different edge: the challenger is the champion plus a
-    # constant per-trade edge, so every comparison direction is deterministic.
-    champion_results = _eval_results(0.00)
-    challenger_results = _eval_results(0.06)
+    # The synthetic specs are never registered in the PROGRAM ledger, and the
+    # report checklist (correctly) fails an evaluated spec the ledger does not
+    # know once that ledger is non-empty. Run the in-process evaluations under
+    # a throwaway root with a header-only ledger — the isolated state this
+    # check was written for — instead of polluting the real record.
+    import importlib
+    import os
+
+    from engine import paths as _paths_mod
+
+    with tempfile.TemporaryDirectory(prefix="promote_eval_") as tmp:
+        ledger = Path(tmp) / "experiments" / "LEDGER.csv"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(",".join(lib.LEDGER_COLUMNS) + "\n")
+        os.environ["INVESTING_PLAN_ROOT"] = tmp
+        importlib.reload(_paths_mod)
+        try:
+            # Same noise seed, different edge: the challenger is the champion
+            # plus a constant per-trade edge, so every comparison direction is
+            # deterministic.
+            champion_results = _eval_results(0.00)
+            challenger_results = _eval_results(0.06)
+        finally:
+            del os.environ["INVESTING_PLAN_ROOT"]
+            importlib.reload(_paths_mod)
 
     promote, reasons = promote_mod.decide(challenger_results, champion_results)
     _require(promote, f"better challenger refused: {reasons}")

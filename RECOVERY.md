@@ -11,7 +11,7 @@ that the steps below are actually present in this file.
 | Location | Contents | Rationale |
 |---|---|---|
 | **Public repo** — `github.com/yshewchuk/investment-validation` | `engine/`, `checks/`, `tests/`, `guides/`, the master plan, `.env.example`, this file | Code survives the laptop. The strategy *logic* is disclosed by design; positions, findings, and data are not. |
-| **Private mirror** — `github.com/yshewchuk/investment-strategies` | `ledger/`, `reports/`, research findings (HANDOFF, VERDICT, STRATEGY, ADVISOR_BRIEF), `config/thesis/`, `AGENTS.md`, `dashboard/`, and the pre-engine research code under `earnings_predictions/` and `bt/` | Irreplaceable and not regenerable. Also position-revealing, so never public. |
+| **Private mirror** — `github.com/yshewchuk/investment-strategies` | `ledger/`, `reports/`, research findings (HANDOFF, VERDICT, STRATEGY, ADVISOR_BRIEF), the `experiments/` records (LEDGER.csv, each REPORT.md, its results/*.json evidence and figures), `config/thesis/`, `AGENTS.md`, `dashboard/`, and the pre-engine research code under `earnings_predictions/` and `bt/` | Irreplaceable and not regenerable. Also position-revealing, so never public. |
 | **Nowhere (deliberately)** | `.env`, all raw/curated/feature data, `polygon_cache/` | Secrets belong in a password manager. Market data is re-pullable at quota cost; ~57k files and ~1.2 GB do not belong in git. |
 
 Three things sit in the private mirror that a reader might expect to be public,
@@ -73,8 +73,8 @@ git clone https://github.com/yshewchuk/investment-strategies.git /tmp/mirror
 rsync -a --exclude .git /tmp/mirror/ ./
 ```
 
-This restores `ledger/`, `reports/`, the research findings docs, `config/thesis/`,
-and the pre-engine research code.
+This restores `ledger/`, `reports/`, the research findings docs, the
+`experiments/` records, `config/thesis/`, and the pre-engine research code.
 
 ### 5. Re-pull market data
 

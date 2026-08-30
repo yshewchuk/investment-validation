@@ -1,0 +1,33 @@
+id: EXP-105
+title: "STR-THRU validation: registered mid-fill gate on the engine trade set"
+hypothesis: "Confirmatory re-validation on the rebuilt pipeline, not discovery. The registered champion gate gate_midfill_str_thru at its stored threshold delivers, under independent walk-forward on all 17,666 engine-replayed STR-THRU events 2018-2026, an OOS mean return per trade materially above the ungated base - of the order the registry training evaluation records (base +2.92%, gated +7.34%, lift +4.42pp). Falsified if the independent OOS lift is not materially positive, or if the gate lifts the mean without improving breakeven alpha (ungated baseline 0.448)."
+type: confirmatory
+strategy: STR-THRU
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+primary_spec:
+  gate: gate_midfill_str_thru
+  gate_kind: registered champion, stored threshold (0.06645), model class refit per walk-forward fold on years < Y
+  gate_features: registry feature list (43), rows without complete features unscoreable and not selected
+  universe: all engine-replayed STR-THRU events 2018-2026, unselected (n=17,666)
+  structure: STR-THRU e+0 x+1 (last pre-print close in, first post-print close out)
+  fills: full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+grid: {}
+data_snapshot: dce985415b76117e7a8fc8d7a45d9256b4c81877e2c5a524efaff18b208b3aaf
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+required_outputs:
+  - OOS mean / Sharpe / win rate / profit factor with the unselected universe beside the gated set
+  - breakeven alpha vs the 0.448 ungated baseline (margin of safety on the mid-fill assumption)
+  - gate-lift reconciliation vs the registry training-eval lift (+4.42pp, OOS 2020-2026)
+  - calibration block from the in-fold isotonic predict_proba
+  - stress battery (2018Q4, 2020-02..04, 2022, 10 worst earnings weeks, IV-regime split)
+  - deployment (peak deployed / equity, worst cash, constrained entries)
+preregistered_at: "2026-08-30T18:12:39+00:00"

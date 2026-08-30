@@ -1,0 +1,36 @@
+id: EXP-107
+title: "STR-RUNUP validation: registered mid-fill gate and the three-number reconciliation"
+hypothesis: "Confirmatory re-validation on the rebuilt pipeline, not discovery. The registered champion gate gate_midfill_str_runup at its stored threshold delivers positive OOS mean return on all 5,311 engine-replayed STR-RUNUP events 2018-2026 (entry fixed at entry_offset=-14), and the exposure it selects from is materially better than the ungated base. The three disagreeing base numbers (plan +3.9% citing EXP-048; engine replay +1.02%; registry gate eval -1.24% over OOS 2020-2026) are reconciled as a required output. Falsified if the gated OOS mean is not positive, or if the reconciliation shows the +3.9% figure came from a universe the engine spec cannot reproduce."
+type: confirmatory
+strategy: STR-RUNUP
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+primary_spec:
+  gate: gate_midfill_str_runup
+  gate_kind: registered champion, stored threshold (0.05242), model class refit per walk-forward fold on years < Y
+  gate_features: registry feature list (43), rows without complete features unscoreable and not selected
+  universe: all engine-replayed STR-RUNUP events 2018-2026, unselected (n=5,311)
+  structure: STR-RUNUP e-14 x+0 target_dte=30 (enter 14 trading days pre-print, exit last pre-print close)
+  entry_offset: -14
+  fills: full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+grid: {}
+data_snapshot: dce985415b76117e7a8fc8d7a45d9256b4c81877e2c5a524efaff18b208b3aaf
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+required_outputs:
+  - three-number reconciliation of the base mean (plan +3.9% / engine replay +1.02% / registry eval -1.24%)
+  - OOS mean / Sharpe / win rate / profit factor with the unselected universe beside the gated set
+  - breakeven alpha vs the 0.478 ungated baseline (2.2 pp margin on the mid-fill assumption)
+  - gate-lift reconciliation vs the registry training-eval lift (+3.46pp, OOS 2020-2026)
+  - calibration block from the in-fold isotonic predict_proba
+  - per-year table and MC sizing curve carrying the four negative years (2020, 2021, 2023, 2025)
+  - stress battery (2018Q4, 2020-02..04, 2022, 10 worst earnings weeks, IV-regime split)
+  - deployment (peak deployed / equity, worst cash, constrained entries)
+preregistered_at: "2026-08-30T18:12:49+00:00"

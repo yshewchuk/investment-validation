@@ -10,6 +10,9 @@ regenerated and must not be published:
 * ``ledger/`` — the append-only prediction ledger, the out-of-time validator;
 * ``reports/`` — generated reports and their provenance;
 * research findings — HANDOFF, VERDICT and strategy documents;
+* ``experiments/`` records — the multiple-testing LEDGER.csv, each experiment's
+  REPORT.md, its results/*.json evidence artifacts and figures. The code
+  (run.py) and spec.yaml ship publicly; the findings do not;
 * ``config/thesis/`` — the watchlist, i.e. position intent;
 * the pre-engine research code, whose build scripts have already been lost once
   (the panel builders lived in ``/tmp``), and the dashboard, which hardcodes the
@@ -48,6 +51,10 @@ INCLUDE = (
     ("ledger", "**/*"),
     ("reports", "**/*.md"),
     ("config/thesis", "**/*"),
+    ("experiments", "LEDGER.csv"),
+    ("experiments", "**/REPORT.md"),
+    ("experiments", "**/results/*.json"),
+    ("experiments", "**/figures/*.png"),
     ("earnings_predictions", "**/*.py"),
     ("earnings_predictions", "**/*.md"),
     ("bt", "**/*.py"),

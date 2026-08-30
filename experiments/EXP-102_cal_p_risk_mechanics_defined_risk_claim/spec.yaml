@@ -1,0 +1,31 @@
+id: EXP-102
+title: "CAL-P risk mechanics: defined-risk claim, assignment exposure, tail injection"
+hypothesis: "Descriptive measurement, no promotion target. The CAL-P structure is defined-risk - realized loss never exceeds the net debit - and early-assignment exposure on the short front put is low enough to trade. A two-query probe already suggests both halves are false (80 of 4,736 trades lost more than the debit at mid fills, worst -3.87x; short put ITM at the post-print close 49.8%); the experiment is pre-registered against that expectation. The decision-relevant question is how much worse than the debit the tail is, and whether the ~50% ITM rate is survivable given close-both-legs-promptly-post-print."
+type: descriptive
+strategy: CAL-P
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+primary_spec:
+  gate: none
+  kind: descriptive risk mechanics, no selection, no promotion target
+  universe: all engine-replayed CAL-P events 2018-2026, unselected (n=4,736)
+  structure: CAL-P e+0 x+1, short front put max_dte=7 + long back put dte>=20, same strike, opened together pre-print and closed together post-print
+  fills: full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+grid: {}
+data_snapshot: dce985415b76117e7a8fc8d7a45d9256b4c81877e2c5a524efaff18b208b3aaf
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+required_outputs:
+  - max-loss distribution vs net debit, per year and per mcap bucket; every ret < -1.0 trade classified (real loss / crossed-quote artifact / stale exit chain)
+  - early-assignment exposure - frequency and depth of the short front put ITM at the post-print close, and at front expiry (pin risk)
+  - zero_cost selection count recovered from build_trades --strategy CAL-P --dry-run, reported beside the headline
+  - tail injection (mandatory, has_short_leg=true) - worst 1% of realized moves doubled and re-priced
+  - breakeven alpha, per-year table, crisis regime replays, deployment
+preregistered_at: "2026-08-30T18:12:49+00:00"
