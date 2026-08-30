@@ -81,6 +81,7 @@ __all__ = [
     "alpha_sweep",
     "breakeven_alpha_from_sweep",
     "build_equity",
+    "dollar_weighted_return",
     "transaction_log",
     "reconcile_transaction_log",
     "walk_forward",
@@ -99,7 +100,7 @@ __all__ = [
 METRIC_KEYS = (
     "n", "mean", "median", "std", "win_rate", "profit_factor",
     "sharpe_trade", "sharpe_equity", "sortino", "max_dd", "tail_ratio",
-    "by_year", "breakeven_alpha", "capacity", "deployment", "mc",
+    "dollar_weighted", "by_year", "breakeven_alpha", "capacity", "deployment", "mc",
 )
 
 #: The fill alphas every result is reported at (worst/mid/best plus the quarter
@@ -228,6 +229,26 @@ def trade_stats(rets: Sequence[float], event_dates: pd.Series | None = None) -> 
     return out
 
 
+def dollar_weighted_return(trades: pd.DataFrame) -> float:
+    """Total P&L over total premium paid — the capital-weighted return.
+
+    The equal-weighted mean answers "what did the average TRADE return"; this
+    answers "what did the average DOLLAR return". They diverge exactly when the
+    edge sits in the cheapest contracts, and the divergence is the thing worth
+    seeing: a $1.10 straddle and a $9.60 straddle count the same in the mean,
+    while fixed-fraction sizing buys nine times as many of the former —
+    a capacity claim disguised as a return.
+    """
+    if not len(trades) or not {"entry_cost", "exit_value"} <= set(trades.columns):
+        return float("nan")
+    cost = pd.to_numeric(trades["entry_cost"], errors="coerce")
+    value = pd.to_numeric(trades["exit_value"], errors="coerce")
+    ok = cost.notna() & value.notna() & (cost > 0)
+    if not ok.any():
+        return float("nan")
+    return float((value[ok] - cost[ok]).sum() / cost[ok].sum())
+
+
 def by_year_table(trades: pd.DataFrame, ret_col: str = "ret") -> dict[str, dict[str, float]]:
     """Per-year {n, mean, win_rate} — the lumpiness view every report carries."""
     out: dict[str, dict[str, float]] = {}
@@ -283,8 +304,36 @@ def capacity_note(trades: pd.DataFrame, alpha: float = 0.5) -> dict[str, Any]:
         out["note"] = "legs blob carried no usable entry quotes"
         return out
     arr = np.asarray(worst_rel)
+    # Where does the money come from, by how wide the market was? An edge that
+    # lives in the widest-quoted names is an edge in the fill assumption, not
+    # in the trade: mid is a real price only where the market is tight enough
+    # for mid to mean something.
+    pnl_by_spread: dict[str, Any] = {}
+    if len(arr) == len(rows) and {"entry_cost", "exit_value"} <= set(rows.columns):
+        frame = pd.DataFrame({
+            "rel": arr,
+            "pnl": pd.to_numeric(rows["exit_value"], errors="coerce").to_numpy()
+                   - pd.to_numeric(rows["entry_cost"], errors="coerce").to_numpy(),
+        }).dropna()
+        if len(frame) >= 25 and frame["rel"].nunique() >= 5:
+            try:
+                buckets = pd.qcut(frame["rel"], 5, labels=False, duplicates="drop")
+            except ValueError:
+                buckets = None
+            if buckets is not None and frame["pnl"].sum() != 0:
+                totals = frame.groupby(buckets)["pnl"].sum()
+                net = totals.sum()
+                pnl_by_spread = {
+                    "widest_quintile_share": float(totals.iloc[-1] / net),
+                    "tightest_two_quintiles_share": float(totals.iloc[:2].sum() / net),
+                    "median_rel_spread_widest": float(
+                        frame.loc[buckets == buckets.max(), "rel"].median()),
+                    "median_rel_spread_tightest": float(
+                        frame.loc[buckets == buckets.min(), "rel"].median()),
+                }
     out.update({
         "available": True,
+        "pnl_by_spread": pnl_by_spread,
         "n": int(arr.size),
         "mean_rel_spread": float(arr.mean()),
         "p95_rel_spread": float(np.percentile(arr, 95)),
@@ -1458,6 +1507,14 @@ def evaluate(
     }
     headline["alpha_sweep"] = alpha_sweep(selected, alphas)
     headline["capacity"] = capacity_note(selected)
+    headline["dollar_weighted"] = dollar_weighted_return(mid_sel)
+    # How much of the headline is not a gate result at all: in ungated years
+    # every row is kept, so a headline that blends them is reporting the base
+    # exposure and the gate under one number.
+    ungated_rows = sum(int(d.get("n_selected", 0)) for d in wf["diagnostics"]
+                       if d.get("ungated"))
+    headline["ungated_share"] = (float(ungated_rows / len(mid_sel))
+                                 if len(mid_sel) else float(np.nan))
     # Anti-selection guard (the S4 lesson): the unselected universe always
     # appears next to the selected one.
     headline["base_unselected"] = {

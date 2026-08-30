@@ -359,6 +359,9 @@ METRIC_SPEC: dict[str, tuple[Any, str, str]] = {
     "sortino": (num, "Sortino", "mean / downside deviation vs 0 — Sharpe counting only losses as risk"),
     "max_dd": (prob, "max drawdown", "worst peak-to-trough fall on the 5%-sized equity curve"),
     "tail_ratio": (ratio, "tail ratio", "|p95 win| / |p95 loss|; below 1.00× the losing tail is the bigger one"),
+    "dollar_weighted": (pct, "return on capital",
+                        "total P&L / total premium paid — what the average DOLLAR "
+                        "returned, as opposed to the average trade"),
     "breakeven_alpha": (num, "breakeven alpha", "the fill quality at which the strategy makes exactly zero"),
 }
 
@@ -631,6 +634,22 @@ def compute_warnings(results: Mapping[str, Any], calibration: Mapping[str, Any] 
     if inconclusive:
         warns.append(f"{len(inconclusive)} stress stage(s) INCONCLUSIVE "
                      f"({', '.join(inconclusive)})")
+
+    mean_v, dollar_v = _f(headline.get("mean")), _f(headline.get("dollar_weighted"))
+    if mean_v is not None and dollar_v is not None and mean_v - dollar_v > 0.01:
+        warns.append(f"equal-weighted {pct(mean_v)} but capital-weighted {pct(dollar_v)} "
+                     "— the edge sits in the cheapest contracts")
+
+    ungated = _f(headline.get("ungated_share"))
+    if ungated is not None and ungated > 0.25:
+        warns.append(f"{prob(ungated)} of headline trades are from ungated years "
+                     "(base exposure, not the gate)")
+
+    spread_pnl = ((headline.get("capacity") or {}).get("pnl_by_spread") or {})
+    widest = _f(spread_pnl.get("widest_quintile_share"))
+    if widest is not None and widest > 0.5:
+        warns.append(f"{prob(widest)} of net P&L comes from the widest-quoted fifth of "
+                     "markets, where mid is least achievable")
 
     conc = ((results.get("transaction_log") or {}).get("concentration") or {})
     share = _f(conc.get("top10_net_share"))
@@ -1465,8 +1484,8 @@ class Report:
             add(f"Anti-selection guard — the same statistics on the UNSELECTED universe "
                 f"(every replayed event, gate ignored): n={count(base.get('n'))}, "
                 f"mean {pct(base.get('mean'))}, win {prob(base.get('win_rate'))}.")
-        keys = ("mean", "median", "std", "win_rate", "profit_factor", "sharpe_trade",
-                "sharpe_equity", "sortino", "max_dd", "tail_ratio")
+        keys = ("mean", "median", "dollar_weighted", "std", "win_rate", "profit_factor",
+                "sharpe_trade", "sharpe_equity", "sortino", "max_dd", "tail_ratio")
         add("")
         add("Canonical metrics (mid fills, walk-forward OOS, on the selected set):")
         add("")
@@ -1474,6 +1493,26 @@ class Report:
         add("|" + "---|" * len(keys))
         add("| " + " | ".join(fmt_metric(k, headline.get(k)) for k in keys) + " |")
         add("")
+        mean_v, dollar_v = _f(headline.get("mean")), _f(headline.get("dollar_weighted"))
+        if mean_v is not None and dollar_v is not None:
+            gap = mean_v - dollar_v
+            if abs(gap) > 0.01:
+                add(f"**Equal-weighted {pct(mean_v)} vs capital-weighted "
+                    f"{pct(dollar_v)} ({pp(gap)}).** The mean counts a cheap contract "
+                    "and an expensive one alike; the capital-weighted number counts "
+                    "dollars. When the mean is the larger of the two, the edge sits in "
+                    "the cheapest contracts — and fixed-fraction sizing buys the most "
+                    "of exactly those, which is a capacity claim rather than a return.")
+                add("")
+
+        ungated = _f(headline.get("ungated_share"))
+        if ungated is not None and ungated > 0.01:
+            add(f"**{prob(ungated)} of these trades come from ungated years** "
+                "(folds without enough training history keep every row). To that "
+                "extent this headline describes the base exposure, not the gate — "
+                "§3 splits it by year and §9 says which folds were ungated.")
+            add("")
+
         capacity = headline.get("capacity") or {}
         if capacity.get("available"):
             wide = capacity.get("wide_market_frac")
@@ -1482,6 +1521,19 @@ class Report:
                 f"{prob(capacity.get('p95_rel_spread'), nd=2)}"
                 + (f", wide-market fraction {prob(wide)}" if wide is not None else "")
                 + f" — {capacity.get('note', '')}")
+            spread_pnl = capacity.get("pnl_by_spread") or {}
+            if spread_pnl:
+                add("")
+                add(f"**Where the P&L sits, by quoted width:** the widest fifth of "
+                    f"markets (median relative spread "
+                    f"{prob(spread_pnl.get('median_rel_spread_widest'))}) supplies "
+                    f"{prob(spread_pnl.get('widest_quintile_share'))} of net P&L; the "
+                    f"two tightest fifths (median "
+                    f"{prob(spread_pnl.get('median_rel_spread_tightest'))}) supply "
+                    f"{prob(spread_pnl.get('tightest_two_quintiles_share'))}. Mid is a "
+                    "real price only where the market is tight enough for mid to mean "
+                    "something, so an edge concentrated in the widest names is an edge "
+                    "in the fill assumption.")
         else:
             add("**Capacity:** not measurable on this trade set"
                 + (f" — {capacity.get('note')}" if capacity.get("note") else "") + ".")

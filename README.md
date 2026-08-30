@@ -145,6 +145,7 @@ acceptance check.
 | `python3 -m engine.ledger snapshot --as-of YYYY-MM-DD` | Freeze today's scored board into the prediction ledger |
 | `python3 -m engine.ledger score --through YYYY-MM-DD` | Resolve predictions whose events have passed; recompute calibration at 50 new rows |
 | `python3 -m engine.ledger status` | What the ledger holds |
+| `python3 tools/log_diagnostics.py --exp EXP-105` | Where a reported curve's return actually came from: equal- vs capital-weighted, the book re-priced at every fill alpha, and the P&L split by trade cost and quoted width |
 | `python3 checks/repo_hygiene.py --all` | No secret, data file, or oversize blob is tracked |
 
 Testing strategy — the two layers, what each is for, and the known thin spots —
@@ -154,6 +155,13 @@ rather than left as an aspiration.
 The migration test is the load-bearing one. Every verdict in the plan rests on
 `events_with_orats_sum.csv`; the test reconciles all 115,500 rows and fails on
 any difference not covered by a **declared, independently verified** delta.
+
+**Reading a reported curve honestly.** `tools/log_diagnostics.py` re-prices a
+whole book from its log at any fill assumption and splits the P&L by what the
+trades cost and how wide their markets were quoted. It exists because a mean
+return can be positive while the median trade loses and the edge sits entirely
+inside the spread — which is what it found on STR-THRU's ungated years
+(`reports/exp-105_log_diagnostics.md`).
 
 **Spot-checking a reported equity curve.** Every plotted curve ships the trades
 behind it: `experiments/EXP-*/results/transactions_<spec-hash>.csv`, one row per

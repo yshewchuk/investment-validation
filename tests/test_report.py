@@ -737,3 +737,43 @@ class TestConcentration:
         report = Report.from_eval(self._result(tmp_path, share=0.2))
         verdict_block = report.write(tmp_path / "out").read_text().split("## 1.")[0]
         assert "trades carry" not in verdict_block
+
+
+class TestCapitalWeightedAndUngatedDisclosure:
+    """The two readings that separate a trade edge from a sizing artifact."""
+
+    def test_equal_vs_capital_weighted_gap_is_called_out(self, tmp_path):
+        result = _eval_result(tmp_path)
+        result.results["headline"]["dollar_weighted"] = 0.005
+        result.results["headline"]["mean"] = 0.035
+        md = Report.from_eval(result).write(tmp_path / "out").read_text()
+        assert "Equal-weighted +3.50% vs capital-weighted +0.50%" in md
+        assert "the edge sits in the cheapest contracts" in md.split("## 1.")[0]
+
+    def test_matching_readings_do_not_warn(self, tmp_path):
+        result = _eval_result(tmp_path)
+        result.results["headline"]["dollar_weighted"] = 0.034
+        result.results["headline"]["mean"] = 0.035
+        md = Report.from_eval(result).write(tmp_path / "out").read_text()
+        assert "cheapest contracts" not in md.split("## 1.")[0]
+
+    def test_ungated_share_is_disclosed_and_warns(self, tmp_path):
+        result = _eval_result(tmp_path)
+        result.results["headline"]["ungated_share"] = 0.709
+        md = Report.from_eval(result).write(tmp_path / "out").read_text()
+        assert "70.9% of these trades come from ungated years" in md
+        assert "base exposure, not the gate" in md.split("## 1.")[0]
+
+    def test_wide_market_concentration_warns(self, tmp_path):
+        result = _eval_result(tmp_path)
+        result.results["headline"]["capacity"] = {
+            "available": True, "mean_rel_spread": 0.36, "p95_rel_spread": 1.6,
+            "note": "spread-based capacity only",
+            "pnl_by_spread": {"widest_quintile_share": 1.155,
+                              "tightest_two_quintiles_share": -1.089,
+                              "median_rel_spread_widest": 0.481,
+                              "median_rel_spread_tightest": 0.042},
+        }
+        md = Report.from_eval(result).write(tmp_path / "out").read_text()
+        assert "Where the P&L sits, by quoted width" in md
+        assert "widest-quoted fifth" in md.split("## 1.")[0]
