@@ -111,6 +111,16 @@ ACCEPTANCE_COVERED = {
     "checks/phase0_verdicts.py": "verdicts",
     "checks/phase0_audit.py": "coverage_report",
     "checks/phase0_checks.py": "is the harness itself",
+    # Phase 1. These are drivers over the full store or the real model
+    # artifacts: what they do is run the modules below them across millions of
+    # rows, so a fixture-scale unit test would assert only that the argument
+    # parser works.
+    "engine/build_trades.py": "phase1 replay_equivalence (it produces the trade set)",
+    "engine/models/training/train_all.py": "phase1 champions + registry",
+    "checks/phase1_replay.py": "phase1 replay_equivalence",
+    "checks/phase1_calibration.py": "phase1 calibration",
+    "checks/phase1_report.py": "renders the Phase 1 report over the real store",
+    "checks/phase1_checks.py": "is the Phase 1 harness itself",
 }
 
 #: Minimum line coverage for `engine/` under the unit suite alone.

@@ -1,0 +1,385 @@
+"""The model registry: one manifest, one champion per role, no silent drift.
+
+``registry.json`` is a list of entries describing every model this program has
+trained. An entry records what the model is, what it eats, when it was trained,
+what it scored, whether it is the current champion, and which experiment
+justified promoting it.
+
+Four integrity rules are enforced at load, each of them a failure that has
+happened to somebody:
+
+1. **Exactly one champion per (strategy, role).** Two champions is not a
+   tie-break to resolve at call time; it is an unresolved promotion.
+2. **The artifact hash matches.** A model retrained in place while the manifest
+   still quotes its old metrics is the most expensive kind of stale: every
+   report downstream cites numbers the file cannot produce. The manifest stores
+   the artifact's sha256 and the loader refuses a mismatch.
+3. **The feature list matches the artifact.** A model whose stored feature order
+   differs from the manifest's would be scored on permuted inputs and would
+   return plausible nonsense.
+4. **Every feature is live-servable.** A model trained on a feature that only
+   exists for realized events backtests perfectly and has nothing to read on the
+   morning it matters — see :data:`engine.features.LIVE_UNAVAILABLE`.
+
+Registry edits are Phase 2's ``promote.py`` job. Phase 1 writes it once, at
+training time, through :func:`register`.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, field, asdict
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from engine import paths
+
+__all__ = [
+    "ROLES",
+    "RegistryError",
+    "ModelArtifact",
+    "RegistryEntry",
+    "Registry",
+    "load_registry",
+    "champion",
+    "register",
+    "REGISTRY_PATH",
+    "ARTIFACT_DIR",
+]
+
+#: What a model is *for*. The scoring engine asks for a role, never a filename.
+#:
+#: ``size``        predicted |earnings move|, in percent of spot
+#: ``implied_t1``  predicted quoted implied move at the last pre-print close
+#: ``gate``        predicted per-trade return at mid fills — the selection signal
+ROLES = ("size", "implied_t1", "gate")
+
+#: Strategy scope. ``"*"`` means the model is strategy-agnostic (the size model
+#: predicts a property of the *event*, not of any structure traded around it).
+ANY_STRATEGY = "*"
+
+REGISTRY_PATH = paths.ENGINE / "models" / "registry.json"
+
+#: Artifacts are data, not code: regenerable at a fixed seed from
+#: ``engine/models/training/``, too large for the repo, and blocked from it by
+#: both the allowlist ``.gitignore`` and the hygiene check.
+ARTIFACT_DIR = paths.DATA / "models"
+
+
+class RegistryError(RuntimeError):
+    """The registry, or an artifact it points at, failed an integrity check."""
+
+
+# --------------------------------------------------------------------------
+# artifacts
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class ModelArtifact:
+    """A trained model plus everything needed to use and audit it.
+
+    ``residuals`` is the point of this class. The scoring engine does not push a
+    point prediction through a payoff and call the result an expectation — it
+    pushes a *distribution*, and the distribution comes from the model's own
+    held-out errors rather than from an assumed normal. Earnings-move residuals
+    are right-skewed and fat-tailed; a normal approximation would understate
+    both the upside of a long-vol structure and the tail that matters for a
+    short leg. Storing the empirical residuals with the model is what makes the
+    honest version possible at scoring time.
+    """
+
+    model: Any
+    role: str
+    features: tuple[str, ...]
+    residuals: np.ndarray
+    target: str
+    train_years: tuple[int, ...] = ()
+    metrics: dict = field(default_factory=dict)
+    params: dict = field(default_factory=dict)
+    seed: int = 0
+    created: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if self.role not in ROLES:
+            raise ValueError(f"unknown role {self.role!r}; known: {ROLES}")
+        self.features = tuple(self.features)
+        self.residuals = np.asarray(self.residuals, dtype=float)
+        self.residuals = self.residuals[np.isfinite(self.residuals)]
+        if not self.created:
+            self.created = date.today().isoformat()
+
+    def predict(self, X) -> np.ndarray:
+        return np.asarray(self.model.predict(X), dtype=float).ravel()
+
+    def residual_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        """``n`` bootstrap draws from the held-out residual distribution."""
+        if self.residuals.size == 0:
+            raise RegistryError(f"{self.role}: artifact carries no residuals")
+        return rng.choice(self.residuals, size=n, replace=True)
+
+    def save(self, path: Path) -> str:
+        import joblib
+
+        path = paths.assert_writable(Path(path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, path, compress=3)
+        return artifact_sha256(path)
+
+
+def artifact_sha256(path: Path, chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while block := fh.read(chunk):
+            h.update(block)
+    return h.hexdigest()
+
+
+def load_artifact(path: Path) -> ModelArtifact:
+    import joblib
+
+    obj = joblib.load(path)
+    if not isinstance(obj, ModelArtifact):
+        raise RegistryError(f"{path} does not hold a ModelArtifact ({type(obj).__name__})")
+    return obj
+
+
+# --------------------------------------------------------------------------
+# entries
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class RegistryEntry:
+    id: str
+    role: str
+    strategy: str
+    artifact: str
+    artifact_sha256: str
+    features: list[str]
+    target: str
+    train_window: str
+    train_years: list[int] = field(default_factory=list)
+    eval: dict = field(default_factory=dict)
+    champion: bool = False
+    promoted: str = ""
+    evidence: str = ""
+    seed: int = 0
+    notes: str = ""
+    #: Selection threshold, for gate models: the score at or above which a
+    #: candidate passes. Stored with the model because it is part of the
+    #: decision rule, not a dashboard preference.
+    threshold: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.role not in ROLES:
+            raise RegistryError(f"{self.id}: unknown role {self.role!r}")
+        if not self.features:
+            raise RegistryError(f"{self.id}: empty feature list")
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.strategy, self.role)
+
+    @property
+    def path(self) -> Path:
+        p = Path(self.artifact)
+        return p if p.is_absolute() else paths.ROOT / p
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+# --------------------------------------------------------------------------
+# the registry
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Registry:
+    entries: list[RegistryEntry]
+    path: Path = REGISTRY_PATH
+
+    def __post_init__(self) -> None:
+        self._validate_uniqueness()
+
+    def _validate_uniqueness(self) -> None:
+        ids = [e.id for e in self.entries]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise RegistryError(f"duplicate registry id(s): {dupes}")
+
+        champions: dict[tuple[str, str], list[str]] = {}
+        for entry in self.entries:
+            if entry.champion:
+                champions.setdefault(entry.key, []).append(entry.id)
+        contested = {k: v for k, v in champions.items() if len(v) > 1}
+        if contested:
+            detail = "; ".join(f"{k}: {v}" for k, v in sorted(contested.items()))
+            raise RegistryError(f"more than one champion for a (strategy, role) — {detail}")
+
+    # -- lookup ------------------------------------------------------------
+
+    def get(self, model_id: str) -> RegistryEntry:
+        for entry in self.entries:
+            if entry.id == model_id:
+                return entry
+        raise RegistryError(f"no registry entry {model_id!r}")
+
+    def champion(self, role: str, strategy: str = ANY_STRATEGY) -> RegistryEntry:
+        """The champion for a role, preferring a strategy-specific entry.
+
+        A strategy-specific champion beats the wildcard, so a per-strategy gate
+        can be promoted later without touching the shared one.
+        """
+        if role not in ROLES:
+            raise RegistryError(f"unknown role {role!r}; known: {ROLES}")
+        specific = [e for e in self.entries if e.champion and e.key == (strategy, role)]
+        if specific:
+            return specific[0]
+        wildcard = [e for e in self.entries if e.champion and e.key == (ANY_STRATEGY, role)]
+        if wildcard:
+            return wildcard[0]
+        raise RegistryError(
+            f"no champion for role {role!r} (strategy {strategy!r}) — "
+            f"train one with `python3 -m engine.models.training.train_all`"
+        )
+
+    def has_champion(self, role: str, strategy: str = ANY_STRATEGY) -> bool:
+        try:
+            self.champion(role, strategy)
+            return True
+        except RegistryError:
+            return False
+
+    # -- artifact loading --------------------------------------------------
+
+    def load(self, entry: RegistryEntry | str, *, verify: bool = True) -> ModelArtifact:
+        """Load an entry's artifact, refusing anything the manifest misdescribes."""
+        if isinstance(entry, str):
+            entry = self.get(entry)
+        path = entry.path
+        if not path.exists():
+            raise RegistryError(
+                f"{entry.id}: artifact {path} is missing. Artifacts are not "
+                f"committed; rebuild with `python3 -m engine.models.training.train_all`"
+            )
+        if verify:
+            actual = artifact_sha256(path)
+            if actual != entry.artifact_sha256:
+                raise RegistryError(
+                    f"{entry.id}: artifact hash mismatch — the file at {path} is not "
+                    f"the model the registry describes (recorded {entry.artifact_sha256[:12]}…, "
+                    f"found {actual[:12]}…). Its recorded metrics {entry.eval} do not "
+                    f"describe it. Retrain and re-register rather than editing the hash."
+                )
+        artifact = load_artifact(path)
+        if verify and list(artifact.features) != list(entry.features):
+            raise RegistryError(
+                f"{entry.id}: feature list disagrees with the artifact.\n"
+                f"  registry: {list(entry.features)}\n"
+                f"  artifact: {list(artifact.features)}\n"
+                "Scoring on a permuted feature vector produces plausible nonsense."
+            )
+        if verify and artifact.role != entry.role:
+            raise RegistryError(
+                f"{entry.id}: artifact role {artifact.role!r} != registry role {entry.role!r}"
+            )
+        return artifact
+
+    def load_champion(
+        self, role: str, strategy: str = ANY_STRATEGY, *, verify: bool = True
+    ) -> tuple[RegistryEntry, ModelArtifact]:
+        entry = self.champion(role, strategy)
+        return entry, self.load(entry, verify=verify)
+
+    # -- validation --------------------------------------------------------
+
+    def validate(self, *, check_artifacts: bool = True) -> list[str]:
+        """Full integrity sweep. Returns a list of problems; empty means clean."""
+        from engine.features import LIVE_UNAVAILABLE
+
+        problems: list[str] = []
+        for entry in self.entries:
+            unservable = sorted(set(entry.features) & set(LIVE_UNAVAILABLE))
+            if unservable:
+                problems.append(
+                    f"{entry.id}: features {unservable} do not exist for an upcoming "
+                    "event — the model could never be served live"
+                )
+            if entry.role == "gate" and entry.champion and entry.threshold is None:
+                problems.append(f"{entry.id}: champion gate carries no threshold")
+            if not check_artifacts:
+                continue
+            try:
+                self.load(entry)
+            except RegistryError as exc:
+                problems.append(str(exc))
+        return problems
+
+    # -- persistence -------------------------------------------------------
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "version": 1,
+                "doc": (
+                    "Model manifest. Champions are looked up by (strategy, role); "
+                    "nothing imports an artifact path directly. Edited only by "
+                    "training/registration code, never by hand."
+                ),
+                "models": [e.as_dict() for e in sorted(self.entries, key=lambda e: e.id)],
+            },
+            indent=1,
+            sort_keys=False,
+        )
+
+    def save(self, path: Path | None = None) -> Path:
+        path = Path(path or self.path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.to_json() + "\n")
+        return path
+
+
+def load_registry(path: Path | None = None, *, missing_ok: bool = True) -> Registry:
+    path = Path(path or REGISTRY_PATH)
+    if not path.exists():
+        if missing_ok:
+            return Registry(entries=[], path=path)
+        raise RegistryError(f"no registry at {path}")
+    doc = json.loads(path.read_text())
+    entries = [RegistryEntry(**row) for row in doc.get("models", [])]
+    return Registry(entries=entries, path=path)
+
+
+def champion(role: str, strategy: str = ANY_STRATEGY) -> tuple[RegistryEntry, ModelArtifact]:
+    """Convenience: load the current champion for a role."""
+    return load_registry().load_champion(role, strategy)
+
+
+def register(
+    entry: RegistryEntry,
+    *,
+    path: Path | None = None,
+    demote_others: bool = True,
+) -> Registry:
+    """Add or replace an entry, keeping the one-champion-per-role invariant.
+
+    ``demote_others`` is what makes promotion atomic: registering a champion
+    demotes the incumbent for that (strategy, role) in the same write, so the
+    registry never passes through a two-champion state on disk.
+    """
+    registry = load_registry(path)
+    kept = [e for e in registry.entries if e.id != entry.id]
+    if entry.champion and demote_others:
+        for other in kept:
+            if other.key == entry.key and other.champion:
+                other.champion = False
+    kept.append(entry)
+    updated = Registry(entries=kept, path=Path(path or REGISTRY_PATH))
+    updated.save()
+    return updated

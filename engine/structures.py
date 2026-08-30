@@ -74,6 +74,10 @@ class ExpirySelector:
         an extra day of optionality is the safer error.
     ``"first_dte_at_least"``
         Earliest expiry with ``dte >= target_dte``.
+    ``"fixed"``
+        Exactly ``expiry``. Used to price a caller-specified expiry — the
+        Phase 1 scoring API's ``expiry=`` argument — and to replay a recorded
+        trade on the contract it actually traded.
     ``"first_post_event"``
         Earliest expiry that still exists on the far side of the print. This is
         the one that matters for every through-the-print structure: 430 events
@@ -94,14 +98,17 @@ class ExpirySelector:
     target_dte: int | None = None
     min_dte: int | None = None
     max_dte: int | None = None
+    expiry: Any = None
 
-    VALID = ("nearest_dte", "first_dte_at_least", "first_post_event")
+    VALID = ("nearest_dte", "first_dte_at_least", "first_post_event", "fixed")
 
     def __post_init__(self) -> None:
         if self.kind not in self.VALID:
             raise ValueError(f"unknown expiry selector {self.kind!r}")
         if self.kind in ("nearest_dte", "first_dte_at_least") and self.target_dte is None:
             raise ValueError(f"{self.kind} requires target_dte")
+        if self.kind == "fixed" and self.expiry is None:
+            raise ValueError("fixed requires expiry")
 
     def select(
         self,
@@ -110,6 +117,15 @@ class ExpirySelector:
         session: str | None = None,
     ) -> pd.Timestamp:
         exp = chain[["expiry", "dte"]].drop_duplicates().sort_values("expiry")
+
+        # A caller-named expiry bypasses the DTE filters: they exist to *choose*
+        # an expiry, and there is nothing left to choose.
+        if self.kind == "fixed":
+            wanted = pd.Timestamp(self.expiry)
+            if not (exp["expiry"] == wanted).any():
+                raise StructureError(f"expiry {wanted.date()} absent from this chain")
+            return wanted
+
         if self.min_dte is not None:
             exp = exp[exp["dte"] >= self.min_dte]
         if self.max_dte is not None:

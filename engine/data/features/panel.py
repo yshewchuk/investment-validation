@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import json
 import time
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,7 @@ __all__ = [
     "SPANS",
     "MIN_HISTORY",
     "ORATS_FEATURES",
+    "history_features",
     "build_events",
     "add_regime_features",
     "add_runup_features",
@@ -116,6 +118,36 @@ def _causal_ema(history: list[float], span: int) -> float | None:
     return ema
 
 
+def history_features(
+    prior_moves: Sequence[float],
+    prior_abs: Sequence[float],
+    prior_implied: Sequence[float | None],
+) -> dict[str, float | None]:
+    """Event-history features for the event that follows the given history.
+
+    The single definition of the panel's history block. :func:`build_events`
+    calls it while walking a ticker's events, and ``engine.features`` calls it
+    with a ticker's realized history to produce the same features for an event
+    that has not happened yet. Two implementations of this recursion would drift
+    the moment either was touched, and the live scorer diverging from the
+    research panel is precisely the failure Phase 1's replay test exists to
+    catch — so there is one.
+
+    ``prior_*`` must contain events strictly before the one being scored.
+    """
+    known_implied = [x for x in prior_implied if x is not None and not pd.isna(x)]
+    out: dict[str, float | None] = {
+        "n_prior": len(prior_moves),
+        "mean_prior_move": float(np.mean(prior_moves)) if len(prior_moves) else None,
+        "mean_prior_abs_move": float(np.mean(prior_abs)) if len(prior_abs) else None,
+        "mean_prior_implied_move": float(np.mean(known_implied)) if known_implied else None,
+    }
+    for span in SPANS:
+        out[f"ema{span}_prior_move"] = _causal_ema(list(prior_moves), span)
+        out[f"ema{span}_prior_abs_move"] = _causal_ema(list(prior_abs), span)
+    return out
+
+
 def build_events(moves_dir: Path | None = None) -> pd.DataFrame:
     """The base causal panel: one row per admitted (ticker, event)."""
     moves_dir = moves_dir or paths.RAW_OQUANTS_MOVES
@@ -150,7 +182,6 @@ def build_events(moves_dir: Path | None = None) -> pd.DataFrame:
         prior_implied: list = []
         for k in range(n):
             if k >= MIN_HISTORY:
-                known_implied = [x for x in prior_implied if x is not None]
                 row = {
                     "ticker": ticker,
                     "k": k,
@@ -159,17 +190,9 @@ def build_events(moves_dir: Path | None = None) -> pd.DataFrame:
                     "move": moves[k],
                     "abs_move": abs_moves[k],
                     "implied_move": implied[k],
-                    "n_prior": k,
-                    "mean_prior_move": float(np.mean(prior_moves)),
-                    "mean_prior_abs_move": float(np.mean(prior_abs)),
-                    "mean_prior_implied_move": (
-                        float(np.mean(known_implied)) if known_implied else None
-                    ),
                     "year": int(str(dates[k])[:4]),
+                    **history_features(prior_moves, prior_abs, prior_implied),
                 }
-                for span in SPANS:
-                    row[f"ema{span}_prior_move"] = _causal_ema(prior_moves, span)
-                    row[f"ema{span}_prior_abs_move"] = _causal_ema(prior_abs, span)
                 rows.append(row)
             prior_moves.append(moves[k])
             prior_abs.append(abs_moves[k])
@@ -198,13 +221,25 @@ def build_events(moves_dir: Path | None = None) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 
 
-def add_regime_features(df: pd.DataFrame, gspc_path: Path | None = None) -> pd.DataFrame:
-    """S&P 500 state as of the last close strictly before each event."""
-    gspc_path = gspc_path or paths.GSPC_DAILY
-    raw = pd.read_csv(gspc_path, skiprows=3, header=None)
+@lru_cache(maxsize=2)
+def _gspc_series(path_str: str, mtime: float) -> pd.DataFrame:
+    """The S&P daily series, read once per process.
+
+    The panel build calls this once, but ``engine.features.live_features`` calls
+    it per scored event — hundreds of times for one dashboard refresh — and
+    re-parsing a twenty-year daily CSV each time is pure waste. Keyed on mtime so
+    a refreshed file is picked up rather than served stale.
+    """
+    raw = pd.read_csv(path_str, skiprows=3, header=None)
     raw.columns = ["date", "adj", "close", "high", "low", "open", "volume"][: raw.shape[1]]
     raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
-    raw = raw.dropna(subset=["date"]).sort_values("date")
+    return raw.dropna(subset=["date"]).sort_values("date")
+
+
+def add_regime_features(df: pd.DataFrame, gspc_path: Path | None = None) -> pd.DataFrame:
+    """S&P 500 state as of the last close strictly before each event."""
+    gspc_path = Path(gspc_path or paths.GSPC_DAILY)
+    raw = _gspc_series(str(gspc_path), gspc_path.stat().st_mtime)
 
     closes = raw["close"].to_numpy(dtype=float)
     dates = raw["date"].to_numpy()

@@ -36,6 +36,33 @@ class TestSelectors:
                 chain_rows, pd.Timestamp("2025-01-01")
             )
 
+    def test_fixed_expiry_selects_exactly_what_was_asked_for(self, chain_rows):
+        """The Phase 1 `score(..., expiry=)` argument resolves through this."""
+        chosen = ExpirySelector(
+            kind="fixed", expiry=pd.Timestamp("2024-05-24")
+        ).select(chain_rows, pd.Timestamp("2024-05-02"))
+        assert chosen == pd.Timestamp("2024-05-24")
+
+    def test_fixed_expiry_ignores_the_dte_filters(self):
+        """Those exist to *choose* an expiry; a named one leaves nothing to choose."""
+        rows = pd.DataFrame(
+            {"expiry": [pd.Timestamp("2024-05-03")], "dte": [2]}
+        )
+        chosen = ExpirySelector(
+            kind="fixed", expiry=pd.Timestamp("2024-05-03"), min_dte=30
+        ).select(rows, pd.Timestamp("2024-05-01"))
+        assert chosen == pd.Timestamp("2024-05-03")
+
+    def test_fixed_expiry_absent_from_the_chain_raises(self, chain_rows):
+        with pytest.raises(StructureError, match="absent from this chain"):
+            ExpirySelector(kind="fixed", expiry=pd.Timestamp("2030-01-18")).select(
+                chain_rows, pd.Timestamp("2024-05-02")
+            )
+
+    def test_fixed_expiry_requires_an_expiry(self):
+        with pytest.raises(ValueError, match="fixed requires expiry"):
+            ExpirySelector(kind="fixed")
+
     def test_nearest_dte_breaks_ties_toward_the_longer_expiry(self):
         rows = pd.DataFrame(
             {"expiry": [pd.Timestamp("2024-05-05"), pd.Timestamp("2024-05-15")],

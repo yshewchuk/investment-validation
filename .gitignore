@@ -101,3 +101,15 @@ venv/
 *.pdf
 *.log
 *.done*
+
+# ── re-includes that must outrank the hard blocks above ──────────────────
+
+# `**/models/` above exists to keep the grandfathered research model trees out.
+# engine/models/ is not one of those: it holds the registry loader, the training
+# scripts, and the registry manifest — all code and config, all public. The
+# trained artifacts it describes live in data/models/, which stays blocked by
+# the /data/ rule, by the .joblib suffix, and by checks/repo_hygiene.py.
+!/engine/models/
+!/engine/models/**/
+!/engine/models/**/*.py
+!/engine/models/registry.json

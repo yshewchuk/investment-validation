@@ -13,11 +13,11 @@ fixtures, no network and no real data store. Fast enough to run on every edit
 (~7s for 500+ tests). This is where the invariants live: fill arithmetic,
 session-aware date math, schema enforcement, leak discipline, the standing bans.
 
-**Layer 2 — acceptance checks (`checks/phase0_checks.py`).** Everything whose
-correctness is only meaningful against the real thing: 15.4M real chain rows,
-the 115,500-row legacy panel, a real git repo, a real clone. A fixture cannot
-prove that the rebuilt panel reproduces the master panel; only the master panel
-can.
+**Layer 2 — acceptance checks (`checks/phase0_checks.py`, `checks/phase1_checks.py`).**
+Everything whose correctness is only meaningful against the real thing: 15.3M
+real chain rows, the 115,500-row legacy panel, real trained artifacts, a real
+git repo, a real clone. A fixture cannot prove that the rebuilt panel reproduces
+the master panel; only the master panel can.
 
 Some modules are covered by Layer 2 *by design*, and show 0% under `pytest`:
 
@@ -28,6 +28,10 @@ Some modules are covered by Layer 2 *by design*, and show 0% under `pytest`:
 | `checks/phase0_verdicts.py` | `verdicts` | The claim is that published numbers reproduce from real chains |
 | `checks/phase0_audit.py` | `coverage_report` | Renders a report over the real store |
 | `checks/phase0_checks.py` | it *is* the harness | — |
+| `engine/build_trades.py` | phase 1 `replay_equivalence` | It drives the replay across 42k events; a fixture-scale run would test the argument parser |
+| `engine/models/training/train_all.py` | phase 1 `registry` | Its output *is* the artifacts the registry check verifies |
+| `checks/phase1_replay.py` | phase 1 `replay_equivalence` | It is a check |
+| `checks/phase1_checks.py` | it *is* the Phase 1 harness | — |
 
 That table is not documentation-by-good-intentions: `test_policy` reads it and
 fails if a module appears in neither layer.
@@ -57,9 +61,10 @@ one that says why `y` is the right answer documents a decision.
 ## Running
 
 ```bash
-python3 -m pytest tests -q                 # layer 1, ~7s
-python3 checks/phase0_checks.py            # both layers
-python3 checks/phase0_checks.py --no-data  # layer 1 + the checks needing no store
+python3 -m pytest tests -q                 # layer 1, ~20s
+python3 checks/phase0_checks.py            # data foundations
+python3 checks/phase1_checks.py            # scoring engine
+python3 checks/phase1_checks.py --no-data  # layer 1 + the checks needing no store
 python3 -m coverage run --source=engine,checks,tools -m pytest tests \
   && python3 -m coverage report --sort=cover -m
 ```

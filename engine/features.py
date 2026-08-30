@@ -1,0 +1,722 @@
+"""As-of feature vectors, for events that have happened and events that have not.
+
+The scoring engine has to answer the same question in two situations that look
+very different:
+
+*"What did we know about AAPL's 2019-01-29 print, at the close before it?"* —
+answerable from the Tier-3 panel, which already carries exactly that row.
+
+*"What do we know about AAPL's print next Tuesday?"* — no panel row exists,
+because the panel is built from realized events and this one has not realized.
+
+If those two paths are written separately they will diverge, and the divergence
+will be invisible: the backtest keeps using the panel while the live dashboard
+quietly drifts onto slightly different features. So both go through
+:func:`build_features` here, and :func:`live_features` is built by *extending*
+the panel's own recursions one event forward rather than by reimplementing
+them. :func:`checks/phase1_checks.py` asserts the two agree on historical
+events to 1e-9, which is what makes the equivalence a fact rather than an
+intention.
+
+Every value comes back inside an :class:`~engine.audit.FeatureVector` carrying
+per-feature as-of stamps, and no consumer gets one without
+:func:`~engine.audit.assert_causal` having run.
+
+**One inherited convention, kept deliberately.** The panel reads market state at
+the last daily row *strictly before the event date*. For a BMO print that is the
+last pre-print close exactly. For an AMC print the event-date close is also
+pre-print and would be admissible, but the panel used the prior close for both,
+so this does too: one session stale on AMC names, never a leak, and identical
+between replay and live. Changing it is a modeling decision for an experiment
+to make and measure, not something a feature builder should do silently.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Iterable, Sequence
+
+import numpy as np
+import pandas as pd
+
+from engine import paths
+from engine.audit import FeatureVector, assert_causal, assert_decision_causal
+from engine.calendar import trading_calendar
+from engine.data import store
+from engine.data.features import panel as panel_mod
+
+__all__ = [
+    "PANEL_FEATURE_COLUMNS",
+    "OUTCOME_COLUMNS",
+    "load_panel",
+    "panel_for_ticker",
+    "build_features",
+    "panel_features",
+    "live_features",
+    "FeatureContext",
+]
+
+#: Columns of the Tier-3 panel that are legitimate model inputs. Everything the
+#: panel carries *except* the realized outcome of the event being scored and the
+#: bookkeeping keys. ``implied_move`` and ``or_implied`` are quoted before the
+#: print, so they are features; ``move`` / ``abs_move`` are the answer.
+OUTCOME_COLUMNS = ("move", "abs_move")
+
+_KEY_COLUMNS = ("ticker", "k", "date", "quarter", "year", "mcap_asof")
+
+#: Panel columns that exist for a *realized* event and cannot exist for an
+#: upcoming one, however causal they are.
+#:
+#: ``implied_move`` is the oquants quoted implied move for the event itself. It
+#: is genuinely pre-print information, so nothing about it leaks — but it is
+#: sourced from the oquants moves file, which only lists events that have
+#: already happened. A model trained on it scores every backtest happily and
+#: then has nothing to read on the morning it matters.
+#:
+#: The legacy S2 feature list contains it. The live-equivalent is ``or_implied``
+#: — the ORATS quoted implied move at the last pre-print close, which comes from
+#: ``daily_market`` and is available for upcoming events — and champion feature
+#: lists must use that instead. :func:`assert_live_available` enforces it at
+#: registry-load time, so this cannot be rediscovered in production.
+LIVE_UNAVAILABLE = ("implied_move",)
+
+
+class UnservableFeature(ValueError):
+    """A model asked for a feature that cannot be produced for a live event."""
+
+
+def assert_live_available(names: Iterable[str], *, label: str = "model") -> None:
+    """Raise unless every feature in ``names`` can be built for an upcoming event."""
+    offenders = sorted(set(names) & set(LIVE_UNAVAILABLE))
+    if offenders:
+        raise UnservableFeature(
+            f"{label}: feature(s) {offenders} exist only for realized events and "
+            f"would be NaN for every upcoming print. Use 'or_implied' for the "
+            f"quoted implied move."
+        )
+
+PANEL_FEATURE_COLUMNS: tuple[str, ...] = tuple(
+    c
+    for c in panel_mod.PANEL_COLUMNS
+    if c not in OUTCOME_COLUMNS and c not in _KEY_COLUMNS
+)
+
+
+# --------------------------------------------------------------------------
+# panel access
+# --------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    """Read the panel once per process, keyed on path + mtime.
+
+    The panel is 115k × 45 and every scoring call needs it. Keying the cache on
+    mtime means a rebuild in the same process is picked up rather than served
+    stale, which matters because the snapshot hash would otherwise disagree with
+    the features actually used.
+    """
+    frame = pd.read_parquet(path_str) if path_str.endswith(".parquet") else pd.read_csv(path_str)
+    frame["date"] = pd.to_datetime(frame["date"])
+    return frame.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def load_panel(path=None) -> pd.DataFrame:
+    """The Tier-3 causal panel."""
+    path = paths.PANEL if path is None else path
+    if not path.exists():
+        alt = path.with_suffix(".csv.gz")
+        if alt.exists():  # pragma: no cover - csv fallback environment
+            path = alt
+        else:
+            raise FileNotFoundError(
+                f"{path} missing — build Tier 3 with `python3 -m engine.data.rebuild "
+                "--table panel`"
+            )
+    return _panel_cached(str(path), path.stat().st_mtime)
+
+
+def panel_for_ticker(ticker: str, panel: pd.DataFrame | None = None) -> pd.DataFrame:
+    frame = load_panel() if panel is None else panel
+    return frame[frame["ticker"] == ticker]
+
+
+# --------------------------------------------------------------------------
+# shared context (loaded once, reused across a scoring run)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class FeatureContext:
+    """Everything the feature builders read, loaded once for a whole run.
+
+    Scoring a three-week calendar means a few hundred feature vectors. Reading
+    the panel and the relevant slice of ``daily_market`` per vector would
+    dominate the runtime and blow the guide's five-minute budget; loading them
+    once here is what keeps it in seconds.
+    """
+
+    panel: pd.DataFrame
+    daily: pd.DataFrame | None = None
+    calendar: object | None = None
+
+    @classmethod
+    def load(
+        cls,
+        tickers: Iterable[str] | None = None,
+        *,
+        years: Iterable[int] | None = None,
+        with_daily: bool = True,
+    ) -> "FeatureContext":
+        panel = load_panel()
+        daily = None
+        if with_daily:
+            # The union of what both consumers need, not just the panel's block:
+            # `add_orats_features` reads ORATS_FEATURES, while `daily_state_frame`
+            # additionally wants iv10, exern_iv10 and spot. Loading only the
+            # first set leaves the second to fail on a missing column, which is
+            # how it failed the first time.
+            columns = sorted(
+                {
+                    "ticker",
+                    "date",
+                    "mcap_usd",
+                    "mcap_log",
+                    "src_iv",
+                    *panel_mod.ORATS_FEATURES.keys(),
+                    *DAILY_STATE_FIELDS.keys(),
+                }
+            )
+            daily = store.read_table("daily_market", years=years, columns=columns)
+            if tickers is not None:
+                daily = daily[daily["ticker"].isin(set(tickers))]
+            daily = daily.sort_values(["ticker", "date"]).reset_index(drop=True)
+        return cls(panel=panel, daily=daily, calendar=trading_calendar())
+
+    #: Per-ticker slices, built once on first use. `daily_market` is ~8.9M rows
+    #: and the panel 115k; a boolean scan per lookup is ~50 ms on the former, and
+    #: scoring a three-week calendar makes hundreds of lookups. Grouping once
+    #: turns the whole run's lookup cost into a single pass.
+    _panel_index: dict | None = None
+    _daily_index: dict | None = None
+
+    def ticker_panel(self, ticker: str) -> pd.DataFrame:
+        if self._panel_index is None:
+            self._panel_index = {t: g for t, g in self.panel.groupby("ticker", sort=False)}
+        return self._panel_index.get(ticker, self.panel.iloc[0:0])
+
+    def ticker_daily(self, ticker: str) -> pd.DataFrame:
+        if self.daily is None:
+            raise RuntimeError("FeatureContext was loaded without daily_market")
+        if self._daily_index is None:
+            self._daily_index = {t: g for t, g in self.daily.groupby("ticker", sort=False)}
+        return self._daily_index.get(ticker, self.daily.iloc[0:0])
+
+
+# --------------------------------------------------------------------------
+# stamps
+# --------------------------------------------------------------------------
+
+#: Which as-of date each block of features carries. The panel reads market state
+#: at the last daily row strictly before the event date and event-history
+#: features from strictly-earlier events, so both are stamped with the last
+#: pre-print close: that is the latest moment any of them could have been known,
+#: and stamping conservatively (later) is what makes the audit meaningful.
+_MARKET_BLOCK = tuple(panel_mod.ORATS_FEATURES.values()) + (
+    "or_exern_z252",
+    "mcap_log",
+    "mcap_usd",
+    "spy_ret21",
+    "spy_ret63",
+    "spy_ret252",
+    "spy_dd252",
+    "spy_vol20",
+    "dist_high",
+    "dist_ema",
+    "ret5",
+    "ret10",
+    "ret20",
+)
+
+
+def _stamps(names: Iterable[str], as_of: pd.Timestamp) -> dict[str, pd.Timestamp]:
+    """Stamp every feature at the decision close.
+
+    Every block resolves to information available at or before the last
+    pre-print close: history features come from strictly-earlier events and
+    market features from the last daily row before the event date. Stamping them
+    all at the decision date is therefore the honest upper bound — and an upper
+    bound is the right direction for an audit to err in.
+    """
+    return {name: as_of for name in names}
+
+
+# --------------------------------------------------------------------------
+# historical path — the panel row IS the feature vector
+# --------------------------------------------------------------------------
+
+
+def panel_features(
+    ticker: str,
+    event_date,
+    *,
+    as_of=None,
+    session: str | None = None,
+    context: FeatureContext | None = None,
+) -> FeatureVector:
+    """Feature vector for an event the panel already carries.
+
+    This is the path the replay and every backtest use, so the numbers behind a
+    historical claim are literally the panel's own — no recomputation, nothing
+    to drift.
+    """
+    ctx = context or FeatureContext(panel=load_panel(), calendar=trading_calendar())
+    event_date = pd.Timestamp(event_date).normalize()
+    rows = ctx.ticker_panel(ticker)
+    hit = rows[rows["date"] == event_date]
+    if hit.empty:
+        raise KeyError(f"panel has no {ticker} event on {event_date.date()}")
+    row = hit.iloc[0]
+
+    if as_of is None:
+        cal = ctx.calendar or trading_calendar()
+        as_of = cal.last_pre_print(event_date, session) if session else event_date
+    as_of = pd.Timestamp(as_of).normalize()
+
+    values = {
+        name: (float(row[name]) if pd.notna(row[name]) else float("nan"))
+        for name in PANEL_FEATURE_COLUMNS
+        if name in row.index
+    }
+    vector = FeatureVector(
+        ticker=ticker,
+        as_of=as_of,
+        values=values,
+        feature_as_of=_stamps(values, as_of),
+        event_date=event_date,
+        session=session,
+        meta={
+            "source": "panel",
+            "k": int(row["k"]),
+            "mcap_asof": row.get("mcap_asof"),
+        },
+    )
+    assert_causal(vector)
+    return vector
+
+
+# --------------------------------------------------------------------------
+# live path — extend the panel's recursions one event forward
+# --------------------------------------------------------------------------
+
+
+def advance_history(last_row) -> dict[str, float]:
+    """Event-history features for the event *after* the one ``last_row`` describes.
+
+    Recomputing the block from the panel's rows is not an option and the reason
+    is worth stating, because it is the kind of thing that silently produces
+    plausible wrong numbers: the panel admits an event only once its ticker has
+    ``MIN_HISTORY`` prior events, so its rows are missing each ticker's first
+    four moves. A mean taken over the rows that survive is a mean over a
+    truncated history, and it is visibly wrong — on AAPL, 0.946 against the
+    panel's 1.040.
+
+    Every statistic in the block is an aggregate the panel already stores
+    alongside the count it was taken over, so each one can be stepped forward
+    exactly instead:
+
+    ``mean``  ``(mean_k · n + x_k) / (n + 1)``
+    ``ema``   ``a · x_k + (1 − a) · ema_k``, the same recursion ``_causal_ema``
+              runs, resumed rather than restarted.
+
+    The one statistic that cannot be advanced is an EMA the previous row did not
+    have — the span-8 and span-12 EMAs before a ticker reaches 8 and 12 events —
+    because resuming needs a value to resume from. Those come back as NaN, which
+    is what the panel itself carries at that point in a ticker's life, and
+    ``ema12r_abs`` falls back to the mean exactly as it does in the panel.
+    """
+    n = int(last_row["n_prior"])
+    move = float(last_row["move"])
+    abs_move = float(last_row["abs_move"])
+    implied = last_row["implied_move"]
+
+    out: dict[str, float] = {"n_prior": n + 1}
+    for mean_col, value in (
+        ("mean_prior_move", move),
+        ("mean_prior_abs_move", abs_move),
+    ):
+        prev = last_row[mean_col]
+        out[mean_col] = (
+            (float(prev) * n + value) / (n + 1) if pd.notna(prev) else float("nan")
+        )
+
+    # The implied-move mean is taken over *known* implied values only. The panel
+    # carries no count of those, so advancing it assumes every prior event had
+    # one — true for all 115,500 panel rows, and asserted by the equivalence
+    # check rather than trusted.
+    prev_implied = last_row["mean_prior_implied_move"]
+    if pd.notna(prev_implied) and pd.notna(implied):
+        out["mean_prior_implied_move"] = (float(prev_implied) * n + float(implied)) / (n + 1)
+    elif pd.notna(prev_implied):
+        out["mean_prior_implied_move"] = float(prev_implied)
+    else:
+        out["mean_prior_implied_move"] = float("nan")
+
+    for span in panel_mod.SPANS:
+        alpha = 2.0 / (span + 1.0)
+        for suffix, value in (("move", move), ("abs_move", abs_move)):
+            col = f"ema{span}_prior_{suffix}"
+            prev = last_row[col]
+            out[col] = (
+                alpha * value + (1.0 - alpha) * float(prev)
+                if pd.notna(prev)
+                else float("nan")
+            )
+    return out
+
+
+def live_features(
+    ticker: str,
+    event_date,
+    *,
+    as_of=None,
+    session: str | None = None,
+    context: FeatureContext | None = None,
+    quarter: str | None = None,
+) -> FeatureVector:
+    """Feature vector for an event with no panel row yet.
+
+    Built by appending a synthetic row for the target event to the ticker's
+    prior panel rows and running the panel's own three feature blocks over the
+    result. The synthetic row's realized ``move`` stays NaN — it is the unknown
+    we are scoring — and none of the blocks read it for the row they are
+    computing, which is the property that makes this safe and is asserted in the
+    test suite.
+    """
+    ctx = context or FeatureContext.load([ticker])
+    event_date = pd.Timestamp(event_date).normalize()
+    cal = ctx.calendar or trading_calendar()
+    if session is None:
+        session = _session_for(ticker, event_date)
+    if as_of is None:
+        as_of = cal.last_pre_print(event_date, session)
+    as_of = pd.Timestamp(as_of).normalize()
+    assert_decision_causal(as_of, event_date, session, calendar=cal)
+
+    prior = ctx.ticker_panel(ticker)
+    prior = prior[prior["date"] < event_date].sort_values("date")
+    if prior.empty:
+        raise KeyError(
+            f"{ticker}: no prior panel events before {event_date.date()} — the "
+            "history features cannot be computed"
+        )
+
+    history = advance_history(prior.iloc[-1])
+
+    synthetic = {
+        "ticker": ticker,
+        "k": history["n_prior"],
+        "date": event_date,
+        "quarter": quarter,
+        "move": np.nan,
+        "abs_move": np.nan,
+        "implied_move": np.nan,
+        "year": int(event_date.year),
+        **history,
+    }
+    frame = pd.concat(
+        [prior, pd.DataFrame([synthetic])], ignore_index=True
+    ).sort_values("date").reset_index(drop=True)
+
+    frame = panel_mod.add_regime_features(frame)
+    frame = panel_mod.add_runup_features(frame)
+    daily = ctx.ticker_daily(ticker) if ctx.daily is not None else None
+    frame = panel_mod.add_orats_features(frame, daily=daily)
+
+    row = frame[frame["date"] == event_date].iloc[-1]
+    values = {
+        name: (float(row[name]) if pd.notna(row[name]) else float("nan"))
+        for name in PANEL_FEATURE_COLUMNS
+        if name in row.index
+    }
+    # `implied_move` is the oquants quoted implied move for this event, which the
+    # panel carries but which does not exist for an unrealized one. `or_implied`
+    # (ORATS, from daily_market at the last pre-print close) is the live
+    # equivalent and is present — so the model layer's feature lists use it.
+    vector = FeatureVector(
+        ticker=ticker,
+        as_of=as_of,
+        values=values,
+        feature_as_of=_stamps(values, as_of),
+        event_date=event_date,
+        session=session,
+        meta={"source": "live", "k": history["n_prior"], "mcap_asof": row.get("mcap_asof")},
+    )
+    assert_causal(vector)
+    return vector
+
+
+def build_features(
+    ticker: str,
+    event_date,
+    *,
+    as_of=None,
+    session: str | None = None,
+    context: FeatureContext | None = None,
+    prefer: str = "auto",
+) -> FeatureVector:
+    """One entry point: panel row where one exists, live extension where not.
+
+    ``prefer`` forces a path (``"panel"`` / ``"live"``) for the equivalence
+    test, which needs to build both for the same historical event and compare.
+    """
+    if prefer not in ("auto", "panel", "live"):
+        raise ValueError(f"unknown prefer={prefer!r}")
+    if prefer == "live":
+        return live_features(
+            ticker, event_date, as_of=as_of, session=session, context=context
+        )
+    try:
+        return panel_features(
+            ticker, event_date, as_of=as_of, session=session, context=context
+        )
+    except KeyError:
+        if prefer == "panel":
+            raise
+        return live_features(
+            ticker, event_date, as_of=as_of, session=session, context=context
+        )
+
+
+# --------------------------------------------------------------------------
+# session lookup
+# --------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _session_index() -> dict[tuple[str, pd.Timestamp], str]:
+    events = store.read_table(
+        "earnings_events", columns=["ticker", "event_date", "session"]
+    )
+    events = events[events["session"].notna()]
+    return {
+        (t, pd.Timestamp(d).normalize()): str(s)
+        for t, d, s in zip(events["ticker"], events["event_date"], events["session"])
+    }
+
+
+def _session_for(ticker: str, event_date: pd.Timestamp) -> str:
+    """BMO/AMC from the Tier-2 calendar, defaulting to AMC.
+
+    AMC is the right default: it is the majority session, and it is the
+    *conservative* one for entry timing — it puts the decision at the event-date
+    close, which for a name that turns out to be BMO would be caught by
+    :func:`~engine.audit.assert_decision_causal` rather than silently traded.
+    """
+    from engine.calendar import AMC
+
+    return _session_index().get((ticker, pd.Timestamp(event_date).normalize()), AMC)
+
+
+def session_for(ticker: str, event_date) -> str:
+    """Public wrapper around the Tier-2 session lookup."""
+    return _session_for(ticker, pd.Timestamp(event_date).normalize())
+
+
+# --------------------------------------------------------------------------
+# daily market state at an arbitrary as-of date
+# --------------------------------------------------------------------------
+
+#: ``daily_market`` column → feature prefix. The panel reads market state at the
+#: last close before the *event*; a structure that enters two weeks earlier needs
+#: it at the *entry*, which is a different date and a different question.
+DAILY_STATE_FIELDS = {
+    "implied_move": "im",
+    "iv10": "iv10",
+    "iv30": "iv30",
+    "exern_iv10": "exern_iv10",
+    "exern_iv30": "exern_iv30",
+    "iee": "iee",
+    "skew": "skew",
+    "contango": "contango",
+    "fwd90_30": "fwd90_30",
+    "fexern90_30": "fexern90_30",
+    "rvol30": "rvol30",
+    "spot": "spot",
+    "mcap_log": "mcap_log",
+}
+
+#: Trailing differences that carry the run-up itself. The OPF finding is that
+#: the *change* in quoted implied move is what is predictable; a level alone
+#: cannot express "this name's implied move has climbed 4 points in a week".
+DAILY_STATE_LAGS = (1, 5, 10)
+
+#: Which fields get lag differences. Restricted to the volatility surface —
+#: differencing a market cap or a spot price produces a number dominated by the
+#: name's size rather than by its vol behaviour.
+LAGGED_FIELDS = ("implied_move", "iv10", "iv30", "exern_iv30")
+
+DAILY_STATE_COLUMNS: tuple[str, ...] = tuple(DAILY_STATE_FIELDS.values()) + tuple(
+    f"{DAILY_STATE_FIELDS[f]}_d{lag}" for f in LAGGED_FIELDS for lag in DAILY_STATE_LAGS
+)
+
+
+def daily_state_frame(
+    requests: pd.DataFrame,
+    *,
+    daily: pd.DataFrame | None = None,
+    as_of_column: str = "as_of",
+) -> pd.DataFrame:
+    """Market state at each ``(ticker, as_of)``, plus trailing changes.
+
+    ``requests`` needs ``ticker`` and ``as_of_column``. Every value is read at
+    the last ``daily_market`` row **on or before** ``as_of`` — on-or-before, not
+    strictly-before, because ``as_of`` is a close at which we would trade, and
+    that close's own quotes are known to us then.
+
+    Returns ``requests`` with the state columns joined on, in the same order.
+    The trailing differences count *rows*, not calendar days: a five-row lag is
+    five observations back in that ticker's own series, so a name with a gap in
+    coverage gets a wider window rather than a silently wrong difference.
+    """
+    if daily is None:
+        columns = ["ticker", "date", "src_iv", *DAILY_STATE_FIELDS.keys()]
+        years = sorted(pd.to_datetime(requests[as_of_column]).dt.year.unique().tolist())
+        daily = store.read_table(
+            "daily_market", years=range(min(years) - 1, max(years) + 1), columns=columns
+        )
+
+    out = requests.copy().reset_index(drop=True)
+    out["_row"] = np.arange(len(out))
+    for column in DAILY_STATE_COLUMNS:
+        out[column] = np.nan
+
+    wanted = set(out["ticker"].unique())
+    daily = daily[daily["ticker"].isin(wanted)]
+    # IV-bearing rows only: `daily_market` also carries rows contributed purely
+    # by the market-cap series, which have no surface on them. Letting one of
+    # those be the as-of answer returns an all-NaN state for a date that does
+    # have quotes.
+    if "src_iv" in daily.columns:
+        surface = daily[daily["src_iv"].notna()]
+    else:  # pragma: no cover - projected reads always carry src_iv
+        surface = daily
+    surface = surface.sort_values(["ticker", "date"])
+
+    by_ticker = {t: g for t, g in surface.groupby("ticker", sort=False)}
+    field_names = list(DAILY_STATE_FIELDS)
+
+    for ticker, group in out.groupby("ticker", sort=False):
+        series = by_ticker.get(ticker)
+        if series is None or series.empty:
+            continue
+        dates = series["date"].to_numpy()
+        values = {f: series[f].to_numpy(dtype=float) for f in field_names}
+        # side="right" - 1 == "the last row on or before as_of".
+        idx = np.searchsorted(dates, group[as_of_column].to_numpy(), side="right") - 1
+        rows = group["_row"].to_numpy()
+        ok = idx >= 0
+        for field_name in field_names:
+            column = DAILY_STATE_FIELDS[field_name]
+            out.loc[rows[ok], column] = values[field_name][idx[ok]]
+        for field_name in LAGGED_FIELDS:
+            column = DAILY_STATE_FIELDS[field_name]
+            arr = values[field_name]
+            for lag in DAILY_STATE_LAGS:
+                prior = idx - lag
+                good = ok & (prior >= 0)
+                out.loc[rows[good], f"{column}_d{lag}"] = (
+                    arr[idx[good]] - arr[prior[good]]
+                )
+
+    return out.drop(columns=["_row"])
+
+
+#: Panel features that depend only on the ticker's *prior events*, and are
+#: therefore known at any decision date before the print — including one two
+#: weeks early.
+#:
+#: The distinction matters and is easy to get wrong. The panel's market-state
+#: block (``or_iv30``, ``dist_high``, ``spy_vol20``, …) is read at the last
+#: pre-print close. For STR-THRU, which enters at that close, using it is
+#: correct. For STR-RUNUP, which enters fourteen trading days earlier, it would
+#: be fourteen days of future information — a leak that would flatter the
+#: entry-timing model precisely where the strategy's whole edge is claimed to
+#: be. Models scored at an early entry use this list plus
+#: :func:`daily_state_frame` at the entry date, never the panel's market block.
+EVENT_HISTORY_FEATURES: tuple[str, ...] = (
+    "n_prior",
+    "mean_prior_move",
+    "mean_prior_abs_move",
+    "mean_prior_implied_move",
+    "ema2_prior_move",
+    "ema4_prior_move",
+    "ema8_prior_move",
+    "ema12_prior_move",
+    "ema2_prior_abs_move",
+    "ema4_prior_abs_move",
+    "ema8_prior_abs_move",
+    "ema12_prior_abs_move",
+    "ema12r_abs",
+    "signed_streak",
+)
+
+
+def entry_feature_frame(
+    requests: pd.DataFrame,
+    *,
+    panel: pd.DataFrame | None = None,
+    daily: pd.DataFrame | None = None,
+    as_of_column: str = "entry_date",
+) -> pd.DataFrame:
+    """Leak-safe features for a decision taken at ``as_of_column``.
+
+    ``requests`` needs ``ticker``, ``event_date`` and the as-of column. Returns
+    it with :data:`EVENT_HISTORY_FEATURES`, :data:`DAILY_STATE_COLUMNS`, and
+    ``days_to_print`` joined on.
+
+    ``days_to_print`` is a feature, not bookkeeping: how far an observation sits
+    from the print is most of what determines how much the implied move still
+    has left to climb.
+    """
+    frame = requests.copy()
+    frame["event_date"] = pd.to_datetime(frame["event_date"])
+    frame[as_of_column] = pd.to_datetime(frame[as_of_column])
+
+    panel_frame = load_panel() if panel is None else panel
+    history_cols = [c for c in EVENT_HISTORY_FEATURES if c in panel_frame.columns]
+    frame = frame.merge(
+        panel_frame[["ticker", "date", *history_cols]].rename(columns={"date": "event_date"}),
+        on=["ticker", "event_date"],
+        how="left",
+    )
+    frame = daily_state_frame(frame, daily=daily, as_of_column=as_of_column)
+    frame["days_to_print"] = (
+        frame["event_date"] - frame[as_of_column]
+    ).dt.days.astype(float)
+    return frame
+
+
+def frame_features(
+    events: pd.DataFrame,
+    *,
+    context: FeatureContext | None = None,
+    columns: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Vectorized panel-path features for many events at once.
+
+    ``events`` needs ``ticker`` and ``event_date``. Used by the replay and the
+    model-training pipelines, where a per-event :class:`FeatureVector` would
+    build hundreds of thousands of objects to no purpose — the causality
+    property is identical (it is the same panel rows), and it is asserted here
+    in one vectorized pass.
+    """
+    ctx = context or FeatureContext(panel=load_panel(), calendar=trading_calendar())
+    wanted = list(columns) if columns is not None else list(PANEL_FEATURE_COLUMNS)
+    keep = ["ticker", "date"] + [c for c in wanted if c in ctx.panel.columns]
+    merged = events.merge(
+        ctx.panel[keep].rename(columns={"date": "event_date"}),
+        on=["ticker", "event_date"],
+        how="left",
+    )
+    return merged

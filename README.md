@@ -5,7 +5,7 @@ Implementation of `EARNINGS_VOL_PROGRAM_PLAN.md`. This repository holds the
 that decide whether a phase is done. Market data, research findings, reports and
 the prediction ledger deliberately live elsewhere — see `RECOVERY.md`.
 
-**Status: Phase 0 complete.** Phases 1–6 are specified in `guides/`.
+**Status: Phases 0 and 1 complete.** Phases 2–6 are specified in `guides/`.
 
 ---
 
@@ -16,7 +16,17 @@ pip install --break-system-packages pyarrow pytest coverage   # non-system deps
 cp .env.example .env                                  # fill from the password manager
 
 python3 -m engine.data.rebuild                        # Tier 1 → Tier 2 → Tier 3
-python3 checks/phase0_checks.py                       # all acceptance checks
+python3 checks/phase0_checks.py                       # data-foundation checks
+
+python3 -m engine.build_trades                        # replay the structures (~35 min)
+python3 -m engine.models.training.train_all           # train + register champions
+python3 checks/phase1_checks.py                       # scoring-engine checks
+```
+
+```python
+from engine.score import score, score_calendar
+score("AAPL", "STR-THRU", as_of="2026-01-28")   # one event
+score_calendar(horizon_days=21)                  # the upcoming board
 ```
 
 ---
@@ -29,6 +39,14 @@ engine/
   fills.py            FillModel: the worst→best execution interpolation
   calendar.py         earnings calendar + session-aware trading-day math
   structures.py       trade structures → leg lists → the one pricing path
+  audit.py            leak discipline, asserted on every scoring path
+  features.py         as-of feature vectors (panel path and live path)
+  replay.py           structures × real chains → priced trades
+  payoff.py           predicted quantity → exit value, empirically calibrated
+  analogs.py          matched historical trades + bootstrap intervals
+  score.py            the Phase 1 scoring API
+  calibrate.py        reliability curves, Brier scores, decile tables
+  models/             registry + champions (artifacts live in data/models/)
   data/
     fetch.py          Tier-1 wrapper: cache-first, throttled, quota-guarded
     throttle.py       per-source pacing, backoff, quota floor, Polygon lock
@@ -45,6 +63,10 @@ engine/
 checks/               acceptance tests, migration test, repo hygiene
 tests/                unit suite (pytest)
 ```
+
+`engine/SCORING.md` is the Phase 1 map: the two estimation layers, the leak
+boundary that separates them, and the three places the Phase 1 guide's
+assumptions did not survive contact with Phase 0's output.
 
 ### The three tiers
 
@@ -93,6 +115,9 @@ acceptance check.
 | `python3 checks/phase0_checks.py` | All 14 Phase-0 acceptance checks |
 | `python3 checks/phase0_migration.py` | The rebuilt panel reproduces the legacy master panel |
 | `python3 checks/phase0_audit.py` | Coverage + price-sanity battery → `reports/phase0_data_audit.md` |
+| `python3 checks/phase1_checks.py` | All 14 Phase-1 acceptance checks |
+| `python3 checks/phase1_replay.py` | The scorer reproduces the replayed trades' pricing to 1e-6, and the live feature path reproduces the panel path to 1e-9 |
+| `python3 checks/phase1_calibration.py` | Predicted win rates vs realized, out of sample |
 | `python3 checks/repo_hygiene.py --all` | No secret, data file, or oversize blob is tracked |
 
 Testing strategy — the two layers, what each is for, and the known thin spots —
