@@ -637,6 +637,39 @@ def check_fillmodel() -> str:
 # --------------------------------------------------------------------------
 
 
+@check("primary_keys", description="every Tier-2 table satisfies its declared primary key")
+def check_primary_keys() -> str:
+    """The store must obey its own contract.
+
+    ``option_chains`` carried 117,344 duplicate-key rows (0.76%) because entry
+    and calendar pulls overlap on a trade date and dedupe was per-source only.
+    They were harmless *then* — every duplicate pair held identical quotes — but
+    a vendor-corrected re-pull would have silently coexisted with the stale copy,
+    which is the case that matters. This is the regression guard.
+    """
+    from engine.data.schemas import SCHEMAS
+
+    summary = []
+    for name in sorted(SCHEMAS):
+        schema = SCHEMAS[name]
+        key = list(schema.primary_key)
+        total = dupes = 0
+        seen_across_years: set = set()
+        for year, chunk in store.iter_table(name, columns=key):
+            total += len(chunk)
+            dupes += int(chunk.duplicated(subset=key).sum())
+        if total == 0:
+            continue
+        _require(
+            dupes == 0,
+            f"{name}: {dupes:,} duplicate row(s) on primary key {tuple(key)} "
+            f"out of {total:,} — the table violates its own schema",
+        )
+        summary.append(f"{name} {total:,}")
+    _require(summary, "no Tier-2 tables were checked — is the store built?")
+    return "unique on: " + ", ".join(summary)
+
+
 @check("verdicts", description="published verdict numbers reproduce through the engine")
 def check_verdicts() -> str:
     from checks.phase0_verdicts import PUBLISHED, TOLERANCE, TRADE_SETS, reproduce
@@ -845,6 +878,7 @@ ORDER = [
     "poison",
     "structures",
     "fillmodel",
+    "primary_keys",
     "verdicts",
     "coverage_report",
     "hygiene_poison",

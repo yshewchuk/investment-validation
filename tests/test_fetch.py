@@ -284,3 +284,58 @@ class TestRedaction:
 
     def test_redaction_leaves_ordinary_parameters_alone(self):
         assert redact("https://x/y?ticker=AAPL&dte=14") == "https://x/y?ticker=AAPL&dte=14"
+
+
+class TestQuotaMonthBoundary:
+    """The quota resets on the 1st; a stale reading must not lock out the month."""
+
+    def _fetcher(self, root):
+        throttle = Throttle(
+            {"orats": SourceConfig("orats", 0.0, 0.0, 3, 10.0, 20_000, 3_000)},
+            sleep_fn=lambda s: None,
+        )
+        return Fetcher(root, throttle=throttle, adapters={"orats": FakeAdapter()})
+
+    def _write_quota_log(self, fetcher, ts, remaining):
+        import csv as _csv
+
+        path = fetcher.quota_log
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="") as fh:
+            writer = _csv.DictWriter(
+                fh, fieldnames=["ts", "source", "endpoint", "key", "status",
+                                "quota_remaining", "elapsed_s"]
+            )
+            writer.writeheader()
+            writer.writerow(
+                {"ts": ts, "source": "orats", "endpoint": "hist/strikes",
+                 "key": "k", "status": 200, "quota_remaining": remaining,
+                 "elapsed_s": 0.1}
+            )
+
+    def test_a_sub_reserve_reading_from_a_previous_month_is_ignored(self, tmp_path):
+        # September correctly stops at the reserve floor, leaving a sub-reserve
+        # reading on disk. On October 1 the guard runs BEFORE the first call
+        # that would refresh the header. Replaying September's number would
+        # block the whole month.
+        fetcher = self._fetcher(tmp_path / "fetch")
+        self._write_quota_log(fetcher, "2020-01-15T00:00:00+00:00", 100)
+        assert fetcher._last_known_quota("orats") is None
+        fetcher.fetch("orats", "hist/strikes", {"tradeDate": "x"})  # must not raise
+
+    def test_a_sub_reserve_reading_from_this_month_still_guards(self, tmp_path):
+        from datetime import datetime, timezone
+
+        fetcher = self._fetcher(tmp_path / "fetch")
+        now = datetime.now(timezone.utc).isoformat()
+        self._write_quota_log(fetcher, now, 100)
+        assert fetcher._last_known_quota("orats") == 100
+        with pytest.raises(QuotaExhausted):
+            fetcher.fetch("orats", "hist/strikes", {"tradeDate": "y"})
+
+    def test_an_ample_reading_from_this_month_is_used(self, tmp_path):
+        from datetime import datetime, timezone
+
+        fetcher = self._fetcher(tmp_path / "fetch")
+        self._write_quota_log(fetcher, datetime.now(timezone.utc).isoformat(), 15_000)
+        assert fetcher._last_known_quota("orats") == 15_000

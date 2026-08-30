@@ -317,3 +317,59 @@ class TestReturns:
         closed = price_structure(spec, exit_snapshot, MID, pin=opened.legs, closing=True)
         result = structure_return(opened, closed)
         assert result["ret"] == pytest.approx(1.0)  # doubled in value
+
+
+class TestSessionAwareExpiry:
+    """An expiry on the event date survives a BMO print but not an AMC one."""
+
+    @pytest.fixture
+    def rows(self):
+        obs = pd.Timestamp("2024-05-06")
+        out = []
+        for expiry, dte in ((pd.Timestamp("2024-05-08"), 2), (pd.Timestamp("2024-05-10"), 4)):
+            for right in ("C", "P"):
+                out.append({
+                    "ticker": "TEST", "obs_date": obs, "expiry": expiry, "dte": dte,
+                    "strike": 100.0, "right": right, "bid": 1.0, "ask": 1.2,
+                    "mid": 1.1, "iv": 0.4, "delta": 0.5, "spot": 100.0,
+                })
+        return pd.DataFrame(out)
+
+    def test_bmo_may_use_an_expiry_on_the_event_date(self, rows):
+        # The announcement lands before the open, so the expiry outlives it.
+        chosen = ExpirySelector(kind="first_post_event").select(
+            rows, pd.Timestamp("2024-05-08"), "BMO"
+        )
+        assert chosen == pd.Timestamp("2024-05-08")
+
+    def test_amc_must_skip_an_expiry_on_the_event_date(self, rows):
+        # The announcement lands after the close; that option is already dead.
+        chosen = ExpirySelector(kind="first_post_event").select(
+            rows, pd.Timestamp("2024-05-08"), "AMC"
+        )
+        assert chosen == pd.Timestamp("2024-05-10")
+
+    def test_an_unknown_session_keeps_the_permissive_legacy_rule(self, rows):
+        chosen = ExpirySelector(kind="first_post_event").select(
+            rows, pd.Timestamp("2024-05-08"), None
+        )
+        assert chosen == pd.Timestamp("2024-05-08")
+
+    def test_amc_with_nothing_left_raises_rather_than_booking_a_dead_option(self, rows):
+        only_same_day = rows[rows["expiry"] == pd.Timestamp("2024-05-08")]
+        with pytest.raises(StructureError, match="dies at the close"):
+            ExpirySelector(kind="first_post_event").select(
+                only_same_day, pd.Timestamp("2024-05-08"), "AMC"
+            )
+
+    def test_the_snapshot_threads_session_into_pricing(self, rows):
+        snapshot = ChainSnapshot(
+            ticker="TEST",
+            obs_date=pd.Timestamp("2024-05-06"),
+            event_date=pd.Timestamp("2024-05-08"),
+            rows=rows,
+            spot=100.0,
+            session="AMC",
+        )
+        priced = price_structure(straddle_through(), snapshot, MID)
+        assert priced.leg("call").expiry == pd.Timestamp("2024-05-10")

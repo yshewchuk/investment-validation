@@ -182,6 +182,15 @@ DAILY_MARKET = TableSchema(
         ("iee", "float64", True, "ieeEarnEffect"),
         ("mcap_usd", "float64", True, "Market cap in TRUE USD"),
         ("mcap_log", "float64", True, "log(mcap_usd)"),
+        ("mcap_asof", "datetime64[ns]", True, "Date the market cap was observed"),
+        (
+            "mcap_age_days",
+            "float64",
+            True,
+            "Calendar days between `date` and `mcap_asof`. The backward join "
+            "carries the last known cap forward, so a large value means a "
+            "stale figure (a name whose cores series stopped), not a fresh one",
+        ),
         ("src_spot", "string", True, ""),
         ("src_iv", "string", True, ""),
         ("src_mcap", "string", True, ""),

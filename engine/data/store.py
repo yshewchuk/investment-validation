@@ -92,8 +92,9 @@ def file_sha256(path: Path, chunk: int = 1 << 20) -> str:
 def _write_frame(df: pd.DataFrame, path: Path) -> None:
     tmp = path.with_name(path.name + ".tmp")
     if HAVE_PARQUET:
-        # `version="2.6"` + no compression metadata drift keeps repeated writes
-        # of identical data byte-identical, which the determinism check relies on.
+        # Repeated writes of identical data must be byte-identical (the
+        # determinism check relies on it), which pyarrow's defaults give us as
+        # long as nothing here injects a timestamp or a row-order dependency.
         df.to_parquet(tmp, engine="pyarrow", index=False, compression="snappy")
     else:
         with gzip.open(tmp, "wt", newline="") as fh:
@@ -184,9 +185,10 @@ class PartitionedWriter:
         frame = pd.concat(chunks, ignore_index=True)
         frame = frame.sort_values(list(self.schema.primary_key), kind="stable")
         if self.validate:
-            # Key uniqueness is asserted across the whole table at close, not
-            # per part file: the same key can legitimately arrive in two batches
-            # only if the source is duplicated, which `finalize` catches.
+            # Key uniqueness cannot be asserted per part file: the same key can
+            # legitimately arrive in two batches when two source payloads
+            # overlap. `finalize(dedupe=True)` resolves it across the whole
+            # table once every batch has been written.
             assert_schema(frame, self.name, check_keys=False)
         part = self._parts.get(year, 0)
         write_partition(frame, self.name, year, part)
@@ -196,6 +198,46 @@ class PartitionedWriter:
 
     def close(self) -> None:
         self.flush()
+
+    def finalize(self, *, dedupe: bool = True) -> int:
+        """Compact each year into one part file, optionally deduplicating.
+
+        A streamed build cannot enforce primary-key uniqueness as it goes: two
+        source payloads can legitimately carry the same contract (entry-date and
+        calendar pulls overlap on a trade date), and they may land in different
+        batches. Uniqueness is therefore a whole-table property, resolved here
+        in a second pass — one year at a time, so peak memory stays at one
+        partition rather than one table.
+
+        The first occurrence wins, and batches are fed in sorted source order,
+        so which row survives is a function of the source set rather than of
+        scheduling. Returns the number of rows removed.
+
+        This also compacts the numbered part files a streamed write leaves
+        behind, which makes later reads cheaper and the content hash stable
+        against changes in flush timing.
+        """
+        self.flush()
+        removed = 0
+        for year in sorted(self._touched):
+            part_dir = paths.curated_partition(self.name, year)
+            parts = _partition_files(part_dir)
+            if not parts:
+                continue
+            frame = pd.concat([_read_part(p, None) for p in parts], ignore_index=True)
+            before = len(frame)
+            if dedupe and self.schema.primary_key:
+                frame = frame.drop_duplicates(
+                    subset=list(self.schema.primary_key), keep="first"
+                )
+            frame = frame.sort_values(list(self.schema.primary_key), kind="stable")
+            removed += before - len(frame)
+            for stale in parts:
+                stale.unlink(missing_ok=True)
+            write_partition(frame, self.name, year, 0)
+            self._parts[year] = 1
+        self.rows_written -= removed
+        return removed
 
     def __enter__(self) -> "PartitionedWriter":
         return self

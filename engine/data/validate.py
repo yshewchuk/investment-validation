@@ -310,6 +310,11 @@ def validate_daily(
         if col in df.columns:
             flag(df[col].notna() & (df[col] < 0), f"{col}_non_negative")
 
+    # `keep="last"` here, but `keep="first"` for chains — deliberately.
+    # A repeated (ticker, date) in a daily series is a corrected restatement,
+    # so the newest wins. A repeated chain contract is the SAME observation
+    # arriving via two overlapping pulls, so first-in-sorted-source-order wins
+    # and the result does not depend on which pull ran last.
     dupes = df.duplicated(subset=["ticker", "date"], keep="last")
     report.add(CheckResult("primary_key_unique", not dupes.any(), len(df), int(dupes.sum())))
 

@@ -364,27 +364,47 @@ def load_orats_earnings(tickers: Iterable[str] | None = None) -> pd.DataFrame:
     Returns ``ticker, event_date, annc_tod, session, updated_at``.
     """
     root = paths.RAW_ORATS_EARNINGS
-    if not root.exists():
-        raise FileNotFoundError(f"{root} missing — ORATS earnings cache not present")
     wanted = set(tickers) if tickers is not None else None
-
     records: list[dict] = []
-    for path in sorted(root.glob("*.json.gz")):
-        ticker = path.name[: -len(".json.gz")]
+
+    def take(row: dict, fallback_ticker: str | None = None) -> None:
+        date = row.get("earnDate")
+        if not date:
+            return
+        ticker = row.get("ticker") or fallback_ticker
         if wanted is not None and ticker not in wanted:
-            continue
-        for row in _read_gz_json(path) or []:
-            date = row.get("earnDate")
-            if not date:
+            return
+        records.append(
+            {
+                "ticker": ticker,
+                "event_date": date,
+                "annc_tod": row.get("anncTod"),
+                "updated_at": row.get("updatedAt"),
+            }
+        )
+
+    if root.exists():
+        for path in sorted(root.glob("*.json.gz")):
+            ticker = path.name[: -len(".json.gz")]
+            if wanted is not None and ticker not in wanted:
                 continue
-            records.append(
-                {
-                    "ticker": row.get("ticker") or ticker,
-                    "event_date": date,
-                    "annc_tod": row.get("anncTod"),
-                    "updated_at": row.get("updatedAt"),
-                }
-            )
+            for row in _read_gz_json(path) or []:
+                take(row, ticker)
+
+    # Anything the Tier-1 fetch wrapper has pulled since. Dates move, so a
+    # refresh has to be able to add to the calendar — and on a restored machine
+    # the legacy tree above does not exist at all, making this the only source.
+    from engine.data.normalize.fetch_store import iter_orats_rows
+
+    for source in iter_orats_rows("hist/earnings"):
+        for row in source.rows:
+            take(row)
+
+    if not records and not root.exists():
+        raise FileNotFoundError(
+            f"no ORATS earnings data: neither {root} nor the Tier-1 fetch store "
+            "holds any hist/earnings response"
+        )
     if not records:
         return pd.DataFrame(
             columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]

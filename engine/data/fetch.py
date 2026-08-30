@@ -46,8 +46,10 @@ from engine.data.throttle import PolygonBusy, QuotaExhausted, Throttle, polygon_
 
 __all__ = [
     "RawRecord",
+    "CachedEntry",
     "Fetcher",
     "fetch",
+    "iter_cached",
     "cache_key",
     "canonical_params",
     "CredentialRotated",
@@ -115,6 +117,75 @@ def cache_key(
 # --------------------------------------------------------------------------
 # records
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CachedEntry:
+    """One entry already sitting in the Tier-1 store, discovered by scanning it.
+
+    The store is written to be readable without the code that wrote it: each
+    body has a ``.meta.json`` sidecar recording source, endpoint and params, so
+    a normalizer can find "every ``hist/strikes`` response ever fetched" without
+    any index, database, or naming convention to keep in sync.
+
+    The body is loaded lazily — a rebuild scanning tens of thousands of sidecars
+    should pay for the bodies it actually parses.
+    """
+
+    meta: dict[str, Any]
+    path: Path
+
+    @property
+    def key(self) -> str:
+        return str(self.meta.get("key", ""))
+
+    @property
+    def endpoint(self) -> str:
+        return str(self.meta.get("endpoint", ""))
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return dict(self.meta.get("params") or {})
+
+    @property
+    def source_id(self) -> str:
+        """Stable provenance string, the fetch-store analogue of a filename."""
+        return f"fetch:{self.meta.get('source', '?')}/{self.endpoint}/{self.key[:12]}"
+
+    def body(self) -> bytes:
+        with gzip.open(self.path, "rb") as fh:
+            return fh.read()
+
+    def json(self) -> Any:
+        return json.loads(self.body())
+
+
+def iter_cached(
+    source: str,
+    endpoint: str | None = None,
+    *,
+    root: Path | None = None,
+) -> list[CachedEntry]:
+    """Every cached entry for ``source``, optionally filtered to one endpoint.
+
+    Deterministically ordered by cache key, so a rebuild that reads the fetch
+    store produces the same output on every run.
+    """
+    base = (Path(root) if root is not None else paths.RAW_FETCH) / source
+    if not base.exists():
+        return []
+    out: list[CachedEntry] = []
+    for meta_path in sorted(base.glob("*/*.meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if endpoint is not None and meta.get("endpoint") != endpoint.strip("/"):
+            continue
+        body_path = meta_path.with_name(meta_path.name.replace(".meta.json", ".body.gz"))
+        if body_path.exists():
+            out.append(CachedEntry(meta=meta, path=body_path))
+    return sorted(out, key=lambda e: e.key)
 
 
 @dataclass(frozen=True)
@@ -226,9 +297,11 @@ class Fetcher:
                 body = fh.read()
             meta = json.loads(meta_path.read_text())
         except (OSError, ValueError, EOFError) as exc:
-            # A truncated entry (crash mid-write) is a miss, not a hard failure:
-            # the write is atomic-by-rename below, so this should be unreachable,
-            # but a corrupt cache must never be able to wedge a pull.
+            # Raise rather than treat it as a miss. A silent miss would
+            # re-spend quota to replace bytes that are already paid for, which
+            # is the one thing Tier 1 exists to prevent — so a corrupt entry is
+            # a loud, fixable error. Writes are atomic-by-rename below, so this
+            # should be unreachable in the first place.
             raise FetchError(
                 f"corrupt Tier-1 entry {body_path} ({exc}); "
                 "move it aside to re-fetch — do not edit it in place"
@@ -412,12 +485,19 @@ class Fetcher:
         self._quota_cache[source] = remaining
 
     def _last_known_quota(self, source: str) -> int | None:
-        """Most recent remaining-quota reading, from this process or the log.
+        """Most recent remaining-quota reading *from the current quota month*.
 
-        ORATS omits quota headers on CDN-cached responses, so the last *known*
-        value is the best available signal; the guard is deliberately advisory
-        rather than authoritative, and the quota ledger reconciliation in the
-        Phase 0 report is what catches drift.
+        ORATS omits quota headers on CDN-cached responses, so the last known
+        value is the best available signal; the guard is advisory, and the quota
+        ledger reconciliation in the Phase 0 report is what catches drift.
+
+        **Readings from a previous month are discarded.** The quota resets on
+        the 1st, and the guard runs *before* the network call that would refresh
+        the header. Without this, a pull that correctly stopped at the reserve
+        floor in September would leave a sub-reserve reading on disk and lock
+        out the very first call of October — permanently, unless
+        ``ORATS_ALLOW_RESERVE=1``, which disables the guard entirely. A stale
+        reading must fail open (unknown), not closed.
         """
         cached = getattr(self, "_quota_cache", {}).get(source)
         if cached is not None:
@@ -425,12 +505,16 @@ class Fetcher:
         path = self.quota_log
         if not path.exists():
             return None
+
+        current_month = datetime.now(timezone.utc).strftime("%Y-%m")
         last: int | None = None
         try:
             with open(path, newline="") as fh:
                 for row in csv.DictReader(fh):
                     if row.get("source") != source:
                         continue
+                    if not str(row.get("ts") or "").startswith(current_month):
+                        continue  # a previous quota month — tells us nothing
                     value = (row.get("quota_remaining") or "").strip()
                     if value:
                         try:

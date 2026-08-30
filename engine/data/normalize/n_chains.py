@@ -34,10 +34,18 @@ from engine.data.normalize.common import mask_sentinels, read_gz_json
 __all__ = [
     "CHAIN_FILE_RE",
     "parse_filename",
+    "rows_to_frame",
     "normalize_file",
+    "normalize_fetch_rows",
     "iter_chain_files",
+    "iter_fetch_sources",
     "iter_normalized",
+    "PRIMARY_KEY",
 ]
+
+#: Tier-2 primary key for a chain row. Duplicates across source files are
+#: resolved on this, keeping the first in sorted-source order.
+PRIMARY_KEY = ("ticker", "obs_date", "expiry", "strike", "right")
 
 #: ``2018-01-02_t14_b3.json.gz`` → date 2018-01-02, kind t14, batch 3.
 CHAIN_FILE_RE = re.compile(
@@ -47,6 +55,10 @@ CHAIN_FILE_RE = re.compile(
 #: Why the chain was pulled. ``eod`` covers the entry and exit pulls, which
 #: share a filename pattern and cannot be told apart after the fact.
 KIND_LABELS = {None: "eod", "t14": "t14", "c2": "c2"}
+
+#: Chains that arrived through the Tier-1 fetch wrapper rather than one of the
+#: pre-engine pulls. Kept distinct so coverage work can tell new data from old.
+FETCH_CHAIN_KIND = "fetch"
 
 
 def parse_filename(name: str) -> dict | None:
@@ -68,22 +80,23 @@ def iter_chain_files(root: Path | None = None) -> list[Path]:
     return sorted(p for p in root.glob("*.json.gz") if parse_filename(p.name))
 
 
-def normalize_file(path: Path) -> tuple[pd.DataFrame, dict]:
-    """Parse one chain file into Tier-2 rows (one per strike *and side*)."""
-    meta = parse_filename(path.name)
-    if meta is None:
-        return pd.DataFrame(), {"file": path.name, "reason": "unrecognized filename"}
+def rows_to_frame(
+    rows: list[dict], *, source_id: str, chain_kind: str
+) -> tuple[pd.DataFrame, dict]:
+    """Turn raw ORATS strike rows into Tier-2 rows (one per strike *and side*).
 
-    doc = read_gz_json(path)
-    rows = (doc or {}).get("rows") or []
+    The single row parser. Both pull generations — the legacy wrapped files and
+    the fetch store's verbatim responses — come through here, so a fix to a
+    price convention cannot apply to one and miss the other.
+    """
     if not rows:
-        return pd.DataFrame(), {"file": path.name, "rows_in": 0, "rows_out": 0}
+        return pd.DataFrame(), {"file": source_id, "rows_in": 0, "rows_out": 0}
 
     src = pd.DataFrame(rows)
     required = {"ticker", "tradeDate", "expirDate", "strike"}
     missing = required - set(src.columns)
     if missing:
-        return pd.DataFrame(), {"file": path.name, "reason": f"missing {sorted(missing)}"}
+        return pd.DataFrame(), {"file": source_id, "reason": f"missing {sorted(missing)}"}
 
     obs_date = pd.to_datetime(src["tradeDate"], errors="coerce")
     expiry = pd.to_datetime(src["expirDate"], errors="coerce")
@@ -123,7 +136,7 @@ def normalize_file(path: Path) -> tuple[pd.DataFrame, dict]:
             )
         )
     if not frames:
-        return pd.DataFrame(), {"file": path.name, "reason": "no price columns"}
+        return pd.DataFrame(), {"file": source_id, "reason": "no price columns"}
 
     out = pd.concat(frames, ignore_index=True)
     out = out.dropna(subset=["ticker", "obs_date", "expiry", "strike"])
@@ -132,18 +145,43 @@ def normalize_file(path: Path) -> tuple[pd.DataFrame, dict]:
     out["dte"] = (out["expiry"] - out["obs_date"]).dt.days
     out["year"] = out["obs_date"].dt.year
     out["src"] = "orats.hist.strikes"
-    out["src_file"] = path.name
-    out["chain_kind"] = meta["chain_kind"]
+    out["src_file"] = source_id
+    out["chain_kind"] = chain_kind
 
     report = {
-        "file": path.name,
-        "date": meta["date"],
-        "chain_kind": meta["chain_kind"],
+        "file": source_id,
+        "chain_kind": chain_kind,
         "rows_in": int(len(src)),
         "rows_out": int(len(out)),
         "tickers": int(out["ticker"].nunique()),
     }
     return out, report
+
+
+def normalize_file(path: Path) -> tuple[pd.DataFrame, dict]:
+    """Parse one legacy chain file (the wrapped `{entry_date, tickers, rows}` form)."""
+    meta = parse_filename(path.name)
+    if meta is None:
+        return pd.DataFrame(), {"file": path.name, "reason": "unrecognized filename"}
+    doc = read_gz_json(path)
+    rows = (doc or {}).get("rows") or []
+    frame, report = rows_to_frame(rows, source_id=path.name, chain_kind=meta["chain_kind"])
+    report["date"] = meta["date"]
+    return frame, report
+
+
+def normalize_fetch_rows(source) -> tuple[pd.DataFrame, dict]:
+    """Parse one fetch-store payload (the verbatim `{"data": [...]}` form)."""
+    return rows_to_frame(
+        source.rows, source_id=source.source_id, chain_kind=FETCH_CHAIN_KIND
+    )
+
+
+def iter_fetch_sources():
+    """Every `hist/strikes` response the Tier-1 fetch wrapper has cached."""
+    from engine.data.normalize.fetch_store import iter_orats_rows
+
+    return list(iter_orats_rows("hist/strikes"))
 
 
 def iter_normalized(

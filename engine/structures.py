@@ -80,6 +80,14 @@ class ExpirySelector:
         in the existing S2 trade set have an expiry at or before the earnings
         date, and pricing "the front expiry" without this filter silently books
         an option that expired before the event.
+
+        **Session matters here.** For a BMO print the announcement lands before
+        the open, so an expiry *on* the event date survives it. For an AMC print
+        the announcement lands after the close, so an expiry on the event date
+        died hours earlier — it must be excluded. Without the session the rule
+        has to assume the permissive case, and the invariant ends up resting on
+        a pull parameter (``dte=1,45`` happens to produce no dte-0 rows) rather
+        than on the selector.
     """
 
     kind: str
@@ -95,7 +103,12 @@ class ExpirySelector:
         if self.kind in ("nearest_dte", "first_dte_at_least") and self.target_dte is None:
             raise ValueError(f"{self.kind} requires target_dte")
 
-    def select(self, chain: pd.DataFrame, event_date: pd.Timestamp) -> pd.Timestamp:
+    def select(
+        self,
+        chain: pd.DataFrame,
+        event_date: pd.Timestamp,
+        session: str | None = None,
+    ) -> pd.Timestamp:
         exp = chain[["expiry", "dte"]].drop_duplicates().sort_values("expiry")
         if self.min_dte is not None:
             exp = exp[exp["dte"] >= self.min_dte]
@@ -105,11 +118,24 @@ class ExpirySelector:
             raise StructureError(f"no expiry survives {self}")
 
         if self.kind == "first_post_event":
-            post = exp[exp["expiry"] >= event_date]
-            if post.empty:
-                raise StructureError(
-                    f"no expiry on or after the event date {event_date.date()}"
-                )
+            # An AMC print happens after the close, so an expiry ON the event
+            # date is already dead when the news lands. Unknown session falls
+            # back to the inclusive rule, which is what the legacy trade sets
+            # used, so behaviour only tightens where the session is known.
+            if str(session).upper() == "AMC":
+                post = exp[exp["expiry"] > event_date]
+                if post.empty:
+                    raise StructureError(
+                        f"no expiry after the AMC event date {event_date.date()} "
+                        "(an expiry on the event date dies at the close, before "
+                        "the announcement)"
+                    )
+            else:
+                post = exp[exp["expiry"] >= event_date]
+                if post.empty:
+                    raise StructureError(
+                        f"no expiry on or after the event date {event_date.date()}"
+                    )
             return pd.Timestamp(post.iloc[0]["expiry"])
 
         if self.kind == "first_dte_at_least":
@@ -298,6 +324,10 @@ class ChainSnapshot:
 
     ``rows`` carries the Tier-2 ``option_chains`` columns: expiry, dte, strike,
     right, bid, ask, mid, iv, delta, spot.
+
+    ``session`` (BMO/AMC) is optional but load-bearing where present: it decides
+    whether an expiry on the event date survives the print. Leaving it unset
+    keeps the permissive legacy behaviour.
     """
 
     ticker: str
@@ -305,6 +335,7 @@ class ChainSnapshot:
     event_date: pd.Timestamp
     rows: pd.DataFrame
     spot: float | None = None
+    session: str | None = None
 
     REQUIRED = ("expiry", "dte", "strike", "right", "bid", "ask")
 
@@ -441,7 +472,7 @@ def price_structure(
                     f"{snapshot.obs_date.date()} chain"
                 )
         else:
-            expiry = spec.expiry.select(rows, snapshot.event_date)
+            expiry = spec.expiry.select(rows, snapshot.event_date, snapshot.session)
             at_expiry = rows[rows["expiry"] == expiry]
             strike = spec.strike.select(at_expiry, spot, resolved_strikes)
 

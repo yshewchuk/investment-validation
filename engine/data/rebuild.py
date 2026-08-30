@@ -160,37 +160,70 @@ def build_securities_table() -> dict:
 
 
 def build_chains_table(sample: int | None = None) -> dict:
+    """Build ``option_chains`` from BOTH pull generations.
+
+    Legacy wrapped files and Tier-1 fetch-store payloads are one stream here.
+    Reading only the legacy tree would make the fetch store write-only: the
+    Sep-1 pull would land 16,000 calls of chains that no rebuild could see, and
+    a restored machine (which has no legacy tree at all) would rebuild empty.
+    """
     _banner("option_chains")
-    files = n_chains.iter_chain_files()
+
+    # (label, parse callable) pairs, legacy first so its rows win the dedupe.
+    sources: list[tuple[str, object]] = [
+        (path.name, ("legacy", path)) for path in n_chains.iter_chain_files()
+    ]
+    fetch_sources = n_chains.iter_fetch_sources()
+    sources += [(s.source_id, ("fetch", s)) for s in fetch_sources]
     if sample:
-        files = files[:sample]
-    progress = _Progress("chains", len(files))
+        sources = sources[:sample]
+    print(
+        f"  sources: {len(sources):,} "
+        f"({len(sources) - len(fetch_sources):,} legacy file(s), "
+        f"{len(fetch_sources):,} fetch-store payload(s))",
+        flush=True,
+    )
+
+    progress = _Progress("chains", len(sources))
     batch = validate.ValidationReport(table="option_chains")
     kinds: dict[str, int] = {}
     unreadable: list[str] = []
 
     with store.PartitionedWriter("option_chains") as writer:
-        for i, path in enumerate(files, 1):
+        for i, (label, (kind, handle)) in enumerate(sources, 1):
             try:
-                frame, report = n_chains.normalize_file(path)
+                if kind == "legacy":
+                    frame, report = n_chains.normalize_file(handle)
+                else:
+                    frame, report = n_chains.normalize_fetch_rows(handle)
             except (ValueError, OSError, EOFError) as exc:
-                unreadable.append(path.name)
-                validate.quarantine(path.name, f"unreadable raw file: {type(exc).__name__}: {exc}")
+                unreadable.append(label)
+                validate.quarantine(label, f"unreadable raw payload: {type(exc).__name__}: {exc}")
                 progress.tick(i)
                 continue
             if not frame.empty:
-                clean, vreport = validate.validate_chains(frame, source_file=path.name)
+                clean, vreport = validate.validate_chains(frame, source_file=label)
                 batch.merge(vreport)
                 kinds[report["chain_kind"]] = kinds.get(report["chain_kind"], 0) + len(clean)
                 writer.add(clean)
             progress.tick(i, f"rows={writer.rows_written:,}")
-    progress.done(len(files), f"rows={writer.rows_written:,}")
+        progress.done(len(sources), f"rows={writer.rows_written:,}")
+
+        # Entry-date and calendar (`_c2_`) pulls overlap on the same trade date,
+        # so the same contract arrives from two payloads. Per-source dedupe
+        # cannot see that; this pass can.
+        print("  deduplicating on the primary key …", flush=True)
+        removed = writer.finalize(dedupe=True)
+        print(f"  removed {removed:,} duplicate-key row(s)", flush=True)
 
     stats = store.table_stats("option_chains")
     print(f"  wrote {stats.rows:,} rows / {len(stats.years)} partitions", flush=True)
     return {
-        "files": len(files),
+        "sources": len(sources),
+        "legacy_files": len(sources) - len(fetch_sources),
+        "fetch_payloads": len(fetch_sources),
         "unreadable": len(unreadable),
+        "duplicates_removed": removed,
         "rows": stats.rows,
         "rows_by_kind": kinds,
         "validation": batch.summary(),

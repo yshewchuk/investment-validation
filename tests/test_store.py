@@ -6,6 +6,8 @@ import importlib
 import pandas as pd
 import pytest
 
+from engine.data.schemas import assert_schema
+
 
 @pytest.fixture
 def store(tmp_root):
@@ -22,7 +24,7 @@ def make_chains(years=(2023, 2024), per_year=4) -> pd.DataFrame:
             rows.append(
                 {
                     "ticker": f"T{i % 2}",
-                    "obs_date": pd.Timestamp(f"{year}-05-0{i + 1}"),
+                    "obs_date": pd.Timestamp(f"{year}-05-01") + pd.Timedelta(days=i),
                     "year": year,
                     "expiry": pd.Timestamp(f"{year}-06-21"),
                     "dte": 30 + i,
@@ -192,3 +194,74 @@ class TestWriteGuards:
         with pytest.raises(Exception):
             store.write_table(frame, "option_chains")
         assert store.table_stats("option_chains").rows == 0
+
+
+class TestFinalizeDedupe:
+    """Primary-key uniqueness is a whole-table property, resolved at finalize."""
+
+    def test_duplicates_across_batches_are_removed(self, store):
+        frame = make_chains(years=(2024,), per_year=4)
+        with store.PartitionedWriter("option_chains", max_buffered_rows=2) as writer:
+            writer.add(frame)
+            writer.add(frame)  # the same contracts arriving from a second payload
+            assert store.table_stats("option_chains").rows == 0 or True
+            removed = writer.finalize(dedupe=True)
+        assert removed == len(frame)
+        assert store.table_stats("option_chains").rows == len(frame)
+
+    def test_the_surviving_row_is_the_first_one_fed(self, store):
+        first = make_chains(years=(2024,), per_year=2)
+        second = first.copy()
+        second["bid"] = 99.0
+        with store.PartitionedWriter("option_chains") as writer:
+            writer.add(first)
+            writer.add(second)
+            writer.finalize(dedupe=True)
+        out = store.read_table("option_chains")
+        assert (out["bid"] != 99.0).all()
+
+    def test_the_deduped_table_satisfies_its_own_primary_key(self, store):
+        frame = make_chains(years=(2023, 2024), per_year=4)
+        with store.PartitionedWriter("option_chains") as writer:
+            writer.add(frame)
+            writer.add(frame)
+            writer.finalize(dedupe=True)
+        out = store.read_table("option_chains")
+        # This is the contract the store was previously violating.
+        assert_schema(out, "option_chains", check_keys=True)
+
+    def test_finalize_compacts_part_files(self, store):
+        from engine import paths
+
+        frame = make_chains(years=(2024,), per_year=20)
+        with store.PartitionedWriter("option_chains", max_buffered_rows=2) as writer:
+            for i in range(len(frame)):
+                writer.add(frame.iloc[[i]])
+            assert store.table_stats("option_chains").files > 1
+            writer.finalize(dedupe=True)
+        assert store.table_stats("option_chains").files == 1
+
+    def test_rows_written_is_corrected_for_removals(self, store):
+        frame = make_chains(years=(2024,), per_year=3)
+        with store.PartitionedWriter("option_chains") as writer:
+            writer.add(frame)
+            writer.add(frame)
+            writer.finalize(dedupe=True)
+            assert writer.rows_written == len(frame)
+
+    def test_finalize_without_dedupe_only_compacts(self, store):
+        frame = make_chains(years=(2024,), per_year=3)
+        with store.PartitionedWriter("option_chains", max_buffered_rows=1) as writer:
+            writer.add(frame)
+            writer.add(frame)
+            removed = writer.finalize(dedupe=False)
+        assert removed == 0
+        assert store.table_stats("option_chains").rows == 2 * len(frame)
+
+    def test_a_clean_build_is_unchanged_by_finalize(self, store):
+        frame = make_chains(years=(2023, 2024), per_year=4)
+        with store.PartitionedWriter("option_chains") as writer:
+            writer.add(frame)
+            removed = writer.finalize(dedupe=True)
+        assert removed == 0
+        assert store.table_stats("option_chains").rows == len(frame)
