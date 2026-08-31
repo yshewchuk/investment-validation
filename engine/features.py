@@ -49,7 +49,9 @@ from engine.data.features import panel as panel_mod
 
 __all__ = [
     "ABSOLUTE_FEATURES",
+    "QUOTE_INDICATORS",
     "add_absolute_features",
+    "add_quote_indicators",
     "PANEL_FEATURE_COLUMNS",
     "OUTCOME_COLUMNS",
     "load_panel",
@@ -129,6 +131,39 @@ ABSOLUTE_FEATURES: dict[str, str] = {
 }
 
 
+#: Availability indicators: one column saying whether a quoted value exists at
+#: all, beside the value itself.
+#:
+#: ``or_implied`` is 0 rather than null on 25.5% of ``daily_market`` rows, and
+#: that zero is overwhelmingly a LIQUIDITY fact — the no-quote rate runs 31.5%
+#: in the smallest market-cap decile against 1.6% in the largest. So the column
+#: currently carries two different facts on one axis: a quoted implied move, and
+#: "this name had no usable option quote". The indicator separates them, which
+#: is what lets the value be nulled later without losing the liquidity signal
+#: the models are presently extracting from the magic number.
+#:
+#: Measured effect on accuracy: none (EXP-111, +0.0032pp, 8/14 years, p=0.50).
+#: Any model that can split on a value can already tell 0 from 6, so this makes
+#: explicit what was implicit rather than adding information.
+QUOTE_INDICATORS: dict[str, str] = {
+    "has_implied_quote": "or_implied",
+}
+
+
+def add_quote_indicators(frame: pd.DataFrame) -> pd.DataFrame:
+    """Attach the ``QUOTE_INDICATORS`` wherever their source column exists.
+
+    1.0 where a real quote is present, 0.0 where the source is zero or null —
+    so the indicator survives the value later becoming a proper null.
+    """
+    for name, source in QUOTE_INDICATORS.items():
+        if source not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[source], errors="coerce")
+        frame[name] = (values > 0).astype(float)
+    return frame
+
+
 def add_absolute_features(frame: pd.DataFrame) -> pd.DataFrame:
     """Attach the ``ABSOLUTE_FEATURES`` wherever their source column exists.
 
@@ -163,6 +198,7 @@ def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
     frame = pd.read_parquet(path_str) if path_str.endswith(".parquet") else pd.read_csv(path_str)
     frame["date"] = pd.to_datetime(frame["date"])
     frame = add_absolute_features(frame)
+    frame = add_quote_indicators(frame)
     return frame.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
@@ -268,6 +304,7 @@ class FeatureContext:
 #: pre-print close: that is the latest moment any of them could have been known,
 #: and stamping conservatively (later) is what makes the audit meaningful.
 _MARKET_BLOCK = tuple(panel_mod.ORATS_FEATURES.values()) + (
+    "has_implied_quote",
     "abs_dist_high",
     "abs_dist_ema",
     "or_exern_z252",
@@ -516,11 +553,12 @@ def live_features(
     # them and the live path would not, which is precisely the training/serving
     # skew `checks/phase1_checks.py::feature_equivalence` exists to catch.
     frame = add_absolute_features(frame)
+    frame = add_quote_indicators(frame)
 
     row = frame[frame["date"] == event_date].iloc[-1]
     values = {
         name: (float(row[name]) if pd.notna(row[name]) else float("nan"))
-        for name in tuple(PANEL_FEATURE_COLUMNS) + tuple(ABSOLUTE_FEATURES)
+        for name in tuple(PANEL_FEATURE_COLUMNS) + tuple(ABSOLUTE_FEATURES) + tuple(QUOTE_INDICATORS)
         if name in row.index
     }
     # True observation dates, not the decision-close upper bound:
@@ -789,6 +827,7 @@ FEATURE_NOTES: dict[str, str] = {
     "mcap_log": "log(market cap). Era-normalized in Tier 2 — the ORATS unit switches are fixed there, once.",
     "dist_high": "Distance from the 52-week high, in %.",
     "dist_ema": "Distance from the trailing EMA of price, in %.",
+    "has_implied_quote": "1 when the market actually quoted an implied move, 0 when it did not — a liquidity fact, not a forecast (EXP-111).",
     "abs_dist_high": "How FAR from the 52-week high, ignoring direction (EXP-109).",
     "abs_dist_ema": "How FAR from the trailing EMA, ignoring direction (EXP-109).",
     "spy_vol20": "20-day realized volatility of the S&P — the market regime the trade sits in.",

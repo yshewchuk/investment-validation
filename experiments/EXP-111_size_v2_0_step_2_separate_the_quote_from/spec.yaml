@@ -1,0 +1,72 @@
+id: EXP-111
+title: "Size v2.0 step 2: separate the quote from its availability"
+hypothesis: >
+  `or_implied` encodes "no quote" as 0, and that zero is overwhelmingly a
+  LIQUIDITY fact: the no-quote rate runs 31.5% in the smallest market-cap decile
+  against 1.6% in the largest, and those events realize a mean |move| of 6.98%
+  against 5.80%. The column therefore carries two different facts on one numeric
+  axis. Adding `has_implied_quote` beside the value separates them.
+  Registered expectation, stated before the run because EXP-110 already
+  measured it: the effect on ACCURACY is approximately nil. Any model that can
+  split on a value can already distinguish 0 from 6. This step is about making
+  an implicit signal explicit, and about not losing it when the value is later
+  nulled on correctness grounds.
+
+kind: model_feature_set
+role: size
+strategy: "*"
+incumbent: size_v1_4
+target: abs_move
+programme: size-v2.0
+step: 2
+prior: EXP-110
+
+price_source: >
+  None. A feature-definition change measured on the Tier-3 panel.
+
+primary_spec:
+  arm: value_plus_indicator
+  features_added: [has_implied_quote]
+  features_removed: []
+
+# The alternatives are evaluated in the same run, on the same rows, because the
+# question "should this be two models" was asked directly and deserves an answer
+# in the record rather than a recollection.
+grid:
+  arms:
+    - arm: indicator_replaces_value
+      features_added: [has_implied_quote]
+      features_removed: [or_implied]
+    - arm: two_models_split_by_quote
+      note: >
+        Separate models for the quoted and unquoted populations, each with the
+        features available to it. Tests whether the two populations differ in
+        STRUCTURE or only in level.
+
+evaluation:
+  what: walk-forward OOS accuracy, all arms on one common row set
+  method: experiments.size_lab.run_bench
+  first_test_year: 2013
+  same_rows: true
+  criteria:
+    min_share_years_improved: 0.7
+    max_wilcoxon_p: 0.05
+    no_single_year_dependence: "mean gain must survive dropping the best year"
+  note: >
+    The primary is expected to fail these criteria. It is registered anyway,
+    because "we adopted it knowing it was a null, for these reasons" is a
+    different and more defensible record than a threshold quietly relaxed.
+
+promotion_target:
+  rule: >
+    No registry change from this step alone. v2.0 promotes as a whole once its
+    steps are done, through the gate-invariance check.
+  registry: null
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-08-31T20:27:30+00:00"

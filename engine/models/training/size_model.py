@@ -53,7 +53,17 @@ TARGET = "abs_move"
 #: all. Adding the magnitudes improved walk-forward OOS MAE in 11 of 14 years
 #: (Wilcoxon p=0.0134), and the gain survived dropping the best year. It is a
 #: 0.36% relative improvement: real, consistent, and small.
+#:
+#: ``has_implied_quote`` came from EXP-111 and is adopted as a KNOWN NULL on
+#: accuracy (+0.0052pp, 9/14 years, p=0.27). ``or_implied`` encodes "no quote"
+#: as 0, and that zero is a liquidity fact — 31.5% of the smallest market-cap
+#: decile against 1.6% of the largest — so the column carries a price and an
+#: availability flag on one axis. The indicator separates them, and it is what
+#: preserves the liquidity signal when the value is later nulled for being
+#: wrong. Two separate models for the quoted and unquoted populations was tested
+#: in the same run and is reliably WORSE (3/14 years, p=0.03).
 FEATURES = (
+    "has_implied_quote",
     "mean_prior_abs_move",
     "abs_dist_ema",
     "abs_dist_high",

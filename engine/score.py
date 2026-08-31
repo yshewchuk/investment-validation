@@ -52,6 +52,7 @@ from engine.features import (
     EVENT_HISTORY_FEATURES,
     FeatureContext,
     add_absolute_features,
+    add_quote_indicators,
     daily_state_frame,
     entry_feature_frame,
     live_features,
@@ -123,7 +124,7 @@ _PANEL_MARKET_BLOCK = (
     "or_iv30", "or_iee", "or_fwd90_30", "or_fexern90_30", "or_exern_z252",
     "mcap_log", "mcap_usd", "spy_ret21", "spy_ret63", "spy_ret252",
     "spy_dd252", "spy_vol20", "dist_high", "dist_ema", "ret5", "ret10", "ret20",
-    "abs_dist_high", "abs_dist_ema",
+    "abs_dist_high", "abs_dist_ema", "has_implied_quote",
 )
 
 
@@ -727,6 +728,7 @@ class Scorer:
         # a feature the model lists but no path supplies is a silent blackout:
         # promoting size_v1_4 without this made every row MISSING_FEATURES.
         built = add_absolute_features(built)
+        built = add_quote_indicators(built)
 
         n_prior = built.get("n_prior")
         if n_prior is not None and pd.notna(n_prior.iloc[0]) and n_prior.iloc[0] < THIN_HISTORY_EVENTS:
