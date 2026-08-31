@@ -59,7 +59,12 @@ INCLUDE = (
     # so they can never reach the PUBLIC repo — and the reason a reported chart
     # can be spot-checked at all, so they must reach this one.
     ("experiments", "**/results/transactions_*.csv"),
-    ("experiments", "**/figures/*.png"),
+    # `**` after figures/, not just before it: from EXP-109 on, an experiment
+    # with several arms writes figures/<arm>/*.png, and the shallower pattern
+    # silently missed every one of them. The reports reached the mirror with
+    # their images broken — which is the failure mode this mirror exists to
+    # prevent, since it is meant to be the copy that can be trusted.
+    ("experiments", "**/figures/**/*.png"),
     ("earnings_predictions", "**/*.py"),
     ("earnings_predictions", "**/*.md"),
     ("bt", "**/*.py"),
