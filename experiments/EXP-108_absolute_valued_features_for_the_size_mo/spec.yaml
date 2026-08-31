@@ -1,0 +1,110 @@
+id: EXP-108
+title: "Absolute-valued features for the size model"
+hypothesis: >
+  The size model's blend is half linear (OLS + MLP(64,32)). A signed input whose
+  relationship to a MAGNITUDE target is V-shaped carries real information that a
+  linear fit cannot represent, and `mean_prior_move` is exactly that: against
+  `abs_move` its decile means run 8.35 -> 4.60 -> 7.82, a 3.75pp span, on a
+  Spearman of +0.013 and a Pearson of +0.017. The absolute counterpart
+  `mean_prior_abs_move` already exists in the panel and is NOT in this model's
+  feature list. Adding it should improve walk-forward OOS accuracy.
+
+kind: model_feature_set
+role: size
+strategy: "*"
+incumbent: size_v1_3
+target: abs_move
+price_source: >
+  None. This experiment touches no prices: it is a feature-set change evaluated
+  on the Tier-3 panel. Stage 2 below is where ORATS-priced trades re-enter.
+
+# The ONE configuration whose OOS result is the headline. Chosen before any arm
+# was run, on the mechanism rather than on a scan: mean_prior_abs_move is the
+# direct absolute counterpart of the most V-shaped input, and it needs no new
+# derivation, so a win is attributable to the absolute VALUE and not to a new
+# column nobody has audited.
+primary_spec:
+  arm: add_mean_prior_abs_move
+  features_added: [mean_prior_abs_move]
+  features_removed: []
+
+# Secondary. Every cell is evaluated and gets its own ledger row; none is the
+# headline, and none may be promoted on its own without a fresh registration.
+grid:
+  arms:
+    - arm: add_abs_dist_ema
+      features_added: [abs_dist_ema]
+      features_removed: []
+    - arm: add_abs_dist_high
+      features_added: [abs_dist_high]
+      features_removed: []
+    - arm: add_all_three
+      features_added: [mean_prior_abs_move, abs_dist_ema, abs_dist_high]
+      features_removed: []
+    - arm: replace_signed_with_absolute
+      features_added: [mean_prior_abs_move]
+      features_removed: [mean_prior_move]
+
+# The falsification test, pre-registered so the MECHANISM is testable rather
+# than a story told afterwards. The hypothesis says the gain comes from the
+# LINEAR half being blind to a V. A gradient-boosted tree splits on thresholds
+# and represents a V natively, so the same treatment on opf_implied_t1_gbm
+# should be approximately neutral. If the GBM improves as much as the blend,
+# the mechanism claim is WRONG — the gain is extra information, not linearity —
+# and the write-up must say so instead of keeping the tidier story.
+control:
+  role: implied_t1
+  incumbent: opf_implied_t1_gbm
+  arm: add_mean_prior_abs_move
+  note: >
+    opf_implied_t1_gbm already carries both the signed and absolute prior-move
+    families, so the control arm adds a duplicate of an input it has. Expected
+    delta: none. A material gain here falsifies the linearity mechanism.
+  expected: neutral
+
+derived_features:
+  # Defined here so the definition is pre-registered too, not chosen at run time.
+  abs_dist_ema: "abs(dist_ema)"
+  abs_dist_high: "abs(dist_high)"
+
+evaluation:
+  stage_1:
+    what: walk-forward OOS accuracy of the driver model itself
+    method: engine.models.training.common.walk_forward
+    first_test_year: 2013
+    metrics: [r, mae, rmse, bias, decile_spread, n]
+    same_rows: >
+      Every arm is scored on the INTERSECTION of rows where all of its own and
+      the incumbent's features are present. walk_forward drops incomplete rows,
+      so an arm with an extra feature would otherwise be judged on a different
+      and possibly easier sample than the incumbent.
+  stage_2:
+    what: does the downstream strategy actually get better
+    gate: runs only if stage 1 clears the thresholds below
+    method: engine.evaluate on STR-THRU trades rescored with the candidate
+    metrics: [oos_mean_mid, sharpe_trade, mc_p_loss_5pct]
+
+# Pre-registered so a small-but-real improvement cannot be promoted as if it
+# mattered. The incumbent is r=0.4565, MAE=3.9187pp on n=96,442; at that n a
+# trivial delta is statistically detectable and economically meaningless.
+promotion_target:
+  stage_1_min_r_gain: 0.005
+  stage_1_max_mae_regression: 0.0
+  stage_1_min_mae_gain_pp: 0.02
+  stage_2_rule: >
+    OOS mean at mid fills and per-trade Sharpe must not worsen, and MC P(loss)
+    at 5% sizing must not worsen, per the champion/challenger protocol in
+    EARNINGS_VOL_PROGRAM_PLAN.md section P2.3.
+  decision: >
+    A win on stage 1 alone is NOT a promotion. It is a candidate that earns a
+    stage-2 run; only both stages clear promotes, with a promotion report
+    diffing champion against challenger.
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+equity_mode: cashflow
+has_short_leg: false
+preregistered_at: "2026-08-31T14:43:42+00:00"
