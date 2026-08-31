@@ -32,6 +32,7 @@ import fnmatch
 import subprocess
 import sys
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +95,16 @@ EXCLUDE_PARTS = ("__pycache__", ".git", ".venv", "node_modules", ".pytest_cache"
 #: the payload (627 files of it five near-identical copies of the same board)
 #: against ~13 MB of everything irreplaceable. ``reports/phase3_checks`` is the
 #: acceptance suite's working directory, regenerated on every run.
+#: Generated diagnostic runs inside an experiment folder, matched as globs.
+#: `eval_*` is the convention for a run that is NOT the experiment's evidence —
+#: EXP-109's two counterfactual selector evaluations are 26 MB of figures and
+#: transaction logs for a system that does not exist, and they regenerate from
+#: `run_stage2.py`. The experiment's own REPORT.md, spec and results still ship.
+EXCLUDE_GLOBS = (
+    "experiments/*/eval_*/*",
+    "experiments/*/eval_*/**/*",
+)
+
 EXCLUDE_DIRS = (
     "dashboard/earnings",
     "dashboard/published",
@@ -129,6 +140,8 @@ def collect() -> tuple[list[Path], list[str]]:
         except ValueError:
             relative = path.as_posix()
         if any(relative.startswith(f"{d}/") for d in EXCLUDE_DIRS):
+            return
+        if any(fnmatch(relative, pattern) for pattern in EXCLUDE_GLOBS):
             return
         cap = _size_cap(path)
         if path.stat().st_size > cap:

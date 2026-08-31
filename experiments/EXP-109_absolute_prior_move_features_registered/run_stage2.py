@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
-"""EXP-109 stage 2 — the promoted model through the full evaluation suite.
+"""EXP-109 stage 2 — what the promoted model does, and does not, change.
 
     python3 experiments/EXP-109_absolute_prior_move_features_registered/run_stage2.py
 
-Stage 1 answered "does it predict |move| better". This answers the question the
-promotion protocol is actually written on: **what happens to the backtest, the
-Monte Carlo and the stress battery** when the board is ranked by the new model
-instead of the old one.
+**Part A is the real stage 2.** In this system the size model does not select
+trades: the registered GATE does, and the gate reads panel/daily features and
+the premium — never a prediction. So the question "does promoting the size model
+change the backtest" has an exact answer, and Part A proves it by re-running
+EXP-105's own registered-gate evaluation under the current champion and checking
+it reproduces EXP-105's published numbers to the digit. Same trades, same P&L,
+same Monte Carlo.
 
-A size-model change cannot alter which trades EXIST or what they returned — the
-trades are priced from real ORATS chains and their P&L is fixed. What it alters
-is SELECTION: the ordering a reader acts on. So the model is wrapped as a
-walk-forward :class:`~engine.evaluate.Gate` that keeps the top quintile by
-predicted expected PnL, and the same suite EXP-105 runs is run twice — once
-selecting with size_v1_3, once with size_v1_4. Two standard reports, same
-format, so every line is comparable.
+**Part B is an explicitly counterfactual side-question**, kept because it is
+worth knowing and clearly labelled because it is not the system: *what if
+selection were driven by predicted expected PnL instead of by the gate?* The
+model is wrapped as a walk-forward Gate keeping the top quintile by predicted
+expected PnL, and the suite is run once per size model.
+
+Part B's reports must never be read as evaluations of STR-THRU as it is actually
+traded. An earlier version of this file ran only Part B, and its two arms were
+compared as though one of them were the live system — which produced a
+confident, entirely counterfactual recommendation to roll the promotion back.
+The tell was the trade count: 7,853 against EXP-105's 7,620. Same strategy, same
+fills, a different n can only mean a different selector.
 
 Causality is the harness's to enforce and it does: ``fit`` only ever sees years
 strictly before the year being traded, and the payoff map that turns a
@@ -118,8 +126,53 @@ def build(features, name, panel, trades):
     return Gate(fit=state.fit, select=state.select, name=name), state
 
 
+#: EXP-105's published registered-gate numbers, the invariance target.
+EXP105_PUBLISHED = {
+    "n": 7620,
+    "mean": 0.040393728522348626,
+    "sharpe_trade": 2.233590012932244,
+}
+
+
+def part_a_gate_invariance() -> dict:
+    """The real stage 2: prove the gate-selected backtest is untouched.
+
+    If this ever stops reproducing, a size-model change HAS reached trade
+    selection and the promotion protocol's OOS-mean-and-Sharpe rule becomes
+    live. As long as it reproduces, that rule is not applicable — the traded set
+    is identical by construction — and the promotion rests on stage 1 alone.
+    """
+    d105 = ROOT / "experiments/EXP-105_str_thru_validation_registered_mid_fill"
+    spec = lib.load_spec(d105 / "spec.yaml")
+    trades = common.load_engine_trades(STRATEGY)
+    dataset = common.gate_dataset(STRATEGY, trades, d105 / "results")
+    gate, _ = common.make_registered_gate(STRATEGY, dataset)
+    out = HERE / "results" / "gate_invariance"
+    out.mkdir(parents=True, exist_ok=True)
+    result = evaluate(
+        dict(spec, id="EXP-109-invariance"), trades, gate=gate, run_dir=out,
+        spy_daily=common.load_spy_daily(), stress=False, write_report=False,
+    )
+    h = result.results["headline"]
+    got = {k: h[k] for k in EXP105_PUBLISHED}
+    matches = all(
+        (isinstance(v, int) and got[k] == v) or
+        (not isinstance(v, int) and abs(got[k] - v) < 1e-12)
+        for k, v in EXP105_PUBLISHED.items()
+    )
+    from engine.models.registry import load_registry
+
+    champion = load_registry().champion("size").id
+    print(f"[EXP-109] part A: registered gate under champion {champion} → "
+          f"n={got['n']}, mean={got['mean']:.6f}, sharpe={got['sharpe_trade']:.6f} "
+          f"→ {'REPRODUCES EXP-105' if matches else 'DIVERGES FROM EXP-105'}", flush=True)
+    return {"champion": champion, "published": EXP105_PUBLISHED, "observed": got,
+            "reproduces": bool(matches)}
+
+
 def main() -> int:
     spec = lib.load_spec(HERE / "spec.yaml")
+    invariance = part_a_gate_invariance()
     panel = add_absolute_features(load_panel())
     panel = size_model.prepare(panel)
 
@@ -157,7 +210,23 @@ def main() -> int:
         run_dir.mkdir(exist_ok=True)
         # The spec's id is stamped per arm so the two runs are distinguishable
         # in the ledger and neither is mistaken for the registered primary.
-        arm_spec = dict(spec, id=f"{spec['id']}-{label}")
+        arm_spec = dict(
+            spec,
+            id=f"{spec['id']}-counterfactual-{label}",
+            title=(
+                f"COUNTERFACTUAL — STR-THRU selected by {label} predicted expected "
+                "PnL, NOT by the registered gate"
+            ),
+            hypothesis=(
+                "This is not the system as traded. STR-THRU's selector is the "
+                "registered gate gate_midfill_str_thru, which never reads the size "
+                "model. This run replaces that gate with a top-quintile ranking on "
+                f"{label}'s predicted expected PnL, to answer a side question: how "
+                "would selection by predicted PnL compare? Its numbers must not be "
+                "read as STR-THRU's, and its trade count differs from EXP-105's for "
+                "exactly that reason."
+            ),
+        )
         result = evaluate(
             arm_spec, trades, gate=gate, run_dir=run_dir,
             repricer=repricer, spy_daily=spy, input_files=input_files,
@@ -171,9 +240,10 @@ def main() -> int:
 
     (HERE / "results").mkdir(exist_ok=True)
     (HERE / "results" / "stage2_evaluations.json").write_text(
-        json.dumps(out, indent=1, default=str)
+        json.dumps({"gate_invariance": invariance, "counterfactual": out},
+                   indent=1, default=str)
     )
-    return 0
+    return 0 if invariance["reproduces"] else 1
 
 
 if __name__ == "__main__":
