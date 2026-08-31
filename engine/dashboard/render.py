@@ -117,7 +117,7 @@ def _write_json(path: Path, payload: Any) -> None:
 def _js_name(stem: str) -> str:
     return {
         "board": "BOARD", "meta": "META", "health": "HEALTH", "flags": "FLAGS",
-        "strategies": "STRATEGIES",
+        "strategies": "STRATEGIES", "models": "MODELS",
     }.get(stem)
 
 
@@ -980,6 +980,16 @@ def render_bundle(
     _write_pair(out / "data", "flags", flags_payload)
 
     _write_pair(out / "data", "strategies", build_strategies(registry=registry))
+
+    # Per-input evidence, if it has been built. Absent is a legitimate state —
+    # it is rebuilt only when a champion changes, not nightly — and the view
+    # says so rather than rendering an empty table.
+    from engine.dashboard.model_evidence import load_model_evidence
+
+    _write_pair(
+        out / "data", "models",
+        load_model_evidence() or {"models": {}, "available": False},
+    )
 
     static_files = _copy_static(out, static_dir)
 

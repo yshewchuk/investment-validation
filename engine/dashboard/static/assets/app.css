@@ -90,3 +90,9 @@ tr.disabled td { color: var(--dim); }
 .layer td, .layer th { padding: 3px 6px; border-bottom: none; }
 
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* Two areas — finding trades, and understanding the models behind them. */
+.tabs.areas { margin-bottom: 2px; }
+.tab.area { font-weight: 600; }
+.bar { display: inline-block; height: 10px; background: #3fb950; vertical-align: middle; }
+.bar.neg { background: #f85149; }

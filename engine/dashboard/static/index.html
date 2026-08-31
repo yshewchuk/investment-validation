@@ -13,11 +13,20 @@
 <h1>Earnings-Vol Monitoring Board</h1>
 <div class="sub" id="meta-line">Loading…</div>
 
-<div class="tabs">
+<div class="tabs areas">
+  <div class="tab area active" data-area="trades">Trades</div>
+  <div class="tab area" data-area="models">Models</div>
+</div>
+
+<div class="tabs" id="subtabs-trades">
   <div class="tab active" data-tab="board">Upcoming prints</div>
   <div class="tab" data-tab="explorer">Ticker / strike explorer</div>
-  <div class="tab" data-tab="health">Model health</div>
+</div>
+
+<div class="tabs hidden" id="subtabs-models">
+  <div class="tab" data-tab="modelx">Model explorer</div>
   <div class="tab" data-tab="derivation">How a number is made</div>
+  <div class="tab" data-tab="health">Model health</div>
 </div>
 
 <div id="flags-banner" class="hidden"></div>
@@ -117,11 +126,37 @@
   </div>
 </div>
 
+<div id="view-modelx" class="hidden">
+  <div class="panel">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <strong>Model</strong>
+      <select id="m-model"></select>
+      <span class="badge" id="m-kind"></span>
+    </div>
+    <div id="m-summary" style="margin-top:10px"></div>
+  </div>
+  <div class="panel">
+    <h3>Inputs, strongest relationship first</h3>
+    <div class="sub" id="m-caveat"></div>
+    <div class="tablewrap" id="m-inputs"></div>
+  </div>
+  <div class="panel" id="m-shape-panel">
+    <h3>Shape of one input against the outcome</h3>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="m-feature"></select>
+      <span class="badge" id="m-shape-note"></span>
+    </div>
+    <div id="m-shape" style="margin-top:10px"></div>
+  </div>
+</div>
+
 <div id="view-derivation" class="hidden">
   <div class="panel">
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <strong>Strategy</strong>
       <select id="d-strategy"></select>
+      <strong style="margin-left:12px">Worked example</strong>
+      <select id="d-row"></select>
     </div>
     <div id="d-body" style="margin-top:12px"></div>
   </div>
@@ -134,6 +169,7 @@
 <script src="data/health.js"></script>
 <script src="data/flags.js"></script>
 <script src="data/strategies.js"></script>
+<script src="data/models.js"></script>
 <script>
 window.TICKER_DATA = window.TICKER_DATA || {};
 </script>

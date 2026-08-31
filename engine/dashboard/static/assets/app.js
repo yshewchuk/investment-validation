@@ -15,6 +15,8 @@ const META = window.META || {};
 const HEALTH = window.HEALTH || {};
 const FLAGS = window.FLAGS || { flags: [] };
 const STRATEGIES = window.STRATEGIES || {};
+const MODELS = (window.MODELS || {}).models || {};
+const MODELS_META = window.MODELS || {};
 const TICKER_DATA = window.TICKER_DATA || {};
 
 const state = {
@@ -59,13 +61,27 @@ function cellColor(x) {
 
 /* ---------------------------------------------------------------- tabs */
 
+/* Two areas: finding trades, and understanding the models that rank them. */
+const AREA_VIEWS = { trades: ["board", "explorer"], models: ["modelx", "derivation", "health"] };
+const ALL_VIEWS = ["board", "explorer", "modelx", "derivation", "health"];
+
 function switchTab(name) {
-  document.querySelectorAll(".tab").forEach(
+  document.querySelectorAll(".tab[data-tab]").forEach(
     (t) => t.classList.toggle("active", t.dataset.tab === name)
   );
-  ["board", "explorer", "health", "derivation"].forEach((v) =>
+  ALL_VIEWS.forEach((v) =>
     document.getElementById("view-" + v).classList.toggle("hidden", v !== name)
   );
+}
+
+function switchArea(area) {
+  document.querySelectorAll(".tab.area").forEach(
+    (t) => t.classList.toggle("active", t.dataset.area === area)
+  );
+  Object.keys(AREA_VIEWS).forEach((a) =>
+    document.getElementById("subtabs-" + a).classList.toggle("hidden", a !== area)
+  );
+  switchTab(AREA_VIEWS[area][0]);
 }
 
 /* ---------------------------------------------------------------- flags */
@@ -237,6 +253,7 @@ function loadTickerData(ticker, then) {
 }
 
 function openExplorer(ticker) {
+  switchArea("trades");
   switchTab("explorer");
   const sel = document.getElementById("x-ticker");
   sel.value = ticker;
@@ -425,6 +442,140 @@ function initExplorerControls() {
   sel.onchange = () => renderExplorer(sel.value);
 }
 
+/* --------------------------------------------------------- model explorer */
+
+/* What each input looks like against the outcome, on the model's OWN training
+   set. Marginal relationships, not attributions — the caveat travels with the
+   data and is rendered, not paraphrased here. */
+
+function corrBar(v) {
+  if (v === null || v === undefined) return "";
+  const w = Math.min(100, Math.abs(Number(v)) * 200);
+  return '<span class="bar' + (v < 0 ? " neg" : "") + '" style="width:' + w.toFixed(0) + 'px"></span>';
+}
+
+function renderModelSummary(m) {
+  const k = m.kind || {};
+  document.getElementById("m-kind").textContent =
+    (k.type || "?") + (k.pipeline ? " [" + k.pipeline.join(" → ") + "]" : "");
+  const params = Object.entries(k.params || {})
+    .map((kv) => kv[0] + "=" + kv[1]).join(", ") || "–";
+  const rows = [
+    ["role", m.role],
+    ["predicts", m.target],
+    ["applies to", m.strategy === "*" ? "all strategies" : m.strategy],
+    ["model type", k.type || "–"],
+    ["parameters", params],
+    ["training rows", (m.n_rows || 0).toLocaleString()],
+    ["outcome mean / sd", fmt(m.target_mean, 3) + " / " + fmt(m.target_std, 3)],
+  ];
+  if (m.sampled) {
+    rows.push(["sampled", m.sampled.events
+      ? m.sampled.events.toLocaleString() + " of " + m.sampled.of.toLocaleString() + " events (seed " + m.sampled.seed + ")"
+      : m.sampled.rows.toLocaleString() + " of " + m.sampled.of.toLocaleString() + " rows (seed " + m.sampled.seed + ")"]);
+  }
+  document.getElementById("m-summary").innerHTML = '<div class="kv">'
+    + rows.map((r) => "<div><div class='k'>" + esc(r[0]) + "</div><div class='v'>" + esc(String(r[1])) + "</div></div>").join("")
+    + "</div>";
+}
+
+function renderModelInputs(m) {
+  const el = document.getElementById("m-inputs");
+  const inputs = m.inputs || [];
+  if (!inputs.length) { el.innerHTML = '<span class="badge">no inputs recorded</span>'; return; }
+  el.innerHTML = "<table><thead><tr><th>Input</th><th>Spearman</th><th></th><th>Pearson</th>"
+    + "<th>decile spread</th><th>coverage</th><th>n</th><th>What it is</th></tr></thead><tbody>"
+    + inputs.map((f) => {
+        if (!f.usable) {
+          return "<tr><td class='mono'>" + esc(f.name) + "</td><td colspan='6'>"
+            + esc(f.reason || "not usable") + "</td><td>" + esc(f.note || "") + "</td></tr>";
+        }
+        return "<tr class='clickable' data-feature='" + esc(f.name) + "'>"
+          + "<td class='mono'>" + esc(f.name) + "</td>"
+          + '<td class="' + cls(f.spearman) + '">' + fmt(f.spearman, 3) + "</td>"
+          + "<td>" + corrBar(f.spearman) + "</td>"
+          + "<td>" + fmt(f.pearson, 3) + "</td>"
+          + "<td>" + fmt(f.decile_spread, 3) + "</td>"
+          + "<td>" + pct(f.coverage, 0) + "</td>"
+          + "<td>" + (f.n || 0).toLocaleString() + "</td>"
+          + "<td>" + esc(f.note || "") + "</td></tr>";
+      }).join("")
+    + "</tbody></table>";
+  el.querySelectorAll("tr[data-feature]").forEach((tr) => {
+    tr.onclick = () => {
+      document.getElementById("m-feature").value = tr.dataset.feature;
+      renderShape(m, tr.dataset.feature);
+    };
+  });
+}
+
+function renderShape(m, featureName) {
+  const f = (m.inputs || []).find((x) => x.name === featureName);
+  const el = document.getElementById("m-shape");
+  const note = document.getElementById("m-shape-note");
+  if (!f || !f.deciles || !f.deciles.length) {
+    note.textContent = "";
+    el.innerHTML = '<span class="badge">no decile shape for this input</span>';
+    return;
+  }
+  note.textContent = f.note || "";
+  const ys = f.deciles.map((d) => d.y_mean);
+  const lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
+  const span = (hi - lo) || 1;
+  el.innerHTML = "<table><thead><tr><th>decile</th><th>" + esc(featureName) + " range</th>"
+    + "<th>mean " + esc(m.target) + "</th><th></th><th>n</th></tr></thead><tbody>"
+    + f.deciles.map((d) =>
+        "<tr><td>" + d.bin + "</td>"
+        + "<td class='mono'>" + fmt(d.x_lo, 3) + " … " + fmt(d.x_hi, 3) + "</td>"
+        + '<td class="' + cls(d.y_mean) + '">' + fmt(d.y_mean, 3) + "</td>"
+        + "<td>" + '<span class="bar' + (d.y_mean < 0 ? " neg" : "") + '" style="width:'
+        + (((d.y_mean - lo) / span) * 160 + 4).toFixed(0) + 'px"></span>' + "</td>"
+        + "<td>" + d.n.toLocaleString() + "</td></tr>").join("")
+    + "</tbody></table>";
+}
+
+function renderModelExplorer(id) {
+  const m = MODELS[id];
+  if (!m) return;
+  if (!m.available) {
+    document.getElementById("m-summary").innerHTML =
+      '<span class="badge">' + esc(m.reason || "not available") + "</span>";
+    document.getElementById("m-inputs").innerHTML = "";
+    document.getElementById("m-shape").innerHTML = "";
+    return;
+  }
+  renderModelSummary(m);
+  renderModelInputs(m);
+  const sel = document.getElementById("m-feature");
+  sel.innerHTML = "";
+  (m.inputs || []).filter((f) => f.usable).forEach((f) => {
+    const o = document.createElement("option");
+    o.value = f.name; o.textContent = f.name;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => renderShape(m, sel.value);
+  if (sel.options.length) renderShape(m, sel.options[0].value);
+}
+
+function initModelExplorer() {
+  const sel = document.getElementById("m-model");
+  const ids = Object.keys(MODELS).sort();
+  document.getElementById("m-caveat").textContent = MODELS_META.caveat || "";
+  if (!ids.length) {
+    document.getElementById("m-summary").innerHTML =
+      '<span class="badge">no model evidence in this snapshot — build it with '
+      + '`python3 -m engine.dashboard.model_evidence`</span>';
+    return;
+  }
+  ids.forEach((id) => {
+    const o = document.createElement("option");
+    o.value = id; o.textContent = id + "  (" + (MODELS[id].role || "") + ")";
+    sel.appendChild(o);
+  });
+  sel.onchange = () => renderModelExplorer(sel.value);
+  renderModelExplorer(ids[0]);
+}
+
 /* ------------------------------------------------------------ derivation */
 
 /* How a number is made. Reads `strategies.json` (the shape: structure, driver,
@@ -461,6 +612,66 @@ function modelPanel(title, m) {
     + "</tbody></table></div></div>";
 }
 
+/* The values a real row actually fed the model. The tab explains the shape;
+   without an example beside it the reader still cannot see what went in. */
+function workedExample(name) {
+  const el = document.getElementById("d-example");
+  const sel = document.getElementById("d-row");
+  const rowId = sel.value;
+  if (!rowId) {
+    el.innerHTML = '<span class="badge">no scored row for this strategy in this snapshot</span>';
+    return;
+  }
+  const board = BOARD.rows.find((r) => r.row_id === rowId);
+  if (!board) { el.innerHTML = ""; return; }
+
+  loadTickerData(board.ticker, (data) => {
+    let full = null;
+    (data ? data.events : []).forEach((ev) => (ev.rows || []).forEach((r) => {
+      if (r.strategy === board.strategy && r.event_date === board.event_date
+          && (r.strike_offset === null || r.strike_offset === undefined)) full = r;
+    }));
+    if (!full || !full.model_inputs) {
+      el.innerHTML = '<span class="badge">no recorded inputs for that row</span>';
+      return;
+    }
+    const notes = ((STRATEGIES[name] || {}).model || {}).features || [];
+    const keys = Object.keys(full.model_inputs);
+    el.innerHTML =
+      "<div class='badge'>" + esc(full.ticker) + " · " + esc(full.event_date) + " · inputs read as of "
+      + esc(full.model_input_as_of || "–") + " → " + esc(full.driver_name || "?") + " = "
+      + fmt(full.driver_prediction, 2) + "%</div>"
+      + "<div class='tablewrap' style='margin-top:8px'><table><thead><tr><th>Input</th><th>Value</th>"
+      + "<th>What it is</th></tr></thead><tbody>"
+      + keys.map((k) => {
+          const v = full.model_inputs[k];
+          const note = notes.find((f) => f.name === k) || {};
+          return "<tr><td class='mono'>" + esc(k) + "</td>"
+            + '<td class="' + (v === null ? "neg" : "") + '">'
+            + (v === null ? "missing" : fmt(v, 4)) + "</td>"
+            + "<td>" + esc(note.note || "") + "</td></tr>";
+        }).join("")
+      + "</tbody></table></div>";
+  });
+}
+
+function initWorkedExample(name) {
+  const sel = document.getElementById("d-row");
+  sel.innerHTML = "";
+  BOARD.rows
+    .filter((r) => r.strategy === name && r.driver_prediction !== null
+                   && r.driver_prediction !== undefined)
+    .slice(0, 200)
+    .forEach((r) => {
+      const o = document.createElement("option");
+      o.value = r.row_id;
+      o.textContent = r.ticker + " " + r.event_date;
+      sel.appendChild(o);
+    });
+  sel.onchange = () => workedExample(name);
+  workedExample(name);
+}
+
 function renderDerivation(name) {
   const s = STRATEGIES[name];
   const el = document.getElementById("d-body");
@@ -487,7 +698,10 @@ function renderDerivation(name) {
     + modelPanel("Champion model", s.model)
     + modelPanel("Gate", s.gate)
     + "</div>";
+  html += '<div class="layer" style="margin-top:10px"><h4>A worked example — the values a real row fed the model</h4>'
+    + '<div id="d-example"></div></div>';
   el.innerHTML = html;
+  initWorkedExample(name);
 }
 
 function initDerivation() {
@@ -592,8 +806,11 @@ function renderHealth() {
 /* ---------------------------------------------------------------- init */
 
 function init() {
-  document.querySelectorAll(".tab").forEach((t) => {
+  document.querySelectorAll(".tab[data-tab]").forEach((t) => {
     t.onclick = () => switchTab(t.dataset.tab);
+  });
+  document.querySelectorAll(".tab.area").forEach((t) => {
+    t.onclick = () => switchArea(t.dataset.area);
   });
 
   const metaBits = [];
@@ -612,6 +829,7 @@ function init() {
   renderBoard();
   initExplorerControls();
   initDerivation();
+  initModelExplorer();
   renderHealth();
 }
 

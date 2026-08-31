@@ -105,6 +105,14 @@ a three-week window, so a full unrestricted night is roughly 40 minutes. That
 is why the strike ladder is priced only for rows the gate passed, and why the
 job is a post-close cron rather than something you wait on.
 
+## Two areas
+
+**Trades** — upcoming prints, and the ticker/strike explorer. Finding something
+to do.
+
+**Models** — the model explorer (below), "how a number is made", and model
+health. Deciding whether to believe it.
+
 ## Taking a number apart
 
 Every board number has an audit trail, in two halves:
@@ -123,6 +131,30 @@ Every board number has an audit trail, in two halves:
 
 Inputs are recorded even when a row declines to score, because that is exactly
 when someone needs to see which one was missing.
+
+### The model explorer
+
+    python3 -m engine.dashboard.model_evidence          # cached on the artifact hash
+
+Per champion: what it is (a blend, a tree ensemble), what it predicts, how many
+rows it learned from — and per input, the **Spearman and Pearson correlation
+with the outcome**, the **decile shape** (the input cut into ten buckets with
+the mean outcome in each), and coverage. Both correlations because a monotone
+but curved relationship shows in Spearman and hides in Pearson; the decile table
+because neither number can show whether a relationship is monotone, flat in the
+middle, or driven by one tail.
+
+Read as description, not attribution: these are marginal relationships in the
+training set. A feature can correlate strongly and add nothing once the others
+are present, or correlate near zero and matter through an interaction. The
+caveat ships with the data and is rendered on the page.
+
+Rebuilt only when a champion changes, not nightly — it rebuilds each model's own
+training set. Two constraints found the hard way: `store.read_table("daily_market")`
+is 8.9M rows and peaked at **6.9 GB** on a 7 GB box, so the daily table is
+streamed per partition and filtered to the tickers a model needs; and the
+`implied_t1` set is 577k rows built in a Python loop, so its EVENTS are sampled
+before the build (recorded in the output, never silent).
 
 Feature explanations live in `engine/features.py` (`FEATURE_NOTES` /
 `feature_note`), next to the definitions. The `_dN` lag and `emaN_prior_*`

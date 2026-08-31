@@ -722,6 +722,19 @@ def check_ui_no_compute() -> str:
         for nested in ("structure", "layers", "model", "gate"):
             if isinstance(block.get(nested), dict):
                 known |= set(block[nested])
+
+    models = json.loads((out / "data" / "models.json").read_text())
+    known |= set(models)
+    for block in (models.get("models") or {}).values():
+        known |= set(block)
+        for entry in block.get("inputs") or []:
+            known |= set(entry)
+        for entry in (block.get("inputs") or [])[:1]:
+            for decile in entry.get("deciles") or []:
+                known |= set(decile)
+        for nested in ("kind", "sampled"):
+            if isinstance(block.get(nested), dict):
+                known |= set(block[nested])
     for event in ticker["events"]:
         known |= set(event)
         for row in event["rows"]:

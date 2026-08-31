@@ -826,3 +826,67 @@ class TestFeatureNotes:
         from engine.features import feature_note
 
         assert feature_note("some_new_thing") == ""
+
+
+class TestModelEvidence:
+    """What each input does to the output, on the model's own training set."""
+
+    def test_feature_stats_report_shape_not_just_a_coefficient(self):
+        """A correlation cannot show whether a relationship is monotone or
+        driven by one tail; the decile table is the part that can."""
+        from engine.dashboard.model_evidence import DECILES, _feature_stats
+
+        rng = np.random.default_rng(0)
+        x = pd.Series(rng.normal(size=5000))
+        y = pd.Series(x * 2 + rng.normal(size=5000) * 0.5)
+        stats = _feature_stats(x, y)
+        assert stats["usable"] and stats["n"] == 5000
+        assert stats["pearson"] > 0.9 and stats["spearman"] > 0.9
+        assert len(stats["deciles"]) == DECILES
+        means = [d["y_mean"] for d in stats["deciles"]]
+        assert means == sorted(means), "a monotone relationship must read monotone"
+        assert stats["decile_spread"] > 0
+
+    def test_a_curved_relationship_shows_in_spearman_not_pearson(self):
+        """Why both are reported: reading only the linear one calls this noise."""
+        from engine.dashboard.model_evidence import _feature_stats
+
+        x = pd.Series(np.linspace(0.01, 1, 4000))
+        y = pd.Series(np.exp(x * 6))
+        stats = _feature_stats(x, y)
+        assert stats["spearman"] > 0.99
+        assert stats["spearman"] > stats["pearson"]
+
+    def test_too_few_rows_is_reported_not_computed(self):
+        from engine.dashboard.model_evidence import _feature_stats
+
+        stats = _feature_stats(pd.Series([1.0, 2.0, 3.0]), pd.Series([1.0, 2.0, 3.0]))
+        assert stats["usable"] is False and "rows" in stats["reason"]
+        assert "pearson" not in stats
+
+    def test_a_lumpy_feature_gets_fewer_honest_buckets(self):
+        """n_prior and signed_streak cannot always be cut into ten distinct
+        bins — fewer real buckets beat ten fabricated ones."""
+        from engine.dashboard.model_evidence import _feature_stats
+
+        x = pd.Series([1.0] * 900 + [2.0] * 900)
+        y = pd.Series(np.arange(1800, dtype=float))
+        stats = _feature_stats(x, y)
+        assert stats["usable"]
+        assert 0 < len(stats.get("deciles", [])) <= 10
+
+    def test_missing_values_do_not_silently_shrink_the_claim(self):
+        from engine.dashboard.model_evidence import _feature_stats
+
+        x = pd.Series([1.0] * 500 + [np.nan] * 500)
+        y = pd.Series(np.arange(1000, dtype=float))
+        stats = _feature_stats(x, y)
+        assert stats["coverage"] == 0.5
+        assert stats["n"] == 500
+
+    def test_the_bundle_carries_the_models_payload(self, tmp_path, scores):
+        render_bundle(scores, tmp_path / "b", as_of=AS_OF)
+        payload = json.loads((tmp_path / "b" / "data" / "models.json").read_text())
+        assert "models" in payload
+        js = (tmp_path / "b" / "data" / "models.js").read_text()
+        assert js.startswith("window.MODELS = ")
