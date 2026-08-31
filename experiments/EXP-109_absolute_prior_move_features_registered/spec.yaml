@@ -1,0 +1,89 @@
+id: EXP-109
+title: "Absolute prior-move features, registered primary, through to trade selection"
+hypothesis: >
+  EXP-108 tested five feature-set arms on the size model. Its registered primary
+  was not reliably better (10/14 OOS years, Wilcoxon p=0.104, its aggregate gain
+  carried by 2020 alone). A SECONDARY arm — adding mean_prior_abs_move,
+  abs(dist_ema) and abs(dist_high) together — improved in 11/14 years at
+  p=0.0134. Promoting that from EXP-108 would have been post-hoc selection, so
+  it is registered here as the primary and nothing else is tried.
+  The claim: the improvement is consistent, and it survives into better trade
+  SELECTION for STR-THRU rather than stopping at model accuracy.
+
+kind: model_feature_set
+role: size
+strategy: STR-THRU
+incumbent: size_v1_3
+target: abs_move
+prior: EXP-108
+price_source: >
+  Stage 1 uses the Tier-3 panel only. Stage 2 uses engine.replay STR-THRU
+  trades priced on real ORATS chains at alpha=0.5 (mid), which is where a
+  claim about trade selection has to be settled.
+
+# ONE arm. No grid. EXP-108 already paid the multiple-comparison cost of
+# searching; this experiment exists to test the single hypothesis that search
+# produced, so a second arm here would re-open the same door.
+primary_spec:
+  arm: add_all_three
+  features_added: [mean_prior_abs_move, abs_dist_ema, abs_dist_high]
+  features_removed: []
+grid: {}
+
+derived_features:
+  abs_dist_ema: "abs(dist_ema)"
+  abs_dist_high: "abs(dist_high)"
+
+evaluation:
+  stage_1:
+    what: is the accuracy gain CONSISTENT, not merely present in aggregate
+    method: engine.models.training.common.walk_forward, compared per OOS year
+    first_test_year: 2013
+    # Registered instead of a magnitude cutoff. EXP-108's thresholds were set
+    # by judgement, reached the right verdict on its primary for the wrong
+    # reason, and would have reached the wrong verdict on this arm. A
+    # magnitude cutoff answers "is it big"; the question is "is it real".
+    criteria:
+      min_years_improved: 10        # of 14 OOS years, on MAE
+      max_wilcoxon_p: 0.05          # signed-rank on per-year MAE deltas
+      no_single_year_dependence: >
+        Dropping the single best year must not take the mean per-year gain
+        negative. This is the 2020 failure mode from EXP-108, made explicit.
+  stage_2:
+    what: does the better model pick better TRADES
+    gate: runs only if stage 1 clears every criterion above
+    method: >
+      Join each model's out-of-sample abs_move prediction to the replayed
+      STR-THRU trades at alpha=0.5, convert to expected PnL through a payoff
+      map fitted only on trades closed BEFORE the test year, rank within year,
+      and compare what the top quintile actually returned.
+    criteria:
+      top_quintile_mean_ret: must not worsen
+      all_trade_mean_ret: must not worsen
+      years_improved: reported, not thresholded
+
+# Why selection and not the gate: gate_midfill_str_thru predicts 'ret' from
+# its own features and never reads the size model, so a better size model cannot
+# change which trades the gate passes. What it can change is the ranking a
+# reader acts on, which is what the board displays and what stage 2 measures.
+notes:
+  gate_independence: >
+    A size-model change moves exp_pnl_model and the board's ordering. It does
+    not move gate_pass. Any claim that this experiment improves gate selection
+    would be false.
+
+promotion_target:
+  rule: >
+    Both stages clear, then a promotion report diffing champion against
+    challenger, per EARNINGS_VOL_PROGRAM_PLAN.md section P2.3. Stage 1 alone is
+    not a promotion.
+  registry: size_v1_3 -> size_v1_4 if promoted
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+equity_mode: cashflow
+has_short_leg: false
+preregistered_at: "2026-08-31T15:04:25+00:00"
