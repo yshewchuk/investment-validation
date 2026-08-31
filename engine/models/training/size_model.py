@@ -62,11 +62,16 @@ TARGET = "abs_move"
 #: preserves the liquidity signal when the value is later nulled for being
 #: wrong. Two separate models for the quoted and unquoted populations was tested
 #: in the same run and is reliably WORSE (3/14 years, p=0.03).
+#:
+#: ``abs_dist_high`` was REMOVED by EXP-113. ``dist_high`` is never positive, so
+#: the absolute value negated it and nothing more — corr -1.000000, VIF infinite,
+#: a singular design matrix for the OLS half. Removing it is a clean no-op on
+#: accuracy (+0.0006pp, 7/14 years, p=0.81), which is the correct result for a
+#: feature that could not have been carrying signal.
 FEATURES = (
     "has_implied_quote",
     "mean_prior_abs_move",
     "abs_dist_ema",
-    "abs_dist_high",
     "ema12r_abs",
     "mean_prior_move",
     "signed_streak",

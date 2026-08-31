@@ -1,0 +1,71 @@
+id: EXP-113
+title: "Size v2.0 step 4: remove collinear inputs from the champion"
+hypothesis: >
+  `dist_high` is distance from the 52-week high and is <= 0 on all 113,521 panel
+  rows — a stock cannot trade above its own 52-week high. So
+  `abs_dist_high == -dist_high` exactly: corr -1.000000, VIF infinite. It
+  carries no information at all and makes the design matrix singular for the OLS
+  half of the blend. It is in the LIVE champion, promoted by EXP-109 inside the
+  `all_three` bundle, and EXP-108 had already measured it at +0.0001 r on its
+  own without anyone connecting that to collinearity.
+  `mean_prior_abs_move`, promoted in the same bundle, is 0.9165 correlated with
+  the incumbent `ema12r_abs` (VIF 7.50) and needs testing on its own merits.
+  Removing a feature that is a deterministic function of another should not hurt
+  accuracy, and should improve the conditioning of the linear half.
+
+kind: model_feature_set
+role: size
+strategy: "*"
+incumbent: size_v1_4
+target: abs_move
+programme: size-v2.0
+step: 4
+prior: EXP-109
+
+price_source: "None. A feature-list change measured on the Tier-3 panel."
+
+primary_spec:
+  arm: drop_abs_dist_high
+  features_removed: [abs_dist_high]
+  features_added: []
+
+grid:
+  arms:
+    - arm: drop_mean_prior_abs_move
+      features_removed: [mean_prior_abs_move]
+      note: "VIF 7.50, corr 0.9165 with ema12r_abs — earns its place or not"
+    - arm: drop_both
+      features_removed: [abs_dist_high, mean_prior_abs_move]
+
+evaluation:
+  what: walk-forward OOS accuracy, all arms on one common row set
+  method: experiments.size_lab.run_bench
+  first_test_year: 2013
+  same_rows: true
+  # A removal is judged on NOT HARMING, which is the opposite direction from an
+  # addition, so the criteria are stated separately rather than reused.
+  criteria:
+    primary_rule: >
+      abs_dist_high is provably redundant, so the test is that its removal does
+      not degrade accuracy: mean per-year MAE change >= -0.005pp and no
+      significant deterioration (Wilcoxon p > 0.05 against a worse direction).
+      A material CHANGE either way would indicate the feature was doing
+      something, which for a perfect linear duplicate would mean a bug.
+    grid_rule: >
+      mean_prior_abs_move is not redundant, only collinear. It is kept unless
+      removing it is neutral-or-better on the same rule.
+
+promotion_target:
+  rule: >
+    A defect fix, not a challenger — abs_dist_high cannot be carrying signal.
+    Still requires a retrain and the gate-invariance check before the champion
+    changes, and v2.0 promotes as a whole.
+  registry: null
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-08-31T20:44:04+00:00"

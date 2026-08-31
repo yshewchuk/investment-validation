@@ -1,0 +1,76 @@
+id: EXP-112
+title: "Size v2.0 step 3: prediction intervals that vary with the prediction"
+hypothesis: >
+  `ModelArtifact.residual_draws` samples one flat, unconditional pool, and
+  `Scorer._score_model` uses it for every event. But residual spread rises
+  steeply and monotonically with the prediction — sd 3.64pp in the lowest
+  implied-move quintile against 8.76pp in the highest, and 8.07 vs 6.38 between
+  unquoted and quoted names. So the shipped intervals are systematically too
+  NARROW on volatile names and too WIDE on quiet ones, and `win_model` inherits
+  the same error.
+  Conditioning the residual pool on the prediction should improve interval
+  coverage and distributional calibration. It cannot change the point estimate
+  and is not expected to: MAE and r are held fixed by construction.
+
+kind: uncertainty_model
+role: size
+strategy: "*"
+incumbent: size_v1_4
+target: abs_move
+programme: size-v2.0
+step: 3
+prior: EXP-111
+
+price_source: >
+  None. The point predictions are the incumbent's, unchanged; only the
+  distribution around them differs between arms.
+
+primary_spec:
+  arm: by_prediction_decile
+  change: "residual pool binned by predicted |move| decile"
+
+grid:
+  arms:
+    - arm: by_prediction_and_quote
+      note: "prediction decile crossed with has_implied_quote, per EXP-111's finding"
+
+# Accuracy metrics are the wrong ones here and are reported only to prove they
+# did not move. What this experiment is judged on:
+evaluation:
+  what: distributional calibration, not point accuracy
+  method: experiments.EXP-112.run
+  first_test_year: 2013
+  causal_pools: >
+    For test year Y the residual pool is built ONLY from out-of-sample residuals
+    of years before Y, and the decile edges likewise. A pool containing the year
+    it is scoring would be reading its own answer.
+  metrics:
+    - coverage_80: "share of outcomes inside the 80% interval; target 0.80"
+    - coverage_50: "target 0.50"
+    - pit_ks: "Kolmogorov-Smirnov distance of the probability-integral transform from uniform; lower is better"
+    - crps: "continuous ranked probability score; lower is better"
+    - coverage_by_decile: "where the miscalibration actually is"
+  criteria:
+    coverage_80_closer_to_target: true
+    pit_ks_improves: true
+    max_wilcoxon_p: 0.05
+    note: >
+      Judged on coverage error and PIT distance, not on MAE. An arm that
+      improves MAE here would indicate a bug, since every arm shares one set of
+      point predictions.
+
+promotion_target:
+  rule: >
+    A win changes how ModelArtifact stores and draws residuals, and therefore
+    what win_model and the CI on the board mean. It is the first v2.0 step that
+    changes a number a reader acts on, so it needs the gate-invariance check
+    and a calibration re-run before any champion moves.
+  registry: null
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-08-31T20:37:47+00:00"
