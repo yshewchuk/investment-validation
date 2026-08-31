@@ -1,0 +1,78 @@
+id: EXP-114
+title: "Size v2.0 step 5: learn the error scale instead of picking buckets"
+hypothesis: >
+  EXP-112 conditioned the residual pool on the predicted value and on
+  `has_implied_quote`, and both dimensions were chosen by hand. A diagnostic
+  afterwards showed the second was nearly the WEAKEST available variable
+  (Spearman -0.064 with |residual|), and that the first is a size-model fact
+  rather than a principle: the prediction ranks 1 of 15 as an error-scale
+  predictor for size_v1_4, but 19 of 42 for opf_implied_t1_gbm and 11 of 43 for
+  gate_midfill_str_thru, where `dte_entry` dominates at -0.353.
+  A hand-picked bucketing is therefore right for one model and wrong for the
+  others. Fitting sigma(x) — a variance model on |residual| over the same
+  features — should discover the conditioning per model, and should beat both
+  the flat pool and EXP-112's buckets on coverage, PIT distance and CRPS.
+
+kind: uncertainty_model
+role: multi
+strategy: "*"
+programme: size-v2.0
+step: 5
+prior: EXP-112
+
+models_evaluated:
+  - size_v1_4
+  - opf_implied_t1_gbm
+models_excluded:
+  gate_midfill_str_thru: "stores residuals but never samples them for scoring"
+  gate_midfill_str_runup: "same, and 3,041 residuals is too thin to fit sigma(x) on 43 features"
+
+price_source: >
+  None. Point predictions are the incumbents', unchanged; only the distribution
+  around them differs between arms.
+
+primary_spec:
+  arm: sigma_model
+  change: >
+    Store standardised residuals plus a fitted sigma(x); draw z from the pool
+    and scale by sigma-hat for the event being scored.
+
+grid:
+  arms:
+    - arm: by_prediction_decile
+      note: "EXP-112's winner, carried forward as the benchmark to beat"
+    - arm: quantile_regression
+      note: >
+        Predict the residual quantiles directly rather than a scale. |move| is
+        bounded below at 0 and right-skewed, so a symmetric scaled pool
+        misplaces the lower tail however well sigma is estimated. Coverage only:
+        PIT and CRPS need the full predictive distribution and are reported N/A.
+
+evaluation:
+  what: distributional calibration, per model
+  first_test_year: {size: 2013, implied_t1: 2015}
+  causal: >
+    For test year Y the residual pool, the sigma(x) model and the quantile
+    models are all fitted on out-of-sample residuals from years before Y only.
+  metrics: [coverage_80, coverage_50, pit_ks, crps]
+  criteria:
+    beats_global_on_coverage: true
+    beats_buckets_on_coverage_or_crps: true
+    per_model: >
+      Judged per model. An arm that wins for size and loses for implied_t1 is
+      not adopted globally — that is the mistake EXP-112 was heading towards.
+
+promotion_target:
+  rule: >
+    Changes ModelArtifact and Scorer._score_model, so it alters win_model and
+    the CI. Needs the gate-invariance check and a recalibration refit before any
+    champion moves.
+  registry: null
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-08-31T21:21:45+00:00"
