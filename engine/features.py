@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable, Sequence
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -703,6 +705,79 @@ EVENT_HISTORY_FEATURES: tuple[str, ...] = (
     "ema12r_abs",
     "signed_streak",
 )
+
+
+#: One line per feature, for the dashboard's derivation view. A prediction the
+#: reader cannot take apart is not evidence, and a bare name like `ema12r_abs`
+#: or `fexern90_30` explains nothing to anyone who did not build it.
+#:
+#: Base names only: the ``_dN`` lags and the ``emaN_prior_*`` family are derived
+#: by :func:`feature_note` from the same rule that generates them, so a new lag
+#: or window documents itself instead of silently arriving unlabelled.
+FEATURE_NOTES: dict[str, str] = {
+    "n_prior": "How many past prints this name has in the panel — the sample the other history features average over.",
+    "mean_prior_move": "Mean SIGNED reaction to past prints, in %. Direction is unpredictable at the event level, so this is a level/drift term, not a bet.",
+    "mean_prior_abs_move": "Mean ABSOLUTE reaction to past prints, in %. The plainest estimate of how much this name usually moves.",
+    "mean_prior_implied_move": "Mean implied move the market quoted before past prints, in %. The baseline the size model is trying to beat.",
+    "ema12r_abs": "Ratio of the fast to the slow EMA of past absolute moves — is this name moving more than it used to?",
+    "signed_streak": "Run length of consecutive same-direction reactions.",
+    "im": "Implied move quoted for THIS print, in %, from the option market.",
+    "or_implied": "Implied move at the last pre-print close (ORATS), in %.",
+    "iv10": "10-day implied volatility.",
+    "iv30": "30-day implied volatility.",
+    "exern_iv10": "10-day IV with the earnings event stripped out — the 'background' vol.",
+    "exern_iv30": "30-day IV with the earnings event stripped out.",
+    "or_rvol30": "30-day realized volatility (ORATS), in %.",
+    "rvol30": "30-day realized volatility, in %.",
+    "iee": "Implied earnings effect: how much of the front IV the event itself accounts for.",
+    "skew": "Put-vs-call skew of the surface.",
+    "contango": "Slope of the IV term structure.",
+    "fwd90_30": "Forward vol between the 30- and 90-day tenors.",
+    "fexern90_30": "The same forward vol, ex-earnings.",
+    "spot": "Underlying price at the decision close.",
+    "mcap_log": "log(market cap). Era-normalized in Tier 2 — the ORATS unit switches are fixed there, once.",
+    "dist_high": "Distance from the 52-week high, in %.",
+    "dist_ema": "Distance from the trailing EMA of price, in %.",
+    "spy_vol20": "20-day realized volatility of the S&P — the market regime the trade sits in.",
+    "spy_dd252": "S&P drawdown from its 252-day high, in %.",
+    "days_to_print": "Calendar days from the decision to the announcement.",
+    "days_before_print": "TRADING days from entry to the last pre-print close. 0 for STR-THRU, 14 for STR-RUNUP — calendar days here would be a silent training/serving skew.",
+    "entry_cost_pct": "Premium paid for the structure, as % of spot. The gate's read on whether the trade is expensive.",
+    "dte_entry": "Days to expiry of the traded contracts at entry.",
+}
+
+#: Human labels for the two payoff drivers.
+DRIVER_NOTES: dict[str, str] = {
+    "abs_move": "the size of the move the stock makes on the print (|move|, %)",
+    "im_t1": "the implied move the market will quote at the last pre-print close (%)",
+}
+
+
+def feature_note(name: str) -> str:
+    """One line explaining ``name``, deriving the lag and EMA families.
+
+    Returns an empty string for a feature nobody has documented — the caller
+    shows the bare name rather than inventing an explanation for it.
+    """
+    if name in FEATURE_NOTES:
+        return FEATURE_NOTES[name]
+
+    lag = re.fullmatch(r"(?P<base>.+)_d(?P<n>\d+)", name)
+    if lag:
+        base = feature_note(lag.group("base")) or lag.group("base")
+        return (
+            f"Change over the last {lag.group('n')} observations in: "
+            f"{base[0].lower()}{base[1:]}"
+        )
+
+    ema = re.fullmatch(r"ema(?P<n>\d+)_prior_(?P<kind>abs_move|move)", name)
+    if ema:
+        kind = "absolute" if ema.group("kind") == "abs_move" else "signed"
+        return (
+            f"Exponentially weighted mean of the {kind} reaction to past prints, "
+            f"span {ema.group('n')} — recent prints weighted more than old ones."
+        )
+    return ""
 
 
 def entry_feature_frame(

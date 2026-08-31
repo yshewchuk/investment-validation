@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+from engine.jsonio import json_safe
 
 #: Bumped when a prediction row's shape changes. Rows carry it so a reader
 #: five schema versions later can still tell what it is holding.
@@ -186,7 +187,14 @@ def write_predictions(rows: Sequence[Mapping[str, Any]], *, as_of=None) -> Path:
     mode = "a" if path.exists() else "x"
     with open(path, mode) as fh:
         for row in rows:
-            fh.write(json.dumps(row, default=str) + "\n")
+            try:
+                line = json.dumps(row, default=str, allow_nan=False)
+            except ValueError as exc:  # NaN/Infinity survived the sanitizer
+                raise LedgerError(
+                    f"row {row['row_id']} is not strict JSON ({exc}); the ledger "
+                    "cannot be corrected after the fact, so it is not written"
+                ) from exc
+            fh.write(line + "\n")
     return path
 
 
@@ -200,7 +208,7 @@ def supersede(old_row_id: str, new_row: Mapping[str, Any], reason: str) -> Path:
         raise LedgerError("a supersede needs a reason")
     if old_row_id not in existing_row_ids():
         raise LedgerError(f"cannot supersede unknown row_id {old_row_id!r}")
-    row = dict(new_row)
+    row = json_safe(dict(new_row))
     row["supersedes"] = old_row_id
     row["supersede_reason"] = reason
     return write_predictions([row])
@@ -270,7 +278,7 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
             "supersedes": None,
             "supersede_reason": None,
         })
-    return rows
+    return [json_safe(row) for row in rows]
 
 
 def snapshot(as_of=None, *, horizon_days: int = 21,
@@ -340,7 +348,9 @@ def _write_outcomes(rows: Sequence[Mapping[str, Any]]) -> Path | None:
     mode = "a" if path.exists() else "x"
     with open(path, mode) as fh:
         for row in fresh:
-            fh.write(json.dumps(row, default=str) + "\n")
+            # Same rule as the prediction side: an outcome file that is not
+            # strict JSON is a corrupt record nobody may rewrite.
+            fh.write(json.dumps(json_safe(row), default=str, allow_nan=False) + "\n")
     return path
 
 

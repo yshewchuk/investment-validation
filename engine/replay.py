@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import time
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
@@ -50,6 +51,7 @@ __all__ = [
     "plan_events",
     "ChainIndex",
     "load_chain_index",
+    "latest_chain_date",
     "replay_one",
     "replay",
     "ReplayResult",
@@ -247,6 +249,37 @@ def filter_plan_by_availability(
         (has_entry & ~has_exit).sum()
     )
     return ReplayPlan(frame=frame[has_entry & has_exit].reset_index(drop=True), skipped=skipped)
+
+
+_CHAIN_DATES_BY_TICKER: dict[str, list[pd.Timestamp]] | None = None
+
+
+def latest_chain_date(ticker: str, on_or_before) -> pd.Timestamp | None:
+    """The newest chain we hold for ``ticker`` at or before a date.
+
+    For scoring an UPCOMING event: its entry date has not happened, so no chain
+    for it can exist, and requiring one leaves the whole forward board unpriced.
+    The newest chain we do hold is the honest substitute — it is strictly OLDER
+    information, so it cannot leak, and the caller labels what it used.
+
+    Built once from :func:`available_chain_keys` and cached, because the caller
+    is a board loop asking a few hundred times.
+    """
+    global _CHAIN_DATES_BY_TICKER
+    if _CHAIN_DATES_BY_TICKER is None:
+        by_ticker: dict[str, list[pd.Timestamp]] = {}
+        for t, d in available_chain_keys():
+            by_ticker.setdefault(str(t), []).append(pd.Timestamp(d))
+        for dates in by_ticker.values():
+            dates.sort()
+        _CHAIN_DATES_BY_TICKER = by_ticker
+
+    dates = _CHAIN_DATES_BY_TICKER.get(str(ticker))
+    if not dates:
+        return None
+    cutoff = pd.Timestamp(on_or_before).normalize()
+    position = bisect_right(dates, cutoff)
+    return dates[position - 1] if position else None
 
 
 def load_chain_index(

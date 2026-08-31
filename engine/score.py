@@ -207,6 +207,19 @@ class ScoreResult:
     analog_buckets: dict = field(default_factory=dict)
     snapshot_hash: str = ""
     detail: str = ""
+    driver_name: str | None = None
+    driver_prediction: float | None = None
+    #: For a row we could not price: the newest chain the store holds for this
+    #: ticker, and its age in days. It turns a bare NO_CHAIN into the actionable
+    #: fact — whether a refresh would fix it, or the name was never covered.
+    chain_last_obs: str | None = None
+    chain_age_days: int | None = None
+    #: The exact feature values the champion consumed, in its own feature order,
+    #: with the date each was observed as of. A prediction nobody can take apart
+    #: is not evidence, and this is what makes the number on the board
+    #: reconstructable by hand.
+    model_inputs: dict = field(default_factory=dict)
+    model_input_as_of: str | None = None
 
     def flag(self, name: str) -> None:
         if name not in self.flags:
@@ -380,6 +393,12 @@ class Scorer:
         )
 
         if request.strategy in DISABLED_STRATEGIES:
+            # Carry the event identity even though nothing is scored. The row
+            # still appears on the board, and one with a blank date reads as a
+            # rendering bug rather than as the deliberate refusal it is.
+            if request.event_date is not None:
+                result.event_date = pd.Timestamp(request.event_date).normalize()
+                result.session = request.session
             result.flag("UNVALIDATED_STRUCTURE")
             result.detail = DISABLED_STRATEGIES[request.strategy]
             return result
@@ -506,6 +525,7 @@ class Scorer:
         rows = index.get(request.ticker, result.entry_date)
         if rows is None or rows.empty:
             result.flag("NO_CHAIN")
+            self._note_chain_age(request, result)
             return
 
         from engine.replay import _clean
@@ -514,6 +534,7 @@ class Scorer:
         clean = _clean(rows)
         if clean.empty:
             result.flag("NO_CHAIN")
+            self._note_chain_age(request, result)
             return
         snapshot = ChainSnapshot(
             ticker=request.ticker,
@@ -526,6 +547,7 @@ class Scorer:
             priced = price_structure(structure, snapshot, request.fill)
         except (StructureError, ValueError):
             result.flag("NO_CHAIN")
+            self._note_chain_age(request, result)
             return
 
         result.entry_cost = float(priced.cost)
@@ -545,6 +567,63 @@ class Scorer:
         if result.extrapolated:
             result.flag("EXTRAPOLATED")
 
+    def _note_chain_age(self, request, result) -> None:
+        """Record how old the newest chain for this ticker is. Never prices off it.
+
+        Substituting an older chain was considered and rejected: the cache is
+        event-centric, so a name's newest chain is from its LAST print — measured
+        at a 93-day median across a live board. That is a different quarter's
+        surface, a different spot, and expiries that do not span the upcoming
+        print. An entry cost derived from it would look like a quote and be
+        fiction, and it would then be frozen into the prediction ledger. The age
+        is reported instead, because it is what tells a reader whether a refresh
+        fixes this row or the name was never covered at all.
+        """
+        from engine.replay import latest_chain_date
+
+        try:
+            newest = latest_chain_date(request.ticker, result.entry_date)
+        except Exception:  # a diagnostic must never take the score down
+            return
+        if newest is None:
+            result.detail = result.detail or "no chain in the store for this ticker"
+            return
+        result.chain_last_obs = str(pd.Timestamp(newest).date())
+        if result.entry_date is not None:
+            result.chain_age_days = int(
+                (pd.Timestamp(result.entry_date).normalize() - pd.Timestamp(newest)).days
+            )
+
+    def _panel_row(self, request, result):
+        """The panel's row for this event, or None when it has not happened."""
+        panel = self.context.panel
+        rows = panel[
+            (panel["ticker"] == request.ticker) & (panel["date"] == result.event_date)
+        ]
+        return rows.iloc[0] if len(rows) else None
+
+    def _live_values(self, request, result) -> dict[str, float]:
+        """``live_features`` for an event the panel does not carry.
+
+        One call per score, shared by the market block and the event-history
+        block below — they are two slices of the same vector, and computing it
+        twice would double the cost of every forward row on the board.
+        """
+        try:
+            vector = live_features(
+                request.ticker,
+                result.event_date,
+                as_of=result.entry_date,
+                session=result.session,
+                context=self.context,
+            )
+        except (KeyError, ValueError, FileNotFoundError):
+            # No prior events, or no price history to build the run-up block
+            # from. The model layer will report MISSING_FEATURES, which is the
+            # honest answer for a name we know nothing about.
+            return {}
+        return dict(vector.values)
+
     def _market_block(self, request, result) -> dict[str, float]:
         """Market state at the last pre-print close, from whichever path has it.
 
@@ -560,36 +639,15 @@ class Scorer:
         historical events, so the fallback is not a second implementation with a
         second set of answers.
         """
-        panel = self.context.panel
-        rows = panel[
-            (panel["ticker"] == request.ticker) & (panel["date"] == result.event_date)
-        ]
-        if len(rows):
-            row = rows.iloc[0]
+        row = self._panel_row(request, result)
+        if row is not None:
             return {
                 column: (float(row[column]) if pd.notna(row[column]) else np.nan)
                 for column in _PANEL_MARKET_BLOCK
                 if column in row.index
             }
-
-        try:
-            vector = live_features(
-                request.ticker,
-                result.event_date,
-                as_of=result.entry_date,
-                session=result.session,
-                context=self.context,
-            )
-        except (KeyError, ValueError, FileNotFoundError):
-            # No prior events, or no price history to build the run-up block
-            # from. The model layer will report MISSING_FEATURES, which is the
-            # honest answer for a name we know nothing about.
-            return {}
-        return {
-            column: vector.values[column]
-            for column in _PANEL_MARKET_BLOCK
-            if column in vector.values
-        }
+        live = self._live_values(request, result)
+        return {c: live[c] for c in _PANEL_MARKET_BLOCK if c in live}
 
     def _features(self, request, result) -> pd.DataFrame:
         """The one leak-audited feature row every layer reads."""
@@ -642,6 +700,24 @@ class Scorer:
             for column, value in block.items():
                 built[column] = value
 
+        # `entry_feature_frame` reads the event-history recursions — n_prior,
+        # the prior-move means, the EMAs — off the panel, and an UPCOMING event
+        # has no panel row, so every one of them lands NaN and every model
+        # declines with MISSING_FEATURES. That is the whole forward board.
+        #
+        # These are not stale substitutes: they are recursions over the ticker's
+        # PRIOR events, which is exactly what the panel would hold, computed one
+        # event forward by `live_features` and cut off at the entry date.
+        # `checks/phase1_replay.py` asserts the two paths agree to 1e-9 on
+        # historical events, so this is not a second set of answers.
+        if self._panel_row(request, result) is None:
+            live = self._live_values(request, result)
+            for column in EVENT_HISTORY_FEATURES:
+                if column not in live:
+                    continue
+                if column not in built.columns or pd.isna(built[column].iloc[0]):
+                    built[column] = live[column]
+
         n_prior = built.get("n_prior")
         if n_prior is not None and pd.notna(n_prior.iloc[0]) and n_prior.iloc[0] < THIN_HISTORY_EVENTS:
             result.flag("THIN_HISTORY")
@@ -684,6 +760,22 @@ class Scorer:
         entry, artifact = loaded
         result.model_versions[f"{driver}"] = entry.id
 
+        # Record the inputs BEFORE any early return: a row that declined to
+        # score is exactly the one where someone needs to see what went in.
+        result.model_input_as_of = (
+            str(pd.Timestamp(result.entry_date).date())
+            if result.entry_date is not None
+            else None
+        )
+        result.model_inputs = {
+            name: (
+                float(features[name].iloc[0])
+                if name in features.columns and pd.notna(features[name].iloc[0])
+                else None
+            )
+            for name in artifact.features
+        }
+
         missing = [f for f in artifact.features if f not in features.columns]
         if missing:
             result.flag("MISSING_FEATURES")
@@ -698,6 +790,20 @@ class Scorer:
             result.detail = f"model {entry.id}: non-finite {absent}"
             return
 
+        # The champion's prediction needs no chain, so it is taken FIRST and
+        # kept even when the row cannot be priced. It is the program's actual
+        # signal — predicted |move| against the market's quoted implied
+        # (EXP-040), predicted T-1 implied move (EXP-043) — and a monitoring
+        # board that hides it until an option quote arrives is withholding the
+        # one number it already knows.
+        point = float(artifact.predict(X)[0])
+        result.driver_name = driver
+        result.driver_prediction = point
+
+        # Expected PnL, though, is a return ON THE PREMIUM. Without an entry
+        # cost there is no denominator — this is arithmetic, not a policy, and
+        # it is why a current chain is the binding requirement for the P&L
+        # columns rather than something a fallback could paper over.
         if result.entry_cost is None or result.entry_cost <= 0 or result.spot is None:
             result.flag("NO_CHAIN")
             return
@@ -706,8 +812,6 @@ class Scorer:
             result.flag("NO_PAYOFF_MAP")
             return
         result.payoff = payoff.as_dict()
-
-        point = float(artifact.predict(X)[0])
         rng = np.random.default_rng(
             int.from_bytes(
                 hashlib.sha256(f"{self.snapshot}|{request.key()}".encode()).digest()[:8],
@@ -851,6 +955,34 @@ def score(
     return (scorer or _scorer()).score(request)
 
 
+#: The exceptions that mean "this row cannot be priced", as opposed to "the
+#: engine is broken". A calendar row that hits one becomes a NO_CHAIN placeholder
+#: rather than taking the whole board down — most often an event whose chains
+#: were never pulled.
+UNSCORABLE = (KeyError, StructureError)
+
+
+def unscorable_result(
+    request: ScoreRequest, *, as_of, snapshot: str, exc: Exception
+) -> ScoreResult:
+    """The NO_CHAIN placeholder for a row the engine cannot price.
+
+    Shared rather than inlined because the dashboard self-check re-scores board
+    rows through a second path: if it built its own placeholder, the two could
+    drift and every unpriceable row would read as a self-check mismatch.
+    """
+    result = ScoreResult(
+        ticker=request.ticker,
+        strategy=request.strategy,
+        as_of=pd.Timestamp(as_of),
+        event_date=None if request.event_date is None else pd.Timestamp(request.event_date),
+        snapshot_hash=snapshot,
+        detail=str(exc),
+    )
+    result.flag("NO_CHAIN")
+    return result
+
+
 def score_calendar(
     as_of=None,
     *,
@@ -933,16 +1065,10 @@ def score_calendar(
                 )
                 try:
                     result = engine.score(request, chain_index=index)
-                except (KeyError, StructureError) as exc:
-                    result = ScoreResult(
-                        ticker=str(event.ticker),
-                        strategy=strategy,
-                        as_of=as_of,
-                        event_date=pd.Timestamp(event.event_date),
-                        snapshot_hash=engine.snapshot,
-                        detail=str(exc),
+                except UNSCORABLE as exc:
+                    result = unscorable_result(
+                        request, as_of=as_of, snapshot=engine.snapshot, exc=exc
                     )
-                    result.flag("NO_CHAIN")
                 if offset is None:
                     atm_spot = result.spot
                 rows.append(result.as_dict() | {"strike_offset": offset})

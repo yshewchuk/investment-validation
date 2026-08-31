@@ -85,6 +85,21 @@ INCLUDE_ROOT_GLOBS = ("*.py",)
 
 EXCLUDE_PARTS = ("__pycache__", ".git", ".venv", "node_modules", ".pytest_cache")
 
+#: Repo-relative directories the ``dashboard`` globs above would otherwise sweep
+#: in. The mirror exists for what CANNOT be regenerated; these are the opposite.
+#:
+#: ``dashboard/earnings`` is the rendered Phase 3 bundle and ``dashboard/published``
+#: its release history — both rebuilt by one `engine.dashboard.nightly` run from
+#: the store and the ledger, which ARE mirrored. Left in, they were 10.5 MB of
+#: the payload (627 files of it five near-identical copies of the same board)
+#: against ~13 MB of everything irreplaceable. ``reports/phase3_checks`` is the
+#: acceptance suite's working directory, regenerated on every run.
+EXCLUDE_DIRS = (
+    "dashboard/earnings",
+    "dashboard/published",
+    "reports/phase3_checks",
+)
+
 #: The 1 MB cap exists to keep a CODE repo from swallowing data. Two artifact
 #: kinds are deliberately exempt here, because they are the evidence the mirror
 #: exists for and they are useless truncated: the per-trade transaction logs
@@ -108,6 +123,12 @@ def collect() -> tuple[list[Path], list[str]]:
         if not path.is_file():
             return
         if any(part in EXCLUDE_PARTS for part in path.parts):
+            return
+        try:
+            relative = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            relative = path.as_posix()
+        if any(relative.startswith(f"{d}/") for d in EXCLUDE_DIRS):
             return
         cap = _size_cap(path)
         if path.stat().st_size > cap:

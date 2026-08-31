@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Earnings-Vol Board</title>
+<!-- Inline, not a file: every page load was asking for /favicon.ico and getting
+     a 404, and a published bundle should not depend on a separate asset for it. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d1117'/%3E%3Cpath d='M3 11.5l3-4 2.5 2L13 4' stroke='%233fb950' stroke-width='1.8' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<h1>Earnings-Vol Monitoring Board</h1>
+<div class="sub" id="meta-line">Loading…</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="board">Upcoming prints</div>
+  <div class="tab" data-tab="explorer">Ticker / strike explorer</div>
+  <div class="tab" data-tab="health">Model health</div>
+  <div class="tab" data-tab="derivation">How a number is made</div>
+</div>
+
+<div id="flags-banner" class="hidden"></div>
+
+<div id="view-board">
+  <div class="panel">
+    <div class="controls">
+      <label>Strategy
+        <select id="f-strategy">
+          <option value="">all</option>
+        </select>
+      </label>
+      <label>Gate
+        <select id="f-gate">
+          <option value="">all</option>
+          <option value="pass">pass</option>
+          <option value="fail">fail</option>
+          <option value="na">n/a</option>
+        </select>
+      </label>
+      <label>Ticker <input id="f-ticker" type="text" placeholder="filter…" autocomplete="off"></label>
+      <span class="badge" id="board-count"></span>
+    </div>
+    <div class="tablewrap">
+      <table id="tbl-board">
+        <thead><tr>
+          <th data-sort="event_date">Event</th>
+          <th data-sort="ticker">Ticker</th>
+          <th data-sort="strategy">Strategy</th>
+          <th data-sort="gate_score">Gate</th>
+          <th data-sort="exp_pnl_model">Exp PnL (model)</th>
+          <th data-sort="exp_pnl_analog">Exp PnL (analogs)</th>
+          <th data-sort="driver_prediction">Model call</th>
+          <th data-sort="win_model">Win + CI</th>
+          <th data-sort="n_analogs">n</th>
+          <th data-sort="entry_cost_pct">Premium vs fair</th>
+          <th data-sort="entry_date">Entry → exit</th>
+          <th data-sort="rank">Rank</th>
+          <th>Flags</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div id="view-explorer" class="hidden">
+  <div class="panel">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <strong>Ticker</strong>
+      <select id="x-ticker"></select>
+      <span class="badge" id="x-asof"></span>
+    </div>
+    <div id="x-grid" style="margin-top:12px"></div>
+    <div id="x-detail" class="hidden" style="margin-top:12px"></div>
+  </div>
+  <div class="grid2">
+    <div class="panel">
+      <h3>Print history (implied vs realized)</h3>
+      <div class="tablewrap" id="x-history"></div>
+    </div>
+    <div class="panel">
+      <h3>Past analog trades on this name</h3>
+      <div class="tablewrap" id="x-analogs"></div>
+    </div>
+  </div>
+</div>
+
+<div id="view-health" class="hidden">
+  <div class="panel">
+    <h3>Snapshot</h3>
+    <div class="kv" id="h-kv"></div>
+  </div>
+  <div class="grid2">
+    <div class="panel">
+      <h3>Champion models</h3>
+      <div class="tablewrap" id="h-models"></div>
+    </div>
+    <div class="panel">
+      <h3>Size model vs implied-move baseline (live ledger)</h3>
+      <div id="h-sizemae"></div>
+    </div>
+  </div>
+  <div class="grid2">
+    <div class="panel">
+      <h3>Ledger calibration</h3>
+      <div id="h-calibration"></div>
+    </div>
+    <div class="panel">
+      <h3>Last self-check</h3>
+      <div id="h-selfcheck"></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Flags</h3>
+    <div id="h-flags"></div>
+  </div>
+</div>
+
+<div id="view-derivation" class="hidden">
+  <div class="panel">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <strong>Strategy</strong>
+      <select id="d-strategy"></select>
+    </div>
+    <div id="d-body" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<div class="sub" id="foot-line"></div>
+
+<script src="data/meta.js"></script>
+<script src="data/board.js"></script>
+<script src="data/health.js"></script>
+<script src="data/flags.js"></script>
+<script src="data/strategies.js"></script>
+<script>
+window.TICKER_DATA = window.TICKER_DATA || {};
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

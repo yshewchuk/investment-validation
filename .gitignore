@@ -57,7 +57,18 @@
 # off-limits when it lives in config/thesis/universe.yaml, and it is no more
 # publishable for being embedded in a module. Revisit when Phase 3 moves the
 # universe into config.
-/dashboard/
+# Written as `/dashboard/*` rather than `/dashboard/`: git does not descend into
+# an excluded DIRECTORY, so a `!` rule under one is silently dead. Excluding the
+# entries instead keeps the two exceptions below working — and keeps every
+# subdirectory (cache/, earnings/, published/) excluded and undescended, which
+# is what holds the rendered bundle's licensed quotes and position intent out of
+# a public remote.
+/dashboard/*
+# Two exceptions, both pure code/docs carrying no universe and no market data:
+# the Phase 3 board's server, and the directory's README (how to run both
+# dashboards, plus the Cloudflare Access checklist).
+!/dashboard/README.md
+!/dashboard/earnings_app.py
 
 # data tiers, caches, and the grandfathered research trees
 /data/
