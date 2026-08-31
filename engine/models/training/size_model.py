@@ -45,7 +45,18 @@ TARGET = "abs_move"
 #: ``implied_move``; ``mcap_log`` is the era-normalized market cap Phase 0
 #: corrected (EXP-037 — small caps move ~2.3× mega caps, the effect the legacy
 #: panel's understated pre-2017 caps partly buried).
+#:
+#: The three absolute-valued inputs came from EXP-109. This blend is half
+#: linear, and a signed input against a magnitude target is often V-shaped —
+#: ``mean_prior_move`` against ``abs_move`` runs 8.35 → 4.60 → 7.82 across its
+#: deciles on a Spearman of +0.013, a shape the OLS half cannot represent at
+#: all. Adding the magnitudes improved walk-forward OOS MAE in 11 of 14 years
+#: (Wilcoxon p=0.0134), and the gain survived dropping the best year. It is a
+#: 0.36% relative improvement: real, consistent, and small.
 FEATURES = (
+    "mean_prior_abs_move",
+    "abs_dist_ema",
+    "abs_dist_high",
     "ema12r_abs",
     "mean_prior_move",
     "signed_streak",

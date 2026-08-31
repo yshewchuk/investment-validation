@@ -51,6 +51,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.data import store  # noqa: E402
 from engine.features import (  # noqa: E402
+    ABSOLUTE_FEATURES,
     PANEL_FEATURE_COLUMNS,
     FeatureContext,
     live_features,
@@ -251,7 +252,11 @@ def check_feature_equivalence(
             failures.append(f"{ticker}: {exc}")
             continue
         compared += 1
-        for name in PANEL_FEATURE_COLUMNS:
+        # ABSOLUTE_FEATURES are derived rather than stored, so they are not in
+        # PANEL_FEATURE_COLUMNS — and a derived feature is exactly the kind that
+        # can be produced by one path and forgotten by the other. This check
+        # exists to catch training/serving skew, so it has to see them.
+        for name in tuple(PANEL_FEATURE_COLUMNS) + tuple(ABSOLUTE_FEATURES):
             if name in FEATURE_EXEMPT:
                 continue
             a, b = from_panel.values.get(name), from_live.values.get(name)

@@ -90,15 +90,18 @@ def train_size(*, seed: int = SEED, dry_run: bool = False) -> dict:
         params={"blend": "OLS + MLP(64,32)", "min_prior": size_mod.MIN_PRIOR},
         seed=seed,
         notes=(
-            "v1.3 architecture. `or_implied` replaces the legacy `implied_move`, "
-            "which cannot be sourced for an unrealized event."
+            "v1.4 architecture. `or_implied` replaces the legacy `implied_move`, "
+            "which cannot be sourced for an unrealized event. v1.4 adds the "
+            "absolute-valued inputs promoted by EXP-109: mean_prior_abs_move, "
+            "abs_dist_ema, abs_dist_high — the magnitudes behind V-shaped signed "
+            "features that the blend's linear half cannot represent."
         ),
     )
     entry = RegistryEntry(
-        id="size_v1_3",
+        id="size_v1_4",
         role="size",
         strategy=ANY_STRATEGY,
-        artifact=str((ARTIFACT_DIR / "size_v1_3.joblib").relative_to(paths.ROOT)),
+        artifact=str((ARTIFACT_DIR / "size_v1_4.joblib").relative_to(paths.ROOT)),
         artifact_sha256="",
         features=list(size_mod.FEATURES),
         target=size_mod.TARGET,

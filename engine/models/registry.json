@@ -455,11 +455,92 @@
      "note": "OLS+NN blend on true implied"
     }
    },
-   "champion": true,
+   "champion": false,
    "promoted": "2026-08-30",
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "v1.3 architecture. `or_implied` replaces the legacy `implied_move`, which cannot be sourced for an unrealized event.",
+   "threshold": null
+  },
+  {
+   "id": "size_v1_4",
+   "role": "size",
+   "strategy": "*",
+   "artifact": "data/models/size_v1_4.joblib",
+   "artifact_sha256": "1ce132b4fa0b89f1b0ba02b6dbdda6493aacd71d563843ca775ae07fcab0ef52",
+   "features": [
+    "mean_prior_abs_move",
+    "abs_dist_ema",
+    "abs_dist_high",
+    "ema12r_abs",
+    "mean_prior_move",
+    "signed_streak",
+    "dist_high",
+    "dist_ema",
+    "spy_vol20",
+    "spy_dd252",
+    "mean_prior_implied_move",
+    "or_implied",
+    "or_rvol30",
+    "mcap_log"
+   ],
+   "target": "abs_move",
+   "train_window": "walk-forward, OOS 2013-2026",
+   "train_years": [
+    2013,
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025,
+    2026
+   ],
+   "eval": {
+    "n": 96442,
+    "r": 0.459073909008991,
+    "mae": 3.9111204498660372,
+    "rmse": 6.055613703945278,
+    "bias": -0.2691348082148594,
+    "decile_spread": 10.523126247766172,
+    "oos_years": 14,
+    "feature_set_comparison": {
+     "servable": {
+      "n": 96442,
+      "r": 0.459073909008991,
+      "mae": 3.9111204498660372,
+      "rmse": 6.055613703945278,
+      "bias": -0.2691348082148594,
+      "decile_spread": 10.523126247766172,
+      "oos_years": 14
+     },
+     "legacy": {
+      "n": 96442,
+      "r": 0.45621084177548044,
+      "mae": 3.909296841584215,
+      "rmse": 6.068385938694533,
+      "bias": -0.31843196410714447,
+      "decile_spread": 10.531823346974841,
+      "oos_years": 14
+     }
+    },
+    "reference": {
+     "oos_r": 0.459,
+     "source": "EXP-040",
+     "note": "OLS+NN blend on true implied"
+    }
+   },
+   "champion": true,
+   "promoted": "2026-08-31",
+   "evidence": "reports/phase1_models.md",
+   "seed": 20260829,
+   "notes": "v1.4 architecture. `or_implied` replaces the legacy `implied_move`, which cannot be sourced for an unrealized event. v1.4 adds the absolute-valued inputs promoted by EXP-109: mean_prior_abs_move, abs_dist_ema, abs_dist_high \u2014 the magnitudes behind V-shaped signed features that the blend's linear half cannot represent.",
    "threshold": null
   }
  ]

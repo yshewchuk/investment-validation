@@ -48,6 +48,8 @@ from engine.data import store
 from engine.data.features import panel as panel_mod
 
 __all__ = [
+    "ABSOLUTE_FEATURES",
+    "add_absolute_features",
     "PANEL_FEATURE_COLUMNS",
     "OUTCOME_COLUMNS",
     "load_panel",
@@ -109,6 +111,46 @@ PANEL_FEATURE_COLUMNS: tuple[str, ...] = tuple(
 # --------------------------------------------------------------------------
 
 
+#: Absolute-valued counterparts of signed inputs, added by EXP-109.
+#:
+#: A signed input against a MAGNITUDE target is often V-shaped — high at both
+#: ends, low in the middle — and the size model's blend is half linear, so the
+#: OLS half cannot represent that shape at all. `mean_prior_move` against
+#: `abs_move` runs 8.35 -> 4.60 -> 7.82 across its deciles on a Spearman of
+#: +0.013. These are the magnitudes that shape is actually about.
+#:
+#: Derived on READ rather than stored in Tier 3, deliberately: they are pure
+#: functions of a column that is already there, so deriving them in one place
+#: means the panel path and the live path cannot drift, and no rebuild is
+#: needed to make an existing snapshot serve them.
+ABSOLUTE_FEATURES: dict[str, str] = {
+    "abs_dist_high": "dist_high",
+    "abs_dist_ema": "dist_ema",
+}
+
+
+def add_absolute_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Attach the ``ABSOLUTE_FEATURES`` wherever their source column exists.
+
+    Fills where the column is ABSENT **or** null, not merely where it is
+    absent. A forward event has no panel row, so the scorer's panel join
+    creates these columns full of NaN before the derivation runs; an
+    absent-only guard then skipped every one of them and left the NaN in place,
+    which took all 148 STR-THRU rows off the board with
+    ``non-finite ['abs_dist_ema', 'abs_dist_high']`` while their sources sat
+    right there, finite, in the same frame.
+    """
+    for name, source in ABSOLUTE_FEATURES.items():
+        if source not in frame.columns:
+            continue
+        derived = pd.to_numeric(frame[source], errors="coerce").abs()
+        if name in frame.columns:
+            frame[name] = pd.to_numeric(frame[name], errors="coerce").fillna(derived)
+        else:
+            frame[name] = derived
+    return frame
+
+
 @lru_cache(maxsize=1)
 def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
     """Read the panel once per process, keyed on path + mtime.
@@ -120,6 +162,7 @@ def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
     """
     frame = pd.read_parquet(path_str) if path_str.endswith(".parquet") else pd.read_csv(path_str)
     frame["date"] = pd.to_datetime(frame["date"])
+    frame = add_absolute_features(frame)
     return frame.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
@@ -225,6 +268,8 @@ class FeatureContext:
 #: pre-print close: that is the latest moment any of them could have been known,
 #: and stamping conservatively (later) is what makes the audit meaningful.
 _MARKET_BLOCK = tuple(panel_mod.ORATS_FEATURES.values()) + (
+    "abs_dist_high",
+    "abs_dist_ema",
     "or_exern_z252",
     "mcap_log",
     "mcap_usd",
@@ -465,11 +510,17 @@ def live_features(
     frame = panel_mod.add_runup_features(frame)
     daily = ctx.ticker_daily(ticker) if ctx.daily is not None else None
     frame = panel_mod.add_orats_features(frame, daily=daily)
+    # The same derivation `load_panel` applies on read. Without it here the
+    # live path would silently omit these and every forward row would report
+    # MISSING_FEATURES for a model that lists them — the panel path would serve
+    # them and the live path would not, which is precisely the training/serving
+    # skew `checks/phase1_checks.py::feature_equivalence` exists to catch.
+    frame = add_absolute_features(frame)
 
     row = frame[frame["date"] == event_date].iloc[-1]
     values = {
         name: (float(row[name]) if pd.notna(row[name]) else float("nan"))
-        for name in PANEL_FEATURE_COLUMNS
+        for name in tuple(PANEL_FEATURE_COLUMNS) + tuple(ABSOLUTE_FEATURES)
         if name in row.index
     }
     # True observation dates, not the decision-close upper bound:
@@ -738,6 +789,8 @@ FEATURE_NOTES: dict[str, str] = {
     "mcap_log": "log(market cap). Era-normalized in Tier 2 — the ORATS unit switches are fixed there, once.",
     "dist_high": "Distance from the 52-week high, in %.",
     "dist_ema": "Distance from the trailing EMA of price, in %.",
+    "abs_dist_high": "How FAR from the 52-week high, ignoring direction (EXP-109).",
+    "abs_dist_ema": "How FAR from the trailing EMA, ignoring direction (EXP-109).",
     "spy_vol20": "20-day realized volatility of the S&P — the market regime the trade sits in.",
     "spy_dd252": "S&P drawdown from its 252-day high, in %.",
     "days_to_print": "Calendar days from the decision to the announcement.",
