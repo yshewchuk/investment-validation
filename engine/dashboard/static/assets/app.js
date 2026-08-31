@@ -153,7 +153,20 @@ function driverCell(r) {
   if (r.driver_prediction === null || r.driver_prediction === undefined) return "–";
   const label = r.driver_name === "abs_move" ? "|move|"
     : r.driver_name === "implied_t1" ? "T–1 implied" : (r.driver_name || "");
-  return fmt(r.driver_prediction, 1) + "% <span class='badge'>" + esc(label) + "</span>";
+  /* The point estimate alone reads as more certain than it is. The band is the
+     10th-90th percentile of the model's own draws — nominally 80%, measured at
+     72.8% (EXP-112/114), which is why the title says the measured number. It is
+     also the SAME width for every event today; making it vary is a pending
+     model change, not something this view can fake. */
+  let band = "";
+  if (r.driver_p10 !== null && r.driver_p10 !== undefined
+      && r.driver_p90 !== null && r.driver_p90 !== undefined) {
+    band = " <span class='band' title='10th-90th percentile of the model draws."
+      + " Nominally an 80% band; measured coverage 72.8%.'>"
+      + fmt(Math.max(r.driver_p10, 0), 1) + "–" + fmt(r.driver_p90, 1) + "</span>";
+  }
+  return fmt(r.driver_prediction, 1) + "%" + band
+    + " <span class='badge'>" + esc(label) + "</span>";
 }
 
 function boardRows() {
@@ -344,8 +357,18 @@ function renderRowDetail(r, detailEl) {
     + "</tbody></table></div>";
 
   const modelExtra =
-    "<tr><td>p10 / p90</td><td>" + signedPct(r.model_p10) + " / " + signedPct(r.model_p90) + "</td></tr>"
-    + "<tr><td>driver (" + esc(r.driver_name || "?") + ")</td><td>" + fmt(r.driver_prediction, 2) + "</td></tr>";
+    "<tr><td title='Percentiles of the TRADE RETURN, after the driver is pushed "
+    + "through the payoff map.'>return p10 / p90</td><td>"
+    + signedPct(r.model_p10) + " / " + signedPct(r.model_p90) + "</td></tr>"
+    + "<tr><td>driver (" + esc(r.driver_name || "?") + ")</td><td>" + fmt(r.driver_prediction, 2)
+    + (r.driver_p10 === null || r.driver_p10 === undefined ? ""
+        : " <span class='band'>" + fmt(Math.max(r.driver_p10, 0), 2) + "–"
+          + fmt(r.driver_p90, 2) + "</span>")
+    + "</td></tr>"
+    + "<tr><td title='The band on the driver is nominally 10th-90th (80%). Its "
+    + "measured out-of-sample coverage is 72.8%, and it is the same width for "
+    + "every event.'>driver band</td><td class='muted'>80% nominal, "
+    + "<strong>72.8% measured</strong>, unconditional</td></tr>";
   const analogExtra =
     "<tr><td>CI (bootstrap)</td><td>[" + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</td></tr>"
     + "<tr><td>matched on</td><td class='mono'>"

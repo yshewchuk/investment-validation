@@ -212,6 +212,19 @@ class ScoreResult:
     detail: str = ""
     driver_name: str | None = None
     driver_prediction: float | None = None
+    #: The interval around ``driver_prediction`` itself — the "± 2" on an
+    #: expected move of 6 — as opposed to ``model_p10``/``model_p90``, which are
+    #: percentiles of the resulting TRADE RETURN. Both are real and they answer
+    #: different questions; only the second was reachable from the board before.
+    #:
+    #: Nominally 10th/90th, so nominally an 80% band. Measured coverage is
+    #: 72.8% (EXP-112, confirmed EXP-114): the pool these are drawn from is
+    #: unconditional, so the band is one width for every event and too narrow
+    #: overall. The board labels it with the measured number rather than the
+    #: nominal one. EXP-114 adopted per-decile conditioning to fix this; that
+    #: is a separate change, gated on a recalibration refit.
+    driver_p10: float | None = None
+    driver_p90: float | None = None
     #: For a row we could not price: the newest chain the store holds for this
     #: ticker, and its age in days. It turns a bare NO_CHAIN into the actionable
     #: fact — whether a refresh would fix it, or the name was never covered.
@@ -812,6 +825,26 @@ class Scorer:
         result.driver_name = driver
         result.driver_prediction = point
 
+        # The band on that prediction, for the same reason and on the same
+        # terms: it is the model's own held-out residuals, so it needs no chain
+        # either. Computing it down in the P&L branch would have withheld it
+        # from exactly the rows the driver column exists to serve — a board more
+        # than a day or two ahead of its prints has a prediction on nearly every
+        # row and an entry cost on almost none.
+        #
+        # The draw ORDER is deliberate: this rng and these draws then feed the
+        # P&L simulation below unchanged, so exp_pnl_model, win_model and the
+        # return percentiles are bit-identical to before this band existed.
+        rng = np.random.default_rng(
+            int.from_bytes(
+                hashlib.sha256(f"{self.snapshot}|{request.key()}".encode()).digest()[:8],
+                "big",
+            )
+        )
+        draws = point + artifact.residual_draws(MODEL_DRAWS, rng)
+        result.driver_p10 = float(np.quantile(draws, 0.10))
+        result.driver_p90 = float(np.quantile(draws, 0.90))
+
         # Expected PnL, though, is a return ON THE PREMIUM. Without an entry
         # cost there is no denominator — this is arithmetic, not a policy, and
         # it is why a current chain is the binding requirement for the P&L
@@ -824,17 +857,12 @@ class Scorer:
             result.flag("NO_PAYOFF_MAP")
             return
         result.payoff = payoff.as_dict()
-        rng = np.random.default_rng(
-            int.from_bytes(
-                hashlib.sha256(f"{self.snapshot}|{request.key()}".encode()).digest()[:8],
-                "big",
-            )
-        )
         # Two independent uncertainties, both real: how wrong the prediction of
         # the driver may be, and how much the payoff line fails to explain even
         # given the driver. Folding in only the first would produce intervals
-        # that are too narrow in exactly the reassuring direction.
-        draws = point + artifact.residual_draws(MODEL_DRAWS, rng)
+        # that are too narrow in exactly the reassuring direction. The first is
+        # `draws`, already taken above with the driver band.
+
         # Both draws are empirical. An earlier version drew this one from a
         # Gaussian of the right standard deviation, which is wrong in a way that
         # shows up exactly where it matters: a long-vol payoff's residuals are

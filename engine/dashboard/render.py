@@ -78,7 +78,7 @@ _BOARD_FIELDS = (
     "n_analogs", "analog_widened",
     "gate_score", "gate_threshold", "gate_pass",
     "extrapolated", "flags", "model_versions",
-    "driver_name", "driver_prediction",
+    "driver_name", "driver_prediction", "driver_p10", "driver_p90",
     "chain_last_obs", "chain_age_days",
     "scored", "rank", "fill", "detail", "digest",
 )

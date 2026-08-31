@@ -51,6 +51,11 @@ tr.disabled td { color: var(--dim); }
 
 .pos { color: var(--green); } .neg { color: var(--red); } .flat { color: var(--dim); }
 .badge { font-size: 11px; color: var(--dim); }
+/* The uncertainty band beside a point estimate. Dimmer than the number
+   it qualifies, so the estimate still reads first, but present enough
+   that nobody quotes the point value as if it were exact. */
+.band { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.muted { color: var(--dim); }
 
 .pill {
   display: inline-block; padding: 2px 9px; border-radius: 10px;
