@@ -103,6 +103,19 @@ SOURCES: dict[str, SourceConfig] = {
         timeout=120.0,
         notes="Playwright cookie→token dance; reuse the bearer within a process.",
     ),
+    "nasdaq": SourceConfig(
+        name="nasdaq",
+        min_interval=0.7,
+        backoff_base=15.0,
+        max_retries=3,
+        timeout=60.0,
+        notes=(
+            "Keyless public calendar endpoint, one call per DATE for the whole "
+            "market. Refuses the default python user-agent with a 403, which is "
+            "a code fix and not a credential failure. Paced politely: a nightly "
+            "needs ~21 calls."
+        ),
+    ),
     "yfinance": SourceConfig(
         name="yfinance",
         min_interval=0.2,

@@ -73,7 +73,10 @@ class TestSnapshotHash:
                     "year": [2024],
                     "src_orats": [True],
                     "src_oquants": [True],
+                    "src_nasdaq": [False],
+                    "src_yfinance": [False],
                     "date_agree": [True],
+                    "date_conflict": [False],
                 }
             ),
             "earnings_events",

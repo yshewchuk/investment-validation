@@ -274,9 +274,13 @@ class TestEventsNormalizer:
                 "event_date": pd.to_datetime(["2024-01-15", "2024-02-01"]),
                 "session": [AMC, BMO],
                 "annc_tod": ["1630", "0900"],
+                "session_src": ["orats", "orats"],
                 "src_orats": [True, True],
                 "src_oquants": [True, False],
+                "src_nasdaq": [False, False],
+                "src_yfinance": [False, False],
                 "date_agree": [True, False],
+                "date_conflict": [False, False],
                 "updated_at": [None, None],
             }
         )
@@ -305,3 +309,123 @@ class TestEventsNormalizer:
         counts = n_events.session_coverage(events)
         assert counts["AMC"] == 2
         assert counts["BMO"] == 1
+
+
+class TestForwardCalendar:
+    """The sources that see ahead. ORATS /hist/earnings does not: its payloads
+    stop at the last print that already happened, so without these the
+    monitoring board has nothing to score."""
+
+    def _orats(self):
+        return pd.DataFrame(
+            {
+                "ticker": ["AAA"],
+                "event_date": pd.to_datetime(["2024-01-15"]),
+                "annc_tod": ["1630"],
+                "session": [AMC],
+                "updated_at": [None],
+            }
+        )
+
+    def _forward(self, ticker="AAA", date="2026-09-10", session=None):
+        return pd.DataFrame(
+            {
+                "ticker": [ticker],
+                "event_date": pd.to_datetime([date]),
+                "annc_tod": [None],
+                "session": [session],
+                "updated_at": ["2026-08-30T00:00:00Z"],
+            }
+        )
+
+    def test_a_forward_source_adds_events_orats_cannot_have(self):
+        out = build_calendar(
+            orats=self._orats(),
+            oquants=pd.DataFrame(columns=["ticker", "event_date"]),
+            nasdaq=self._forward(session="AMC"),
+        )
+        assert len(out) == 2
+        row = out[out["event_date"] == pd.Timestamp("2026-09-10")].iloc[0]
+        assert row["session"] == "AMC"
+        assert row["session_src"] == "nasdaq"
+        assert bool(row["src_nasdaq"]) and not bool(row["src_orats"])
+
+    def test_orats_outranks_the_forward_sources_on_session(self):
+        """Once ORATS carries the event, its anncTod is the answer — a forward
+        guess must not survive alongside the authority."""
+        contested = pd.DataFrame(
+            {
+                "ticker": ["AAA"],
+                "event_date": pd.to_datetime(["2024-01-15"]),
+                "annc_tod": [None],
+                "session": [BMO],  # disagrees with the ORATS AMC above
+                "updated_at": [None],
+            }
+        )
+        out = build_calendar(
+            orats=self._orats(),
+            oquants=pd.DataFrame(columns=["ticker", "event_date"]),
+            nasdaq=contested,
+            yfinance=contested,
+        )
+        row = out.iloc[0]
+        assert row["session"] == AMC
+        assert row["session_src"] == "orats"
+        assert row["annc_tod"] == "1630"
+
+    def test_yfinance_outranks_nasdaq(self):
+        """yfinance keeps the announcement TIME on historical rows, so its
+        session is gradeable after the fact; Nasdaq's never is."""
+        out = build_calendar(
+            orats=pd.DataFrame(columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]),
+            nasdaq=self._forward(session="BMO"),
+            yfinance=self._forward(session="AMC"),
+        )
+        assert out.iloc[0]["session"] == "AMC"
+        assert out.iloc[0]["session_src"] == "yfinance"
+
+    def test_a_session_nobody_supplies_stays_null(self):
+        """`time-not-supplied` must not become a guess: the scorer skips events
+        with no session, and a wrong one shifts entry and exit by a day."""
+        out = build_calendar(
+            orats=pd.DataFrame(columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]),
+            nasdaq=self._forward(session=None),
+        )
+        assert pd.isna(out.iloc[0]["session"])
+        assert pd.isna(out.iloc[0]["session_src"])
+
+    def test_rival_forward_dates_are_flagged_and_both_kept(self):
+        out = build_calendar(
+            orats=pd.DataFrame(columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]),
+            nasdaq=self._forward(date="2026-09-02"),
+            yfinance=self._forward(date="2026-09-08", session="AMC"),
+        )
+        assert len(out) == 2, "a disagreement must never be resolved by dropping a row"
+        assert out["date_conflict"].all()
+
+    def test_a_normal_quarterly_cadence_is_not_a_conflict(self):
+        out = build_calendar(
+            orats=pd.DataFrame(columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]),
+            nasdaq=pd.concat([self._forward(date="2026-09-02"), self._forward(date="2026-12-02")]),
+        )
+        assert not out["date_conflict"].any()
+
+    def test_an_orats_confirmed_event_is_never_a_conflict(self):
+        """History is left alone: a fiscal-calendar change really can put two
+        prints close together, and ORATS is the authority on what happened."""
+        orats = pd.DataFrame(
+            {
+                "ticker": ["AAA", "AAA"],
+                "event_date": pd.to_datetime(["2024-01-15", "2024-02-05"]),
+                "annc_tod": ["1630", "1630"],
+                "session": [AMC, AMC],
+                "updated_at": [None, None],
+            }
+        )
+        out = build_calendar(orats=orats)
+        assert not out["date_conflict"].any()
+
+    def test_explicit_frames_do_not_pull_the_local_cache(self):
+        """A caller handing over frames wants a closed, reproducible world."""
+        out = build_calendar(orats=self._orats())
+        assert len(out) == 1

@@ -51,6 +51,10 @@ __all__ = [
     "projected_trading_days",
     "load_orats_earnings",
     "load_oquants_event_dates",
+    "load_nasdaq_earnings",
+    "load_yfinance_earnings",
+    "SESSION_PRIORITY",
+    "CONFLICT_WINDOW_DAYS",
     "build_calendar",
     "detect_date_changes",
     "DateChange",
@@ -445,10 +449,163 @@ def load_oquants_event_dates(tickers: Iterable[str] | None = None) -> pd.DataFra
     )
 
 
+def load_nasdaq_earnings(tickers: Iterable[str] | None = None) -> pd.DataFrame:
+    """Forward announcement dates from the cached Nasdaq calendar.
+
+    One cached payload per DATE, holding every company reporting that day, so
+    the whole forward market costs one call per trading day rather than one per
+    ticker. Returns ``ticker, event_date, annc_tod, session, updated_at`` — the
+    same shape as :func:`load_orats_earnings`, so the merge treats them alike.
+
+    ``annc_tod`` is NULL here on purpose: Nasdaq states a session
+    (``time-pre-market`` / ``time-after-hours``), not a time, and inventing an
+    HHMM to fill the column would fabricate a precision the source never gave.
+    """
+    from engine.data.fetch import iter_cached
+    from engine.data.sources.nasdaq import SESSION_BY_TIME
+
+    wanted = set(tickers) if tickers is not None else None
+    records: list[dict] = []
+    for entry in iter_cached("nasdaq", "calendar/earnings"):
+        try:
+            payload = entry.json()
+        except (OSError, EOFError, ValueError):
+            continue
+        date = (entry.meta.get("params") or {}).get("date")
+        rows = ((payload or {}).get("data") or {}).get("rows") or []
+        for row in rows:
+            ticker = str(row.get("symbol") or "").strip()
+            if not ticker or (wanted is not None and ticker not in wanted):
+                continue
+            records.append(
+                {
+                    "ticker": ticker,
+                    "event_date": date,
+                    "annc_tod": None,
+                    "session": SESSION_BY_TIME.get(row.get("time")),
+                    "updated_at": entry.meta.get("ts"),
+                }
+            )
+    if not records:
+        return pd.DataFrame(
+            columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]
+        )
+    df = pd.DataFrame.from_records(records)
+    df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce")
+    df = df.dropna(subset=["event_date"])
+    # Later payloads win: a date re-fetched closer to the print is the one whose
+    # session Nasdaq has firmed up.
+    df = df.sort_values("updated_at").drop_duplicates(["ticker", "event_date"], keep="last")
+    return df.sort_values(["ticker", "event_date"]).reset_index(drop=True)
+
+
+def load_yfinance_earnings(tickers: Iterable[str] | None = None) -> pd.DataFrame:
+    """Announcement dates from the cached yfinance per-ticker calendar.
+
+    The adapter has already converted each timestamp to US/Eastern and derived
+    the session, so this only reads and filters. Same columns as the other
+    loaders.
+    """
+    import io
+
+    from engine.data.fetch import iter_cached
+
+    wanted = set(tickers) if tickers is not None else None
+    frames: list[pd.DataFrame] = []
+    for entry in iter_cached("yfinance", "earnings"):
+        try:
+            text = entry.path.read_bytes()
+        except OSError:
+            continue
+        if entry.path.suffix == ".gz":
+            text = gzip.decompress(text)
+        try:
+            frame = pd.read_csv(io.BytesIO(text))
+        except (ValueError, OSError):
+            continue
+        if frame.empty:
+            continue
+        frame["updated_at"] = entry.meta.get("ts")
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(
+            columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]
+        )
+    df = pd.concat(frames, ignore_index=True)
+    df["ticker"] = df["ticker"].astype(str)
+    if wanted is not None:
+        df = df[df["ticker"].isin(wanted)]
+    df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce")
+    df = df.dropna(subset=["event_date"])
+    df["annc_tod"] = df["annc_tod"].apply(
+        lambda v: None if pd.isna(v) else f"{int(v):04d}"
+    )
+    df["session"] = df["session"].where(df["session"].isin([BMO, AMC]))
+    df = df.sort_values("updated_at").drop_duplicates(["ticker", "event_date"], keep="last")
+    return df[
+        ["ticker", "event_date", "annc_tod", "session", "updated_at"]
+    ].sort_values(["ticker", "event_date"]).reset_index(drop=True)
+
+
+#: Two forward dates for one ticker closer together than this are read as the
+#: sources disagreeing about ONE print, not as two prints. Companies report
+#: quarterly (~91 days), so anything inside a month is a conflict — and a stale
+#: or wrong announcement date is a named loss source in this program, because it
+#: puts the entry on the wrong day.
+CONFLICT_WINDOW_DAYS = 30
+
+
+def _flag_date_conflicts(merged: pd.DataFrame) -> pd.Series:
+    """Mark forward rows whose ticker has a rival date from another source.
+
+    Only rows ORATS has not confirmed are eligible: ORATS is the authority, so
+    once it carries the event there is nothing to argue about, and history
+    (where a fiscal-calendar change really can put two prints close together)
+    is left alone.
+
+    Both rows are flagged and BOTH are kept. Silently picking one would hide
+    the disagreement, and dropping one would delete a source's claim — the
+    calendar's standing rule is that a disagreement survives as a flag.
+    """
+    flag = pd.Series(False, index=merged.index)
+    forward = merged[~merged["src_orats"].astype(bool)]
+    for _, group in forward.groupby("ticker", sort=False):
+        if len(group) < 2:
+            continue
+        dates = group["event_date"].sort_values()
+        gaps = dates.diff().dt.days
+        close = gaps[gaps <= CONFLICT_WINDOW_DAYS]
+        if close.empty:
+            continue
+        for idx in close.index:
+            position = list(dates.index).index(idx)
+            flag.loc[idx] = True
+            flag.loc[dates.index[position - 1]] = True
+    return flag
+
+
+#: Which source's session wins, best first. Ordered by what each one can be
+#: held to account for, not by convenience:
+#:
+#: * **ORATS** ``anncTod`` is the program's authority — 99.52% agreement with
+#:   the oquants panel on dates (EXP-038) — but it only ever carries events
+#:   that have already happened.
+#: * **yfinance** keeps the announcement TIME on historical rows, so its
+#:   session is checkable after the fact: 99.72% agreement with ORATS
+#:   ``anncTod`` on 716 overlapping events (measured 2026-08-30).
+#: * **Nasdaq** returns ``time-not-supplied`` for almost every past date
+#:   (1,392 of 1,395 sampled), so its session can never be graded
+#:   retrospectively. It agreed with yfinance on 99.15% of the 117 forward
+#:   events where both spoke, which is reassuring but is not the same evidence.
+SESSION_PRIORITY = ("orats", "yfinance", "nasdaq")
+
+
 def build_calendar(
     orats: pd.DataFrame | None = None,
     oquants: pd.DataFrame | None = None,
     tickers: Iterable[str] | None = None,
+    nasdaq: pd.DataFrame | None = None,
+    yfinance: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Merge the two sources into the canonical calendar.
 
@@ -460,17 +617,98 @@ def build_calendar(
     quality verdict — oquants only covers 2007+ and only names it tracked,
     while the ORATS calendar reaches back to the 1980s — but it is the flag any
     consumer needs in order to restrict to the doubly-confirmed subset.
+
+    **Four sources, two jobs.** ORATS and oquants cover history; Nasdaq and
+    yfinance are the only ones that see FORWARD, and without them the board has
+    nothing to score (ORATS ``/hist/earnings`` stops at the last print that
+    already happened). Every row records which sources carried it and, in
+    ``session_src``, which one supplied the session that survived
+    :data:`SESSION_PRIORITY` — so a row's BMO/AMC can always be traced to the
+    source accountable for it, and a forward guess is never mistaken for the
+    ORATS-confirmed article once the event is past.
     """
-    orats = load_orats_earnings(tickers) if orats is None else orats.copy()
-    oquants = load_oquants_event_dates(tickers) if oquants is None else oquants.copy()
+    # Passing ANY frame explicitly means a closed world: the sources the caller
+    # did not name default to empty rather than to whatever happens to be in the
+    # local cache. Otherwise a caller handing over two hand-made frames would
+    # silently get the machine's real forward calendar merged into its result,
+    # which is neither what it asked for nor reproducible.
+    explicit = any(f is not None for f in (orats, oquants, nasdaq, yfinance))
+    empty = pd.DataFrame(
+        columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]
+    ).astype({"event_date": "datetime64[ns]"})
 
-    orats = orats.assign(src_orats=True)
-    oquants = oquants.assign(src_oquants=True)
+    def source(frame, loader):
+        frame = frame.copy() if frame is not None else (
+            empty.copy() if explicit else loader(tickers)
+        )
+        # Coerce the join keys rather than trusting them. An empty frame built
+        # as `pd.DataFrame(columns=[...])` carries object dtypes, and merging
+        # that against a real datetime column raises instead of yielding the
+        # empty result the caller obviously meant.
+        if "event_date" in frame.columns:
+            frame["event_date"] = pd.to_datetime(frame["event_date"], errors="coerce")
+        else:
+            frame["event_date"] = pd.Series(dtype="datetime64[ns]")
+        if "ticker" in frame.columns:
+            frame["ticker"] = frame["ticker"].astype(str)
+        else:
+            frame["ticker"] = pd.Series(dtype=str)
+        return frame
 
-    merged = orats.merge(oquants, on=["ticker", "event_date"], how="outer")
-    merged["src_orats"] = merged["src_orats"].fillna(False).astype(bool)
-    merged["src_oquants"] = merged["src_oquants"].fillna(False).astype(bool)
+    orats = source(orats, load_orats_earnings)
+    oquants = source(oquants, load_oquants_event_dates)
+    nasdaq = source(nasdaq, load_nasdaq_earnings)
+    yfinance = source(yfinance, load_yfinance_earnings)
+
+    dated = {
+        "orats": orats.assign(src_orats=True),
+        "nasdaq": nasdaq.copy().assign(src_nasdaq=True),
+        "yfinance": yfinance.copy().assign(src_yfinance=True),
+    }
+
+    merged = oquants.assign(src_oquants=True)[["ticker", "event_date", "src_oquants"]]
+    for name, frame in dated.items():
+        keep = ["ticker", "event_date", f"src_{name}"]
+        for col in ("session", "annc_tod", "updated_at"):
+            if col in frame.columns:
+                frame = frame.rename(columns={col: f"{col}_{name}"})
+                keep.append(f"{col}_{name}")
+        merged = merged.merge(frame[keep], on=["ticker", "event_date"], how="outer")
+
+    for name in ("orats", "oquants", "nasdaq", "yfinance"):
+        col = f"src_{name}"
+        merged[col] = merged[col].fillna(False).astype(bool) if col in merged else False
+
+    # `date_agree` keeps its established meaning — the two HISTORICAL sources
+    # confirming each other — so every consumer that already filters on it
+    # keeps the same subset it had before the forward sources existed.
     merged["date_agree"] = merged["src_orats"] & merged["src_oquants"]
+
+    # Session priority, applied per row rather than per frame: an event ORATS
+    # has not seen yet still gets yfinance's session, and one ORATS has seen
+    # takes ORATS's even where all three spoke.
+    session = pd.Series(pd.NA, index=merged.index, dtype="object")
+    session_src = pd.Series(pd.NA, index=merged.index, dtype="object")
+    annc_tod = pd.Series(pd.NA, index=merged.index, dtype="object")
+    for name in SESSION_PRIORITY:
+        col = f"session_{name}"
+        if col not in merged:
+            continue
+        take = session.isna() & merged[col].notna()
+        session = session.mask(take, merged[col])
+        session_src = session_src.mask(take, name)
+        tod_col = f"annc_tod_{name}"
+        if tod_col in merged:
+            annc_tod = annc_tod.mask(take, merged[tod_col])
+    merged["session"] = session
+    merged["session_src"] = session_src
+    merged["annc_tod"] = annc_tod
+
+    merged["date_conflict"] = _flag_date_conflicts(merged)
+
+    stamps = [c for c in merged.columns if c.startswith("updated_at_")]
+    merged["updated_at"] = merged[stamps].bfill(axis=1).iloc[:, 0] if stamps else pd.NA
+
     merged["event_id"] = (
         merged["ticker"].astype(str) + "_" + merged["event_date"].dt.strftime("%Y-%m-%d")
     )
@@ -479,10 +717,14 @@ def build_calendar(
         "ticker",
         "event_date",
         "session",
+        "session_src",
         "annc_tod",
         "src_orats",
         "src_oquants",
+        "src_nasdaq",
+        "src_yfinance",
         "date_agree",
+        "date_conflict",
         "updated_at",
     ]
     for col in cols:
@@ -514,6 +756,7 @@ def detect_date_changes(
     current: pd.DataFrame,
     *,
     horizon_days: int = 45,
+    as_of=None,
 ) -> list[DateChange]:
     """Flag calendar drift between two refreshes.
 
@@ -524,6 +767,10 @@ def detect_date_changes(
 
     A "moved" event is one where a ticker's next scheduled date changed; the
     heuristic pairs each ticker's earliest upcoming event in the two snapshots.
+
+    ``as_of`` anchors "upcoming" (default: today). A replayed run — the nightly
+    job over a past date — has to pass its own as-of, or the whole comparison
+    window sits in that run's future and no drift is ever detected.
     """
     changes: list[DateChange] = []
     if previous.empty and current.empty:
@@ -531,10 +778,22 @@ def detect_date_changes(
 
     def upcoming(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
-            return df.assign(event_date=pd.to_datetime([]))
+            # Keep the columns the groupby below needs: an empty `previous`
+            # (the first-ever run) must compare cleanly, not raise.
+            return pd.DataFrame(
+                {
+                    "ticker": pd.Series(dtype=str),
+                    "event_date": pd.Series(dtype="datetime64[ns]"),
+                    "session": pd.Series(dtype=str),
+                }
+            )
         d = df.copy()
         d["event_date"] = pd.to_datetime(d["event_date"])
-        anchor = pd.Timestamp.today().normalize()
+        anchor = (
+            pd.Timestamp(as_of).normalize()
+            if as_of is not None
+            else pd.Timestamp.today().normalize()
+        )
         return d[
             (d["event_date"] >= anchor)
             & (d["event_date"] <= anchor + pd.Timedelta(days=horizon_days))

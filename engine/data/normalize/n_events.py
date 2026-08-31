@@ -24,10 +24,11 @@ def normalize(tickers: Iterable[str] | None = None) -> tuple[pd.DataFrame, dict]
 
     out = cal.copy()
     out["year"] = pd.to_datetime(out["event_date"]).dt.year
-    out["annc_tod"] = out["annc_tod"].astype("string")
-    out["updated_at"] = out["updated_at"].astype("string")
-    out["session"] = out["session"].astype("string")
+    for col in ("annc_tod", "updated_at", "session", "session_src"):
+        out[col] = out[col].astype("string")
 
+    today = pd.Timestamp.today().normalize()
+    forward = out[pd.to_datetime(out["event_date"]) >= today]
     report = {
         "rows": int(len(out)),
         "tickers": int(out["ticker"].nunique()),
@@ -36,6 +37,16 @@ def normalize(tickers: Iterable[str] | None = None) -> tuple[pd.DataFrame, dict]
         "orats_only": int((out["src_orats"] & ~out["src_oquants"]).sum()),
         "oquants_only": int((~out["src_orats"] & out["src_oquants"]).sum()),
         "session_known": int(out["session"].notna().sum()),
+        "session_by_source": {
+            str(k): int(v) for k, v in out["session_src"].value_counts().items()
+        },
+        # The forward slice is the one the monitoring board scores, and the one
+        # ORATS cannot supply — reported separately so a calendar that is fat
+        # with history and empty ahead cannot look healthy.
+        "forward_rows": int(len(forward)),
+        "forward_tickers": int(forward["ticker"].nunique()),
+        "forward_session_known": int(forward["session"].notna().sum()),
+        "forward_date_conflicts": int(forward["date_conflict"].sum()),
     }
     return out, report
 

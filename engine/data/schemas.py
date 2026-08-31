@@ -84,7 +84,15 @@ SOURCE_PRIORITY = {
     "option_chains": "orats",
     "option_daily": "polygon (real traded bars; 2024-08-19+ only on this plan)",
     "realized_moves": "oquants (OHLCV-validated panel)",
-    "calendar": "orats (anncTod, 99.52% agreement — EXP-038)",
+    "calendar": (
+        "orats (anncTod, 99.52% agreement — EXP-038) for events that have "
+        "happened. ORATS /hist/earnings carries NO forward dates, so the "
+        "upcoming calendar comes from nasdaq (one call per date, whole market) "
+        "and yfinance (per ticker); session priority is orats > yfinance > "
+        "nasdaq — see engine.calendar.SESSION_PRIORITY for the measured "
+        "agreement behind that order. Every row names its session source in "
+        "`session_src`."
+    ),
     "spot": "orats, cross-checked against yfinance close (1.3% tolerance)",
 }
 
@@ -151,19 +159,28 @@ SECURITIES = TableSchema(
 
 EARNINGS_EVENTS = TableSchema(
     name="earnings_events",
-    doc="The canonical calendar: ORATS authoritative, oquants as cross-check.",
+    doc=(
+        "The canonical calendar. ORATS is authoritative and oquants the "
+        "cross-check, but both are history-only: Nasdaq and yfinance are what "
+        "carry the FORWARD dates the monitoring board scores."
+    ),
     primary_key=("event_id",),
     columns=_cols(
         ("event_id", "string", False, "{ticker}_{YYYY-MM-DD}"),
         ("ticker", "string", False, ""),
         ("event_date", "datetime64[ns]", False, ""),
         ("year", "int64", False, ""),
-        ("session", "string", True, "BMO | AMC, from ORATS anncTod"),
-        ("annc_tod", "string", True, "Raw ORATS anncTod (HHMM)"),
-        ("src_orats", "bool", False, "Present in the ORATS calendar"),
-        ("src_oquants", "bool", False, "Present in the oquants panel"),
-        ("date_agree", "bool", False, "Both sources carry this date"),
-        ("updated_at", "string", True, "ORATS last-update stamp"),
+        ("session", "string", True, "BMO | AMC, by engine.calendar.SESSION_PRIORITY"),
+        ("session_src", "string", True, "Which source supplied `session`"),
+        ("annc_tod", "string", True, "Announcement time HHMM, from the session's source"),
+        ("src_orats", "bool", False, "Present in the ORATS calendar (history only)"),
+        ("src_oquants", "bool", False, "Present in the oquants panel (history only)"),
+        ("src_nasdaq", "bool", False, "Present in the Nasdaq calendar (forward)"),
+        ("src_yfinance", "bool", False, "Present in the yfinance calendar (forward + history)"),
+        ("date_agree", "bool", False, "Both HISTORICAL sources carry this date"),
+        ("date_conflict", "bool", False,
+         "Forward sources disagree about this print's date (both rows kept)"),
+        ("updated_at", "string", True, "Last-update stamp from the contributing source"),
     ),
 )
 

@@ -40,6 +40,12 @@ def _oquants():
     return OquantsAdapter()
 
 
+def _nasdaq():
+    from engine.data.sources.nasdaq import NasdaqAdapter
+
+    return NasdaqAdapter()
+
+
 def _yfinance():
     from engine.data.sources.yf import YFinanceAdapter
 
@@ -52,6 +58,7 @@ ADAPTERS: dict[str, Callable[[], SourceAdapter]] = {
     "orats": _orats,
     "polygon": _polygon,
     "oquants": _oquants,
+    "nasdaq": _nasdaq,
     "yfinance": _yfinance,
 }
 
