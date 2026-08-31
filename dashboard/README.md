@@ -144,6 +144,21 @@ but curved relationship shows in Spearman and hides in Pearson; the decile table
 because neither number can show whether a relationship is monotone, flat in the
 middle, or driven by one tail.
 
+**Non-monotone inputs are the reason two readings are shown.** A signed input
+against a magnitude outcome runs high at both ends and low in the middle, and
+BOTH correlations score that at approximately zero. `mean_prior_move` against
+`abs_move` in the size model goes 8.35 → 4.60 → 7.82 across its deciles on a
+Spearman of +0.013. So each input also carries **`magnitude_spearman`** — the
+correlation of *distance from the middle* with the outcome, +0.185 for that
+one — and **`decile_range`** (best-to-worst) beside `decile_spread`
+(end-to-end). Inputs are ranked by the larger of the two readings, so a V no
+longer sorts to the bottom, and the UI badges it `V` and says so in words.
+
+The scatter shows the sampled rows, the straight line a linear model would fit
+(red) and the mean outcome per decile (green) on the same axes. That pairing is
+the point: where the line is flat and the decile curve is a V, the relationship
+is real and a linear reading cannot see it.
+
 Read as description, not attribution: these are marginal relationships in the
 training set. A feature can correlate strongly and add nothing once the others
 are present, or correlate near zero and matter through an interaction. The

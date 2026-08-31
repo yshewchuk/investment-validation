@@ -854,12 +854,24 @@ def write_single_file(bundle: Path | str, out: Path | str | None = None) -> Path
         '<link rel="stylesheet" href="assets/app.css">', f"<style>\n{css}\n</style>"
     )
 
-    # Every data script the page loads, found in the page rather than listed
-    # here: a new payload added to index.html is inlined automatically instead
-    # of being silently dropped from the one-file build.
+    # Every data script the page references, inlined where it sat.
+    referenced = set()
     for src in re.findall(r'<script src="(data/[^"]+\.js)"></script>', html):
+        referenced.add(src)
         payload = (bundle / src).read_text()
         html = html.replace(f'<script src="{src}"></script>', f"<script>\n{payload}</script>")
+
+    # Plus every payload the page loads ON DEMAND. models.js is ~2 MB and is
+    # deliberately not on the first-paint path, so a build that inlined only
+    # what index.html references would ship a one-file board whose Models area
+    # is permanently empty.
+    lazy = [
+        path for path in sorted((bundle / "data").glob("*.js"))
+        if f"data/{path.name}" not in referenced
+    ]
+    if lazy:
+        blocks = "\n".join(f"<script>\n{path.read_text()}</script>" for path in lazy)
+        html = html.replace("</body>", f"{blocks}\n</body>") if "</body>" in html else html + blocks
 
     # Every ticker, inlined where the client already looks first: its lazy
     # loader checks `TICKER_DATA[ticker]` before injecting a script, so a

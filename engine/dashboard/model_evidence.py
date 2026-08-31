@@ -58,6 +58,11 @@ MAX_EVENTS = 20_000
 #: Deterministic sample, so two runs on the same store agree.
 SAMPLE_SEED = 7
 
+#: Raw points kept per input for the scatter. Enough to read the spread and the
+#: shape, small enough that fifty inputs across four models stay a file a phone
+#: will load.
+SCATTER_POINTS = 300
+
 
 def evidence_path() -> "paths.Path":
     return paths.FEATURES / "model_evidence.json"
@@ -88,6 +93,28 @@ def _feature_stats(x: pd.Series, y: pd.Series) -> dict:
     out["usable"] = True
     out["pearson"] = round(float(xs.corr(ys)), 4)
     out["spearman"] = round(float(xs.corr(ys, method="spearman")), 4)
+
+    # The V-shape measure, and it is not optional. A signed input against a
+    # magnitude outcome — mean_prior_move against |move| — runs high at both
+    # ends and low in the middle, which is a real and strong relationship that
+    # BOTH correlations above score at approximately zero. Ranking inputs by
+    # correlation alone therefore buries exactly the ones that matter most.
+    # Distance from the centre is the reading that sees it.
+    centre = float(xs.median())
+    out["magnitude_spearman"] = round(
+        float((xs - centre).abs().corr(ys, method="spearman")), 4
+    )
+    out["centre"] = round(centre, 4)
+
+    # The straight line a linear model would fit, for the scatter overlay. It
+    # is drawn precisely so a reader can SEE when the line explains nothing
+    # that the decile means clearly do.
+    if float(xs.std()) > 0:
+        slope = float(xs.cov(ys) / xs.var())
+        out["ols"] = {
+            "slope": round(slope, 6),
+            "intercept": round(float(ys.mean() - slope * float(xs.mean())), 6),
+        }
     out["mean"] = round(float(xs.mean()), 4)
     out["std"] = round(float(xs.std()), 4)
     out["p10"] = round(float(xs.quantile(0.10)), 4)
@@ -113,9 +140,39 @@ def _feature_stats(x: pd.Series, y: pd.Series) -> dict:
         for b, g in grouped
     ]
     if out["deciles"]:
-        first, last = out["deciles"][0]["y_mean"], out["deciles"][-1]["y_mean"]
+        means = [d["y_mean"] for d in out["deciles"]]
+        first, last = means[0], means[-1]
+        # End-to-end: what a monotone reading sees.
         out["decile_spread"] = round(float(last - first), 4)
+        # Best-to-worst across ALL deciles: what a V or an inverted U actually
+        # spans. When this dwarfs the end-to-end number the relationship is
+        # real and non-monotone, and the UI badges it.
+        out["decile_range"] = round(float(max(means) - min(means)), 4)
+        out["monotone"] = bool(
+            means == sorted(means) or means == sorted(means, reverse=True)
+        )
+        out["extreme_bin"] = int(
+            out["deciles"][means.index(max(means))]["bin"]
+        )
+
+    out["scatter"] = _scatter_sample(xs, ys)
     return out
+
+
+def _scatter_sample(xs: pd.Series, ys: pd.Series) -> list[list[float]]:
+    """A bounded sample of the raw points, for the scatter.
+
+    Deliberately a sample and not the whole set: plotting 115,000 points is
+    overplotting that hides density rather than showing it, and the bundle has
+    a size budget. The decile means carry the shape; these points carry the
+    spread around it, which is the part a summary always flatters.
+    """
+    n = min(SCATTER_POINTS, len(xs))
+    if n <= 0:
+        return []
+    idx = np.random.default_rng(SAMPLE_SEED).choice(len(xs), size=n, replace=False)
+    sx, sy = xs.to_numpy()[idx], ys.to_numpy()[idx]
+    return [[round(float(a), 4), round(float(b), 4)] for a, b in zip(sx, sy)]
 
 
 def _daily_subset(tickers, years=None) -> pd.DataFrame:
@@ -263,10 +320,16 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
             stats["note"] = feature_note(name)
             block["inputs"].append(stats)
 
-        # Strongest marginal relationships first — the reader's way in. The
-        # model's own feature order is preserved in `strategies.json`.
+        # Strongest marginal relationship first, where "strongest" takes the
+        # LARGER of the monotone and the magnitude readings. Sorting on
+        # correlation alone put mean_prior_move — an 8.35 → 4.60 → 7.82 V
+        # against |move| — near the bottom of the size model's table on a
+        # Spearman of +0.013.
         block["inputs"].sort(
-            key=lambda s: abs(s.get("spearman") or 0.0), reverse=True
+            key=lambda s: max(
+                abs(s.get("spearman") or 0.0), abs(s.get("magnitude_spearman") or 0.0)
+            ),
+            reverse=True,
         )
         models[entry.id] = block
         # The rebuilt sets are large and are not needed once measured.

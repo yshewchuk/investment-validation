@@ -15,8 +15,8 @@ const META = window.META || {};
 const HEALTH = window.HEALTH || {};
 const FLAGS = window.FLAGS || { flags: [] };
 const STRATEGIES = window.STRATEGIES || {};
-const MODELS = (window.MODELS || {}).models || {};
-const MODELS_META = window.MODELS || {};
+let MODELS = {};        /* filled when the Models area is first opened */
+let MODELS_META = {};
 const TICKER_DATA = window.TICKER_DATA || {};
 
 const state = {
@@ -75,6 +75,7 @@ function switchTab(name) {
 }
 
 function switchArea(area) {
+  if (area === "models") initModelExplorer();
   document.querySelectorAll(".tab.area").forEach(
     (t) => t.classList.toggle("active", t.dataset.area === area)
   );
@@ -483,19 +484,23 @@ function renderModelInputs(m) {
   const el = document.getElementById("m-inputs");
   const inputs = m.inputs || [];
   if (!inputs.length) { el.innerHTML = '<span class="badge">no inputs recorded</span>'; return; }
-  el.innerHTML = "<table><thead><tr><th>Input</th><th>Spearman</th><th></th><th>Pearson</th>"
-    + "<th>decile spread</th><th>coverage</th><th>n</th><th>What it is</th></tr></thead><tbody>"
+  el.innerHTML = "<table><thead><tr><th>Input</th><th>Spearman</th><th></th><th>|distance|</th><th>Pearson</th>"
+    + "<th>decile range</th><th>coverage</th><th>n</th><th>What it is</th></tr></thead><tbody>"
     + inputs.map((f) => {
         if (!f.usable) {
-          return "<tr><td class='mono'>" + esc(f.name) + "</td><td colspan='6'>"
+          return "<tr><td class='mono'>" + esc(f.name) + "</td><td colspan='7'>"
             + esc(f.reason || "not usable") + "</td><td>" + esc(f.note || "") + "</td></tr>";
         }
         return "<tr class='clickable' data-feature='" + esc(f.name) + "'>"
           + "<td class='mono'>" + esc(f.name) + "</td>"
-          + '<td class="' + cls(f.spearman) + '">' + fmt(f.spearman, 3) + "</td>"
+          + '<td class="' + cls(f.spearman) + '">' + fmt(f.spearman, 3)
+          + (f.monotone === false && Math.abs(f.decile_range)
+                > 2 * Math.abs(f.decile_spread || 0)
+              ? ' <span class="pill warn">V</span>' : "") + "</td>"
           + "<td>" + corrBar(f.spearman) + "</td>"
+          + "<td>" + fmt(f.magnitude_spearman, 3) + "</td>"
           + "<td>" + fmt(f.pearson, 3) + "</td>"
-          + "<td>" + fmt(f.decile_spread, 3) + "</td>"
+          + "<td>" + fmt(f.decile_range, 3) + "</td>"
           + "<td>" + pct(f.coverage, 0) + "</td>"
           + "<td>" + (f.n || 0).toLocaleString() + "</td>"
           + "<td>" + esc(f.note || "") + "</td></tr>";
@@ -509,6 +514,73 @@ function renderModelInputs(m) {
   });
 }
 
+/* Scatter, with the straight line a linear model would fit and the decile
+   means over the top. The two together are the point: where the line is flat
+   and the decile curve is a V, the relationship is real and a linear reading
+   cannot see it. All three come pre-computed in the bundle. */
+function scatterSvg(f, m) {
+  const pts = f.scatter || [];
+  if (!pts.length) return "";
+  const W = 560, H = 300, PAD = 44;
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const xlo = Math.min.apply(null, xs), xhi = Math.max.apply(null, xs);
+  const ylo = Math.min.apply(null, ys), yhi = Math.max.apply(null, ys);
+  const xr = (xhi - xlo) || 1, yr = (yhi - ylo) || 1;
+  const sx = (v) => PAD + ((v - xlo) / xr) * (W - PAD - 12);
+  const sy = (v) => H - PAD - ((v - ylo) / yr) * (H - PAD - 14);
+
+  let svg = '<svg viewBox="0 0 ' + W + " " + H + '" width="100%" style="max-width:' + W + 'px">';
+  svg += '<rect x="' + PAD + '" y="10" width="' + (W - PAD - 12) + '" height="' + (H - PAD - 10)
+       + '" fill="none" stroke="#30363d"/>';
+  pts.forEach((p) => {
+    svg += '<circle cx="' + sx(p[0]).toFixed(1) + '" cy="' + sy(p[1]).toFixed(1)
+         + '" r="1.6" fill="#58a6ff" fill-opacity="0.35"/>';
+  });
+  if (f.ols) {
+    const y1 = f.ols.intercept + f.ols.slope * xlo;
+    const y2 = f.ols.intercept + f.ols.slope * xhi;
+    svg += '<line x1="' + sx(xlo).toFixed(1) + '" y1="' + sy(y1).toFixed(1)
+         + '" x2="' + sx(xhi).toFixed(1) + '" y2="' + sy(y2).toFixed(1)
+         + '" stroke="#f85149" stroke-width="2"/>';
+  }
+  if (f.deciles && f.deciles.length) {
+    const path = f.deciles.map((d, i) => (i ? "L" : "M")
+      + sx((d.x_lo + d.x_hi) / 2).toFixed(1) + " " + sy(d.y_mean).toFixed(1)).join(" ");
+    svg += '<path d="' + path + '" fill="none" stroke="#3fb950" stroke-width="2.5"/>';
+    f.deciles.forEach((d) => {
+      svg += '<circle cx="' + sx((d.x_lo + d.x_hi) / 2).toFixed(1) + '" cy="' + sy(d.y_mean).toFixed(1)
+           + '" r="3.5" fill="#3fb950"/>';
+    });
+  }
+  svg += '<text x="' + PAD + '" y="' + (H - 14) + '" fill="#8b949e" font-size="11">'
+       + esc(String(fmt(xlo, 2))) + "</text>";
+  svg += '<text x="' + (W - 60) + '" y="' + (H - 14) + '" fill="#8b949e" font-size="11">'
+       + esc(String(fmt(xhi, 2))) + "</text>";
+  svg += '<text x="6" y="18" fill="#8b949e" font-size="11">' + esc(String(fmt(yhi, 2))) + "</text>";
+  svg += '<text x="6" y="' + (H - PAD) + '" fill="#8b949e" font-size="11">'
+       + esc(String(fmt(ylo, 2))) + "</text>";
+  svg += '<text x="' + (W / 2 - 40) + '" y="' + (H - 2) + '" fill="#8b949e" font-size="11">'
+       + esc(f.name) + "</text>";
+  svg += "</svg>";
+  svg += "<div class='badge' style='margin-top:6px'>"
+       + "<span style='color:#f85149'>—</span> the straight line a linear model fits &nbsp; "
+       + "<span style='color:#3fb950'>—</span> mean " + esc(m.target) + " per decile &nbsp; "
+       + "<span style='color:#58a6ff'>·</span> " + pts.length + " sampled rows of "
+       + (f.n || 0).toLocaleString() + "</div>";
+  return svg;
+}
+
+function shapeVerdict(f, m) {
+  if (!f.deciles || f.monotone !== false) return "";
+  const ratio = Math.abs(f.decile_range) / Math.max(Math.abs(f.decile_spread), 1e-9);
+  if (ratio < 2) return "";
+  return "<div class='flag-line'>⚑ Non-monotone: mean " + esc(m.target) + " spans "
+    + fmt(f.decile_range, 2) + " across the deciles but only " + fmt(f.decile_spread, 2)
+    + " end to end, so the correlations above (" + fmt(f.spearman, 3)
+    + ") understate it. Distance from the middle reads "
+    + fmt(f.magnitude_spearman, 3) + ".</div>";
+}
+
 function renderShape(m, featureName) {
   const f = (m.inputs || []).find((x) => x.name === featureName);
   const el = document.getElementById("m-shape");
@@ -520,9 +592,10 @@ function renderShape(m, featureName) {
   }
   note.textContent = f.note || "";
   const ys = f.deciles.map((d) => d.y_mean);
+  const head = shapeVerdict(f, m) + scatterSvg(f, m);
   const lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
   const span = (hi - lo) || 1;
-  el.innerHTML = "<table><thead><tr><th>decile</th><th>" + esc(featureName) + " range</th>"
+  el.innerHTML = head + "<table style='margin-top:10px'><thead><tr><th>decile</th><th>" + esc(featureName) + " range</th>"
     + "<th>mean " + esc(m.target) + "</th><th></th><th>n</th></tr></thead><tbody>"
     + f.deciles.map((d) =>
         "<tr><td>" + d.bin + "</td>"
@@ -557,8 +630,35 @@ function renderModelExplorer(id) {
   if (sel.options.length) renderShape(m, sel.options[0].value);
 }
 
+/* ~2 MB of per-input evidence, fetched only when someone asks for it. */
+let modelsRequested = false;
+
+function loadModels(then) {
+  if (window.MODELS) { then(); return; }
+  if (modelsRequested) return;
+  modelsRequested = true;
+  const script = document.createElement("script");
+  script.src = "data/models.js";
+  script.onload = () => then();
+  script.onerror = () => {
+    document.getElementById("m-summary").innerHTML =
+      '<span class="badge">model evidence not in this bundle — build it with '
+      + "`python3 -m engine.dashboard.model_evidence`</span>";
+  };
+  document.head.appendChild(script);
+}
+
 function initModelExplorer() {
+  loadModels(() => {
+    MODELS_META = window.MODELS || {};
+    MODELS = MODELS_META.models || {};
+    buildModelExplorer();
+  });
+}
+
+function buildModelExplorer() {
   const sel = document.getElementById("m-model");
+  if (sel.options.length) return;  /* already built */
   const ids = Object.keys(MODELS).sort();
   document.getElementById("m-caveat").textContent = MODELS_META.caveat || "";
   if (!ids.length) {
@@ -829,7 +929,6 @@ function init() {
   renderBoard();
   initExplorerControls();
   initDerivation();
-  initModelExplorer();
   renderHealth();
 }
 

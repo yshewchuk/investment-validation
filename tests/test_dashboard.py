@@ -890,3 +890,80 @@ class TestModelEvidence:
         assert "models" in payload
         js = (tmp_path / "b" / "data" / "models.js").read_text()
         assert js.startswith("window.MODELS = ")
+
+
+class TestNonMonotoneEvidence:
+    """A V-shaped input is a real relationship that both correlations score at
+    zero. Ranking on correlation alone buries exactly the inputs that matter."""
+
+    def _v_shape(self):
+        x = pd.Series(np.linspace(-3, 3, 4000))
+        y = x.abs() * 2 + 1  # high at both ends, low in the middle
+        return x, y
+
+    def test_a_v_shape_reads_zero_on_both_correlations(self):
+        from engine.dashboard.model_evidence import _feature_stats
+
+        stats = _feature_stats(*self._v_shape())
+        assert abs(stats["pearson"]) < 0.05
+        assert abs(stats["spearman"]) < 0.05
+
+    def test_but_the_magnitude_reading_sees_it(self):
+        from engine.dashboard.model_evidence import _feature_stats
+
+        stats = _feature_stats(*self._v_shape())
+        assert stats["magnitude_spearman"] > 0.95
+
+    def test_and_the_decile_range_sees_it(self):
+        """End-to-end is ~0 for a symmetric V; best-to-worst is the real span."""
+        from engine.dashboard.model_evidence import _feature_stats
+
+        stats = _feature_stats(*self._v_shape())
+        assert abs(stats["decile_spread"]) < 0.5
+        assert stats["decile_range"] > 4
+        assert stats["monotone"] is False
+
+    def test_a_monotone_input_is_marked_monotone(self):
+        from engine.dashboard.model_evidence import _feature_stats
+
+        x = pd.Series(np.linspace(0, 10, 4000))
+        stats = _feature_stats(x, x * 3)
+        assert stats["monotone"] is True
+        assert stats["decile_range"] == pytest.approx(stats["decile_spread"], rel=0.01)
+
+    def test_the_scatter_carries_the_fitted_line_with_it(self):
+        """The line is drawn precisely so a reader can see it explain nothing
+        where the decile means clearly do."""
+        from engine.dashboard.model_evidence import SCATTER_POINTS, _feature_stats
+
+        stats = _feature_stats(*self._v_shape())
+        assert len(stats["scatter"]) == SCATTER_POINTS
+        assert all(len(p) == 2 for p in stats["scatter"])
+        assert abs(stats["ols"]["slope"]) < 0.05, "a symmetric V has no linear slope"
+
+    def test_scatter_is_deterministic(self):
+        from engine.dashboard.model_evidence import _feature_stats
+
+        a = _feature_stats(*self._v_shape())["scatter"]
+        b = _feature_stats(*self._v_shape())["scatter"]
+        assert a == b, "two runs on the same store must agree"
+
+
+class TestLazyModelsPayload:
+    def test_models_js_is_not_on_the_first_paint_path(self, tmp_path, scores):
+        """It carries the scatter samples and is ~1 MB; the board must not pay
+        for it on every visit."""
+        render_bundle(scores, tmp_path / "b", as_of=AS_OF)
+        html = (tmp_path / "b" / "index.html").read_text()
+        assert 'src="data/models.js"' not in html
+        assert (tmp_path / "b" / "data" / "models.js").exists()
+
+    def test_the_single_file_build_still_inlines_it(self, tmp_path, scores):
+        """Inlining only what index.html references would ship a one-file board
+        whose Models area is permanently empty."""
+        from engine.dashboard.render import write_single_file
+
+        render_bundle(scores, tmp_path / "b", as_of=AS_OF)
+        text = write_single_file(tmp_path / "b", tmp_path / "one.html").read_text()
+        assert "window.MODELS = " in text
+        assert "window.STRATEGIES = " in text

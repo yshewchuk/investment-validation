@@ -169,7 +169,9 @@
 <script src="data/health.js"></script>
 <script src="data/flags.js"></script>
 <script src="data/strategies.js"></script>
-<script src="data/models.js"></script>
+<!-- data/models.js is NOT loaded here: it carries the per-input scatter samples
+     and is ~2 MB. It loads on demand when the Models area is first opened, the
+     same way per-ticker files do, so the board stays cheap on mobile data. -->
 <script>
 window.TICKER_DATA = window.TICKER_DATA || {};
 </script>
