@@ -121,6 +121,54 @@ class SizeModelSelector:
         return pd.Series([i in keep for i in rows.index], index=rows.index)
 
 
+def stamp_counterfactual(run_dir: Path) -> int:
+    """Watermark every figure in a counterfactual run, on the image itself.
+
+    The report title says COUNTERFACTUAL and the verdict section says it again,
+    and neither travels with the picture. An equity curve opened straight out of
+    `figures/` looks exactly like STR-THRU's — same shape, same axes, same
+    plausible drawdown — and that is how a chart of a system nobody trades ends
+    up in front of someone as though it were the system. The marker has to be on
+    the artifact, not just around it.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+
+    stamped = 0
+    for png in sorted((run_dir / "figures").glob("*.png")):
+        image = mpimg.imread(png)
+        height, width = image.shape[0], image.shape[1]
+        dpi = 100
+        fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(image)
+        ax.axis("off")
+        ax.text(
+            0.5, 0.5, "COUNTERFACTUAL\nnot STR-THRU as traded",
+            transform=ax.transAxes, ha="center", va="center",
+            fontsize=max(14, width / 34), color="#d0342c", alpha=0.28,
+            rotation=24, fontweight="bold", linespacing=1.4,
+        )
+        # Banded across the TOP: the generator already writes a falsification
+        # caption along the bottom edge, and two lines of red text on top of
+        # each other is how a warning becomes unreadable.
+        # Short enough to fit the narrowest figure the generator emits. An
+        # earlier version ran off both edges, which turns a warning into noise.
+        ax.text(
+            0.5, 0.988,
+            "COUNTERFACTUAL — not STR-THRU as traded",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=max(9, width / 78), color="#ffffff", fontweight="bold",
+            bbox={"facecolor": "#d0342c", "edgecolor": "none", "pad": 3.5, "alpha": 0.93},
+        )
+        fig.savefig(png, dpi=dpi)
+        plt.close(fig)
+        stamped += 1
+    return stamped
+
+
 def build(features, name, panel, trades):
     state = SizeModelSelector(features, panel, trades, name)
     return Gate(fit=state.fit, select=state.select, name=name), state
@@ -231,11 +279,14 @@ def main() -> int:
             arm_spec, trades, gate=gate, run_dir=run_dir,
             repricer=repricer, spy_daily=spy, input_files=input_files,
         )
+        stamped = stamp_counterfactual(run_dir)
         out[label] = {
             "report": str(result.report_path),
             "results": result.results,
             "folds": state.folds,
+            "figures_stamped": stamped,
         }
+        print(f"[EXP-109] {label}: {stamped} figure(s) watermarked", flush=True)
         print(f"[EXP-109] {label} report: {result.report_path}", flush=True)
 
     (HERE / "results").mkdir(exist_ok=True)

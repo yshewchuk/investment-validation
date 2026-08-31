@@ -131,8 +131,8 @@ class TestSync:
         root = private_mirror.ROOT
         files = [root / "README.md"]
         target = tmp_path / "mirror"
-        copied = sync(target, files)
-        assert copied == 1
+        copied, pruned = sync(target, files)
+        assert copied == 1 and pruned == []
         assert (target / "README.md").read_bytes() == (root / "README.md").read_bytes()
 
     def test_unchanged_files_are_not_recopied(self, tmp_path):
@@ -140,7 +140,7 @@ class TestSync:
         files = [root / "README.md"]
         target = tmp_path / "mirror"
         sync(target, files)
-        assert sync(target, files) == 0
+        assert sync(target, files)[0] == 0
 
     def test_changed_files_are_recopied(self, tmp_path):
         root = private_mirror.ROOT
@@ -148,4 +148,44 @@ class TestSync:
         target = tmp_path / "mirror"
         sync(target, files)
         (target / "README.md").write_text("stale")
-        assert sync(target, files) == 1
+        assert sync(target, files)[0] == 1
+
+    def test_a_file_no_longer_collected_is_pruned(self, tmp_path):
+        """Copy-only left a superseded artifact in the mirror forever.
+
+        It bit where it does most damage: two evaluation reports were
+        regenerated with a COUNTERFACTUAL label and then excluded, and the
+        unlabelled originals stayed — so the copy anyone would read was the
+        misleading one.
+        """
+        root = private_mirror.ROOT
+        target = tmp_path / "mirror"
+        (target / "reports").mkdir(parents=True)
+        stale = target / "reports" / "superseded.md"
+        stale.write_text("the version that should not survive")
+
+        copied, pruned = sync(target, [root / "README.md"])
+        assert not stale.exists()
+        assert "reports/superseded.md" in pruned
+
+    def test_pruning_never_touches_the_mirror_s_own_git(self, tmp_path):
+        """The mirror is a git clone; deleting its history to match a file
+        listing would destroy the recoverability that makes pruning safe."""
+        root = private_mirror.ROOT
+        target = tmp_path / "mirror"
+        (target / ".git").mkdir(parents=True)
+        head = target / ".git" / "HEAD"
+        head.write_text("ref: refs/heads/main")
+
+        sync(target, [root / "README.md"])
+        assert head.exists()
+
+    def test_a_stray_file_outside_the_managed_roots_is_left_alone(self, tmp_path):
+        root = private_mirror.ROOT
+        target = tmp_path / "mirror"
+        target.mkdir()
+        stray = target / "NOTES-BY-HAND.txt"
+        stray.write_text("someone put this here deliberately")
+
+        _, pruned = sync(target, [root / "README.md"])
+        assert stray.exists() and "NOTES-BY-HAND.txt" not in pruned

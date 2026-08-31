@@ -181,10 +181,27 @@ def scan_for_secrets(files: list[Path]) -> Report:
     return report
 
 
-def sync(target: Path, files: list[Path]) -> int:
+def sync(target: Path, files: list[Path]) -> tuple[int, list[str]]:
+    """Copy the collected files, and PRUNE anything the mirror should no longer hold.
+
+    Copy-only was a real defect, not a missing nicety. A file that stops being
+    collected — excluded, renamed, or deleted here — used to live on in the
+    mirror indefinitely, and the mirror is meant to be the trustworthy record.
+    It bit exactly where it does most damage: two evaluation reports were
+    regenerated with a COUNTERFACTUAL label after the originals had already
+    synced, then excluded from the mirror altogether. The unlabelled originals
+    stayed, so the copy anyone would actually read was the misleading one.
+
+    Pruning a backup is destructive, so it is bounded: only inside directories
+    the mirror manages, never ``.git``, and every removal is returned for the
+    caller to print. The mirror is a git clone, so a wrong deletion is
+    recoverable from its own history.
+    """
     copied = 0
+    wanted = set()
     for path in files:
         rel = path.relative_to(ROOT)
+        wanted.add(rel.as_posix())
         dest = target / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         data = path.read_bytes()
@@ -192,7 +209,29 @@ def sync(target: Path, files: list[Path]) -> int:
             continue
         dest.write_bytes(data)
         copied += 1
-    return copied
+
+    # Only prune under roots the mirror actually manages, so an unrelated file
+    # someone put in the clone by hand is left alone.
+    managed = {d for d, _ in INCLUDE} | {"reports", "ledger", "experiments"}
+    pruned: list[str] = []
+    for existing in sorted(target.rglob("*")):
+        if not existing.is_file():
+            continue
+        rel = existing.relative_to(target)
+        if rel.parts and rel.parts[0] == ".git":
+            continue
+        if rel.parts[0] not in managed and rel.as_posix() not in {
+            f.relative_to(ROOT).as_posix() for f in files
+        }:
+            continue
+        if rel.as_posix() in wanted:
+            continue
+        existing.unlink()
+        pruned.append(rel.as_posix())
+    for directory in sorted(target.rglob("*"), reverse=True):
+        if directory.is_dir() and directory.name != ".git" and not any(directory.iterdir()):
+            directory.rmdir()
+    return copied, pruned
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -236,8 +275,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    copied = sync(target, files)
+    copied, pruned = sync(target, files)
     print(f"  synced {copied} changed file(s) → {target}")
+    if pruned:
+        # Named, not counted. A silent deletion from the record the program
+        # falls back on is the one thing this tool must never do.
+        print(f"  pruned {len(pruned)} file(s) no longer collected:")
+        for rel in pruned[:20]:
+            print(f"    - {rel}")
+        if len(pruned) > 20:
+            print(f"    … and {len(pruned) - 20} more")
 
     if args.push:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
