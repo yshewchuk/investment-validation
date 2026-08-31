@@ -1,0 +1,72 @@
+id: EXP-110
+title: "Size v2.0 step 1: or_implied encodes missing as zero"
+hypothesis: >
+  ORATS `implied_move` is exactly 0 on 305,363 of 1,427,752 daily_market rows
+  (21.4%) against 689 nulls, and the zeros are spread evenly across every year
+  since 2009 — so zero is a sentinel for "no quote", not a coverage boundary and
+  not a real forecast. Events carrying it realize a HIGHER mean absolute move
+  (6.68% vs 5.72%) than the rest, so the size model is currently told the market
+  expects no movement on exactly the events that move most. Excluding those rows
+  lifts corr(or_implied, abs_move) from 0.2330 to 0.3730.
+  Treating the sentinel as missing should improve the size model.
+
+kind: data_fix
+role: size
+strategy: "*"
+incumbent: size_v1_4
+target: abs_move
+programme: size-v2.0
+step: 1
+
+price_source: >
+  None. This is a Tier-2 data-quality change measured on the Tier-3 panel. It
+  touches no prices and selects no trades.
+
+primary_spec:
+  arm: sentinel_to_null
+  change: "or_implied <= 0 becomes NULL rather than 0"
+  affects: [or_implied]
+grid: {}
+
+# Deliberately measured three ways, because a null is not free: the incumbent
+# architecture (OLS + MLP) cannot consume one, so rows with a null are DROPPED
+# by walk_forward. A fix that improves the surviving rows while deleting 12% of
+# the training set is not obviously a win, and the arms below are what separate
+# the two effects.
+arms_explained:
+  incumbent: "or_implied as it stands, zeros included"
+  sentinel_to_null: "zeros nulled; rows carrying them are then dropped by walk_forward"
+  drop_or_implied: >
+    or_implied removed from the feature list entirely, keeping every row. The
+    control for 'is the feature worth its missingness at all'.
+
+evaluation:
+  what: walk-forward OOS accuracy of the driver model
+  method: experiments.size_lab.run_bench
+  first_test_year: 2013
+  same_rows: false
+  same_rows_note: >
+    The arms deliberately see DIFFERENT row counts — that is the effect under
+    test. Aggregate MAE is therefore not comparable across arms on its own, and
+    the verdict rests on the per-year consistency of the paired years plus the
+    row counts reported beside every number.
+  criteria:
+    min_share_years_improved: 0.7
+    max_wilcoxon_p: 0.05
+    no_single_year_dependence: "mean gain must survive dropping the best year"
+
+promotion_target:
+  rule: >
+    A win here changes engine/data/normalize, not the registry. The model is
+    retrained afterwards and goes through the gate-invariance check before any
+    champion changes.
+  registry: null
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-08-31T18:11:55+00:00"
