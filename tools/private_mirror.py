@@ -54,6 +54,9 @@ INCLUDE = (
     ("config/thesis", "**/*"),
     ("experiments", "LEDGER.csv"),
     ("experiments", "**/REPORT.md"),
+    # EXP-117 introduced a stage-0 definition/audit document beside the report;
+    # it is the experiment's evidence and is not regenerable from code alone.
+    ("experiments", "**/DEFINITION.md"),
     ("experiments", "**/results/*.json"),
     # The transaction logs behind the plotted equity curves: real ORATS quotes,
     # so they can never reach the PUBLIC repo — and the reason a reported chart
