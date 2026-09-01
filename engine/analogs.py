@@ -365,6 +365,18 @@ class AnalogMatcher:
         unavailable = [d for d in ("mcap_bucket", *WIDENING_ORDER)
                        if buckets.get(d) is None]
 
+        if len(unavailable) == 4:
+            # No dimension has a value — no chain, no size, no implied quote.
+            # Matching on zero dimensions would return the strategy's base
+            # rate wearing an empty bucket label, the exact lie this layer was
+            # rewritten to stop telling; the honest answer is an empty match.
+            return self._summarize(
+                self.trades.iloc[0:0], strategy, alpha, buckets, 0,
+                list(unavailable), bootstrap=bootstrap,
+                min_analogs=min_analogs, request_key=request_key,
+                unavailable=tuple(unavailable),
+            )
+
         active = [d for d in ("mcap_bucket", *WIDENING_ORDER) if d not in unavailable]
         dropped: list[str] = list(unavailable)
         for widened in range(len(WIDENING_ORDER) + 1 - len(unavailable)):

@@ -101,6 +101,13 @@ QUOTA_LOG = RAW_FETCH / "quota_log.csv"
 POLYGON_LOCK = RAW_FETCH / ".polygon.lock"
 QUARANTINE = RAW / "quarantine"
 
+#: Synthesized oquants-format moves files for tickers the oquants panel does
+#: not carry (EXP-117 universe extension): dates/sessions from the ORATS
+#: calendar, moves computed session-aware from yfinance closes (validated
+#: exact against Polygon in EXP-117), implied moves from daily_market. The
+#: target provenance of these rows is COMPUTED, not vendor-supplied.
+COMPUTED_MOVES = RAW / "computed_moves"
+
 # Tier 2 — normalized store (Parquet, partitioned by year)
 CURATED = DATA / "curated"
 

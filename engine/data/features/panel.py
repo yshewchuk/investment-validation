@@ -148,10 +148,25 @@ def history_features(
     return out
 
 
-def build_events(moves_dir: Path | None = None) -> pd.DataFrame:
-    """The base causal panel: one row per admitted (ticker, event)."""
+def build_events(moves_dir: Path | None = None,
+                 extra_moves_dirs: Sequence[Path] = ()) -> pd.DataFrame:
+    """The base causal panel: one row per admitted (ticker, event).
+
+    ``extra_moves_dirs`` hold synthesized oquants-format files — the EXP-117
+    universe extension for tickers oquants does not carry (target provenance:
+    COMPUTED, see engine/data/pulls/computed_moves.py). A ticker present in
+    the primary dir is never shadowed by a synthesized one.
+    """
     moves_dir = moves_dir or paths.RAW_OQUANTS_MOVES
     files = sorted(moves_dir.glob("moves_*.json"))
+    if extra_moves_dirs:
+        seen = {p.name for p in files}
+        for extra in extra_moves_dirs:
+            extra_path = Path(extra)
+            if not extra_path.exists():
+                continue
+            files += sorted(p for p in extra_path.glob("moves_*.json")
+                            if p.name not in seen)
     if not files:
         raise FileNotFoundError(f"no oquants moves files under {moves_dir}")
 
@@ -281,6 +296,40 @@ def add_regime_features(df: pd.DataFrame, gspc_path: Path | None = None) -> pd.D
 # --------------------------------------------------------------------------
 
 
+def _yf_history_from_tier1(ticker: str) -> pd.DataFrame | None:
+    """Price history from the Tier-1 yfinance cache, for tickers the legacy
+    ``px_{T}.csv`` tree does not carry (the EXP-117 universe extension).
+
+    Same series the synthesized moves were computed from — split-adjusted
+    Close, validated exact against Polygon in EXP-117 — shaped like a legacy
+    px frame (``date``, ``close_adj``). Dividends are not adjusted; that only
+    matters for the run-up features of these tickers, never for a price.
+    """
+    import gzip
+    import io
+
+    from engine.data.fetch import Fetcher, cache_key
+
+    try:
+        fetcher = Fetcher()
+        key = cache_key("yfinance", "history", {"ticker": ticker, "period": "max"})
+        path = fetcher.body_path("yfinance", key)
+        if not path.exists():
+            return None
+        with gzip.open(path, "rb") as fh:
+            frame = pd.read_csv(io.BytesIO(fh.read()))
+    except (OSError, ValueError, EOFError):
+        return None
+    if frame.empty or "Close" not in frame.columns:
+        return None
+    dates = pd.to_datetime(frame[frame.columns[0]], errors="coerce", utc=True)
+    dates = dates.dt.tz_localize(None)
+    closes = pd.to_numeric(frame["Close"], errors="coerce")
+    out = pd.DataFrame({"date": dates, "close_adj": closes})
+    out = out.dropna().sort_values("date")
+    return out if len(out) else None
+
+
 def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataFrame:
     """Streak, distance-from-extreme, and short-horizon return features."""
     px_dir = px_dir or paths.RAW_YF
@@ -321,13 +370,15 @@ def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataF
         if gi % 500 == 0:
             _log(f"runup {gi}/{len(groups)} tickers, {time.time()-started:.0f}s")
         path = px_dir / f"px_{ticker}.csv"
-        if not path.exists() or path.stat().st_size < 50:
-            continue
-        try:
-            px = pd.read_csv(path, parse_dates=["date"]).sort_values("date")
-        except (ValueError, OSError):
-            continue
-        if len(px) < 300 or "close_adj" not in px.columns:
+        px = None
+        if path.exists() and path.stat().st_size >= 50:
+            try:
+                px = pd.read_csv(path, parse_dates=["date"]).sort_values("date")
+            except (ValueError, OSError):
+                px = None
+        if px is None or len(px) < 300 or "close_adj" not in px.columns:
+            px = _yf_history_from_tier1(ticker)
+        if px is None or len(px) < 300 or "close_adj" not in px.columns:
             continue
         closes = px["close_adj"].to_numpy(dtype=float)
         pdates = px["date"].to_numpy()
@@ -481,7 +532,7 @@ def add_orats_features(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> p
 def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     """Full Tier-3 causal panel, built from Tier 1 (moves/prices) and Tier 2."""
     _log("block 1/4 — causal events from oquants moves")
-    panel = build_events()
+    panel = build_events(extra_moves_dirs=(paths.COMPUTED_MOVES,))
     _log("block 2/4 — market regime")
     panel = add_regime_features(panel)
     _log("block 3/4 — run-up and distance features")

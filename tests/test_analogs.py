@@ -122,6 +122,27 @@ class TestBucketing:
 
 
 class TestMatching:
+    def test_no_dimension_has_a_value_is_an_empty_match_not_a_crash(self):
+        """No chain, no size, no implied quote: every bucket is None.
+
+        The widening loop has zero active dimensions and used to fall through
+        to an 'unreachable' assert — hit live by board tickers with no ORATS
+        daily rows and no chain (CANG, PDEX, ...). Matching on nothing must
+        return the empty set, not the base rate wearing an empty label.
+        """
+        pool = trades(30, ret=0.10, mcap=5e9, dte=5)
+        matcher = AnalogMatcher(pool, snapshot="test")
+        result = matcher.match(
+            "STR-THRU",
+            matcher.buckets_for(mcap_usd=None, dte=None, moneyness_pct=None,
+                                implied_ratio=None),
+            alpha=0.5,
+        )
+        assert result.n == 0
+        assert result.mean is None
+        assert result.thin
+        assert len(result.unavailable) == 4
+
     def test_returns_the_known_bucket_mean(self):
         """Guide test 5: hand-built buckets → the matcher returns their means."""
         pool = pd.concat(
