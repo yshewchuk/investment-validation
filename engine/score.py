@@ -117,6 +117,23 @@ ATM_TOLERANCE_PCT = 2.0
 #: Draws used to turn a point prediction into a P&L distribution.
 MODEL_DRAWS = 4000
 
+#: Below this, a quoted implied move is treated as ABSENT rather than displayed.
+#:
+#: EXP-110 established that `or_implied` uses exactly 0 for "no quote" on 25.6%
+#: of `daily_market`. It is not only exact zeros: a further 8.3% of rows fall in
+#: (0, 1), and that band is degenerate rather than a population of low-vol
+#: names — its median is 0.00065% and even its 99th percentile is 0.88%. Real
+#: quotes are the 66.1% at or above 1%, whose median is 8.25%.
+#:
+#: A first version of this guard tested `> 0` and let 1e-06 through, which
+#: produced a model/market ratio of 10,258,753 on the board.
+#:
+#: The 1.0 threshold is a judgement call — mine, not the data's. It is set where
+#: the degenerate band ends rather than where a genuine quote is implausible,
+#: and it fails toward silence: a real sub-1% quote would be shown as "no quote"
+#: rather than as a number that makes a ratio meaningless.
+MIN_QUOTED_IMPLIED_MOVE = 1.0
+
 #: Panel columns read at the last pre-print close. Supplied to a model only when
 #: the decision is taken at that close; see ``Scorer._features``.
 _PANEL_MARKET_BLOCK = (
@@ -210,6 +227,17 @@ class ScoreResult:
     analog_buckets: dict = field(default_factory=dict)
     snapshot_hash: str = ""
     detail: str = ""
+    #: The implied move the OPTION MARKET quotes for this print, in %, as of
+    #: the decision date. Not a model output — it is the number the champion's
+    #: prediction is supposed to be traded against, and the board showed the
+    #: prediction with nothing to compare it to.
+    #:
+    #: Sourced from the ORATS daily state (`im`), which is why it is present on
+    #: forward rows that have no option chain. A straddle's own quoted price is
+    #: only computable where a chain exists, and there it already appears as
+    #: `entry_cost_pct`.
+    implied_move: float | None = None
+
     driver_name: str | None = None
     driver_prediction: float | None = None
     #: The interval around ``driver_prediction`` itself — the "± 2" on an
@@ -452,6 +480,13 @@ class Scorer:
 
         # -- features ------------------------------------------------------
         features = self._features(request, result)
+
+        # Carried before the layers run: every layer reads this frame, and two
+        # of them already used `im` internally without ever surfacing it.
+        if "im" in features.columns:
+            quoted = features["im"].iloc[0]
+            if pd.notna(quoted) and float(quoted) >= MIN_QUOTED_IMPLIED_MOVE:
+                result.implied_move = float(quoted)
 
         # -- layers --------------------------------------------------------
         self._score_model(request, result, features)

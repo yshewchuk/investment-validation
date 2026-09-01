@@ -172,6 +172,25 @@ function driverCell(r) {
     + " <span class='badge'>" + esc(label) + "</span>";
 }
 
+/* What the market says, next to what the model says. The board carried the
+   prediction with nothing to compare it against, which is the one comparison
+   the whole programme is built on: predicted |move| against quoted implied. */
+function impliedCell(r) {
+  if (r.implied_move === null || r.implied_move === undefined) return "–";
+  let gap = "";
+  if (r.driver_name === "abs_move" && r.driver_prediction !== null
+      && r.driver_prediction !== undefined && r.implied_move > 0) {
+    const ratio = r.driver_prediction / r.implied_move;
+    /* Model below market = the option looks expensive against the model, which
+       is the short-vol direction; above = it looks cheap. Stated as a ratio
+       rather than coloured, because which side is "good" depends on the
+       structure and the board carries several. */
+    gap = " <span class='badge' title='model call / market implied'>×"
+      + fmt(ratio, 2) + "</span>";
+  }
+  return fmt(r.implied_move, 1) + "%" + gap;
+}
+
 function boardRows() {
   let rows = BOARD.rows.slice();
   if (state.strategy) rows = rows.filter((r) => r.strategy === state.strategy);
@@ -214,6 +233,7 @@ function renderBoard() {
       + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
       + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
       + "<td>" + driverCell(r) + "</td>"
+      + "<td>" + impliedCell(r) + "</td>"
       + "<td>" + winCell + "</td>"
       + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
       + "<td>" + premium + "</td>"

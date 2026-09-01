@@ -59,13 +59,33 @@ class TestCollection:
     def test_it_finds_real_files_and_stays_small(self):
         files, _ = collect()
         assert files, "the mirror collected nothing"
-        logs = [p for p in files if p.name.startswith("transactions_")]
-        rest = sum(p.stat().st_size for p in files if p not in set(logs))
+
+        # Two categories are legitimately large and GROW BY DESIGN, so they are
+        # budgeted apart from the payload this guard is really about:
+        #
+        #   transactions_*.csv    a few MB per registered evaluation
+        #   ledger/predictions/   ~1 MB per night, append-only, and the
+        #                         out-of-time evidence the programme leans on
+        #
+        # The prediction ledger used to count against the payload budget, which
+        # meant the guard would fail every few nights for doing its job — one
+        # backfilled night was enough to tip it. Folding it in would have hidden
+        # the thing the guard exists for; separating it keeps the question sharp.
+        def _is_growth(path):
+            return (path.name.startswith("transactions_")
+                    or "predictions" in path.parts)
+
+        growth = [p for p in files if _is_growth(p)]
+        rest = sum(p.stat().st_size for p in files if not _is_growth(p))
         total = sum(p.stat().st_size for p in files)
-        # Docs, code and result artifacts. The transaction logs are budgeted
-        # separately because they are legitimately a few MB each; everything
-        # else ballooning means a data glob has crept into the allowlist.
-        assert rest < 10_000_000, f"non-log payload is {rest:,} bytes — check the allowlist"
+
+        # Docs, code and result artifacts. Ballooning here means a data glob has
+        # crept into the allowlist, which is the failure worth catching.
+        assert rest < 10_000_000, f"non-growth payload is {rest:,} bytes — check the allowlist"
+        assert sum(p.stat().st_size for p in growth) < 30_000_000, (
+            f"evidence files are {sum(p.stat().st_size for p in growth):,} bytes — "
+            "expected, but prune or archive before the mirror gets unwieldy"
+        )
         assert total < 40_000_000, f"mirror is {total:,} bytes"
 
     def test_no_market_data_files_are_collected(self):
