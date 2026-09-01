@@ -79,6 +79,7 @@ _BOARD_FIELDS = (
     "gate_score", "gate_threshold", "gate_pass",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90", "implied_move",
+    "model_vs_market",
     "chain_last_obs", "chain_age_days",
     "scored", "rank", "fill", "detail", "digest",
 )
@@ -228,6 +229,27 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
         if entry_cost is not None and spot
         else None
     )
+    # Derived HERE, not in the client. The board's rule is that the UI formats
+    # and never computes, so the nightly self-check covers every number shown.
+    # This ratio first shipped as arithmetic in app.js, which `ui_no_compute`
+    # did not catch: that check compares the FIELD NAMES a client reads against
+    # the ones the renderer wrote, and a division between two legitimate fields
+    # reads as legitimate.
+    #
+    # Only for `abs_move` drivers. STR-RUNUP predicts `im_t1` — the quote at
+    # T-1, a forecast of the market's own number rather than of the realized
+    # move — so dividing it by today's quote would compare two different things
+    # and put a confident-looking number on the board that means nothing.
+    driver_prediction = record.get("driver_prediction")
+    implied_move = record.get("implied_move")
+    model_vs_market = (
+        float(driver_prediction) / float(implied_move)
+        if record.get("driver_name") == "abs_move"
+        and driver_prediction is not None
+        and implied_move not in (None, 0.0)
+        else None
+    )
+
     fair_pct = _model_fair_pct(record)
     premium_vs_fair = (
         entry_cost_pct / fair_pct
@@ -246,6 +268,7 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
         "entry_cost_pct": entry_cost_pct,
         "model_fair_pct": fair_pct,
         "premium_vs_fair": premium_vs_fair,
+        "model_vs_market": model_vs_market,
         "scored": record.get("exp_pnl_model") is not None
         or record.get("exp_pnl_analog") is not None,
         "rank": rank,

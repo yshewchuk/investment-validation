@@ -172,23 +172,25 @@ function driverCell(r) {
     + " <span class='badge'>" + esc(label) + "</span>";
 }
 
-/* What the market says, next to what the model says. The board carried the
+/* What the market says, beside what the model says. The board carried the
    prediction with nothing to compare it against, which is the one comparison
    the whole programme is built on: predicted |move| against quoted implied. */
 function impliedCell(r) {
   if (r.implied_move === null || r.implied_move === undefined) return "–";
-  let gap = "";
-  if (r.driver_name === "abs_move" && r.driver_prediction !== null
-      && r.driver_prediction !== undefined && r.implied_move > 0) {
-    const ratio = r.driver_prediction / r.implied_move;
-    /* Model below market = the option looks expensive against the model, which
-       is the short-vol direction; above = it looks cheap. Stated as a ratio
-       rather than coloured, because which side is "good" depends on the
-       structure and the board carries several. */
-    gap = " <span class='badge' title='model call / market implied'>×"
-      + fmt(ratio, 2) + "</span>";
-  }
-  return fmt(r.implied_move, 1) + "%" + gap;
+  return fmt(r.implied_move, 1) + "%";
+}
+
+/* The ratio is DERIVED BY THE RENDERER, not here. It first shipped as a
+   division in this file, which is a UI computation the board's rules forbid —
+   and `ui_no_compute` did not catch it, because that check compares the field
+   names a client reads against the ones the renderer wrote, and dividing two
+   legitimate fields reads as legitimate. */
+function ratioCell(r) {
+  if (r.model_vs_market === null || r.model_vs_market === undefined) return "–";
+  /* Not coloured. Below 1.0 means the model expects less movement than the
+     option is priced for — which is bad for a long straddle and good for a
+     short one, and the board carries both kinds. */
+  return "×" + fmt(r.model_vs_market, 2);
 }
 
 function boardRows() {
@@ -234,6 +236,7 @@ function renderBoard() {
       + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
       + "<td>" + driverCell(r) + "</td>"
       + "<td>" + impliedCell(r) + "</td>"
+      + "<td>" + ratioCell(r) + "</td>"
       + "<td>" + winCell + "</td>"
       + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
       + "<td>" + premium + "</td>"

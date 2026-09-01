@@ -227,10 +227,18 @@ class ScoreResult:
     analog_buckets: dict = field(default_factory=dict)
     snapshot_hash: str = ""
     detail: str = ""
-    #: The implied move the OPTION MARKET quotes for this print, in %, as of
-    #: the decision date. Not a model output — it is the number the champion's
-    #: prediction is supposed to be traded against, and the board showed the
-    #: prediction with nothing to compare it to.
+    #: The implied move the OPTION MARKET quotes for this print, in %, read at
+    #: THIS TRADE'S entry date (``live_features(..., as_of=result.entry_date)``).
+    #: Not a model output — it is the number the champion's prediction is
+    #: supposed to be traded against, and the board showed the prediction with
+    #: nothing to compare it to.
+    #:
+    #: It is per-TRADE, not per-event, and the difference is not noise: on 78 of
+    #: 128 board pairs the same print quotes differently to STR-RUNUP and
+    #: STR-THRU, because one enters weeks earlier and implied move rises into a
+    #: print — which is the whole STR-RUNUP thesis. Anything displaying this
+    #: must say which date it is as of, or it reads as a property of the event
+    #: and looks inconsistent.
     #:
     #: Sourced from the ORATS daily state (`im`), which is why it is present on
     #: forward rows that have no option chain. A straddle's own quoted price is

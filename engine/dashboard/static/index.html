@@ -53,20 +53,21 @@
     <div class="tablewrap">
       <table id="tbl-board">
         <thead><tr>
-          <th data-sort="event_date">Event</th>
-          <th data-sort="ticker">Ticker</th>
-          <th data-sort="strategy">Strategy</th>
-          <th data-sort="gate_score">Gate</th>
-          <th data-sort="exp_pnl_model">Exp PnL (model)</th>
-          <th data-sort="exp_pnl_analog">Exp PnL (analogs)</th>
-          <th data-sort="driver_prediction" title="The champion's prediction, with its 10th-90th percentile band. Nominally 80%; measured out-of-sample coverage 79.3% (EXP-115). The width varies by event: drawn from the residual bucket matching this prediction, not one pool shared by every row.">Model call <span class="badge">± band</span></th>
-          <th data-sort="implied_move" title="The implied move the option market quotes for this print, from the ORATS daily state as of the decision date. This is what the model's call is traded against: the edge is the gap between them, not the prediction on its own. Blank where no quote was available — `or_implied` uses 0 for &quot;no quote&quot;, and showing 0.0% would claim the market expects no move.">Market implied</th>
-          <th data-sort="win_model">Win + CI</th>
-          <th data-sort="n_analogs">n</th>
-          <th data-sort="entry_cost_pct">Premium vs fair</th>
-          <th data-sort="entry_date">Entry → exit</th>
-          <th data-sort="rank">Rank</th>
-          <th>Flags</th>
+          <th data-sort="event_date" title="The print date and session. AMC = after market close, BMO = before market open. The session decides which day the trade is entered and exited, so a wrong session is a wrong trade rather than a cosmetic error.">Event</th>
+          <th data-sort="ticker" title="The underlying. Click any row to open its full evidence: inputs, history and matched analog trades.">Ticker</th>
+          <th data-sort="strategy" title="The structure being scored. STR-THRU = buy the straddle, hold THROUGH the print. STR-RUNUP = own vol into the print and exit before it. CAL-P is listed but never scored — it has no backtest yet, so it shows as unvalidated rather than guessing.">Strategy</th>
+          <th data-sort="gate_score" title="The gate model's score and whether it passes its threshold. This — not expected P&L — is what actually selects trades. The gate reads its own features and never sees the size model, so improving the size model provably cannot change which rows pass (EXP-115: 0 of 618 rows moved).">Gate</th>
+          <th data-sort="exp_pnl_model" title="The MODEL layer: the champion's prediction pushed through an empirically-calibrated payoff map against the real entry cost, then averaged over 4,000 draws from the model's own held-out residuals. Not a point estimate pushed through a formula — a distribution.">Exp PnL (model)</th>
+          <th data-sort="exp_pnl_analog" title="The EMPIRICAL layer: the mean realized return of matched historical trades, priced by the same replay code at the same fill. Matched on market cap, the ticker's implied move against its own history, days to expiry and moneyness. Never averaged with the model column — when the two disagree, the disagreement is the finding.">Exp PnL (analogs)</th>
+          <th data-sort="driver_prediction" title="The champion's own prediction, with its 10th-90th percentile band. Needs no option chain, so it is present on rows whose P&L columns are not. The band is nominally 80%; measured out-of-sample coverage is 79.3% (EXP-115), and its width varies by event because the draws come from the residual bucket matching this prediction rather than one pool shared by every row.">Model call <span class="badge">± band</span></th>
+          <th data-sort="implied_move" title="The implied move the option market quoted for this print AS OF THIS TRADE&#39;S ENTRY DATE — not a single number for the event. Two structures on the same print legitimately differ: STR-RUNUP enters weeks earlier than STR-THRU, and implied move usually rises into a print. That rise IS the STR-RUNUP thesis, so the gap between the two rows is signal rather than inconsistency. Blank where no quote was available: the source uses 0 for &quot;no quote&quot; on 25.6% of rows, and showing 0.0% would claim the market expects no move.">Market implied <span class="badge">@ entry</span></th>
+          <th data-sort="model_vs_market" title="Model call divided by the market implied quoted at THIS trade&#39;s entry date. Below 1.0 the model expects LESS movement than the option is priced for, so a long straddle looks expensive; above 1.0 it looks cheap. Shown only for STR-THRU, whose driver is the realized move and is therefore comparable to a quote — STR-RUNUP predicts the QUOTE itself at T-1, so the same ratio would compare two different quantities.">Model / market</th>
+          <th data-sort="win_model" title="Share of the model's simulated return distribution above zero, after an isotonic recalibration fitted only on trades that had closed before this decision date. The bracket is the ANALOG layer's bootstrap confidence interval, not the model's.">Win + CI</th>
+          <th data-sort="n_analogs" title="How many matched historical trades stand behind the analog columns. This is the number that says how much weight they deserve. Below the minimum the row is flagged THIN_ANALOGS; if buckets had to be dropped to find matches, the count is a looser comparison than it looks and the row records how many were dropped.">n</th>
+          <th data-sort="entry_cost_pct" title="What the structure costs as a percentage of spot, and beside it the ratio of that premium to what the model thinks the payoff is worth. For a straddle the premium itself is effectively the market's calculated implied move.">Premium vs fair</th>
+          <th data-sort="entry_date" title="The trade the numbers describe: when it is opened and closed, derived from the print session. Everything on this row prices THAT trade, not a generic position in the name.">Entry → exit</th>
+          <th data-sort="rank" title="Position within the strategy when sorted by expected model P&L. A ranking, not a recommendation: the gate decides what is tradeable.">Rank</th>
+          <th title="Conditions attached to this row. NO_CHAIN = no option quote, so the P&L columns cannot be computed. EXTRAPOLATED = a strike away from at-the-money, beyond the evidence. LAYER_DISAGREE = the model and analog layers disagree. THIN_ANALOGS / THIN_HISTORY = too little evidence behind the estimate.">Flags</th>
         </tr></thead>
         <tbody></tbody>
       </table>
