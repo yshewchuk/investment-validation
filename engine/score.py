@@ -58,7 +58,7 @@ from engine.features import (
     live_features,
     session_for,
 )
-from engine.fills import MID, FillModel
+from engine.fills import BAD_QUOTE_COST_PCT, MID, FillModel
 from engine.models.registry import Registry, RegistryError, load_registry
 from engine.payoff import PayoffError, PayoffMap, fit_payoff, simulate_returns
 from engine.replay import ChainIndex, legs_spot_dte, load_chain_index, plan_events
@@ -99,6 +99,7 @@ FLAGS = (
     "THIN_ANALOGS",
     "NO_CHAIN",
     "WIDE_MARKET",
+    "BAD_QUOTE",
     "NO_MODEL",
     "MISSING_FEATURES",
     "NO_PAYOFF_MAP",
@@ -512,6 +513,18 @@ class Scorer:
             result.implied_move = today
 
         # -- layers --------------------------------------------------------
+        # EXP-117: a quote that fails the cost-of-spot sanity ceiling gets no
+        # model, analog, or gate numbers — the entry cost shown is the
+        # diagnosis, and a confident P&L built on a junk quote is worse than
+        # none. The row stays visible with the flag.
+        if "BAD_QUOTE" in result.flags:
+            result.detail = (
+                f"entry cost {result.entry_cost:.2f} is "
+                f"{result.entry_cost / result.spot * 100.0:.0f}% of spot "
+                f"{result.spot:.2f} — above the {BAD_QUOTE_COST_PCT:.0f}% "
+                "bad-quote ceiling; not scored"
+            )
+            return result
         self._score_model(request, result, features)
         self._score_analogs(request, result, features)
         self._score_gate(request, result, features)
@@ -631,6 +644,14 @@ class Scorer:
         result.dte_entry = int(priced.legs[0].dte)
         if priced.any_wide_market:
             result.flag("WIDE_MARKET")
+        # EXP-117: a straddle costing more than BAD_QUOTE_COST_PCT of spot is
+        # not a tradeable quote. WIDE_MARKET sees the spread; this sees the
+        # level. The row stays on the board with its cost and the flag, but
+        # the scoring layers refuse to produce confident numbers from it.
+        if result.spot and result.entry_cost is not None:
+            cost_pct = result.entry_cost / result.spot * 100.0
+            if cost_pct > BAD_QUOTE_COST_PCT:
+                result.flag("BAD_QUOTE")
         if bool(clean.get("quote_repaired", pd.Series(dtype=bool)).any()):
             result.flag("QUOTE_REPAIRED")
 

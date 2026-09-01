@@ -1,0 +1,166 @@
+id: EXP-117
+title: "abs_move target validation and the ORATS event universe"
+hypothesis: >
+  The panel's abs_move target -- oquants realized_moves, session rule
+  BMO close(t-1)->close(t), AMC close(t)->close(t+1) on unadjusted closes --
+  has never been checked against anything beyond EXP-000's 12 events. It agrees
+  with independent close-to-close measurements (Polygon daily bars, unadjusted)
+  on >=95% of a stratified event sample within 0.5pp, and the residual
+  disagreement rate is small, quantified, and explained (corporate actions,
+  date/session anchoring, bad source prices). If so, the target is sound and the
+  universe question proceeds; if not, the disagreement rate itself is the
+  headline finding.
+
+  Secondary: building the event universe from the ORATS calendar (dates +
+  anncTod sessions, back to the 1980s) instead of the oquants panel adds
+  scoreable tickers -- tickers with >=12 prior prints -- beyond the current
+  oquants-bounded 2,936.
+
+kind: data-validation
+role: target
+strategy: "*"
+programme: target-validation
+prior: [EXP-000, EXP-038]
+plan: guides/exp117_orats_event_universe.md
+
+stage0:
+  status: closed
+  definition_file: DEFINITION.md
+  recompute_script: stage0_recompute.py
+  findings:
+    session_aware_orats_vs_oquants: >
+      n=126,409 events: corr 0.9969, median abs diff 0.0pp, 92.9% within 0.1pp,
+      97.3% within 1pp, 252 events (0.20%) differ by >5pp. Convention
+      (session rule + unadjusted closes) is confirmed as what oquants computes
+      for the overwhelming majority of events.
+    naive_reproduction: >
+      Single-rule close(t)->close(t+1) recomputation reproduces the plan's v1.0
+      numbers (median |move| 2.72 vs oquants 3.91; corr 0.70): session handling
+      was the dominant cause of the naive disagreement, as the plan hypothesized.
+    big_disagreements: >
+      Of the 252: 173 (all AMC) equal the ADJACENT close(t-1)->close(t) window
+      on ORATS prices -- oquants anchored on the reaction day rather than the
+      announcement day (or ORATS calendar date off by one); ~60 are events where
+      yfinance agrees with oquants exactly against ORATS spot (ORATS price/date
+      error suspected); the remainder are three-way splits for Polygon to
+      adjudicate.
+    yfinance_quality: >
+      yfinance px files are retroactively split-adjusted and carry era-dependent
+      price noise from ~2015 (median ORATS-vs-yf move disagreement 0.17pp in
+      2015 growing to 0.65pp in 2026; pre-2015 exact). yfinance is therefore
+      NOT an adjudicator; Polygon is the independent source.
+    orats_pipeline_agreement: >
+      option_chains.spot (hist/strikes pipeline) vs daily_market.spot
+      (summaries pipeline): 99.65% exactly equal, max relative diff 0.053%.
+      Same measurement; partial independence only.
+
+primary_spec:
+  discovered_constraint: >
+    Probed 2026-09-01 during the pull: this plan's Polygon EQUITY aggregates
+    carry only the trailing ~2 years (500 bars). Historical windows (2019,
+    2023, 2024-H1) return 403 NOT_AUTHORIZED "plan doesn't include this data
+    timeframe"; a wide 2006-2026 request silently returns the last 500 bars
+    (2024-09-03 onward). Registered after Stage 0, before looking at any
+    Stage-1 verdict. Consequence: three-way triangulation with the
+    independent vendor is possible only for events anchored ~2024-09 onward;
+    earlier events fall back to the Stage-0 panel-scale two-vendor result
+    (oquants vs ORATS) with yfinance as tie-breaker for the outliers. The
+    acceptance criteria below are evaluated on the entitled subset, and the
+    pre-2024-09 events are reported as two-source-validated, never as
+    independently triangulated.
+  discovered_dependence: >
+    Measured in Stage 1 before Stage 4 ran (amendment, 2026-09-01): against
+    Polygon truth (3,120 events, 2024-09 to 2026-08), yfinance close_raw is
+    exact (99.5% within 0.5pp, median diff 0.000); ORATS spot is right only
+    40.9% of the time; oquants matches ORATS exactly on 99.8% of 2024 and
+    90.1% of 2025 events and inherits their errors there, then diverges from
+    ORATS in 2026 and is clean (99.3% within 0.5pp). oquants and ORATS are
+    therefore NOT independent price sources in 2024-2025; the independent
+    consensus is the Polygon+yfinance pair. Stage 4 corrections follow the
+    evidence: Polygon-covered events take the Polygon value where oquants
+    deviates; pre-Polygon events keep the registered agreeing-pair consensus
+    over {oquants, ORATS, yfinance}, correcting oquants only when it is the
+    outlier of a pair it is not part of. The registered acceptance criterion
+    (computed target within 0.5pp of independent consensus on >=95% of
+    covered events) is met by the computed target at 99.5%.
+  stage1_sample:
+    n_tickers: 220
+    stratification: >
+      tickers drawn from the oquants panel universe, stratified by decade of
+      event history (2007-2009, 2010-2014, 2015-2019, 2020-2026) and by market
+      cap bucket (<1B, 1-10B, >10B at last observation), plus a forced inclusion
+      of every ticker with a Stage-0 >5pp disagreement and of known split-heavy
+      names. All events of a sampled ticker are validated (one Polygon call per
+      ticker buys its whole history).
+    price_source: "Polygon v2/aggs/ticker/{T}/range/1/day, adjusted=false (and
+      adjusted=true for split detection), full history, limit=50000"
+    rule: >
+      move = unadjusted close-to-close, BMO last close strictly before t ->
+      first close on/after t; AMC last close on/before t -> first close strictly
+      after t; anchored on the name's own observed trading days; events with no
+      close on either side or a >5-calendar-day window excluded and counted.
+  acceptance:
+    consensus_agreement_min_pct: 95.0
+    consensus_tolerance_pp: 0.5
+    adjudication: >
+      where >=2 independent sources (Polygon, ORATS spot, oquants) agree within
+      0.5pp, that is the consensus; a source deviating from consensus on an
+      event is wrong on that event. Where the independent sources disagree with
+      each other, the event is ambiguous and returns to definition, it is not a
+      verdict against any source.
+    report: >
+      disagreement RATE by source, by year, by session, by mcap bucket -- not a
+      pass/fail.
+
+stage2:
+  what: >
+    Chain quote sanity: (a) cost%-of-spot ceiling on straddle entries --
+    entry_cost/spot above the ceiling flags the event BAD_QUOTE and removes it
+    from scoring (live example: CBAT 2026-08-31 STR-THRU at 166.7% of spot);
+    (b) Greeks consistency check: for events with chains on both sides of the
+    print, the observed straddle price change must be reconcilable with some
+    plausible underlying move given delta/gamma/theta/vega; irreconcilable
+    changes mark a bad quote on at least one side.
+  cost_pct_ceiling: 30.0
+  note: ceiling registered before measuring how many historical events it trips.
+
+stage3:
+  what: >
+    Build the event universe from the ORATS calendar (dates + anncTod) instead
+    of the oquants moves cache; count tickers reaching >=12 prior prints
+    (scoreability bar) overall, among the board's currently-unreachable
+    tickers, and the effect on panel rows.
+  promotion_threshold: >
+    Adopt the universe change only if it adds >=15 scoreable tickers
+    (>=12 prior prints) beyond the oquants-bounded set. Registered before
+    measurement; below that, ship the target validation and drop the universe
+    change (plan section 9).
+
+stage4:
+  what: >
+    Retrain size_v1_4 on the computed (Polygon-validated) target; compare
+    r / MAE / RMSE on the original 2,936-ticker subset only (like-for-like).
+    Extended-panel metrics reported separately, never beside the incumbent's.
+  criteria:
+    like_for_like_no_degradation: true
+
+promotion_rule: >
+  Adopt only if ALL hold: (1) Stage 1 consensus agreement >=95% within 0.5pp
+  with the oquants disagreement rate quantified and explained; (2) Stage 3 adds
+  >=15 scoreable tickers; (3) Stage 4 shows no like-for-like degradation;
+  (4) the ledger records the commit at which the target provenance changed.
+
+abandon_criteria:
+  - independent sources disagree with each other and Stage 0 cannot resolve why
+  - computed target agrees with consensus but Stage 3 adds <15 scoreable tickers
+    (ship the validation, drop the universe change)
+  - Polygon coverage of sampled names is thin (check early, before fetching at
+    scale)
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 5851ad42cab64465756615751030c6e4fe3b4247c310891652537870969f7210
+preregistered_at: "2026-09-01T12:58:54+00:00"

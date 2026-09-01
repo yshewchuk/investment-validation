@@ -24,12 +24,22 @@ import numpy as np
 #: mid is already a market you cannot reliably work a limit order into.
 WIDE_MARKET_RATIO = 0.5
 
+#: Entry cost above this fraction of spot is a BAD_QUOTE, not a price: no real
+#: straddle costs more than a third of the stock. EXP-117 measured the
+#: historical distribution (p95 18.6%, p99 53.4%, max 169%) and found 0.7% of
+#: STR-THRU entries above the ceiling — junk-quote small caps, rising with
+#: time, exactly the class of the live CBAT 2026-08-31 row at 166.7% that
+#: WIDE_MARKET flagged but did not remove. Registered in EXP-117 spec.yaml
+#: before the historical rate was measured.
+BAD_QUOTE_COST_PCT = 30.0
+
 __all__ = [
     "FillModel",
     "WORST",
     "MID",
     "BEST",
     "WIDE_MARKET_RATIO",
+    "BAD_QUOTE_COST_PCT",
     "breakeven_alpha",
     "ALPHA_SWEEP",
 ]

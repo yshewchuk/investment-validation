@@ -76,6 +76,14 @@ CONVENTIONS = {
         "so option_daily exists only from that date and carries no bid/ask — "
         "real traded prices, not quotes."
     ),
+    "polygon_equity_window": (
+        "Polygon EQUITY aggregates on this plan carry only the trailing ~2 "
+        "years (probed 2026-09-01, EXP-117): a historical window returns 403 "
+        "NOT_AUTHORIZED 'plan doesn't include this data timeframe', while a "
+        "wide range silently returns the last 500 bars. Any historical "
+        "underlying-price validation must treat Polygon as a recent-era "
+        "source only; plan upgrades change this."
+    ),
 }
 
 #: Which source wins where two disagree. Written down because it is a decision,
