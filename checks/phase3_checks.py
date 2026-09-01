@@ -23,6 +23,7 @@ which are only real if something enforces them:
 10. ``server_local``     the desk server binds 127.0.0.1 and keeps the quota
                          actions off the published bundle
 11. ``board_budget``     board.json fits the mobile budget
+12. ``registry_current`` every champion matches the code that trains it
 
 Test 7 in the guide ("phone loads the URL through the Access login") is a manual
 check the agent cannot perform; what is automated here is the rule that protects
@@ -863,6 +864,74 @@ def check_server_local() -> str:
 # --------------------------------------------------------------------------
 
 
+@check("registry_current", needs_data=False,
+       description="every champion matches the code that trains it")
+def check_registry_current() -> str:
+    """A promoted experiment that was never retrained is invisible otherwise.
+
+    ``size_model.FEATURES`` changed twice — EXP-111 added ``has_implied_quote``,
+    EXP-113 removed ``abs_dist_high`` — and neither reached the registered
+    artifact, because nothing retrained it. ``Scorer`` builds its feature matrix
+    from ``artifact.features``, so the board scored on the pre-EXP-111 feature
+    set for as long as that went unnoticed: the code said one thing, the shipped
+    model did another, and every test passed throughout.
+
+    Nothing here re-trains or judges quality. It asks only whether what is
+    registered is what the current training code would produce.
+    """
+    import json
+
+    from engine.models.registry import artifact_sha256, load_registry
+    from engine.models.training import gate as gate_mod
+    from engine.models.training import implied_t1 as implied_mod
+    from engine.models.training import size_model as size_mod
+
+    code = {
+        "size": set(size_mod.FEATURES),
+        "implied_t1": set(implied_mod.FEATURES),
+        "gate": set(gate_mod.FEATURES),
+    }
+    registry_path = ROOT / "engine" / "models" / "registry.json"
+    champions = [
+        entry for entry in json.loads(registry_path.read_text())["models"]
+        if entry.get("champion")
+    ]
+    _require(champions, "the registry lists no champions")
+
+    registry = load_registry()
+    problems: list[str] = []
+    for entry in champions:
+        role, registered = entry["role"], set(entry["features"])
+        expected = code.get(role)
+        if expected is None:
+            problems.append(f"{entry['id']}: role {role!r} has no training module")
+            continue
+        if expected != registered:
+            missing = sorted(expected - registered)
+            extra = sorted(registered - expected)
+            problems.append(
+                f"{entry['id']}: features drifted from {role} training code — "
+                f"never deployed {missing}, still deployed {extra}"
+            )
+        artifact = ROOT / entry["artifact"]
+        if not artifact.exists():
+            problems.append(f"{entry['id']}: artifact missing at {entry['artifact']}")
+        elif artifact_sha256(artifact) != entry["artifact_sha256"]:
+            problems.append(f"{entry['id']}: artifact sha does not match the registry")
+        # The registry records the feature list; the ARTIFACT carries the one
+        # actually used at scoring time. They can disagree, and the artifact wins.
+        loaded = registry.load_champion(role, entry.get("strategy") or "*", verify=False)
+        if set(loaded[1].features) != registered:
+            problems.append(
+                f"{entry['id']}: the artifact's own features differ from the "
+                "registry entry — the registry is describing a model that is not "
+                "the one being scored with"
+            )
+
+    _require(not problems, "registry is stale:\n  " + "\n  ".join(problems))
+    return f"{len(champions)} champion(s) match their training code and their artifacts"
+
+
 @check("board_budget", needs_data=False, description="board.json fits the mobile budget")
 def check_board_budget() -> str:
     out = bundle()
@@ -902,6 +971,7 @@ ORDER = [
     "calp_unvalidated",
     "server_local",
     "board_budget",
+    "registry_current",
 ]
 
 
