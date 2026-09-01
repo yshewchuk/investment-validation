@@ -36,6 +36,19 @@ def needles():
     return secret_needles(parse_env(ENV_BODY))
 
 
+class TestParserDuplication:
+    def test_the_hook_and_the_engine_agree_on_a_dotenv_line(self):
+        """`checks.repo_hygiene` duplicates `engine.env.parse_env` on purpose.
+
+        The hook is copied into a bare repo and run standalone, where `engine`
+        is not importable — importing it there crashed every commit. The copy
+        is therefore deliberate, and this asserts the two never drift.
+        """
+        from engine.env import parse_env as engine_parse
+
+        assert engine_parse(ENV_BODY) == parse_env(ENV_BODY)
+
+
 class TestEnvParsing:
     def test_export_and_bare_assignments_both_parse(self):
         env = parse_env(ENV_BODY)

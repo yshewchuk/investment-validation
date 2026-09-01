@@ -28,4 +28,13 @@ Import discipline: everything downstream reads Tier 2/3 through
 ``engine/models/`` opens a model artifact.
 """
 
+# Credentials are read from os.environ by every adapter, and nothing was
+# putting .env there — the nightly stopped at `ORATS_API_KEY is unset` the first
+# time it ran outside a shell that had sourced the file. Loaded here so every
+# entry point gets it rather than each caller remembering. Never overrides a
+# variable the environment already set. See engine/env.py.
+from engine.env import load_env as _load_env  # noqa: E402
+
+_load_env()
+
 __version__ = "0.1.0"

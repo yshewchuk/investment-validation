@@ -151,6 +151,13 @@ def parse_env(text: str) -> dict[str, str]:
     return out
 
 
+# NOTE: this parser is duplicated in engine/env.py, deliberately. This module is
+# copied into a bare repository and run as a standalone pre-commit hook, where
+# `engine` is not importable — importing it here makes the hook crash with
+# ModuleNotFoundError on every commit. The duplication is guarded by
+# tests/test_repo_hygiene.py, which asserts the two agree on the same input.
+
+
 def secret_needles(env: dict[str, str]) -> dict[bytes, str]:
     """Build the set of byte patterns to search for, keyed to their env name.
 

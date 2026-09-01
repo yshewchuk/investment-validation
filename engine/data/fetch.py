@@ -358,14 +358,23 @@ class Fetcher:
                     "credential has rotated. Update .env and re-run; do not retry."
                 )
 
+            # A quota header describes the ACCOUNT, not whether this one request
+            # succeeded, so it is recorded from any response that carries one.
+            # It used to be logged only on 2xx, which left the guard blind in a
+            # way that actually happened: ORATS omits the header on CDN-cached
+            # responses, so a successful call reported no quota, while a 404 —
+            # the reading that told us the month had reset to 20,000 — was
+            # thrown away for being non-ok. `quota_log.csv` was never created,
+            # and `_last_known_quota` therefore never had anything to enforce.
+            if quota is not None:
+                self._log_quota(source, endpoint, key, response, quota)
+
             if response.ok:
                 path = self._persist(source, endpoint, key, params, response, quota, note)
                 self._log(
                     source, endpoint, key, response.status, len(response.body),
                     response.elapsed_s, quota, False, response.url, note,
                 )
-                if quota is not None:
-                    self._log_quota(source, endpoint, key, response, quota)
                 meta = json.loads(self.meta_path(source, key).read_text())
                 return RawRecord(response.body, meta, path, from_cache=False)
 

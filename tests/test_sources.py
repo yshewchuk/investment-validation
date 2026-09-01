@@ -55,7 +55,13 @@ class TestOratsUrls:
         with pytest.raises(ValueError, match="known-bad"):
             adapter.build_url(path, {})
 
-    def test_a_missing_key_raises_rather_than_calling_anonymously(self):
+    def test_a_missing_key_raises_rather_than_calling_anonymously(self, monkeypatch):
+        # The env is cleared explicitly. The adapter resolves its key as
+        # `api_key or os.environ.get(...)`, so an empty argument FALLS THROUGH
+        # to the environment — and since `engine` loads .env at import, this
+        # test would otherwise find a real key and never reach the raise. It
+        # passed for years only because nothing had put .env into os.environ.
+        monkeypatch.delenv("ORATS_API_KEY", raising=False)
         with pytest.raises(CredentialRotated, match="ORATS_API_KEY"):
             OratsAdapter(api_key="").request("hist/earnings", {}, 10.0)
 
@@ -160,7 +166,8 @@ class TestPolygonAdapter:
         adapter = PolygonAdapter(api_key="k")
         assert adapter.is_auth_failure(Response(200, b'{"error":"Unknown API Key"}', {}, "u"))
 
-    def test_a_missing_key_raises(self):
+    def test_a_missing_key_raises(self, monkeypatch):
+        monkeypatch.delenv("POLYGON_API_KEY", raising=False)
         with pytest.raises(CredentialRotated, match="POLYGON_API_KEY"):
             PolygonAdapter(api_key="").request("v2/aggs", {}, 10.0)
 
@@ -221,7 +228,9 @@ class TestOquantsPnlBan:
             adapter.request("dashboard/volatility/skew-timeseries", {"ticker": "AAPL"}, 10.0)
         assert "banned from P&L" not in str(excinfo.value)
 
-    def test_missing_cookie_raises_credential_rotated(self):
+    def test_missing_cookie_raises_credential_rotated(self, monkeypatch):
+        for name in ("OQUANTS_COOKIE_NAME", "OQUANTS_COOKIE_VALUE"):
+            monkeypatch.delenv(name, raising=False)
         with pytest.raises(CredentialRotated, match="OQUANTS_COOKIE"):
             OquantsAdapter(cookie_name="", cookie_value="").token()
 
