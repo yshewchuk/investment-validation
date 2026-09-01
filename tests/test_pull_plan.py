@@ -179,11 +179,21 @@ class TestResumability:
 class TestScoping:
     def test_only_the_target_mcap_buckets_are_planned(self, patched):
         events = make_events(n_per_point=4)
-        events["mcap_bucket"] = "<1B"  # outside the plan's slices
+        events["mcap_bucket"] = "unknown"  # outside the plan's slices
         patched(events)
         plan = build_plan(fetcher=FakeFetcher())
         assert plan.n_calls == 0
         assert plan.events_targeted == 0
+
+    def test_smallcap_events_are_in_scope(self, patched):
+        # The analog layer cannot score a request whose mcap bucket holds no
+        # replayed trades; "<1B" held none, so the slice joined the target set.
+        events = make_events(n_per_point=4)
+        events["mcap_bucket"] = "<1B"
+        patched(events)
+        plan = build_plan(fetcher=FakeFetcher())
+        assert plan.events_targeted == 4
+        assert plan.n_calls > 0
 
     def test_events_with_an_unresolvable_date_are_skipped(self, patched):
         events = make_events(n_per_point=4)

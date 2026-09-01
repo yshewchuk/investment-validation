@@ -8,7 +8,9 @@
 one specific place. Entry-date chains already cover 48.7% of 2017+ events
 (79–95% inside the target mcap slices), but *exit*-date chains cover only 18.0%.
 Since a through-the-print structure needs both ends, exit chains are the binding
-constraint and get first claim on the budget.
+constraint and get first claim on the budget. (The one slice thinner than exit
+coverage is `<1B`, near zero everywhere; it joined the target set 2026-09-01
+because the analog layer cannot score a request whose bucket holds no trades.)
 
 **One assumption in the plan needed correcting.** The plan calls for pulling
 "put-side chains specifically", on the grounds that the cache was pulled
@@ -90,7 +92,13 @@ DTE_RANGE = "1,45"
 #: through-the-print structure, and entry coverage is already good.
 PRIORITIES = ("exit", "entry", "t14")
 
-TARGET_BUCKETS = ("1-10B", ">10B")
+#: Every mcap slice, not just the liquid two: the board's analog layer buckets
+#: trades on the SAME edges (engine.analogs.MCAP_EDGES), and a slice with zero
+#: replayed trades returns an empty match for every request in it. That was the
+#: state of "<1B" — 20k panel events, one chain on an event date — which left
+#: every sub-$1B name on the forward board unscored. The slice is pulled last
+#: because the plan walks events in bucket order and the budget may run out.
+TARGET_BUCKETS = ("1-10B", ">10B", "<1B")
 
 
 @dataclass
@@ -318,13 +326,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--confirm", action="store_true", help="actually spend quota")
     ap.add_argument("--budget", type=int, default=BUDGET_CALLS)
     ap.add_argument("--min-year", type=int, default=2017)
+    ap.add_argument(
+        "--buckets", nargs="*", default=None,
+        help="mcap slices to target (default: all of them); labels as in "
+             "engine.data.coverage.MCAP_BUCKETS, e.g. '<1B' '1-10B' '>10B'",
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
 
     if not (args.dry_run or args.confirm):
         ap.error("pass --dry-run to plan, or --confirm to spend. Never both implicitly.")
 
-    plan = build_plan(min_year=args.min_year, budget=args.budget)
+    buckets = tuple(args.buckets) if args.buckets else None
+    if buckets is not None:
+        from engine.data.coverage import MCAP_BUCKETS
+
+        known = {label for label, _, _ in MCAP_BUCKETS}
+        bad = sorted(set(buckets) - known)
+        if bad:
+            ap.error(f"unknown bucket labels {bad}; known: {sorted(known)}")
+
+    plan = build_plan(min_year=args.min_year, budget=args.budget,
+                      buckets=buckets if buckets is not None else TARGET_BUCKETS)
     print(render_dry_run(plan))
 
     report = {"plan": plan.summary(), "generated_at": datetime.now(timezone.utc).isoformat()}
