@@ -18,6 +18,7 @@ Contracts this orchestrator upholds:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import sys
 import time
@@ -174,18 +175,26 @@ def build_chains_table(sample: int | None = None) -> dict:
         (path.name, ("legacy", path)) for path in n_chains.iter_chain_files()
     ]
     fetch_stats: dict = {}
-    fetch_sources = n_chains.iter_fetch_sources(stats=fetch_stats)
-    sources += [(s.source_id, ("fetch", s)) for s in fetch_sources]
+    n_legacy = len(sources)
+    n_fetch = n_chains.count_fetch_sources()
+    # Chained lazily: the fetch payloads are parsed one at a time as the writer
+    # consumes them, so peak memory is one payload rather than all of them.
+    def _fetch_stream():
+        for source in n_chains.iter_fetch_sources(stats=fetch_stats):
+            yield (source.source_id, ("fetch", source))
+
+    sources = itertools.chain(iter(sources), _fetch_stream())
+    total = n_legacy + n_fetch
     if sample:
-        sources = sources[:sample]
+        sources = itertools.islice(sources, sample)
+        total = min(total, sample)
     print(
-        f"  sources: {len(sources):,} "
-        f"({len(sources) - len(fetch_sources):,} legacy file(s), "
-        f"{len(fetch_sources):,} fetch-store payload(s))",
+        f"  sources: {total:,} "
+        f"({n_legacy:,} legacy file(s), {n_fetch:,} fetch-store payload(s))",
         flush=True,
     )
 
-    progress = _Progress("chains", len(sources))
+    progress = _Progress("chains", total)
     batch = validate.ValidationReport(table="option_chains")
     kinds: dict[str, int] = {}
     unreadable: list[str] = []
@@ -208,7 +217,7 @@ def build_chains_table(sample: int | None = None) -> dict:
                 kinds[report["chain_kind"]] = kinds.get(report["chain_kind"], 0) + len(clean)
                 writer.add(clean)
             progress.tick(i, f"rows={writer.rows_written:,}")
-        progress.done(len(sources), f"rows={writer.rows_written:,}")
+        progress.done(total, f"rows={writer.rows_written:,}")
 
         # Entry-date and calendar (`_c2_`) pulls overlap on the same trade date,
         # so the same contract arrives from two payloads. Per-source dedupe
@@ -220,9 +229,9 @@ def build_chains_table(sample: int | None = None) -> dict:
     stats = store.table_stats("option_chains")
     print(f"  wrote {stats.rows:,} rows / {len(stats.years)} partitions", flush=True)
     return {
-        "sources": len(sources),
-        "legacy_files": len(sources) - len(fetch_sources),
-        "fetch_payloads": len(fetch_sources),
+        "sources": total,
+        "legacy_files": n_legacy,
+        "fetch_payloads": n_fetch,
         "fetch_empty": fetch_stats.get("empty", 0),
         "fetch_unrecognized": fetch_stats.get("unrecognized", 0),
         "fetch_unreadable": fetch_stats.get("unreadable", 0),

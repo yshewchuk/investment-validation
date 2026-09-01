@@ -203,10 +203,28 @@ def iter_fetch_sources(stats: dict | None = None):
     bodies were scanned, how many were empty, and how many cost quota but
     parsed to nothing (unrecognized/unreadable) — the numbers that turn a
     silent zero-row rebuild into a visible one.
+
+    Streamed, NOT materialized. This used to return a list, which was harmless
+    while the fetch store held almost no strike payloads and became an OOM the
+    moment 19,050 legacy pulls were migrated into it: every payload's rows sat
+    in memory before the writer had written a single partition. The rebuild
+    reached 7 GB and was killed at 7% — and because the writer had already
+    flushed the early partitions, the table was left holding 2017-2019 only.
     """
     from engine.data.normalize.fetch_store import iter_orats_rows
 
-    return list(iter_orats_rows("hist/strikes", stats=stats))
+    yield from iter_orats_rows("hist/strikes", stats=stats)
+
+
+def count_fetch_sources() -> int:
+    """How many `hist/strikes` payloads are cached, without parsing any of them.
+
+    The progress meter needs a total and the bodies are the expensive part;
+    sidecars are small and are all this has to touch.
+    """
+    from engine.data.fetch import iter_cached
+
+    return sum(1 for _ in iter_cached("orats", "hist/strikes"))
 
 
 def iter_normalized(

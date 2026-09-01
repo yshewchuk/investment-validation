@@ -68,13 +68,22 @@ def list_tickers(root: Path | None = None, *, include_fetch: bool = True) -> lis
 
 @lru_cache(maxsize=1)
 def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
-    """Index the fetch store's summaries/cores rows by ticker.
+    """Index the fetch store's MARKET-WIDE summaries/cores rows by ticker.
 
     On a fresh machine this is the *only* source of daily data: the legacy
     per-ticker trees do not exist, and the restore path re-pulls through the
     fetch wrapper. Without this bridge a restored machine rebuilds empty tables,
     which is the failure the recovery drill could not see (it checks imports and
     the no-data test subset, not a full rebuild).
+
+    **Per-ticker responses are deliberately NOT indexed here.** ORATS serves a
+    ticker's entire history — ~4,900 rows — from one ``?ticker=X`` call, and
+    once the nightly began backfilling those, indexing every row of every
+    response meant holding ~1.8M dicts in memory: the rebuild reached 5 GB RSS
+    in 28 seconds and was killed. Those responses do not need an index at all,
+    because they are addressable by cache key: :func:`_ticker_history_rows`
+    loads exactly the one being asked for. The index is left holding only the
+    market-wide (``tradeDate``) responses, which are a few thousand rows each.
 
     Cached because a rebuild asks for it once per ticker.
     """
@@ -83,12 +92,42 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     index: dict[str, dict[str, list[dict]]] = {}
     for endpoint, kind in (("hist/summaries", "summaries"), ("hist/cores", "cores")):
         for source in iter_orats_rows(endpoint):
+            # A response fetched for ONE ticker is fetched back on demand.
+            if (source.params or {}).get("ticker"):
+                continue
             for row in source.rows:
                 ticker = row.get("ticker")
                 if not ticker:
                     continue
                 index.setdefault(str(ticker), {"summaries": [], "cores": []})[kind].append(row)
     return index
+
+
+def _ticker_history_rows(ticker: str, kind: str) -> list[dict]:
+    """The cached ``?ticker=X`` response for one ticker, or nothing.
+
+    A direct key lookup rather than a scan: the Tier-1 key is a hash of
+    (source, endpoint, params), so the entry for this exact request is found
+    without touching any other. This is what keeps a rebuild's memory flat as
+    per-ticker history accumulates.
+    """
+    import gzip
+    import json as _json
+
+    from engine.data.fetch import Fetcher, cache_key
+
+    endpoint = {"summaries": "hist/summaries", "cores": "hist/cores"}[kind]
+    key = cache_key("orats", endpoint, {"ticker": str(ticker)})
+    path = Fetcher().body_path("orats", key)
+    if not path.exists():
+        return []
+    try:
+        with gzip.open(path, "rb") as fh:
+            payload = _json.loads(fh.read())
+    except (OSError, EOFError, ValueError):
+        return []
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    return list(rows or [])
 
 
 def _rows_for(ticker: str, kind: str, directory: Path) -> list[dict]:
@@ -105,6 +144,8 @@ def _rows_for(ticker: str, kind: str, directory: Path) -> list[dict]:
     if path.exists():
         rows.extend(read_gz_json(path) or [])
     rows.extend(fetch_daily_index().get(ticker, {}).get(kind, []))
+    # The per-ticker history pull, loaded by key rather than through the index.
+    rows.extend(_ticker_history_rows(ticker, kind))
     return rows
 
 

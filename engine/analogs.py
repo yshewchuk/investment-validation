@@ -167,6 +167,10 @@ class AnalogSet:
     ci_low: float | None
     ci_high: float | None
     widened: int
+    #: Dimensions that had no value to match on at all — distinct from
+    #: ``dropped``, which is what widening gave up deliberately to find enough
+    #: trades. Non-empty means no comparison was possible, not that it was loose.
+    unavailable: tuple[str, ...] = ()
     buckets: dict = field(default_factory=dict)
     dropped: tuple[str, ...] = ()
     thin: bool = False
@@ -187,16 +191,19 @@ class AnalogSet:
             "ci_high": r(self.ci_high),
             "widened": self.widened,
             "dropped": list(self.dropped),
+            "unavailable": list(self.unavailable),
             "thin": self.thin,
             "buckets": self.buckets,
             "years": list(self.years),
         }
 
 
-def _empty(strategy: str, alpha: float, buckets: dict, widened: int, dropped) -> AnalogSet:
+def _empty(strategy: str, alpha: float, buckets: dict, widened: int, dropped,
+           *, unavailable: tuple[str, ...] = ()) -> AnalogSet:
     return AnalogSet(
         strategy=strategy, alpha=alpha, n=0, mean=None, median=None, win_rate=None,
         p10=None, p90=None, ci_low=None, ci_high=None, widened=widened,
+        unavailable=unavailable,
         buckets=buckets, dropped=tuple(dropped), thin=True,
     )
 
@@ -341,9 +348,26 @@ class AnalogMatcher:
                 buckets["implied_tercile"] = _bucket([ratio], edges,
                                                      ("low", "mid", "high"))[0]
 
-        active = ["mcap_bucket", *WIDENING_ORDER]
-        dropped: list[str] = []
-        for widened in range(len(WIDENING_ORDER) + 1):
+        # A dimension with no value cannot match on, and must be COUNTED as
+        # dropped rather than quietly skipped. The loop below used to `continue`
+        # past a None bucket, so a row with no option chain — no `dte_entry`,
+        # no `strike`, therefore no `dte_band` and no `moneyness_band` — matched
+        # on the remaining two, succeeded on the FIRST pass, and reported
+        # `widened: 0`. The board then showed the strategy's own base rate
+        # (STR-THRU +0.0270, win 0.388, matched set up to 17,666 — the entire
+        # population) wearing a badge that said nothing had been dropped.
+        #
+        # The number was never the problem; the label was. Refusing to answer
+        # was tried and was worse: the analog layer exists to answer when the
+        # model layer cannot, and a thin or absent match is the ONLY signal that
+        # the model is extrapolating past its evidence. Suppressing it removes
+        # the warning along with the estimate.
+        unavailable = [d for d in ("mcap_bucket", *WIDENING_ORDER)
+                       if buckets.get(d) is None]
+
+        active = [d for d in ("mcap_bucket", *WIDENING_ORDER) if d not in unavailable]
+        dropped: list[str] = list(unavailable)
+        for widened in range(len(WIDENING_ORDER) + 1 - len(unavailable)):
             mask = np.ones(len(pool), dtype=bool)
             for dimension in active:
                 want = buckets.get(dimension)
@@ -351,24 +375,27 @@ class AnalogMatcher:
                     continue
                 mask &= (pool[dimension] == want).to_numpy()
             matched = pool[mask]
-            if len(matched) >= min_analogs or widened == len(WIDENING_ORDER):
+            remaining = [d for d in WIDENING_ORDER if d not in dropped]
+            if len(matched) >= min_analogs or not remaining:
                 return self._summarize(
-                    matched, strategy, alpha, buckets, widened, dropped,
-                    bootstrap=bootstrap, min_analogs=min_analogs, request_key=request_key,
+                    matched, strategy, alpha, buckets, len(dropped), dropped,
+                    bootstrap=bootstrap, min_analogs=min_analogs,
+                    request_key=request_key, unavailable=tuple(unavailable),
                 )
-            drop = WIDENING_ORDER[widened]
+            drop = remaining[0]
             active.remove(drop)
             dropped.append(drop)
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _summarize(
         self, matched, strategy, alpha, buckets, widened, dropped, *,
-        bootstrap, min_analogs, request_key,
+        bootstrap, min_analogs, request_key, unavailable=(),
     ) -> AnalogSet:
         returns = pd.to_numeric(matched.get("ret"), errors="coerce").to_numpy(dtype=float)
         returns = returns[np.isfinite(returns)]
         if returns.size == 0:
-            return _empty(strategy, alpha, buckets, widened, dropped)
+            return _empty(strategy, alpha, buckets, widened, dropped,
+                          unavailable=unavailable)
 
         thin = returns.size < min_analogs
         ci_low = ci_high = None
@@ -401,6 +428,7 @@ class AnalogMatcher:
             dropped=tuple(dropped),
             thin=thin,
             years=years,
+            unavailable=tuple(unavailable),
         )
 
 

@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+from engine.data.throttle import QuotaExhausted
 
 __all__ = [
     "NightlyStop", "NightlyReport", "run_nightly", "refresh_calendar_data",
@@ -140,6 +141,174 @@ def _write_state(bundle_dir: Path | None, state: dict) -> None:
 #: authority — so the confirmation pass only needs to look at the recent past.
 CONFIRM_LOOKBACK_DAYS = 10
 
+#: Endpoints that serve a ticker's whole history from one call.
+HISTORY_ENDPOINTS = ("hist/summaries", "hist/cores")
+
+
+#: Symbols ORATS returned 404 for. A negative cache: the fetch store keeps only
+#: 2xx, so without this the nightly re-asks for symbols that do not exist there
+#: every night. Reviewable by hand — a symbology fix (BF.A vs BFA) is a delete
+#: away from being retried.
+UNKNOWN_SYMBOLS_PATH = paths.REPORTS / "orats_unknown_symbols.json"
+
+
+def _unknown_symbols() -> set[str]:
+    try:
+        return set(json.loads(UNKNOWN_SYMBOLS_PATH.read_text()))
+    except (OSError, ValueError):
+        return set()
+
+
+def _remember_unknown_symbol(ticker: str) -> None:
+    known = _unknown_symbols()
+    known.add(str(ticker))
+    try:
+        paths.assert_writable(UNKNOWN_SYMBOLS_PATH).parent.mkdir(parents=True, exist_ok=True)
+        UNKNOWN_SYMBOLS_PATH.write_text(json.dumps(sorted(known), indent=1))
+    except OSError:
+        pass
+
+
+def backfill_ticker_history(tickers, *, fetcher=None) -> dict:
+    """Full per-ticker history for names we have never fetched, once each.
+
+    ORATS serves a ticker's ENTIRE history — 2007 to today — from a single
+    ``hist/summaries?ticker=X`` call with no ``tradeDate``. So a ticker needs
+    this exactly once; from then on the market-wide daily pull keeps it current.
+    That is what makes the board's coverage gap cheap to close: the tickers with
+    no prediction are overwhelmingly ones with no prior prints and no price
+    history, because they only became visible when the nightly started ingesting
+    market-wide summaries (~6,000 tickers against a historical ~2,900).
+
+    **One ticker per call, deliberately.** Batching is possible — the endpoint
+    accepts a comma list — but it TRUNCATES SILENTLY: a request for 50 tickers
+    returns 5 with HTTP 200 and no indication the rest were dropped. Batching
+    would therefore need its own record of which tickers really arrived, whereas
+    one-per-call makes the Tier-1 cache that record: ``has()`` answers "have we
+    ever fetched this ticker" exactly, because the cache key IS the ticker.
+    ``live=False`` for the same reason — this is immutable history, and a
+    per-day cache key would re-buy it every night.
+    """
+    from engine.data.fetch import Fetcher
+
+    fetcher = fetcher or Fetcher()
+    out = {"considered": len(tickers), "already_cached": 0, "fetched": 0,
+           "no_data": [], "failed": [], "unknown_symbol": [], "skipped_unknown": 0,
+           "calls": 0}
+    unknown = _unknown_symbols()
+
+    for ticker in sorted(set(tickers)):
+        params = {"ticker": str(ticker)}
+        if all(fetcher.has("orats", ep, params) for ep in HISTORY_ENDPOINTS):
+            out["already_cached"] += 1
+            continue
+        if str(ticker) in unknown:
+            out["skipped_unknown"] += 1
+            continue
+        rows = 0
+        try:
+            for endpoint in HISTORY_ENDPOINTS:
+                record = fetcher.fetch("orats", endpoint, params, note="history backfill")
+                out["calls"] += 0 if record.from_cache else 1
+                rows += len(record.json().get("data") or [])
+        except QuotaExhausted:
+            raise
+        except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+            # 404 is PERMANENT: ORATS does not carry this symbol, and asking
+            # again tomorrow will not change that. The Tier-1 cache only stores
+            # 2xx, so without recording it here `has()` stays False and the
+            # nightly re-buys the same 404 every night — 25 wasted calls a night
+            # on the first board this ran against, forever. Anything else (429,
+            # 502, transport) IS transient and must stay retryable.
+            #
+            # The status is kept, not just the exception type: collapsing them
+            # to `FetchError` is what hid this distinction in the first place.
+            detail = str(exc)
+            if "HTTP 404" in detail:
+                out["unknown_symbol"].append(str(ticker))
+                _remember_unknown_symbol(ticker)
+            else:
+                out["failed"].append(f"{ticker}: {detail[-40:]}")
+            continue
+        if rows:
+            out["fetched"] += 1
+        else:
+            # Cached as an empty answer, so a delisted or brand-new name is not
+            # re-asked every night for data that does not exist.
+            out["no_data"].append(str(ticker))
+    return out
+
+
+#: Tickers per `hist/strikes` call. MEASURED, not guessed: the endpoint caps at
+#: 10 and TRUNCATES SILENTLY — a request for 30 returns byte-identical content
+#: to a request for the first 10, with HTTP 200 and no indication the other 20
+#: were dropped. `pull()` therefore diffs requested against returned and refuses
+#: to continue on a short response. (The legacy pullers use 5, which is safe but
+#: half the throughput; nothing about 5 was ever measured.)
+CHAIN_BATCH = 10
+
+#: The chain fields the replay/scoring path needs, matching what
+#: `_shared/strike_pull.py` requests so both produce the same cache key shape.
+CHAIN_FIELDS = (
+    "ticker,tradeDate,expirDate,dte,strike,stockPrice,callBidPrice,callAskPrice,"
+    "putBidPrice,putAskPrice,callMidIv,putMidIv,smvVol,delta,spotPrice"
+)
+CHAIN_DTE = "1,45"
+
+
+def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH) -> dict:
+    """EOD option chains for the names the board is about to score.
+
+    This is what the board has been missing. Everything chain-dependent —
+    expected P&L, the gate, the premium, the win rate — is blank without it,
+    which is why a board of 603 rows showed numbers in three columns. Nothing in
+    the nightly fetched chains: `hist/strikes` appeared nowhere in `engine/`, and
+    the only pullers that touched it were the strategy backtest scripts pulling
+    HISTORY.
+
+    Cost is ~18 calls a night for a 176-ticker board, against a 20,000/month
+    budget — the endpoint is per (tradeDate, ticker-batch), so the whole board's
+    chains for one session cost less than a rounding error.
+
+    Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
+    """
+    from engine.data.fetch import Fetcher
+
+    fetcher = fetcher or Fetcher()
+    stamp = str(pd.Timestamp(as_of).normalize().date())
+    unknown = _unknown_symbols()
+    wanted = [str(t) for t in sorted(set(tickers)) if str(t) not in unknown]
+
+    out = {"as_of": stamp, "requested": len(wanted), "returned": 0, "rows": 0,
+           "calls": 0, "cache_hits": 0, "missing": [], "failed": []}
+    for start in range(0, len(wanted), batch):
+        chunk = wanted[start : start + batch]
+        params = {"ticker": ",".join(chunk), "tradeDate": stamp,
+                  "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
+        try:
+            record = fetcher.fetch("orats", "hist/strikes", params,
+                                   note="phase3 forward chains")
+        except QuotaExhausted:
+            raise
+        except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+            out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
+            continue
+        out["calls"] += 0 if record.from_cache else 1
+        out["cache_hits"] += 1 if record.from_cache else 0
+        rows = record.json().get("data") or []
+        out["rows"] += len(rows)
+        got = {r.get("ticker") for r in rows}
+        out["returned"] += len(got & set(chunk))
+        # A short response has TWO causes and they look identical: the endpoint
+        # truncating (it caps at 10 and returns HTTP 200 regardless), or the
+        # ticker genuinely having no chain on this date. Both are recorded as
+        # `missing` rather than asserting one — a single-ticker retry is what
+        # distinguishes them, and on the first real board all 7 were 404s, i.e.
+        # genuinely absent. Calling that "truncated" would have blamed the
+        # batching for the data's own gap.
+        out["missing"].extend(t for t in chunk if t not in got)
+    return out
+
 
 def refresh_calendar_data(
     tickers: Sequence[str],
@@ -190,6 +359,13 @@ def refresh_calendar_data(
         )
         out["forward_calendar"] = result.as_dict()
 
+    # -- 1b. per-ticker history, once per ticker ----------------------------
+    # Costs nothing after the first time a ticker is seen, and it is what turns
+    # a row with no prior prints into a scoreable one: the prior-move features
+    # need ~12 past prints, which no amount of today's data supplies.
+    out["history"] = backfill_ticker_history(tickers, fetcher=fetcher)
+    out["calls"] += out["history"]["calls"]
+
     # -- 2. market-wide summaries and cores: one ORATS call each ------------
     for endpoint in ("hist/summaries", "hist/cores"):
         record = fetcher.fetch(
@@ -220,9 +396,15 @@ def refresh_calendar_data(
         "lookback_days": CONFIRM_LOOKBACK_DAYS,
     }
 
+    # -- 4. option chains for the board's own names --------------------------
+    # Last, because it is the only pass whose cost scales with the board, and
+    # because everything above must succeed for the board to exist at all.
+    out["chains"] = refresh_forward_chains(tickers, as_of, fetcher=fetcher)
+    out["calls"] += out["chains"]["calls"]
+
     from engine.data.rebuild import rebuild
 
-    rebuild_result = rebuild(tables=("events", "daily"))
+    rebuild_result = rebuild(tables=("events", "daily", "chains"))
     out["rebuild"] = {"snapshot": rebuild_result.snapshot, "elapsed_s": round(rebuild_result.elapsed_s, 1)}
     return out
 

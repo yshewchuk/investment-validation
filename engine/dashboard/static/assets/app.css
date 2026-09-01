@@ -101,3 +101,10 @@ tr.disabled td { color: var(--dim); }
 .tab.area { font-weight: 600; }
 .bar { display: inline-block; height: 10px; background: #3fb950; vertical-align: middle; }
 .bar.neg { background: #f85149; }
+
+/* A print and its structures. The ticker row carries what belongs to the EVENT;
+   the sub-rows carry what differs by structure. The tint is what makes the
+   grouping readable at a glance without adding a column to say so. */
+tr.tickerrow > td { background: rgba(88,166,255,0.06); border-top: 2px solid var(--line, #30363d); }
+tr.subrow > td:first-child, tr.subrow > td:nth-child(2) { border-top: none; }
+tr.subrow > td { padding-top: 4px; padding-bottom: 4px; }

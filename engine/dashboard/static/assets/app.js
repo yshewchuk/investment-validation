@@ -193,6 +193,53 @@ function ratioCell(r) {
   return "×" + fmt(r.model_vs_market, 2);
 }
 
+/* The PRINT row: everything that is a property of the event rather than of a
+   structure. All three forecasts belong here — how far the stock moves, what
+   the market charges now, and what it will charge at T-1 — because they are
+   statements about the event. That they arrive on different strategy rows is an
+   artefact of which driver each strategy happens to use, not a real difference.
+   Repeating event values per structure is what made two correct rows look like
+   they disagreed. */
+function printRow(members) {
+  const head = members[0];
+  const byDriver = (name) => members.find((m) => m.driver_name === name) || {};
+  const move = byDriver("abs_move");
+  const t1 = byDriver("implied_t1");
+  const passes = members.filter((m) => m.gate_pass === true).length;
+  return '<tr class="tickerrow clickable" data-ticker="' + esc(head.ticker) + '">'
+    + "<td><strong>" + esc(head.event_date) + "</strong><br><span class='badge'>"
+    + esc(head.session || "") + "</span></td>"
+    + "<td><strong>" + esc(head.ticker) + "</strong>"
+    + (passes ? " <span class='pill pass'>" + passes + "</span>" : "") + "</td>"
+    + "<td>" + driverCell(move) + "</td>"
+    + "<td>" + impliedCell(head) + "</td>"
+    + "<td>" + ratioCell(move) + "</td>"
+    + "<td>" + (t1.driver_prediction === null || t1.driver_prediction === undefined
+        ? "–" : fmt(t1.driver_prediction, 1) + "%") + "</td>"
+    + "<td colspan='10'><span class='badge'>" + members.length + " structure"
+    + (members.length === 1 ? "" : "s") + "</span></td>"
+    + "</tr>";
+}
+
+/* One structure under its print: only what genuinely differs between them —
+   the gate, the two P&L layers, the win rate, and the dates it would trade. */
+function strategyRow(r, disabled, winCell, premium) {
+  return '<tr class="subrow clickable' + (disabled ? " disabled" : "") + '" data-ticker="'
+    + esc(r.ticker) + '">'
+    + "<td></td><td></td><td></td><td></td><td></td><td></td>"
+    + "<td><span class='band'>└</span> " + esc(r.strategy) + "</td>"
+    + "<td>" + gatePill(r) + "</td>"
+    + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
+    + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
+    + "<td>" + winCell + "</td>"
+    + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
+    + "<td>" + premium + "</td>"
+    + "<td>" + esc(r.entry_date || "–") + " → " + esc(r.exit_date || "–") + "</td>"
+    + "<td>" + (r.rank || "–") + "</td>"
+    + "<td>" + flagBadges(r) + "</td>"
+    + "</tr>";
+}
+
 function boardRows() {
   let rows = BOARD.rows.slice();
   if (state.strategy) rows = rows.filter((r) => r.strategy === state.strategy);
@@ -218,32 +265,31 @@ function renderBoard() {
     rows.length + " / " + BOARD.rows.length + " rows";
 
   const tb = document.querySelector("#tbl-board tbody");
-  tb.innerHTML = rows.map((r) => {
-    const disabled = r.strategy === "CAL-P";
-    const winCell = r.win_model === null || r.win_model === undefined
-      ? "–"
-      : pct(r.win_model, 0) + ' <span class="badge">[' + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</span>";
-    const premium = r.entry_cost_pct === null || r.entry_cost_pct === undefined
-      ? "–"
-      : fmt(r.entry_cost_pct, 1) + "%" + (r.model_fair_pct !== null && r.model_fair_pct !== undefined
-          ? ' <span class="badge">vs fair ' + fmt(r.model_fair_pct, 1) + "%</span>" : "");
-    return '<tr class="clickable' + (disabled ? " disabled" : "") + '" data-ticker="' + esc(r.ticker) + '">'
-      + "<td><strong>" + esc(r.event_date) + "</strong><br><span class='badge'>" + esc(r.session || "") + "</span></td>"
-      + "<td><strong>" + esc(r.ticker) + "</strong></td>"
-      + "<td>" + esc(r.strategy) + "</td>"
-      + "<td>" + gatePill(r) + "</td>"
-      + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
-      + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
-      + "<td>" + driverCell(r) + "</td>"
-      + "<td>" + impliedCell(r) + "</td>"
-      + "<td>" + ratioCell(r) + "</td>"
-      + "<td>" + winCell + "</td>"
-      + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
-      + "<td>" + premium + "</td>"
-      + "<td>" + esc(r.entry_date || "–") + " → " + esc(r.exit_date || "–") + "</td>"
-      + "<td>" + (r.rank || "–") + "</td>"
-      + "<td>" + flagBadges(r) + "</td>"
-      + "</tr>";
+
+  /* Grouped by PRINT, not by (ticker, strategy). A ticker with two structures
+     used to be two unrelated-looking rows; the things that actually belong to
+     the EVENT — the date, the session, what the market is quoting today — were
+     repeated on each and invited the reader to compare them as if they differed.
+     Only the per-strategy numbers differ, and those are the sub-rows. */
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.ticker + "|" + r.event_date;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+
+  tb.innerHTML = Array.from(groups.values()).map((members) => {
+    return printRow(members) + members.map((r) => {
+      const disabled = r.strategy === "CAL-P";
+      const winCell = r.win_model === null || r.win_model === undefined
+        ? "–"
+        : pct(r.win_model, 0) + ' <span class="badge">[' + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</span>";
+      const premium = r.entry_cost_pct === null || r.entry_cost_pct === undefined
+        ? "–"
+        : fmt(r.entry_cost_pct, 1) + "%" + (r.model_fair_pct !== null && r.model_fair_pct !== undefined
+            ? ' <span class="badge">vs fair ' + fmt(r.model_fair_pct, 1) + "%</span>" : "");
+      return strategyRow(r, disabled, winCell, premium);
+    }).join("");
   }).join("");
 
   tb.querySelectorAll("tr").forEach((tr) => {
@@ -394,7 +440,21 @@ function renderRowDetail(r, detailEl) {
     + "<tr><td title='The band on the driver is nominally 10th-90th (80%). Its "
     + "measured out-of-sample coverage is 79.3%, and since EXP-115 the width "
     + "varies with the prediction.'>driver band</td><td class='muted'>80% nominal, "
-    + "<strong>79.3% measured</strong>, conditioned on the prediction</td></tr>";
+    + "<strong>79.3% measured</strong>, conditioned on the prediction</td></tr>"
+    /* Both quotes, because they answer different questions and confusing them
+       is what made two correct rows look inconsistent. */
+    + "<tr><td title='What the market quotes for this print as of TODAY. The "
+    + "same for every strategy on the print.'>market implied (today)</td><td>"
+    + (r.implied_move === null || r.implied_move === undefined
+        ? "– <span class=\'badge\'>no quote</span>" : fmt(r.implied_move, 2) + "%")
+    + "</td></tr>"
+    + "<tr><td title='The quote at THIS trade&#39;s own entry date — what the "
+    + "model actually consumed. Differs between strategies on one print because "
+    + "they enter on different days and implied move rises into a print, which "
+    + "is the STR-RUNUP thesis.'>… at this trade&#39;s entry</td><td class='muted'>"
+    + (r.implied_move_at_entry === null || r.implied_move_at_entry === undefined
+        ? "–" : fmt(r.implied_move_at_entry, 2) + "%")
+    + "</td></tr>";
   const analogExtra =
     "<tr><td>CI (bootstrap)</td><td>[" + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</td></tr>"
     + "<tr><td>matched on</td><td class='mono'>"

@@ -227,24 +227,23 @@ class ScoreResult:
     analog_buckets: dict = field(default_factory=dict)
     snapshot_hash: str = ""
     detail: str = ""
-    #: The implied move the OPTION MARKET quotes for this print, in %, read at
-    #: THIS TRADE'S entry date (``live_features(..., as_of=result.entry_date)``).
-    #: Not a model output — it is the number the champion's prediction is
-    #: supposed to be traded against, and the board showed the prediction with
-    #: nothing to compare it to.
+    #: What the option market is quoting for this print AS OF THE DECISION
+    #: DATE — today, for a live board. This is the number a reader compares the
+    #: model call against, because they are deciding now and may enter a day
+    #: early or late; a quote pinned to the day the strategy happens to execute
+    #: would make their read of the trade an artefact of the data assembly.
     #:
-    #: It is per-TRADE, not per-event, and the difference is not noise: on 78 of
-    #: 128 board pairs the same print quotes differently to STR-RUNUP and
-    #: STR-THRU, because one enters weeks earlier and implied move rises into a
-    #: print — which is the whole STR-RUNUP thesis. Anything displaying this
-    #: must say which date it is as of, or it reads as a property of the event
-    #: and looks inconsistent.
-    #:
-    #: Sourced from the ORATS daily state (`im`), which is why it is present on
-    #: forward rows that have no option chain. A straddle's own quoted price is
-    #: only computable where a chain exists, and there it already appears as
-    #: `entry_cost_pct`.
+    #: Same for every strategy on a print, because it is a property of the
+    #: event and the date, not of the structure.
     implied_move: float | None = None
+
+    #: The quote at THIS TRADE'S entry date — what the model actually consumed
+    #: (``live_features(..., as_of=result.entry_date)``). Per-TRADE, so two
+    #: structures on one print differ: STR-RUNUP enters weeks before STR-THRU
+    #: and implied move rises into a print, which is the STR-RUNUP thesis. Kept
+    #: because it is the honest provenance of the model's input, and shown in
+    #: the detail rather than on the board.
+    implied_move_at_entry: float | None = None
 
     driver_name: str | None = None
     driver_prediction: float | None = None
@@ -337,6 +336,7 @@ class Scorer:
         self._payoffs: dict[tuple[str, float, object], PayoffMap] = {}
         self._recalibrations: dict[tuple[str, float, object], object] = {}
         self._recal_pairs = None
+        self._quotes: dict[tuple[str, object], float | None] = {}
         self._verify = verify_artifacts
 
     # -- setup -------------------------------------------------------------
@@ -491,10 +491,25 @@ class Scorer:
 
         # Carried before the layers run: every layer reads this frame, and two
         # of them already used `im` internally without ever surfacing it.
+        # TWO quotes, and they answer different questions.
+        #
+        # `implied_move_at_entry` is what the model consumed: the quote at this
+        # trade's own entry date. It is per-TRADE, so STR-RUNUP and STR-THRU on
+        # the same print legitimately differ — one enters weeks before the other
+        # and implied move rises into a print.
+        #
+        # `implied_move` is what the market is quoting NOW, at the decision
+        # date. That is the one a reader needs, because they are deciding today
+        # and may pull the trigger a day early or late: showing them a quote
+        # from the day the strategy happens to execute makes their read of the
+        # trade an artefact of how the data is assembled.
         if "im" in features.columns:
-            quoted = features["im"].iloc[0]
-            if pd.notna(quoted) and float(quoted) >= MIN_QUOTED_IMPLIED_MOVE:
-                result.implied_move = float(quoted)
+            at_entry = features["im"].iloc[0]
+            if pd.notna(at_entry) and float(at_entry) >= MIN_QUOTED_IMPLIED_MOVE:
+                result.implied_move_at_entry = float(at_entry)
+        today = self._quote_today(request.ticker, result.as_of)
+        if today is not None:
+            result.implied_move = today
 
         # -- layers --------------------------------------------------------
         self._score_model(request, result, features)
@@ -928,6 +943,38 @@ class Scorer:
         result.model_p10 = float(np.quantile(returns, 0.10))
         result.model_p90 = float(np.quantile(returns, 0.90))
 
+    def _quote_today(self, ticker: str, as_of) -> float | None:
+        """The implied move quoted at ``as_of``, regardless of when a trade enters.
+
+        Read from the last ``daily_market`` row on or before the decision date,
+        which is the same rule ``daily_state_frame`` applies everywhere else —
+        on-or-before, because that close's own quotes are known to us at it.
+
+        Cached per (ticker, date): every strategy on a print asks the same
+        question, and this must return the same answer to all of them or the
+        board is back to showing a number that depends on the structure.
+        """
+        if as_of is None:
+            return None
+        stamp = pd.Timestamp(as_of).normalize()
+        key = (str(ticker), stamp)
+        if key in self._quotes:
+            return self._quotes[key]
+
+        value = None
+        try:
+            state = daily_state_frame(
+                pd.DataFrame({"ticker": [str(ticker)], "as_of": [stamp]}),
+                daily=self.context.daily,
+            )
+            quoted = state["im"].iloc[0] if "im" in state.columns else None
+            if quoted is not None and pd.notna(quoted) and float(quoted) >= MIN_QUOTED_IMPLIED_MOVE:
+                value = float(quoted)
+        except (KeyError, IndexError, ValueError):
+            value = None
+        self._quotes[key] = value
+        return value
+
     def _score_analogs(self, request, result, features) -> None:
         implied = features.get("im")
         prior = features.get("mean_prior_implied_move")
@@ -966,6 +1013,15 @@ class Scorer:
         result.analog_buckets = analogs.as_dict()
         if analogs.thin:
             result.flag("THIN_ANALOGS")
+        if analogs.unavailable:
+            # The match still HAPPENED, on the dimensions that had values — it
+            # is simply coarser than the header implies, and `analog_widened`
+            # now says so. Recorded in the detail rather than as its own flag:
+            # a thin match and a coarse one are both "weak evidence", and the
+            # number that distinguishes them is n_analogs.
+            result.detail = (result.detail or "") + (
+                f" analogs matched without {', '.join(analogs.unavailable)}"
+            ).strip()
 
     def _score_gate(self, request, result, features) -> None:
         loaded = self.model("gate", request.strategy)
