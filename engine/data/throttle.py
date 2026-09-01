@@ -41,6 +41,8 @@ __all__ = [
     "PolygonBusy",
     "polygon_lock",
     "ORATS_RESERVE_FLOOR",
+    "QUOTA_LOGS",
+    "latest_quota",
 ]
 
 #: Calls held back for daily live operation (Phase 3), out of 20,000/month.
@@ -263,3 +265,58 @@ class _FileLock:
 def polygon_lock(path: Path | None = None) -> _FileLock:
     """Context manager asserting this is the only Polygon-touching process."""
     return _FileLock(path or paths.POLYGON_LOCK)
+
+#: Every place ORATS quota is logged. There are two, and that is the defect this
+#: reader exists to close: ``engine.data.fetch`` writes its own ledger under
+#: ``data/raw/fetch/``, while the strike pulls that actually consumed August's
+#: 19,125 calls ran through a legacy script writing under
+#: ``earnings_predictions/data/raw/orats/``. Every consumer read only the first,
+#: which has never existed, so ``_quota_flag`` returned None, the board showed no
+#: quota, and the reserve floor went unenforced down to 875 calls remaining.
+#:
+#: Both files carry a ``quota_remaining`` column; the schemas otherwise differ,
+#: so they are parsed by HEADER NAME rather than position. A positional read
+#: happens to work on both today and would break silently if either changed.
+QUOTA_LOGS = ("QUOTA_LOG", "RAW_ORATS_QUOTA_LOG")
+
+
+def latest_quota(logs=None) -> dict:
+    """The most recent quota reading across every ledger, newest wins.
+
+    Returns ``{"remaining", "ts", "source", "below_reserve", "floor"}`` with
+    ``remaining`` None when nothing has been logged anywhere — which is a real
+    state (no pull has run) and must stay distinguishable from zero.
+    """
+    import csv
+
+    candidates = []
+    for name in (logs or QUOTA_LOGS):
+        path = getattr(paths, name, None)
+        if path is None or not Path(path).exists():
+            continue
+        try:
+            with open(path, newline="") as fh:
+                rows = [r for r in csv.DictReader(fh) if (r.get("quota_remaining") or "").strip()]
+        except (OSError, ValueError):
+            continue
+        if rows:
+            last = rows[-1]
+            try:
+                candidates.append({
+                    "remaining": int(float(last["quota_remaining"])),
+                    "ts": last.get("ts"),
+                    "source": name,
+                })
+            except (TypeError, ValueError):
+                continue
+
+    state = {"remaining": None, "ts": None, "source": None,
+             "floor": ORATS_RESERVE_FLOOR, "below_reserve": False}
+    if not candidates:
+        return state
+    # Newest by timestamp. Two ledgers can be written by different processes, so
+    # "last line of whichever file" is not the same as "most recent reading".
+    newest = max(candidates, key=lambda c: str(c["ts"] or ""))
+    state.update(newest)
+    state["below_reserve"] = newest["remaining"] < ORATS_RESERVE_FLOOR
+    return state

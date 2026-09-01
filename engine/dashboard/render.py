@@ -361,25 +361,18 @@ def freshness_summary(as_of=None) -> dict:
 
 def quota_state() -> dict:
     """The ORATS quota picture from the quota ledger's last entry."""
-    from engine.data.throttle import ORATS_RESERVE_FLOOR
+    from engine.data.throttle import latest_quota
 
-    state: dict[str, Any] = {"reserve_floor": ORATS_RESERVE_FLOOR, "remaining": None, "ts": None}
-    if not paths.QUOTA_LOG.exists():
-        return state
-    try:
-        with open(paths.QUOTA_LOG, newline="") as fh:
-            rows = list(csv.DictReader(fh))
-        if rows:
-            last = rows[-1]
-            remaining = last.get("quota_remaining")
-            state["remaining"] = int(remaining) if remaining not in (None, "") else None
-            state["ts"] = last.get("ts")
-            state["below_reserve"] = (
-                state["remaining"] is not None and state["remaining"] < ORATS_RESERVE_FLOOR
-            )
-    except (OSError, ValueError):
-        pass
-    return state
+    # Across every ledger, not just the engine fetcher's own: the pulls that
+    # spend the budget have historically been logged somewhere else entirely.
+    q = latest_quota()
+    return {
+        "reserve_floor": q["floor"],
+        "remaining": q["remaining"],
+        "ts": q["ts"],
+        "below_reserve": q["below_reserve"],
+        "ledger": q["source"],
+    }
 
 
 def size_model_mae_from_ledger(panel: pd.DataFrame | None = None) -> dict:

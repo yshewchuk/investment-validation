@@ -134,10 +134,13 @@ def build_provenance(spec_hash: str | None = None,
         except (ValueError, OSError):
             snapshot_hash = None
 
-    quota_state = None
-    if paths.QUOTA_LOG.exists():
-        lines = paths.QUOTA_LOG.read_text().splitlines()
-        quota_state = lines[-1] if len(lines) > 1 else None
+    from engine.data.throttle import latest_quota
+
+    q = latest_quota()
+    quota_state = (
+        f"{q['remaining']} remaining at {q['ts']} ({q['source']})"
+        if q["remaining"] is not None else None
+    )
 
     return {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),

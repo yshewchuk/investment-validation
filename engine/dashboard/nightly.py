@@ -388,21 +388,19 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
 
 
 def _quota_flag() -> dict | None:
-    from engine.data.throttle import ORATS_RESERVE_FLOOR
+    """Raise when ORATS quota has fallen under the reserve kept for live operation.
 
-    if not paths.QUOTA_LOG.exists():
+    Reads every quota ledger rather than one. This flag was silent through all
+    of August — it read `paths.QUOTA_LOG`, which no process writes, while the
+    strike pulls logged elsewhere and ran the budget down to 875 of 20,000.
+    """
+    from engine.data.throttle import latest_quota
+
+    state = latest_quota()
+    if state["remaining"] is None or not state["below_reserve"]:
         return None
-    try:
-        lines = [ln for ln in paths.QUOTA_LOG.read_text().splitlines()[1:] if ln.strip()]
-        if not lines:
-            return None
-        remaining = lines[-1].split(",")[5]
-        remaining = int(remaining) if remaining.strip().isdigit() else None
-    except (OSError, IndexError, ValueError):
-        return None
-    if remaining is None or remaining >= ORATS_RESERVE_FLOOR:
-        return None
-    return {"kind": "quota_below_reserve", "remaining": remaining, "floor": ORATS_RESERVE_FLOOR}
+    return {"kind": "quota_below_reserve", "remaining": state["remaining"],
+            "floor": state["floor"], "as_of": state["ts"]}
 
 
 def _calibration_flag() -> dict | None:
