@@ -1,0 +1,81 @@
+id: EXP-116
+title: "GBM architecture for the size model"
+hypothesis: >
+  The incumbent size model is an OLS + MLP(64,32) blend. EXP-108's control arm
+  was designed on the reasoning that "a GBM represents a V natively", and
+  EXP-109's promoted absolute-valued features only helped BECAUSE the linear
+  half cannot represent a V — which suggests the blend is leaving non-linearity
+  unmodelled. EXP-110's side probe measured a GBM at MAE 3.799 against the
+  incumbent's 3.911.
+
+  So: gradient boosting should predict |earnings move| more accurately than the
+  incumbent on identical rows, consistently across years. And fitting
+  log1p(abs_move) rather than the raw target should improve it further, by
+  removing a skew of 3.53 that squared-error fitting distorts.
+
+  Registered before the arms were run. The EXP-110 figure it leans on is NOT
+  like-for-like — 85,180 rows against 96,442 — which is the first thing this
+  experiment corrects.
+
+kind: architecture
+role: size
+strategy: "*"
+programme: size-v2.0
+step: 7
+prior: [EXP-108, EXP-110]
+
+primary_spec:
+  arm: gbm
+  change: >
+    HistGradientBoostingRegressor(learning_rate=0.06, max_iter=400) replacing
+    the OLS + MLP blend. Same features, same rows, same walk-forward.
+
+grid:
+  arms:
+    - arm: gbm_log1p
+      change: "the same GBM fitted on log1p(abs_move), inverted with expm1"
+      note: >
+        Reported on MAE **and** RMSE. A transform that shrinks the right tail can
+        win the typical event and lose the tail, and for a long-vol structure the
+        tail is the part that pays — so an MAE gain bought with an RMSE loss is
+        not obviously a gain at all.
+    - arm: gbm_nan
+      change: "the GBM consuming rows the incumbent must drop for missing features"
+      note: >
+        NOT comparable to the others on aggregate MAE, and never reported as if
+        it were. This is a claim about COVERAGE, not architecture: `walk_forward`
+        drops any row with a non-finite feature, and a GBM does not need it to.
+        Judged only on (a) how many extra rows it scores and (b) like-for-like
+        MAE on the rows the incumbent also scored. Comparing a larger, easier
+        sample against a smaller one is the confound that made EXP-110's probe
+        look decisive when it was not.
+
+evaluation:
+  what: out-of-sample accuracy, walk-forward by year
+  first_test_year: 2013
+  same_rows: true
+  metrics: [r, mae, rmse]
+  criteria:
+    standard: >
+      Per-year consistency, not magnitude: years improved, a signed-rank p, and
+      an explicit drop-the-best-year check. Magnitude cutoffs were the EXP-108
+      mistake and are not used here.
+    min_years_improved: 9
+    max_wilcoxon_p: 0.05
+    must_hold_excluding_best_year: true
+    rmse_must_not_degrade: true
+
+promotion_target:
+  rule: >
+    A champion swap. Changes every downstream distribution — the residual
+    buckets EXP-115 shipped, the recalibration map, the payoff simulation — so
+    promotion requires retraining all of it, not just registering an artifact.
+  registry: null
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-09-01T01:39:08+00:00"
