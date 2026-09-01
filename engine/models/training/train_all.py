@@ -31,6 +31,7 @@ from engine.models.registry import (
     ARTIFACT_DIR,
     ModelArtifact,
     RegistryEntry,
+    bucket_residuals,
     load_registry,
     register,
 )
@@ -79,11 +80,27 @@ def train_size(*, seed: int = SEED, dry_run: bool = False) -> dict:
         f"vs {comparison['legacy']['r']:.4f}"
     )
 
+    # Residuals grouped by the decile of the prediction that produced them.
+    # The pairing exists only here — `result.frame` carries `pred` beside the
+    # target — and is gone by the time an artifact is loaded for scoring, which
+    # is why the flat pool was the only thing the scorer could ever offer.
+    # EXP-115: takes the shipped 80% interval from 72.8% coverage to 79.3%,
+    # 12/13 years, p=0.00049.
+    buckets = bucket_residuals(
+        result.frame["pred"].to_numpy(dtype=float), result.residuals
+    )
+    if buckets:
+        log(f"residual buckets: {len(buckets['pools'])} deciles, "
+            f"{buckets['n']:,} paired residuals, thin={buckets['thin']}")
+    else:
+        log("residual buckets: sample too small to split; flat pool only")
+
     artifact = ModelArtifact(
         model=model,
         role="size",
         features=size_mod.FEATURES,
         residuals=result.residuals,
+        residual_buckets=buckets,
         target=size_mod.TARGET,
         train_years=tuple(sorted(int(y) for y in panel["year"].dropna().unique())),
         metrics=result.metrics,

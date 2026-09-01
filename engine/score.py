@@ -841,7 +841,9 @@ class Scorer:
                 "big",
             )
         )
-        draws = point + artifact.residual_draws(MODEL_DRAWS, rng)
+        # `prediction=` is inert unless the artifact carries buckets, so this is
+        # bit-identical for every champion saved before EXP-115.
+        draws = point + artifact.residual_draws(MODEL_DRAWS, rng, prediction=point)
         result.driver_p10 = float(np.quantile(draws, 0.10))
         result.driver_p90 = float(np.quantile(draws, 0.90))
 

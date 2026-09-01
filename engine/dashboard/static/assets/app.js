@@ -154,15 +154,18 @@ function driverCell(r) {
   const label = r.driver_name === "abs_move" ? "|move|"
     : r.driver_name === "implied_t1" ? "T–1 implied" : (r.driver_name || "");
   /* The point estimate alone reads as more certain than it is. The band is the
-     10th-90th percentile of the model's own draws — nominally 80%, measured at
-     72.8% (EXP-112/114), which is why the title says the measured number. It is
-     also the SAME width for every event today; making it vary is a pending
-     model change, not something this view can fake. */
+     10th-90th percentile of the model's own draws. Since EXP-115 those draws
+     come from the residual bucket matching this row's prediction rather than
+     one pool shared by every event: measured coverage 79.3% against a nominal
+     80%, up from 72.8% when the pool was flat. The width now varies by event —
+     narrow where the model is reliably right, wide where it is not — which is
+     the information a single shared width destroyed. */
   let band = "";
   if (r.driver_p10 !== null && r.driver_p10 !== undefined
       && r.driver_p90 !== null && r.driver_p90 !== undefined) {
     band = " <span class='band' title='10th-90th percentile of the model draws."
-      + " Nominally an 80% band; measured coverage 72.8%.'>"
+      + " Drawn from the residual bucket for this prediction. Nominally an 80%"
+      + " band; measured coverage 79.3% (EXP-115).'>"
       + fmt(Math.max(r.driver_p10, 0), 1) + "–" + fmt(r.driver_p90, 1) + "</span>";
   }
   return fmt(r.driver_prediction, 1) + "%" + band
@@ -366,9 +369,9 @@ function renderRowDetail(r, detailEl) {
           + fmt(r.driver_p90, 2) + "</span>")
     + "</td></tr>"
     + "<tr><td title='The band on the driver is nominally 10th-90th (80%). Its "
-    + "measured out-of-sample coverage is 72.8%, and it is the same width for "
-    + "every event.'>driver band</td><td class='muted'>80% nominal, "
-    + "<strong>72.8% measured</strong>, unconditional</td></tr>";
+    + "measured out-of-sample coverage is 79.3%, and since EXP-115 the width "
+    + "varies with the prediction.'>driver band</td><td class='muted'>80% nominal, "
+    + "<strong>79.3% measured</strong>, conditioned on the prediction</td></tr>";
   const analogExtra =
     "<tr><td>CI (bootstrap)</td><td>[" + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</td></tr>"
     + "<tr><td>matched on</td><td class='mono'>"

@@ -1,0 +1,104 @@
+id: EXP-115
+title: "Condition the residual pool on the prediction, in the scoring path"
+hypothesis: >
+  EXP-114 measured, offline, that bucketing the size model's residual pool by
+  prediction decile takes its nominal-80% interval from 72.8% coverage to
+  79.3%, wins 12 of 13 years (p=0.00049) and survives dropping its best year.
+  None of that is wired in: `ModelArtifact` stores a bare 1-D residual array,
+  so `residual_draws` has no bucket to draw from and every event on the board
+  gets the same width. Across the live board the prediction spans 13-14pp
+  while the band width spans 1pp, and that 1pp is Monte Carlo jitter.
+
+  The claim under test is that the offline result TRANSFERS to the scoring
+  path, and that it is safe there. Conditioning the pool changes the draws that
+  feed the payoff simulation, so it moves exp_pnl_model, win_model and the
+  return percentiles — it is not a display change, and it is not free.
+
+kind: uncertainty_model
+role: size
+strategy: "*"
+programme: size-v2.0
+step: 6
+prior: EXP-114
+
+models_evaluated:
+  - size_v1_4
+models_excluded:
+  opf_implied_t1_gbm: >
+    EXP-114 found NO arm consistent for this model: the best won 3 of 8 years
+    and every one collapsed when 2020 was dropped. Conditioning it would be
+    shipping an effect that experiment failed to establish.
+  gate_midfill_str_thru: "stores residuals but never samples them for scoring"
+  gate_midfill_str_runup: "same"
+
+primary_spec:
+  arm: by_prediction_decile
+  change: >
+    ModelArtifact gains per-decile residual pools and their edges, derived at
+    TRAINING time from the walk-forward held-out predictions that already
+    produce `residuals`. residual_draws(n, rng, prediction=) selects the
+    bucket; the flat pool remains and is the fallback.
+  deciles: 10
+  min_pool: 250
+  fallback: >
+    A bucket thinner than min_pool falls back to the flat pool, the same rule
+    EXP-114 evaluated under. The fallback must be reported, not silent.
+  feeds: >
+    BOTH the driver band and the payoff simulation. The alternative — condition
+    the displayed band only — was rejected deliberately: it would put two
+    different uncertainty models behind two numbers on the same row.
+
+grid:
+  arms:
+    - arm: flat
+      note: "the incumbent, one pool for every event"
+
+evaluation:
+  stage_1:
+    what: "does the offline calibration result hold in the scoring path"
+    metrics: [coverage_80, coverage_50, pit_ks, crps]
+    criteria:
+      coverage_80_error_below_flat: true
+      per_year_consistency: >
+        Years closer to nominal than flat, with a signed-rank p and an explicit
+        drop-the-best-year check. Magnitude cutoffs are not the standard here;
+        that was the EXP-108 mistake.
+  stage_2:
+    what: "gate invariance"
+    criteria:
+      identical_trade_selection: true
+    why: >
+      The gates never read the size model, so conditioning it must not change
+      which trades are selected. That is exactly the assumption EXP-105/109
+      violated in practice, so it is PROVEN here rather than asserted: the
+      gate-passing set must be identical, row for row.
+  stage_3:
+    what: "win_model calibration, with the recalibration map refitted"
+    metrics: [brier, reliability_slope, log_loss]
+    criteria:
+      no_worse_than_flat: true
+    why: >
+      The shipped recalibration map was fitted against the miscalibrated
+      intervals this change replaces, so comparing against it unrefitted would
+      credit or blame the wrong thing. Both arms are refitted on their own
+      distribution and compared on held-out years.
+  stage_4:
+    what: "does it change the trades a reader would act on"
+    metrics: [top_quintile_return, oos_mean_mid, sharpe_trade]
+    criteria:
+      does_not_degrade: true
+
+promotion_target:
+  rule: >
+    Adopt only if stage 1 clears on per-year consistency, stage 2 is exactly
+    invariant, stage 3 does not degrade, and stage 4 does not degrade. A
+    calibration win that costs win-rate calibration is not a win.
+  registry: "size champion artifact schema + Scorer._score_model"
+
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+data_snapshot: 4249d34a37981733340c444ab0b209723dd741bbe056331eb1b9b56961775070
+preregistered_at: "2026-08-31T22:55:10+00:00"

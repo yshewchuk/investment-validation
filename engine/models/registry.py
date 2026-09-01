@@ -103,6 +103,17 @@ class ModelArtifact:
     seed: int = 0
     created: str = ""
     notes: str = ""
+    #: Optional per-bucket residual pools, keyed by where the PREDICTION falls.
+    #: ``{"edges": ndarray, "pools": [ndarray, ...], "min_pool": int,
+    #: "kind": "prediction_decile"}``. When absent — which is every artifact
+    #: saved before EXP-115 — ``residual_draws`` uses the flat pool and behaves
+    #: exactly as it always has.
+    #:
+    #: The flat pool stays authoritative and is never replaced: a bucket thinner
+    #: than ``min_pool`` falls back to it, so conditioning can only ever refine
+    #: the estimate, never leave a sparse region of the prediction range with a
+    #: pool too thin to be a distribution.
+    residual_buckets: dict | None = None
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
@@ -110,17 +121,57 @@ class ModelArtifact:
         self.features = tuple(self.features)
         self.residuals = np.asarray(self.residuals, dtype=float)
         self.residuals = self.residuals[np.isfinite(self.residuals)]
+        if self.residual_buckets:
+            b = dict(self.residual_buckets)
+            b["edges"] = np.asarray(b["edges"], dtype=float)
+            b["pools"] = [np.asarray(pool, dtype=float) for pool in b["pools"]]
+            if len(b["pools"]) != len(b["edges"]) - 1:
+                raise ValueError(
+                    f"{self.role}: {len(b['pools'])} pools for "
+                    f"{len(b['edges'])} edges; expected len(edges) - 1"
+                )
+            self.residual_buckets = b
         if not self.created:
             self.created = date.today().isoformat()
 
     def predict(self, X) -> np.ndarray:
         return np.asarray(self.model.predict(X), dtype=float).ravel()
 
-    def residual_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
-        """``n`` bootstrap draws from the held-out residual distribution."""
+    def residual_pool(self, prediction: float | None = None) -> tuple[np.ndarray, str]:
+        """The residual pool to draw from, and a label saying which one it is.
+
+        Returns the flat pool unless this artifact carries buckets AND a
+        prediction was supplied AND the matching bucket is thick enough. The
+        label is returned rather than inferred by the caller because "which pool
+        did this interval come from" is the first question to ask of a width
+        that looks wrong, and a silent fallback is indistinguishable from a
+        conditioning that did nothing.
+        """
         if self.residuals.size == 0:
             raise RegistryError(f"{self.role}: artifact carries no residuals")
-        return rng.choice(self.residuals, size=n, replace=True)
+        # getattr, not attribute access: joblib pickles the instance dict, so an
+        # artifact saved before this field existed unpickles WITHOUT it and
+        # __post_init__ does not run to supply the default.
+        buckets = getattr(self, "residual_buckets", None)
+        if not buckets or prediction is None or not np.isfinite(prediction):
+            return self.residuals, "flat"
+        edges = buckets["edges"]
+        index = int(np.clip(np.searchsorted(edges, prediction, side="right") - 1,
+                            0, len(buckets["pools"]) - 1))
+        pool = buckets["pools"][index]
+        if pool.size < int(buckets.get("min_pool", 0)):
+            return self.residuals, f"flat (bucket {index} thin: {pool.size})"
+        return pool, f"bucket {index}"
+
+    def residual_draws(self, n: int, rng: np.random.Generator,
+                       prediction: float | None = None) -> np.ndarray:
+        """``n`` bootstrap draws from the held-out residual distribution.
+
+        ``prediction`` is optional and ignored unless the artifact carries
+        buckets, so every existing caller keeps its exact behaviour.
+        """
+        pool, _ = self.residual_pool(prediction)
+        return rng.choice(pool, size=n, replace=True)
 
     def save(self, path: Path) -> str:
         import joblib
@@ -129,6 +180,51 @@ class ModelArtifact:
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self, path, compress=3)
         return artifact_sha256(path)
+
+
+def bucket_residuals(
+    predictions, residuals, *, deciles: int = 10, min_pool: int = 250
+) -> dict | None:
+    """Group held-out residuals by the decile of the prediction they came from.
+
+    The pairing is the whole point and it is only available here, at training
+    time: ``residuals`` and the predictions that produced them come out of the
+    same walk-forward frame. By the time an artifact is loaded for scoring the
+    predictions are gone, which is why the incumbent could only ever offer one
+    pool for every event.
+
+    Edges come from the training predictions alone, so a bucket is a statement
+    about where a prediction sits in the distribution the model was fitted on —
+    not about the row being scored. The outer edges are opened to +/-inf so a
+    live prediction beyond anything seen in training still lands somewhere
+    rather than falling off the end.
+
+    Returns ``None`` when the sample cannot support the split, so the caller
+    stores nothing and the artifact keeps its flat-pool behaviour.
+    """
+    pred = np.asarray(predictions, dtype=float)
+    res = np.asarray(residuals, dtype=float)
+    if pred.shape != res.shape:
+        raise ValueError(f"predictions {pred.shape} and residuals {res.shape} differ")
+    ok = np.isfinite(pred) & np.isfinite(res)
+    pred, res = pred[ok], res[ok]
+    if pred.size < deciles * min_pool:
+        return None
+
+    edges = np.unique(np.quantile(pred, np.linspace(0, 1, deciles + 1)))
+    if edges.size < 3:
+        return None
+    edges[0], edges[-1] = -np.inf, np.inf
+    index = np.clip(np.searchsorted(edges, pred, side="right") - 1, 0, edges.size - 2)
+    pools = [res[index == i] for i in range(edges.size - 1)]
+    return {
+        "kind": "prediction_decile",
+        "edges": edges,
+        "pools": pools,
+        "min_pool": int(min_pool),
+        "n": int(pred.size),
+        "thin": [i for i, pool in enumerate(pools) if pool.size < min_pool],
+    }
 
 
 def artifact_sha256(path: Path, chunk: int = 1 << 20) -> str:
