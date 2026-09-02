@@ -43,6 +43,7 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
+from engine import paths
 from engine.analogs import AnalogMatcher, AnalogSet, bucket_frame
 from engine.audit import FeatureVector, assert_causal, assert_decision_causal
 from engine.calendar import trading_calendar
@@ -105,11 +106,30 @@ FLAGS = (
     "NO_PAYOFF_MAP",
     "QUOTE_REPAIRED",
     "PROJECTED_CALENDAR",
+    "OUT_OF_DOMAIN",
 )
 
 #: A ticker with fewer prior events than this is the regime where the size model
 #: measurably degrades (EXP-024 addendum 2).
 THIN_HISTORY_EVENTS = 4
+
+#: Market-cap floor of the gates' training universe. The `<1B` slice joined the
+#: target set 2026-09-01 (engine/data/pulls/sep2026_plan.py) with near-zero
+#: prior coverage, one day after the gates were promoted on 2026-08-30, and
+#: EXP-118 showed retraining on the expanded universe does not clear the
+#: champions. Until a gate trained on the expanded universe promotes, the
+#: decision is withheld for names the champion never saw: a gate call on a
+#: name outside its evidence is an undetermined result, not a trade.
+GATE_MCAP_FLOOR = 1e9
+
+
+def _computed_moves_names() -> frozenset:
+    """The EXP-117 universe: names the oquants panel does not carry, scored
+    from synthesized moves — absent from every promoted gate's training data
+    by construction."""
+    return frozenset(
+        p.stem[len("moves_"):] for p in paths.COMPUTED_MOVES.glob("moves_*.json")
+    )
 
 #: |strike/spot − 1| within this is "at the money" — the only region the current
 #: evidence covers.
@@ -1044,12 +1064,34 @@ class Scorer:
                 f" analogs matched without {', '.join(analogs.unavailable)}"
             ).strip()
 
+    def _gate_in_domain(self, request, features) -> bool:
+        """Is this name inside the champion gate's training universe?
+
+        The gates were promoted 2026-08-30 on a universe with near-zero `<1B`
+        coverage and no computed-moves names; both joined the board 2026-09-01.
+        EXP-118 showed retraining on the expanded universe does not clear the
+        champions, so the champions stand — which is only coherent if the gate
+        also refuses to decide the names it was never validated on. A gate call
+        on an out-of-domain name is an undetermined result, not a trade.
+        """
+        if request.ticker in _computed_moves_names():
+            return False
+        if "mcap_log" in features.columns:
+            mcap_log = pd.to_numeric(features["mcap_log"], errors="coerce")
+            if len(mcap_log) and np.isfinite(mcap_log.iloc[0]):
+                if float(mcap_log.iloc[0]) < np.log(GATE_MCAP_FLOOR):
+                    return False
+        return True
+
     def _score_gate(self, request, result, features) -> None:
         loaded = self.model("gate", request.strategy)
         if loaded is None:
             return
         entry, artifact = loaded
         result.model_versions["gate"] = entry.id
+        if not self._gate_in_domain(request, features):
+            result.flag("OUT_OF_DOMAIN")
+            return
         missing = [f for f in artifact.features if f not in features.columns]
         if missing:
             return

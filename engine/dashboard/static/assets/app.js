@@ -152,7 +152,8 @@ function flagBadges(row) {
   (row.flags || []).forEach((f) => {
     if (f === "UNVALIDATED_STRUCTURE") return;  /* badged above, with the detail text */
     if (f === "EXTRAPOLATED") return;
-    const klass = f === "LAYER_DISAGREE" ? "warn" : f === "THIN_ANALOGS" || f === "THIN_HISTORY" ? "info" : "na";
+    const klass = f === "LAYER_DISAGREE" ? "warn"
+      : f === "THIN_ANALOGS" || f === "THIN_HISTORY" || f === "OUT_OF_DOMAIN" ? "info" : "na";
     /* NO_CHAIN says nothing on its own; the age of the newest chain says
        whether a refresh fixes this row or the name was never covered. */
     const label = f === "NO_CHAIN" && row.chain_age_days !== null && row.chain_age_days !== undefined

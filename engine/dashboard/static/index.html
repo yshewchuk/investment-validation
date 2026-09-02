@@ -47,7 +47,9 @@
       <div class="sub">The estimates are never averaged: opposite signs flag LAYER_DISAGREE, which means the model may
         be extrapolating past its evidence. The amber <span class="pill warn">gate vs model</span> pill marks rows where
         the gate passes while the model forecast is negative — two independent estimators disagreeing that hard is
-        rare, so treat the row with suspicion rather than as a trade.</div>
+        rare, so treat the row with suspicion rather than as a trade. OUT_OF_DOMAIN means the gate decision is
+        withheld: the name was outside the champion gate's training universe (a &lt;1B name or a name the oquants
+        panel does not carry, both added after the gate was promoted — EXP-118), so no decision exists for it yet.</div>
     </div>
   </details>
   <div class="panel">
@@ -96,7 +98,7 @@
           <th data-sort="win_model" title="Share of the model's simulated return distribution above zero, after isotonic recalibration fitted only on trades closed before this decision date. The bracket is the ANALOG layer's bootstrap interval, not the model's.">Win + CI</th>
           <th data-sort="exp_pnl_analog" title="The EVIDENCE layer: mean realized return of matched historical trades, priced by the same replay code at the same fill. Never averaged with the model column — when they disagree, the disagreement is the finding. Blank when no genuine match was possible.">Exp PnL (analogs)</th>
           <th data-sort="n_analogs" title="How many matched historical trades stand behind the analog columns — the number that says how much weight they deserve. Below the minimum the row is flagged THIN_ANALOGS; NO_ANALOG_MATCH means no comparison was possible at all.">n</th>
-          <th title="Conditions on this row. NO_CHAIN = no option quote, so P&L cannot be computed. NO_ANALOG_MATCH = the analog comparison was impossible. EXTRAPOLATED = a strike away from at-the-money. LAYER_DISAGREE = the two layers disagree.">Flags</th>
+          <th title="Conditions on this row. NO_CHAIN = no option quote, so P&L cannot be computed. NO_ANALOG_MATCH = the analog comparison was impossible. EXTRAPOLATED = a strike away from at-the-money. LAYER_DISAGREE = the two layers disagree. OUT_OF_DOMAIN = the gate decision is withheld because the name was outside the champion gate's training universe.">Flags</th>
           </tr>
         </thead>
         <tbody></tbody>

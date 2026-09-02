@@ -310,6 +310,25 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     return out
 
 
+def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:
+    """as_of's session first, then recent sessions, weekends skipped.
+
+    ORATS builds the market-wide EOD file later than the per-ticker series,
+    so ``tradeDate=<tonight>`` 404s for a while every evening (AGENTS.md).
+    The ladder walks back to the newest session ORATS has published; a
+    holiday only costs one extra 404 attempt.
+    """
+    from datetime import timedelta
+
+    days: list = []
+    day = pd.Timestamp(as_of).date()
+    while len(days) < lookback:
+        if day.weekday() < 5:
+            days.append(day)
+        day -= timedelta(days=1)
+    return days
+
+
 def refresh_calendar_data(
     tickers: Sequence[str],
     as_of,
@@ -327,8 +346,11 @@ def refresh_calendar_data(
     1. **The forward calendar** (unmetered: Nasdaq + yfinance). This is the one
        that decides whether the board has any rows at all, and it costs no
        ORATS quota — see :mod:`engine.data.pulls.forward_calendar`.
-    2. **Summaries and cores** for the as-of date: ONE ORATS call each, for the
-       whole market, via ``tradeDate``. Spot, IVs and implied moves.
+    2. **Summaries and cores**: ONE ORATS call each, for the whole market, via
+       ``tradeDate``. Spot, IVs and implied moves. ORATS builds the market-wide
+       EOD file later than the per-ticker series, so today's ``tradeDate``
+       404s for a while every evening — the pass walks back to the newest
+       published session rather than failing the whole refresh.
     3. **ORATS earnings confirmation**, batched, and ONLY for names that printed
        in the last :data:`CONFIRM_LOOKBACK_DAYS` days. This pass used to run
        over every ticker on the calendar frontier — ~290 calls a night against
@@ -367,18 +389,39 @@ def refresh_calendar_data(
     out["calls"] += out["history"]["calls"]
 
     # -- 2. market-wide summaries and cores: one ORATS call each ------------
+    # ORATS publishes the market-wide EOD file later than the per-ticker
+    # series, so tradeDate=as_of 404s for hours after every close (see
+    # AGENTS.md). Walk back over recent sessions until the newest published
+    # one: a daily-state column one session stale beats a failed refresh.
+    from engine.data.fetch import FetchError
+
     for endpoint in ("hist/summaries", "hist/cores"):
-        record = fetcher.fetch(
-            "orats", endpoint, {"tradeDate": str(as_of.date())},
-            live=True, note="phase3 nightly refresh",
-        )
+        record = None
+        resolved = None
+        missed: list[str] = []
+        for day in _market_wide_days(as_of):
+            try:
+                record = fetcher.fetch(
+                    "orats", endpoint, {"tradeDate": str(day)},
+                    live=True, note="phase3 nightly refresh",
+                )
+                resolved = str(day)
+                break
+            except FetchError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+                missed.append(str(day))
+        if record is None:
+            raise FetchError(
+                f"orats {endpoint} returned HTTP 404 for {', '.join(missed)}"
+            )
         out["calls"] += 0 if record.from_cache else 1
         out["cache_hits"] += 1 if record.from_cache else 0
         try:
             rows = record.json().get("data") or []
         except (ValueError, AttributeError):
             rows = []
-        out["endpoints"][endpoint] = {"rows": len(rows)}
+        out["endpoints"][endpoint] = {"rows": len(rows), "tradeDate": resolved}
 
     # -- 3. ORATS confirmation of prints that just happened -----------------
     confirm = _recently_printed(as_of, tickers)

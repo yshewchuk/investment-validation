@@ -391,6 +391,62 @@ class TestFlags:
         assert "WIDE_MARKET" in result.flags
 
 
+class TestGateDomain:
+    """The gate decides only inside the universe it was validated on (EXP-118)."""
+
+    def _stub_gate(self, scorer):
+        artifact = ModelArtifact(
+            model=Linear(0.10),
+            role="gate",
+            features=("mcap_log",),
+            residuals=np.array([-0.01, 0.0, 0.01]),
+            target="ret",
+        )
+        entry = RegistryEntry(
+            id="gate_test", role="gate", strategy="STR-THRU",
+            artifact="x", artifact_sha256="",
+            features=["mcap_log"], target="ret",
+            train_window="test", champion=True, threshold=0.05,
+        )
+        scorer._models[("STR-THRU", "gate")] = (entry, artifact)
+
+    def _result(self):
+        return ScoreResult(ticker=TICKER, strategy="STR-THRU", as_of=EVENT)
+
+    def test_an_in_domain_name_gets_a_decision(self, scorer):
+        from engine.score import GATE_MCAP_FLOOR
+
+        self._stub_gate(scorer)
+        result = self._result()
+        features = pd.DataFrame({"mcap_log": [np.log(2 * GATE_MCAP_FLOOR)]})
+        scorer._score_gate(request(), result, features)
+        assert "OUT_OF_DOMAIN" not in result.flags
+        assert result.gate_score == pytest.approx(0.10)
+        assert result.gate_pass is True
+
+    def test_a_sub_1b_name_gets_no_decision(self, scorer):
+        from engine.score import GATE_MCAP_FLOOR
+
+        self._stub_gate(scorer)
+        result = self._result()
+        features = pd.DataFrame({"mcap_log": [np.log(GATE_MCAP_FLOOR / 2)]})
+        scorer._score_gate(request(), result, features)
+        assert "OUT_OF_DOMAIN" in result.flags
+        assert result.gate_score is None
+        assert result.gate_pass is None
+
+    def test_a_computed_moves_name_gets_no_decision(self, scorer, monkeypatch):
+        from engine import score as sm
+
+        self._stub_gate(scorer)
+        monkeypatch.setattr(sm, "_computed_moves_names", lambda: frozenset({TICKER}))
+        result = self._result()
+        features = pd.DataFrame({"mcap_log": [np.log(2e10)]})
+        scorer._score_gate(request(), result, features)
+        assert "OUT_OF_DOMAIN" in result.flags
+        assert result.gate_pass is None
+
+
 class TestCausality:
     def test_a_bmo_decision_on_the_event_date_is_refused(self, scorer, chain_index):
         with pytest.raises(LeakError):
