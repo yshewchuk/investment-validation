@@ -195,6 +195,55 @@ the shortfall by year and mcap bucket rather than retraining on whatever
 survived — a T−2 book silently restricted to the liquid half of the universe
 would beat the champion for reasons that have nothing to do with timing.
 
+### Step 4 result — the pull ran and the gate passed — **done 2026-09-02**
+
+Arm A only. `python3 -m engine.data.pulls.sep2026_plan --t2 --confirm`, then
+`python3 -m engine.data.rebuild --table chains`.
+
+```
+planned 3,628   fetched 3,628   failed 0
+cache_hits 0    absent_tickers 0   truncation_retries 0   elapsed 1,962s
+```
+
+Not one missing ticker across ~36,000 requested, so the verification-retry path
+never fired and there was no overage. Report: `reports/t2_pull_d1.json`.
+Chain table 15M → **22,763,172 rows**, snapshot `19d0afac…`.
+
+**The gate, over the replayable set:**
+
+| | |
+|---|---|
+| replayable events | 26,746 |
+| with a `D−1` chain | 26,710 |
+| **coverage** | **99.9% — PASS** (threshold 80%) |
+
+Uniform, which is the point — the gate exists to catch a universe quietly
+restricted to the liquid half:
+
+```
+by year   99.4%–100.0%, every year 2018–2026
+by bucket 1-10B 100.0% | >10B 100.0% | <1B 99.9% | unknown 72.5% (80 events)
+```
+
+The only sub-gate slice is `unknown` — 22 events of 26,746 (0.08%), and
+"unknown" means no market cap in the panel rather than no chain. 36 events lack
+a `D−1` chain outright (PEP ×4, 32 singletons); genuine ORATS absences.
+
+Two things the estimate did not predict:
+
+- **The replayable set grew**, 26,710 → 26,746. Some `D−1` batches landed on
+  dates that were also another event's entry or exit date, so 36 events became
+  replayable for free.
+- **The ORATS quota header is coarse.** The ledger logged 3,628 rows, one per
+  call, but `quota_remaining` moved only **7 times**, in jumps of 530–578. The
+  header updates in batches of ~550, so any single reading lags by up to that
+  much — `throttle.check_quota` reads it, so the reserve floor carries a blind
+  spot of the same size. The 3,000 floor absorbs it comfortably, which is a
+  reason to keep the floor generous rather than trim it toward the true minimum.
+
+Quota after: header **13,131**, true remaining ~**12,858** (16,486 at pull start
+− 3,628), ~9,858 above the floor. Arm B (3,630) still fits.
+
 ---
 
 ## 4. The silent leak you must fix first
@@ -564,7 +613,7 @@ served against a `D0` decision date. Register it as
 | 1 | ~~Fix the §4 leak; add the regression tests; rebuild Tier 3 with and without the change and confirm the two agree~~ **done 2026-09-02** | no | yes |
 | 2 | ~~Land the `decision_offset` plumbing with `decision_offset=None` everywhere — no behaviour change, full test suite green~~ **done 2026-09-02** | no | yes |
 | 3 | ~~`build_t2_plan --dry-run`, review the call count~~ **done 2026-09-02** | no | yes |
-| 4 | Execute the `D−1` pull (~3,628 calls); ingest; run the §3 coverage gate | **yes** | data is kept |
+| 4 | ~~Execute the `D−1` pull (~3,628 calls); ingest; run the §3 coverage gate~~ **done 2026-09-02 — gate PASSED at 99.9%** | **yes** | data is kept |
 | 5 | Run §6.3 drift measurement. **Decision point.** | no | yes |
 | 6 | Set `decision_offset=-1` on `straddle_through`; rebuild the T−2 trade set as a distinct variant | no | yes |
 | 7 | Retrain the gate, walk-forward, EXP-120 report | no | yes |
