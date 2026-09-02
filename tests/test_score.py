@@ -270,6 +270,51 @@ class TestEntryPricing:
         assert bmo.entry_date < EVENT
 
 
+class TestDecisionDate:
+    """`as_of` is the date the score is *taken*, which every audit keys on.
+
+    It now defaults to the structure's decision close rather than its entry
+    close. Those are the same close for every structure that ships today, so
+    these tests pin the current behaviour and the propagation that will make
+    the T−2 variant work.
+    """
+
+    def test_as_of_defaults_to_the_decision_close(self, scorer, chain_index):
+        result = scorer.score(request(), chain_index=chain_index)
+        assert result.as_of == result.entry_date
+
+    def test_an_explicit_as_of_is_still_respected(self, scorer, chain_index):
+        asked = EVENT - pd.Timedelta(days=7)
+        result = scorer.score(request(as_of=asked), chain_index=chain_index)
+        assert result.as_of == asked
+
+    def test_a_pinned_contract_keeps_the_decision_offset(self, scorer, monkeypatch):
+        """`_structure` rebuilds the spec to pin the caller's strike/expiry. If
+        it dropped the decision offset there, asking for a specific contract
+        would silently revert the trade to deciding at its entry close."""
+        from engine.structures import STRUCTURES, straddle_through
+
+        monkeypatch.setitem(
+            STRUCTURES, "STR-THRU", lambda: straddle_through(decision_offset=-1)
+        )
+        rebuilt = scorer._structure(request(strike=105.0))
+        assert rebuilt.decision_offset == -1
+
+    def test_an_early_decision_moves_as_of_off_the_entry_date(
+        self, scorer, chain_index, monkeypatch
+    ):
+        """The whole point of the offset: the score is taken a session before
+        the trade is placed, so there is time to act on it."""
+        from engine.structures import STRUCTURES, straddle_through
+
+        monkeypatch.setitem(
+            STRUCTURES, "STR-THRU", lambda: straddle_through(decision_offset=-1)
+        )
+        result = scorer.score(request(), chain_index=chain_index)
+        assert result.as_of < result.entry_date
+        assert result.evidence_cutoff == result.as_of
+
+
 class TestModelLayer:
     def test_produces_a_distribution_not_a_point(self, scorer, chain_index):
         result = scorer.score(request(), chain_index=chain_index)

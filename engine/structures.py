@@ -270,12 +270,22 @@ class Structure:
     the last pre-print close itself, and ``+1`` is the first post-print close.
     :func:`engine.calendar.resolve_offsets` maps those onto real dates using the
     BMO/AMC session, so the same spec means the same thing for both sessions.
+
+    ``decision_offset`` is the close the trade is **decided** on, on the same
+    anchor. ``None`` — the default, and what every structure shipped with —
+    means "decided at the entry close". That is unactionable for a structure
+    that enters at the last pre-print close: the chain you price against only
+    exists after that close has happened, so the prediction cannot be reached
+    in time to place the trade. Setting ``decision_offset`` earlier than
+    ``entry_offset`` buys lead time, at the cost of quoting a premium from a
+    close you will not fill at. See ``guides/str_thru_t2_decision.md``.
     """
 
     name: str
     legs: tuple[LegSpec, ...]
     entry_offset: int
     exit_offset: int
+    decision_offset: int | None = None
     description: str = ""
     params: dict[str, Any] = field(default_factory=dict)
 
@@ -290,6 +300,12 @@ class Structure:
                 f"{self.name}: exit_offset ({self.exit_offset}) must be after "
                 f"entry_offset ({self.entry_offset})"
             )
+        if self.decision_offset is not None and self.decision_offset > self.entry_offset:
+            raise ValueError(
+                f"{self.name}: decision_offset ({self.decision_offset}) cannot be "
+                f"after entry_offset ({self.entry_offset}) — a trade cannot be "
+                "decided on information that only exists once it is already on"
+            )
         for leg in self.legs:
             if leg.strike.kind == "same_as" and leg.strike.ref not in names:
                 raise ValueError(f"{self.name}: same_as ref {leg.strike.ref!r} is not a leg")
@@ -298,6 +314,21 @@ class Structure:
                     f"{self.name}: leg {leg.name!r} references {leg.strike.ref!r}, "
                     "which resolves later"
                 )
+
+    @property
+    def decided_at(self) -> int:
+        """The offset the trade is decided on — ``entry_offset`` when unset.
+
+        Read this rather than ``decision_offset`` anywhere a date is being
+        resolved, so that "unset" resolves to the entry close in exactly one
+        place instead of at every call site.
+        """
+        return self.entry_offset if self.decision_offset is None else self.decision_offset
+
+    @property
+    def decided_early(self) -> bool:
+        """True when the decision close is strictly before the entry close."""
+        return self.decided_at < self.entry_offset
 
     @property
     def holds_through_print(self) -> bool:
@@ -313,6 +344,7 @@ class Structure:
             "name": self.name,
             "entry_offset": self.entry_offset,
             "exit_offset": self.exit_offset,
+            "decision_offset": self.decision_offset,
             "description": self.description,
             "params": dict(self.params),
             "legs": [
@@ -582,6 +614,7 @@ def put_calendar(
     back_moneyness: float | None = None,
     entry_offset: int = 0,
     exit_offset: int = 1,
+    decision_offset: int | None = None,
 ) -> Structure:
     """CAL-P — short ~``front_dte`` put, long ~``back_dte`` put, opened and closed together.
 
@@ -623,6 +656,7 @@ def put_calendar(
         ),
         entry_offset=entry_offset,
         exit_offset=exit_offset,
+        decision_offset=decision_offset,
         params={
             "front_dte": front_dte,
             "back_dte": back_dte,
@@ -631,7 +665,11 @@ def put_calendar(
     )
 
 
-def straddle_through(entry_offset: int = 0, exit_offset: int = 1) -> Structure:
+def straddle_through(
+    entry_offset: int = 0,
+    exit_offset: int = 1,
+    decision_offset: int | None = None,
+) -> Structure:
     """STR-THRU — long ATM straddle bought before the print, sold right after."""
     expiry = ExpirySelector(kind="first_post_event")
     return Structure(
@@ -643,10 +681,16 @@ def straddle_through(entry_offset: int = 0, exit_offset: int = 1) -> Structure:
         ),
         entry_offset=entry_offset,
         exit_offset=exit_offset,
+        decision_offset=decision_offset,
     )
 
 
-def straddle_runup(entry_offset: int = -14, exit_offset: int = 0, target_dte: int = 30) -> Structure:
+def straddle_runup(
+    entry_offset: int = -14,
+    exit_offset: int = 0,
+    target_dte: int = 30,
+    decision_offset: int | None = None,
+) -> Structure:
     """STR-RUNUP — long ATM straddle bought early, sold immediately *before* the print.
 
     ``exit_offset=0`` is the last pre-print close, so the position never sees
@@ -662,6 +706,7 @@ def straddle_runup(entry_offset: int = -14, exit_offset: int = 0, target_dte: in
         ),
         entry_offset=entry_offset,
         exit_offset=exit_offset,
+        decision_offset=decision_offset,
         params={"target_dte": target_dte},
     )
 

@@ -489,11 +489,17 @@ class Scorer:
         structure = self._structure(request)
 
         window = self.calendar.resolve_offsets(
-            event_date, session, structure.entry_offset, structure.exit_offset
+            event_date, session, structure.entry_offset, structure.exit_offset,
+            decision_offset=structure.decision_offset,
         )
         result.entry_date, result.exit_date = window.entry_date, window.exit_date
+        # The decision date, not the entry date. They are the same close for
+        # every structure that has not set a `decision_offset`, so nothing moves
+        # yet; what changes is that the default is now the date the score is
+        # *taken*, which is the date the rest of the pipeline already audits
+        # against.
         if result.as_of is None:
-            result.as_of = window.entry_date
+            result.as_of = window.decision_date
         assert_decision_causal(result.as_of, event_date, session, calendar=self.calendar)
 
         # The cutoff for *evidence* — which analogs are eligible, which trades
@@ -616,6 +622,7 @@ class Scorer:
             legs=tuple(legs),
             entry_offset=structure.entry_offset,
             exit_offset=structure.exit_offset,
+            decision_offset=structure.decision_offset,
             description=structure.description,
             params=dict(structure.params) | {
                 "requested_strike": request.strike,

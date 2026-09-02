@@ -45,6 +45,7 @@ __all__ = [
     "BMO",
     "AMC",
     "session_from_annc_tod",
+    "PrintWindow",
     "TradingCalendar",
     "trading_calendar",
     "us_market_holidays",
@@ -203,6 +204,16 @@ class PrintWindow:
     exit_date: pd.Timestamp
     last_pre_print: pd.Timestamp
     first_post_print: pd.Timestamp
+    #: The close whose information the trade is decided on. Defaults to
+    #: ``entry_date`` — decide and enter at the same close — which is what every
+    #: structure did before ``decision_offset`` existed, and is the reason a
+    #: prediction currently arrives too late to act on. It is never later than
+    #: the entry; a structure moves it earlier by setting ``decision_offset``.
+    decision_date: pd.Timestamp | None = None
+
+    def __post_init__(self) -> None:
+        if self.decision_date is None:
+            object.__setattr__(self, "decision_date", self.entry_date)
 
 
 class TradingCalendar:
@@ -301,7 +312,12 @@ class TradingCalendar:
         raise ValueError(f"unknown session {session!r}")
 
     def resolve_offsets(
-        self, event_date, session: str, entry_offset: int, exit_offset: int
+        self,
+        event_date,
+        session: str,
+        entry_offset: int,
+        exit_offset: int,
+        decision_offset: int | None = None,
     ) -> PrintWindow:
         """Map a structure's ``(entry_offset, exit_offset)`` onto real dates.
 
@@ -309,6 +325,12 @@ class TradingCalendar:
         offsets step forward from the *first post-print* close, so ``+1`` is
         that close and ``+2`` the one after — there is no offset that lands on
         the print itself, because no chain is observed mid-event.
+
+        ``decision_offset`` is the close the trade is *decided* on, resolved on
+        the same anchor and by the same arithmetic. ``None`` means "decide at
+        the entry close", which is what every structure did before it existed.
+        This is arithmetic only: that a decision may not come after its own
+        entry is a property of the structure, and is enforced there.
         """
         pre = self.last_pre_print(event_date, session)
         post = self.first_post_print(event_date, session)
@@ -323,6 +345,9 @@ class TradingCalendar:
             session=session,
             entry_date=resolve(entry_offset),
             exit_date=resolve(exit_offset),
+            decision_date=(
+                resolve(decision_offset) if decision_offset is not None else None
+            ),
             last_pre_print=pre,
             first_post_print=post,
         )

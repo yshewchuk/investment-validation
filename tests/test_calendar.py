@@ -10,6 +10,7 @@ from engine.calendar import (
     AMC,
     BMO,
     DateChange,
+    PrintWindow,
     TradingCalendar,
     build_calendar,
     detect_date_changes,
@@ -165,6 +166,64 @@ class TestTradingCalendar:
     def test_empty_calendar_is_rejected(self):
         with pytest.raises(ValueError, match="cannot be empty"):
             TradingCalendar([])
+
+
+class TestDecisionOffsets:
+    """The decision close, which is what makes a prediction actionable.
+
+    Every structure that shipped before this decided at its entry close, which
+    for STR-THRU is the last pre-print close — a chain that does not exist until
+    that session is over. `decision_offset` is how a structure buys lead time.
+    """
+
+    @pytest.fixture
+    def tc(self):
+        # Same calendar as TestTradingCalendar: Wednesday 2024-05-08 is closed,
+        # so a one-session step back is not a one-calendar-day step back.
+        days = [d for d in pd.date_range("2024-05-01", "2024-05-17", freq="B")
+                if d != pd.Timestamp("2024-05-08")]
+        return TradingCalendar(days)
+
+    def test_no_decision_offset_means_decide_at_the_entry_close(self, tc):
+        window = tc.resolve_offsets("2024-05-09", AMC, entry_offset=0, exit_offset=1)
+        assert window.decision_date == window.entry_date
+
+    def test_passing_none_is_the_same_as_not_passing_it(self, tc):
+        implicit = tc.resolve_offsets("2024-05-09", AMC, 0, 1)
+        explicit = tc.resolve_offsets("2024-05-09", AMC, 0, 1, decision_offset=None)
+        assert implicit == explicit
+
+    def test_a_decision_offset_steps_back_on_the_same_anchor(self, tc):
+        window = tc.resolve_offsets("2024-05-09", AMC, 0, 1, decision_offset=-1)
+        assert window.entry_date == pd.Timestamp("2024-05-09")
+        assert window.decision_date == pd.Timestamp("2024-05-07")  # the 8th is closed
+        assert window.exit_date == pd.Timestamp("2024-05-10")
+
+    def test_the_decision_lands_a_session_earlier_for_both_sessions(self, tc):
+        bmo = tc.resolve_offsets("2024-05-09", BMO, 0, 1, decision_offset=-1)
+        amc = tc.resolve_offsets("2024-05-09", AMC, 0, 1, decision_offset=-1)
+        # BMO's entry is already the day before the print, so deciding a session
+        # earlier puts the decision two sessions ahead of the announcement.
+        assert bmo.entry_date == pd.Timestamp("2024-05-07")
+        assert bmo.decision_date == pd.Timestamp("2024-05-06")
+        assert amc.entry_date == pd.Timestamp("2024-05-09")
+        assert amc.decision_date == pd.Timestamp("2024-05-07")
+
+    def test_the_decision_is_never_after_the_last_information_free_close(self, tc):
+        for session in (BMO, AMC):
+            window = tc.resolve_offsets("2024-05-09", session, 0, 1, decision_offset=-1)
+            assert window.decision_date < window.last_pre_print
+
+    def test_a_directly_built_window_still_has_a_decision_date(self):
+        """Nothing constructs PrintWindow by hand today, but if it does the
+        decision date must not silently be None and break date arithmetic."""
+        day = pd.Timestamp("2024-05-09")
+        window = PrintWindow(
+            event_date=day, session=AMC, entry_date=day,
+            exit_date=day + pd.Timedelta(days=1),
+            last_pre_print=day, first_post_print=day + pd.Timedelta(days=1),
+        )
+        assert window.decision_date == day
 
 
 class TestBuildCalendar:

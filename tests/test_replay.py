@@ -237,6 +237,71 @@ class TestReplayOne:
         assert rows[0]["wide_market"] is True
 
 
+class TestDecisionDates:
+    """The plan has to carry the decision close, and carry it inertly.
+
+    Nothing in the shipped structures sets a decision offset yet, so the whole
+    point of these tests is that the new column changes no counts, no keys and
+    no labels until a structure actually asks for it.
+    """
+
+    def test_the_plan_carries_a_decision_date(self, events, calendar):
+        plan = replay.plan_events(straddle_through(), events, calendar=calendar)
+        assert "decision_date" in plan.frame.columns
+        assert (plan.frame["decision_date"] == plan.frame["entry_date"]).all()
+
+    def test_an_early_decision_moves_only_that_column(self, events, calendar):
+        base = replay.plan_events(straddle_through(), events, calendar=calendar)
+        early = replay.plan_events(
+            straddle_through(decision_offset=-1), events, calendar=calendar
+        )
+        assert list(early.frame["entry_date"]) == list(base.frame["entry_date"])
+        assert list(early.frame["exit_date"]) == list(base.frame["exit_date"])
+        assert (early.frame["decision_date"] < early.frame["entry_date"]).all()
+
+    def test_no_extra_chains_are_loaded_when_the_decision_is_the_entry(
+        self, events, calendar
+    ):
+        plan = replay.plan_events(straddle_through(), events, calendar=calendar)
+        # 2 events × (entry, exit), with no third date to fetch.
+        assert len(plan.chain_keys) == 4
+
+    def test_an_early_decision_asks_for_a_third_chain(self, events, calendar):
+        plan = replay.plan_events(
+            straddle_through(decision_offset=-1), events, calendar=calendar
+        )
+        assert len(plan.chain_keys) == 6
+        for row in plan.frame.itertuples():
+            assert (row.ticker, row.decision_date) in plan.chain_keys
+
+    def test_a_missing_decision_chain_is_counted_separately(self, events, calendar):
+        plan = replay.plan_events(
+            straddle_through(decision_offset=-1), events, calendar=calendar
+        )
+        row = plan.frame[plan.frame["ticker"] == "TEST"].iloc[0]
+        available = {("TEST", row["entry_date"]), ("TEST", row["exit_date"])}
+        filtered = replay.filter_plan_by_availability(plan, available)
+        assert filtered.frame.empty
+        assert filtered.skipped["no_decision_chain"] == 1
+        # Not double-counted: TEST had both of the chains those reasons name.
+        assert filtered.skipped["no_entry_chain"] == 1  # the BMO event only
+        assert filtered.skipped["no_exit_chain"] == 0
+
+    def test_no_decision_chain_stays_zero_for_a_same_close_decision(
+        self, events, calendar
+    ):
+        plan = replay.plan_events(straddle_through(), events, calendar=calendar)
+        filtered = replay.filter_plan_by_availability(plan, set())
+        assert filtered.skipped["no_decision_chain"] == 0
+
+    def test_the_variant_label_distinguishes_the_two_books(self):
+        # `e+0_x+1` already names a book in the trades table; it must not come
+        # to mean two different trade sets.
+        assert replay._variant_label(straddle_through()) == "e+0_x+1"
+        assert replay._variant_label(straddle_through(decision_offset=0)) == "e+0_x+1"
+        assert replay._variant_label(straddle_through(decision_offset=-1)) == "e+0_x+1_d-1"
+
+
 class TestFilterByAvailability:
     def test_counts_missing_chains_under_the_pricing_reasons(self, events, calendar):
         plan = replay.plan_events(straddle_through(), events, calendar=calendar)

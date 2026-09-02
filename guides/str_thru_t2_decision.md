@@ -291,25 +291,64 @@ serving.
 
 ## 5. Code changes, file by file
 
-### 5.1 `engine/structures.py` — a decision offset
+### 5.1 `engine/structures.py` — a decision offset — **done 2026-09-02**
 
-Add `decision_offset: int | None = None` to `Structure`, defaulting to
-`entry_offset` so every existing structure is unchanged. Validate
-`decision_offset <= entry_offset`. Include it in `as_dict()` and in
-`replay._variant_label` (`replay.py:589`) so a T−2 trade set is distinguishable
-from a T−1 one in the `trades` table — `e+0x+1` must not silently mean two
-different things.
+`Structure` carries `decision_offset: int | None = None`. Two properties read
+it, so "unset means the entry close" is decided in one place rather than at
+every call site:
 
-Then: `straddle_through(entry_offset=0, exit_offset=1, decision_offset=-1)`.
+- `decided_at` → `entry_offset` when `decision_offset is None`
+- `decided_early` → `decided_at < entry_offset`
 
-### 5.2 `engine/calendar.py` — resolve it
+`__post_init__` rejects `decision_offset > entry_offset`. `to_dict()` always
+emits the key, including when it is `None`: a spec that omits it is
+indistinguishable from one written before decision offsets existed, and those
+two do not mean the same thing once any structure sets one.
+`put_calendar`, `straddle_through` and `straddle_runup` all take it through.
 
-`resolve_offsets` gains `decision_offset` and `PrintWindow` gains
-`decision_date`. Same anchor arithmetic as the others; no new rules.
+`replay._variant_label` appends `d{offset:+d}` **only when `decided_early`**, so
+every label already written still means what it meant — `STR-THRU` is still
+`e+0_x+1`, and the T−2 book will be `e+0_x+1_d-1`.
+
+Then, at step 6: `straddle_through(entry_offset=0, exit_offset=1, decision_offset=-1)`.
+
+### 5.2 `engine/calendar.py` — resolve it — **done 2026-09-02**
+
+`resolve_offsets` gained `decision_offset` and `PrintWindow` gained
+`decision_date`. Same anchor arithmetic as the others; no new rules. A
+`PrintWindow` built without one fills `decision_date` from `entry_date` in
+`__post_init__`, so the field is never `None` downstream.
+
+The calendar does **not** enforce `decision <= entry`: that is a property of the
+structure, and lives in exactly one place, in `Structure.__post_init__`.
+
+`engine/replay.py` also gained, in the same step:
+
+- `plan_events` resolves and carries a `decision_date` column
+- `ReplayPlan.chain_keys` unions the decision keys in — a set, so while decision
+  and entry are the same close nothing extra is loaded
+- `filter_plan_by_availability` checks the decision chain and counts what it
+  drops under a new `no_decision_chain` skip reason, which stays zero until a
+  structure is decided early. This is a hole plugged before step 6 can fall in
+  it: without it, an event with no `D−1` chain would have been planned and then
+  failed silently at pricing time.
+
+**What step 2 deliberately did not do.** `ScoreResult` did *not* gain a
+`decision_date` field, and the ledger was not touched. `ScoreResult.as_dict()`
+is `asdict(self)`, and the dashboard's `row_digest` hashes it — a new key
+changes every row digest. That change belongs with the ledger's `SCHEMA_VERSION
+→ 2` in step 10, where the digest break is accounted for once instead of twice.
+Until then `result.as_of` carries the decision date, which is what every audit
+in the pipeline already keys on.
 
 ### 5.3 `engine/score.py` — the core change
 
 - `result.as_of` defaults to `window.decision_date`, not `window.entry_date`.
+  **Done 2026-09-02** — inert, because the two dates are the same close for
+  every structure that has not set an offset. `Scorer._structure`, which
+  rebuilds the spec to pin a caller's strike or expiry, passes `decision_offset`
+  through: dropping it there would make asking for a specific contract silently
+  revert the trade to deciding at its entry close.
 - `_price_entry` prices on the **decision-date** chain and records
   `result.quote_date`. Everything it fills — `entry_cost`, `spot`, `strike`,
   `expiry`, `dte_entry` — is now an *estimate for* the entry, and the field
@@ -477,7 +516,7 @@ served against a `D0` decision date. Register it as
 | # | step | spends quota | reversible |
 |---|---|---|---|
 | 1 | ~~Fix the §4 leak; add the regression tests; rebuild Tier 3 with and without the change and confirm the two agree~~ **done 2026-09-02** | no | yes |
-| 2 | Land the `decision_offset` plumbing with `decision_offset=None` everywhere — no behaviour change, full test suite green | no | yes |
+| 2 | ~~Land the `decision_offset` plumbing with `decision_offset=None` everywhere — no behaviour change, full test suite green~~ **done 2026-09-02** | no | yes |
 | 3 | `build_t2_plan --dry-run`, review the call count | no | yes |
 | 4 | Execute the `D−1` pull (~3,628 calls); ingest; run the §3 coverage gate | **yes** | data is kept |
 | 5 | Run §6.3 drift measurement. **Decision point.** | no | yes |

@@ -171,12 +171,49 @@ class TestStructureSpecs:
                 exit_offset=1,
             )
 
+    def test_a_structure_decides_at_its_entry_close_by_default(self):
+        """The status quo, made explicit: every shipped structure decides on
+        the same close it enters on, which is why STR-THRU's prediction cannot
+        be acted on — the chain it prices against is only published once that
+        close has already happened."""
+        for spec in (put_calendar(), straddle_through(), straddle_runup()):
+            assert spec.decision_offset is None
+            assert spec.decided_at == spec.entry_offset
+            assert not spec.decided_early
+
+    def test_a_decision_offset_moves_the_decision_earlier(self):
+        spec = straddle_through(decision_offset=-1)
+        assert spec.decided_at == -1
+        assert spec.decided_early
+        assert spec.entry_offset == 0  # the trade itself is unchanged
+
+    def test_the_decision_may_not_come_after_the_entry(self):
+        with pytest.raises(ValueError, match="cannot be after entry_offset"):
+            straddle_through(decision_offset=1)
+
+    def test_deciding_at_the_entry_close_is_allowed_explicitly(self):
+        """`decision_offset == entry_offset` is legal — it just says out loud
+        what `None` says implicitly — but it is not `decided_early`, so it must
+        not change a variant label or pull a second chain."""
+        spec = straddle_through(decision_offset=0)
+        assert spec.decided_at == 0
+        assert not spec.decided_early
+
+    def test_every_structure_can_take_one(self):
+        assert put_calendar(decision_offset=-1).decided_at == -1
+        assert straddle_runup(decision_offset=-16).decided_at == -16
+
     def test_spec_round_trips_to_a_dict(self):
         spec = put_calendar(back_dte=30)
         blob = spec.to_dict()
         assert blob["name"] == "CAL-P"
         assert blob["params"]["back_dte"] == 30
         assert len(blob["legs"]) == 2
+        # Serialized even when unset: a spec that omits it is indistinguishable
+        # from one written before decision offsets existed, and the two do not
+        # mean the same thing once any structure sets it.
+        assert blob["decision_offset"] is None
+        assert straddle_through(decision_offset=-1).to_dict()["decision_offset"] == -1
 
 
 class TestPricing:

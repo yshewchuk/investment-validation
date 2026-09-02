@@ -70,6 +70,10 @@ ALPHA_GRID: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
 SKIP_REASONS = (
     "no_entry_chain",
     "no_exit_chain",
+    # Only ever non-zero for a structure decided before it enters: when the
+    # decision close is the entry close, an event without a decision chain has
+    # already been counted as `no_entry_chain`.
+    "no_decision_chain",
     "structure_unresolved",
     "expiry_gone_at_exit",
     "bad_quote",
@@ -103,8 +107,18 @@ class ReplayPlan:
 
     @property
     def chain_keys(self) -> set[tuple[str, pd.Timestamp]]:
+        """Every (ticker, date) chain this plan needs loaded.
+
+        Three dates, not two: a structure decided early needs the decision
+        chain to quote the premium the board shows as well as the entry chain
+        it actually fills on. It is a set, so for the usual case — decide and
+        enter at the same close — the decision keys collapse into the entry
+        keys and nothing extra is loaded.
+        """
         keys = set(zip(self.frame["ticker"], self.frame["entry_date"]))
         keys |= set(zip(self.frame["ticker"], self.frame["exit_date"]))
+        if "decision_date" in self.frame.columns:
+            keys |= set(zip(self.frame["ticker"], self.frame["decision_date"]))
         return keys
 
     @property
@@ -137,7 +151,8 @@ def plan_events(
         event_date = pd.Timestamp(event.event_date).normalize()
         try:
             window = cal.resolve_offsets(
-                event_date, str(session), structure.entry_offset, structure.exit_offset
+                event_date, str(session), structure.entry_offset, structure.exit_offset,
+                decision_offset=structure.decision_offset,
             )
         except KeyError:
             skipped["calendar_out_of_range"] += 1
@@ -148,6 +163,7 @@ def plan_events(
                 "ticker": str(event.ticker),
                 "event_date": event_date,
                 "session": str(session),
+                "decision_date": window.decision_date,
                 "entry_date": window.entry_date,
                 "exit_date": window.exit_date,
                 "last_pre_print": window.last_pre_print,
@@ -158,7 +174,7 @@ def plan_events(
     frame = pd.DataFrame(
         rows,
         columns=[
-            "event_id", "ticker", "event_date", "session",
+            "event_id", "ticker", "event_date", "session", "decision_date",
             "entry_date", "exit_date", "last_pre_print", "first_post_print",
         ],
     )
@@ -227,11 +243,16 @@ def available_chain_keys(refresh: bool = False) -> set[tuple[str, pd.Timestamp]]
 def filter_plan_by_availability(
     plan: ReplayPlan, available: set[tuple[str, pd.Timestamp]] | None = None
 ) -> ReplayPlan:
-    """Drop planned events whose entry or exit chain is not in the store.
+    """Drop planned events whose decision, entry or exit chain is not in the store.
 
     The dropped events are counted under the same skip reasons pricing would
     have used, so the accounting is identical either way — this only moves the
     discovery earlier, where it is free.
+
+    The decision chain is checked because a structure decided early cannot be
+    replayed without it: the premium the board would have quoted comes from
+    that close. Where the decision close *is* the entry close the two checks
+    are the same check, and `no_decision_chain` stays zero.
     """
     if plan.frame.empty:
         return plan
@@ -243,12 +264,22 @@ def filter_plan_by_availability(
     has_exit = np.array(
         [(t, d) in keys for t, d in zip(frame["ticker"], frame["exit_date"])]
     )
+    if "decision_date" in frame.columns:
+        has_decision = np.array(
+            [(t, d) in keys for t, d in zip(frame["ticker"], frame["decision_date"])]
+        )
+    else:
+        has_decision = np.ones(len(frame), dtype=bool)
     skipped = dict(plan.skipped)
     skipped["no_entry_chain"] = skipped.get("no_entry_chain", 0) + int((~has_entry).sum())
     skipped["no_exit_chain"] = skipped.get("no_exit_chain", 0) + int(
         (has_entry & ~has_exit).sum()
     )
-    return ReplayPlan(frame=frame[has_entry & has_exit].reset_index(drop=True), skipped=skipped)
+    skipped["no_decision_chain"] = skipped.get("no_decision_chain", 0) + int(
+        (has_entry & has_exit & ~has_decision).sum()
+    )
+    keep = has_entry & has_exit & has_decision
+    return ReplayPlan(frame=frame[keep].reset_index(drop=True), skipped=skipped)
 
 
 _CHAIN_DATES_BY_TICKER: dict[str, list[pd.Timestamp]] | None = None
@@ -587,8 +618,17 @@ def replay(
 
 
 def _variant_label(structure: Structure) -> str:
-    """Stable, human-readable parameterization key for a structure."""
+    """Stable, human-readable parameterization key for a structure.
+
+    The decision offset appears only when it differs from the entry offset, so
+    every label written before decision offsets existed still means exactly what
+    it meant then. Once it does differ the label must carry it: a T−2 book and a
+    T−1 book are different trade sets, and `e+0x+1` cannot be allowed to name
+    both of them in the `trades` table.
+    """
     parts = [f"e{structure.entry_offset:+d}", f"x{structure.exit_offset:+d}"]
+    if structure.decided_early:
+        parts.append(f"d{structure.decided_at:+d}")
     for key in sorted(structure.params):
         value = structure.params[key]
         if value is not None:
