@@ -339,6 +339,8 @@ class TestDecisionPlan:
                     "t14_both": False,
                     "d1_both": False,
                     "d2_both": False,
+                    "d1_any": False,
+                    "d2_any": False,
                     "through_print_ready": True,
                 }
             )
@@ -356,7 +358,7 @@ class TestDecisionPlan:
 
     def test_only_replayable_events_are_bought_for(self, patched):
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         bought = {t for job in plan.jobs for t in job.tickers}
         assert "NOPE" not in bought
         assert plan.events_targeted == 4
@@ -365,18 +367,18 @@ class TestDecisionPlan:
         # The traded expiry is a day further out seen from a day earlier, so a
         # 1,45 window would drop every event whose expiry sat at the ceiling.
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         assert all(job.params["dte"] == DTE_T2 for job in plan.jobs)
         assert DTE_T2 != DTE_RANGE
 
     def test_it_buys_the_decision_date_not_the_entry_date(self, patched):
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         assert {job.trade_date for job in plan.jobs} == {"2024-05-07"}
 
     def test_four_tickers_on_one_date_are_one_call(self, patched):
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         assert plan.n_calls == 1  # 4 tickers, batch of 10
         assert plan.jobs[0].tickers == ("T000", "T001", "T002", "T003")
 
@@ -384,28 +386,28 @@ class TestDecisionPlan:
         """The Fetcher caches on exact request params, so a batch built in a
         different order is a fresh call rather than a cache hit."""
         patched(self._events())
-        first = build_t2_plan(-1, fetcher=FakeFetcher())
+        first = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         patched(self._events())
-        second = build_t2_plan(-1, fetcher=FakeFetcher())
+        second = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         assert [j.params for j in first.jobs] == [j.params for j in second.jobs]
 
     def test_an_event_that_already_has_the_chain_is_not_re_bought(self, patched):
         events = self._events()
         events.loc[events["ticker"] == "T000", "d1_both"] = True
         patched(events)
-        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         assert "T000" not in {t for job in plan.jobs for t in job.tickers}
         assert plan.context["per_offset"]["d1"]["already_have_chain"] == 1
 
     def test_a_cached_request_costs_nothing(self, patched):
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher(cached_keys={"2024-05-07"}))
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(cached_keys={"2024-05-07"}), already_requested=set())
         assert plan.n_calls == 0
         assert plan.skipped_cached == 1
 
     def test_the_budget_truncates_rather_than_overspends(self, patched):
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher(), budget=0, batch=1)
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), budget=0, batch=1, already_requested=set())
         assert plan.n_calls == 0
         assert plan.truncated_at_budget
 
@@ -413,7 +415,7 @@ class TestDecisionPlan:
         """The reason to plan both arms together: one call buys one date for up
         to ten tickers, and the arms' dates only partly overlap."""
         patched(self._events())
-        both = build_t2_plan((-1, -2), fetcher=FakeFetcher())
+        both = build_t2_plan((-1, -2), fetcher=FakeFetcher(), already_requested=set())
         assert {job.trade_date for job in both.jobs} == {"2024-05-07", "2024-05-06"}
         assert both.n_calls == 2
         assert both.context["per_offset"]["d1"]["calls_alone"] == 1
@@ -421,12 +423,12 @@ class TestDecisionPlan:
 
     def test_the_plan_reports_what_staging_would_cost(self, patched):
         patched(self._events())
-        both = build_t2_plan((-1, -2), fetcher=FakeFetcher())
+        both = build_t2_plan((-1, -2), fetcher=FakeFetcher(), already_requested=set())
         assert both.context["calls_if_staged"] >= both.n_calls
 
     def test_no_offsets_is_refused_rather_than_silently_planning_nothing(self):
         with pytest.raises(ValueError, match="at least one decision offset"):
-            build_t2_plan((), fetcher=FakeFetcher())
+            build_t2_plan((), fetcher=FakeFetcher(), already_requested=set())
 
     def test_call_counting_batches_per_date_not_across_dates(self):
         # Eleven pairs spread one-per-date is eleven calls, not two.
@@ -437,8 +439,114 @@ class TestDecisionPlan:
 
     def test_the_dry_run_names_the_coverage_gate_and_the_quota(self, patched):
         patched(self._events())
-        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
         text = sep2026_plan.render_t2_dry_run(plan)
         assert "nothing has been spent" in text
         assert "80%" in text
         assert "--confirm" in text
+
+
+class TestNothingIsRePulled:
+    """The guard the money depends on: never buy a (ticker, date) we hold.
+
+    Three layers, because they see different things. Coverage is content-based
+    and catches anything in the store however it was fetched. Request history is
+    per-pair and survives batch regrouping. `Fetcher.has` is params-based and
+    only recognises an identical call — which is what makes an interrupted run
+    resumable, and is also why it cannot be the only guard.
+    """
+
+    def _events(self, n=4):
+        rows = []
+        for i in range(n):
+            rows.append(
+                {
+                    "event_id": f"T{i:03d}_2024-05-08",
+                    "ticker": f"T{i:03d}",
+                    "event_date": pd.Timestamp("2024-05-08"),
+                    "year": 2024,
+                    "session": "AMC",
+                    "mcap_bucket": ">10B",
+                    "entry_date": pd.Timestamp("2024-05-08"),
+                    "exit_date": pd.Timestamp("2024-05-09"),
+                    "runup_date": pd.Timestamp("2024-04-18"),
+                    "d1_date": pd.Timestamp("2024-05-07"),
+                    "entry_both": True, "exit_both": True, "t14_both": False,
+                    "d1_both": False, "d1_any": False,
+                    "through_print_ready": True,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def test_a_stored_chain_is_never_re_bought(self, patched):
+        events = self._events()
+        events.loc[events["ticker"] == "T000", ["d1_both", "d1_any"]] = True
+        patched(events)
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
+        assert "T000" not in {t for j in plan.jobs for t in j.tickers}
+
+    def test_a_pair_asked_for_before_and_still_empty_is_not_asked_again(self, patched):
+        """ORATS returned nothing for it once. Coverage will keep proposing it
+        forever, because the store will never hold it."""
+        patched(self._events())
+        plan = build_t2_plan(
+            -1, fetcher=FakeFetcher(), already_requested={("T001", "2024-05-07")}
+        )
+        assert "T001" not in {t for j in plan.jobs for t in j.tickers}
+        assert plan.context["skipped_requested_but_empty"] == 1
+
+    def test_one_sided_store_data_is_reported_not_silently_bought(self, patched):
+        """`_both` false but `_any` true means the pair IS in the store. ORATS
+        returns both sides in one row so this should never happen — but if it
+        does, it is quota about to be spent on rows we hold, and it must be
+        visible rather than inferred."""
+        events = self._events()
+        events.loc[events["ticker"] == "T002", "d1_any"] = True
+        patched(events)
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
+        assert plan.context["partial_side_in_store"] == 1
+
+    def test_an_interrupted_run_resumes_free(self, patched):
+        """Re-running before the new files are ingested must compose the same
+        batches, so every completed call is a cache hit rather than a re-buy."""
+        patched(self._events(n=25))
+        first = build_t2_plan(-1, fetcher=FakeFetcher(), already_requested=set())
+        patched(self._events(n=25))
+        done = {j.trade_date for j in first.jobs[:1]}
+        second = build_t2_plan(
+            -1, fetcher=FakeFetcher(cached_keys=done), already_requested=set()
+        )
+        assert [j.params for j in first.jobs] == [
+            j.params for j in first.jobs
+        ]  # deterministic composition
+        assert second.skipped_cached == first.n_calls  # all on the one date
+        assert second.n_calls == 0
+
+    def test_the_dry_run_shows_what_each_guard_skipped(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(
+            -1, fetcher=FakeFetcher(), already_requested={("T001", "2024-05-07")}
+        )
+        text = sep2026_plan.render_t2_dry_run(plan)
+        assert "nothing already held is re-bought" in text
+        assert "asked before, came back empty" in text
+
+    def test_the_request_history_reads_params_not_bodies(self, tmp_path, monkeypatch):
+        """Cheap enough to run on every dry run — sidecars only."""
+        from engine.data import fetch
+
+        class Entry:
+            def __init__(self, params):
+                self.params = params
+
+        monkeypatch.setattr(
+            sep2026_plan, "iter_cached",
+            lambda source, endpoint: [
+                Entry({"ticker": "AAA,BBB", "tradeDate": "2024-05-07", "dte": "1,45"}),
+                Entry({"ticker": "CCC", "tradeDate": "2024-05-08"}),
+                Entry({"ticker": "", "tradeDate": ""}),  # malformed, skipped
+            ],
+        )
+        assert sep2026_plan.requested_pairs() == {
+            ("AAA", "2024-05-07"), ("BBB", "2024-05-07"), ("CCC", "2024-05-08")
+        }

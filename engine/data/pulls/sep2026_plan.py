@@ -49,7 +49,7 @@ import pandas as pd
 
 from engine import paths
 from engine.data import coverage, store
-from engine.data.fetch import Fetcher
+from engine.data.fetch import Fetcher, iter_cached
 from engine.data.throttle import QuotaExhausted, latest_quota
 
 __all__ = ["PullJob", "PullPlan", "build_plan", "build_focus_plan", "build_t2_plan",
@@ -360,6 +360,7 @@ def build_t2_plan(
     budget: int = BUDGET_CALLS,
     fetcher: Fetcher | None = None,
     batch: int = BATCH_T2,
+    already_requested: set[tuple[str, str]] | None = None,
 ) -> PullPlan:
     """The decision-date chains a T−2 STR-THRU book cannot be backtested without.
 
@@ -389,6 +390,21 @@ def build_t2_plan(
     buying a decision date for a fixed, already-replayable event set, and
     dropping the events whose panel row has no market cap would restrict the
     retrain universe for a reason that has nothing to do with the decision date.
+
+    **Nothing already held is re-bought.** Three guards, in order of how much
+    they can see:
+
+    1. *Coverage.* A pair whose chain is in the store is not in the missing set
+       at all. This is content-based, so it holds however the request that
+       fetched it was composed.
+    2. *Request history* (:func:`requested_pairs`, overridable via
+       ``already_requested``). A pair asked for before and returned empty is
+       never re-asked. Per-pair, so it survives batch regrouping.
+    3. *``Fetcher.has``.* An identical request is a free cache hit, which is
+       what makes an interrupted run resumable by re-running it.
+
+    The dry run prints what each one skipped, so "we already have this" is a
+    number you can read rather than a claim you have to trust.
     """
     if isinstance(decision_offsets, int):
         decision_offsets = (decision_offsets,)
@@ -416,6 +432,14 @@ def build_t2_plan(
         for point in ("entry", "exit", *labels)
     }
 
+    if already_requested is None:
+        already_requested = requested_pairs()
+        print(
+            f"  {len(already_requested):,} (ticker, date) pairs have ever been "
+            "requested on hist/strikes",
+            flush=True,
+        )
+
     pairs: set[tuple[str, str]] = set()
     per_offset: dict[str, dict] = {}
     for offset, label in zip(offsets, labels):
@@ -426,10 +450,21 @@ def build_t2_plan(
         arm_pairs = {
             (str(t), str(d)[:10]) for t, d in zip(missing["ticker"], missing[column])
         }
+        # One-sided data would mean the pair IS in the store while `_both` says
+        # it is not. ORATS returns the call and the put in the same row so this
+        # should always be zero; it is reported rather than assumed, because a
+        # non-zero here is quota about to be spent on rows we hold.
+        partial = int((~have & resolvable & replayable[f"{label}_any"]).sum())
+        # Asked for before and still not in the store: ORATS has nothing there,
+        # and asking again buys nothing.
+        empty_before = arm_pairs & already_requested
+        arm_pairs -= empty_before
         pairs |= arm_pairs
         per_offset[label] = {
             "offset": int(offset),
             "already_have_chain": int(have.sum()),
+            "partial_side_in_store": partial,
+            "skipped_requested_but_empty": len(empty_before),
             "unresolvable_date": int((~resolvable).sum()),
             "events_needing_a_pull": int(len(missing)),
             "new_pairs": len(arm_pairs),
@@ -463,6 +498,11 @@ def build_t2_plan(
         "new_pairs": len(pairs),
         "distinct_dates": len(by_date),
         "calls_if_staged": sum(v["calls_alone"] for v in per_offset.values()),
+        "pairs_ever_requested": len(already_requested),
+        "skipped_requested_but_empty": sum(
+            v["skipped_requested_but_empty"] for v in per_offset.values()
+        ),
+        "partial_side_in_store": sum(v["partial_side_in_store"] for v in per_offset.values()),
         "per_offset": per_offset,
     }
     print(
@@ -498,6 +538,36 @@ def build_t2_plan(
     plan.by_purpose["decision"] = added
     print(f"  decision: {added:,} calls planned", flush=True)
     return plan
+
+
+def requested_pairs() -> set[tuple[str, str]]:
+    """Every ``(ticker, tradeDate)`` ever ASKED FOR on ``hist/strikes``.
+
+    Not the same set as what the chain store holds, and the difference is the
+    point: a pair that was requested and came back empty is absent from the
+    store forever, so a coverage-driven plan will keep proposing to buy it on
+    every future run. Measured 2026-09-02 that is 52 pairs of 104,050 (0.05%) —
+    small, but it is the one re-pull the other two guards cannot see.
+
+    ``Fetcher.has`` cannot stand in for this. Its cache key is a hash of the
+    exact request params, so it only recognises a call whose ticker batch was
+    composed identically. After a partial pull is ingested the missing set
+    shrinks, the batches recompose, and those hits are lost — while this set,
+    being per-pair, survives any regrouping.
+
+    Cheap: reads the Tier-1 sidecars, not the bodies (~1s for 21,706 of them).
+    """
+    pairs: set[tuple[str, str]] = set()
+    for entry in iter_cached("orats", "hist/strikes"):
+        params = entry.params
+        trade_date = str(params.get("tradeDate", ""))[:10]
+        if not trade_date:
+            continue
+        for ticker in str(params.get("ticker", "")).split(","):
+            ticker = ticker.strip()
+            if ticker:
+                pairs.add((ticker, trade_date))
+    return pairs
 
 
 def _batched_call_count(pairs: set[tuple[str, str]], batch: int) -> int:
@@ -550,11 +620,21 @@ def render_t2_dry_run(plan: PullPlan) -> str:
         "  coverage now, over those replayable events:",
         *[f"    {k:<6s} {v:.1%}" for k, v in plan.coverage_before.items()],
         "",
+        "  nothing already held is re-bought — what each guard skipped:",
+        f"    1. chain already in the store   : "
+        f"{sum(v.get('already_have_chain', 0) for v in per_offset.values()):,} events",
+        f"       (one-sided, would slip guard 1: "
+        f"{ctx.get('partial_side_in_store', 0):,} — expect 0)",
+        f"    2. asked before, came back empty: "
+        f"{ctx.get('skipped_requested_but_empty', 0):,} pairs "
+        f"(of {ctx.get('pairs_ever_requested', 0):,} ever requested)",
+        f"    3. identical request cached     : {plan.skipped_cached:,} calls",
+        "",
         "  cost:",
-        f"    new (ticker,date)  : {ctx.get('new_pairs', 0):,} pairs",
+        f"    NEW (ticker,date)  : {ctx.get('new_pairs', 0):,} pairs "
+        "— none of these are in the store",
         f"    distinct dates     : {ctx.get('distinct_dates', 0):,}",
         f"    planned calls      : {plan.n_calls:,}",
-        f"    already cached,free: {plan.skipped_cached:,}",
     ]
     staged = ctx.get("calls_if_staged")
     if staged is not None and len(labels) > 1:
