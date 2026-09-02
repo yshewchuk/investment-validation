@@ -14,12 +14,15 @@ from engine.data.pulls import sep2026_plan
 from engine.data.pulls.sep2026_plan import (
     BATCH,
     BATCH_FOCUS,
+    BATCH_T2,
     BUDGET_CALLS,
     DTE_RANGE,
+    DTE_T2,
     PRIORITIES,
     PullJob,
     build_focus_plan,
     build_plan,
+    build_t2_plan,
 )
 
 
@@ -304,3 +307,138 @@ class TestFocusPlan:
         plan = build_focus_plan(["FOC"], budget=2, fetcher=FakeFetcher())
         assert plan.n_calls == 2
         assert plan.truncated_at_budget
+
+
+class TestDecisionPlan:
+    """The T−2 pull: buy the close the trade would be DECIDED on.
+
+    Costs real money — 3,628 calls at the measured 2026-09-02 universe — so the
+    universe rule, the DTE widening and the batch arithmetic are pinned here
+    rather than discovered against the live quota.
+    """
+
+    def _events(self):
+        """Four replayable events plus one that is not, all needing a d1 chain."""
+        rows = []
+        for i in range(4):
+            rows.append(
+                {
+                    "event_id": f"T{i:03d}_2024-05-08",
+                    "ticker": f"T{i:03d}",
+                    "event_date": pd.Timestamp("2024-05-08"),
+                    "year": 2024,
+                    "session": "AMC",
+                    "mcap_bucket": "1-10B" if i % 2 else ">10B",
+                    "entry_date": pd.Timestamp("2024-05-08"),
+                    "exit_date": pd.Timestamp("2024-05-09"),
+                    "runup_date": pd.Timestamp("2024-04-18"),
+                    "d1_date": pd.Timestamp("2024-05-07"),
+                    "d2_date": pd.Timestamp("2024-05-06"),
+                    "entry_both": True,
+                    "exit_both": True,
+                    "t14_both": False,
+                    "d1_both": False,
+                    "d2_both": False,
+                    "through_print_ready": True,
+                }
+            )
+        # Not replayable: no exit chain, so a decision chain buys nothing.
+        rows.append(
+            {
+                **rows[0],
+                "event_id": "NOPE_2024-05-08",
+                "ticker": "NOPE",
+                "exit_both": False,
+                "through_print_ready": False,
+            }
+        )
+        return pd.DataFrame(rows)
+
+    def test_only_replayable_events_are_bought_for(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        bought = {t for job in plan.jobs for t in job.tickers}
+        assert "NOPE" not in bought
+        assert plan.events_targeted == 4
+
+    def test_the_decision_pull_asks_for_one_more_day_of_dte(self, patched):
+        # The traded expiry is a day further out seen from a day earlier, so a
+        # 1,45 window would drop every event whose expiry sat at the ceiling.
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        assert all(job.params["dte"] == DTE_T2 for job in plan.jobs)
+        assert DTE_T2 != DTE_RANGE
+
+    def test_it_buys_the_decision_date_not_the_entry_date(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        assert {job.trade_date for job in plan.jobs} == {"2024-05-07"}
+
+    def test_four_tickers_on_one_date_are_one_call(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        assert plan.n_calls == 1  # 4 tickers, batch of 10
+        assert plan.jobs[0].tickers == ("T000", "T001", "T002", "T003")
+
+    def test_batches_are_composed_in_a_stable_order(self, patched):
+        """The Fetcher caches on exact request params, so a batch built in a
+        different order is a fresh call rather than a cache hit."""
+        patched(self._events())
+        first = build_t2_plan(-1, fetcher=FakeFetcher())
+        patched(self._events())
+        second = build_t2_plan(-1, fetcher=FakeFetcher())
+        assert [j.params for j in first.jobs] == [j.params for j in second.jobs]
+
+    def test_an_event_that_already_has_the_chain_is_not_re_bought(self, patched):
+        events = self._events()
+        events.loc[events["ticker"] == "T000", "d1_both"] = True
+        patched(events)
+        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        assert "T000" not in {t for job in plan.jobs for t in job.tickers}
+        assert plan.context["per_offset"]["d1"]["already_have_chain"] == 1
+
+    def test_a_cached_request_costs_nothing(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(cached_keys={"2024-05-07"}))
+        assert plan.n_calls == 0
+        assert plan.skipped_cached == 1
+
+    def test_the_budget_truncates_rather_than_overspends(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher(), budget=0, batch=1)
+        assert plan.n_calls == 0
+        assert plan.truncated_at_budget
+
+    def test_two_arms_share_batches_instead_of_paying_twice(self, patched):
+        """The reason to plan both arms together: one call buys one date for up
+        to ten tickers, and the arms' dates only partly overlap."""
+        patched(self._events())
+        both = build_t2_plan((-1, -2), fetcher=FakeFetcher())
+        assert {job.trade_date for job in both.jobs} == {"2024-05-07", "2024-05-06"}
+        assert both.n_calls == 2
+        assert both.context["per_offset"]["d1"]["calls_alone"] == 1
+        assert both.context["per_offset"]["d2"]["calls_alone"] == 1
+
+    def test_the_plan_reports_what_staging_would_cost(self, patched):
+        patched(self._events())
+        both = build_t2_plan((-1, -2), fetcher=FakeFetcher())
+        assert both.context["calls_if_staged"] >= both.n_calls
+
+    def test_no_offsets_is_refused_rather_than_silently_planning_nothing(self):
+        with pytest.raises(ValueError, match="at least one decision offset"):
+            build_t2_plan((), fetcher=FakeFetcher())
+
+    def test_call_counting_batches_per_date_not_across_dates(self):
+        # Eleven pairs spread one-per-date is eleven calls, not two.
+        spread = {(f"T{i}", f"2024-05-{i+1:02d}") for i in range(11)}
+        assert sep2026_plan._batched_call_count(spread, 10) == 11
+        stacked = {(f"T{i}", "2024-05-07") for i in range(11)}
+        assert sep2026_plan._batched_call_count(stacked, 10) == 2
+
+    def test_the_dry_run_names_the_coverage_gate_and_the_quota(self, patched):
+        patched(self._events())
+        plan = build_t2_plan(-1, fetcher=FakeFetcher())
+        text = sep2026_plan.render_t2_dry_run(plan)
+        assert "nothing has been spent" in text
+        assert "80%" in text
+        assert "--confirm" in text

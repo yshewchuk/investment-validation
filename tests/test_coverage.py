@@ -67,6 +67,57 @@ class TestEventChainCoverage:
         assert by_ticker["AAA"]
         assert not by_ticker["BBB"]
 
+    def test_no_decision_offsets_leaves_the_frame_alone(self, events, calendar):
+        """Every existing caller passes nothing and must see what it always saw."""
+        index = self._index([])
+        out = coverage.event_chain_coverage(events, index, min_year=2024)
+        assert not [c for c in out.columns if c.startswith("d1_") or c.startswith("d2_")]
+
+    def test_a_decision_offset_steps_back_from_the_entry_close(self, events, calendar):
+        index = self._index([])
+        out = coverage.event_chain_coverage(
+            events, index, min_year=2024, decision_offsets=(-1,)
+        )
+        by_ticker = {
+            t: (e, d) for t, e, d in zip(out["ticker"], out["entry_date"], out["d1_date"])
+        }
+        # AAA is AMC → entry 05-08, decision 05-07.
+        assert by_ticker["AAA"] == (pd.Timestamp("2024-05-08"), pd.Timestamp("2024-05-07"))
+        # BBB is BMO → entry 05-07, decision 05-06. The decision date is
+        # session-dependent because the close it steps back from already is.
+        assert by_ticker["BBB"] == (pd.Timestamp("2024-05-07"), pd.Timestamp("2024-05-06"))
+
+    def test_the_decision_chain_is_measured_on_its_own_date(self, events, calendar):
+        index = self._index(
+            [
+                # AAA has the entry chain but nothing a session earlier.
+                ("AAA", pd.Timestamp("2024-05-08"), "C", 10),
+                ("AAA", pd.Timestamp("2024-05-08"), "P", 10),
+                # BBB has the decision chain but only one side of it.
+                ("BBB", pd.Timestamp("2024-05-06"), "C", 11),
+            ]
+        )
+        out = coverage.event_chain_coverage(
+            events, index, min_year=2024, decision_offsets=(-1,)
+        )
+        rows = out.set_index("ticker")
+        assert rows.loc["AAA", "entry_both"] and not rows.loc["AAA", "d1_both"]
+        assert rows.loc["BBB", "d1_any"] and not rows.loc["BBB", "d1_both"]
+
+    def test_several_offsets_each_get_their_own_block(self, events, calendar):
+        out = coverage.event_chain_coverage(
+            events, self._index([]), min_year=2024, decision_offsets=(-1, -2)
+        )
+        # 05-04 is the Saturday; two business days back from 05-08 is 05-06.
+        assert out.set_index("ticker").loc["AAA", "d2_date"] == pd.Timestamp("2024-05-06")
+        for label in ("d1", "d2"):
+            for suffix in ("date", "call", "put", "any", "both"):
+                assert f"{label}_{suffix}" in out.columns
+
+    def test_a_forward_decision_offset_is_refused(self):
+        with pytest.raises(ValueError, match="steps back"):
+            coverage.decision_label(1)
+
     def test_session_decides_which_dates_are_checked(self, events, calendar):
         # BBB is BMO on 05-08, so its pre-print close is 05-07 and its
         # post-print close is 05-08 — different dates from the AMC name.

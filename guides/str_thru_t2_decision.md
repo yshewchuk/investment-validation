@@ -139,7 +139,53 @@ quota-guarded, resumable, and it distinguishes truncation from genuine absence
 (`sep2026_plan.py:375`). Add a `build_t2_plan(...)` beside `build_plan`; do not
 write a new puller.
 
-Then ingest: `python3 -m engine.data.rebuild --table option_chains`.
+### Step 3 result — the planner agrees with the estimate — **done 2026-09-02**
+
+```
+python3 -m engine.data.pulls.sep2026_plan --t2 --dry-run                     # arm A
+python3 -m engine.data.pulls.sep2026_plan --t2 --dry-run --decision-offset -1 -2
+```
+
+(Space-separated, not `=`: `--decision-offset=-1 -2` leaves the `-2` dangling.)
+
+`build_t2_plan` lives in `engine/data/pulls/sep2026_plan.py`, plans one or
+several arms together, and every number it produced reproduces §3's estimate to
+the call:
+
+| | planner | §3 estimate |
+|---|---|---|
+| replayable events, 2018+ | 26,710 | 26,710 |
+| `D−1` pairs / calls | 26,584 / **3,628** | 26,584 / 3,628 |
+| `D−2` pairs / calls | 26,607 / **3,630** | 26,607 / 3,630 |
+| both arms, planned together | 53,158 / **6,365** | 53,158 / 6,365 |
+
+Existing decision-chain coverage over the replayable set: `D−1` **0.2%** (43
+events), `D−2` **0.1%** (20). Neither arm has anything to build on.
+
+**One thing the estimate did not say: staging is not free.** Pulling the two
+arms in separate runs costs **7,258** calls against **6,365** for one run —
+**+893**, 14% — because a call buys one *date* for up to ten tickers and the two
+arms land on the same 1,643 dates, so each arm separately pays for its own
+half-empty batches. That does not settle the staging question, which §6.3 does;
+it prices it. Arm B's marginal cost is 2,737 if bought with Arm A and 3,630 if
+bought after it.
+
+Both arms together are 47% of the 13,528 spendable calls; Arm A alone is 27%.
+
+The universe rule the planner enforces, which is not the same as `build_plan`'s:
+it buys decision chains only for events that are **already replayable
+end-to-end**. A decision chain on an event with no exit chain buys a trade that
+still cannot be priced. It also defaults to every mcap slice including
+`unknown`, where `build_plan` targets slices — this pull is not closing a
+per-slice coverage gap, and dropping the 58 events whose panel row has no market
+cap would restrict the retrain universe for a reason unrelated to timing.
+
+Staging by year, if the budget ever gets tight: 2023-on is 15,589 of the 26,667
+`D−1` events (58%) and 2020-on is 21,213 (80%).
+
+Then ingest: `python3 -m engine.data.rebuild --table chains`. (The table is
+named `option_chains` in the store; the rebuild flag calls it `chains` —
+`--table option_chains` is rejected by argparse.)
 `n_chains.normalize_fetch_rows` picks the new raw files up with no change, and
 dedupes on the primary key.
 
@@ -517,7 +563,7 @@ served against a `D0` decision date. Register it as
 |---|---|---|---|
 | 1 | ~~Fix the §4 leak; add the regression tests; rebuild Tier 3 with and without the change and confirm the two agree~~ **done 2026-09-02** | no | yes |
 | 2 | ~~Land the `decision_offset` plumbing with `decision_offset=None` everywhere — no behaviour change, full test suite green~~ **done 2026-09-02** | no | yes |
-| 3 | `build_t2_plan --dry-run`, review the call count | no | yes |
+| 3 | ~~`build_t2_plan --dry-run`, review the call count~~ **done 2026-09-02** | no | yes |
 | 4 | Execute the `D−1` pull (~3,628 calls); ingest; run the §3 coverage gate | **yes** | data is kept |
 | 5 | Run §6.3 drift measurement. **Decision point.** | no | yes |
 | 6 | Set `decision_offset=-1` on `straddle_through`; rebuild the T−2 trade set as a distinct variant | no | yes |

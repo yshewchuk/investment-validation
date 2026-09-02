@@ -4,6 +4,12 @@
     python3 -m engine.data.pulls.sep2026_plan --dry-run          # always first
     python3 -m engine.data.pulls.sep2026_plan --confirm          # spends quota
 
+    # the T-2 decision chains (guides/str_thru_t2_decision.md step 3/4):
+    python3 -m engine.data.pulls.sep2026_plan --t2 --dry-run              # arm A
+    python3 -m engine.data.pulls.sep2026_plan --t2 --dry-run \
+        --decision-offset -1 -2                                           # both arms
+    python3 -m engine.data.pulls.sep2026_plan --t2 --confirm
+
 **What the audit says to buy.** Coverage is not uniformly thin — it is thin in
 one specific place. Entry-date chains already cover 48.7% of 2017+ events
 (79–95% inside the target mcap slices), but *exit*-date chains cover only 18.0%.
@@ -44,10 +50,12 @@ import pandas as pd
 from engine import paths
 from engine.data import coverage, store
 from engine.data.fetch import Fetcher
-from engine.data.throttle import QuotaExhausted
+from engine.data.throttle import QuotaExhausted, latest_quota
 
-__all__ = ["PullJob", "PullPlan", "build_plan", "build_focus_plan", "execute",
-           "BATCH", "BATCH_FOCUS", "BUDGET_CALLS", "FIELDS", "LIQUIDITY_FIELDS"]
+__all__ = ["PullJob", "PullPlan", "build_plan", "build_focus_plan", "build_t2_plan",
+           "execute", "render_dry_run", "render_t2_dry_run",
+           "BATCH", "BATCH_FOCUS", "BATCH_T2", "BUDGET_CALLS", "DTE_RANGE", "DTE_T2",
+           "FIELDS", "LIQUIDITY_FIELDS"]
 
 #: Tickers per ``/hist/strikes`` call. Five is the verified-safe batch: ten
 #: tickers on ``/hist/cores`` returned 502 (payload too large for the gateway),
@@ -96,6 +104,20 @@ LIQUIDITY_FIELDS = (
 
 DTE_RANGE = "1,45"
 
+#: The decision pull asks for one more day of DTE than the entry pull does.
+#: The expiry a through-the-print structure trades is the first one that
+#: survives the print; seen from one session earlier that same expiry is one
+#: day further out, so a `1,45` window silently drops every event whose traded
+#: expiry sat at the ceiling. Widening by one costs no extra calls — ORATS
+#: bills per call, not per row.
+DTE_T2 = "1,46"
+
+#: Tickers per call for the decision pull. Ten is the documented `/hist/strikes`
+#: cap, run in production every night by the forward-chain pull, and
+#: :func:`execute` verifies every response and single-ticker retries a
+#: suspect-looking shortfall. Halving the call count halves the cost.
+BATCH_T2 = 10
+
 #: Priority order. Exit chains first: they are the binding constraint on every
 #: through-the-print structure, and entry coverage is already good.
 PRIORITIES = ("exit", "entry", "t14")
@@ -113,15 +135,19 @@ TARGET_BUCKETS = ("1-10B", ">10B", "<1B")
 class PullJob:
     trade_date: str
     tickers: tuple[str, ...]
-    purpose: str  # exit | entry | t14
+    purpose: str  # exit | entry | t14 | focus | decision
     events_unlocked: int = 0
+    #: Per-job, because the decision pull needs a day more (:data:`DTE_T2`).
+    #: The cache key is the exact request params, so this is also what makes a
+    #: `1,46` job a different call from a `1,45` one rather than a cache hit.
+    dte: str = DTE_RANGE
 
     @property
     def params(self) -> dict:
         return {
             "ticker": ",".join(self.tickers),
             "tradeDate": self.trade_date,
-            "dte": DTE_RANGE,
+            "dte": self.dte,
             "fields": FIELDS,
         }
 
@@ -134,13 +160,16 @@ class PullPlan:
     coverage_before: dict = field(default_factory=dict)
     events_targeted: int = 0
     truncated_at_budget: bool = False
+    #: Free-form, plan-specific numbers a renderer wants. Kept out of the
+    #: fields above so the two existing plans serialize exactly as they did.
+    context: dict = field(default_factory=dict)
 
     @property
     def n_calls(self) -> int:
         return len(self.jobs)
 
     def summary(self) -> dict:
-        return {
+        out = {
             "calls": self.n_calls,
             "budget": BUDGET_CALLS,
             "skipped_already_cached": self.skipped_cached,
@@ -149,6 +178,9 @@ class PullPlan:
             "coverage_before": self.coverage_before,
             "truncated_at_budget": self.truncated_at_budget,
         }
+        if self.context:
+            out["context"] = self.context
+        return out
 
 
 # --------------------------------------------------------------------------
@@ -320,6 +352,275 @@ def build_focus_plan(
     return plan
 
 
+def build_t2_plan(
+    decision_offsets: Sequence[int] | int = -1,
+    *,
+    min_year: int = 2018,
+    buckets: tuple[str, ...] | None = None,
+    budget: int = BUDGET_CALLS,
+    fetcher: Fetcher | None = None,
+    batch: int = BATCH_T2,
+) -> PullPlan:
+    """The decision-date chains a T−2 STR-THRU book cannot be backtested without.
+
+    Different question from :func:`build_plan`, which buys the chains that make
+    an event *replayable at all*. This one starts from the events that already
+    are — entry and exit chains both present — and buys the one chain that says
+    what the board would have quoted a session earlier. An event without a
+    decision chain is not a thinner backtest; it is an event the T−2 variant
+    cannot be measured on, so nothing is gained by buying a decision chain for
+    an event that is not replayable in the first place.
+
+    Two deviations from the entry pull, both deliberate:
+
+    - ``dte=1,46`` (:data:`DTE_T2`) — the traded expiry is a day further out
+      seen from a day earlier.
+    - ``batch=10`` (:data:`BATCH_T2`) — the documented cap, halving the cost.
+
+    Several offsets can be planned **together**, and doing so is cheaper than
+    planning them one after another: a call buys one trade date for up to
+    ``batch`` tickers, and the two arms' dates overlap heavily, so their pairs
+    share batches instead of each paying for a half-empty one. Staging is still
+    a legitimate choice — it just is not free, and the dry run prices both.
+
+    ``buckets=None`` means every market-cap slice, ``unknown`` included. That is
+    the right default here and the wrong one for :func:`build_plan`: the entry
+    pull is closing a coverage gap that is measured per slice, while this one is
+    buying a decision date for a fixed, already-replayable event set, and
+    dropping the events whose panel row has no market cap would restrict the
+    retrain universe for a reason that has nothing to do with the decision date.
+    """
+    if isinstance(decision_offsets, int):
+        decision_offsets = (decision_offsets,)
+    offsets = tuple(int(o) for o in decision_offsets)
+    if not offsets:
+        raise ValueError("build_t2_plan needs at least one decision offset")
+    labels = [coverage.decision_label(o) for o in offsets]
+    shown = ", ".join(f"T{o:+d}" for o in offsets)
+    print(f"planning ({shown} decision chains): computing coverage …", flush=True)
+
+    events = coverage.attach_mcap(
+        coverage.event_chain_coverage(min_year=min_year, decision_offsets=offsets)
+    )
+    if buckets is not None:
+        events = events[events["mcap_bucket"].isin(buckets)].copy()
+
+    # The universe is what can actually be replayed end to end today. Anything
+    # else is a decision chain bought for a trade that still cannot be priced.
+    replayable = events[events["through_print_ready"]].copy()
+
+    plan = PullPlan()
+    plan.events_targeted = int(len(replayable))
+    plan.coverage_before = {
+        point: round(float(replayable[f"{point}_both"].mean()), 4) if len(replayable) else 0.0
+        for point in ("entry", "exit", *labels)
+    }
+
+    pairs: set[tuple[str, str]] = set()
+    per_offset: dict[str, dict] = {}
+    for offset, label in zip(offsets, labels):
+        column = f"{label}_date"
+        have = replayable[f"{label}_both"]
+        resolvable = replayable[column].notna()
+        missing = replayable[~have & resolvable]
+        arm_pairs = {
+            (str(t), str(d)[:10]) for t, d in zip(missing["ticker"], missing[column])
+        }
+        pairs |= arm_pairs
+        per_offset[label] = {
+            "offset": int(offset),
+            "already_have_chain": int(have.sum()),
+            "unresolvable_date": int((~resolvable).sum()),
+            "events_needing_a_pull": int(len(missing)),
+            "new_pairs": len(arm_pairs),
+            "distinct_dates": len({d for _, d in arm_pairs}),
+            "calls_alone": _batched_call_count(arm_pairs, batch),
+            "by_year": {
+                int(y): int(n)
+                for y, n in missing["event_date"].dt.year.value_counts().sort_index().items()
+            },
+            "by_bucket": {
+                str(k): int(v) for k, v in missing["mcap_bucket"].value_counts().items()
+            },
+        }
+        print(
+            f"  {label}: {len(missing):,} events to buy, {len(arm_pairs):,} pairs, "
+            f"{per_offset[label]['calls_alone']:,} calls if pulled alone",
+            flush=True,
+        )
+
+    by_date: dict[str, set[str]] = {}
+    for ticker, trade_date in pairs:
+        by_date.setdefault(trade_date, set()).add(ticker)
+
+    plan.context = {
+        "decision_offsets": list(offsets),
+        "labels": labels,
+        "min_year": int(min_year),
+        "dte": DTE_T2,
+        "batch": int(batch),
+        "replayable_events": int(len(replayable)),
+        "new_pairs": len(pairs),
+        "distinct_dates": len(by_date),
+        "calls_if_staged": sum(v["calls_alone"] for v in per_offset.values()),
+        "per_offset": per_offset,
+    }
+    print(
+        f"  {len(replayable):,} replayable events; {len(pairs):,} (ticker, date) "
+        f"pairs to buy on {len(by_date):,} dates",
+        flush=True,
+    )
+
+    fetcher = fetcher or Fetcher()
+    added = 0
+    for trade_date in sorted(by_date):
+        # Sorted, so a re-run composes the same batches. The Fetcher caches on
+        # exact request params, and a batch built in a different order is a
+        # fresh call rather than a cache hit — batch order is money here.
+        tickers = sorted(by_date[trade_date])
+        for start in range(0, len(tickers), batch):
+            chunk = tuple(tickers[start : start + batch])
+            job = PullJob(
+                trade_date=trade_date, tickers=chunk, purpose="decision",
+                events_unlocked=len(chunk), dte=DTE_T2,
+            )
+            if fetcher.has("orats", "hist/strikes", job.params):
+                plan.skipped_cached += 1
+                continue
+            if len(plan.jobs) >= budget:
+                plan.truncated_at_budget = True
+                break
+            plan.jobs.append(job)
+            added += 1
+        if plan.truncated_at_budget:
+            print(f"  budget of {budget:,} reached — plan truncated", flush=True)
+            break
+    plan.by_purpose["decision"] = added
+    print(f"  decision: {added:,} calls planned", flush=True)
+    return plan
+
+
+def _batched_call_count(pairs: set[tuple[str, str]], batch: int) -> int:
+    """Calls one set of (ticker, date) pairs would cost on its own.
+
+    Not `len(pairs) / batch`: a call buys ONE date, so the batching is per date
+    and every date pays for its own remainder.
+    """
+    by_date: dict[str, int] = {}
+    for _, trade_date in pairs:
+        by_date[trade_date] = by_date.get(trade_date, 0) + 1
+    return sum(-(-n // batch) for n in by_date.values())
+
+
+def render_t2_dry_run(plan: PullPlan) -> str:
+    """The decision-pull dry run, with the numbers the go/no-go actually needs."""
+    ctx = plan.context
+    labels = ctx.get("labels", [])
+    per_offset = ctx.get("per_offset", {})
+    quota = latest_quota()
+    remaining = quota.get("remaining")
+    floor = quota.get("floor", 0) or 0
+    spendable = (remaining - floor) if remaining is not None else None
+    replayable = ctx.get("replayable_events", 0)
+    arms = ", ".join(f"T{o:+d}" for o in ctx.get("decision_offsets", []))
+
+    lines = [
+        "",
+        "=" * 68,
+        f"DECISION-CHAIN PULL ({arms}) — DRY RUN (nothing has been spent)",
+        "=" * 68,
+        f"  decision closes      : {arms} sessions relative to the entry close",
+        f"  dte window           : {ctx.get('dte')}  (one wider than the entry pull)",
+        f"  tickers per call     : {ctx.get('batch')}",
+        f"  events from          : {ctx.get('min_year')}",
+        "",
+        "  universe (events replayable end-to-end TODAY — entry and exit both present):",
+        f"    replayable events  : {replayable:,}",
+    ]
+    for label in labels:
+        arm = per_offset.get(label, {})
+        lines += [
+            f"    {label}: have {arm.get('already_have_chain', 0):,}, "
+            f"unresolvable {arm.get('unresolvable_date', 0):,}, "
+            f"to buy {arm.get('events_needing_a_pull', 0):,} events "
+            f"({arm.get('new_pairs', 0):,} pairs on {arm.get('distinct_dates', 0):,} dates)",
+        ]
+    lines += [
+        "",
+        "  coverage now, over those replayable events:",
+        *[f"    {k:<6s} {v:.1%}" for k, v in plan.coverage_before.items()],
+        "",
+        "  cost:",
+        f"    new (ticker,date)  : {ctx.get('new_pairs', 0):,} pairs",
+        f"    distinct dates     : {ctx.get('distinct_dates', 0):,}",
+        f"    planned calls      : {plan.n_calls:,}",
+        f"    already cached,free: {plan.skipped_cached:,}",
+    ]
+    staged = ctx.get("calls_if_staged")
+    if staged is not None and len(labels) > 1:
+        lines += [
+            f"    if pulled one arm at a time: {staged:,} "
+            f"(+{staged - plan.n_calls:,} — the arms share dates, "
+            "so staging pays for half-empty batches twice)",
+        ]
+    lines += [
+        "",
+        "  quota:",
+        f"    remaining          : "
+        + (f"{remaining:,}" if remaining is not None else "unknown")
+        + (f"   (as of {quota.get('ts')})" if quota.get("ts") else ""),
+        f"    live-ops floor     : {floor:,}",
+        "    spendable          : "
+        + (f"{spendable:,}" if spendable is not None else "unknown"),
+    ]
+    if spendable is not None and plan.n_calls:
+        share = 100.0 * plan.n_calls / spendable if spendable > 0 else float("inf")
+        verdict = "FITS" if plan.n_calls <= spendable else "DOES NOT FIT"
+        lines.append(f"    this plan          : {share:.0f}% of spendable — {verdict}")
+
+    for label in labels:
+        by_year = (per_offset.get(label) or {}).get("by_year") or {}
+        if not by_year:
+            continue
+        total = sum(by_year.values())
+        lines += ["", f"  {label}: events still to buy, by year (staging guide):"]
+        running = 0
+        for year in sorted(by_year, reverse=True):
+            running += by_year[year]
+            lines.append(
+                f"    {year}  {by_year[year]:>6,}   "
+                f"({running:>6,} cumulative, {100*running/total:.0f}% from {year} on)"
+            )
+        by_bucket = (per_offset.get(label) or {}).get("by_bucket") or {}
+        if by_bucket:
+            lines += [f"  {label}: by mcap bucket:"]
+            lines += [f"    {k:<8s} {v:>6,}" for k, v in sorted(by_bucket.items())]
+
+    if plan.jobs:
+        lines += [
+            "",
+            "  first 5 calls:",
+            *[
+                f"    {j.trade_date}  {j.purpose:<8s} dte={j.dte}  {','.join(j.tickers)}"
+                for j in plan.jobs[:5]
+            ],
+        ]
+    if plan.truncated_at_budget:
+        lines += ["", "  NOTE: plan truncated at the budget; re-run for the rest."]
+    lines += [
+        "",
+        f"  Coverage gate after ingest: at least 80% of the {replayable:,} replayable",
+        "  events must come back with a usable decision chain. Below that, report the",
+        "  shortfall by year and mcap bucket and STOP — do not retrain on whatever",
+        "  survived (guides/str_thru_t2_decision.md §3).",
+        "",
+        "  To spend: re-run with --confirm",
+        "=" * 68,
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def render_dry_run(plan: PullPlan) -> str:
     lines = [
         "",
@@ -474,6 +775,20 @@ def main(argv: list[str] | None = None) -> int:
         help="focus+hitchhike mode: fetch these names' dates, and let every "
              "ticker that needs the same dates ride along (see build_focus_plan)",
     )
+    ap.add_argument(
+        "--t2", action="store_true",
+        help="decision-chain mode: buy the close a T-2 trade would be DECIDED "
+             "on, for the events that are already replayable end-to-end "
+             "(see build_t2_plan)",
+    )
+    ap.add_argument(
+        "--decision-offset", type=int, nargs="+", default=[-1], metavar="N",
+        help="sessions before the entry close (default -1). Space-separated, "
+             "NOT '=' — `--decision-offset -1 -2` plans both arms; "
+             "`--decision-offset=-1 -2` leaves the -2 dangling and argparse "
+             "rejects it. Arms planned together share date batches, which is "
+             "cheaper than pulling them one at a time.",
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
 
@@ -489,15 +804,28 @@ def main(argv: list[str] | None = None) -> int:
         if bad:
             ap.error(f"unknown bucket labels {bad}; known: {sorted(known)}")
 
-    if args.focus:
+    if args.t2 and args.focus:
+        ap.error("--t2 and --focus are different plans; run one at a time")
+
+    if args.t2:
+        # min_year defaults to 2017 for the entry pull; the replay universe the
+        # T-2 book is measured on starts in 2018.
+        min_year = 2018 if args.min_year == 2017 else args.min_year
+        plan = build_t2_plan(
+            args.decision_offset, min_year=min_year, budget=args.budget,
+            buckets=buckets,  # None = every slice, which is what this pull wants
+        )
+        print(render_t2_dry_run(plan))
+    elif args.focus:
         plan = build_focus_plan(
             args.focus, min_year=args.min_year, budget=args.budget,
             buckets=buckets if buckets is not None else TARGET_BUCKETS,
         )
+        print(render_dry_run(plan))
     else:
         plan = build_plan(min_year=args.min_year, budget=args.budget,
                           buckets=buckets if buckets is not None else TARGET_BUCKETS)
-    print(render_dry_run(plan))
+        print(render_dry_run(plan))
 
     report = {"plan": plan.summary(), "generated_at": datetime.now(timezone.utc).isoformat()}
     if args.confirm:

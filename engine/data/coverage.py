@@ -10,6 +10,12 @@ not merely somewhere near the event:
 ``exit``   a chain on the first post-print close (what through-print structures close on)
 ``t14``    a chain around T−14 (what the run-up structure opens on)
 
+A fourth, on request: ``decision_offsets`` measures whether a chain exists on
+the close a trade would be **decided** on, some number of sessions before the
+entry. Entry coverage cannot answer that, because a structure that decides and
+enters on the same close is exactly the structure whose prediction arrives too
+late to act on. See ``guides/str_thru_t2_decision.md``.
+
 Coverage is reported by year × market-cap bucket, because that is how the plan
 slices the universe, and split call/put because much of the existing cache was
 pulled straddle-centric while CAL-P needs puts.
@@ -21,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from typing import Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -31,6 +39,7 @@ from engine.data import store
 __all__ = [
     "MCAP_BUCKETS",
     "bucket_mcap",
+    "decision_label",
     "event_chain_coverage",
     "coverage_matrix",
     "side_coverage",
@@ -65,18 +74,38 @@ def _log(message: str) -> None:
 # --------------------------------------------------------------------------
 
 
+def decision_label(offset: int) -> str:
+    """Column prefix for a decision offset: ``-1`` → ``d1``.
+
+    One session before the entry close is ``d1``, two is ``d2``. The sign is
+    dropped because a decision offset is only ever backwards — a trade decided
+    after it is placed is not a thing — and ``d-1`` reads like a column name
+    with a minus sign in it.
+    """
+    if offset > 0:
+        raise ValueError(f"a decision offset steps back, got {offset:+d}")
+    return f"d{abs(int(offset))}"
+
+
 def event_chain_coverage(
     events: pd.DataFrame | None = None,
     chains_index: pd.DataFrame | None = None,
     *,
     min_year: int = 2017,
     runup_offset: int = -14,
+    decision_offsets: Sequence[int] = (),
 ) -> pd.DataFrame:
     """One row per event with entry/exit/T−14 chain availability, by side.
 
     ``chains_index`` is the distinct ``(ticker, obs_date, right)`` set of the
     chain store — small enough to hold in memory even though the chain table
     itself is 15M rows.
+
+    ``decision_offsets`` adds one date column and one coverage block per offset,
+    stepping back from the **entry** close (the last pre-print close), so
+    ``(-1, -2)`` gives ``d1_date``/``d1_both`` and ``d2_date``/``d2_both``.
+    Passing nothing leaves the frame exactly as it was, which is what every
+    existing caller gets.
     """
     if events is None:
         events = store.read_table("earnings_events")
@@ -100,8 +129,11 @@ def event_chain_coverage(
     events = events[events["session"].notna()]
     _log(f"events from {min_year}: {len(events):,} with a known session")
 
+    offsets = tuple(int(o) for o in decision_offsets)
+    labels = [decision_label(o) for o in offsets]
     calendar = trading_calendar()
     entry_dates, exit_dates, runup_dates = [], [], []
+    decision_dates: dict[str, list] = {label: [] for label in labels}
     for event_date, session in zip(events["event_date"], events["session"]):
         try:
             window = calendar.resolve_offsets(event_date, session, runup_offset, 1)
@@ -112,9 +144,23 @@ def event_chain_coverage(
             entry_dates.append(pd.NaT)
             exit_dates.append(pd.NaT)
             runup_dates.append(pd.NaT)
+            for label in labels:
+                decision_dates[label].append(pd.NaT)
+            continue
+        for offset, label in zip(offsets, labels):
+            # Stepping back from the entry close, not from the event date: the
+            # entry close is already session-dependent (T−1 for BMO, T−0 for
+            # AMC), and the decision offset composes onto it exactly the way
+            # `TradingCalendar.resolve_offsets` composes it.
+            try:
+                decision_dates[label].append(calendar.shift(window.last_pre_print, offset))
+            except KeyError:
+                decision_dates[label].append(pd.NaT)
     events["entry_date"] = entry_dates
     events["exit_date"] = exit_dates
     events["runup_date"] = runup_dates
+    for label in labels:
+        events[f"{label}_date"] = decision_dates[label]
 
     have = {
         (str(t), pd.Timestamp(d), str(r))
@@ -122,7 +168,9 @@ def event_chain_coverage(
             chains_index["ticker"], chains_index["obs_date"], chains_index["right"]
         )
     }
-    for label, column in (("entry", "entry_date"), ("exit", "exit_date"), ("t14", "runup_date")):
+    blocks = [("entry", "entry_date"), ("exit", "exit_date"), ("t14", "runup_date")]
+    blocks += [(label, f"{label}_date") for label in labels]
+    for label, column in blocks:
         for side, side_name in (("C", "call"), ("P", "put")):
             events[f"{label}_{side_name}"] = [
                 (str(t), pd.Timestamp(d), side) in have if pd.notna(d) else False
