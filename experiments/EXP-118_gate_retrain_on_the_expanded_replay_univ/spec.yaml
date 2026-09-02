@@ -1,0 +1,52 @@
+id: EXP-118
+title: "gate retrain on the expanded replay universe"
+hypothesis: "The STR-THRU and STR-RUNUP mid-fill gates (registry n=11,080 and n=3,041) were walk-forward trained on the pre-expansion replay universe. The trades table now carries 19,190 STR-THRU and 6,607 STR-RUNUP mid-fill engine.replay trades spanning 2018-2026, with ORATS-derived daily-state features backfilled across the span. Retraining the SAME architecture (HistGBM, unchanged hyperparameters), SAME feature list, SAME top-20% threshold rule and first_test_year=2020 on the expanded universe preserves or improves OOS selection quality: gate_lift at or above the incumbent champions (+4.42pp STR-THRU, +3.46pp STR-RUNUP) and gated win rate at or above champions (0.412 STR-THRU, 0.402 STR-RUNUP), measured on the identical 2020-2026 OOS window; 2018-2019 enter as additional training data. An extended window 2018-2026 is pre-registered as secondary. If lift on the comparable window is below the champions, the expanded data did not improve the gates and the champions stand."
+kind: retrain
+role: gate
+strategy: STR-THRU
+programme: gate-refresh
+prior: [EXP-049, EXP-117]
+price_source: engine.replay mid fills (alpha=0.5) over the Tier-2 trades table
+
+primary_spec:
+  arm: str_thru_2020
+  change: >
+    Dataset only. gate_mod.build_dataset + gate_mod.train on the current
+    engine.replay STR-THRU trades (fill_alpha=0.5), identical FEATURES,
+    identical HistGBM hyperparameters, identical top-20% threshold rule,
+    first_test_year=2020. Nothing about the model changes; the universe it
+    learns from is the only variable.
+
+arms:
+  # All four runs are pre-registered before any of them executes. The first
+  # is the headline; the others are secondary and labelled as such.
+  str_thru_2020:  {strategy: STR-THRU,  first_test_year: 2020, status: primary}
+  str_runup_2020: {strategy: STR-RUNUP, first_test_year: 2020, status: secondary (pre-registered co-arm, requested with the primary)}
+  str_thru_2018:  {strategy: STR-THRU,  first_test_year: 2018, status: secondary (extended OOS window)}
+  str_runup_2018: {strategy: STR-RUNUP, first_test_year: 2018, status: secondary (extended OOS window)}
+
+success_criteria:
+  str_thru_2020:
+    gate_lift_at_least: 0.04424042589858676
+    gated_win_rate_at_least: 0.4120036101083033
+    n_complete_above: 11080
+  str_runup_2020:
+    gate_lift_at_least: 0.034636853800143266
+    gated_win_rate_at_least: 0.40229885057471265
+    n_complete_above: 3041
+
+promotion_path: >
+  If an arm clears its criteria, the champion refresh goes through the
+  engine's own registrar (python3 -m engine.models.training.train_all
+  --role gate), which refits on the current data, re-measures, and
+  re-registers with full integrity rules. This experiment is the evidence;
+  train_all is the registrar.
+
+data_snapshot: b885dc346142ba6dc0c0a6412d6a336c3a15c722e1ce69d5b034d1f59f427c64
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+promotion_target: gate_midfill_str_thru
+preregistered_at: "2026-09-02T02:42:49+00:00"
