@@ -397,7 +397,7 @@ class Registry:
 
     def validate(self, *, check_artifacts: bool = True) -> list[str]:
         """Full integrity sweep. Returns a list of problems; empty means clean."""
-        from engine.features import LIVE_UNAVAILABLE
+        from engine.features import LIVE_UNAVAILABLE, QUARANTINED_FEATURES
 
         problems: list[str] = []
         for entry in self.entries:
@@ -406,6 +406,16 @@ class Registry:
                 problems.append(
                     f"{entry.id}: features {unservable} do not exist for an upcoming "
                     "event — the model could never be served live"
+                )
+            # A feature that CAN be served and is WRONG. `or_exern_z252` leaks
+            # the future on 507 stored panel rows; no entry has ever listed it,
+            # and this is what keeps that true.
+            # TODO(2026-Q4): drop with the column.
+            quarantined = sorted(set(entry.features) & set(QUARANTINED_FEATURES))
+            if quarantined:
+                problems.append(
+                    f"{entry.id}: features {quarantined} are quarantined — their "
+                    "stored values are known to be computed wrong"
                 )
             if entry.role == "gate" and entry.champion and entry.threshold is None:
                 problems.append(f"{entry.id}: champion gate carries no threshold")

@@ -50,6 +50,7 @@ __all__ = [
     "SPANS",
     "MIN_HISTORY",
     "ORATS_FEATURES",
+    "ANCHOR_COLUMNS",
     "history_features",
     "build_events",
     "add_regime_features",
@@ -89,6 +90,43 @@ PANEL_COLUMNS = (
     + list(ORATS_FEATURES.values())
     + ["or_exern_z252", "mcap_log", "mcap_usd", "mcap_asof"]
 )
+
+#: Per-block observation dates written by the three market-state builders: the
+#: row each block was actually read at, given whatever ``as_of_column`` the
+#: caller anchored on. They are provenance for the live path's stamps, not
+#: features, and :func:`build_panel` drops them (see there for why).
+ANCHOR_COLUMNS = ("regime_asof", "runup_asof", "orats_asof")
+
+
+def _anchor_index(
+    series_dates: np.ndarray,
+    event_dates: np.ndarray,
+    as_of_dates: np.ndarray | None,
+) -> np.ndarray:
+    """Row index each market block is read at: the earlier of two ceilings.
+
+    **Strictly before the event date** — the panel's rule. For a BMO print that
+    is the last pre-print close exactly; for an AMC print the event-date close
+    would also be admissible, but the legacy panel used the prior close for both
+    and every stored number follows that. It is a modelling choice with its own
+    experiment to justify changing it, so it stays a hard ceiling here.
+
+    **On or before the decision date** — ``daily_state_frame``'s rule, and the
+    right one for an as-of that is a close we would trade at: that close's own
+    quotes are known to us then.
+
+    Taking the ``min`` composes them. A decision at or after the panel's anchor
+    resolves to the panel's anchor, so every existing value is unchanged and the
+    AMC conservatism survives; a decision *earlier* than it resolves to the
+    decision's own row, which is the whole point. Using the decision's ceiling
+    alone would silently push BMO names one session staler than the panel and
+    break the panel/live equivalence check.
+    """
+    event_idx = np.searchsorted(series_dates, event_dates, side="left") - 1
+    if as_of_dates is None:
+        return event_idx
+    as_of_idx = np.searchsorted(series_dates, as_of_dates, side="right") - 1
+    return np.minimum(event_idx, as_of_idx)
 
 
 def _log(message: str) -> None:
@@ -251,8 +289,24 @@ def _gspc_series(path_str: str, mtime: float) -> pd.DataFrame:
     return raw.dropna(subset=["date"]).sort_values("date")
 
 
-def add_regime_features(df: pd.DataFrame, gspc_path: Path | None = None) -> pd.DataFrame:
-    """S&P 500 state as of the last close strictly before each event."""
+def add_regime_features(
+    df: pd.DataFrame,
+    gspc_path: Path | None = None,
+    as_of_column: str = "date",
+) -> pd.DataFrame:
+    """S&P 500 state as of the last close strictly before each ``as_of_column``.
+
+    ``as_of_column`` defaults to ``"date"`` — the event date — which is the
+    panel's own convention and leaves the Tier-3 build byte-identical. A caller
+    scoring a decision taken *earlier* than the last pre-print close must pass
+    the column holding that decision date instead: anchoring on the event date
+    would hand it market state it could not have seen, and because
+    :func:`engine.features._stamps` derives its stamp from the decision date
+    independently of the value, ``assert_causal`` would not catch it.
+
+    The row date actually used is returned in ``regime_asof``, so the stamp can
+    be the observation's own date rather than an assumption about it.
+    """
     gspc_path = Path(gspc_path or paths.GSPC_DAILY)
     raw = _gspc_series(str(gspc_path), gspc_path.stat().st_mtime)
 
@@ -269,11 +323,16 @@ def add_regime_features(df: pd.DataFrame, gspc_path: Path | None = None) -> pd.D
     cols = {c: np.full(n, np.nan) for c in
             ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20")}
 
-    event_dates = out["date"].to_numpy()
-    idx = np.searchsorted(dates, event_dates, side="left") - 1
+    anchor = np.full(n, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
+    idx = _anchor_index(
+        dates,
+        out["date"].to_numpy(),
+        out[as_of_column].to_numpy() if as_of_column != "date" else None,
+    )
     for i, j in enumerate(idx):
         if j < 0 or j >= len(closes):
             continue
+        anchor[i] = dates[j]
         spot = closes[j]
         if j >= 21:
             cols["spy_ret21"][i] = (spot / closes[j - 21] - 1.0) * 100
@@ -287,6 +346,7 @@ def add_regime_features(df: pd.DataFrame, gspc_path: Path | None = None) -> pd.D
             cols["spy_vol20"][i] = simple_ret[j - 20 : j].std(ddof=1) * np.sqrt(252) * 100
     for name, values in cols.items():
         out[name] = values
+    out["regime_asof"] = anchor
     _log(f"regime: {int(np.isfinite(cols['spy_vol20']).sum())}/{n} events with market state")
     return out
 
@@ -330,8 +390,23 @@ def _yf_history_from_tier1(ticker: str) -> pd.DataFrame | None:
     return out if len(out) else None
 
 
-def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataFrame:
-    """Streak, distance-from-extreme, and short-horizon return features."""
+def add_runup_features(
+    df: pd.DataFrame,
+    px_dir: Path | None = None,
+    as_of_column: str = "date",
+) -> pd.DataFrame:
+    """Streak, distance-from-extreme, and short-horizon return features.
+
+    ``signed_streak`` and ``ema12r_abs`` are recursions over *prior events* and
+    do not read a date at all. The price-anchored block — ``dist_high``,
+    ``dist_ema``, ``ret5/10/20`` — is read at the last close strictly before
+    ``as_of_column``; see :func:`add_regime_features` for why that column has to
+    be the decision date and not the event date when the two differ. The close
+    actually used comes back in ``runup_asof``.
+
+    Ordering stays on ``date`` regardless: the streak recursion walks the
+    ticker's events in event order, which is not what ``as_of_column`` means.
+    """
     px_dir = px_dir or paths.RAW_YF
     out = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
@@ -362,6 +437,7 @@ def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataF
 
     for col in ("dist_high", "dist_ema", "ret5", "ret10", "ret20"):
         out[col] = np.nan
+    out["runup_asof"] = np.datetime64("NaT", "ns")
 
     groups = list(out.groupby("ticker", sort=True))
     started = time.time()
@@ -391,10 +467,17 @@ def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataF
         r5 = np.full(size, np.nan)
         r10 = np.full(size, np.nan)
         r20 = np.full(size, np.nan)
-        for j, event_date in enumerate(group["date"].to_numpy()):
-            idx = int(np.searchsorted(pdates, event_date, side="left")) - 1
+        anchor = np.full(size, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
+        row_idx = _anchor_index(
+            pdates,
+            group["date"].to_numpy(),
+            group[as_of_column].to_numpy() if as_of_column != "date" else None,
+        )
+        for j, idx in enumerate(row_idx):
+            idx = int(idx)
             if idx < 0:
                 continue
+            anchor[j] = pdates[idx]
             if idx >= 252 and np.isfinite(high252[idx]) and np.isfinite(ema252[idx]) and ema252[idx] > 0:
                 dist_high[j] = (closes[idx] / high252[idx] - 1.0) * 100
                 dist_ema[j] = (closes[idx] / ema252[idx] - 1.0) * 100
@@ -407,6 +490,7 @@ def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataF
         out.loc[group.index, "ret5"] = r5
         out.loc[group.index, "ret10"] = r10
         out.loc[group.index, "ret20"] = r20
+        out.loc[group.index, "runup_asof"] = anchor
         covered += 1
 
     _log(f"runup: price history found for {covered}/{len(groups)} tickers")
@@ -418,16 +502,28 @@ def add_runup_features(df: pd.DataFrame, px_dir: Path | None = None) -> pd.DataF
 # --------------------------------------------------------------------------
 
 
-def add_orats_features(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> pd.DataFrame:
+def add_orats_features(
+    df: pd.DataFrame,
+    daily: pd.DataFrame | None = None,
+    as_of_column: str = "date",
+) -> pd.DataFrame:
     """Join Tier-2 ``daily_market`` state as of the last row before each event.
 
-    The as-of rule is ``searchsorted(dates, event_date, "left") - 1``: the last
-    EOD row *strictly before* the event date. For a BMO print that is the
-    previous close, which is exactly right. For an AMC print the event-date
-    close is also pre-print and is therefore admissible, but the legacy panel
-    used the prior close for both, so this reproduces that — a deliberate
-    conservatism (never a leak; at worst one session stale on AMC names) that
-    Phase 1 can revisit with the session-aware anchors in ``engine.calendar``.
+    The as-of rule is ``searchsorted(dates, as_of, "left") - 1``: the last EOD
+    row *strictly before* ``as_of_column``, which defaults to the event date.
+    For a BMO print that is the previous close, which is exactly right. For an
+    AMC print the event-date close is also pre-print and is therefore
+    admissible, but the legacy panel used the prior close for both, so this
+    reproduces that — a deliberate conservatism (never a leak; at worst one
+    session stale on AMC names) that Phase 1 can revisit with the session-aware
+    anchors in ``engine.calendar``.
+
+    That conservatism stops being conservative once the decision moves earlier
+    than the last pre-print close: anchoring on the event date then reaches
+    *forward* of the decision. Pass the decision-date column as
+    ``as_of_column`` in that case. The IV row actually used comes back in
+    ``orats_asof``; the market cap keeps its own ``mcap_asof``, because the two
+    series do not share every date.
     """
     if daily is None:
         needed = ["ticker", "date", "mcap_usd", "mcap_log", "src_iv", *ORATS_FEATURES.keys()]
@@ -446,12 +542,20 @@ def add_orats_features(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> p
     # era the raw value came from — the event date is the wrong key for that
     # when an event sits on or just after an era boundary.
     mcap_asof = np.full(n, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
+    orats_asof = np.full(n, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
 
-    positions: dict[str, list[tuple[int, np.datetime64]]] = {}
-    for i, (ticker, event_date) in enumerate(
-        zip(out["ticker"].to_numpy(), out["date"].to_numpy())
+    # Both ceilings travel per row: the event date (the panel's rule) and the
+    # decision date (the caller's). `_anchor_index` composes them per series,
+    # because the IV series and the market-cap series do not share every date.
+    positions: dict[str, list[tuple[int, np.datetime64, np.datetime64]]] = {}
+    for i, (ticker, event_date, as_of_date) in enumerate(
+        zip(
+            out["ticker"].to_numpy(),
+            out["date"].to_numpy(),
+            out[as_of_column].to_numpy(),
+        )
     ):
-        positions.setdefault(ticker, []).append((i, event_date))
+        positions.setdefault(ticker, []).append((i, event_date, as_of_date))
 
     daily = daily.sort_values(["ticker", "date"])
     known_tickers = set(daily["ticker"].unique())
@@ -490,32 +594,74 @@ def add_orats_features(df: pd.DataFrame, daily: pd.DataFrame | None = None) -> p
         mcap_log_vals = group["mcap_log"].to_numpy(dtype=float)[has_mcap]
         mcap_usd_vals = group["mcap_usd"].to_numpy(dtype=float)[has_mcap]
 
-        for i, event_date in positions[ticker]:
-            j = int(np.searchsorted(dates, event_date, side="left")) - 1 if len(dates) else -1
+        rows = positions[ticker]
+        events = np.array([r[1] for r in rows], dtype="datetime64[ns]")
+        as_ofs = None if as_of_column == "date" else np.array(
+            [r[2] for r in rows], dtype="datetime64[ns]"
+        )
+        iv_idx = _anchor_index(dates, events, as_ofs) if len(dates) else np.full(len(rows), -1)
+        mcap_idx = (
+            _anchor_index(mcap_dates, events, as_ofs)
+            if len(mcap_dates)
+            else np.full(len(rows), -1)
+        )
+
+        for pos, (i, event_date, _as_of) in enumerate(rows):
+            j = int(iv_idx[pos])
             if j < 0:
                 no_prior += 1
             else:
+                orats_asof[i] = dates[j]
                 for src_col, panel_col in ORATS_FEATURES.items():
                     targets[panel_col][i] = columns[src_col][j]
+                # z-score of ex-earnings IV against its own trailing 252
+                # sessions, strictly before j — a within-name standardization,
+                # so it cannot leak cross-sectional information from the future.
+                #
+                # LEAK FIXED 2026-09-02. This block used to sit OUTSIDE the
+                # `else`, so it also ran for events with no prior daily row.
+                # There `j == -1`, which makes `exern[j]` the LAST row of the
+                # ticker's series — routinely years AFTER the print — and
+                # `exern[max(0, -253):-1]` the entire history rather than a
+                # trailing window. That is a straight future leak, and it
+                # populated 507 of the 116,432 non-null values (0.44%), spread
+                # over 1989-2025: every event that precedes its own ticker's
+                # ORATS coverage.
+                #
+                # `checks/phase0_migration.py::verify_z252_delta` — the
+                # reference implementation this builder is supposed to
+                # reproduce — has carried `if j < 0: continue` all along, which
+                # is what says this was an oversight rather than a definition.
+                #
+                # No model has ever consumed the column (verified against every
+                # registry entry, champion and retired), so nothing downstream
+                # moves. `engine.features.QUARANTINED_FEATURES` now keeps it out
+                # of the model-input surface so nothing can start.
+                #
+                # TODO(2026-Q4): delete `or_exern_z252` outright — this block,
+                # its `targets` entry, and its name in PANEL_COLUMNS — together
+                # with the KnownDelta and verify_z252_delta in
+                # checks/phase0_migration.py that exist only to reconcile it.
+                # Needs a Tier-3 rebuild, so it wants its own change, not a
+                # ride-along. Until then every panel built before 2026-09-02
+                # still carries the leaked values on those 507 rows.
+                window = exern[max(0, j - 252) : j]
+                window = window[np.isfinite(window)]
+                if len(window) >= 60 and np.isfinite(exern[j]):
+                    std = window.std()
+                    if std > 0:
+                        targets["or_exern_z252"][i] = (exern[j] - window.mean()) / std
             if len(mcap_dates):
-                jm = int(np.searchsorted(mcap_dates, event_date, side="left")) - 1
+                jm = int(mcap_idx[pos])
                 if jm >= 0:
                     targets["mcap_log"][i] = mcap_log_vals[jm]
                     targets["mcap_usd"][i] = mcap_usd_vals[jm]
                     mcap_asof[i] = mcap_dates[jm]
-            # z-score of ex-earnings IV against its own trailing 252 sessions,
-            # strictly before j — a within-name standardization, so it cannot
-            # leak cross-sectional information from the future.
-            window = exern[max(0, j - 252) : j]
-            window = window[np.isfinite(window)]
-            if len(window) >= 60 and np.isfinite(exern[j]):
-                std = window.std()
-                if std > 0:
-                    targets["or_exern_z252"][i] = (exern[j] - window.mean()) / std
 
     for name, values in targets.items():
         out[name] = values
     out["mcap_asof"] = mcap_asof
+    out["orats_asof"] = orats_asof
     coverage = float(np.isfinite(targets["or_implied"]).mean())
     _log(
         f"orats: implied-move coverage {coverage:.3f}; "
@@ -539,6 +685,14 @@ def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     panel = add_runup_features(panel)
     _log("block 4/4 — ORATS state from tier 2")
     panel = add_orats_features(panel, daily=daily)
+
+    # The per-block anchor dates are provenance for a *caller-supplied* as-of,
+    # and the panel's as-of is always the event date, which every row already
+    # carries. Dropping them keeps Tier 3 byte-identical to the pre-`as_of_column`
+    # build — the property that proves this refactor changed no historical
+    # number — and keeps `PANEL_FEATURE_COLUMNS` from acquiring three date
+    # columns that no model can consume.
+    panel = panel.drop(columns=[c for c in ANCHOR_COLUMNS if c in panel.columns])
 
     ordered = [c for c in PANEL_COLUMNS if c in panel.columns]
     extra = [c for c in panel.columns if c not in ordered]

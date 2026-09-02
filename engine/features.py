@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import re
 
@@ -43,7 +43,7 @@ import pandas as pd
 
 from engine import paths
 from engine.audit import FeatureVector, assert_causal, assert_decision_causal
-from engine.calendar import trading_calendar
+from engine.calendar import BMO, trading_calendar
 from engine.data import store
 from engine.data.features import panel as panel_mod
 
@@ -86,9 +86,56 @@ _KEY_COLUMNS = ("ticker", "k", "date", "quarter", "year", "mcap_asof")
 #: registry-load time, so this cannot be rediscovered in production.
 LIVE_UNAVAILABLE = ("implied_move",)
 
+#: Panel columns that are still COMPUTED but must never reach a model.
+#:
+#: ``or_exern_z252`` — until 2026-09-02 the z-score block in
+#: :func:`~engine.data.features.panel.add_orats_features` ran outside the
+#: ``j < 0`` guard, so for an event with no prior daily row it standardized
+#: ``exern[-1]`` — the last row of the ticker's series, routinely years after
+#: the print — against the entire history instead of a trailing window. A
+#: future leak, on 507 of the 116,432 populated values (0.44%), 1989-2025.
+#:
+#: The guard is fixed and those rows are NaN going forward, but **every panel
+#: built before 2026-09-02 still carries the leaked numbers**, and a Tier-3
+#: rebuild is not free. No model has ever listed the column — verified against
+#: every registry entry, champion and retired — so quarantining costs nothing
+#: today and stops it being adopted by accident tomorrow.
+#:
+#: Quarantined rather than deleted because ``checks/phase0_migration.py``
+#: reconciles it against the legacy panel through a ``KnownDelta`` and a
+#: ``verify_z252_delta`` recomputation; deleting the column means retiring that
+#: coverage too. It stays in ``PANEL_COLUMNS`` so the panel's shape and column
+#: order are untouched — only the *read* surface changes.
+#:
+#: TODO(2026-Q4): delete the column and this entry. See the matching TODO in
+#: `add_orats_features`.
+QUARANTINED_FEATURES = ("or_exern_z252",)
+
 
 class UnservableFeature(ValueError):
     """A model asked for a feature that cannot be produced for a live event."""
+
+
+class QuarantinedFeature(ValueError):
+    """A model asked for a feature that is known to be computed wrong."""
+
+
+def assert_not_quarantined(names: Iterable[str], *, label: str = "model") -> None:
+    """Raise if ``names`` contains a feature in :data:`QUARANTINED_FEATURES`.
+
+    The sibling of :func:`assert_live_available`, and a distinct hazard: that
+    one catches a feature that cannot be *served*, this one a feature that can
+    be served and is *wrong*. Enforced at registry-validate time so a model
+    cannot quietly adopt one.
+    """
+    offenders = sorted(set(names) & set(QUARANTINED_FEATURES))
+    if offenders:
+        raise QuarantinedFeature(
+            f"{label}: feature(s) {offenders} are quarantined — the stored "
+            f"values are known to be computed wrong (see "
+            f"engine.features.QUARANTINED_FEATURES). They must not be trained "
+            f"on or served."
+        )
 
 
 def assert_live_available(names: Iterable[str], *, label: str = "model") -> None:
@@ -104,7 +151,9 @@ def assert_live_available(names: Iterable[str], *, label: str = "model") -> None
 PANEL_FEATURE_COLUMNS: tuple[str, ...] = tuple(
     c
     for c in panel_mod.PANEL_COLUMNS
-    if c not in OUTCOME_COLUMNS and c not in _KEY_COLUMNS
+    if c not in OUTCOME_COLUMNS
+    and c not in _KEY_COLUMNS
+    and c not in QUARANTINED_FEATURES
 )
 
 
@@ -303,24 +352,43 @@ class FeatureContext:
 #: features from strictly-earlier events, so both are stamped with the last
 #: pre-print close: that is the latest moment any of them could have been known,
 #: and stamping conservatively (later) is what makes the audit meaningful.
-_MARKET_BLOCK = tuple(panel_mod.ORATS_FEATURES.values()) + (
-    "has_implied_quote",
-    "abs_dist_high",
-    "abs_dist_ema",
-    "or_exern_z252",
-    "mcap_log",
-    "mcap_usd",
-    "spy_ret21",
-    "spy_ret63",
-    "spy_ret252",
-    "spy_dd252",
-    "spy_vol20",
+#:
+#: The market state is not one block but three, each read from its own series at
+#: its own row: the S&P daily file, the ticker's own closes, and Tier-2
+#: ``daily_market``. They are stamped separately because they resolve to
+#: different dates — a name with a gap in its ORATS coverage gets an older
+#: ``orats_asof`` than its ``runup_asof``, and collapsing the two to one date
+#: would stamp the staler block later than it was actually observed. Which is
+#: exactly the direction that hides a leak.
+_REGIME_BLOCK = ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20")
+
+_RUNUP_BLOCK = (
     "dist_high",
     "dist_ema",
     "ret5",
     "ret10",
     "ret20",
+    "abs_dist_high",
+    "abs_dist_ema",
 )
+
+#: `or_exern_z252` is deliberately absent: it is quarantined
+#: (:data:`QUARANTINED_FEATURES`), so it never reaches a feature vector and has
+#: nothing to stamp. TODO(2026-Q4): nothing to do here when the column goes.
+_ORATS_BLOCK = tuple(panel_mod.ORATS_FEATURES.values()) + (
+    "has_implied_quote",
+    "mcap_log",
+    "mcap_usd",
+)
+
+_MARKET_BLOCK = _REGIME_BLOCK + _RUNUP_BLOCK + _ORATS_BLOCK
+
+#: Feature name → the ``panel`` anchor column whose date it was observed at.
+_BLOCK_ANCHOR: dict[str, str] = {
+    **{name: "regime_asof" for name in _REGIME_BLOCK},
+    **{name: "runup_asof" for name in _RUNUP_BLOCK},
+    **{name: "orats_asof" for name in _ORATS_BLOCK},
+}
 
 
 def _stamps(
@@ -328,32 +396,39 @@ def _stamps(
     as_of: pd.Timestamp,
     *,
     history_date: pd.Timestamp | None = None,
-    market_date: pd.Timestamp | None = None,
+    market_dates: Mapping[str, pd.Timestamp] | None = None,
 ) -> dict[str, pd.Timestamp]:
     """Stamp each feature at the date its information was actually observed.
-
-    Three blocks, three stamps:
 
     - **Event-history features** (:data:`EVENT_HISTORY_FEATURES`) are computed
       from the ticker's strictly-earlier events, so they are observed at the
       last prior event's date (``history_date``). Stamping them there makes the
       audit substantive: a history feature built from the current or a future
       event fails ``assert_causal`` instead of passing a tautology.
-    - **Market/ORATS block** (:data:`_MARKET_BLOCK`) is read at the last daily
-      row on or before the decision close, so it is stamped at that row's date
-      (``market_date``) when the caller knows it.
+    - **Market state** is three blocks over three series, and ``market_dates``
+      maps each block's anchor column (:data:`~engine.data.features.panel.ANCHOR_COLUMNS`)
+      to the row date that block was actually read at.
     - Anything else falls back to the decision close — the honest upper bound.
 
-    Callers that cannot know a block's true date pass ``None`` for it and get
-    the upper-bound stamp; the panel path does this for the market block (the
-    panel row does not record which daily row built it), and says so.
+    Callers that cannot know a block's true date omit it and get the
+    upper-bound stamp; the panel path does this (the panel row does not record
+    which daily row built it), and says so.
+
+    **The stamp must come from the value's own provenance, never from
+    ``as_of``.** Deriving it from the decision date instead is how a leak
+    survives an audit designed to catch it: the builder anchors on the event
+    date, the stamp says the decision date, ``assert_causal`` compares stamps
+    to ``as_of``, and a session of hindsight passes clean. That was the live
+    path's behaviour before this signature changed.
     """
+    anchors = dict(market_dates or {})
     out: dict[str, pd.Timestamp] = {}
     for name in names:
+        block = _BLOCK_ANCHOR.get(name)
         if history_date is not None and name in EVENT_HISTORY_FEATURES:
             out[name] = history_date
-        elif market_date is not None and name in _MARKET_BLOCK:
-            out[name] = market_date
+        elif block is not None and anchors.get(block) is not None:
+            out[name] = anchors[block]
         else:
             out[name] = as_of
     return out
@@ -396,6 +471,28 @@ def panel_features(
         for name in PANEL_FEATURE_COLUMNS
         if name in row.index
     }
+
+    # The panel's market state is read at the last daily row STRICTLY BEFORE the
+    # event date — one fixed anchor per row, baked in at build time. A caller
+    # asking for an earlier decision date cannot be served from it: the values
+    # would be up to a session ahead of the decision, and since the panel row
+    # does not record which daily row produced them, nothing downstream could
+    # notice. Withhold the block instead, so a model that needs it reports
+    # MISSING_FEATURES and declines — the same refusal STR-RUNUP already gets.
+    #
+    # `last_pre_print(event_date, BMO)` IS that anchor bound: the panel used the
+    # strictly-before rule for both sessions, which is the BMO rule.
+    cal = ctx.calendar or trading_calendar()
+    try:
+        panel_anchor = cal.last_pre_print(event_date, BMO)
+    except (KeyError, ValueError):  # event outside the calendar's range
+        panel_anchor = None
+    market_stale = panel_anchor is not None and as_of < panel_anchor
+    if market_stale:
+        for name in _MARKET_BLOCK:
+            if name in values:
+                values[name] = float("nan")
+
     # Event-history features were observed at the last prior event; the market
     # block's true daily row is not recorded on the panel row, so it keeps the
     # decision-close upper bound (documented in _stamps).
@@ -414,6 +511,7 @@ def panel_features(
             "source": "panel",
             "k": int(row["k"]),
             "mcap_asof": row.get("mcap_asof"),
+            "market_block_withheld": bool(market_stale),
         },
     )
     assert_causal(vector)
@@ -543,10 +641,24 @@ def live_features(
         [prior, pd.DataFrame([synthetic])], ignore_index=True
     ).sort_values("date").reset_index(drop=True)
 
-    frame = panel_mod.add_regime_features(frame)
-    frame = panel_mod.add_runup_features(frame)
+    # Anchor every market-state block on the DECISION date, not the event date.
+    # The builders default to `date` because that is the panel's convention, and
+    # for a decision taken at the last pre-print close the two agree on BMO
+    # names — which is why this was invisible. Move the decision one session
+    # earlier and the event-date anchor reaches forward of it.
+    #
+    # Only the synthetic row is read out below, so the prior rows keep their own
+    # event date and stay exactly what the panel path would have produced. No
+    # block has a cross-row date dependency: `signed_streak` and `ema12r_abs`
+    # recur over prior events without reading a date, and `or_exern_z252` walks
+    # the daily series, not the frame.
+    frame["_as_of"] = frame["date"]
+    frame.loc[frame["date"] == event_date, "_as_of"] = as_of
+
+    frame = panel_mod.add_regime_features(frame, as_of_column="_as_of")
+    frame = panel_mod.add_runup_features(frame, as_of_column="_as_of")
     daily = ctx.ticker_daily(ticker) if ctx.daily is not None else None
-    frame = panel_mod.add_orats_features(frame, daily=daily)
+    frame = panel_mod.add_orats_features(frame, daily=daily, as_of_column="_as_of")
     # The same derivation `load_panel` applies on read. Without it here the
     # live path would silently omit these and every forward row would report
     # MISSING_FEATURES for a model that lists them — the panel path would serve
@@ -563,24 +675,27 @@ def live_features(
     }
     # True observation dates, not the decision-close upper bound:
     # - event-history features were fixed at the last prior event;
-    # - the market/ORATS block is read from the last daily row on or before
-    #   as_of, so that row's date is when it was actually observable.
+    # - each market block is stamped at the row the BUILDER actually read,
+    #   reported back on the frame as `regime_asof` / `runup_asof` /
+    #   `orats_asof`. Recomputing the date here from `as_of` — which is what
+    #   this did — asserts the anchor rather than observing it, and passes
+    #   whether or not the builder honoured it.
     # (`implied_move` is the oquants quoted implied move for this event, which
     # the panel carries but which does not exist for an unrealized one.
     # `or_implied` — ORATS, from daily_market at the last pre-print close — is
     # the live equivalent and is present, so model feature lists use it.)
     history_date = pd.Timestamp(prior.iloc[-1]["date"]).normalize()
-    market_date = None
-    if daily is not None and len(daily):
-        on_or_before = daily.loc[daily["date"] <= as_of, "date"]
-        if len(on_or_before):
-            market_date = pd.Timestamp(on_or_before.max()).normalize()
+    market_dates = {
+        column: pd.Timestamp(row[column]).normalize()
+        for column in panel_mod.ANCHOR_COLUMNS
+        if column in row.index and pd.notna(row[column])
+    }
     vector = FeatureVector(
         ticker=ticker,
         as_of=as_of,
         values=values,
         feature_as_of=_stamps(
-            values, as_of, history_date=history_date, market_date=market_date
+            values, as_of, history_date=history_date, market_dates=market_dates
         ),
         event_date=event_date,
         session=session,

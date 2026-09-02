@@ -159,7 +159,13 @@ MIN_QUOTED_IMPLIED_MOVE = 1.0
 #: the decision is taken at that close; see ``Scorer._features``.
 _PANEL_MARKET_BLOCK = (
     "or_implied", "or_skewing", "or_contango", "or_rvol30", "or_exern30",
-    "or_iv30", "or_iee", "or_fwd90_30", "or_fexern90_30", "or_exern_z252",
+    # `or_exern_z252` was here and is deliberately gone: it is quarantined
+    # (engine.features.QUARANTINED_FEATURES) because the stored values leak the
+    # future on 507 panel rows. It was never consumed — `model_inputs` is built
+    # from the champion's own feature list, not from this one — so copying it
+    # into the feature frame only made it available to be adopted by mistake.
+    # TODO(2026-Q4): no action here when the column is deleted.
+    "or_iv30", "or_iee", "or_fwd90_30", "or_fexern90_30",
     "mcap_log", "mcap_usd", "spy_ret21", "spy_ret63", "spy_ret252",
     "spy_dd252", "spy_vol20", "dist_high", "dist_ema", "ret5", "ret10", "ret20",
     "abs_dist_high", "abs_dist_ema", "has_implied_quote",
