@@ -80,8 +80,22 @@ def reconstruct_request(row: dict):
         as_of=None,
         event_date=pd.Timestamp(row["event_date"]),
         session=row.get("session"),
-        strike=float(row["strike"]) if offset is not None and row.get("strike") is not None else None,
+        # `requested_strike` first: `strike` is what RESOLVED, and a ladder row
+        # that failed to resolve has none — reconstructing it from `strike`
+        # alone silently turns it back into an ATM request.
+        strike=(
+            float(row["requested_strike"])
+            if row.get("requested_strike") is not None
+            else (float(row["strike"]) if offset is not None and row.get("strike") is not None else None)
+        ),
         fill=FillModel(float(row.get("fill", 0.5))),
+        # Part of the request, so part of what has to be reproduced. A row
+        # priced off an older chain re-scores to NO_CHAIN without it, and the
+        # digest would flag every forward row as a mismatch.
+        quote_max_age_sessions=(
+            int(row["quote_max_age_sessions"])
+            if row.get("quote_max_age_sessions") is not None else None
+        ),
     )
 
 

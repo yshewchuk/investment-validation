@@ -596,6 +596,16 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
                 session=None if pd.isna(session) else str(session),
                 strike=float(spot) * (1 + offset),
                 fill=FillModel(float(record.get("fill", 0.5))),
+                # Same quote bound as the board row this ladder steps off. A
+                # ladder priced under a stricter rule than its own ATM anchor is
+                # not a view of the same decision, and the selfcheck cannot
+                # reconstruct it: a ladder row that fails to price has a null
+                # strike, so its row_id collapses to "atm" and it becomes
+                # indistinguishable from the base row.
+                quote_max_age_sessions=(
+                    int(record["quote_max_age_sessions"])
+                    if record.get("quote_max_age_sessions") is not None else None
+                ),
             )
             try:
                 result = scorer.score(request)

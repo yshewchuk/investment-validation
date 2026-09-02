@@ -189,7 +189,7 @@ def plan_events(
 
 _CHAIN_COLUMNS = (
     "ticker", "obs_date", "expiry", "dte", "strike", "right",
-    "bid", "ask", "spot", "quote_repaired",
+    "bid", "ask", "delta", "spot", "quote_repaired",
 )
 
 
@@ -424,6 +424,8 @@ def replay_one(
     # book a different strategy rather than the same one decided sooner.
     decision_pin = None
     quoted_cost = float("nan")
+    spot_decision = float("nan")
+    dte_decision = None
     if structure.decided_early:
         decision_rows = _clean(decision_rows)
         if decision_rows.empty:
@@ -441,6 +443,12 @@ def replay_one(
             return [], "structure_unresolved"
         decision_pin = quoted.legs
         quoted_cost = quoted.cost
+        spot_decision = quoted.spot
+        # DTE seen from the decision close. `dte_entry` is the gate's dominant
+        # feature (EXP-114, -0.353), and at the decision it is `dte_entry + 1`
+        # by construction — leaving the gate reading the entry value would be a
+        # one-day leak in the feature it leans on hardest.
+        dte_decision = int(quoted.legs[0].dte)
 
     rows: list[dict] = []
     pinned = decision_pin
@@ -488,6 +496,8 @@ def replay_one(
                 #: NaN when the decision is the entry, where the two are the
                 #: same number by construction.
                 "quoted_cost": quoted_cost,
+                "spot_decision": spot_decision,
+                "dte_decision": dte_decision,
                 "entry_cost": result["cost"],
                 "exit_value": result["exit_value"],
                 "pnl": result["pnl"],
@@ -672,7 +682,7 @@ def _empty_trades() -> pd.DataFrame:
     columns = [
         "strategy", "variant", "event_id", "ticker", "event_date", "session",
         "decision_date", "entry_date", "exit_date", "fill_alpha",
-        "quoted_cost", "entry_cost", "exit_value",
+        "quoted_cost", "spot_decision", "dte_decision", "entry_cost", "exit_value",
         "pnl", "ret", "spot_entry", "spot_exit", "strike", "expiry",
         "dte_entry", "n_legs", "wide_market", "quote_repaired", "legs",
     ]

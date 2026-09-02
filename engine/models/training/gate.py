@@ -87,21 +87,43 @@ def build_dataset(
     rows["event_date"] = pd.to_datetime(rows["event_date"])
     rows["entry_date"] = pd.to_datetime(rows["entry_date"])
     rows["year"] = rows["event_date"].dt.year
+
+    # A book decided before it is entered is scored on what it EARNED at the
+    # entry (TARGET stays `ret`, the realized return on the D0 fill) but may
+    # only see what was knowable at the decision. That asymmetry is the whole
+    # point: the gate learns to select a session early and is graded on what
+    # the trade actually made. See guides/str_thru_t2_decision.md §5.5.
+    decided_early = (
+        "decision_date" in rows.columns
+        and rows["decision_date"].notna().any()
+        and (pd.to_datetime(rows["decision_date"]) < rows["entry_date"]).any()
+    )
+    if decided_early:
+        rows["decision_date"] = pd.to_datetime(rows["decision_date"])
     # Spot and DTE live in the `legs` blob, not in the Tier-2 columns. Read them
     # back through the replay's own helper so the gate's premium feature is
     # quoted against the spot the trade was actually priced at.
     if "spot_entry" not in rows.columns or "dte_entry" not in rows.columns:
         rows["spot_entry"], rows["dte_entry"] = legs_spot_dte(rows)
 
-    frame = entry_feature_frame(rows, panel=panel, daily=daily, as_of_column="entry_date")
+    as_of_column = "decision_date" if decided_early else "entry_date"
+    frame = entry_feature_frame(rows, panel=panel, daily=daily, as_of_column=as_of_column)
+
     # The premium as a share of spot: a straddle costing 12% of spot is a
-    # different proposition from one costing 3%, and it is known at entry.
+    # different proposition from one costing 3%. For a book decided early it is
+    # the QUOTED premium against the DECISION close's spot — the entry cost is
+    # not knowable when the call is made, and using it would leak the fill.
+    cost = frame["quoted_cost"] if decided_early else frame["entry_cost"]
+    spot = frame["spot_decision"] if decided_early else frame["spot_entry"]
     frame["entry_cost_pct"] = (
-        pd.to_numeric(frame["entry_cost"], errors="coerce")
-        / pd.to_numeric(frame["spot_entry"], errors="coerce") * 100.0
+        pd.to_numeric(cost, errors="coerce")
+        / pd.to_numeric(spot, errors="coerce") * 100.0
     )
-    frame["dte_entry"] = pd.to_numeric(frame["dte_entry"], errors="coerce")
-    log(f"gate dataset: {len(frame):,} trades at alpha={alpha}")
+    if decided_early:
+        frame["dte_entry"] = pd.to_numeric(frame["dte_decision"], errors="coerce")
+    else:
+        frame["dte_entry"] = pd.to_numeric(frame["dte_entry"], errors="coerce")
+    log(f"gate dataset: {len(frame):,} trades at alpha={alpha}, as_of={as_of_column}")
     return frame
 
 

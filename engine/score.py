@@ -193,6 +193,11 @@ class ScoreRequest:
     #: the entry close". Opt-in per request so the nightly's champion path is
     #: untouched while the T−2 variant is still unvalidated.
     decision_offset: int | None = None
+    #: Price a not-yet-tradeable entry on the newest chain within this many
+    #: SESSIONS of the decision, instead of returning NO_CHAIN. This is what
+    #: lets the board show a trade several days out. `None` keeps the strict
+    #: behaviour: no chain for the entry date, no price.
+    quote_max_age_sessions: int | None = None
 
     def key(self) -> str:
         """Stable identity, for the deterministic bootstrap seed."""
@@ -206,6 +211,7 @@ class ScoreRequest:
             f"{self.fill.alpha:.4f}",
             self.variant or "",
             "" if self.decision_offset is None else f"d{self.decision_offset:+d}",
+            "" if self.quote_max_age_sessions is None else f"q{self.quote_max_age_sessions}",
         ]
         return "|".join(parts)
 
@@ -255,6 +261,21 @@ class ScoreResult:
     #: not the fill. Say so on the board; see guides/str_thru_t2_decision.md §6.3
     #: for the measured drift between the two.
     quote_date: pd.Timestamp | None = None
+    #: Sessions between `quote_date` and `entry_date`. 0 is a contemporaneous
+    #: quote; anything above it is an estimate whose staleness the board must
+    #: show, because the fill will be at the entry close, not this one.
+    quote_age_sessions: int | None = None
+    #: The bound the quote fallback ran under. Recorded because it is part of
+    #: HOW this row was produced: without it the row cannot be re-scored, and a
+    #: digest over a request you cannot reconstruct proves nothing. The nightly
+    #: selfcheck reads it straight back out.
+    quote_max_age_sessions: int | None = None
+    #: The strike the CALLER asked for, as distinct from `strike`, which is what
+    #: resolved against the chain. They differ exactly when resolution failed —
+    #: and that is the case the record has to survive: without it a failed
+    #: strike-ladder row is indistinguishable from an ATM row, and re-scoring it
+    #: silently produces a different trade.
+    requested_strike: float | None = None
     spot: float | None = None
     dte_entry: int | None = None
     fill_alpha: float = 0.5
@@ -498,6 +519,9 @@ class Scorer:
 
         event_date, session = self._resolve_event(request)
         result.event_date, result.session = event_date, session
+        result.requested_strike = (
+            float(request.strike) if request.strike is not None else None
+        )
         structure = self._structure(request)
 
         window = self.calendar.resolve_offsets(
@@ -669,6 +693,7 @@ class Scorer:
         the entry rather than the fill, and must be labelled that way wherever
         it is shown.
         """
+        result.quote_max_age_sessions = request.quote_max_age_sessions
         result.quote_date = result.quote_date or result.entry_date
         if structure.decided_early:
             window = self.calendar.resolve_offsets(
@@ -684,6 +709,40 @@ class Scorer:
                 progress_every=0,
             )
         rows = index.get(request.ticker, result.quote_date)
+        if (rows is None or rows.empty) and request.quote_max_age_sessions is not None:
+            # An UPCOMING entry has no chain and never will until that session
+            # closes, which is what leaves a forward board unpriced. The newest
+            # chain we hold is strictly OLDER information, so it cannot leak.
+            #
+            # Substituting one was previously rejected outright, and that was
+            # right at the time: the cache was event-centric, so a name's newest
+            # chain came from its LAST print — a 93-day median, a different
+            # quarter's surface, expiries that do not span the coming event. The
+            # nightly now pulls a fresh chain for every board name, so the
+            # substitute is usually one session old. The AGE BOUND is what makes
+            # the difference, and it is not optional: past it, we go back to
+            # refusing rather than quoting fiction.
+            fallback, age = self._fresh_quote_date(
+                request, result, int(request.quote_max_age_sessions)
+            )
+            if fallback is not None:
+                candidate = index.get(request.ticker, fallback)
+                if (candidate is None or candidate.empty) and chain_index is None:
+                    # We own this index, and it was built before the fallback
+                    # date was known — so the key it needs is simply not in it.
+                    # A caller-supplied index (the board) pre-loads these; a
+                    # one-off `score()` has to fetch on demand, and without this
+                    # the same row prices on the board and returns NO_CHAIN when
+                    # the nightly selfcheck re-scores it.
+                    extra = load_chain_index(
+                        [(request.ticker, fallback)], progress_every=0
+                    )
+                    candidate = extra.get(request.ticker, fallback)
+                if candidate is not None and not candidate.empty:
+                    rows = candidate
+                    result.quote_date = fallback
+                    result.quote_age_sessions = age
+                    result.flag("STALE_QUOTE")
         if rows is None or rows.empty:
             result.flag("NO_CHAIN")
             self._note_chain_age(request, result)
@@ -735,6 +794,35 @@ class Scorer:
         result.extrapolated = moneyness > ATM_TOLERANCE_PCT
         if result.extrapolated:
             result.flag("EXTRAPOLATED")
+
+    def _fresh_quote_date(self, request, result, max_age: int):
+        """Newest chain for this name within ``max_age`` SESSIONS of the entry.
+
+        Sessions, not calendar days: a Monday entry quoted on the preceding
+        Friday is one session stale, and counting it as three would refuse a
+        board every weekend.
+        """
+        from engine.replay import latest_chain_date
+
+        anchor = result.quote_date or result.entry_date
+        if anchor is None:
+            return None, None
+        try:
+            newest = latest_chain_date(request.ticker, anchor)
+        except Exception:  # a board must not die on a diagnostic
+            return None, None
+        if newest is None:
+            return None, None
+        newest = pd.Timestamp(newest).normalize()
+        try:
+            age = self.calendar.index_of(anchor, side="prev") - self.calendar.index_of(
+                newest, side="prev"
+            )
+        except (KeyError, ValueError):
+            return None, None
+        if age < 0 or age > max_age:
+            return None, None
+        return newest, int(age)
 
     def _note_chain_age(self, request, result) -> None:
         """Record how old the newest chain for this ticker is. Never prices off it.
@@ -1251,6 +1339,7 @@ def score_calendar(
     tickers: Iterable[str] | None = None,
     progress_every: int = 50,
     alt_strikes: int = 0,
+    quote_max_age_sessions: int | None = 5,
 ) -> pd.DataFrame:
     """Score every confirmed event in the next ``horizon_days`` × every strategy.
 
@@ -1292,6 +1381,19 @@ def score_calendar(
             continue
         plan = plan_events(STRUCTURES[strategy](), events, calendar=engine.calendar)
         keys |= plan.chain_keys
+    if quote_max_age_sessions is not None:
+        # Every row whose entry has not happened is priced off the newest chain
+        # we hold, so those have to be in the index too — otherwise the board
+        # falls back to a chain it never loaded and reports NO_CHAIN anyway.
+        from engine.replay import latest_chain_date
+
+        for ticker in events["ticker"].astype(str).unique():
+            try:
+                newest = latest_chain_date(ticker, as_of)
+            except Exception:
+                continue
+            if newest is not None:
+                keys.add((ticker, pd.Timestamp(newest).normalize()))
     index = load_chain_index(keys, progress_every=0) if keys else ChainIndex({})
 
     #: Alternative strikes are offered as fractions of spot either side of ATM.
@@ -1320,6 +1422,7 @@ def score_calendar(
                     session=str(event.session),
                     strike=strike,
                     fill=fill,
+                    quote_max_age_sessions=quote_max_age_sessions,
                 )
                 try:
                     result = engine.score(request, chain_index=index)

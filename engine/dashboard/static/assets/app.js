@@ -505,8 +505,17 @@ function renderRowDetail(r, detailEl) {
 
   detailEl.innerHTML =
     "<h3>" + esc(r.strategy) + " — " + esc(r.ticker) + " " + esc(r.event_date || "")
-    + " · strike " + (r.strike === null || r.strike === undefined ? "ATM" : fmt(r.strike, 2))
+    // Strike is deliberately NOT shown. Naming a strike from an older close is
+    // where the whole quote/fill gap comes from: 34% of the time spot moves
+    // enough overnight to shift the ATM strike, and buying yesterday's strike
+    // costs 0.86% on those. Resolve ATM when the order is placed instead.
     + " · expiry " + esc(r.expiry || "–") + " (DTE " + (r.dte_entry === null ? "–" : r.dte_entry) + ")</h3>"
+    + '<div class="badge">trade on <b>' + esc(r.entry_date || "–") + "</b>"
+    + (r.quote_age_sessions ? " · premium quoted at the " + esc(r.quote_date || "–")
+        + " close, <b>" + r.quote_age_sessions + " session"
+        + (r.quote_age_sessions === 1 ? "" : "s") + " before</b> your fill"
+      : " · premium quoted at that close")
+    + " · buy whatever is ATM when you place the order</div>"
     + '<div class="detail-grid">'
     + layer("Model layer", r.exp_pnl_model, r.win_model, modelExtra)
     + layer("Analog layer", r.exp_pnl_analog, r.win_analog, analogExtra)

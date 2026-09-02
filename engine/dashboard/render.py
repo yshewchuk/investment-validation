@@ -71,6 +71,11 @@ BOARD_MAX_BYTES = 1_200_000
 _BOARD_FIELDS = (
     "row_id", "ticker", "strategy", "event_date", "session",
     "entry_date", "exit_date", "strike", "strike_offset", "expiry",
+    # `quote_date` / `quote_age_sessions`: which close the premium came from,
+    # and how many sessions before the entry that was. A row several days out is
+    # priced on the newest chain we hold, and the board has to say so — the fill
+    # is at the entry close, not this one.
+    "quote_date", "quote_age_sessions", "quote_max_age_sessions", "requested_strike",
     "dte_entry", "spot", "entry_cost", "entry_cost_pct",
     "model_fair_pct", "premium_vs_fair",
     "exp_pnl_model", "win_model", "model_p10", "model_p90",
