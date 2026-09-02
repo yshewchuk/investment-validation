@@ -42,6 +42,21 @@ th {
 }
 th[data-sort] { cursor: pointer; user-select: none; }
 th[data-sort]:hover { color: var(--fg); }
+/* Group labels above the column headers: the board's hierarchy in one
+   glance — trade, signal, cost, decision, forecast, evidence. */
+tr.grouprow th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--dim); border-bottom: none; padding-bottom: 2px;
+}
+tr.grouprow th.g-decision { color: var(--green); }
+tr.grouprow th.g-forecast { color: var(--blue); }
+tr.grouprow th.g-evidence { color: #bc8cff; }
+
+/* The how-to-read legend above the board. */
+details.legend { margin-bottom: 12px; }
+details.legend summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+details.legend .legend-body { display: grid; gap: 6px; margin-top: 8px; font-size: 12.5px; line-height: 1.45; }
+details.legend .legend-body > div { max-width: 1100px; }
 th.sorted-asc::after { content: " ▲"; color: var(--blue); }
 th.sorted-desc::after { content: " ▼"; color: var(--blue); }
 td { padding: 6px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; }

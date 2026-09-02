@@ -32,6 +32,24 @@
 <div id="flags-banner" class="hidden"></div>
 
 <div id="view-board">
+  <details class="panel legend" open>
+    <summary>How to read this board — one decision rule, two estimates, one evidence check</summary>
+    <div class="legend-body">
+      <div><span class="pill pass">Decision</span> <strong>Gate</strong> — the gate model's predicted return on the trade
+        against its threshold. Pass = tradeable. <em>This is the selection rule the backtests used</em>; the gate reads
+        its own features and never sees the size model. A ranking, not a probability of profit.</div>
+      <div><span class="pill info">Forecast</span> <strong>Exp PnL (model)</strong> — the size champion's Monte-Carlo
+        forecast for THIS trade: draws from the champion's own held-out errors, pushed through a payoff map fitted on
+        real replayed trades, priced at the real quoted premium. Win is its probability of profit. A forecast, not a selector.</div>
+      <div><span class="pill na">Evidence</span> <strong>Exp PnL (analogs)</strong> — what matched historical trades
+        actually made, priced by the same replay code; n is how many stand behind it, and the bracket on Win is their
+        bootstrap interval.</div>
+      <div class="sub">The estimates are never averaged: opposite signs flag LAYER_DISAGREE, which means the model may
+        be extrapolating past its evidence. The amber <span class="pill warn">gate vs model</span> pill marks rows where
+        the gate passes while the model forecast is negative — two independent estimators disagreeing that hard is
+        rare, so treat the row with suspicion rather than as a trade.</div>
+    </div>
+  </details>
   <div class="panel">
     <div class="controls">
       <label>Strategy
@@ -52,24 +70,35 @@
     </div>
     <div class="tablewrap">
       <table id="tbl-board">
-        <thead><tr>
+        <thead>
+          <tr class="grouprow">
+            <th colspan="4">The trade</th>
+            <th colspan="4">The event signal</th>
+            <th colspan="1">Cost</th>
+            <th colspan="2" class="g-decision">Decision — the backtest rule</th>
+            <th colspan="2" class="g-forecast">Forecast — model Monte-Carlo</th>
+            <th colspan="2" class="g-evidence">Evidence — analog trades</th>
+            <th colspan="1"></th>
+          </tr>
+          <tr>
           <th data-sort="event_date" title="The print date and session. AMC = after market close, BMO = before market open. The session decides which day a trade is entered and exited, so a wrong session is a wrong trade rather than a cosmetic error.">Event</th>
           <th data-sort="ticker" title="The underlying. Click any row to open its full evidence: inputs, print history and matched analog trades.">Ticker</th>
+          <th data-sort="strategy" title="The structure. STR-THRU = buy the straddle and hold THROUGH the print. STR-RUNUP = own vol into the print and exit before it. CAL-P is listed but never scored — no backtest exists, so it shows as unvalidated rather than guessing.">Strategy</th>
+          <th data-sort="entry_date" title="When this structure would be opened and closed, derived from the print session. Everything on this row prices THAT trade.">Entry → exit</th>
           <th data-sort="driver_prediction" title="The size champion's forecast of how far the stock actually moves on this print, with its 10th-90th percentile band. A property of the EVENT, not of any structure. Needs no option chain, so it is present on rows whose P&L columns are not. Band coverage measured at 79.3% out of sample (EXP-115), and its width varies by event.">Est. |move| <span class="badge">± band</span></th>
           <th data-sort="implied_move" title="What the option market is quoting for this print AS OF TODAY. The number you would trade against now — deliberately not the quote at a strategy's own entry date, which would make your read of the trade an artefact of when it happens to execute. Blank where no quote was available; the source uses 0 for &quot;no quote&quot; on 25.6% of rows.">Implied today</th>
           <th data-sort="model_vs_market" title="Estimated |move| divided by today's implied. Below 1.0 the model expects LESS movement than the option is priced for, so long vol looks expensive; above 1.0 it looks cheap. This is the programme's core signal.">Model / market</th>
           <th title="The forecast of what the market will be quoting the day BEFORE the print — a forecast of the quote itself, not of the realized move. The gap between this and today's implied is the run-up that STR-RUNUP exists to capture.">Est. implied @ T-1</th>
-          <th data-sort="strategy" title="The structure. STR-THRU = buy the straddle and hold THROUGH the print. STR-RUNUP = own vol into the print and exit before it. CAL-P is listed but never scored — no backtest exists, so it shows as unvalidated rather than guessing.">Strategy</th>
-          <th data-sort="gate_score" title="The gate model's score and whether it passes. This — not expected P&L — is what actually selects trades. The gate reads its own features and never sees the size model (EXP-115: 0 of 618 rows moved when the size model changed).">Gate</th>
-          <th data-sort="exp_pnl_model" title="The MODEL layer: the champion's prediction pushed through an empirically-calibrated payoff map against the real entry cost, averaged over 4,000 draws from the model's own held-out residuals. A distribution, not a formula.">Exp PnL (model)</th>
-          <th data-sort="exp_pnl_analog" title="The EMPIRICAL layer: mean realized return of matched historical trades, priced by the same replay code at the same fill. Never averaged with the model column — when they disagree, the disagreement is the finding. Blank when no genuine match was possible.">Exp PnL (analogs)</th>
-          <th data-sort="win_model" title="Share of the model's simulated return distribution above zero, after isotonic recalibration fitted only on trades closed before this decision date. The bracket is the ANALOG layer's bootstrap interval, not the model's.">Win + CI</th>
-          <th data-sort="n_analogs" title="How many matched historical trades stand behind the analog columns — the number that says how much weight they deserve. Below the minimum the row is flagged THIN_ANALOGS; NO_ANALOG_MATCH means no comparison was possible at all.">n</th>
           <th data-sort="entry_cost_pct" title="What the structure costs as a percentage of spot, and the ratio of that premium to what the model thinks the payoff is worth. For a straddle the premium is effectively the market's own calculated implied move.">Premium vs fair</th>
-          <th data-sort="entry_date" title="When this structure would be opened and closed, derived from the print session. Everything on this row prices THAT trade.">Entry → exit</th>
-          <th data-sort="rank" title="Position within the strategy by expected model P&L. A ranking, not a recommendation: the gate decides what is tradeable.">Rank</th>
+          <th data-sort="gate_score" title="The DECISION layer: the gate's predicted return on this trade against its threshold — pass = tradeable. This, not expected P&L, is the selection rule the backtests used. The gate reads its own features and never sees the size model (EXP-115: 0 of 618 rows moved when the size model changed). The amber gate-vs-model pill appears where the gate passes while the model forecast is negative.">Gate</th>
+          <th data-sort="rank" title="Position within the strategy: gate passers first, then gate score, then model P&L. A display order, not a recommendation.">Rank</th>
+          <th data-sort="exp_pnl_model" title="The FORECAST layer: the champion's prediction pushed through an empirically-calibrated payoff map against the real entry cost, averaged over 4,000 draws from the model's own held-out residuals. A distribution, not a formula — and a forecast of THIS trade, not the selector the backtests used.">Exp PnL (model)</th>
+          <th data-sort="win_model" title="Share of the model's simulated return distribution above zero, after isotonic recalibration fitted only on trades closed before this decision date. The bracket is the ANALOG layer's bootstrap interval, not the model's.">Win + CI</th>
+          <th data-sort="exp_pnl_analog" title="The EVIDENCE layer: mean realized return of matched historical trades, priced by the same replay code at the same fill. Never averaged with the model column — when they disagree, the disagreement is the finding. Blank when no genuine match was possible.">Exp PnL (analogs)</th>
+          <th data-sort="n_analogs" title="How many matched historical trades stand behind the analog columns — the number that says how much weight they deserve. Below the minimum the row is flagged THIN_ANALOGS; NO_ANALOG_MATCH means no comparison was possible at all.">n</th>
           <th title="Conditions on this row. NO_CHAIN = no option quote, so P&L cannot be computed. NO_ANALOG_MATCH = the analog comparison was impossible. EXTRAPOLATED = a strike away from at-the-money. LAYER_DISAGREE = the two layers disagree.">Flags</th>
-        </tr></thead>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </div>

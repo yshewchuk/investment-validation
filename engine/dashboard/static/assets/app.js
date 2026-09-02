@@ -122,10 +122,27 @@ function renderFlagsBanner() {
 
 /* ---------------------------------------------------------------- board */
 
+/* The DECISION layer. Shown as predicted-return vs threshold, in the same
+   percent units as the P&L columns, because "PASS 0.10" beside "+55.2%"
+   invited reading the score as a probability — it is a predicted return,
+   and the comparison against the threshold is the whole decision. */
 function gatePill(row) {
-  if (row.gate_pass === true) return '<span class="pill pass">PASS ' + fmt(row.gate_score, 2) + "</span>";
-  if (row.gate_pass === false) return '<span class="pill fail">fail ' + fmt(row.gate_score, 2) + "</span>";
+  const thr = row.gate_threshold === null || row.gate_threshold === undefined
+    ? "" : " " + (row.gate_pass === true ? "&ge; " : "&lt; ") + pct(row.gate_threshold, 1);
+  if (row.gate_pass === true) return '<span class="pill pass">PASS ' + signedPct(row.gate_score, 1) + thr + "</span>";
+  if (row.gate_pass === false) return '<span class="pill fail">fail ' + signedPct(row.gate_score, 1) + thr + "</span>";
   return '<span class="pill na">n/a</span>';
+}
+
+/* Gate passes while the model Monte-Carlo forecast is negative: two
+   independent estimators of the same trade's return, opposite signs. The
+   gate never sees the size model, so this is a real disagreement, not a
+   rounding artefact — surfaced rather than hidden. */
+function splitBadge(row) {
+  if (row.gate_pass === true && row.exp_pnl_model !== null && row.exp_pnl_model !== undefined && row.exp_pnl_model < 0) {
+    return ' <span class="pill warn" title="Gate passes but the model Monte-Carlo forecast is negative. The gate never sees the size model; two independent estimators disagreeing this hard is rare — treat the row with suspicion rather than as a trade.">gate vs model</span>';
+  }
+  return "";
 }
 
 function flagBadges(row) {
@@ -211,31 +228,36 @@ function printRow(members) {
     + esc(head.session || "") + "</span></td>"
     + "<td><strong>" + esc(head.ticker) + "</strong>"
     + (passes ? " <span class='pill pass'>" + passes + "</span>" : "") + "</td>"
+    + "<td colspan='2'></td>"
     + "<td>" + driverCell(move) + "</td>"
     + "<td>" + impliedCell(head) + "</td>"
     + "<td>" + ratioCell(move) + "</td>"
     + "<td>" + (t1.driver_prediction === null || t1.driver_prediction === undefined
         ? "–" : fmt(t1.driver_prediction, 1) + "%") + "</td>"
-    + "<td colspan='10'><span class='badge'>" + members.length + " structure"
+    + "<td colspan='8'><span class='badge'>" + members.length + " structure"
     + (members.length === 1 ? "" : "s") + "</span></td>"
     + "</tr>";
 }
 
 /* One structure under its print: only what genuinely differs between them —
-   the gate, the two P&L layers, the win rate, and the dates it would trade. */
+   the gate, the two P&L layers, the win rate, and the dates it would trade.
+   Cell order mirrors the grouped header: trade (strategy, dates), signal
+   (blank — event-level), cost, decision (gate, rank), forecast (model PnL,
+   win), evidence (analog PnL, n), flags. */
 function strategyRow(r, disabled, winCell, premium) {
   return '<tr class="subrow clickable' + (disabled ? " disabled" : "") + '" data-ticker="'
     + esc(r.ticker) + '">'
-    + "<td></td><td></td><td></td><td></td><td></td><td></td>"
+    + "<td></td><td></td>"
     + "<td><span class='band'>└</span> " + esc(r.strategy) + "</td>"
-    + "<td>" + gatePill(r) + "</td>"
-    + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
-    + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
-    + "<td>" + winCell + "</td>"
-    + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
-    + "<td>" + premium + "</td>"
     + "<td>" + esc(r.entry_date || "–") + " → " + esc(r.exit_date || "–") + "</td>"
+    + "<td></td><td></td><td></td><td></td>"
+    + "<td>" + premium + "</td>"
+    + "<td>" + gatePill(r) + splitBadge(r) + "</td>"
     + "<td>" + (r.rank || "–") + "</td>"
+    + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
+    + "<td>" + winCell + "</td>"
+    + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
+    + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
     + "<td>" + flagBadges(r) + "</td>"
     + "</tr>";
 }
