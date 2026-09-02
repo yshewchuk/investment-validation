@@ -386,6 +386,11 @@ def replay_one(
     measurement of nothing.
     """
     ticker = plan_row["ticker"]
+    decision_date = plan_row.get("decision_date", plan_row["entry_date"])
+    if structure.decided_early:
+        decision_rows = index.get(ticker, decision_date)
+        if decision_rows is None or decision_rows.empty:
+            return [], "no_decision_chain"
     entry_rows = index.get(ticker, plan_row["entry_date"])
     if entry_rows is None or entry_rows.empty:
         return [], "no_entry_chain"
@@ -413,19 +418,41 @@ def replay_one(
         session=plan_row["session"],
     )
 
+    # A structure decided early names its contract on the DECISION chain and
+    # then buys that contract at the entry. Re-resolving ATM at the entry would
+    # book a trade the decision never selected — and would quietly make the T−2
+    # book a different strategy rather than the same one decided sooner.
+    decision_pin = None
+    quoted_cost = float("nan")
+    if structure.decided_early:
+        decision_rows = _clean(decision_rows)
+        if decision_rows.empty:
+            return [], "bad_quote"
+        decision_snap = ChainSnapshot(
+            ticker=ticker,
+            obs_date=decision_date,
+            event_date=plan_row["event_date"],
+            rows=decision_rows,
+            session=plan_row["session"],
+        )
+        try:
+            quoted = price_structure(structure, decision_snap, FillModel(0.5))
+        except (StructureError, ValueError):
+            return [], "structure_unresolved"
+        decision_pin = quoted.legs
+        quoted_cost = quoted.cost
+
     rows: list[dict] = []
-    pinned = None
+    pinned = decision_pin
     for alpha in alphas:
         fill = FillModel(float(alpha))
         try:
-            entry = price_structure(structure, entry_snap, fill)
+            entry = price_structure(structure, entry_snap, fill, pin=pinned)
             # Pin from the first alpha's resolution: the contracts a structure
             # selects must not depend on the fill assumption, or the alpha sweep
             # would be comparing different trades.
             if pinned is None:
                 pinned = entry.legs
-            else:
-                entry = price_structure(structure, entry_snap, fill, pin=pinned)
             exit_ = price_structure(
                 structure, exit_snap, fill, pin=pinned, closing=True
             )
@@ -453,9 +480,14 @@ def replay_one(
                 "ticker": ticker,
                 "event_date": plan_row["event_date"],
                 "session": plan_row["session"],
+                "decision_date": decision_date,
                 "entry_date": plan_row["entry_date"],
                 "exit_date": plan_row["exit_date"],
                 "fill_alpha": float(alpha),
+                #: What the board would have QUOTED at the decision close, mid.
+                #: NaN when the decision is the entry, where the two are the
+                #: same number by construction.
+                "quoted_cost": quoted_cost,
                 "entry_cost": result["cost"],
                 "exit_value": result["exit_value"],
                 "pnl": result["pnl"],
@@ -639,7 +671,8 @@ def _variant_label(structure: Structure) -> str:
 def _empty_trades() -> pd.DataFrame:
     columns = [
         "strategy", "variant", "event_id", "ticker", "event_date", "session",
-        "entry_date", "exit_date", "fill_alpha", "entry_cost", "exit_value",
+        "decision_date", "entry_date", "exit_date", "fill_alpha",
+        "quoted_cost", "entry_cost", "exit_value",
         "pnl", "ret", "spot_entry", "spot_exit", "strike", "expiry",
         "dte_entry", "n_legs", "wide_market", "quote_repaired", "legs",
     ]

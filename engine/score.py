@@ -188,6 +188,11 @@ class ScoreRequest:
     fill: FillModel = MID
     variant: str | None = None
     session: str | None = None
+    #: Decide this many sessions before the entry close. ``None`` keeps the
+    #: structure's own setting, which for every shipped structure is "decide at
+    #: the entry close". Opt-in per request so the nightly's champion path is
+    #: untouched while the T−2 variant is still unvalidated.
+    decision_offset: int | None = None
 
     def key(self) -> str:
         """Stable identity, for the deterministic bootstrap seed."""
@@ -200,6 +205,7 @@ class ScoreRequest:
             str(pd.Timestamp(self.expiry).date()) if self.expiry is not None else "",
             f"{self.fill.alpha:.4f}",
             self.variant or "",
+            "" if self.decision_offset is None else f"d{self.decision_offset:+d}",
         ]
         return "|".join(parts)
 
@@ -243,6 +249,12 @@ class ScoreResult:
     strike: float | None = None
     expiry: pd.Timestamp | None = None
     entry_cost: float | None = None
+    #: The close the entry was PRICED on. Equal to ``entry_date`` for every
+    #: structure decided at its entry, and one or more sessions earlier for one
+    #: decided early — in which case `entry_cost` is an estimate for the entry,
+    #: not the fill. Say so on the board; see guides/str_thru_t2_decision.md §6.3
+    #: for the measured drift between the two.
+    quote_date: pd.Timestamp | None = None
     spot: float | None = None
     dte_entry: int | None = None
     fill_alpha: float = 0.5
@@ -311,7 +323,7 @@ class ScoreResult:
         out = asdict(self)
         for key in (
             "as_of", "event_date", "entry_date", "exit_date", "expiry",
-            "evidence_cutoff",
+            "evidence_cutoff", "quote_date",
         ):
             value = out.get(key)
             out[key] = str(pd.Timestamp(value).date()) if value is not None else None
@@ -598,6 +610,15 @@ class Scorer:
         and put drift onto different strikes and stop being a straddle.
         """
         structure = STRUCTURES[request.strategy]()
+        if request.decision_offset is not None:
+            structure = Structure(
+                name=structure.name, legs=structure.legs,
+                entry_offset=structure.entry_offset,
+                exit_offset=structure.exit_offset,
+                decision_offset=int(request.decision_offset),
+                description=structure.description,
+                params=dict(structure.params),
+            )
         if request.strike is None and request.expiry is None:
             return structure
 
@@ -635,14 +656,34 @@ class Scorer:
         )
 
     def _price_entry(self, request, structure, result, chain_index) -> None:
-        """Resolve and price the structure on the real entry chain."""
+        """Resolve and price the structure on the chain the DECISION can see.
+
+        For every structure decided at its entry close that is the entry chain,
+        unchanged. For one decided early it is the decision-date chain — which
+        is the only chain that exists when the call has to be made. The entry
+        chain for a session is not published until that session is over, so
+        pricing against it is what makes today's prediction unactionable.
+
+        `quote_date` records which it was. Everything filled from here —
+        `entry_cost`, `strike`, `expiry`, `dte_entry` — is then an ESTIMATE for
+        the entry rather than the fill, and must be labelled that way wherever
+        it is shown.
+        """
+        result.quote_date = result.quote_date or result.entry_date
+        if structure.decided_early:
+            window = self.calendar.resolve_offsets(
+                result.event_date, result.session,
+                structure.entry_offset, structure.exit_offset,
+                decision_offset=structure.decision_offset,
+            )
+            result.quote_date = window.decision_date
         index = chain_index
         if index is None:
             index = load_chain_index(
-                [(request.ticker, result.entry_date), (request.ticker, result.exit_date)],
+                [(request.ticker, result.quote_date), (request.ticker, result.exit_date)],
                 progress_every=0,
             )
-        rows = index.get(request.ticker, result.entry_date)
+        rows = index.get(request.ticker, result.quote_date)
         if rows is None or rows.empty:
             result.flag("NO_CHAIN")
             self._note_chain_age(request, result)
@@ -658,7 +699,7 @@ class Scorer:
             return
         snapshot = ChainSnapshot(
             ticker=request.ticker,
-            obs_date=result.entry_date,
+            obs_date=result.quote_date,
             event_date=result.event_date,
             rows=clean,
             session=result.session,

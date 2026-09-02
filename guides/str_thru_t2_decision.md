@@ -614,8 +614,8 @@ served against a `D0` decision date. Register it as
 | 2 | ~~Land the `decision_offset` plumbing with `decision_offset=None` everywhere — no behaviour change, full test suite green~~ **done 2026-09-02** | no | yes |
 | 3 | ~~`build_t2_plan --dry-run`, review the call count~~ **done 2026-09-02** | no | yes |
 | 4 | ~~Execute the `D−1` pull (~3,628 calls); ingest; run the §3 coverage gate~~ **done 2026-09-02 — gate PASSED at 99.9%** | **yes** | data is kept |
-| 5 | Run §6.3 drift measurement. **Decision point.** | no | yes |
-| 6 | Set `decision_offset=-1` on `straddle_through`; rebuild the T−2 trade set as a distinct variant | no | yes |
+| 5 | ~~Run §6.3 drift measurement. **Decision point.**~~ **done 2026-09-02 — passed, and it re-opened the arm choice** | no | yes |
+| 6 | ~~Set `decision_offset=-1`; rebuild the T−2 trade set as a distinct variant~~ **done 2026-09-02 — T−2 costs 0.31pp of mean return** | no | yes |
 | 7 | Retrain the gate, walk-forward, EXP-120 report | no | yes |
 | 8 | Promote or don't | no | registry write is last |
 | 9 | Board: Trade-on column, quote-date disclosure, ungated-row labelling | no | yes |
@@ -664,3 +664,92 @@ Two honesty rules to hold yourself to, because the ledger will measure them:
 | `dte_entry` left on the entry date | one-day leak in the gate's dominant feature | §5.5; assert `dte@D−1 == dte@D0 + 1` in the dataset build |
 | Two variants collide in `trades` | `e+0x+1` means two different books | `_variant_label` carries the decision offset |
 | The T−2 gate is served on a `D0` decision | a model applied to a decision it was never trained for | champion lookup keyed on `decision_offset`; ungated + labelled until promotion |
+
+
+---
+
+## 10. Steps 5 and 6, measured — 2026-09-02
+
+### Step 5: the drift gate passes, and the number that matters is not the mean
+
+`checks/t2_drift.py`, 26,702 events, mid fill, no quota and no model — both
+sides of the comparison are quotes already in the store.
+
+```
+                        n    median      mean       p10       p90
+A  same contract   26,702     0.00%     2.83%   -11.83%   +18.52%
+A' ATM re-resolved 26,702    -1.49%     0.18%   -13.73%   +13.51%
+spot move          26,709    +0.09%     0.12%    -2.81%    +2.99%
+```
+
+**Median drift is ~0%.** §6.3's kill condition — drift large enough to swamp the
+base return — does not fire. T−2 is viable.
+
+The mean is not usable: 995 straddles (3.7%) priced under $0.50, where a
+two-cent tick is a 4% move, carry mean drift +17.5% and drag it. Strip them and
+the rest run +2.26% mean, 0.00% median. The aggregate with a P&L meaning is
+cost-weighted — sum the dollars, then divide:
+
+```
+A  same contract   : +1.48%      A' ATM re-resolved : -1.31%
+```
+
+**Quote quality, which the board must disclose either way:** median `|drift|`
+6.18%, p90 23.44%; only **42.5% of fills land within ±5%** of the quoted
+premium, 67.3% within ±10%. The row has to say *"quoted at the D−1 close, you
+will fill at the D0 close."*
+
+### Step 6: the T−2 book costs 0.31pp of mean return
+
+`replay_one` now resolves the contract on the **decision** chain, pins it, and
+prices the entry and exit on their own chains (§5.4). The trade row carries
+`decision_date` and `quoted_cost` beside `entry_cost`. Both books replayed in
+one run, same code, same data:
+
+```
+head-to-head on 26,214 shared events (mid fill)
+              mean     median    win
+T-1 (today)  +4.02%    -8.90%   39.3%
+T-2          +3.71%    -9.37%   39.2%
+per-event difference: mean -0.31%, median +0.00%
+```
+
+Paired, against the stored champion book (n=19,180, a different build vintage —
+quote the −0.31pp above, not this): mean −0.48%, se 0.178%, **t = −2.71**, 95%
+CI [−0.83%, −0.13%]. Negative in **7 of 9 years**. The effect is real, not one
+year's noise.
+
+**Three findings that change the plan:**
+
+1. **64.0% of events are the identical trade.** The strike named at `D−1` *is*
+   the `D0` ATM strike, so the decision date changes nothing. The whole cost
+   lives in the third of events where spot moved enough overnight to shift it.
+2. **Where they differ, T−2 wins more often and loses bigger** — 52.4% better,
+   median +2.56%, but mean −1.34%. A pinned off-ATM strike occasionally misses a
+   large move a re-centred straddle would have caught. Fat-tail asymmetry, not a
+   systematic bleed.
+3. **Arm A′ must be replayed before step 8.** §5.4 made A primary on the
+   grounds that the board's number and the trade should be the same contract.
+   Finding 2 is exactly the failure A′ avoids, and step 5 has A′ cost-weighted
+   2.79pp cheaper. The arm choice is now an open question, not a settled one.
+
+**A correction to how step 5 was read here.** The cost-weighted +1.48% was first
+described as "51% of the base return". That was wrong: drift moves the entry
+cost *and* the same pinned contract's exit value, and a return is a ratio, so
+most of it cancels. The realized cost of deciding early is **0.31pp on a 4.02%
+base — about 8% of the edge**, and step 6 is the measurement that settles it,
+not step 5.
+
+### What this buys
+
+An unactionable signal becomes an actionable one for ~8% of the edge. Today the
+STR-THRU board cannot be traded at all: the chain it prices against is published
+only after the close it tells you to trade into. Scored live on 2026-09-02 for
+two names printing that evening, the T−1 path returned `NO_CHAIN` and an analog
+number identical across both tickers; the T−2 path returned a priced contract,
+a model forecast and a gate score an hour before the close.
+
+**That gate score is not yet trustworthy** — see step 7. `dte_entry` is the
+gate's dominant feature (EXP-114, −0.353), and at `D−1` it is `dte@D0 + 1` by
+construction, so the champion is extrapolating on the one feature it leans on
+hardest. Until the retrain, a T−2 board must be served **ungated and labelled**.
