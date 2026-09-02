@@ -13,10 +13,12 @@ import pytest
 from engine.data.pulls import sep2026_plan
 from engine.data.pulls.sep2026_plan import (
     BATCH,
+    BATCH_FOCUS,
     BUDGET_CALLS,
     DTE_RANGE,
     PRIORITIES,
     PullJob,
+    build_focus_plan,
     build_plan,
 )
 
@@ -210,3 +212,95 @@ class TestScoping:
         assert "--confirm" in text
         for point in PRIORITIES:
             assert point in text
+
+
+def ev(ticker, bucket="1-10B", entry=None, exit_=None, runup=None,
+       entry_both=True, exit_both=True, t14_both=True, event_date="2024-05-08"):
+    """One coverage row; a None date becomes NaT and adds no needed pair."""
+    return {
+        "ticker": ticker,
+        "event_id": f"{ticker}_{event_date}",
+        "event_date": pd.Timestamp(event_date),
+        "year": 2024,
+        "session": "AMC",
+        "mcap_bucket": bucket,
+        "entry_date": pd.Timestamp(entry) if entry else pd.NaT,
+        "exit_date": pd.Timestamp(exit_) if exit_ else pd.NaT,
+        "runup_date": pd.Timestamp(runup) if runup else pd.NaT,
+        "entry_both": entry_both,
+        "exit_both": exit_both,
+        "t14_both": t14_both,
+        "through_print_ready": False,
+    }
+
+
+class TestFocusPlan:
+    def test_focus_dates_carry_hitchhikers(self, patched):
+        # FOC defines the date; OTH needs the same date and rides; FAR's date
+        # is not a focus date, so FAR is not pulled.
+        events = pd.DataFrame([
+            ev("FOC", exit_="2024-05-09", exit_both=False),
+            ev("OTH", exit_="2024-05-09", exit_both=False),
+            ev("FAR", exit_="2024-06-01", exit_both=False),
+        ])
+        patched(events)
+        plan = build_focus_plan(["FOC"], fetcher=FakeFetcher())
+        assert plan.n_calls == 1
+        assert plan.jobs[0].trade_date == "2024-05-09"
+        assert set(plan.jobs[0].tickers) == {"FOC", "OTH"}
+
+    def test_a_rider_on_a_different_purpose_still_rides(self, patched):
+        # The ride set is date-based: FOC needs the date for exit, OTH for
+        # entry — one call covers both.
+        events = pd.DataFrame([
+            ev("FOC", exit_="2024-05-09", exit_both=False),
+            ev("OTH", entry="2024-05-09", entry_both=False),
+        ])
+        patched(events)
+        plan = build_focus_plan(["FOC"], fetcher=FakeFetcher())
+        assert plan.n_calls == 1
+        assert set(plan.jobs[0].tickers) == {"FOC", "OTH"}
+
+    def test_cross_purpose_pairs_dedupe_to_one_call(self, patched):
+        # FOC needs the SAME date for both entry and exit; that is one pair and
+        # one call, not two.
+        events = pd.DataFrame([
+            ev("FOC", entry="2024-05-09", exit_="2024-05-09",
+               entry_both=False, exit_both=False),
+        ])
+        patched(events)
+        plan = build_focus_plan(["FOC"], fetcher=FakeFetcher())
+        assert plan.n_calls == 1
+        assert plan.jobs[0].tickers == ("FOC",)
+
+    def test_riders_batch_at_the_focus_cap(self, patched):
+        # 12 tickers on one focus date batch into ceil(12/10) = 2 calls.
+        rows = [ev(f"T{i:02d}", exit_="2024-05-09", exit_both=False)
+                for i in range(12)]
+        patched(pd.DataFrame(rows))
+        plan = build_focus_plan(["T00"], fetcher=FakeFetcher())
+        assert plan.n_calls == 2
+        assert all(len(j.tickers) <= BATCH_FOCUS for j in plan.jobs)
+        assert sum(len(j.tickers) for j in plan.jobs) == 12
+
+    def test_partial_events_do_not_ride(self, patched):
+        # PART needs the focus date for exit but ALSO 2024-06-01 for entry; the
+        # event cannot complete, so not even its focus-date pair is fetched.
+        events = pd.DataFrame([
+            ev("FOC", exit_="2024-05-09", exit_both=False),
+            ev("PART", exit_="2024-05-09", entry="2024-06-01",
+               exit_both=False, entry_both=False),
+        ])
+        patched(events)
+        plan = build_focus_plan(["FOC"], fetcher=FakeFetcher())
+        assert plan.n_calls == 1
+        assert plan.jobs[0].tickers == ("FOC",)
+
+    def test_focus_budget_truncates(self, patched):
+        # Three focus events on three dates -> three calls, truncated to two.
+        rows = [ev("FOC", exit_=d, exit_both=False, event_date=d)
+                for d in ("2024-05-09", "2024-05-10", "2024-05-11")]
+        patched(pd.DataFrame(rows))
+        plan = build_focus_plan(["FOC"], budget=2, fetcher=FakeFetcher())
+        assert plan.n_calls == 2
+        assert plan.truncated_at_budget

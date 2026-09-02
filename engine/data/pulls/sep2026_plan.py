@@ -36,6 +36,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -45,13 +46,20 @@ from engine.data import coverage, store
 from engine.data.fetch import Fetcher
 from engine.data.throttle import QuotaExhausted
 
-__all__ = ["PullJob", "PullPlan", "build_plan", "execute", "BATCH", "BUDGET_CALLS",
-           "FIELDS", "LIQUIDITY_FIELDS"]
+__all__ = ["PullJob", "PullPlan", "build_plan", "build_focus_plan", "execute",
+           "BATCH", "BATCH_FOCUS", "BUDGET_CALLS", "FIELDS", "LIQUIDITY_FIELDS"]
 
 #: Tickers per ``/hist/strikes`` call. Five is the verified-safe batch: ten
 #: tickers on ``/hist/cores`` returned 502 (payload too large for the gateway),
 #: and the existing strikes puller settled on five.
 BATCH = 5
+
+#: Focus pulls batch at ten — the documented ticker cap of ``/hist/strikes``,
+#: verified in production by the nightly forward-chain pull, which runs at ten
+#: and diffs requested against returned. A focus plan is mostly small-cap dates
+#: (~300 rows per call median), far under any row cap, so ten is safe and halves
+#: the call count. :func:`execute` still verifies every response.
+BATCH_FOCUS = 10
 
 #: Total calls this plan may spend, against the 20,000/month allowance.
 BUDGET_CALLS = 16_000
@@ -215,6 +223,103 @@ def build_plan(
     return plan
 
 
+def build_focus_plan(
+    focus: Sequence[str],
+    *,
+    min_year: int = 2017,
+    buckets: tuple[str, ...] = TARGET_BUCKETS,
+    budget: int = BUDGET_CALLS,
+    fetcher: Fetcher | None = None,
+    batch: int = BATCH_FOCUS,
+) -> PullPlan:
+    """Focus tickers define the dates; every ticker that needs those dates rides.
+
+    The economy this exploits: one call buys one trade DATE for up to ``batch``
+    tickers, so once a date is being fetched for a focus name, any other name
+    that needs the same date costs nothing until the batch fills. Focus events
+    are few and their dates scatter across years; the events of the wider
+    universe that happen to share those dates are many. Measured 2026-09-01 for
+    the five-name focus: 180 focus dates / 192 focus pairs, and 2,058 extra
+    events across 1,341 tickers hitchhike on them — 517 calls all-in against
+    14,882 for the full ``<1B`` slice.
+
+    Pairs are deduplicated ACROSS purposes — a (ticker, date) needed for both an
+    exit and a t14 is one call, not two. The ride set is only the events that
+    COMPLETE on the focus dates — every one of their missing pairs falls on a
+    date already being bought. Partial events are refused: a replay needs the
+    entry AND the exit chain, so a fetched pair whose event stays incomplete is
+    quota spent on a trade that still cannot be priced. That distinction is the
+    difference between 517 calls and 1,390 for the five-name focus.
+    """
+    print(f"planning (focus): {len(focus)} names, computing coverage …", flush=True)
+    events = coverage.attach_mcap(coverage.event_chain_coverage(min_year=min_year))
+    target = events[events["mcap_bucket"].isin(buckets)].copy()
+    focus_set = {str(t).upper() for t in focus}
+    foc = target[target["ticker"].isin(focus_set)]
+
+    plan = PullPlan()
+    plan.events_targeted = int(len(foc))
+    plan.coverage_before = {
+        point: round(float(foc[f"{point}_both"].mean()), 4) if len(foc) else 0.0
+        for point in PRIORITIES
+    }
+
+    def needed_pairs(frame: pd.DataFrame) -> set[tuple[str, str]]:
+        pairs: set[tuple[str, str]] = set()
+        for purpose in PRIORITIES:
+            column = {"exit": "exit_date", "entry": "entry_date", "t14": "runup_date"}[purpose]
+            missing = frame[~frame[f"{purpose}_both"] & frame[column].notna()]
+            pairs |= {
+                (str(t), str(d)[:10])
+                for t, d in zip(missing["ticker"], missing[column])
+            }
+        return pairs
+
+    focus_pairs = needed_pairs(foc)
+    focus_dates = {d for _, d in focus_pairs}
+    ride_pairs: set[tuple[str, str]] = set()
+    complete_events = 0
+    for _, event_rows in target.groupby("event_id"):
+        pairs = needed_pairs(event_rows)
+        if pairs and all(d in focus_dates for _, d in pairs):
+            ride_pairs |= pairs
+            complete_events += 1
+    ride_pairs -= focus_pairs
+    print(
+        f"  focus: {len(foc)} events, {len(focus_pairs)} pairs on {len(focus_dates)} dates; "
+        f"hitchhikers: {len(ride_pairs)} pairs from {complete_events:,} events "
+        f"that complete on those dates",
+        flush=True,
+    )
+
+    by_date: dict[str, set[str]] = {}
+    for t, d in focus_pairs | ride_pairs:
+        by_date.setdefault(d, set()).add(t)
+
+    fetcher = fetcher or Fetcher()
+    added = 0
+    for trade_date in sorted(by_date):
+        tickers = sorted(by_date[trade_date])
+        for start in range(0, len(tickers), batch):
+            chunk = tuple(tickers[start : start + batch])
+            job = PullJob(trade_date=trade_date, tickers=chunk, purpose="focus",
+                          events_unlocked=len(chunk))
+            if fetcher.has("orats", "hist/strikes", job.params):
+                plan.skipped_cached += 1
+                continue
+            if len(plan.jobs) >= budget:
+                plan.truncated_at_budget = True
+                break
+            plan.jobs.append(job)
+            added += 1
+        if plan.truncated_at_budget:
+            print(f"  budget of {budget:,} reached — plan truncated", flush=True)
+            break
+    plan.by_purpose["focus"] = added
+    print(f"  focus: {added:,} calls planned", flush=True)
+    return plan
+
+
 def render_dry_run(plan: PullPlan) -> str:
     lines = [
         "",
@@ -268,11 +373,18 @@ def render_dry_run(plan: PullPlan) -> str:
 
 
 def execute(plan: PullPlan, fetcher: Fetcher | None = None, log_every: float = 30.0) -> dict:
-    """Spend the plan. One process, cache-first, quota-guarded, resumable."""
+    """Spend the plan. One process, cache-first, quota-guarded, resumable.
+
+    Every fresh response is verified against what was asked for. A shortfall is
+    only EVER retried single-ticker when truncation is actually suspect — a full
+    ``batch`` of ten (the documented cap) or a payload near a row cap. Below
+    that, a missing ticker is a genuine absence (a name with no chain that day)
+    and re-asking would spend calls the way the 404-retry bug used to.
+    """
     fetcher = fetcher or Fetcher()
     started = time.time()
     last_log = 0.0
-    done = cached = failed = 0
+    done = cached = failed = absent = truncation_retries = 0
     errors: list[str] = []
 
     for i, job in enumerate(plan.jobs, 1):
@@ -284,6 +396,30 @@ def execute(plan: PullPlan, fetcher: Fetcher | None = None, log_every: float = 3
                 cached += 1
             else:
                 done += 1
+                try:
+                    rows = record.json().get("data") or []
+                except (ValueError, AttributeError):
+                    rows = []
+                got = {r.get("ticker") for r in rows}
+                missing = [t for t in job.tickers if t not in got]
+                suspect = len(job.tickers) >= 10 or len(rows) >= 4_500
+                if missing and suspect:
+                    # Distinguish truncation from absence: one single each.
+                    for t in missing:
+                        single = dict(job.params)
+                        single["ticker"] = t
+                        if fetcher.has("orats", "hist/strikes", single):
+                            continue
+                        truncation_retries += 1
+                        rec2 = fetcher.fetch(
+                            "orats", "hist/strikes", single,
+                            note=f"sep2026:{job.purpose}:verify",
+                        )
+                        rows2 = rec2.json().get("data") or []
+                        if not any(r.get("ticker") == t for r in rows2):
+                            absent += 1
+                elif missing:
+                    absent += len(missing)
         except QuotaExhausted as exc:
             # A clean stop, not a crash: the plan resumes next cycle, and every
             # call already made is in Tier 1.
@@ -305,7 +441,7 @@ def execute(plan: PullPlan, fetcher: Fetcher | None = None, log_every: float = 3
             eta = (len(plan.jobs) - i) / rate if rate else 0
             print(
                 f"  [pull] {i}/{len(plan.jobs)} ({100*i/len(plan.jobs):.1f}%) "
-                f"fetched={done} cached={cached} failed={failed} "
+                f"fetched={done} cached={cached} failed={failed} absent={absent} "
                 f"{elapsed:.0f}s elapsed, ETA {eta:.0f}s",
                 flush=True,
             )
@@ -315,6 +451,8 @@ def execute(plan: PullPlan, fetcher: Fetcher | None = None, log_every: float = 3
         "fetched": done,
         "cache_hits": cached,
         "failed": failed,
+        "absent_tickers": absent,
+        "truncation_retries": truncation_retries,
         "elapsed_s": round(time.time() - started, 1),
         "errors": errors[:50],
     }
@@ -331,6 +469,11 @@ def main(argv: list[str] | None = None) -> int:
         help="mcap slices to target (default: all of them); labels as in "
              "engine.data.coverage.MCAP_BUCKETS, e.g. '<1B' '1-10B' '>10B'",
     )
+    ap.add_argument(
+        "--focus", nargs="*", default=None, metavar="TICKER",
+        help="focus+hitchhike mode: fetch these names' dates, and let every "
+             "ticker that needs the same dates ride along (see build_focus_plan)",
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
 
@@ -346,8 +489,14 @@ def main(argv: list[str] | None = None) -> int:
         if bad:
             ap.error(f"unknown bucket labels {bad}; known: {sorted(known)}")
 
-    plan = build_plan(min_year=args.min_year, budget=args.budget,
-                      buckets=buckets if buckets is not None else TARGET_BUCKETS)
+    if args.focus:
+        plan = build_focus_plan(
+            args.focus, min_year=args.min_year, budget=args.budget,
+            buckets=buckets if buckets is not None else TARGET_BUCKETS,
+        )
+    else:
+        plan = build_plan(min_year=args.min_year, budget=args.budget,
+                          buckets=buckets if buckets is not None else TARGET_BUCKETS)
     print(render_dry_run(plan))
 
     report = {"plan": plan.summary(), "generated_at": datetime.now(timezone.utc).isoformat()}
