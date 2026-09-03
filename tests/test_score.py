@@ -237,6 +237,44 @@ class TestDisabledStrategies:
         with pytest.raises(KeyError, match="unknown strategy"):
             scorer.score(request(strategy="NOPE"))
 
+    def test_cnd_p_is_disabled_too(self, scorer):
+        """CND-P shipped in engine.structures for EXP-121's replay/backtest use.
+
+        STRUCTURES is shared with score_calendar's default strategy list — the
+        live board — so a structure landing in that dict reaches production
+        scoring unless something opts it back out. It reached the board once,
+        233 spurious rows in one render, before this guard existed.
+        """
+        result = scorer.score(request(strategy="CND-P"))
+        assert result.flags == ["UNVALIDATED_STRUCTURE"]
+        assert not result.scored
+
+    def test_every_registered_structure_is_either_promoted_or_disabled(self):
+        """The general form of the CND-P leak, so the NEXT new structure trips
+        this instead of shipping silently onto the live board.
+
+        A structure only belongs in `score_calendar`'s default universe once
+        SOMETHING has decided it is ready — a promoted gate, or the CAL-P/CND-P
+        precedent of an explicit disable-with-reason. `STRUCTURES` has no third
+        state; being merely defined is not being ready.
+        """
+        from engine.models.registry import load_registry
+        from engine.score import DISABLED_STRATEGIES
+        from engine.structures import STRUCTURES
+
+        registry = load_registry(missing_ok=True)
+        unaccounted = [
+            name for name in STRUCTURES
+            if name not in DISABLED_STRATEGIES
+            and not (registry and registry.has_champion("gate", name))
+        ]
+        assert not unaccounted, (
+            f"{unaccounted} are in STRUCTURES with no promoted gate and no "
+            "DISABLED_STRATEGIES entry — they will be scored on the live "
+            "board by default. Add a DISABLED_STRATEGIES reason until a gate "
+            "is promoted."
+        )
+
 
 class TestEntryPricing:
     def test_prices_the_real_chain(self, scorer, chain_index):
