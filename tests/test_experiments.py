@@ -7,6 +7,7 @@ stamp and the EXP-101 floor that keeps the 0-50 range reserved.
 """
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from experiments import lib
@@ -273,3 +274,126 @@ class TestPromotionReport:
         assert "Decision:" in md
         assert "## Provenance" in md
         assert "data snapshot" in md
+
+
+class TestTailShockDirection:
+    """Which tail gets shocked is a property of the structure, not a default.
+
+    CAL-P is short a put and is ruined by a fall; CND-P is short the move in
+    BOTH directions and is ruined by either wing being blown through. Ranking a
+    condor's shock set on the signed move would inject only the down tail and
+    leave half its ruin cases untouched.
+    """
+
+    @staticmethod
+    def _trades(moves):
+        import json
+
+        rows = []
+        for i, move in enumerate(moves):
+            legs = {
+                "spot_entry": 100.0,
+                "spot_exit": 100.0 * (1.0 + move),
+                "exit": [{"name": "short_hi", "right": "P", "side": "sell",
+                          "qty": 1.0, "strike": 105.0, "expiry": "2024-05-17",
+                          "dte": 0, "bid": 5.0, "ask": 5.4}],
+            }
+            rows.append({
+                "event_id": f"e{i}", "ticker": "T",
+                "event_date": pd.Timestamp("2024-05-02"),
+                "entry_date": pd.Timestamp("2024-05-01"),
+                "exit_date": pd.Timestamp("2024-05-03"),
+                "fill_alpha": 0.5, "entry_cost": 2.0, "exit_value": 2.0,
+                "pnl": 0.0, "ret": 0.0, "legs": json.dumps(legs),
+            })
+        return pd.DataFrame(rows)
+
+    def _shocked(self, out):
+        return [i for i in range(len(out)) if out.loc[i, "exit_value"] != 2.0]
+
+    def test_signed_shock_takes_the_worst_fall(self):
+        from experiments.common import calp_tail_shock
+
+        # index 1 is the biggest fall; index 2 is a bigger move, but upward.
+        out = calp_tail_shock(self._trades([0.01, -0.12, 0.40, -0.01]),
+                              worst_frac=0.25)
+        assert self._shocked(out) == [1]
+
+    def test_absolute_shock_takes_the_biggest_move_either_way(self):
+        from experiments.common import abs_move_tail_shock
+
+        out = abs_move_tail_shock(self._trades([0.01, -0.12, 0.40, -0.01]),
+                                  worst_frac=0.25)
+        assert self._shocked(out) == [2]
+
+    def test_both_leave_the_quiet_events_alone(self):
+        from experiments.common import abs_move_tail_shock, calp_tail_shock
+
+        trades = self._trades([0.01, -0.12, 0.40, -0.01])
+        for shock in (calp_tail_shock, abs_move_tail_shock):
+            out = shock(trades, worst_frac=0.25)
+            assert 0 not in self._shocked(out)
+            assert 3 not in self._shocked(out)
+
+
+class TestTrainedGateThreshold:
+    """A gate with no champion picks its threshold on TRAIN rows, per fold.
+
+    The threshold is part of the decision rule, so choosing it on the year being
+    gated is the same leak as fitting the model on it: every walk-forward year
+    would look like a selection the gate actually made.
+    """
+
+    @staticmethod
+    def _dataset(n=1200, seed=0):
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        signal = rng.normal(size=n)
+        return pd.DataFrame({
+            "event_id": [f"e{i}" for i in range(n)],
+            "event_date": pd.to_datetime("2018-01-01")
+            + pd.to_timedelta(rng.integers(0, 2500, size=n), unit="D"),
+            "f1": signal,
+            "f2": rng.normal(size=n),
+            "ret": 0.3 * signal + rng.normal(scale=0.2, size=n),
+        })
+
+    def test_threshold_comes_from_the_training_fold(self):
+        from experiments.common import make_trained_gate
+
+        data = self._dataset()
+        gate, state = make_trained_gate("test_gate", data, ["f1", "f2"],
+                                        top_fraction=0.2)
+        train = data.iloc[:900]
+        gate.fit(train)
+        chosen = [s["threshold_chosen_on_train"] for s in state.stats
+                  if "threshold_chosen_on_train" in s]
+        assert len(chosen) == 1
+        assert state.threshold == pytest.approx(chosen[0])
+
+    def test_it_passes_about_the_registered_top_fraction(self):
+        from experiments.common import make_trained_gate
+
+        data = self._dataset()
+        gate, state = make_trained_gate("test_gate", data, ["f1", "f2"],
+                                        top_fraction=0.2)
+        gate.fit(data)
+        passed = gate.select(data)
+        assert 0.12 < float(passed.mean()) < 0.30
+
+    def test_a_fold_too_small_to_fit_selects_nothing(self):
+        from experiments.common import make_trained_gate
+
+        data = self._dataset()
+        gate, state = make_trained_gate("test_gate", data, ["f1", "f2"],
+                                        top_fraction=0.2)
+        gate.fit(data.iloc[:50])
+        assert state.threshold is None
+        assert not gate.select(data).any()
+
+    def test_a_champion_gate_and_a_trained_one_cannot_be_confused(self):
+        from experiments.common import _RegisteredGateState
+
+        with pytest.raises(ValueError, match="exactly one of"):
+            _RegisteredGateState("x", ("f1",), None, threshold=0.1, top_fraction=0.2)

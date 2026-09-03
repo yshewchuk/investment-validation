@@ -20,6 +20,11 @@ Three structures ship with Phase 0:
 ``straddle_runup`` (STR-RUNUP)
     Long ATM straddle bought early, sold immediately *before* the print.
 
+``put_condor`` (CND-P) was added later:
+    Long the wings, short the two strikes straddling the money, all puts, all
+    one expiry, evenly spaced. The first structure in the program that WANTS the
+    print to be quiet — the other three are long the move or long the run-up.
+
 Day rules are expressed in trading days relative to the print and resolved by
 :mod:`engine.calendar`, because "shortly before the print" means T−1 for a BMO
 announcement and T−0 for an AMC one.
@@ -45,6 +50,7 @@ __all__ = [
     "put_calendar",
     "straddle_through",
     "straddle_runup",
+    "put_condor",
     "STRUCTURES",
     "price_structure",
     "structure_return",
@@ -178,6 +184,30 @@ class StrikeSelector:
     ``"delta"``         strike whose |delta| is closest to ``target_delta``
     ``"fixed"``         exactly ``strike`` (used to replay a recorded trade)
     ``"same_as"``       reuse the strike already resolved for leg ``ref``
+    ``"bracket"``       the listed strike immediately below (``side="below"``)
+                        or above (``side="above"``) spot — the pair that
+                        straddles the money
+    ``"offset_from"``   the listed strike closest to ``ref``'s strike plus
+                        ``moneyness * spot``, excluding ``ref``'s own strike
+    ``"mirror"``        ``2 * about - ref``: the strike as far the other side of
+                        ``about`` as ``ref`` is this side of it, and it must be
+                        listed
+
+    The last three exist for :func:`put_condor`, whose four strikes are one
+    geometric object rather than four independent choices. ``bracket`` puts the
+    two shorts either side of spot, ``offset_from`` sets the common spacing by
+    snapping it to the listed grid, and ``mirror`` places each wing so that the
+    spacing is EXACTLY even in dollars. Even spacing is not cosmetic: a condor
+    whose lower gap exceeds its upper gap pays ``(K4-K3) - (K2-K1) < 0`` below
+    the bottom strike, so its loss is no longer capped at the debit. Requiring
+    the mirrored strike to be listed — rather than snapping to the nearest one —
+    is what keeps the defined-risk claim a property of the structure instead of
+    an approximation.
+
+    Selection is restricted to the leg's own ``right`` where the caller passes
+    one. Calls and puts do not share a delta at a strike, and a strike that is
+    listed for one right and not the other would otherwise be chosen and then
+    fail to price.
     """
 
     kind: str = "atm"
@@ -185,29 +215,111 @@ class StrikeSelector:
     target_delta: float | None = None
     strike: float | None = None
     ref: str | None = None
+    side: str | None = None
+    about: str | None = None
 
-    VALID = ("atm", "moneyness", "delta", "fixed", "same_as")
+    VALID = ("atm", "moneyness", "delta", "fixed", "same_as",
+             "bracket", "offset_from", "mirror")
+
+    #: Legs this selector must resolve after, by field.
+    REF_FIELDS = ("ref", "about")
 
     def __post_init__(self) -> None:
         if self.kind not in self.VALID:
             raise ValueError(f"unknown strike selector {self.kind!r}")
         need = {
-            "moneyness": "moneyness",
-            "delta": "target_delta",
-            "fixed": "strike",
-            "same_as": "ref",
-        }.get(self.kind)
-        if need is not None and getattr(self, need) is None:
-            raise ValueError(f"{self.kind} requires {need}")
+            "moneyness": ("moneyness",),
+            "delta": ("target_delta",),
+            "fixed": ("strike",),
+            "same_as": ("ref",),
+            "bracket": ("side",),
+            "offset_from": ("ref", "moneyness"),
+            "mirror": ("ref", "about"),
+        }.get(self.kind, ())
+        for field_name in need:
+            if getattr(self, field_name) is None:
+                raise ValueError(f"{self.kind} requires {field_name}")
+        if self.kind == "bracket" and self.side not in ("below", "above"):
+            raise ValueError(f"bracket side must be 'below' or 'above', got {self.side!r}")
+
+    @property
+    def refs(self) -> tuple[str, ...]:
+        """Leg names this selector reads, in no particular order."""
+        return tuple(
+            value for value in (getattr(self, f) for f in self.REF_FIELDS)
+            if value is not None
+        )
+
+    @staticmethod
+    def _grid(rows: pd.DataFrame) -> np.ndarray:
+        """Sorted distinct strikes present in ``rows``."""
+        return np.sort(np.unique(rows["strike"].to_numpy(dtype=float)))
 
     def select(
         self,
         rows: pd.DataFrame,
         spot: float,
         resolved: dict[str, float],
+        *,
+        right: str | None = None,
     ) -> float:
         if rows.empty:
             raise StructureError("no chain rows at the selected expiry")
+        if right is not None and "right" in rows.columns:
+            same_right = rows[rows["right"] == right]
+            # A chain missing the right entirely is a data problem, not a
+            # selection one; fall back so the leg's own lookup raises the
+            # message that says which contract was absent.
+            if not same_right.empty:
+                rows = same_right
+
+        if self.kind == "bracket":
+            grid = self._grid(rows)
+            side = grid[grid <= spot] if self.side == "below" else grid[grid > spot]
+            if side.size == 0:
+                raise StructureError(
+                    f"no listed strike {self.side} spot {spot:.4f} at this expiry"
+                )
+            return float(side[-1] if self.side == "below" else side[0])
+
+        if self.kind == "offset_from":
+            if self.ref not in resolved:
+                raise StructureError(
+                    f"leg {self.ref!r} must resolve before an offset_from reference to it"
+                )
+            anchor = resolved[self.ref]
+            grid = self._grid(rows)
+            # Candidates lie strictly on the side the offset points, so the sign
+            # of `moneyness` is a guarantee rather than a hope. Excluding the
+            # anchor keeps a spacing smaller than one grid step from snapping
+            # back onto it and collapsing two of the condor's strikes into one;
+            # excluding the far side keeps a lopsided grid (dense above spot,
+            # sparse below) from returning a nearer strike in the wrong
+            # direction and inverting the structure.
+            grid = grid[grid > anchor] if self.moneyness > 0 else grid[grid < anchor]
+            if grid.size == 0:
+                side = "above" if self.moneyness > 0 else "below"
+                raise StructureError(
+                    f"no listed strike {side} {anchor:.4f} at this expiry"
+                )
+            target = anchor + self.moneyness * spot
+            return float(grid[np.abs(grid - target).argmin()])
+
+        if self.kind == "mirror":
+            for name in (self.ref, self.about):
+                if name not in resolved:
+                    raise StructureError(
+                        f"leg {name!r} must resolve before a mirror reference to it"
+                    )
+            target = 2.0 * resolved[self.about] - resolved[self.ref]
+            grid = self._grid(rows)
+            if not np.isclose(grid, target).any():
+                raise StructureError(
+                    f"mirrored strike {target:.4f} "
+                    f"(2x{resolved[self.about]:.4f} - {resolved[self.ref]:.4f}) "
+                    "is not listed at this expiry"
+                )
+            return float(target)
 
         if self.kind == "same_as":
             if self.ref not in resolved:
@@ -306,14 +418,21 @@ class Structure:
                 f"after entry_offset ({self.entry_offset}) — a trade cannot be "
                 "decided on information that only exists once it is already on"
             )
+        # Every cross-leg strike reference — same_as, offset_from, mirror — must
+        # name a real leg that resolves EARLIER, because resolution is a single
+        # pass over `legs` in order and a forward reference reads an empty slot.
         for leg in self.legs:
-            if leg.strike.kind == "same_as" and leg.strike.ref not in names:
-                raise ValueError(f"{self.name}: same_as ref {leg.strike.ref!r} is not a leg")
-            if leg.strike.kind == "same_as" and names.index(leg.strike.ref) > names.index(leg.name):
-                raise ValueError(
-                    f"{self.name}: leg {leg.name!r} references {leg.strike.ref!r}, "
-                    "which resolves later"
-                )
+            for ref in leg.strike.refs:
+                if ref not in names:
+                    raise ValueError(
+                        f"{self.name}: leg {leg.name!r} references {ref!r}, "
+                        "which is not a leg"
+                    )
+                if names.index(ref) > names.index(leg.name):
+                    raise ValueError(
+                        f"{self.name}: leg {leg.name!r} references {ref!r}, "
+                        "which resolves later"
+                    )
 
     @property
     def decided_at(self) -> int:
@@ -522,7 +641,9 @@ def price_structure(
         else:
             expiry = spec.expiry.select(rows, snapshot.event_date, snapshot.session)
             at_expiry = rows[rows["expiry"] == expiry]
-            strike = spec.strike.select(at_expiry, spot, resolved_strikes)
+            strike = spec.strike.select(
+                at_expiry, spot, resolved_strikes, right=spec.right
+            )
 
         resolved_strikes[spec.name] = strike
         hit = at_expiry[
@@ -711,9 +832,85 @@ def straddle_runup(
     )
 
 
+def put_condor(
+    width: float = 0.05,
+    entry_offset: int = 0,
+    exit_offset: int = 1,
+    decision_offset: int | None = None,
+) -> Structure:
+    """CND-P — long put condor: long the wings, short the two strikes around spot.
+
+    Four puts, one expiry (the first that survives the print), evenly spaced::
+
+        K1 = K2 - w   BUY   long_lo    out of the money
+        K2            SELL  short_lo   the listed strike at or below spot
+        K3 = K2 + w   SELL  short_hi   the next one up, w above K2, above spot
+        K4 = K3 + w   BUY   long_hi    in the money
+
+    ``w`` is the common spacing: the listed strike nearest ``width * spot``
+    above ``K2``, so the geometry snaps to the ticker's own strike grid and the
+    wings are then MIRRORED to make the three gaps exactly equal. Payoff at
+    expiry is a tent — zero at or beyond both wings, ``w`` flat between the two
+    shorts, straight ramps in between — so the structure is long the debit and
+    wins when the stock goes nowhere. That makes it the first structure here
+    that is **short** the event: STR-THRU and STR-RUNUP pay for the move, CND-P
+    is paid for it, and its gate therefore wants the prints where the implied
+    move is much LARGER than the predicted one.
+
+    **Why the even spacing is load-bearing.** Below ``K1`` the four legs settle
+    to ``(K4 - K3) - (K2 - K1)``. Equal gaps make that zero, which is what caps
+    the loss at the debit; a wider lower gap makes it negative and the "defined
+    risk" claim is simply false. The mirror selector therefore requires the
+    wing strike to be LISTED rather than snapping to the nearest one — an event
+    whose grid cannot carry a symmetric condor is refused and counted, not
+    priced as an approximately-symmetric one.
+
+    Both shorts sit inside long strikes, so neither is naked; ``short_hi`` is
+    in the money by construction, which is early-assignment exposure of the
+    same kind EXP-102 measured on CAL-P's front put, and is a required output
+    of any experiment that trades this.
+
+    Executed in puts alone. A short iron condor — the same tent built from a
+    put spread plus a call spread for a credit — is the put-call-parity
+    equivalent, and the reason to prefer one expiry in one right here is that
+    the replay prices what it can verify: four quotes off one chain, no
+    cross-right basis.
+    """
+    if not width > 0:
+        raise ValueError(f"width must be positive, got {width!r}")
+    expiry = ExpirySelector(kind="first_post_event")
+    return Structure(
+        name="CND-P",
+        description=(
+            "Long put condor: short the two strikes straddling spot, long "
+            "evenly spaced wings, one post-event expiry, held through the print."
+        ),
+        legs=(
+            LegSpec("short_lo", PUT, SELL, expiry, StrikeSelector("bracket", side="below")),
+            LegSpec(
+                "short_hi", PUT, SELL, expiry,
+                StrikeSelector("offset_from", ref="short_lo", moneyness=width),
+            ),
+            LegSpec(
+                "long_lo", PUT, BUY, expiry,
+                StrikeSelector("mirror", ref="short_hi", about="short_lo"),
+            ),
+            LegSpec(
+                "long_hi", PUT, BUY, expiry,
+                StrikeSelector("mirror", ref="short_lo", about="short_hi"),
+            ),
+        ),
+        entry_offset=entry_offset,
+        exit_offset=exit_offset,
+        decision_offset=decision_offset,
+        params={"width": width},
+    )
+
+
 #: Factories keyed by strategy code, so specs can name a structure as a string.
 STRUCTURES = {
     "CAL-P": put_calendar,
     "STR-THRU": straddle_through,
     "STR-RUNUP": straddle_runup,
+    "CND-P": put_condor,
 }

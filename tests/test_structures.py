@@ -12,8 +12,10 @@ from engine.structures import (
     StrikeSelector,
     Structure,
     StructureError,
+    STRUCTURES,
     price_structure,
     put_calendar,
+    put_condor,
     straddle_runup,
     straddle_through,
     structure_return,
@@ -437,3 +439,215 @@ class TestSessionAwareExpiry:
         )
         priced = price_structure(straddle_through(), snapshot, MID)
         assert priced.leg("call").expiry == pd.Timestamp("2024-05-10")
+
+
+# --------------------------------------------------------------------------
+# CND-P — the long put condor
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def condor_rows():
+    """A one-expiry put/call ladder on a uniform $2.50 grid, spot 101.
+
+    Spot sits between two listed strikes on purpose: the two shorts have to
+    straddle it, and a spot that lands exactly on a grid point would hide a
+    boundary error in `bracket`.
+    """
+    obs = pd.Timestamp("2024-05-01")
+    expiry, dte = pd.Timestamp("2024-05-17"), 16
+    rows = []
+    strike = 80.0
+    while strike <= 120.0 + 1e-9:
+        for right in ("C", "P"):
+            intrinsic = max(strike - 101.0, 0.0) if right == "P" else max(101.0 - strike, 0.0)
+            mid = intrinsic + 2.0
+            rows.append(
+                {
+                    "ticker": "TEST", "obs_date": obs, "expiry": expiry, "dte": dte,
+                    "strike": round(strike, 4), "right": right,
+                    "bid": round(mid - 0.2, 4), "ask": round(mid + 0.2, 4),
+                    "iv": 0.5, "delta": -0.5 if right == "P" else 0.5, "spot": 101.0,
+                }
+            )
+        strike += 2.5
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def condor_snapshot(condor_rows):
+    return ChainSnapshot(
+        ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+        event_date=pd.Timestamp("2024-05-02"), rows=condor_rows,
+        spot=101.0, session="AMC",
+    )
+
+
+def _condor_strikes(price):
+    return {leg.name: leg.strike for leg in price.legs}
+
+
+def _terminal_payoff(price, spot_at_expiry: float) -> float:
+    """Intrinsic value of the whole structure at expiry, long-positive."""
+    total = 0.0
+    for leg in price.legs:
+        intrinsic = max(leg.strike - spot_at_expiry, 0.0)
+        total += intrinsic * leg.qty * (1.0 if leg.side == "buy" else -1.0)
+    return total
+
+
+class TestPutCondor:
+    def test_registered_under_its_strategy_code(self):
+        assert STRUCTURES["CND-P"] is put_condor
+        assert put_condor().name == "CND-P"
+
+    def test_four_put_legs_one_expiry_two_short_two_long(self, condor_snapshot):
+        price = price_structure(put_condor(), condor_snapshot, MID)
+        assert [leg.right for leg in price.legs] == ["P"] * 4
+        assert len({leg.expiry for leg in price.legs}) == 1
+        assert sorted(leg.side for leg in price.legs) == ["buy", "buy", "sell", "sell"]
+
+    def test_the_two_shorts_straddle_spot(self, condor_snapshot):
+        k = _condor_strikes(price_structure(put_condor(), condor_snapshot, MID))
+        assert k["short_lo"] <= condor_snapshot.spot_price < k["short_hi"]
+
+    def test_strikes_are_evenly_spaced(self, condor_snapshot):
+        k = _condor_strikes(price_structure(put_condor(width=0.05), condor_snapshot, MID))
+        ordered = [k["long_lo"], k["short_lo"], k["short_hi"], k["long_hi"]]
+        assert ordered == sorted(ordered)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+        assert gaps[0] == pytest.approx(gaps[1])
+        assert gaps[1] == pytest.approx(gaps[2])
+
+    def test_width_snaps_to_the_listed_grid(self, condor_snapshot):
+        """0.05 x 101 = 5.05, and the grid step is 2.50, so the spacing is 5.00."""
+        k = _condor_strikes(price_structure(put_condor(width=0.05), condor_snapshot, MID))
+        assert k["short_lo"] == pytest.approx(100.0)
+        assert k["short_hi"] == pytest.approx(105.0)
+        assert k["long_lo"] == pytest.approx(95.0)
+        assert k["long_hi"] == pytest.approx(110.0)
+
+    def test_a_wider_width_widens_every_gap(self, condor_snapshot):
+        narrow = _condor_strikes(price_structure(put_condor(width=0.025), condor_snapshot, MID))
+        wide = _condor_strikes(price_structure(put_condor(width=0.10), condor_snapshot, MID))
+        assert narrow["short_hi"] - narrow["short_lo"] < wide["short_hi"] - wide["short_lo"]
+
+    def test_width_below_one_grid_step_still_moves_a_strike(self, condor_snapshot):
+        """Snapping a sub-step spacing back onto the anchor would collapse the body."""
+        k = _condor_strikes(price_structure(put_condor(width=0.001), condor_snapshot, MID))
+        assert k["short_hi"] > k["short_lo"]
+        assert len({round(v, 6) for v in k.values()}) == 4
+
+    def test_terminal_payoff_is_never_negative(self, condor_snapshot):
+        """The defined-risk claim, as a property of the geometry rather than a hope.
+
+        Even spacing is what makes the settlement below the bottom strike
+        `(K4-K3) - (K2-K1) = 0`; an uneven condor pays a negative constant there
+        and loses more than the debit no matter how it was filled.
+        """
+        price = price_structure(put_condor(), condor_snapshot, MID)
+        grid = [0.0, 50.0, 90.0, 94.9, 95.0, 97.5, 100.0, 102.5, 105.0, 110.0, 130.0, 1000.0]
+        assert min(_terminal_payoff(price, s) for s in grid) >= -1e-9
+
+    def test_max_terminal_payoff_is_the_spacing(self, condor_snapshot):
+        price = price_structure(put_condor(), condor_snapshot, MID)
+        k = _condor_strikes(price)
+        spacing = k["short_hi"] - k["short_lo"]
+        for s in (k["short_lo"], k["short_hi"], 0.5 * (k["short_lo"] + k["short_hi"])):
+            assert _terminal_payoff(price, s) == pytest.approx(spacing)
+
+    def test_it_costs_a_debit(self, condor_snapshot):
+        assert price_structure(put_condor(), condor_snapshot, MID).cost > 0
+
+    def test_an_unlisted_mirror_strike_refuses_rather_than_approximating(self, condor_rows):
+        """No 110 put ⇒ no symmetric condor. Refused, not snapped to 107.50."""
+        rows = condor_rows[
+            ~((condor_rows["strike"] == 110.0) & (condor_rows["right"] == "P"))
+        ]
+        snap = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+            event_date=pd.Timestamp("2024-05-02"), rows=rows, spot=101.0, session="AMC",
+        )
+        with pytest.raises(StructureError, match="not listed"):
+            price_structure(put_condor(width=0.05), snap, MID)
+
+    def test_strike_selection_stays_within_the_legs_own_right(self, condor_rows):
+        """A 102.50 call with no 102.50 put must not become a put leg's strike."""
+        rows = condor_rows[
+            ~((condor_rows["strike"] == 102.5) & (condor_rows["right"] == "P"))
+        ]
+        snap = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+            event_date=pd.Timestamp("2024-05-02"), rows=rows, spot=101.0, session="AMC",
+        )
+        k = _condor_strikes(price_structure(put_condor(width=0.015), snap, MID))
+        assert 102.5 not in {round(v, 6) for v in k.values()}
+
+    def test_pinning_closes_on_the_same_four_contracts(self, condor_snapshot):
+        entry = price_structure(put_condor(), condor_snapshot, MID)
+        exit_ = price_structure(put_condor(), condor_snapshot, MID,
+                                pin=entry.legs, closing=True)
+        assert _condor_strikes(entry) == _condor_strikes(exit_)
+        assert [leg.side for leg in exit_.legs] == ["buy", "buy", "sell", "sell"]
+
+    def test_width_must_be_positive(self):
+        with pytest.raises(ValueError, match="width must be positive"):
+            put_condor(width=0.0)
+
+
+class TestCrossLegStrikeReferences:
+    def test_a_forward_reference_is_rejected_at_construction(self):
+        expiry = ExpirySelector(kind="first_post_event")
+        with pytest.raises(ValueError, match="resolves later"):
+            Structure(
+                name="BAD",
+                legs=(
+                    LegSpec("a", "P", "buy", expiry,
+                            StrikeSelector("mirror", ref="b", about="b")),
+                    LegSpec("b", "P", "sell", expiry, StrikeSelector("atm")),
+                ),
+                entry_offset=0, exit_offset=1,
+            )
+
+    def test_a_reference_to_a_leg_that_does_not_exist_is_rejected(self):
+        expiry = ExpirySelector(kind="first_post_event")
+        with pytest.raises(ValueError, match="is not a leg"):
+            Structure(
+                name="BAD",
+                legs=(
+                    LegSpec("a", "P", "buy", expiry, StrikeSelector("atm")),
+                    LegSpec("b", "P", "sell", expiry,
+                            StrikeSelector("offset_from", ref="ghost", moneyness=0.05)),
+                ),
+                entry_offset=0, exit_offset=1,
+            )
+
+    def test_bracket_needs_a_side(self):
+        with pytest.raises(ValueError, match="bracket side must be"):
+            StrikeSelector("bracket", side="sideways")
+
+    def test_bracket_below_includes_a_strike_exactly_at_spot(self, condor_rows):
+        below = StrikeSelector("bracket", side="below").select(
+            condor_rows, 100.0, {}, right="P")
+        above = StrikeSelector("bracket", side="above").select(
+            condor_rows, 100.0, {}, right="P")
+        assert below == pytest.approx(100.0)
+        assert above == pytest.approx(102.5)
+
+    def test_bracket_raises_when_spot_is_off_the_ladder(self, condor_rows):
+        with pytest.raises(StructureError, match="no listed strike below"):
+            StrikeSelector("bracket", side="below").select(condor_rows, 10.0, {}, right="P")
+
+    def test_offset_from_stays_on_the_side_its_sign_points(self, condor_rows):
+        """A grid that is sparse below the anchor must not pull the offset down."""
+        rows = condor_rows[
+            (condor_rows["strike"] >= 100.0) | (condor_rows["strike"] <= 85.0)
+        ]
+        chosen = StrikeSelector("offset_from", ref="a", moneyness=0.02).select(
+            rows, 101.0, {"a": 100.0}, right="P")
+        assert chosen > 100.0
+
+    def test_offset_from_raises_when_the_grid_ends(self, condor_rows):
+        with pytest.raises(StructureError, match="no listed strike above"):
+            StrikeSelector("offset_from", ref="a", moneyness=0.05).select(
+                condor_rows, 101.0, {"a": 120.0}, right="P")

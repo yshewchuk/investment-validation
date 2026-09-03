@@ -1,0 +1,156 @@
+id: EXP-121
+title: "CND-P put condor: defined-risk short-vol on the print"
+kind: descriptive
+strategy: CND-P
+programme: structure-validation
+prior: [EXP-102, EXP-105, EXP-117, EXP-120]
+type: descriptive
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+hypothesis: >
+  A long put condor - long the out-of-the-money wing, short the two strikes
+  straddling spot, long the in-the-money wing, all puts, one post-event expiry,
+  evenly spaced, opened at the last pre-print close and closed at the first
+  post-print close - is defined-risk by construction and is the first structure
+  in this programme that is SHORT the event. STR-THRU and STR-RUNUP pay for the
+  move; CND-P is paid for it, and wins when the print is quieter than it was
+  priced to be.
+
+  This is descriptive measurement with no promotion target. It answers four
+  questions, in this order: does the geometry survive real strike grids; does
+  the defined-risk claim hold at real fills; how exposed is the in-the-money
+  short to early assignment; and what is the CEILING - what an oracle that knew
+  the realized move in advance could have made. The ceiling is the number that
+  decides whether a gate is worth building at all (EXP-122), because no
+  selector can beat a perfect one.
+
+  Registered expectation, stated so it cannot be claimed afterwards: the
+  UNSELECTED mean at mid fills is at or below zero. Earnings implied moves
+  carry a variance risk premium, so selling the move indiscriminately should
+  land near break-even before costs and below it after them. A positive
+  unselected mean would be a surprise and would be reported as one.
+
+known_before_registration:
+  # Stated so none of it is later mistaken for a finding of this experiment.
+  payoff_algebra: >
+    With equal spacing w and strikes K1 < K2 <= spot < K3 < K4, the terminal
+    payoff is 0 at or beyond both wings, rises linearly to w at K2, is flat at w
+    between the two shorts, and falls linearly to 0 at K4. Below K1 the legs
+    settle to (K4-K3) - (K2-K1), which equal spacing makes exactly zero: that is
+    what caps the loss at the debit. Break-even at expiry is roughly
+    |move| < 1.5w - c for a debit c, so w must be of the order of the implied
+    move for the structure to be a short-vol trade rather than a bet on a pin.
+    This algebra is why  is the parameter the structure turns on, and it
+    is proved as a property test in tests/test_structures.py, not measured here.
+  implied_move_series: >
+    EXP-120 could not adjudicate the two implied-move series against an
+    independent chain reconstruction (stage 0 coverage failed: 406 of 52,390
+    events carry both expiries). Its unregistered secondary measured both
+    against the iv30/exErnIv30 decomposition on n=92,309: median |oquants - dec|
+    0.614pp against |ORATS - dec| 2.469pp, oquants closer in 18 of 19 years.
+    Stage 0 below therefore sizes the condor against the OQUANTS series, and
+    that choice is registered here rather than made after seeing which width
+    looked better.
+  base_rates_of_the_other_structures: >
+    On the engine trade set at mid: STR-THRU +2.70%/trade over 17,666 events,
+    breakeven alpha 0.448; STR-RUNUP +1.02% over 5,311, breakeven 0.478; CAL-P
+    +2.76% over 4,736, breakeven 0.475. CND-P is being measured against these,
+    and its breakeven alpha is the number that decides whether the four-leg
+    spread cost is survivable at all.
+  four_legs_cost_four_spreads: >
+    CND-P crosses four bid-ask spreads to open and four to close, against two
+    for STR-THRU and two for CAL-P. Its breakeven alpha is expected to be worse
+    than theirs for that reason alone, and a breakeven alpha above 0.5 would
+    mean the structure does not make money at mid at all.
+
+stage0:
+  status: registered
+  question: >
+    Does a symmetric condor exist on real strike grids, and at what spacing?
+    For each candidate width, over every event with an entry chain: does the
+    ladder carry K1, K2, K3 and K4 with exactly equal gaps at the first
+    post-event expiry, and what spacing does the snap actually produce as a
+    share of spot?
+  looks_at: >
+    Strike grids, spot, and the oquants implied move. NO returns, NO exit
+    chains, NO pricing. Nothing in stage 0 can see whether a width made money.
+  candidate_widths: [0.025, 0.05, 0.075, 0.10]
+  width_rule: >
+    The PRIMARY width is the SMALLEST candidate that satisfies both:
+    (a) the symmetric condor resolves on >= 50% of events with an entry chain;
+    (b) the median realized spacing, as a share of spot, is >= the median
+    oquants implied move over the same events.
+    Rationale, registered in advance: the max-profit zone is one spacing wide
+    and the whole profit zone about three spacings wide centred on the money, so
+    a spacing below the typical implied move puts the entire profit region
+    inside one ordinary event move. If NO candidate satisfies both, the primary
+    is the widest candidate meeting (a) alone, and the shortfall against (b) is
+    reported beside the headline rather than quietly absorbed.
+  api_calls: 0
+
+primary_spec:
+  gate: none
+  kind: descriptive structure mechanics, no selection, no promotion target
+  universe: >
+    every CND-P event the engine can replay 2018-2026, unselected - the same
+    event universe engine.build_trades uses, filtered only by "the chain exists
+    and the structure resolves"
+  structure: >
+    CND-P e+0 x+1: four puts at the first expiry that survives the print,
+    short_lo at the listed strike at or below spot, short_hi one registered
+    spacing above it, wings mirrored so the three gaps are exactly equal.
+    Opened at the last pre-print close, closed at the first post-print close.
+  width: "set by the stage 0 width_rule, from the registered candidate list"
+  fills: full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+
+grid:
+  # Every candidate width runs and is logged. None of them is the headline.
+  width: [0.025, 0.05, 0.075, 0.10]
+
+required_outputs:
+  - >
+    DEFINED-RISK FALSIFICATION. The distribution of ret against -1.0 at every
+    fill alpha, per year and per mcap bucket. The structure cannot lose more
+    than its debit at expiry; every ret < -1.0 is therefore an EXIT-side
+    artifact and each one is classified (real loss / crossed or stale quote /
+    missing wing at the exit). Reported as a count and a worst case, not as a
+    pass-fail on the mean.
+  - >
+    EARLY-ASSIGNMENT EXPOSURE. short_hi is in the money at entry by
+    construction. Frequency and depth of both shorts being in the money at the
+    post-print close, and the share of events where short_hi is in the money by
+    more than one spacing - the region where an American put is worth
+    exercising early.
+  - >
+    RESOLVABILITY LEDGER. Every skip reason from engine.replay, with the
+    structure_unresolved count split by cause (no bracket, no listed offset, no
+    listed mirror) so the cost of demanding exact symmetry is a number.
+  - >
+    THE ORACLE CEILING. Mean return of the quietest quintile of events by
+    REALIZED absolute move, at mid. Hindsight by construction and labelled as
+    such on every line it appears: it is not a strategy, it is the bound EXP-122
+    has to fit under. Reported beside the same quintile cut on the oquants
+    implied move (a real, tradeable cut) so the gap between what is knowable and
+    what is not is visible.
+  - >
+    Breakeven alpha against the 0.448 / 0.475 / 0.478 baselines of the three
+    existing structures, with the four-spread cost noted.
+  - >
+    Tail injection (mandatory, has_short_leg=true) - worst 1% of realized moves
+    doubled and re-priced. For a condor the ruin direction is a LARGE move in
+    either direction, not just down, so the shock set is taken on |move|.
+  - per-year table, crisis regime replays, IV-regime split, deployment
+
+data_snapshot: 0f01d8d79a6315b96cece8cf793252d5f63650957422b03318467d6328f67b5a
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-03T12:09:25+00:00"

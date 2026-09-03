@@ -39,8 +39,10 @@ __all__ = [
     "load_spy_daily",
     "gate_dataset",
     "make_registered_gate",
+    "make_trained_gate",
     "make_repricer",
     "calp_tail_shock",
+    "abs_move_tail_shock",
     "MIN_FIT_ROWS",
 ]
 
@@ -146,13 +148,21 @@ def gate_dataset(strategy: str, trades: pd.DataFrame, cache_dir: Path | str) -> 
 
 
 class _RegisteredGateState:
-    """Fold state behind :func:`make_registered_gate`.
+    """Fold state behind :func:`make_registered_gate` and :func:`make_trained_gate`.
 
     ``fit(train)`` refits the champion model class on the fold's train rows —
     the harness hands it only years strictly before the year being traded —
     and fits the isotonic P(win) map on the same rows. ``select`` applies the
-    registry's stored threshold; ``predict_proba`` returns P(win) from the most
-    recent fit. ``engine.evaluate.walk_forward`` calls ``predict_proba`` BEFORE
+    threshold; ``predict_proba`` returns P(win) from the most recent fit.
+
+    The threshold comes from one of two places and never from anywhere else. A
+    strategy with a registered champion passes ``threshold=`` and the registry's
+    stored number is applied unchanged — that is the decision rule as promoted.
+    A strategy with no champion yet passes ``top_fraction=`` instead, and each
+    fold chooses its own threshold as that quantile of its TRAINING-year
+    predictions. A threshold picked on the year being gated is a rank the model
+    could not have known, and it would make every walk-forward year look like a
+    selection the gate actually made. ``engine.evaluate.walk_forward`` calls ``predict_proba`` BEFORE
     the same year's ``fit``, so each year's probabilities come from the
     previous fold's model (and the first gated year has none, hence NaN). That
     is leak-free — the model behind a probability never saw that year — and one
@@ -164,11 +174,17 @@ class _RegisteredGateState:
     """
 
     def __init__(self, name: str, features: Sequence[str], feat: pd.DataFrame,
-                 threshold: float, seed: int = SEED):
+                 threshold: float | None = None, seed: int = SEED,
+                 top_fraction: float | None = None):
+        if (threshold is None) == (top_fraction is None):
+            raise ValueError(
+                "pass exactly one of threshold= (a registered champion's stored "
+                "rule) or top_fraction= (choose it per fold on training rows)")
         self.name = name
         self.features = tuple(features)
         self.feat = feat
-        self.threshold = float(threshold)
+        self.threshold = None if threshold is None else float(threshold)
+        self.top_fraction = top_fraction
         self.seed = seed
         self.model_ = None
         self.iso_ = None
@@ -195,9 +211,14 @@ class _RegisteredGateState:
         if n_complete < MIN_FIT_ROWS:
             self.model_ = None
             self.iso_ = None
+            if self.top_fraction is not None:
+                self.threshold = None
             return
         self.model_ = gate_mod.fit(X[ok], y[ok], seed=self.seed)
         pred = np.asarray(self.model_.predict(X[ok]), dtype=float)
+        if self.top_fraction is not None:
+            self.threshold = gate_mod.choose_threshold(pred, self.top_fraction)
+            self.stats[-1]["threshold_chosen_on_train"] = self.threshold
         win = (y[ok] > 0).astype(float)
         self.base_rate_ = float(win.mean())
         try:
@@ -211,7 +232,7 @@ class _RegisteredGateState:
             self.iso_ = None
 
     def select(self, rows: pd.DataFrame) -> pd.Series:
-        if self.model_ is None:
+        if self.model_ is None or self.threshold is None:
             return pd.Series(False, index=rows.index)
         X, complete = self._lookup(rows)
         pred = np.full(len(rows), np.nan)
@@ -266,6 +287,38 @@ def make_registered_gate(strategy: str, dataset: pd.DataFrame) -> tuple[Gate, _R
         select=state.select,
         predict_proba=state.predict_proba,
         name=f"{entry.id}@{entry.threshold:.5f}",
+    )
+    return gate, state
+
+
+def make_trained_gate(
+    name: str,
+    dataset: pd.DataFrame,
+    features: Sequence[str],
+    *,
+    top_fraction: float = gate_mod.TOP_FRACTION,
+    seed: int = SEED,
+) -> tuple[Gate, _RegisteredGateState]:
+    """A gate for a strategy that has no champion yet.
+
+    Same model class, same features, same fold discipline as
+    :func:`make_registered_gate` — the difference is that there is no stored
+    threshold to apply, so each fold picks its own on its training predictions.
+    Use this to ask whether a gate is worth promoting; use the registered one to
+    re-validate a gate that already was.
+    """
+    missing = [c for c in features if c not in dataset.columns]
+    if missing:
+        raise ValueError(f"{name}: dataset is missing features {missing}")
+    feat = dataset.set_index("event_id")[list(features)]
+    feat = feat[~feat.index.duplicated(keep="first")]
+    state = _RegisteredGateState(
+        name, features, feat, seed=seed, top_fraction=top_fraction)
+    gate = Gate(
+        fit=state.fit,
+        select=state.select,
+        predict_proba=state.predict_proba,
+        name=f"{name}@top{top_fraction:.0%}",
     )
     return gate, state
 
@@ -350,20 +403,36 @@ def make_repricer(
 
 
 def calp_tail_shock(trades: pd.DataFrame, worst_frac: float = 0.01) -> pd.DataFrame:
-    """Double the realized move of the worst-move trades and re-price the exit.
+    """Double the realized move of the worst DOWN-move trades and re-price the exit.
+
+    The ruin tail for CAL-P's short front put is a large fall, so the shock set
+    is the most negative spot moves — not the worst returns: a trade can lose on
+    an up move (time-value dynamics), and doubling an up move makes it better,
+    which would let a "ruin" stress report a worst trade that improved. The
+    return-tail losses are already in the base distribution; tail injection adds
+    the doubled DOWN tail on top of it.
+    """
+    return _tail_shock(trades, worst_frac, signed=True)
+
+
+def abs_move_tail_shock(trades: pd.DataFrame, worst_frac: float = 0.01) -> pd.DataFrame:
+    """Double the realized move of the LARGEST-|move| trades and re-price the exit.
+
+    The shock set for a structure that is short the event. A condor is hurt by a
+    big move in EITHER direction — it settles worthless past either wing — so
+    ranking by the signed move would shock only the down tail and leave the
+    up-side blow-ups, half the ruin cases, untouched.
+    """
+    return _tail_shock(trades, worst_frac, signed=False)
+
+
+def _tail_shock(trades: pd.DataFrame, worst_frac: float, *, signed: bool) -> pd.DataFrame:
+    """Double the realized move of the worst ``worst_frac`` and re-price the exit.
 
     The harness does not know a structure's payoff, so this supplies the
-    re-pricing for CAL-P. The shock set is the worst ``worst_frac`` of trades
-    by REALIZED MOVE — the most negative spot moves, which is the ruin tail
-    for a short front put — not by return: a trade can lose on an up move
-    (time-value dynamics), and doubling an up move makes it better, which
-    would let a "ruin" stress report a worst trade that improved. The
-    return-tail losses are already in the base distribution; tail injection
-    adds the doubled DOWN tail on top of it.
-
-    A large DOWN move then makes the short front put deep ITM while the back
-    put's time value does not scale with the move, which is exactly the
-    blow-up the stress exists to expose.
+    re-pricing. ``signed`` picks the ruin direction: the most negative moves for
+    a structure that is long the downside risk, the largest absolute moves for
+    one that is short the move in both directions.
 
     Re-pricing needs no chain reload: the stored ``legs`` blob carries both
     exit legs' quotes. Each shocked leg keeps the time value of its actual
@@ -406,7 +475,8 @@ def calp_tail_shock(trades: pd.DataFrame, worst_frac: float = 0.01) -> pd.DataFr
         t.attrs["tail_shock_applied"] = 0
         t.attrs["tail_shock_skipped"] = 0
         return t
-    order = eligible[np.argsort(move[eligible])]
+    rank = move[eligible] if signed else -np.abs(move[eligible])
+    order = eligible[np.argsort(rank)]
     worst_idx = order[:n_shock]
 
     applied = 0
