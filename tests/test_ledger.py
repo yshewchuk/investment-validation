@@ -166,6 +166,58 @@ class TestOutcomeScoring:
         assert outcome["realized_win"] is True
         assert outcome["predicted_win"] == 0.55
 
+    def test_each_strategy_gets_its_own_realized_return(self, ledger_root, monkeypatch):
+        """Three structures on the same event are three different trades.
+
+        The lookup was keyed on (event_id, alpha) with no strategy, inside a
+        loop over strategies — so each replay overwrote the last, and whichever
+        `groupby` visited last (STR-THRU, alphabetically) was handed to every
+        other strategy as its own realized return. STR-RUNUP reported outcomes
+        for events its replay had just said it could not price.
+        """
+        from engine import replay as replay_mod
+
+        for strategy in ("CAL-P", "STR-RUNUP", "STR-THRU"):
+            ledger.write_predictions([_prediction(strategy=strategy)])
+
+        rets = {"CAL-P": -0.30, "STR-RUNUP": 0.05, "STR-THRU": 0.12}
+
+        def fake_replay(strategy, events, **kwargs):
+            frame = self._priced(ret=rets[strategy])
+            frame["strategy"] = strategy
+            return _fake_replay(frame)(strategy, events, **kwargs)
+
+        monkeypatch.setattr(replay_mod, "replay", fake_replay)
+        ledger.score_outcomes(through="2026-10-20")
+        got = {o["strategy"]: o["realized_pnl"] for o in ledger.read_outcomes()}
+        assert got == pytest.approx(rets), got
+        assert len(set(got.values())) == 3, "three structures must not share one number"
+
+    def test_a_strategy_the_replay_cannot_price_stays_unresolved(
+        self, ledger_root, monkeypatch
+    ):
+        """The failure that hid the bug: STR-RUNUP priced 0 events and still
+        reported resolved outcomes, borrowed from STR-THRU."""
+        from engine import replay as replay_mod
+
+        for strategy in ("STR-RUNUP", "STR-THRU"):
+            ledger.write_predictions([_prediction(strategy=strategy)])
+
+        def fake_replay(strategy, events, **kwargs):
+            frame = self._priced() if strategy == "STR-THRU" else pd.DataFrame(
+                columns=["event_id", "strategy", "fill_alpha", "ret",
+                         "event_date", "entry_cost", "exit_value"]
+            )
+            if len(frame):
+                frame["strategy"] = strategy
+            return _fake_replay(frame)(strategy, events, **kwargs)
+
+        monkeypatch.setattr(replay_mod, "replay", fake_replay)
+        ledger.score_outcomes(through="2026-10-20")
+        by = {o["strategy"]: o["status"] for o in ledger.read_outcomes()}
+        assert by["STR-THRU"] == "resolved"
+        assert by["STR-RUNUP"] == "unresolvable"
+
     def test_unresolvable_is_recorded_not_dropped(self, ledger_root, monkeypatch):
         from engine import replay as replay_mod
 

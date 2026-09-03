@@ -255,8 +255,16 @@ CHAIN_FIELDS = (
 )
 CHAIN_DTE = "1,45"
 
+#: Trading sessions the nightly refreshes, counting back from ``as_of``.
+#: Two, because ORATS publishes a session around midnight: a run in the evening
+#: cannot get today, so it must also ask for yesterday or it acquires nothing.
+#: It also heals a night that did not run — a session is re-asked until it is
+#: actually held, and `skip_held` makes an already-held one free.
+CHAIN_SESSIONS = 2
 
-def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH) -> dict:
+
+def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH,
+                           sessions: int = CHAIN_SESSIONS, skip_held: bool = True) -> dict:
     """EOD option chains for the names the board is about to score.
 
     This is what the board has been missing. Everything chain-dependent —
@@ -271,16 +279,69 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     chains for one session cost less than a rounding error.
 
     Truncation is checked, not assumed: see :data:`CHAIN_BATCH`.
+
+    **It refreshes the last ``sessions`` trading days, not just ``as_of``.**
+    ORATS publishes a session's chains around midnight, so a run in the evening
+    that asks only for today gets nothing back — silently, because an
+    unpublished date and a name with no chain look identical. Asking for the
+    previous session too means the run always acquires something, and it heals
+    a gap left by a night that did not run: each session is asked for again
+    until it is actually held.
+
+    **A pair already in the store is never re-bought** (``skip_held``). Without
+    it, covering several sessions would multiply the nightly cost; with it the
+    second session is usually free, because the previous run already got it.
+    This is a CONTENT check, not a cache-key check — `Fetcher.has` only
+    recognises an identical ticker batch, and the board's ticker set changes
+    nightly, so every key would miss.
     """
     from engine.data.fetch import Fetcher
 
     fetcher = fetcher or Fetcher()
-    stamp = str(pd.Timestamp(as_of).normalize().date())
+    as_of = pd.Timestamp(as_of).normalize()
+    stamp = str(as_of.date())
     unknown = _unknown_symbols()
-    wanted = [str(t) for t in sorted(set(tickers)) if str(t) not in unknown]
+    wanted_all = [str(t) for t in sorted(set(tickers)) if str(t) not in unknown]
 
-    out = {"as_of": stamp, "requested": len(wanted), "returned": 0, "rows": 0,
-           "calls": 0, "cache_hits": 0, "missing": [], "failed": []}
+    from engine.calendar import trading_calendar
+
+    cal = trading_calendar()
+    stamps: list[str] = []
+    try:
+        pos = cal.index_of(as_of, side="prev")
+        for k in range(max(1, int(sessions))):
+            if pos - k >= 0:
+                stamps.append(str(cal.days[pos - k].date()))
+    except (KeyError, ValueError):
+        stamps = [stamp]
+
+    held: set = set()
+    if skip_held:
+        from engine.replay import available_chain_keys
+
+        try:
+            held = available_chain_keys()
+        except Exception:  # a cost optimisation must never take the refresh down
+            held = set()
+
+    out = {"as_of": stamp, "sessions": stamps, "requested": len(wanted_all),
+           "returned": 0, "rows": 0, "calls": 0, "cache_hits": 0,
+           "skipped_held": 0, "missing": [], "failed": []}
+    for stamp in stamps:
+        _refresh_one_session(
+            fetcher, wanted_all, stamp, held, batch=batch, out=out, skip_held=skip_held
+        )
+    return out
+
+
+def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held) -> None:
+    """Fetch one trade date for whatever part of the universe still needs it."""
+    session_day = pd.Timestamp(stamp).normalize()
+    if skip_held:
+        wanted = [t for t in wanted_all if (t, session_day) not in held]
+        out["skipped_held"] += len(wanted_all) - len(wanted)
+    else:
+        wanted = list(wanted_all)
     for start in range(0, len(wanted), batch):
         chunk = wanted[start : start + batch]
         params = {"ticker": ",".join(chunk), "tradeDate": stamp,
@@ -307,7 +368,6 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
         # genuinely absent. Calling that "truncated" would have blamed the
         # batching for the data's own gap.
         out["missing"].extend(t for t in chunk if t not in got)
-    return out
 
 
 def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:
@@ -336,6 +396,7 @@ def refresh_calendar_data(
     fetcher=None,
     batch: int = 10,
     horizon_days: int = 21,
+    sessions: int = CHAIN_SESSIONS,
     forward: bool = True,
     max_confirmations: int = 400,
 ) -> dict:
@@ -442,7 +503,8 @@ def refresh_calendar_data(
     # -- 4. option chains for the board's own names --------------------------
     # Last, because it is the only pass whose cost scales with the board, and
     # because everything above must succeed for the board to exist at all.
-    out["chains"] = refresh_forward_chains(tickers, as_of, fetcher=fetcher)
+    out["chains"] = refresh_forward_chains(tickers, as_of, fetcher=fetcher,
+                                           sessions=sessions)
     out["calls"] += out["chains"]["calls"]
 
     from engine.data.rebuild import rebuild
@@ -747,6 +809,7 @@ def run_nightly(
     publish: bool = True,
     backup: bool = False,
     backfill: bool = True,
+    chain_sessions: int = CHAIN_SESSIONS,
     fetcher=None,
     scorer=None,
     max_staleness_days: int = MAX_STALENESS_DAYS,
@@ -821,7 +884,8 @@ def run_nightly(
 
         try:
             report.steps["refresh"] = refresh_calendar_data(
-                calendar_tickers, as_of, fetcher=fetcher, horizon_days=horizon_days
+                calendar_tickers, as_of, fetcher=fetcher, horizon_days=horizon_days,
+                sessions=chain_sessions,
             )
             # The calendar may have moved under the refresh — re-read it.
             events = store.read_table(
@@ -885,6 +949,26 @@ def run_nightly(
     # views of the same decision, and freezing them would inflate the
     # calibration sample with rows nobody would trade.
     report.steps["ledger"] = ledger.snapshot(as_of=as_of, scores=board_scores)
+
+    # -- 4a. SETTLE what has already happened --------------------------------
+    # The nightly wrote predictions for six nights and settled none of them,
+    # because nothing ever called this. A frozen prediction with no outcome is
+    # a record of an opinion, not of a result: the calibration report, the
+    # health page and the hypothetical book all read `scored_pairs()`, and all
+    # three were empty for the same reason.
+    #
+    # It runs AFTER the refresh, so a chain acquired tonight settles tonight
+    # rather than waiting a further day.
+    try:
+        report.steps["settle"] = ledger.score_outcomes()
+    except Exception as exc:  # noqa: BLE001 — a settlement failure must not
+        # take the board down; the predictions are already frozen and the
+        # outcomes can be scored again tomorrow.
+        report.steps["settle"] = {"failed": f"{type(exc).__name__}: {exc}"}
+        report.flags.append({
+            "kind": "settle_failed",
+            "detail": f"outcomes not scored tonight — {type(exc).__name__}: {exc}",
+        })
 
     # -- 3b. the strike ladder, for the explorer -------------------------------
     ladder = strike_ladder(
@@ -1076,6 +1160,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-publish", action="store_true")
     parser.add_argument("--no-backfill", action="store_true")
     parser.add_argument("--backup", action="store_true", help="run the git + private-mirror sync")
+    parser.add_argument(
+        "--chain-sessions", type=int, default=CHAIN_SESSIONS,
+        help="trading sessions of chains to refresh, counting back from --as-of. "
+             "2 is the steady state (ORATS publishes around midnight, so tonight "
+             "needs yesterday too); widen it once to heal a gap left by nights "
+             "that did not run. Already-held pairs are skipped, so a wider "
+             "window costs only what is genuinely missing.",
+    )
     parser.add_argument("--max-staleness", type=int, default=MAX_STALENESS_DAYS)
     parser.add_argument("--json", default=None, help="write the run report to this path")
     args = parser.parse_args(argv)
@@ -1093,6 +1185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             publish=not args.no_publish,
             backup=args.backup,
             backfill=not args.no_backfill,
+            chain_sessions=args.chain_sessions,
             max_staleness_days=args.max_staleness,
         )
     except NightlyStop as exc:

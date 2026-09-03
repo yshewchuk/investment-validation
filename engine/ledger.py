@@ -397,11 +397,21 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
         if not len(trades):
             continue
         for record in trades.to_dict(orient="records"):
-            priced[(str(record["event_id"]), f"{float(record['fill_alpha']):.2f}")] = record
+            # The STRATEGY is part of the key. Without it every strategy's
+            # replay overwrote the previous one's entry for the same event, and
+            # since `groupby` walks them alphabetically the last one (STR-THRU)
+            # was handed to CAL-P and STR-RUNUP as their own realized return.
+            # Three structurally different trades — one holds through the print,
+            # one exits before it, one is a calendar — reported an identical
+            # number, and STR-RUNUP reported outcomes for events whose chains
+            # the replay had just said it could not price.
+            priced[(strategy, str(record["event_id"]),
+                    f"{float(record['fill_alpha']):.2f}")] = record
 
     rows: list[dict] = []
     for row, record in zip(pending, frame.to_dict(orient="records")):
-        key = (str(record["event_id"]), f"{float(record['alpha'] or 0.5):.2f}")
+        key = (str(record["strategy"]), str(record["event_id"]),
+               f"{float(record['alpha'] or 0.5):.2f}")
         trade = priced.get(key)
         base = {
             "schema_version": SCHEMA_VERSION,

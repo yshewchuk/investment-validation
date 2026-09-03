@@ -967,3 +967,91 @@ class TestLazyModelsPayload:
         text = write_single_file(tmp_path / "b", tmp_path / "one.html").read_text()
         assert "window.MODELS = " in text
         assert "window.STRATEGIES = " in text
+
+
+class TestChainRefreshCoversTheGap:
+    """The refresh acquired almost nothing for six nights, silently.
+
+    ORATS publishes a session around midnight, so an evening run asking only
+    for today gets an empty response — indistinguishable from a name that has
+    no chain. Two sessions, and skipping what is already held, fixes both that
+    and a night that did not run.
+    """
+
+    class _Fetcher:
+        def __init__(self):
+            self.asked = []
+
+        def fetch(self, source, endpoint, params, note=""):
+            self.asked.append(params["tradeDate"])
+
+            class R:
+                from_cache = False
+
+                @staticmethod
+                def json():
+                    return {"data": [{"ticker": params["ticker"].split(",")[0]}]}
+
+            return R()
+
+    def test_it_asks_for_the_previous_session_too(self, monkeypatch):
+        from engine.dashboard import nightly
+
+        monkeypatch.setattr(nightly, "_unknown_symbols", lambda: set())
+        f = self._Fetcher()
+        out = nightly.refresh_forward_chains(
+            ["AAA"], "2026-09-02", fetcher=f, skip_held=False
+        )
+        assert len(out["sessions"]) == 2
+        assert out["sessions"][0] == "2026-09-02"
+        assert out["sessions"][1] < "2026-09-02"
+        assert set(f.asked) == set(out["sessions"])
+
+    def test_a_pair_already_in_the_store_is_not_re_bought(self, monkeypatch):
+        from engine.dashboard import nightly
+
+        monkeypatch.setattr(nightly, "_unknown_symbols", lambda: set())
+        monkeypatch.setattr(
+            "engine.replay.available_chain_keys",
+            lambda: {("AAA", pd.Timestamp("2026-09-02"))},
+        )
+        f = self._Fetcher()
+        out = nightly.refresh_forward_chains(["AAA"], "2026-09-02", fetcher=f)
+        assert out["skipped_held"] == 1
+        assert "2026-09-02" not in f.asked, "already held — must not be re-bought"
+
+    def test_sessions_can_be_widened_to_heal_a_longer_gap(self, monkeypatch):
+        from engine.dashboard import nightly
+
+        monkeypatch.setattr(nightly, "_unknown_symbols", lambda: set())
+        f = self._Fetcher()
+        out = nightly.refresh_forward_chains(
+            ["AAA"], "2026-09-02", fetcher=f, sessions=5, skip_held=False
+        )
+        assert len(out["sessions"]) == 5
+        assert out["sessions"] == sorted(out["sessions"], reverse=True)
+
+    def test_weekends_are_stepped_over(self, monkeypatch):
+        """Sessions, not calendar days — a Monday run must reach back to
+        Friday, not to Sunday."""
+        from engine.dashboard import nightly
+
+        monkeypatch.setattr(nightly, "_unknown_symbols", lambda: set())
+        f = self._Fetcher()
+        out = nightly.refresh_forward_chains(
+            ["AAA"], "2026-09-14", fetcher=f, sessions=2, skip_held=False
+        )
+        assert out["sessions"] == ["2026-09-14", "2026-09-11"], out["sessions"]
+
+    def test_a_run_on_a_market_holiday_falls_back_to_real_sessions(self, monkeypatch):
+        """2026-09-07 is Labor Day. A run stamped that date must not ask for a
+        closed session — there is no chain to publish for one."""
+        from engine.dashboard import nightly
+
+        monkeypatch.setattr(nightly, "_unknown_symbols", lambda: set())
+        f = self._Fetcher()
+        out = nightly.refresh_forward_chains(
+            ["AAA"], "2026-09-07", fetcher=f, sessions=2, skip_held=False
+        )
+        assert out["sessions"] == ["2026-09-04", "2026-09-03"], out["sessions"]
+        assert "2026-09-07" not in f.asked
