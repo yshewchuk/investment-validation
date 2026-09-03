@@ -57,8 +57,27 @@ def main() -> None:
             cell["primary_spec"]["universe"] = label
             cell["grid_cell"] = True
 
+        # The entry rule is a UNIVERSE DEFINITION, not a gate. Passing it as a
+        # Gate looked tidy — it reused the harness's anti-selection reporting —
+        # but walk_forward bypasses a gate for years with less than
+        # min_train_years of history, which is right for a model that has to
+        # learn something and wrong for arithmetic that does not. It kept 2018
+        # and 2019 unfiltered: 3,011 of 3,830 headline trades, 78.6%, never saw
+        # the rule. The rule selects the trade set, so the trade set is what is
+        # evaluated, and the unfiltered universe is reported beside it below.
+        # Decide ONCE, on mid quotes, then keep every fill for the events that
+        # passed. `c < w` is a test on the debit, and the debit moves with the
+        # fill assumption — applied per row it admitted 1,147 events at mid but
+        # only 335 at worst, so the alpha sweep was pricing a DIFFERENT universe
+        # at every point on its own curve and the breakeven alpha it produced
+        # described nothing. Mid is the decision basis the programme quotes
+        # everywhere else; the sweep then measures what those same trades do
+        # when the fill is worse.
+        decided = trades[np.isclose(trades["fill_alpha"].astype(float), 0.5)]
+        chosen = set(decided.loc[decided[column].fillna(False).astype(bool), "event_id"])
+        evaluated = trades[trades["event_id"].isin(chosen)]
         result = evaluate(
-            cell, trades, gate=twinp.make_filter_gate(column), run_dir=HERE,
+            cell, evaluated, gate=None, run_dir=HERE,
             repricer=(common.make_repricer(twinp.STRATEGY,
                                            structure=twin_peak(steps=steps))
                       if is_primary else None),
@@ -66,6 +85,8 @@ def main() -> None:
             input_files=[twinp.trades_path(steps)],
             extra_sections=(lambda r, t=trades, c=column, p=is_primary:
                             sections(r, t, c, p)),
+            # min_train_years in the spec is inapplicable here: nothing is
+            # fitted, so no fold needs history and every year is evaluated.
             write_report=is_primary,
         )
         lib.record_evaluation(HERE, cell, result.results)
@@ -88,6 +109,27 @@ def sections(result, trades, column, is_primary) -> list[dict]:
         before = len(cur)
         cur = cur[cur[col].fillna(False)]
         rows.append([name, f"{len(cur):,}", f"-{before - len(cur):,}"])
+    if len(sel):
+        base = mid
+        out.append({
+            "title": f"Anti-selection baseline ({label})",
+            "note": ("With the rule defining the universe rather than gating it, "
+                     "the harness's own guard has nothing to compare against — so "
+                     "the comparison is made here, on the same rows, at mid fills."),
+            "columns": ["set", "events", "mean/trade", "median", "win rate"],
+            "align": ["---", "---:", "---:", "---:", "---:"],
+            "rows": [
+                ["every resolvable event", f"{len(base):,}",
+                 f"{100 * base['ret'].mean():+.2f}%", f"{100 * base['ret'].median():+.2f}%",
+                 f"{100 * (base['ret'] > 0).mean():.1f}%"],
+                ["passes the entry rule", f"{len(sel):,}",
+                 f"{100 * sel['ret'].mean():+.2f}%", f"{100 * sel['ret'].median():+.2f}%",
+                 f"{100 * (sel['ret'] > 0).mean():.1f}%"],
+            ],
+            "body": ["", "If these two rows are not meaningfully different, the "
+                     "entry rule is decoration and the result is the base exposure."],
+        })
+
     out.append({
         "title": f"Entry-rule funnel ({label})",
         "note": ("Each term is arithmetic on the entry close. Nothing here is "
