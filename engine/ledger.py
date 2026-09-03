@@ -140,6 +140,80 @@ def read_outcomes() -> list[dict]:
     return rows
 
 
+def trade_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    """The identity of a TRADE, stable across the nights it was proposed on.
+
+    ``row_id`` cannot do this. It is keyed on ``(as_of, ticker, strategy,
+    strike, expiry)``, so the same trade gets a new id every night, a different
+    one again once a chain arrives and a strike resolves, and — because it
+    carries no event date — the same id can describe two different events.
+
+    A trade is one ticker, one strategy, one event. Everything else is a
+    restatement of the same intention.
+    """
+    return (str(row.get("ticker")), str(row.get("strategy")),
+            str(pd.Timestamp(row["event_date"]).date())
+            if row.get("event_date") else "")
+
+
+def _priced(row: Mapping[str, Any]) -> bool:
+    score = row.get("score") or {}
+    return score.get("entry_cost") is not None or score.get("gate_pass") is not None
+
+
+def canonical_predictions(rows: Sequence[Mapping[str, Any]] | None = None) -> list[dict]:
+    """One prediction per trade — the one you would actually have acted on.
+
+    The board re-proposed every upcoming event each night, and on a given night
+    could emit both an unpriced ATM row and a priced one, so a single trade
+    accumulated up to six prediction rows with different ``row_id``s and, as
+    chains arrived, DIFFERENT GATE VERDICTS. Counting them all weights the
+    calibration toward the events that sat on the board longest, and picking
+    one arbitrarily can report a trade as withheld when it was recommended.
+
+    The choice here: the LAST prediction at or before the entry date, preferring
+    one that actually priced. That is the final view available when the position
+    would have been opened — the verdict you would have acted on. It is a
+    judgement, not a fact, and it exists only for rows written before
+    :func:`build_prediction_rows` began recording one row per trade.
+    """
+    rows = list(rows if rows is not None else read_predictions())
+    best: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        key = trade_key(row)
+        if not key[2]:
+            continue
+        entry = (row.get("score") or {}).get("entry_date")
+        as_of = str(row.get("as_of") or "")
+        # Sort so the winner is the last usable view before the entry.
+        rank = (
+            1 if (entry and as_of and as_of <= str(pd.Timestamp(entry).date())) else 0,
+            as_of,
+            1 if _priced(row) else 0,
+        )
+        current = best.get(key)
+        if current is None or rank > current["_rank"]:
+            best[key] = dict(row) | {"_rank": rank, "trade_key": "|".join(key)}
+    return [{k: v for k, v in row.items() if k != "_rank"}
+            for row in sorted(best.values(), key=lambda r: r["trade_key"])]
+
+
+def duplication_report() -> dict:
+    """How much of the ledger is restatement rather than new information."""
+    rows = read_predictions()
+    keyed = [r for r in rows if trade_key(r)[2]]
+    trades = {trade_key(r) for r in keyed}
+    per = {}
+    for r in keyed:
+        per[trade_key(r)] = per.get(trade_key(r), 0) + 1
+    return {
+        "prediction_rows": len(rows),
+        "distinct_trades": len(trades),
+        "rows_per_trade_max": max(per.values()) if per else 0,
+        "duplication_factor": round(len(keyed) / len(trades), 2) if trades else 0.0,
+    }
+
+
 def existing_row_ids() -> set[str]:
     return {r["row_id"] for r in read_predictions(resolve_supersedes=False)}
 
@@ -230,13 +304,22 @@ def _event_ids(events_wanted: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
-                          audit_receipts: Mapping[str, Any] | None = None) -> list[dict]:
+                          audit_receipts: Mapping[str, Any] | None = None,
+                          entry_dated_only: bool = True) -> list[dict]:
     """Turn a scored board into ledger rows.
 
     The whole ``ScoreResult`` is embedded rather than a hand-picked subset:
     scoring one prediction correctly a month later needs the model versions,
     the analog buckets, the flags and the evidence cutoff, and a schema that
     picks favourites now is one that loses the field it turns out to need.
+
+    **Only rows whose entry is TODAY are recorded** (``entry_dated_only``). The
+    board looks days ahead so you can see what is coming; the ledger is the
+    record of a position you would have opened, and those are not the same
+    thing. Recording every forward row every night wrote 3,716 predictions for
+    about 600 events — the same trade five times, each on a quote a session
+    staler than the last, none of which anyone would have acted on. A trade is
+    recorded once, on the session it would have been opened in.
     """
     as_of = pd.Timestamp(as_of).normalize()
     decision_ts = pd.Timestamp(decision_ts or datetime.now(tz=timezone.utc))
@@ -250,6 +333,12 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
     written_at = datetime.now(tz=timezone.utc).isoformat()
     rows: list[dict] = []
     for record in scores.to_dict(orient="records"):
+        if entry_dated_only:
+            entry_date = record.get("entry_date")
+            if entry_date is None or pd.isna(entry_date):
+                continue
+            if pd.Timestamp(entry_date).normalize() != as_of:
+                continue
         event_date = pd.to_datetime(record.get("event_date"))
         rid = row_id(as_of, record.get("ticker"), record.get("strategy"),
                      record.get("strike"), record.get("expiry"))
@@ -284,12 +373,16 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
 def snapshot(as_of=None, *, horizon_days: int = 21,
              strategies: Sequence[str] | None = None,
              tickers: Iterable[str] | None = None,
-             scores: pd.DataFrame | None = None) -> dict:
-    """Score the upcoming calendar and freeze it into the ledger.
+             scores: pd.DataFrame | None = None,
+             entry_dated_only: bool = True) -> dict:
+    """Score the upcoming calendar and freeze the rows that ENTER today.
 
     Phase 3's nightly job calls this; until Phase 3 exists the CLI does, so the
     ledger accrues rows before the Q3 season rather than starting empty on the
     day it matters.
+
+    The board shows days ahead; the ledger records a position. See
+    :func:`build_prediction_rows` for why those must not be the same set.
     """
     from engine.audit import audit_receipt_for_snapshot
     from engine.score import score_calendar
@@ -303,7 +396,11 @@ def snapshot(as_of=None, *, horizon_days: int = 21,
         return {"as_of": str(as_of.date()), "rows": 0, "path": None,
                 "note": "no confirmed events in the horizon"}
 
-    rows = build_prediction_rows(scores, as_of=as_of)
+    rows = build_prediction_rows(scores, as_of=as_of,
+                                 entry_dated_only=entry_dated_only)
+    if not rows:
+        return {"as_of": str(as_of.date()), "rows": 0, "path": None,
+                "note": "no board row enters today — nothing to record"}
     receipt = audit_receipt_for_snapshot(scores, decision_ts=rows[0]["decision_ts"])
     for row in rows:
         row["audit_receipt"] = receipt.as_dict()
@@ -477,20 +574,42 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
 
 
 def scored_pairs() -> pd.DataFrame:
-    """Predicted vs realized, one row per resolved outcome."""
-    # Last outcome per row wins: a row retried after its chain arrived carries
-    # both an early `unresolvable` and a later `resolved`, and only the verdict
-    # that stuck should reach the calibration.
-    latest: dict[str, dict] = {}
-    for outcome in read_outcomes():
-        latest[outcome["row_id"]] = outcome
-    outcomes = [o for o in latest.values() if o.get("status") == "resolved"]
-    if not outcomes:
-        return pd.DataFrame(columns=["row_id", "strategy", "predicted_win",
-                                     "realized_win", "predicted_pnl", "realized_pnl"])
-    return pd.DataFrame(outcomes)[
-        ["row_id", "strategy", "predicted_win", "realized_win",
-         "predicted_pnl", "realized_pnl", "event_date"]]
+    """Predicted vs realized, ONE ROW PER TRADE.
+
+    Built from :func:`canonical_predictions`, not from the raw outcome file.
+    The ledger holds 3,741 prediction rows for 684 trades — a 5.25x
+    restatement — and the outcome scorer settled each of them against the same
+    replayed trade. Counting the rows weights the calibration toward whatever
+    sat on the board longest, and deduplicating the OUTCOMES arbitrarily can
+    report a trade as gate-withheld when the verdict at its entry was a pass.
+    """
+    resolved: dict[str, dict] = {}
+    for outcome in read_outcomes():           # file order is chronological
+        if outcome.get("status") == "resolved":
+            resolved[outcome["row_id"]] = outcome
+
+    rows = []
+    for pred in canonical_predictions():
+        outcome = resolved.get(pred["row_id"])
+        if outcome is None:
+            continue
+        score = pred.get("score") or {}
+        rows.append({
+            "row_id": pred["row_id"],
+            "trade_key": pred["trade_key"],
+            "strategy": pred.get("strategy"),
+            "event_date": pred.get("event_date"),
+            "gate_pass": score.get("gate_pass"),
+            "predicted_win": score.get("win_model"),
+            "predicted_pnl": score.get("exp_pnl_model"),
+            "realized_win": outcome.get("realized_win"),
+            "realized_pnl": outcome.get("realized_pnl"),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["row_id", "trade_key", "strategy", "event_date",
+                                     "gate_pass", "predicted_win", "predicted_pnl",
+                                     "realized_win", "realized_pnl"])
+    return pd.DataFrame(rows)
 
 
 def _strategy_calibration(frame: pd.DataFrame) -> dict:

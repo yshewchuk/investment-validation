@@ -54,10 +54,14 @@ class TestOnePurchasePerTrade:
         book = portfolio.build_book()
         assert len(book) == 1
 
-    def test_it_is_bought_on_the_first_night_it_was_recommended(self, ledger_stub):
-        ledger_stub([_pred(as_of="2026-08-29", event_date="2026-09-30"),
-                     _pred(as_of="2026-08-26", event_date="2026-09-30")])
-        assert str(portfolio.build_book()["as_of"].iloc[0].date()) == "2026-08-26"
+    def test_the_last_view_before_entry_is_the_one_that_counts(self, ledger_stub):
+        """Not the first night it appeared — the last one before the position
+        opens. The gate's verdict CHANGES across those nights as chains arrive
+        and features fill in, and the verdict you would have acted on is the
+        final one, not the first."""
+        ledger_stub([_pred(as_of="2026-08-26", event_date="2026-09-30"),
+                     _pred(as_of="2026-08-29", event_date="2026-09-30")])
+        assert str(portfolio.build_book()["as_of"].iloc[0].date()) == "2026-08-29"
 
     def test_the_same_ticker_on_two_events_is_two_trades(self, ledger_stub):
         ledger_stub([_pred(event_date="2026-09-30"), _pred(event_date="2026-12-30")])
@@ -92,6 +96,66 @@ class TestStates:
         assert book["state"].iloc[0] == "unresolvable"
         assert len(book) == 1, "a trade the book could not follow must not vanish"
 
+    def test_equal_dollars_is_the_default_not_equal_contracts(self, ledger_stub):
+        """One contract each is not equal sizing. Premiums in a single week ran
+        $2.40 to $69.00, so a one-contract book puts 29x more capital behind the
+        expensive name and lets a few premiums decide the P&L."""
+        old = (pd.Timestamp.today() - pd.Timedelta(days=60)).date()
+        cheap = _pred(ticker="CHEAP", event_date=str(old), entry_cost=2.0)
+        dear = _pred(ticker="DEAR", event_date=str(old), entry_cost=60.0)
+        ledger_stub([cheap, dear])
+        book = portfolio.build_book(capital_per_trade=10_000.0)
+        # A premium is per SHARE and a contract is 100 shares: $2.00 is $200 a
+        # lot (50 lots = $10,000 exactly), $60.00 is $6,000 a lot (1 lot).
+        # Near-equal, not equal — whole lots, rounded down. The dearest names
+        # are the ones that fall short, which is why the budget is $10,000 and
+        # not $1,000.
+        assert book["contracts"].tolist() == [50.0, 1.0]
+        assert book["capital"].tolist() == [10_000.0, 6_000.0]
+
+    def test_equal_dollars_gives_each_trade_the_same_pnl_for_the_same_return(
+        self, ledger_stub
+    ):
+        old = (pd.Timestamp.today() - pd.Timedelta(days=60)).date()
+        cheap = _pred(ticker="CHEAP", event_date=str(old), entry_cost=2.0)
+        dear = _pred(ticker="DEAR", event_date=str(old), entry_cost=60.0)
+        ledger_stub([cheap, dear], [
+            self._settled(cheap["row_id"], 0.10, cost=2.0),
+            self._settled(dear["row_id"], 0.10, cost=60.0),
+        ])
+        book = portfolio.build_book(capital_per_trade=10_000.0)
+        # 10% on $10,000 and on $6,000 — the rounding gap, made visible.
+        assert book["pnl"].round(2).tolist() == [1000.0, 600.0]
+
+    def test_contracts_mode_is_still_available_and_is_not_equal(self, ledger_stub):
+        old = (pd.Timestamp.today() - pd.Timedelta(days=60)).date()
+        ledger_stub([_pred(ticker="CHEAP", event_date=str(old), entry_cost=2.0),
+                     _pred(ticker="DEAR", event_date=str(old), entry_cost=60.0)])
+        book = portfolio.build_book(contracts=1)
+        assert book["capital"].tolist() == [200.0, 6000.0]
+
+    def test_an_expensive_name_is_not_dropped_by_the_budget(self, ledger_stub):
+        """Whole lots with a floor of one. Rounding down alone would size a
+        premium above the budget at zero, and a book that silently drops its
+        priciest recommendations is not measuring the board."""
+        old = (pd.Timestamp.today() - pd.Timedelta(days=60)).date()
+        ledger_stub([_pred(ticker="HUGE", event_date=str(old), entry_cost=150.0)])
+        book = portfolio.build_book(capital_per_trade=10_000.0)
+        assert len(book) == 1
+        # $15,000 a lot against a $10,000 budget: one lot, over budget, kept.
+        assert book["contracts"].iloc[0] == 1.0
+        assert book["capital"].iloc[0] == pytest.approx(15_000.0)
+
+    def test_contracts_are_always_whole(self, ledger_stub):
+        """The book is meant to be executable. A fraction of a contract is not
+        a thing you can buy."""
+        old = (pd.Timestamp.today() - pd.Timedelta(days=60)).date()
+        ledger_stub([_pred(ticker=f"T{i}", event_date=str(old), entry_cost=c)
+                     for i, c in enumerate((1.075, 6.2, 31.225, 69.0))])
+        book = portfolio.build_book(capital_per_trade=10_000.0)
+        assert (book["contracts"] == book["contracts"].round()).all()
+        assert (book["contracts"] >= 1).all()
+
     def test_settled_pnl_is_return_times_cost_times_multiplier(self, ledger_stub):
         old = (pd.Timestamp.today() - pd.Timedelta(days=60)).date()
         p = _pred(event_date=str(old))
@@ -105,9 +169,13 @@ class TestStates:
         far = (pd.Timestamp.today() + pd.Timedelta(days=30)).date()
         ledger_stub([_pred(ticker="AAA", event_date=str(far), entry_cost=5.0),
                      _pred(ticker="BBB", event_date=str(far), entry_cost=7.0)])
-        s = portfolio.summarize(portfolio.build_book())
+        s = portfolio.summarize(portfolio.build_book(contracts=1))
         assert s["capital_committed"] == pytest.approx(1200.0)
         assert s["n_settled"] == 0
+        # and under the default equal-dollar sizing, both carry the same capital
+        eq = portfolio.summarize(portfolio.build_book(capital_per_trade=10_000.0))
+        # $5.00 -> 20 lots = $10,000; $7.00 -> 14 lots = $9,800.
+        assert eq["capital_committed"] == pytest.approx(19_800.0)
 
 
 class TestEmptyBook:

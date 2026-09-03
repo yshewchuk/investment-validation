@@ -140,6 +140,52 @@ def _fake_replay(trades: pd.DataFrame):
     return _replay
 
 
+class TestOnlyTodaysEntriesAreRecorded:
+    """The board looks days ahead; the ledger records a position.
+
+    Recording every forward row every night wrote 3,716 predictions for about
+    600 events — the same trade once per night, each on a quote a session
+    staler than the last, none of which anyone would have acted on.
+    """
+
+    def _board(self):
+        return pd.DataFrame([
+            {"ticker": "TODAY", "strategy": "STR-THRU", "event_date": "2026-09-02",
+             "entry_date": "2026-09-02", "strike": None, "expiry": "2026-09-04"},
+            {"ticker": "BMOTODAY", "strategy": "STR-THRU", "event_date": "2026-09-03",
+             "entry_date": "2026-09-02", "strike": None, "expiry": "2026-09-04"},
+            {"ticker": "NEXTWEEK", "strategy": "STR-THRU", "event_date": "2026-09-09",
+             "entry_date": "2026-09-09", "strike": None, "expiry": "2026-09-11"},
+        ])
+
+    def test_only_rows_entering_today_are_recorded(self, ledger_root):
+        rows = ledger.build_prediction_rows(self._board(), as_of="2026-09-02")
+        assert sorted(r["ticker"] for r in rows) == ["BMOTODAY", "TODAY"]
+
+    def test_a_bmo_print_tomorrow_entering_today_is_recorded(self, ledger_root):
+        """The entry date decides, not the event date: a BMO print on the 3rd
+        is opened at the 2nd's close, so tonight is its night."""
+        rows = ledger.build_prediction_rows(self._board(), as_of="2026-09-02")
+        assert "BMOTODAY" in {r["ticker"] for r in rows}
+
+    def test_the_same_trade_is_not_recorded_again_the_next_night(self, ledger_root):
+        board = self._board()
+        first = ledger.build_prediction_rows(board, as_of="2026-09-02")
+        later = ledger.build_prediction_rows(board, as_of="2026-09-03")
+        assert {r["ticker"] for r in first} & {r["ticker"] for r in later} == set()
+
+    def test_a_row_with_no_entry_date_is_skipped_not_guessed(self, ledger_root):
+        board = pd.DataFrame([{"ticker": "NOENTRY", "strategy": "STR-THRU",
+                               "event_date": "2026-09-02", "entry_date": None,
+                               "strike": None, "expiry": "2026-09-04"}])
+        assert ledger.build_prediction_rows(board, as_of="2026-09-02") == []
+
+    def test_the_old_behaviour_is_still_reachable_for_backfill(self, ledger_root):
+        rows = ledger.build_prediction_rows(self._board(), as_of="2026-09-02",
+                                            entry_dated_only=False)
+        assert len(rows) == 3
+
+
 class TestOutcomeScoring:
     def _priced(self, event_id="AAPL-2026-10-16", ret=0.12):
         return pd.DataFrame([{

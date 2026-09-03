@@ -56,10 +56,44 @@ CONTRACT_MULTIPLIER = 100
 #: Three covers a Friday print whose exit chain lands Monday night.
 SETTLE_LAG_DAYS = 3
 
+#: Target dollars per position. One contract each is not equal sizing: premiums
+#: in a single week ran from $2.40 (AEO) to $69.00 (CASY), so a one-contract
+#: book puts 29x more capital behind CASY and lets a few expensive names decide
+#: the P&L. Sizing to a budget makes every recommendation count roughly the
+#: same, which is what a book measuring SELECTION should do.
+#:
+#: $10,000 because contracts are WHOLE. A $69 premium is $6,900 a contract, so
+#: a smaller budget would round it to one lot and leave the cheap names at 4x
+#: the weight; at $10,000 even a $100 premium still gets a position, and the
+#: cheap names land close to the target instead of far above it.
+CAPITAL_PER_TRADE = 10_000.0
 
-def build_book(contracts: int = 1) -> pd.DataFrame:
-    """One row per distinct recommended trade, with its state and P&L."""
-    preds = pd.DataFrame(ledger.read_predictions())
+
+def build_book(contracts: int | None = None,
+               capital_per_trade: float = CAPITAL_PER_TRADE) -> pd.DataFrame:
+    """One row per distinct recommended trade, with its state and P&L.
+
+    Sized by equal DOLLARS per trade by default. Pass ``contracts`` to size by
+    a fixed contract count instead — useful for reading the book as a literal
+    order list, misleading for judging the strategy, because it weights the
+    expensive premiums far above the cheap ones.
+
+    Contracts are WHOLE, because that is what you can actually buy — the book
+    is meant to be a thing you could have executed, not a fractional
+    abstraction. It rounds DOWN to stay inside the budget, with a floor of one:
+    a premium larger than the whole budget still takes a position rather than
+    vanishing, because a book that silently omits its most expensive
+    recommendations is not measuring the board it claims to.
+
+    Rounding means sizes are near-equal, not equal, and `capital` records what
+    each position actually costs so the spread is visible rather than assumed.
+    """
+    # Canonical, not raw: the ledger restates the same trade every night it is
+    # on the board (5.25x), and as chains arrive the gate verdict CHANGES. The
+    # canonical row is the last view at or before the entry — the verdict you
+    # would have acted on. Grouping the raw rows instead can pick a night the
+    # gate was still withholding and drop a real recommendation.
+    preds = pd.DataFrame(ledger.canonical_predictions())
     if preds.empty:
         return pd.DataFrame()
     score = preds["score"].apply(lambda s: s or {})
@@ -75,10 +109,7 @@ def build_book(contracts: int = 1) -> pd.DataFrame:
     rec = preds[preds["gate_pass"] == True].copy()  # noqa: E712 — None must not pass
     if rec.empty:
         return pd.DataFrame()
-
-    # The night you would have acted: the first time the board said buy.
-    rec = rec.sort_values("as_of")
-    book = rec.groupby(["ticker", "strategy", "event_date"], as_index=False).first()
+    book = rec.sort_values("as_of").reset_index(drop=True)
 
     outcomes = pd.DataFrame(ledger.read_outcomes())
     if not outcomes.empty:
@@ -108,11 +139,24 @@ def build_book(contracts: int = 1) -> pd.DataFrame:
     # Capital is the quoted premium at the decision, which is what you would
     # have committed. `realized_entry_cost` is what the replay actually paid;
     # the two differ by the quote/fill drift and both are reported.
-    size = contracts * CONTRACT_MULTIPLIER
-    book["capital"] = book["entry_cost"] * size
-    book["pnl"] = pd.to_numeric(book["realized_pnl"], errors="coerce") * pd.to_numeric(
-        book["realized_entry_cost"], errors="coerce") * size
-    book["contracts"] = contracts
+    cost_per_contract = book["entry_cost"] * CONTRACT_MULTIPLIER
+    if contracts is not None:
+        book["contracts"] = float(contracts)
+        book["sizing"] = f"{contracts} contract(s)"
+    else:
+        # Round DOWN to stay inside the budget, floor of one lot so an
+        # expensive name is still taken rather than dropped.
+        lots = np.floor(capital_per_trade / cost_per_contract.replace(0, np.nan))
+        book["contracts"] = lots.clip(lower=1).fillna(1)
+        book["sizing"] = f"~${capital_per_trade:,.0f}/trade, whole lots"
+    book["capital"] = cost_per_contract * book["contracts"]
+    # P&L on the price actually paid, not the quoted premium: the two differ by
+    # the quote/fill drift, and the realized one is what a fill would have cost.
+    book["pnl"] = (
+        pd.to_numeric(book["realized_pnl"], errors="coerce")
+        * pd.to_numeric(book["realized_entry_cost"], errors="coerce")
+        * CONTRACT_MULTIPLIER * book["contracts"]
+    )
     return book.sort_values(["event_date", "ticker"]).reset_index(drop=True)
 
 
@@ -154,7 +198,7 @@ def render(book: pd.DataFrame, summary: dict) -> str:
          "=" * 72,
          f"  recommendations      : {summary['n_recommended']:,} distinct trades",
          f"  by state             : {summary.get('by_state')}",
-         f"  contracts per trade  : {int(book['contracts'].iloc[0])}",
+         f"  sizing               : {book['sizing'].iloc[0]}",
          f"  capital committed    : ${summary['capital_committed']:,.0f}", ""]
     if summary.get("n_settled"):
         L += [f"  SETTLED ({summary['n_settled']}):",
@@ -187,10 +231,13 @@ def render(book: pd.DataFrame, summary: dict) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--contracts", type=int, default=1)
+    ap.add_argument("--contracts", type=int, default=None,
+                    help="size by a fixed contract count instead of equal dollars")
+    ap.add_argument("--capital-per-trade", type=float, default=CAPITAL_PER_TRADE)
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
-    book = build_book(contracts=args.contracts)
+    book = build_book(contracts=args.contracts,
+                      capital_per_trade=args.capital_per_trade)
     summary = summarize(book)
     print(render(book, summary))
     if args.json:
