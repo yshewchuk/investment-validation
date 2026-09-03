@@ -223,6 +223,31 @@ class TestReplayOne:
         assert rows == []
         assert reason == "zero_cost"
 
+    def test_a_floating_point_noise_cost_is_also_skipped_as_zero_cost(self, monkeypatch):
+        """The orchestration side of the MIN_MEANINGFUL_COST fix (EXP-121):
+        `structure_return`'s own arithmetic is covered in test_structures.py —
+        this checks that replay_one treats a near-zero-but-POSITIVE cost the
+        same way it treats an exact zero or a credit, rather than booking it
+        with a denominator that produces a quadrillion-percent return.
+        """
+        import engine.replay as replay_mod
+
+        real = replay_mod.structure_return
+        monkeypatch.setattr(
+            replay_mod, "structure_return",
+            lambda entry, exit_: real(entry, exit_) | {"cost": 5.55e-17},
+        )
+        entry = chain("TEST", "2024-05-02")
+        index = replay.ChainIndex(
+            {
+                ("TEST", pd.Timestamp("2024-05-02")): entry,
+                ("TEST", pd.Timestamp("2024-05-03")): chain("TEST", "2024-05-03"),
+            }
+        )
+        rows, reason = replay.replay_one(put_calendar(back_dte=20), self.plan_row(), index)
+        assert rows == []
+        assert reason == "zero_cost"
+
     def test_wide_markets_are_flagged(self):
         entry = chain("TEST", "2024-05-02", call=(0.1, 5.0), put=(0.1, 5.0))
         index = replay.ChainIndex(

@@ -37,7 +37,7 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
-from engine.fills import FillModel
+from engine.fills import MIN_MEANINGFUL_COST, FillModel
 
 __all__ = [
     "ExpirySelector",
@@ -714,11 +714,16 @@ def structure_return(entry: StructurePrice, exit_: StructurePrice) -> dict[str, 
     cost = entry.cost
     exit_value = exit_.exit_value
     pnl = exit_value - cost
+    # A cost this small is floating-point noise around zero, not a price — see
+    # MIN_MEANINGFUL_COST. `ret` on it is not a large return, it is division by
+    # an artifact, and reports NaN precisely because the true cost is unknown
+    # to be positive at all, not because it is provably a credit.
+    meaningful = cost > MIN_MEANINGFUL_COST
     return {
         "cost": cost,
         "exit_value": exit_value,
         "pnl": pnl,
-        "ret": pnl / cost if cost > 0 else float("nan"),
+        "ret": pnl / cost if meaningful else float("nan"),
         "alpha_entry": entry.alpha,
         "alpha_exit": exit_.alpha,
     }

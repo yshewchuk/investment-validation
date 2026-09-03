@@ -93,6 +93,14 @@ def main() -> None:
         # together. They are a required output for the HEADLINE, so the primary
         # gets them and the grid cells report them as unavailable — which the
         # report says, rather than quietly leaving the stage blank.
+        # write_report=is_primary — every width shares run_dir=HERE, so a
+        # second call at the default (True) OVERWRITES REPORT.md: the four
+        # widths ran primary-first, and the width=0.1 grid cell's report was
+        # what actually ended up on disk when the run finished, silently
+        # discarding the one this whole experiment is registered to measure.
+        # metrics_<hash>.json and transactions_<hash>.csv are unconditional
+        # (keyed by spec hash, not by filename) and survive for every width
+        # regardless; only the rendered REPORT.md needs this guard.
         result = evaluate(
             cell, trades, gate=None, run_dir=HERE,
             repricer=(common.make_repricer(condor.STRATEGY,
@@ -101,9 +109,12 @@ def main() -> None:
             tail_shock=common.abs_move_tail_shock, spy_daily=spy,
             input_files=[condor.trades_path(w)],
             extra_sections=sections,
+            write_report=is_primary,
         )
         lib.record_evaluation(HERE, cell, result.results)
-        print(f"[{spec['id']}] width {w}: report {result.report_path}", flush=True)
+        print(f"[{spec['id']}] width {w}: report "
+              f"{result.report_path or '(grid cell — not written; see metrics json)'}",
+              flush=True)
 
 
 # --------------------------------------------------------------------------

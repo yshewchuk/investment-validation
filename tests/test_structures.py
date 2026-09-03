@@ -9,9 +9,11 @@ from engine.structures import (
     ChainSnapshot,
     ExpirySelector,
     LegSpec,
+    ResolvedLeg,
     StrikeSelector,
     Structure,
     StructureError,
+    StructurePrice,
     STRUCTURES,
     price_structure,
     put_calendar,
@@ -383,6 +385,56 @@ class TestReturns:
         closed = price_structure(spec, exit_snapshot, MID, pin=opened.legs, closing=True)
         result = structure_return(opened, closed)
         assert result["ret"] == pytest.approx(1.0)  # doubled in value
+
+    @staticmethod
+    def _pair(entry_cash_flows, exit_cash_flows, exit_value=1.0):
+        """Two StructurePrice objects with hand-set leg cash flows.
+
+        Bypasses chain resolution entirely so the entry cost can be pinned to
+        an exact floating-point value — the only way to reproduce the
+        cancellation EXP-121 found without needing a real chain that happens
+        to cancel to 1e-16.
+        """
+        def legs(cash_flows):
+            return tuple(
+                ResolvedLeg(
+                    name=f"l{i}", right="P", side="buy" if cf < 0 else "sell",
+                    qty=1.0, expiry=pd.Timestamp("2024-05-17"), strike=100.0,
+                    dte=15, bid=1.0, ask=1.0, price=abs(cf), cash_flow=cf,
+                    wide_market=False,
+                )
+                for i, cf in enumerate(cash_flows)
+            )
+        entry = StructurePrice("CND-P", "TEST", pd.Timestamp("2024-05-01"),
+                               pd.Timestamp("2024-05-02"), 100.0, 1.0, legs(entry_cash_flows))
+        exit_ = StructurePrice("CND-P", "TEST", pd.Timestamp("2024-05-03"),
+                               pd.Timestamp("2024-05-02"), 100.0, 1.0,
+                               legs(exit_cash_flows), closing=True)
+        return entry, exit_
+
+    def test_a_floating_point_noise_cost_returns_nan_not_a_huge_number(self):
+        """Two legs whose cash flows nearly cancel (net cost ~1e-16) is the
+        exact mechanism EXP-121 found on CND-P's best-fill column: 65 of
+        18,388 trades costing between 1e-17 and 2e-15, producing a mean return
+        in the quadrillions of percent. `ret` must be NaN, not astronomical —
+        the true cost here is unknowable to be positive at all, so it is the
+        same "no meaningful denominator" case as an exact zero.
+        """
+        # -(0.1+0.2) + 0.3 = -5.551115123125783e-17, the textbook float64
+        # residual — the same class of artifact as EXP-121's 1e-17..2e-15 band.
+        entry, exit_ = self._pair([-(0.1 + 0.2), 0.3], [10.0, -8.0])
+        result = structure_return(entry, exit_)
+        assert 0 < result["cost"] < 1e-9  # the float-noise cost, not exactly 0
+        assert result["ret"] != result["ret"]  # NaN
+
+    def test_a_real_penny_cost_still_returns_a_real_number(self):
+        """The floor must not swallow a legitimately cheap structure — the
+        cleanest real value above the noise band, from the same data, is
+        exactly $0.01."""
+        entry, exit_ = self._pair([-5.0, 4.99], [10.0, -7.99])
+        result = structure_return(entry, exit_)
+        assert result["cost"] == pytest.approx(0.01)
+        assert result["ret"] == pytest.approx(200.0)  # pnl 2.00 / cost 0.01
 
 
 class TestSessionAwareExpiry:

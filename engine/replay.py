@@ -34,7 +34,7 @@ import pandas as pd
 
 from engine.calendar import TradingCalendar, trading_calendar
 from engine.data import store
-from engine.fills import FillModel
+from engine.fills import MIN_MEANINGFUL_COST, FillModel
 from engine.structures import (
     STRUCTURES,
     ChainSnapshot,
@@ -475,11 +475,16 @@ def replay_one(
             return [], "bad_quote"
 
         result = structure_return(entry, exit_)
-        if result["cost"] <= 0:
+        if result["cost"] <= MIN_MEANINGFUL_COST:
             # A structure opened for a credit has no return-on-debit, and every
             # metric downstream is quoted on the debit. CAL-P can legitimately
             # price at a credit; it is skipped here and counted, not booked with
-            # a meaningless denominator.
+            # a meaningless denominator. The floor above zero catches the same
+            # thing by another route: a multi-leg structure with offsetting
+            # long/short legs (CND-P) can sum to a cost floating-point cannot
+            # tell from zero — EXP-121 found trades costing 1e-17 to 2e-15,
+            # nowhere near the next real price ($0.01) — and dividing pnl by
+            # that noise produced returns in the quadrillions of percent.
             return [], "zero_cost"
 
         rows.append(

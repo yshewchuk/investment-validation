@@ -33,6 +33,21 @@ WIDE_MARKET_RATIO = 0.5
 #: before the historical rate was measured.
 BAD_QUOTE_COST_PCT = 30.0
 
+#: A structure's net cost below this floor is FLOATING-POINT ZERO, not a real
+#: price. A multi-leg structure with offsetting long and short legs (CND-P: two
+#: long, two short) can sum to a net debit that floating-point addition cannot
+#: distinguish from zero at the extreme end of the fill grid, where the longs'
+#: cheapest price and the shorts' richest price nearly cancel. EXP-121 found 65
+#: of 18,388 CND-P best-fill (alpha=1.0) trades costing between 1e-17 and 2e-15
+#: — pure summation noise, not a $0.0000000000000001 debit anyone could pay —
+#: against a clean floor: the next real value above the noise band is exactly
+#: $0.01. `ret = pnl / cost` on a noise-floor cost produced means in the
+#: quadrillions of percent, which corrupted every headline statistic that
+#: touches best fill. 1e-6 sits five orders of magnitude above the noise band
+#: and five below the cheapest real price observed, so it cannot misclassify
+#: either side.
+MIN_MEANINGFUL_COST = 1e-6
+
 __all__ = [
     "FillModel",
     "WORST",
@@ -40,6 +55,7 @@ __all__ = [
     "BEST",
     "WIDE_MARKET_RATIO",
     "BAD_QUOTE_COST_PCT",
+    "MIN_MEANINGFUL_COST",
     "breakeven_alpha",
     "ALPHA_SWEEP",
 ]
