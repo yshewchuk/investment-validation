@@ -1,0 +1,195 @@
+id: EXP-122
+title: "the 1-DTE straddle as a model-free implied move"
+kind: data-validation
+role: denominator
+strategy: "*"
+programme: target-validation
+prior: [EXP-110, EXP-111, EXP-117, EXP-120]
+type: confirmatory
+price_source: ORATS chains (bid/ask, validated +/-2-3%), stored only. No network call.
+
+hypothesis: >
+  At the last pre-print close, when the first expiry that survives the print has
+  DTE = 1, the at-the-money straddle measures the expected absolute move with NO
+  model. The straddle struck at the forward equals E|S_T - F| exactly, for any
+  distribution - it is an identity, not an approximation - and at one day there
+  is almost no diffusive time value sitting on top of the event. 3,949 stored
+  events qualify.
+
+  Measuring both vendors against it answers what EXP-120 could not: which series
+  `model_vs_market` should divide by. It also tests a sharper hypothesis, that
+  the two vendors are not competing estimates of one quantity but two different
+  CONVENTIONS for it - E|move| against the 1-sigma move - which differ by
+  sqrt(2/pi) = 0.7979 by construction. If that is what they are, then neither is
+  wrong, and the board's core signal has been dividing a predicted E|move| by a
+  1-sigma denominator, which biases it low by a fixed ~20% on every row.
+
+  Falsified as a convention story if the 1-DTE straddle does not land near ONE
+  of the two vendors at the registered tolerances - then the vendors differ for
+  reasons this construction cannot see, and the denominator stays unexplained.
+
+known_before_registration:
+  # None of this is a finding of this experiment. All of it was measured before
+  # this spec was written, and it is stated here so that it cannot later be
+  # claimed as a result.
+  from_exp_120: >
+    Vendors disagree far too much to both be right: corr 0.6079, median |diff|
+    2.44pp on 102,008 paired events, growing 2.08pp (2017) to 3.32pp (2026).
+    ORATS impliedMove is NOT reproducible from ORATS' own iv30/exErnIv30 (median
+    gap 2.636pp, n=49,926), which is what voided the circularity objection to
+    using that decomposition as a yardstick. The registered two-expiry chain
+    reconstruction FAILED - stage 0 found only 406 of 52,390 events carry both a
+    pre- and a post-print expiry against a gate of 3,000, and the 396 that ran
+    produced a median implied move of 0.09% with 35% negative event variance.
+    The registered primary of EXP-120 is UNANSWERED.
+  why_the_dte_must_be_pinned: >
+    EXP-120 also established, on 18,813 replayed STR-THRU straddles, that
+    neither vendor quotes the full straddle premium: `straddle - oquants` and
+    `straddle - ORATS` both RISE strongly with DTE (Spearman +0.67, +0.60)
+    while the vendor gap FALLS (-0.32). That is a statement about pooling across
+    DTEs, not about the straddle. The diffusive overhang IS the confound, and
+    holding DTE at 1 is what removes it. This experiment exists because that
+    earlier result identified the confound rather than despite it.
+  the_1dte_census: >
+    Measured 2026-09-03 from EXP-121's stage 0 artifact, before this spec was
+    written. Of 52,577 events with an entry chain, the first expiry surviving
+    the print has DTE = 1 on 3,949 (7.5%), across 851 tickers, 374-590 per year
+    in every year 2018-2026. DTE = 2 adds 6,149; DTE <= 4 totals 17,235. DTE 5
+    and 6 are empty, which is the calendar working (expiries are Fridays, so a
+    Mon-Thu close gives 4/3/2/1 and a Friday close gives 7).
+  convention_reconnaissance: >
+    Run 2026-09-03 BEFORE this registration, to decide what was worth
+    registering. On 102,008 paired events the median RATIO ORATS/oquants is
+    1.375 (p10 0.64, p90 1.67), drifting 1.18 (2009) to ~1.39 (2026) - so the
+    two are NOT a constant multiple, and the apparent sqrt(pi/2) = 1.2533 match
+    in the pooled medians was an artifact of ratio-of-medians. But on a level
+    test against ORATS' own surface, each vendor sits closest to a DIFFERENT
+    convention: with sigma = sqrt((iv30^2 - exErnIv30^2) * 30/365) and
+    mad = sqrt(2/pi) * sigma, on n=95,978, median |oquants - mad| = 0.761pp
+    against |oquants - sigma| = 1.401pp, and median |ORATS - sigma| = 1.041pp
+    against |ORATS - mad| = 2.461pp. Both vendors sit ABOVE their own
+    construction (ORATS +16% vs sigma, oquants +11% vs mad), and 16% of events
+    (18,571) have exErnIv30 >= iv30 and were dropped. That is suggestive and
+    too loose to conclude from - which is why this experiment uses a
+    construction with no surface fields in it at all.
+
+definition:
+  measurement: >
+    At the entry close (offset 0 on the print, the same anchor engine.replay
+    uses), take the first expiry that survives the print and require dte == 1.
+    Recover the forward by put-call parity at the listed strike nearest spot,
+    F = K + C_mid - P_mid, then take the straddle at the listed strike nearest
+    F. The 1-DTE implied move is
+        im_1dte = 100 * (C_mid + P_mid) / F
+    Discounting over one day is ignored (1 day at 5% is 0.014%, two orders below
+    the effect being measured) and this is recorded rather than corrected.
+  why_it_is_model_free: >
+    C(K) + P(K) = E[(S-K)+] + E[(K-S)+] = E|S - K| for a martingale S. It is an
+    identity: no vol, no distribution, no smile. The only approximation is that
+    K is a listed strike rather than exactly F, which the exclusion below bounds.
+  exclusions:
+    # Registered before measurement; each removes events the identity does not
+    # cleanly cover, never events whose answer is inconvenient.
+    - "|K - F| / F > 1%: the straddle then measures E|S-K| at a strike far
+       enough from the forward that it is not the quantity wanted"
+    - "either leg with a missing, crossed, or zero-ask quote"
+    - "either leg quoted through a market wider than half its mid
+       (engine.fills.WIDE_MARKET_RATIO) - reported as a count, and the headline
+       is also re-reported WITH them so the exclusion's effect is visible"
+    - "im_1dte > 30% of spot (engine.fills.BAD_QUOTE_COST_PCT), the ceiling
+       EXP-117 registered for junk quotes"
+  fills: >
+    Mid on both legs is the headline. The same measurement at BID on both legs
+    and at ASK on both legs is reported beside it as a bracket - 1-DTE quotes are
+    the widest on the board and the spread must not be invisible.
+
+stage0:
+  status: registered
+  question: >
+    Of the 3,949 dte==1 events, how many survive the exclusions with a priceable
+    straddle, and how wide are the quotes?
+  looks_at: "chains only. No vendor field is read in stage 0."
+  gate: >
+    >= 1,500 usable events -> dte == 1 is the primary. Below that, the primary
+    falls back to dte <= 2 (registered here, not chosen later) and every result
+    is labelled with the DTE band it was measured on.
+  api_calls: 0
+
+primary_spec:
+  measurement: "median |vendor - im_1dte| in percentage points, paired per event"
+  universe: "stored events with dte == 1 at the entry close, after the registered exclusions"
+  acceptance:
+    # Consistency, not magnitude - the standard this programme uses.
+    winner_rule: >
+      A vendor WINS only if its median |vendor - im_1dte| is lower in >= 70% of
+      years AND the pooled Wilcoxon signed-rank test on the paired per-event
+      absolute errors gives p <= 0.05. A pooled median win in < 70% of years is
+      reported as NO WINNER.
+    survives_best_year: "the winner must keep its sign after dropping its single best year"
+    neither_rule: >
+      If BOTH vendors have a pooled median |vendor - im_1dte| > 2.0pp, the
+      registered conclusion is that NEITHER is usable as the denominator,
+      regardless of which is closer.
+  q2_the_convention_test:
+    # A numeric prediction, registered before measurement, that the data can
+    # refuse. This is the whole reason the experiment is worth running.
+    prediction: >
+      If oquants quotes E|move| and ORATS quotes the 1-sigma move, then
+      median(im_1dte / oquants) ~ 1.00 and median(im_1dte / ORATS) ~ 0.7979.
+    reading: >
+      im_1dte/oquants in [0.95, 1.05] AND im_1dte/ORATS in [0.76, 0.84]
+        -> CONFIRMED: the vendors quote two conventions, ORATS is the 1-sigma one.
+      The mirror pattern (im_1dte/ORATS ~ 1.00, im_1dte/oquants ~ 1.25)
+        -> CONFIRMED with the roles REVERSED.
+      Neither pattern -> NOT a convention difference; the vendors disagree for a
+      reason this construction cannot see, and no convention claim is made.
+  positive_control:
+    # If the design works, the confound it controls for must be visible when
+    # the control is released. Registered so a null result can be told apart
+    # from a broken measurement.
+    spec: >
+      Repeat at dte <= 2 and dte <= 4. im_1dte minus each vendor must INCREASE
+      monotonically with the DTE band, because the diffusive overhang grows.
+      If it does not, the measurement is not reading what it claims to and the
+      headline is withdrawn rather than reported.
+
+required_outputs:
+  - "per-year table of median |vendor - im_1dte| for both vendors, with n"
+  - "the q2 ratio distribution, median and IQR, per year"
+  - "bootstrap 95% CI on the difference of median absolute errors, seed 0"
+  - "the bid / mid / ask bracket on the headline, so the spread is priced in"
+  - >
+    REPRESENTATIVENESS. The dte==1 slice is 7.5% of events and is selected for
+    weekly options and for prints landing on a Thursday, so it skews liquid and
+    large. Report its mcap and premium distribution against the full panel's,
+    and state plainly that a result here generalises to the whole board only as
+    far as that comparison supports.
+  - "count and share removed by each registered exclusion"
+
+decision_if:
+  convention_confirmed_orats_is_sigma: >
+    `model_vs_market` divides a predicted E|move| by a 1-sigma denominator and
+    reads ~20% low on every row. The fix is live-available and is one line -
+    multiply or_implied by sqrt(2/pi) - and it needs no new data. Raise it as a
+    decision with the measured factor attached.
+  convention_confirmed_reversed: >
+    `model_vs_market` stands as-is and oquants is the series carrying the
+    conversion. Record it and change nothing.
+  a_winner_but_no_convention: >
+    Report which vendor the model-free construction sits closer to, and treat it
+    as evidence about the denominator without claiming to know what either
+    vendor computes.
+  no_winner_or_neither: >
+    EXP-120's stage 2 - promoting the iv30/exErnIv30 decomposition to a computed
+    live denominator - becomes the route, and this experiment is the reason to
+    stop looking for a vendor to trust.
+
+data_snapshot: 0f01d8d79a6315b96cece8cf793252d5f63650957422b03318467d6328f67b5a
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-03T13:09:25+00:00"

@@ -163,7 +163,11 @@ def scaffold(title: str, hypothesis: str, *, exp_id: str | None = None,
         id=exp_id,
         title=json.dumps(title),
         hypothesis=json.dumps(hypothesis.strip().replace("\n", " ")),
-        strategy=strategy, snapshot=snapshot or "UNKNOWN", preregistered_at=stamp,
+        # `*` is a YAML alias marker and `CAL-P` is fine unquoted; quoting every
+        # strategy the same way means a programme-wide spec (strategy: "*")
+        # scaffolds instead of writing a spec.yaml that will not parse.
+        strategy=json.dumps(strategy),
+        snapshot=snapshot or "UNKNOWN", preregistered_at=stamp,
     )
     (folder / "spec.yaml").write_text(spec_text)
     (folder / "run.py").write_text(

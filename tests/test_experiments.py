@@ -397,3 +397,24 @@ class TestTrainedGateThreshold:
 
         with pytest.raises(ValueError, match="exactly one of"):
             _RegisteredGateState("x", ("f1",), None, threshold=0.1, top_fraction=0.2)
+
+
+class TestScaffoldQuotesTheStrategy:
+    """`--strategy "*"` must scaffold, not write a spec.yaml that cannot parse.
+
+    `*` opens a YAML alias, so an unquoted programme-wide strategy made
+    new_experiment.py create the folder and then die reading its own output —
+    leaving a half-scaffolded experiment with no ledger row.
+    """
+
+    def test_a_wildcard_strategy_round_trips(self, tmp_path):
+        folder = scaffold("wildcard strategy spec", "hypothesis text",
+                          exp_id="EXP-901", strategy="*", root=tmp_path,
+                          ledger_path=tmp_path / "LEDGER.csv")
+        assert lib.load_spec(folder / "spec.yaml")["strategy"] == "*"
+
+    def test_an_ordinary_strategy_still_round_trips(self, tmp_path):
+        folder = scaffold("ordinary strategy spec", "hypothesis text",
+                          exp_id="EXP-902", strategy="CND-P", root=tmp_path,
+                          ledger_path=tmp_path / "LEDGER.csv")
+        assert lib.load_spec(folder / "spec.yaml")["strategy"] == "CND-P"
