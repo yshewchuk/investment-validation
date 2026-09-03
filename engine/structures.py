@@ -51,6 +51,7 @@ __all__ = [
     "straddle_through",
     "straddle_runup",
     "put_condor",
+    "twin_peak",
     "STRUCTURES",
     "price_structure",
     "structure_return",
@@ -189,6 +190,8 @@ class StrikeSelector:
                         straddles the money
     ``"offset_from"``   the listed strike closest to ``ref``'s strike plus
                         ``moneyness * spot``, excluding ``ref``'s own strike
+    ``"grid_step"``     ``steps`` positions along the listed grid from ``ref``
+                        — the ticker's OWN granularity, not a share of spot
     ``"mirror"``        ``2 * about - ref``: the strike as far the other side of
                         ``about`` as ``ref`` is this side of it, and it must be
                         listed
@@ -217,9 +220,10 @@ class StrikeSelector:
     ref: str | None = None
     side: str | None = None
     about: str | None = None
+    steps: int | None = None
 
     VALID = ("atm", "moneyness", "delta", "fixed", "same_as",
-             "bracket", "offset_from", "mirror")
+             "bracket", "offset_from", "grid_step", "mirror")
 
     #: Legs this selector must resolve after, by field.
     REF_FIELDS = ("ref", "about")
@@ -234,6 +238,7 @@ class StrikeSelector:
             "same_as": ("ref",),
             "bracket": ("side",),
             "offset_from": ("ref", "moneyness"),
+            "grid_step": ("ref", "steps"),
             "mirror": ("ref", "about"),
         }.get(self.kind, ())
         for field_name in need:
@@ -281,6 +286,25 @@ class StrikeSelector:
                     f"no listed strike {self.side} spot {spot:.4f} at this expiry"
                 )
             return float(side[-1] if self.side == "below" else side[0])
+
+        if self.kind == "grid_step":
+            if self.ref not in resolved:
+                raise StructureError(
+                    f"leg {self.ref!r} must resolve before a grid_step reference to it"
+                )
+            grid = self._grid(rows)
+            hit = np.flatnonzero(np.isclose(grid, resolved[self.ref]))
+            if hit.size == 0:
+                raise StructureError(
+                    f"anchor strike {resolved[self.ref]:.4f} is not on this expiry's grid"
+                )
+            target = int(hit[0]) + int(self.steps)
+            if not 0 <= target < grid.size:
+                raise StructureError(
+                    f"{self.steps:+d} grid steps from {resolved[self.ref]:.4f} runs off "
+                    f"the ladder ({grid.size} listed strikes)"
+                )
+            return float(grid[target])
 
         if self.kind == "offset_from":
             if self.ref not in resolved:
@@ -912,10 +936,86 @@ def put_condor(
     )
 
 
+def twin_peak(
+    steps: int = 1,
+    entry_offset: int = 0,
+    exit_offset: int = 1,
+    decision_offset: int | None = None,
+) -> Structure:
+    """TWIN-P — two mirrored put condors sharing a doubled at-the-money long.
+
+    Seven strikes, eight contracts, all puts, one post-event expiry::
+
+        A - 4w  BUY  1      A       BUY  2      A + 4w  BUY  1
+        A - 2w  SELL 1      A + w   SELL 1
+        A - w   SELL 1      A + 2w  SELL 1
+
+    ``A`` is the listed strike at or below spot; ``w`` is ``steps`` positions
+    along that ticker's OWN strike ladder, so the geometry is set by the
+    granularity the name actually lists rather than by a share of spot. Every
+    other strike is then exact mirror arithmetic off ``A`` and ``A + w``, and
+    each one must be LISTED — an event whose ladder cannot carry all seven is
+    refused, not approximated.
+
+    **The payoff is twin-peaked**, which is the point::
+
+        2w ┤   ┌──┐      ┌──┐
+        1w ┤  ╱    └──┬──┘    ╲
+         0 ┼──────────────────────
+          -4w  -2w  0  +2w  +4w
+
+    Flat at ``2w`` for a move of one to two ``w`` in EITHER direction, dipping
+    to ``w`` at a dead-flat print, zero beyond ``±4w``. Net contracts sum to
+    zero so the far tails cancel, the floor is exactly zero everywhere, and max
+    loss is therefore the debit.
+
+    That shape is the thesis: earnings moves are usually SMALL but rarely zero,
+    and realized lands below implied about two thirds of the time (EXP-120:
+    realized/implied median 0.634). CND-P put its maximum at zero move — the
+    least likely single outcome. This puts the maximum on the modal one.
+
+    The cost is eight legs, so sixteen spread crossings round trip against a
+    debit the design deliberately keeps small. That is the risk, and it is why
+    an experiment trading this belongs on names whose markets are tight enough
+    for mid to mean something.
+    """
+    if int(steps) < 1:
+        raise ValueError(f"steps must be a positive integer, got {steps!r}")
+    expiry = ExpirySelector(kind="first_post_event")
+    atm = StrikeSelector("bracket", side="below")
+    return Structure(
+        name="TWIN-P",
+        description=(
+            "Twin-peak put structure: doubled ATM long, four shorts at +/-w and "
+            "+/-2w, wings at +/-4w, all puts, one post-event expiry."
+        ),
+        legs=(
+            LegSpec("atm", PUT, BUY, expiry, atm, qty=2.0),
+            LegSpec("up1", PUT, SELL, expiry,
+                    StrikeSelector("grid_step", ref="atm", steps=int(steps))),
+            LegSpec("up2", PUT, SELL, expiry,
+                    StrikeSelector("mirror", ref="atm", about="up1")),
+            LegSpec("up4", PUT, BUY, expiry,
+                    StrikeSelector("mirror", ref="atm", about="up2")),
+            LegSpec("dn1", PUT, SELL, expiry,
+                    StrikeSelector("mirror", ref="up1", about="atm")),
+            LegSpec("dn2", PUT, SELL, expiry,
+                    StrikeSelector("mirror", ref="up2", about="atm")),
+            LegSpec("dn4", PUT, BUY, expiry,
+                    StrikeSelector("mirror", ref="up4", about="atm")),
+        ),
+        entry_offset=entry_offset,
+        exit_offset=exit_offset,
+        decision_offset=decision_offset,
+        params={"steps": int(steps)},
+    )
+
+
 #: Factories keyed by strategy code, so specs can name a structure as a string.
 STRUCTURES = {
     "CAL-P": put_calendar,
     "STR-THRU": straddle_through,
     "STR-RUNUP": straddle_runup,
     "CND-P": put_condor,
+    "TWIN-P": twin_peak,
 }

@@ -90,6 +90,14 @@ DISABLED_STRATEGIES = {
         "never been backtested. EXP-046b tested straddle legs at T-14 unwound "
         "pre-print — a different structure. Phase 2 backlog 1-2 must run first."
     ),
+    "TWIN-P": (
+        "Registered in STRUCTURES so its experiment can price it; nothing has "
+        "measured it yet. Eight legs against a deliberately small debit is the "
+        "open question — CND-P failed at mid fills on four legs — and no "
+        "resolvability, fill or gate evidence exists. It reaches the live "
+        "board's default strategy list by sharing that registry, which is the "
+        "only reason it needs an entry here."
+    ),
     "CND-P": (
         "EXP-121 registered and ran the risk-mechanics validation (defined-risk "
         "falsification, assignment exposure, the oracle ceiling) but nothing has "

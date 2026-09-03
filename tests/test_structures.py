@@ -21,6 +21,7 @@ from engine.structures import (
     straddle_runup,
     straddle_through,
     structure_return,
+    twin_peak,
 )
 
 
@@ -703,3 +704,108 @@ class TestCrossLegStrikeReferences:
         with pytest.raises(StructureError, match="no listed strike above"):
             StrikeSelector("offset_from", ref="a", moneyness=0.05).select(
                 condor_rows, 101.0, {"a": 120.0}, right="P")
+
+
+# --------------------------------------------------------------------------
+# TWIN-P — the twin-peak put structure
+# --------------------------------------------------------------------------
+
+
+def _twin_strikes(price):
+    return {leg.name: leg.strike for leg in price.legs}
+
+
+class TestTwinPeak:
+    """Seven strikes, eight contracts, and a payoff with two peaks.
+
+    The geometry is set by `w` — `steps` positions along the ticker's own
+    ladder — and everything else is exact mirror arithmetic off `A` and
+    `A + w`. What matters is that the arithmetic holds and that the floor is
+    zero, because the floor is the entire risk claim.
+    """
+
+    def test_registered_under_its_strategy_code(self):
+        assert STRUCTURES["TWIN-P"] is twin_peak
+        assert twin_peak().name == "TWIN-P"
+
+    def test_eight_contracts_over_seven_put_strikes(self, condor_snapshot):
+        price = price_structure(twin_peak(), condor_snapshot, MID)
+        assert [leg.right for leg in price.legs] == ["P"] * 7
+        assert sum(leg.qty for leg in price.legs) == 8.0
+        assert len({leg.expiry for leg in price.legs}) == 1
+
+    def test_four_bought_four_sold(self, condor_snapshot):
+        price = price_structure(twin_peak(), condor_snapshot, MID)
+        bought = sum(l.qty for l in price.legs if l.side == "buy")
+        sold = sum(l.qty for l in price.legs if l.side == "sell")
+        assert bought == 4.0 and sold == 4.0
+
+    def test_the_strikes_are_exact_multiples_of_w(self, condor_snapshot):
+        k = _twin_strikes(price_structure(twin_peak(), condor_snapshot, MID))
+        a = k["atm"]
+        w = k["up1"] - a
+        assert w > 0
+        assert k["up2"] == pytest.approx(a + 2 * w)
+        assert k["up4"] == pytest.approx(a + 4 * w)
+        assert k["dn1"] == pytest.approx(a - w)
+        assert k["dn2"] == pytest.approx(a - 2 * w)
+        assert k["dn4"] == pytest.approx(a - 4 * w)
+
+    def test_the_atm_leg_sits_at_or_below_spot(self, condor_snapshot):
+        k = _twin_strikes(price_structure(twin_peak(), condor_snapshot, MID))
+        assert k["atm"] <= condor_snapshot.spot_price
+        assert k["up1"] > condor_snapshot.spot_price or k["up1"] > k["atm"]
+
+    def test_terminal_payoff_never_goes_below_zero(self, condor_snapshot):
+        """The whole risk claim: max loss is the debit and nothing worse.
+
+        Net contracts sum to zero, so the far tails cancel; the mirror
+        symmetry is what makes them cancel to exactly zero rather than to a
+        negative constant.
+        """
+        price = price_structure(twin_peak(), condor_snapshot, MID)
+        a = _twin_strikes(price)["atm"]
+        grid = [0.0, a - 50, a - 12, a - 5, a - 2.5, a, a + 2.5, a + 5,
+                a + 12, a + 50, 10_000.0]
+        assert min(_terminal_payoff(price, s) for s in grid) >= -1e-9
+
+    def test_the_payoff_has_two_peaks_with_a_dip_at_the_money(self, condor_snapshot):
+        price = price_structure(twin_peak(), condor_snapshot, MID)
+        k = _twin_strikes(price)
+        a, w = k["atm"], k["up1"] - k["atm"]
+        at_money = _terminal_payoff(price, a)
+        peak_up = _terminal_payoff(price, a + 1.5 * w)
+        peak_dn = _terminal_payoff(price, a - 1.5 * w)
+        assert peak_up == pytest.approx(2 * w)
+        assert peak_dn == pytest.approx(2 * w)
+        assert at_money == pytest.approx(w)          # the dip, half the peak
+        assert peak_up > at_money
+
+    def test_it_is_worthless_beyond_the_wings(self, condor_snapshot):
+        price = price_structure(twin_peak(), condor_snapshot, MID)
+        k = _twin_strikes(price)
+        a, w = k["atm"], k["up1"] - k["atm"]
+        assert _terminal_payoff(price, a + 4 * w) == pytest.approx(0.0)
+        assert _terminal_payoff(price, a - 4 * w) == pytest.approx(0.0)
+
+    def test_a_wider_step_widens_every_gap(self, condor_snapshot):
+        one = _twin_strikes(price_structure(twin_peak(steps=1), condor_snapshot, MID))
+        two = _twin_strikes(price_structure(twin_peak(steps=2), condor_snapshot, MID))
+        assert (two["up1"] - two["atm"]) > (one["up1"] - one["atm"])
+
+    def test_a_ladder_that_cannot_carry_the_wing_is_refused(self, condor_rows):
+        """No listed strike where the mirror lands ⇒ no trade, not an
+        approximately-symmetric one."""
+        rows = condor_rows[
+            ~((condor_rows["strike"] == 110.0) & (condor_rows["right"] == "P"))
+        ]
+        snap = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+            event_date=pd.Timestamp("2024-05-02"), rows=rows, spot=101.0, session="AMC",
+        )
+        with pytest.raises(StructureError, match="not listed"):
+            price_structure(twin_peak(steps=2), snap, MID)
+
+    def test_steps_must_be_positive(self):
+        with pytest.raises(ValueError, match="steps must be a positive integer"):
+            twin_peak(steps=0)

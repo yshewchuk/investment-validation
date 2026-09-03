@@ -82,11 +82,18 @@ class TestCollection:
         # Docs, code and result artifacts. Ballooning here means a data glob has
         # crept into the allowlist, which is the failure worth catching.
         assert rest < 10_000_000, f"non-growth payload is {rest:,} bytes — check the allowlist"
-        assert sum(p.stat().st_size for p in growth) < 30_000_000, (
+        # Raised from 30MB when EXP-121 landed. A transaction log carries every
+        # leg's quotes at both ends, so its size scales with LEG COUNT, not just
+        # trade count: STR-THRU's 17,666 two-leg trades are 4.1MB, TWIN-P's
+        # seven-leg equivalent would be ~3.5x that. The 2-leg era's ceiling was
+        # measuring the wrong thing once multi-leg structures existed. The
+        # allowlist guard above is the one that catches a data glob creeping in;
+        # this one only asks whether the evidence has become unwieldy.
+        assert sum(p.stat().st_size for p in growth) < 60_000_000, (
             f"evidence files are {sum(p.stat().st_size for p in growth):,} bytes — "
             "expected, but prune or archive before the mirror gets unwieldy"
         )
-        assert total < 40_000_000, f"mirror is {total:,} bytes"
+        assert total < 75_000_000, f"mirror is {total:,} bytes"
 
     def test_no_market_data_files_are_collected(self):
         """No market data — but the irreplaceable non-code artifacts DO ship.
