@@ -1,0 +1,138 @@
+id: EXP-123
+title: "TWIN-P twin-peak: does a cheap structure on stable mega-caps pay"
+kind: strategy-validation
+strategy: TWIN-P
+programme: structure-validation
+prior: [EXP-102, EXP-117, EXP-120, EXP-121]
+type: confirmatory
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+hypothesis: >
+  A twin-peaked put structure - doubled at-the-money long, four shorts at +/-w
+  and +/-2w, wings at +/-4w, all puts, one post-event expiry - pays 2w for a
+  move of one to two w in EITHER direction, w at a dead-flat print, and nothing
+  beyond +/-4w. It is long the modal outcome rather than the least likely one,
+  which is what separates it from CND-P (EXP-121), whose maximum sat at exactly
+  zero move and which lost 0.24%/trade at mid.
+
+  Entered ONLY where the market prices it cheaply - net debit below one strike
+  spacing, so max profit exceeds max loss - it is profitable at mid fills. The
+  entry rule is arithmetic on quotes known at the entry close, not a trained
+  model: there is no gate here to leak, overfit, or retrain.
+
+  Falsified as a tradeable idea if the breakeven alpha exceeds 0.45. CND-P died
+  at 0.501 with no margin below mid; a structure crossing twice as many spreads
+  has to show real room, not a hair of it, or the mid-fill assumption is the
+  whole result.
+
+known_before_registration:
+  # Measured 2026-09-03 before this spec was written. None of it is a finding
+  # of this experiment and none of it may later be claimed as one.
+  payoff_algebra: >
+    Verified numerically, not asserted: net contracts sum to zero so the far
+    tails cancel; the floor is exactly zero everywhere, so max loss is the
+    debit; the payoff is flat at 2w on |move| in [w, 2w], dips to w at zero
+    move, and reaches zero at 4w. Proved as a property test in
+    tests/test_structures.py.
+  addressable_universe: >
+    Of 26,795 events with both chains, 12,502 (46.7%) resolve all seven strikes
+    - seven is demanding and structure_unresolved (7,862) plus zero_cost (6,431)
+    take the rest. Of those, 1,497 (12.0%) satisfy c < w. After mcap >= 10B:
+    1,151. After mean relative spread <= 25%: 1,147, present in all nine years
+    (min 54/yr). The >100B slice is 491 (min 25/yr).
+  the_filter_and_the_universe_are_the_same_filter: >
+    c < w fires on 4.2% of sub-1B events and 44.0% of >100B ones, a 10x
+    gradient, because median w/implied_move runs 1.16x for small caps and 0.35x
+    for mega-caps. Large names list fine strike ladders relative to how far they
+    actually move, which is what puts them in the zone where this structure
+    prices cheap. The market-cap restriction and the reward>risk restriction are
+    not independent conditions; one largely implies the other.
+  geometry_on_the_target_slice: >
+    On >100B: median implied move 3.88%, w = 0.94% of spot, w/implied 0.24x,
+    structure spans +/-3.8% of spot. Breakeven at |move| < 3.07w ~ 2.89% of
+    spot against a typical realized move of ~2.44% (0.63 x implied, EXP-120).
+    Profitable at the median by 0.45 points - thin enough that the mean over
+    the whole distribution is genuinely unknown, which is why this runs.
+  execution_cost: >
+    Round-trip spread across eight legs is $0.85 median on a $0.86 debit
+    (>=10B) and $0.79 on $0.93 (>100B) - 108% and 86% of the debit, but 58%
+    and 46% of MAX PROFIT, which is the number that matters. The structure
+    clears its own round-trip spread on 82.0% (>=10B) and 91.6% (>100B) of
+    events. Fill quality is the decisive variable and the registered
+    falsification is set on it.
+  what_cnd_p_showed: >
+    EXP-121, full universe: -0.24%/trade at mid, breakeven alpha 0.501,
+    reward:risk 0.31:1, 80.4% of trades quoted through markets wider than half
+    their mid, and 134 of 282 debit-exceeding losses classified as real rather
+    than quote artifacts. TWIN-P's reward:risk on the target slice is 1.53:1
+    (>=10B) and 1.66:1 (>100B).
+
+definition:
+  structure: >
+    TWIN-P at steps=1: w is ONE position along that ticker's own listed strike
+    ladder - never a share of spot. Only the first satellite uses the grid;
+    every other strike is exact mirror arithmetic off A and A+w and must itself
+    be listed, so the symmetry that cancels the tails is guaranteed or the event
+    is refused and counted.
+  entry_filters:
+    # All four are computable at the entry close. No realized-move data, no
+    # model, nothing fitted. This is the entire selection rule.
+    - "all seven strikes listed at exactly A, A+/-w, A+/-2w, A+/-4w"
+    - "net debit c < w  (max profit 2w - c exceeds max loss c)"
+    - "mean relative bid-ask spread across the eight legs <= 25%"
+    - "market cap >= $10B at the event's year"
+  why_no_gate: >
+    CND-P's oracle ceiling said a perfect selector could reach +17.93%/trade,
+    which is a statement about how much a MODEL would have to add. Here the
+    selection is price arithmetic that is right or wrong on its own terms, so
+    the experiment measures the rule rather than a fitted approximation of it.
+    A gate can be added later; it cannot be blamed for this result.
+
+primary_spec:
+  universe: ">= $10B, all four entry filters, 2018-2026 (n ~ 1,147)"
+  structure: "TWIN-P steps=1, e+0 x+1 (last pre-print close in, first post-print close out)"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+  acceptance:
+    breakeven_alpha: "<= 0.45 or the idea is not tradeable, regardless of the mean"
+    consistency: >
+      positive mid-fill mean in >= 70% of out-of-sample years, the standard this
+      programme uses. A positive pooled mean carried by two years is reported as
+      NO RESULT.
+    anti_selection: >
+      the unselected universe (every resolvable event, filters ignored) is
+      reported beside the filtered set. If the filters do not separate the two,
+      the entry rule is decoration.
+
+grid:
+  # Secondary, labelled, never the headline.
+  steps: [1, 2]
+
+secondary_registered:
+  mega_cap_slice: >
+    The >$100B subset (n ~ 491, min 25/yr) reported separately. It is where the
+    thesis is cleanest - better reward:risk, lower spread drag - and it is
+    registered HERE so a better number there cannot be presented as the headline
+    after the fact. Too thin to carry the primary; not too thin to report.
+
+required_outputs:
+  - "breakeven alpha against the registered 0.45 bar, and against CND-P's 0.501"
+  - "the anti-selection baseline: unselected resolvable universe beside the filtered set"
+  - "per-year table for the primary and for the >$100B secondary, with n"
+  - "realized reward:risk and the share of events where round-trip spread < max profit"
+  - "where the realized move landed on the payoff curve - ATM dip / plateau / outer ramp / past the wing"
+  - "defined-risk falsification: any trade losing more than its debit, classified"
+  - "tail injection on |move| (mandatory, has_short_leg=true)"
+
+data_snapshot: 0f01d8d79a6315b96cece8cf793252d5f63650957422b03318467d6328f67b5a
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-03T19:46:24+00:00"
