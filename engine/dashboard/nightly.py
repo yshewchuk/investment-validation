@@ -409,6 +409,24 @@ def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:
     return days
 
 
+def _newest_published(refresh_out: dict, *, default):
+    """The newest tradeDate the market-wide pass actually got data for.
+
+    Pass 2 discovers this by walking back one call per session until ORATS
+    answers. Returning it here is free; re-discovering it in the chain pass
+    costs one call per ten tickers per session.
+    """
+    dates = [
+        block.get("tradeDate")
+        for block in (refresh_out.get("endpoints") or {}).values()
+        if isinstance(block, dict) and block.get("tradeDate")
+    ]
+    if not dates:
+        return default
+    newest = max(pd.Timestamp(d) for d in dates)
+    return min(newest, pd.Timestamp(default))
+
+
 def refresh_calendar_data(
     tickers: Sequence[str],
     as_of,
@@ -523,7 +541,28 @@ def refresh_calendar_data(
     # -- 4. option chains for the board's own names --------------------------
     # Last, because it is the only pass whose cost scales with the board, and
     # because everything above must succeed for the board to exist at all.
-    out["chains"] = refresh_forward_chains(tickers, as_of, fetcher=fetcher,
+    #
+    # Anchored on the newest session ORATS has actually PUBLISHED, not on the
+    # wall clock. Pass 2 just walked back to find that date at one call per
+    # session; the chain pass costs one call per TEN TICKERS per session, so
+    # asking it for an unpublished date is the expensive way to learn what pass
+    # 2 already knows. Measured 2026-09-03: an as_of the market had not yet
+    # closed produced 30 of 30 `hist/strikes` 404s before the pass moved on to
+    # the session that existed. The prescribed 21:30 cron would have paid that
+    # every weeknight - ORATS publishes around 00:12 - which is ~630 calls a
+    # month against a 3,000-call live reserve.
+    #
+    # A board entry that outruns the newest chain is not a problem this needs to
+    # solve: `quote_max_age_sessions` already prices it off the newest chain
+    # held and flags STALE_QUOTE.
+    chain_anchor = _newest_published(out, default=as_of)
+    if chain_anchor != as_of:
+        out["chain_anchor"] = {
+            "as_of": str(pd.Timestamp(as_of).date()),
+            "used": str(pd.Timestamp(chain_anchor).date()),
+            "why": "newest session ORATS has published; as_of has not closed yet",
+        }
+    out["chains"] = refresh_forward_chains(tickers, chain_anchor, fetcher=fetcher,
                                            sessions=sessions)
     out["calls"] += out["chains"]["calls"]
 

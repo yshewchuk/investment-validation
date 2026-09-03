@@ -1392,3 +1392,44 @@ class TestImpliedMoveSentinel:
         # is a test that punishes documenting the bug.
         code = "\n".join(l for l in gate.splitlines() if not l.lstrip().startswith("#"))
         assert ").strip()" not in code
+
+
+class TestChainAnchorFollowsWhatIsPublished:
+    """The chain pass must not buy a session ORATS has not published.
+
+    Measured 2026-09-03: an `as_of` whose market had not closed produced 30 of
+    30 `hist/strikes` 404s. The pass costs one call per TEN TICKERS per session,
+    while the market-wide pass that runs immediately before it discovers the
+    newest published date at one call per session — and used to throw that
+    answer away. The prescribed 21:30 cron would have paid ~630 calls a month
+    for nothing, against a 3,000-call live reserve.
+    """
+
+    def test_an_unpublished_today_falls_back_to_the_published_session(self):
+        from engine.dashboard.nightly import _newest_published
+
+        out = {"endpoints": {"hist/summaries": {"tradeDate": "2026-09-02"},
+                             "hist/cores": {"tradeDate": "2026-09-02"}}}
+        got = _newest_published(out, default=pd.Timestamp("2026-09-03"))
+        assert got == pd.Timestamp("2026-09-02")
+
+    def test_a_published_today_is_used_as_is(self):
+        from engine.dashboard.nightly import _newest_published
+
+        out = {"endpoints": {"hist/summaries": {"tradeDate": "2026-09-03"}}}
+        assert _newest_published(out, default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
+
+    def test_it_never_runs_ahead_of_as_of(self):
+        """A backfill run for an old date must not be dragged forward to today
+        by a summaries pass that happened to fetch something newer."""
+        from engine.dashboard.nightly import _newest_published
+
+        out = {"endpoints": {"hist/summaries": {"tradeDate": "2026-09-09"}}}
+        assert _newest_published(out, default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
+
+    def test_no_information_means_no_change(self):
+        from engine.dashboard.nightly import _newest_published
+
+        assert _newest_published({}, default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
+        assert _newest_published({"endpoints": {"x": {}}},
+                                 default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
