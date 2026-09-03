@@ -155,6 +155,11 @@ function splitBadge(row) {
   return "";
 }
 
+/* Flags that say something about the EVENT rather than about this structure.
+   They are identical on every sub-row of a print, so a pill each turned one
+   fact into three or four; they are shown once, on the print row. */
+const EVENT_FLAGS = { PROJECTED_CALENDAR: 1 };
+
 function flagBadges(row) {
   const out = [];
   if (row.strategy === "CAL-P") out.push('<span class="pill warn">unvalidated — pending EXP-101/102</span>');
@@ -162,6 +167,7 @@ function flagBadges(row) {
   (row.flags || []).forEach((f) => {
     if (f === "UNVALIDATED_STRUCTURE") return;  /* badged above, with the detail text */
     if (f === "EXTRAPOLATED") return;
+    if (EVENT_FLAGS[f]) return;                 /* carried on the print row */
     const klass = f === "LAYER_DISAGREE" ? "warn"
       : f === "THIN_ANALOGS" || f === "THIN_HISTORY" || f === "OUT_OF_DOMAIN" ? "info" : "na";
     /* NO_CHAIN says nothing on its own; the age of the newest chain says
@@ -234,9 +240,15 @@ function printRow(members) {
   const move = byDriver("abs_move");
   const t1 = byDriver("implied_t1");
   const passes = members.filter((m) => m.gate_pass === true).length;
+  /* PROJECTED_CALENDAR is a statement about the DATE, so it is said next to
+     the date: a print no forward source has confirmed is an estimate, and the
+     estimate is what everything on the row is anchored to. */
+  const projected = members.some((m) => (m.flags || []).indexOf("PROJECTED_CALENDAR") !== -1)
+    ? " <span class='badge' title='No forward source confirms this date yet — it is projected from the name\u2019s own print history, so it can move.'>est.</span>"
+    : "";
   return '<tr class="tickerrow clickable" data-ticker="' + esc(head.ticker) + '">'
-    + "<td><strong>" + esc(head.event_date) + "</strong><br><span class='badge'>"
-    + esc(head.session || "") + "</span></td>"
+    + "<td><strong>" + esc(head.event_date) + "</strong>" + projected
+    + "<br><span class='badge'>" + esc(head.session || "") + "</span></td>"
     + "<td><strong>" + esc(head.ticker) + "</strong>"
     + (passes ? " <span class='pill pass'>" + passes + "</span>" : "") + "</td>"
     + "<td colspan='2'></td>"

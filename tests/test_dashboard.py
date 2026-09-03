@@ -1316,3 +1316,19 @@ class TestLadderRowsRoundTrip:
             "strike": None, "requested_strike": 360.3502, "strike_offset": -0.025,
         }
         assert compact_row(record)["row_id"] == _row_identity(record)
+
+    def test_a_rendered_bundle_has_no_duplicate_row_ids(self, tmp_path):
+        """The property the acceptance check enforces on the real board, tested
+        here on the ladder shape that actually broke it."""
+        from engine.dashboard.render import compact_row
+
+        base = {
+            "ticker": "AVGO", "strategy": "STR-THRU", "event_date": "2026-09-02",
+            "strike": None,
+        }
+        ids = [
+            compact_row(base | {"requested_strike": s, "strike_offset": o})["row_id"]
+            for s, o in ((360.3502, -0.025), (378.8297, 0.025))
+        ]
+        ids.append(compact_row(base | {"strike": 370.0})["row_id"])
+        assert len(set(ids)) == len(ids)

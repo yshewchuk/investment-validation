@@ -200,6 +200,31 @@ def check_unittests() -> str:
     return proc.stdout.strip().splitlines()[-1]
 
 
+@check("board_row_ids_unique",
+       description="one board row, one identity — including on the strike ladder")
+def check_board_row_ids_unique() -> str:
+    """The self-check and the derivation view both address a row by `row_id`.
+
+    Ladder rows that failed to resolve a strike used to share one id, so a
+    digest mismatch named a row the reader could not find and the derivation
+    view opened whichever of them came first. Nothing enforced uniqueness,
+    which is why 24 rows sharing 12 identities shipped unnoticed.
+    """
+    out = bundle()
+    rows = json.loads((out / "data" / "board.json").read_text())["rows"]
+    _require(rows, "the board has no rows to check")
+    seen: dict[str, int] = {}
+    for row in rows:
+        seen[row["row_id"]] = seen.get(row["row_id"], 0) + 1
+    dupes = {k: v for k, v in seen.items() if v > 1}
+    _require(
+        not dupes,
+        f"{len(dupes)} duplicate row_id(s) covering {sum(dupes.values())} rows: "
+        + ", ".join(sorted(dupes)[:5]),
+    )
+    return f"{len(rows):,} rows, {len(seen):,} distinct ids"
+
+
 # --------------------------------------------------------------------------
 # 1. self-check (guide test 1)
 # --------------------------------------------------------------------------
