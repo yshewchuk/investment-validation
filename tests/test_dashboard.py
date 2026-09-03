@@ -1105,6 +1105,24 @@ class TestBookPanel:
 
         assert _js_name("book") == "BOOK"
 
+    def test_the_page_actually_loads_the_book_script(self):
+        """A wrapper nobody's <script> tag points at is dead on arrival.
+
+        `data/book.js` shipped correctly for a full session — real rows,
+        written by `_write_pair` alongside its `.json` twin — and the client
+        never loaded it: `index.html` had no `<script src="data/book.js">`,
+        and unlike `models.js` it had no on-demand loader either (`app.js`
+        reads `window.BOOK` at module-parse time, not behind a click). The
+        Book tab rendered its empty state against a real book, in every
+        environment, for as long as the tag was missing — and nothing that
+        inspects book.json's CONTENT (including the two tests above this one)
+        would ever have caught it.
+        """
+        from pathlib import Path
+
+        html = Path("engine/dashboard/static/index.html").read_text()
+        assert '<script src="data/book.js">' in html
+
     def test_every_state_the_book_emits_has_a_ui_label(self):
         """A state with no label renders as a raw enum, and `unresolvable`
         rendering as a blank is how a dropped trade hides."""

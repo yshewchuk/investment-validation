@@ -225,6 +225,42 @@ def check_board_row_ids_unique() -> str:
     return f"{len(rows):,} rows, {len(seen):,} distinct ids"
 
 
+@check("data_scripts_referenced",
+       description="every rendered data/*.js file is either eager-loaded or "
+                   "reachable through the client's own on-demand loader")
+def check_data_scripts_referenced() -> str:
+    """A generated payload nobody's <script> tag points at is dead on arrival.
+
+    `data/book.js` shipped correctly for a full session — real rows, `_clean`ed,
+    `_write_pair`ed alongside its `.json` twin — and the client never loaded it:
+    `index.html` had no `<script src="data/book.js">`, and unlike `models.js` it
+    had no on-demand loader either (`app.js` reads `window.BOOK` at parse time).
+    The Book tab therefore rendered its empty state against the SAME bundle in
+    every environment, for as long as the tag was missing, and every check that
+    inspects book.json's CONTENT would have stayed green throughout.
+
+    Every `data/*.js` file must be either named directly in `index.html`, or
+    named as a `src` inside `app.js`'s own on-demand loaders (the `models.js`
+    pattern) — checked by grepping app.js for the literal filename, which is
+    what a real loader's `script.src = "data/NAME.js"` assignment always is.
+    """
+    out = bundle()
+    html = (out / "index.html").read_text()
+    app_js = (out / "assets" / "app.js").read_text()
+    referenced = set(re.findall(r'<script src="data/([^"]+\.js)"></script>', html))
+    on_demand = {p.name for p in (out / "data").glob("*.js") if p.name in app_js}
+    present = {p.name for p in (out / "data").glob("*.js")}
+    orphaned = present - referenced - on_demand
+    _require(
+        not orphaned,
+        f"{len(orphaned)} data script(s) rendered but never loaded by the "
+        f"client (no <script src> in index.html, no on-demand reference in "
+        f"app.js): {sorted(orphaned)}",
+    )
+    return (f"{len(present)} data scripts: {len(referenced)} eager, "
+            f"{len(on_demand)} on-demand, 0 orphaned")
+
+
 # --------------------------------------------------------------------------
 # 1. self-check (guide test 1)
 # --------------------------------------------------------------------------
