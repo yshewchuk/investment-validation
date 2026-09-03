@@ -218,6 +218,45 @@ class TestOutcomeScoring:
         assert by["STR-THRU"] == "resolved"
         assert by["STR-RUNUP"] == "unresolvable"
 
+    def test_an_unresolvable_row_is_retried_when_the_chain_arrives(
+        self, ledger_root, monkeypatch
+    ):
+        """`unresolvable` is transient, not a verdict.
+
+        ORATS publishes a session around midnight, so a print cannot settle on
+        the night it happens. Treating the first failed attempt as final wrote
+        off 861 real predictions whose chains arrived hours later.
+        """
+        from engine import replay as replay_mod
+
+        ledger.write_predictions([_prediction()])
+        empty = pd.DataFrame(columns=["event_id", "strategy", "fill_alpha", "ret",
+                                      "event_date", "entry_cost", "exit_value"])
+        monkeypatch.setattr(replay_mod, "replay", _fake_replay(empty))
+        assert ledger.score_outcomes(through="2026-10-20")["unresolvable"] == 1
+
+        # the chain lands, and the same row settles on a later pass
+        monkeypatch.setattr(replay_mod, "replay", _fake_replay(self._priced(ret=0.4)))
+        again = ledger.score_outcomes(through="2026-10-20")
+        assert again["resolved"] == 1, "the retry must pick it up"
+
+        pairs = ledger.scored_pairs()
+        assert len(pairs) == 1, "one prediction, one verdict — the last one"
+        assert pairs["realized_pnl"].iloc[0] == pytest.approx(0.4)
+
+    def test_a_resolved_row_is_never_re_scored(self, ledger_root, monkeypatch):
+        """Resolved IS terminal. Re-pricing a settled trade later would let the
+        record drift with the data, which is the opposite of a frozen ledger."""
+        from engine import replay as replay_mod
+
+        ledger.write_predictions([_prediction()])
+        monkeypatch.setattr(replay_mod, "replay", _fake_replay(self._priced(ret=0.12)))
+        assert ledger.score_outcomes(through="2026-10-20")["resolved"] == 1
+
+        monkeypatch.setattr(replay_mod, "replay", _fake_replay(self._priced(ret=0.99)))
+        assert ledger.score_outcomes(through="2026-10-20")["resolved"] == 0
+        assert ledger.scored_pairs()["realized_pnl"].iloc[0] == pytest.approx(0.12)
+
     def test_unresolvable_is_recorded_not_dropped(self, ledger_root, monkeypatch):
         from engine import replay as replay_mod
 

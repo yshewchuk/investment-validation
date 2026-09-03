@@ -323,10 +323,26 @@ def snapshot(as_of=None, *, horizon_days: int = 21,
 
 
 def _unresolved(through: pd.Timestamp) -> list[dict]:
-    scored = {o["row_id"] for o in read_outcomes()}
+    """Predictions still owed an outcome.
+
+    Only ``resolved`` is terminal. ``unresolvable`` is almost always transient —
+    ORATS publishes a session's chains around midnight, so a print settles a day
+    or more after it happens, and a first attempt on the night of the print
+    cannot price it. Treating that as final permanently writes off every trade
+    the ledger merely asked about too early: 861 rows were written off that way,
+    and the chains for them arrived hours later.
+
+    So a row whose LATEST outcome is unresolvable is retried. Nothing is
+    rewritten — the retry appends, and readers take the last outcome per
+    row_id — which keeps the append-only contract while letting a verdict
+    improve when the evidence arrives.
+    """
+    latest: dict[str, str] = {}
+    for outcome in read_outcomes():          # file order is chronological
+        latest[outcome["row_id"]] = str(outcome.get("status") or "")
     out = []
     for row in read_predictions():
-        if row["row_id"] in scored or not row.get("event_date"):
+        if latest.get(row["row_id"]) == "resolved" or not row.get("event_date"):
             continue
         if pd.Timestamp(row["event_date"]) <= through:
             out.append(row)
@@ -339,8 +355,10 @@ def _write_outcomes(rows: Sequence[Mapping[str, Any]]) -> Path | None:
         return None
     directory = paths.assert_writable(outcomes_dir())
     directory.mkdir(parents=True, exist_ok=True)
-    already = {o["row_id"] for o in read_outcomes()}
-    fresh = [r for r in rows if r["row_id"] not in already]
+    # Only a RESOLVED outcome blocks a re-write. An unresolvable one is a
+    # verdict that may improve, and appending the better verdict is how it does.
+    settled = {o["row_id"] for o in read_outcomes() if o.get("status") == "resolved"}
+    fresh = [r for r in rows if r["row_id"] not in settled]
     if not fresh:
         return None
     resolved_on = pd.Timestamp(fresh[0]["resolved_at"]).normalize()
@@ -460,7 +478,13 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
 
 def scored_pairs() -> pd.DataFrame:
     """Predicted vs realized, one row per resolved outcome."""
-    outcomes = [o for o in read_outcomes() if o.get("status") == "resolved"]
+    # Last outcome per row wins: a row retried after its chain arrived carries
+    # both an early `unresolvable` and a later `resolved`, and only the verdict
+    # that stuck should reach the calibration.
+    latest: dict[str, dict] = {}
+    for outcome in read_outcomes():
+        latest[outcome["row_id"]] = outcome
+    outcomes = [o for o in latest.values() if o.get("status") == "resolved"]
     if not outcomes:
         return pd.DataFrame(columns=["row_id", "strategy", "predicted_win",
                                      "realized_win", "predicted_pnl", "realized_pnl"])
