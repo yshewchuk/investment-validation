@@ -15,6 +15,11 @@ Phase 0 refused to relabel them as CAL-P/STR-THRU/STR-RUNUP for exactly that
 reason, and this preserves the distinction — engine rows carry
 ``provenance="engine.replay"``, legacy rows carry ``provenance="legacy:..."``,
 and the analog layer reads only the former.
+
+A ``--strategy`` run replaces **only the strategies it replayed**. Engine rows
+for the others survive it. Anything else would make a partial rebuild a silent
+delete of the strategies it did not name, and the table would look complete
+afterwards.
 """
 from __future__ import annotations
 
@@ -78,23 +83,35 @@ def build(strategies, years=None, dry_run: bool = False) -> dict:
         return report
 
     engine_rows = replay.to_trades_table(results)
-    legacy = store.read_table("trades")
-    legacy = legacy[~legacy["provenance"].astype(str).str.startswith("engine.replay")]
-    combined = pd.concat([coerce(legacy, "trades"), coerce(engine_rows, "trades")],
+    existing = store.read_table("trades")
+    is_engine = existing["provenance"].astype(str).str.startswith("engine.replay")
+    # A --strategy run rebuilds SOME strategies. Dropping every engine row and
+    # writing back only the rebuilt ones would silently delete the others: one
+    # `--strategy CND-P` and the STR-THRU, STR-RUNUP and CAL-P trade sets are
+    # gone, with the table looking complete afterwards. Only the strategies
+    # actually replayed are replaced.
+    rebuilt = {r.strategy for r in results}
+    kept = existing[~is_engine | ~existing["strategy"].isin(rebuilt)]
+    n_legacy = int((~is_engine.loc[kept.index]).sum())
+    n_other_engine = int(len(kept) - n_legacy)
+    combined = pd.concat([coerce(kept, "trades"), coerce(engine_rows, "trades")],
                          ignore_index=True)
     store.write_table(combined, "trades")
 
     stats = store.table_stats("trades")
     print(
         f"\ntrades table: {stats.rows:,} rows "
-        f"({len(legacy):,} legacy + {len(engine_rows):,} engine)",
+        f"({n_legacy:,} legacy + {n_other_engine:,} engine rows for strategies "
+        f"not rebuilt + {len(engine_rows):,} rebuilt {sorted(rebuilt)})",
         flush=True,
     )
 
     snapshot = manifest.write_snapshot()
     manifest.write_manifest()
     report["trades_rows"] = int(stats.rows)
-    report["legacy_rows"] = int(len(legacy))
+    report["legacy_rows"] = n_legacy
+    report["kept_engine_rows"] = n_other_engine
+    report["rebuilt_strategies"] = sorted(rebuilt)
     report["engine_rows"] = int(len(engine_rows))
     report["snapshot"] = snapshot
     report["elapsed_s"] = round(time.time() - started, 1)
