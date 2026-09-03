@@ -184,3 +184,43 @@ class TestEmptyBook:
         book = portfolio.build_book()
         assert book.empty
         assert "No recommendations" in portfolio.render(book, portfolio.summarize(book))
+
+
+class TestOutcomesMissingRealizedColumns:
+    """No outcome has resolved into `realized_entry_cost`/`realized_exit_value`.
+
+    Those two fields are written only by a RESOLVED outcome row — an
+    unresolvable one has nothing to price yet. A freshly reset ledger, or
+    simply no trade's exit session having settled, means every outcome on file
+    can be unresolvable at once, and a frame built from those JSON records
+    never gets a column no row supplied. This is not a hypothetical: it broke
+    `dashboard/earnings/data/book.json` for the whole board (`available: false,
+    KeyError: "['realized_entry_cost', 'realized_exit_value'] not in index"`)
+    the day the ledger reset and nothing had settled yet.
+    """
+
+    @staticmethod
+    def _unresolvable(row_id):
+        return {"row_id": row_id, "status": "unresolvable",
+                "reason": "no priced replay for this event at the intended alpha",
+                "realized_pnl": None, "realized_win": None}
+
+    def test_an_all_unresolvable_outcomes_table_does_not_raise(self, ledger_stub):
+        ledger_stub([_pred(ticker="AAA")], outcomes=[self._unresolvable("AAA-row")])
+        book = portfolio.build_book()
+        assert list(book["ticker"]) == ["AAA"]
+        assert pd.isna(book.loc[0, "realized_entry_cost"])
+        assert pd.isna(book.loc[0, "realized_exit_value"])
+
+    def test_a_mix_of_resolved_and_unresolvable_still_merges_correctly(self, ledger_stub):
+        preds = [_pred(ticker="AAA", row_id="A-row"), _pred(ticker="BBB", row_id="B-row")]
+        outcomes = [
+            {"row_id": "A-row", "status": "resolved", "reason": None,
+             "realized_pnl": 0.2, "realized_win": True,
+             "realized_entry_cost": 6.0, "realized_exit_value": 7.2},
+            self._unresolvable("B-row"),
+        ]
+        ledger_stub(preds, outcomes=outcomes)
+        book = portfolio.build_book().set_index("ticker")
+        assert book.loc["AAA", "realized_entry_cost"] == pytest.approx(6.0)
+        assert pd.isna(book.loc["BBB", "realized_entry_cost"])

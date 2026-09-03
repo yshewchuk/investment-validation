@@ -69,6 +69,16 @@ SETTLE_LAG_DAYS = 3
 CAPITAL_PER_TRADE = 10_000.0
 
 
+#: Columns pulled from `ledger.read_outcomes()` into the book. `row_id` is the
+#: join key; the rest are populated only on a resolved outcome and stay NaN/None
+#: on an unresolvable or not-yet-settled one — see the reindex note in
+#: :func:`build_book`.
+OUTCOME_MERGE_COLUMNS = (
+    "row_id", "status", "realized_pnl", "realized_entry_cost",
+    "realized_exit_value", "reason",
+)
+
+
 def build_book(contracts: int | None = None,
                capital_per_trade: float = CAPITAL_PER_TRADE) -> pd.DataFrame:
     """One row per distinct recommended trade, with its state and P&L.
@@ -112,16 +122,20 @@ def build_book(contracts: int | None = None,
     book = rec.sort_values("as_of").reset_index(drop=True)
 
     outcomes = pd.DataFrame(ledger.read_outcomes())
+    # `realized_entry_cost` / `realized_exit_value` are written only on a
+    # RESOLVED outcome row (engine.ledger.score_outcomes) — an unresolvable one
+    # has nothing to price yet. Every outcome on file can legitimately be
+    # unresolvable at once (a freshly reset ledger, or simply no trade has had
+    # its exit session settle yet), and a DataFrame built from JSON records
+    # never gets a column no row supplied. Reindexing onto the full column set
+    # before selecting keeps the merge from raising in exactly that gap.
+    outcomes = outcomes.reindex(columns=list(OUTCOME_MERGE_COLUMNS))
     if not outcomes.empty:
         outcomes = outcomes.drop_duplicates("row_id", keep="last")
-        book = book.merge(
-            outcomes[["row_id", "status", "realized_pnl", "realized_entry_cost",
-                      "realized_exit_value", "reason"]],
-            on="row_id", how="left",
-        )
+        book = book.merge(outcomes[list(OUTCOME_MERGE_COLUMNS)],
+                          on="row_id", how="left")
     else:
-        for c in ("status", "realized_pnl", "realized_entry_cost",
-                  "realized_exit_value", "reason"):
+        for c in OUTCOME_MERGE_COLUMNS[1:]:
             book[c] = None
 
     # A print settles on the FIRST session after it, and that session's chains
