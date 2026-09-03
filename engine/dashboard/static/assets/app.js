@@ -20,12 +20,21 @@ let MODELS = {};        /* filled when the Models area is first opened */
 let MODELS_META = {};
 const TICKER_DATA = window.TICKER_DATA || {};
 
+/* How many rows the out-of-domain switch is currently hiding, under whatever
+   other filters are set. Kept beside the count badge so a shrunken board says
+   why it shrank rather than looking like a thin night. */
+let boardHidden = 0;
+
 const state = {
   sortKey: "event_date",
   sortDir: 1,
   strategy: "",
   gate: "",
   ticker: "",
+  /* Off by default: a withheld gate is not a decision, and a name the champion
+     gate was never trained on has no verdict to read. Those rows belong behind
+     a switch rather than in the middle of the ones that do carry a call. */
+  outOfDomain: false,
   tickerSelected: null,
 };
 
@@ -264,6 +273,52 @@ function strategyRow(r, disabled, winCell, premium) {
     + "</tr>";
 }
 
+/* BMO sorts before AMC on the same date because that is the order the
+   DECISIONS come due, not the order the prints do: a BMO print is entered at
+   the previous session's close, an AMC print at the close of the print day
+   itself. Sorting the label alphabetically would put AMC first and quietly
+   invert the schedule. */
+const SESSION_ORDER = { BMO: 0, AMC: 1 };
+
+function sessionOrder(session) {
+  const v = SESSION_ORDER[String(session || "").toUpperCase()];
+  return v === undefined ? 2 : v;
+}
+
+/* What the board is proposing to do with the row, in the order a reader wants
+   to meet it: a tradeable call first, then a call not to trade, then rows
+   where no call exists. This is the gate verdict — the selection rule the
+   backtests used — and not a re-ranking of any kind. */
+function actionRank(row) {
+  if (row.gate_pass === true) return 0;
+  if (row.gate_pass === false) return 1;
+  return 2;
+}
+
+function groupKey(row) {
+  return row.ticker + "|" + row.event_date;
+}
+
+function isOutOfDomain(row) {
+  return (row.flags || []).indexOf("OUT_OF_DOMAIN") !== -1;
+}
+
+/* The default order: when the decision is due, then what the decision is.
+   `dir` flips the schedule only — passers stay at the top of their session
+   either way, because reversing the date is a request to read the calendar
+   backwards, not a request to bury the trades. */
+function scheduleOrder(a, b, dir, groupAction) {
+  const ad = String(a.event_date || ""), bd = String(b.event_date || "");
+  if (ad !== bd) return ad.localeCompare(bd) * dir;
+  const as = sessionOrder(a.session), bs = sessionOrder(b.session);
+  if (as !== bs) return (as - bs) * dir;
+  const ag = groupAction.get(groupKey(a)), bg = groupAction.get(groupKey(b));
+  if (ag !== bg) return ag - bg;
+  const at = String(a.ticker || ""), bt = String(b.ticker || "");
+  if (at !== bt) return at.localeCompare(bt);
+  return actionRank(a) - actionRank(b);
+}
+
 function boardRows() {
   let rows = BOARD.rows.slice();
   if (state.strategy) rows = rows.filter((r) => r.strategy === state.strategy);
@@ -271,14 +326,39 @@ function boardRows() {
   if (state.gate === "fail") rows = rows.filter((r) => r.gate_pass === false);
   if (state.gate === "na") rows = rows.filter((r) => r.gate_pass === null || r.gate_pass === undefined);
   if (state.ticker) rows = rows.filter((r) => (r.ticker || "").toLowerCase().includes(state.ticker));
+  if (state.outOfDomain) {
+    boardHidden = 0;
+  } else {
+    const before = rows.length;
+    rows = rows.filter((r) => !isOutOfDomain(r));
+    boardHidden = before - rows.length;
+  }
+
+  /* A print is placed by the strongest verdict any of its structures carries,
+     so a name with one tradeable structure sorts above a name with none — and
+     its other structures stay with it rather than scattering down the board. */
+  const groupAction = new Map();
+  rows.forEach((r) => {
+    const k = groupKey(r), a = actionRank(r);
+    if (!groupAction.has(k) || a < groupAction.get(k)) groupAction.set(k, a);
+  });
 
   const key = state.sortKey, dir = state.sortDir;
   rows.sort((a, b) => {
-    const x = a[key], y = b[key];
-    if (x === null || x === undefined) return 1;
-    if (y === null || y === undefined) return -1;
-    if (typeof x === "string") return x.localeCompare(y) * dir;
-    return (x - y) * dir;
+    if (key !== "event_date") {
+      const x = a[key], y = b[key];
+      if (x === null || x === undefined) {
+        if (!(y === null || y === undefined)) return 1;
+      } else if (y === null || y === undefined) {
+        return -1;
+      } else if (typeof x === "string") {
+        const c = x.localeCompare(y) * dir;
+        if (c) return c;
+      } else if (x !== y) {
+        return (x - y) * dir;
+      }
+    }
+    return scheduleOrder(a, b, key === "event_date" ? dir : 1, groupAction);
   });
   return rows;
 }
@@ -286,7 +366,8 @@ function boardRows() {
 function renderBoard() {
   const rows = boardRows();
   document.getElementById("board-count").textContent =
-    rows.length + " / " + BOARD.rows.length + " rows";
+    rows.length + " / " + BOARD.rows.length + " rows"
+    + (boardHidden ? " · " + boardHidden + " out-of-domain hidden" : "");
 
   const tb = document.querySelector("#tbl-board tbody");
 
@@ -338,6 +419,9 @@ function initBoardControls() {
   });
   sel.onchange = () => { state.strategy = sel.value; renderBoard(); };
   document.getElementById("f-gate").onchange = (e) => { state.gate = e.target.value; renderBoard(); };
+  const ood = document.getElementById("f-ood");
+  ood.checked = state.outOfDomain;
+  ood.onchange = (e) => { state.outOfDomain = e.target.checked; renderBoard(); };
   document.getElementById("f-ticker").oninput = (e) => {
     state.ticker = e.target.value.trim().toLowerCase(); renderBoard();
   };

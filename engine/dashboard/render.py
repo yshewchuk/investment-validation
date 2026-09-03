@@ -262,14 +262,7 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
         else None
     )
     row = {
-        "row_id": "|".join(
-            [
-                str(record.get("ticker")),
-                str(record.get("strategy")),
-                str(record.get("event_date")),
-                "atm" if record.get("strike") is None else f"{float(record['strike']):.4f}",
-            ]
-        ),
+        "row_id": _row_identity(record),
         "entry_cost_pct": entry_cost_pct,
         "model_fair_pct": fair_pct,
         "premium_vs_fair": premium_vs_fair,
@@ -329,14 +322,40 @@ def _rank_rows(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return ranks
 
 
+def _finite(value: Any) -> bool:
+    """A real number — not ``None``, not ``NaN``. A ScoreResult travels through
+    a DataFrame on its way here, where a missing strike becomes ``NaN`` rather
+    than staying ``None``, so both spellings of "absent" have to be caught."""
+    if value is None:
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
 def _row_identity(record: Mapping[str, Any]) -> str:
+    """The board's key for one scored row — unique, including on the ladder.
+
+    A ladder row that failed to resolve has no ``strike``, so keying on the
+    resolved strike alone gave every unresolved step of one print the same id
+    ``…|atm``: two different requests, one identity. The self-check then
+    reported a mismatch it could not name, and the derivation view opened
+    whichever of them came first. The REQUESTED strike is what distinguishes
+    them, and it exists whether or not the chain had it.
+    """
     strike = record.get("strike")
+    if strike is not None and _finite(strike):
+        tag = f"{float(strike):.4f}"
+    else:
+        requested = record.get("requested_strike")
+        tag = f"req{float(requested):.4f}" if _finite(requested) else "atm"
     return "|".join(
         [
             str(record.get("ticker")),
             str(record.get("strategy")),
             str(record.get("event_date")),
-            "atm" if strike is None else f"{float(strike):.4f}",
+            tag,
         ]
     )
 

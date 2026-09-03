@@ -44,6 +44,7 @@ import pandas as pd
 
 from engine import paths
 from engine.data.throttle import QuotaExhausted
+from engine.score import LADDER_STEP
 
 __all__ = [
     "NightlyStop", "NightlyReport", "run_nightly", "refresh_calendar_data",
@@ -611,9 +612,10 @@ def validate_refresh(
 # --------------------------------------------------------------------------
 
 
-#: Alternative strikes are offered as fractions of spot either side of ATM —
-#: the same ±2.5% steps :func:`engine.score.score_calendar` uses.
-STRIKE_STEP = 0.025
+#: Alternative strikes are offered as fractions of spot either side of ATM.
+#: Re-exported rather than restated: two copies of the same step is how the
+#: explorer's grid and the board's ladder drift apart.
+STRIKE_STEP = LADDER_STEP
 
 
 def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> list[dict]:
@@ -635,7 +637,7 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
         return []
 
     from engine.fills import FillModel
-    from engine.score import UNSCORABLE, ScoreRequest, unscorable_result
+    from engine.score import UNSCORABLE, ScoreRequest, ladder_strike, unscorable_result
 
     live = board[board["gate_pass"].fillna(False).astype(bool)]
     offsets = [
@@ -656,7 +658,10 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
                 as_of=None,
                 event_date=pd.Timestamp(record["event_date"]),
                 session=None if pd.isna(session) else str(session),
-                strike=float(spot) * (1 + offset),
+                # Quantized: an unrounded `spot * (1 + offset)` does not
+                # survive the bundle's float rounding, and the self-check then
+                # re-scores it under a different seed. See `ladder_strike`.
+                strike=ladder_strike(spot, offset),
                 fill=FillModel(float(record.get("fill", 0.5))),
                 # Same quote bound as the board row this ladder steps off. A
                 # ladder priced under a stricter rule than its own ATM anchor is
@@ -797,10 +802,30 @@ def _write_flag_report(as_of, flags: list[dict], steps: dict) -> Path:
 # --------------------------------------------------------------------------
 
 
+#: How far ahead the board looks, in calendar days.
+#:
+#: Set by STR-RUNUP, not by STR-THRU. STR-THRU is entered at the last pre-print
+#: close, so a 21-day horizon showed it three weeks of warning. STR-RUNUP is
+#: entered **14 trading days before** that close — roughly 20 calendar days —
+#: so on a 21-day horizon its entry was already in the past on every row but
+#: the last day's, and the board carried 195 STR-RUNUP rows with one gate
+#: verdict between them. Nothing was broken; the trades had simply expired
+#: before they were shown.
+#:
+#: 35 days puts STR-RUNUP entries from today out to ~11 trading days ahead.
+#: It costs ~10 extra (free) Nasdaq calendar calls and ~2 extra ORATS chain
+#: batches a night; the ORATS reserve does not notice.
+#:
+#: Far-out STR-THRU rows do NOT become guesses as a result: the quote fallback
+#: is bounded in SESSIONS from the entry, so an entry a month out still reports
+#: NO_CHAIN rather than pricing itself off today's close.
+HORIZON_DAYS = 35
+
+
 def run_nightly(
     as_of=None,
     *,
-    horizon_days: int = 21,
+    horizon_days: int = HORIZON_DAYS,
     alt_strikes: int = 1,
     tickers: Iterable[str] | None = None,
     bundle_dir: Path | str | None = None,
@@ -1150,7 +1175,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--as-of", default=None)
-    parser.add_argument("--horizon", type=int, default=21)
+    parser.add_argument("--horizon", type=int, default=HORIZON_DAYS,
+                        help="calendar days of prints to score; the default is "
+                             "set by STR-RUNUP's 14-trading-day entry")
     parser.add_argument("--alt-strikes", type=int, default=1,
                         help="strikes either side of ATM, scored for gate passers only")
     parser.add_argument("--tickers", default=None, help="comma-separated restriction")

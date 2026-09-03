@@ -7,22 +7,45 @@ body {
   background: var(--bg); color: var(--fg); padding: 18px;
   font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
 }
-h1 { font-size: 20px; margin-bottom: 4px; }
+h1 { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
 h3 { font-size: 14px; margin: 0 0 8px; }
 .sub { color: var(--dim); font-size: 12px; margin: 4px 0 12px; }
 .hidden { display: none; }
 
-.tabs { display: flex; gap: 8px; margin: 14px 0; flex-wrap: wrap; }
-.tab {
-  padding: 7px 16px; background: var(--panel); border: 1px solid var(--border);
-  border-radius: 6px; cursor: pointer; color: var(--dim); font-size: 13px;
+/* Title and snapshot line share a row: two stacked blocks of small grey text
+   above the nav was three rows of chrome before any content. */
+.topbar { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.topbar .sub { margin: 0; }
+
+/* Tabs are tabs. These were bordered pills, which read as buttons — something
+   you press to make something happen — when every one of them only changes
+   what you are looking at. Two strips of them, stacked, was the single largest
+   piece of furniture on the page. */
+.tabs { display: flex; flex-wrap: wrap; }
+.tabs.areas {
+  gap: 2px; margin: 10px 0 0; border-bottom: 1px solid var(--border);
 }
-.tab.active { color: var(--fg); border-color: var(--blue); }
+.tab {
+  cursor: pointer; color: var(--dim); font-size: 13px; background: none;
+  border: none; padding: 7px 12px; border-radius: 6px;
+}
 .tab:hover { color: var(--fg); }
+.tab.active { color: var(--fg); }
+/* The primary strip: an underline that sits ON the rule below it. */
+.tab.area {
+  font-weight: 600; border-radius: 0; margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+}
+.tab.area.active { border-bottom-color: var(--blue); }
+/* The secondary strip is subordinate — a quiet segmented control, not a
+   second row of the same thing. */
+.tabs:not(.areas) { gap: 2px; margin: 10px 0 14px; }
+.tabs:not(.areas) .tab { padding: 4px 11px; font-size: 12.5px; }
+.tabs:not(.areas) .tab.active { background: rgba(88, 166, 255, 0.13); }
 
 .panel {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: 8px; padding: 14px; margin-bottom: 14px;
+  border-radius: 8px; padding: 13px 14px; margin-bottom: 12px;
 }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
@@ -33,6 +56,13 @@ h3 { font-size: 14px; margin: 0 0 8px; }
   background: var(--bg); color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 8px; font-size: 13px;
 }
+/* A checkbox inherits the text-input padding above and renders as a lopsided
+   box; it needs the box, not the field. */
+.controls input[type="checkbox"] {
+  padding: 0; margin: 0; width: 13px; height: 13px; accent-color: var(--blue);
+  cursor: pointer;
+}
+.controls label:has(input[type="checkbox"]) { cursor: pointer; }
 
 .tablewrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -52,14 +82,21 @@ tr.grouprow th.g-decision { color: var(--green); }
 tr.grouprow th.g-forecast { color: var(--blue); }
 tr.grouprow th.g-evidence { color: #bc8cff; }
 
-/* The how-to-read legend above the board. */
+/* The how-to-read legend above the board. Collapsed by default: it is a
+   screenful of prose that a reader needs once and then never again, and it was
+   pushing the table — the thing the page is for — below the fold every visit. */
 details.legend { margin-bottom: 12px; }
-details.legend summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+details.legend summary {
+  cursor: pointer; font-weight: 500; font-size: 12.5px; color: var(--dim);
+  list-style-position: outside;
+}
+details.legend summary:hover { color: var(--fg); }
+details[open].legend summary { color: var(--fg); margin-bottom: 2px; }
 details.legend .legend-body { display: grid; gap: 6px; margin-top: 8px; font-size: 12.5px; line-height: 1.45; }
 details.legend .legend-body > div { max-width: 1100px; }
 th.sorted-asc::after { content: " ▲"; color: var(--blue); }
 th.sorted-desc::after { content: " ▼"; color: var(--blue); }
-td { padding: 6px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; }
+td { padding: 6px 8px; border-bottom: 1px solid #1b2027; white-space: nowrap; }
 tbody tr:hover td { background: #1c2129; }
 tr.clickable { cursor: pointer; }
 tr.disabled td { color: var(--dim); }
@@ -111,9 +148,6 @@ tr.disabled td { color: var(--dim); }
 
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 
-/* Two areas — finding trades, and understanding the models behind them. */
-.tabs.areas { margin-bottom: 2px; }
-.tab.area { font-weight: 600; }
 .bar { display: inline-block; height: 10px; background: #3fb950; vertical-align: middle; }
 .bar.neg { background: #f85149; }
 

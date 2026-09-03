@@ -177,6 +177,24 @@ _PANEL_MARKET_BLOCK = (
 # --------------------------------------------------------------------------
 
 
+#: Ladder strikes step this fraction of spot either side of ATM.
+LADDER_STEP = 0.025
+
+#: Decimals a ladder strike is quantized to. `ScoreRequest.key()` renders the
+#: strike at four places and the dashboard stores floats at six, so a strike
+#: carrying more precision than that is a strike the round trip cannot return:
+#: `spot * 0.975` on a $369.59 name is 360.35024999999996, the bundle keeps
+#: 360.35025, and the two format to DIFFERENT four-place keys — a different
+#: bootstrap seed, and a self-check mismatch on a row nothing is wrong with.
+#: An option strike is quoted in cents, so four places is already generous.
+LADDER_STRIKE_DP = 4
+
+
+def ladder_strike(spot: float, offset: float) -> float:
+    """A strike `offset` away from `spot`, quantized so it round-trips."""
+    return round(float(spot) * (1.0 + float(offset)), LADDER_STRIKE_DP)
+
+
 @dataclass(frozen=True)
 class ScoreRequest:
     ticker: str
@@ -1399,7 +1417,7 @@ def score_calendar(
     #: Alternative strikes are offered as fractions of spot either side of ATM.
     offsets = [None] + [
         step * sign
-        for step in (0.025 * k for k in range(1, alt_strikes + 1))
+        for step in (LADDER_STEP * k for k in range(1, alt_strikes + 1))
         for sign in (-1.0, 1.0)
     ]
 
@@ -1410,7 +1428,8 @@ def score_calendar(
             atm_spot: float | None = None
             for offset in offsets:
                 strike = (
-                    None if offset is None or atm_spot is None else atm_spot * (1 + offset)
+                    None if offset is None or atm_spot is None
+                    else ladder_strike(atm_spot, offset)
                 )
                 if offset is not None and strike is None:
                     continue  # the ATM pass found no chain; nothing to step off

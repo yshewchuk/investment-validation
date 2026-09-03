@@ -10,8 +10,10 @@
 <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
-<h1>Earnings-Vol Monitoring Board</h1>
-<div class="sub" id="meta-line">Loading…</div>
+<div class="topbar">
+  <h1>Earnings-Vol Monitoring Board</h1>
+  <div class="sub" id="meta-line">Loading…</div>
+</div>
 
 <div class="tabs areas">
   <div class="tab area active" data-area="trades">Trades</div>
@@ -33,7 +35,7 @@
 <div id="flags-banner" class="hidden"></div>
 
 <div id="view-board">
-  <details class="panel legend" open>
+  <details class="panel legend">
     <summary>How to read this board — one decision rule, two estimates, one evidence check</summary>
     <div class="legend-body">
       <div><span class="pill pass">Decision</span> <strong>Gate</strong> — the gate model's predicted return on the trade
@@ -50,7 +52,13 @@
         the gate passes while the model forecast is negative — two independent estimators disagreeing that hard is
         rare, so treat the row with suspicion rather than as a trade. OUT_OF_DOMAIN means the gate decision is
         withheld: the name was outside the champion gate's training universe (a &lt;1B name or a name the oquants
-        panel does not carry, both added after the gate was promoted — EXP-118), so no decision exists for it yet.</div>
+        panel does not carry, both added after the gate was promoted — EXP-118), so no decision exists for it yet.
+        Those rows are <strong>hidden by default</strong> — the “show out-of-domain” switch above the table brings
+        them back.</div>
+      <div class="sub">Default order is the order the decisions come due: <strong>date</strong>, then
+        <strong>session</strong> (BMO first — a BMO print is entered at the previous session's close, an AMC print at
+        the close of the print day), then <strong>what the gate proposes</strong> — passers, then fails, then rows
+        with no decision. Any column header re-sorts on that column instead.</div>
     </div>
   </details>
   <div class="panel">
@@ -69,6 +77,8 @@
         </select>
       </label>
       <label>Ticker <input id="f-ticker" type="text" placeholder="filter…" autocomplete="off"></label>
+      <label title="Rows the champion gate withholds a decision on because the name was outside its training universe — a &lt;1B name, or a name the oquants panel does not carry. They have no verdict to read, so they are hidden by default rather than mixed in with the rows that do.">
+        <input id="f-ood" type="checkbox"> Show out-of-domain</label>
       <span class="badge" id="board-count"></span>
     </div>
     <div class="tablewrap">
@@ -84,7 +94,7 @@
             <th colspan="1"></th>
           </tr>
           <tr>
-          <th data-sort="event_date" title="The print date and session. AMC = after market close, BMO = before market open. The session decides which day a trade is entered and exited, so a wrong session is a wrong trade rather than a cosmetic error.">Event</th>
+          <th data-sort="event_date" title="The print date and session, and the board's default order: date, then session, then what the gate proposes. AMC = after market close, BMO = before market open. BMO sorts first because it is decided first — a BMO print is entered at the PREVIOUS session's close, an AMC print at the close of the print day itself. The session decides which day a trade is entered and exited, so a wrong session is a wrong trade rather than a cosmetic error.">Event</th>
           <th data-sort="ticker" title="The underlying. Click any row to open its full evidence: inputs, print history and matched analog trades.">Ticker</th>
           <th data-sort="strategy" title="The structure. STR-THRU = buy the straddle and hold THROUGH the print. STR-RUNUP = own vol into the print and exit before it. CAL-P is listed but never scored — no backtest exists, so it shows as unvalidated rather than guessing.">Strategy</th>
           <th data-sort="entry_date" title="When this structure would be opened and closed, derived from the print session. Everything on this row prices THAT trade.">Entry → exit</th>
@@ -135,7 +145,9 @@
     <h3>Every recommendation, taken at the recommended time</h3>
     <div class="badge">Frozen predictions only — nothing here is re-scored.
       A row counts only where the gate actually said pass; a withheld gate is
-      not a buy. Each trade is bought once, on the first night it appeared.</div>
+      not a buy. Each trade is bought once, at the LAST view of it at or before
+      its entry — the verdict you would actually have acted on, since the gate
+      changes its mind as chains arrive.</div>
     <div class="kv" id="bk-kv"></div>
   </div>
   <div class="panel">

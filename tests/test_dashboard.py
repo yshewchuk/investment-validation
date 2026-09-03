@@ -1113,3 +1113,206 @@ class TestBookPanel:
         app = Path("engine/dashboard/static/assets/app.js").read_text()
         for state in ("settled", "open", "awaiting_exit", "unresolvable"):
             assert f"{state}:" in app or f'"{state}"' in app, state
+
+
+class TestBoardOrderAndDomainFilter:
+    """The board's default order and its out-of-domain switch.
+
+    Both are client-side, so the assertions come in two layers: cheap text
+    checks that pin the invariants a reader of `app.js` could otherwise break
+    silently, and — where node is available — the real sort run against
+    synthetic rows.
+    """
+
+    APP = Path("engine/dashboard/static/assets/app.js")
+
+    def test_the_session_order_is_explicit_not_alphabetical(self):
+        """`"AMC" < "BMO"` as strings, so sorting the label sorts the schedule
+        backwards: a BMO print is decided at the PREVIOUS session's close and
+        must come first."""
+        app = self.APP.read_text()
+        assert "SESSION_ORDER = { BMO: 0, AMC: 1 }" in app
+
+    def test_the_out_of_domain_switch_defaults_to_off(self):
+        app = self.APP.read_text()
+        assert "outOfDomain: false," in app
+        html = Path("engine/dashboard/static/index.html").read_text()
+        assert 'id="f-ood" type="checkbox"' in html
+        # No `checked` attribute: the markup must not re-enable what the state
+        # turns off.
+        assert 'id="f-ood" type="checkbox" checked' not in html
+
+    # -- the real sort, when node is around ---------------------------------
+
+    @staticmethod
+    def _run(rows, state=None, tmp_path=None):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not available")
+        driver = tmp_path / "drive.mjs"
+        driver.write_text(
+            "import fs from 'node:fs';\n"
+            "const src = fs.readFileSync(%r, 'utf8');\n"
+            "const body = src.slice(0, src.indexOf('function init()'));\n"
+            "globalThis.window = { BOARD: { rows: %s } };\n"
+            "globalThis.document = { getElementById: () => ({}),"
+            " querySelectorAll: () => [], querySelector: () => ({}),"
+            " createElement: () => ({ appendChild(){} }) };\n"
+            "const m = new Function(body + '\\nreturn {boardRows, state, get hidden(){return boardHidden;}};')();\n"
+            "Object.assign(m.state, %s);\n"
+            "const out = m.boardRows().map((r) => r.ticker + '/' + r.strategy);\n"
+            "console.log(JSON.stringify({ order: out, hidden: m.hidden }));\n"
+            % (str(TestBoardOrderAndDomainFilter.APP), json.dumps(rows), json.dumps(state or {}))
+        )
+        proc = subprocess.run(
+            [node, str(driver)], capture_output=True, text=True, timeout=60
+        )
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
+    @staticmethod
+    def _row(ticker, session, event_date, *, gate_pass=None, flags=(), strategy="STR-THRU"):
+        return {
+            "row_id": f"{ticker}|{strategy}|{event_date}",
+            "ticker": ticker, "strategy": strategy, "session": session,
+            "event_date": event_date, "gate_pass": gate_pass, "gate_score": None,
+            "flags": list(flags),
+        }
+
+    def test_bmo_precedes_amc_on_the_same_date(self, tmp_path):
+        rows = [
+            self._row("ZZZ", "AMC", "2026-09-02"),
+            self._row("AAA", "BMO", "2026-09-02"),
+            self._row("BBB", "BMO", "2026-09-01"),
+        ]
+        got = self._run(rows, tmp_path=tmp_path)
+        assert got["order"] == ["BBB/STR-THRU", "AAA/STR-THRU", "ZZZ/STR-THRU"]
+
+    def test_within_a_session_a_proposed_trade_comes_first(self, tmp_path):
+        """Order inside a date/session is the gate verdict: pass, then fail,
+        then rows carrying no decision at all."""
+        rows = [
+            self._row("CCC", "BMO", "2026-09-02", gate_pass=None),
+            self._row("BBB", "BMO", "2026-09-02", gate_pass=False),
+            self._row("AAA", "BMO", "2026-09-02", gate_pass=True),
+        ]
+        got = self._run(rows, tmp_path=tmp_path)
+        assert got["order"] == ["AAA/STR-THRU", "BBB/STR-THRU", "CCC/STR-THRU"]
+
+    def test_a_prints_structures_stay_together_under_its_best_verdict(self, tmp_path):
+        """A name with one tradeable structure sorts above a name with none,
+        and its other structures travel with it rather than scattering."""
+        rows = [
+            self._row("NOPE", "BMO", "2026-09-02", gate_pass=False),
+            self._row("NOPE", "BMO", "2026-09-02", gate_pass=None, strategy="CAL-P"),
+            self._row("YES", "BMO", "2026-09-02", gate_pass=None, strategy="CAL-P"),
+            self._row("YES", "BMO", "2026-09-02", gate_pass=True),
+        ]
+        got = self._run(rows, tmp_path=tmp_path)
+        assert got["order"] == [
+            "YES/STR-THRU", "YES/CAL-P", "NOPE/STR-THRU", "NOPE/CAL-P",
+        ]
+
+    def test_reversing_the_date_keeps_the_passers_on_top(self, tmp_path):
+        """Reading the calendar backwards is not a request to bury the trades."""
+        rows = [
+            self._row("AAA", "BMO", "2026-09-02", gate_pass=None),
+            self._row("BBB", "BMO", "2026-09-02", gate_pass=True),
+        ]
+        got = self._run(rows, {"sortDir": -1}, tmp_path=tmp_path)
+        assert got["order"] == ["BBB/STR-THRU", "AAA/STR-THRU"]
+
+    def test_out_of_domain_rows_are_hidden_by_default_and_counted(self, tmp_path):
+        rows = [
+            self._row("AAA", "BMO", "2026-09-02", gate_pass=True),
+            self._row("OOD", "BMO", "2026-09-02", flags=["OUT_OF_DOMAIN"]),
+        ]
+        got = self._run(rows, tmp_path=tmp_path)
+        assert got["order"] == ["AAA/STR-THRU"]
+        assert got["hidden"] == 1
+
+        shown = self._run(rows, {"outOfDomain": True}, tmp_path=tmp_path)
+        assert shown["order"] == ["AAA/STR-THRU", "OOD/STR-THRU"]
+        assert shown["hidden"] == 0
+
+    def test_the_switch_hides_only_the_out_of_domain_structure(self, tmp_path):
+        """A print with one withheld structure and one scored keeps the scored
+        one — the filter is per row, not per name."""
+        rows = [
+            self._row("AAA", "BMO", "2026-09-02", gate_pass=True),
+            self._row("AAA", "BMO", "2026-09-02", flags=["OUT_OF_DOMAIN"], strategy="CAL-P"),
+        ]
+        got = self._run(rows, tmp_path=tmp_path)
+        assert got["order"] == ["AAA/STR-THRU"]
+
+
+class TestLadderRowsRoundTrip:
+    """Two defects the ladder carried, both invisible until a self-check ran.
+
+    A ±2.5% strike off a $369.59 spot is 360.35024999999996. The bundle stores
+    floats at six places, so it comes back as 360.35025 — and `ScoreRequest.key()`
+    renders the strike at FOUR, where those two floats disagree. The re-scored
+    row then drew from a different bootstrap seed and failed the digest, on a
+    row nothing was actually wrong with. Separately, neither ladder row resolved
+    a strike, so both were keyed `…|atm`: one identity, two requests.
+    """
+
+    def test_a_ladder_strike_survives_the_bundles_rounding(self):
+        from engine.dashboard.render import BUNDLE_PRECISION
+        from engine.score import ladder_strike
+
+        spot = 369.59
+        for offset in (-0.025, 0.025, -0.05, 0.05):
+            strike = ladder_strike(spot, offset)
+            stored = round(strike, BUNDLE_PRECISION)
+            assert stored == strike
+            # The four-place rendering `ScoreRequest.key()` uses is what the
+            # bootstrap seed is derived from.
+            assert f"{stored:.4f}" == f"{strike:.4f}"
+
+    def test_the_unrounded_strike_is_what_used_to_break(self):
+        """Guards the diagnosis, not the fix: if this ever stops being true the
+        test above is no longer testing anything."""
+        from engine.dashboard.render import BUNDLE_PRECISION
+
+        raw = 369.59 * (1 - 0.025)
+        assert f"{raw:.4f}" != f"{round(raw, BUNDLE_PRECISION):.4f}"
+
+    def test_two_unresolved_ladder_rows_are_two_rows(self):
+        from engine.dashboard.render import _row_identity
+
+        base = {"ticker": "AVGO", "strategy": "STR-THRU", "event_date": "2026-09-02"}
+        low = _row_identity(base | {"strike": None, "requested_strike": 360.3502})
+        high = _row_identity(base | {"strike": None, "requested_strike": 378.8297})
+        assert low != high
+
+    def test_a_resolved_row_still_keys_on_the_strike_it_got(self):
+        from engine.dashboard.render import _row_identity
+
+        base = {"ticker": "AVGO", "strategy": "STR-THRU", "event_date": "2026-09-02"}
+        assert _row_identity(base | {"strike": 370.0}) == "AVGO|STR-THRU|2026-09-02|370.0000"
+        # A plain ATM row that resolved nothing keeps the old identity: it is
+        # the only row of its print with no requested strike.
+        assert _row_identity(base | {"strike": None}) == "AVGO|STR-THRU|2026-09-02|atm"
+
+    def test_a_nan_strike_reads_as_absent(self):
+        """A ScoreResult travels through a DataFrame, where a missing strike
+        becomes NaN — keying on `is None` alone would format it as `nan`."""
+        from engine.dashboard.render import _row_identity
+
+        base = {"ticker": "AVGO", "strategy": "STR-THRU", "event_date": "2026-09-02"}
+        got = _row_identity(base | {"strike": float("nan"), "requested_strike": 360.3502})
+        assert got == "AVGO|STR-THRU|2026-09-02|req360.3502"
+
+    def test_compact_row_and_rank_agree_on_identity(self):
+        """They used to build the id twice, in two places, from one rule."""
+        from engine.dashboard.render import _row_identity, compact_row
+
+        record = {
+            "ticker": "AVGO", "strategy": "STR-THRU", "event_date": "2026-09-02",
+            "strike": None, "requested_strike": 360.3502, "strike_offset": -0.025,
+        }
+        assert compact_row(record)["row_id"] == _row_identity(record)
