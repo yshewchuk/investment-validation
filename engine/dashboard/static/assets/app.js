@@ -1066,22 +1066,73 @@ const BK_STATE = {
   unresolvable: ["unresolvable", "the exit chain should exist and it still cannot be priced"],
 };
 
+/* Client-side because the filter combines two dimensions (strategy x
+   recommended/declined) the server's `by_strategy` and `by_recommended`
+   summaries only ever split ONE at a time — the arithmetic mirrors
+   engine.portfolio._summarize_settled exactly so the two cannot disagree. */
+function summarizeBookRows(rows) {
+  const settled = rows.filter((r) => r.state === "settled");
+  const sum = (arr, f) => arr.reduce((a, r) => a + (f(r) || 0), 0);
+  const out = {
+    n_recommended: rows.length,
+    capital_committed: sum(rows, (r) => r.capital),
+    by_state: {},
+    n_settled: settled.length,
+  };
+  rows.forEach((r) => { out.by_state[r.state] = (out.by_state[r.state] || 0) + 1; });
+  if (settled.length) {
+    out.pnl = sum(settled, (r) => r.pnl);
+    out.capital_settled = sum(settled, (r) => r.capital);
+    out.return_on_capital = out.capital_settled ? out.pnl / out.capital_settled : NaN;
+    out.win_rate = settled.filter((r) => r.pnl > 0).length / settled.length;
+    const rets = settled.map((r) => r.realized_pnl).filter((v) => v !== null && v !== undefined);
+    out.mean_trade_return = rets.length ? sum(settled, (r) => r.realized_pnl) / rets.length : NaN;
+  }
+  return out;
+}
+
+function bookFilterOptions() {
+  const strategies = Array.from(new Set((BOOK.rows || []).map((r) => r.strategy))).sort();
+  const sel = document.getElementById("bk-f-strategy");
+  if (sel && sel.options.length <= 1) {
+    strategies.forEach((s) => {
+      const o = document.createElement("option");
+      o.value = s; o.textContent = s;
+      sel.appendChild(o);
+    });
+  }
+}
+
+function initBookControls() {
+  const strat = document.getElementById("bk-f-strategy");
+  const rec = document.getElementById("bk-f-recommended");
+  if (strat) strat.onchange = renderBook;
+  if (rec) rec.onchange = renderBook;
+}
+
 function renderBook() {
   const kv = document.getElementById("bk-kv");
   const tbl = document.getElementById("bk-table");
   if (!kv || !tbl) return;
-  const s = BOOK.summary || {};
   if (!BOOK.available || !(BOOK.rows || []).length) {
     kv.innerHTML = "<div class='badge'>No recommendations in the ledger yet — "
       + "no row has gate_pass=true.</div>";
     tbl.innerHTML = "";
     return;
   }
+  bookFilterOptions();
+  const fStrategy = (document.getElementById("bk-f-strategy") || {}).value || "";
+  const fRecommended = (document.getElementById("bk-f-recommended") || {}).value;
+  let rows = BOOK.rows || [];
+  if (fStrategy) rows = rows.filter((r) => r.strategy === fStrategy);
+  if (fRecommended !== "") rows = rows.filter((r) => String(r.recommended) === fRecommended);
+
+  const s = summarizeBookRows(rows);
   const st = s.by_state || {};
   const money = (v) => (v === null || v === undefined || isNaN(v) ? "–"
     : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 }));
   const parts = [
-    ["recommendations", (s.n_recommended || 0) + " distinct trades"],
+    ["trades", (s.n_recommended || 0) + " (" + (fRecommended === "false" ? "declined" : fRecommended === "true" ? "recommended" : "recommended + declined") + ")"],
     ["contracts each", BOOK.contracts],
     ["capital committed", money(s.capital_committed)],
     ["settled", (s.n_settled || 0) + " of " + (s.n_recommended || 0)],
@@ -1096,20 +1147,23 @@ function renderBook() {
     .map((p) => esc(p[0]) + ": <span class='mono'>" + esc(String(p[1])) + "</span>")
     .join("<br>");
 
-  const rows = (BOOK.rows || []).slice().sort((a, b) =>
+  const sorted = rows.slice().sort((a, b) =>
     String(a.event_date).localeCompare(String(b.event_date)));
-  const head = ["recommended", "ticker", "strategy", "event", "state",
+  const head = ["entered", "ticker", "strategy", "call", "event", "state",
                 "premium", "return", "P&L"];
   let html = "<table><thead><tr>" + head.map((h) => "<th>" + esc(h) + "</th>").join("")
     + "</tr></thead><tbody>";
-  rows.forEach((r) => {
+  sorted.forEach((r) => {
     const meta = BK_STATE[r.state] || [r.state, ""];
     const ret = r.realized_pnl === null || r.realized_pnl === undefined
       ? "–" : (100 * r.realized_pnl).toFixed(2) + "%";
+    const call = r.recommended
+      ? "<span class='pill pass'>taken</span>" : "<span class='pill fail'>declined</span>";
     html += "<tr>"
       + "<td class='mono'>" + esc(String(r.as_of || "").slice(0, 10)) + "</td>"
       + "<td>" + esc(r.ticker) + "</td>"
       + "<td>" + esc(r.strategy) + "</td>"
+      + "<td>" + call + "</td>"
       + "<td class='mono'>" + esc(String(r.event_date || "").slice(0, 10)) + "</td>"
       + "<td title='" + esc(meta[1]) + "'>" + esc(meta[0]) + "</td>"
       + "<td class='mono'>" + (r.entry_cost === null || r.entry_cost === undefined
@@ -1233,6 +1287,7 @@ function init() {
   initExplorerControls();
   initDerivation();
   renderHealth();
+  initBookControls();
   renderBook();
 }
 

@@ -1064,6 +1064,21 @@ class TestBookPanel:
     never takes the board down and never quietly drops a trade.
     """
 
+    def test_it_asks_the_ledger_for_the_contrarian_rows_too(self, monkeypatch):
+        """The client filters one dataset by `recommended` — book.json has to
+        carry both populations or there is nothing for the filter to show."""
+        from engine.dashboard import render
+
+        captured = {}
+
+        def fake(contracts=1, include_declined=False):
+            captured["include_declined"] = include_declined
+            return pd.DataFrame()
+
+        monkeypatch.setattr("engine.portfolio.build_book", fake)
+        render.build_book()
+        assert captured["include_declined"] is True
+
     def test_it_carries_the_rows_and_the_summary(self, monkeypatch):
         from engine.dashboard import render
 
@@ -1073,7 +1088,7 @@ class TestBookPanel:
             "state": "settled", "entry_cost": 6.0, "realized_pnl": 0.25,
             "pnl": 150.0, "capital": 600.0, "contracts": 1,
         }])
-        monkeypatch.setattr("engine.portfolio.build_book", lambda contracts=1: book)
+        monkeypatch.setattr("engine.portfolio.build_book", lambda contracts=1, include_declined=False: book)
         payload = render.build_book()
         assert payload["available"] is True
         assert len(payload["rows"]) == 1
@@ -1084,7 +1099,7 @@ class TestBookPanel:
         """A dashboard that will not load is worse than one saying 'nothing yet'."""
         from engine.dashboard import render
 
-        def boom(contracts=1):
+        def boom(contracts=1, include_declined=False):
             raise RuntimeError("ledger unreadable")
 
         monkeypatch.setattr("engine.portfolio.build_book", boom)
@@ -1096,7 +1111,7 @@ class TestBookPanel:
     def test_an_empty_ledger_is_available_but_empty(self, monkeypatch):
         from engine.dashboard import render
 
-        monkeypatch.setattr("engine.portfolio.build_book", lambda contracts=1: pd.DataFrame())
+        monkeypatch.setattr("engine.portfolio.build_book", lambda contracts=1, include_declined=False: pd.DataFrame())
         payload = render.build_book()
         assert payload["available"] is True and payload["rows"] == []
 

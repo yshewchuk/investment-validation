@@ -224,3 +224,58 @@ class TestOutcomesMissingRealizedColumns:
         book = portfolio.build_book().set_index("ticker")
         assert book.loc["AAA", "realized_entry_cost"] == pytest.approx(6.0)
         assert pd.isna(book.loc["BBB", "realized_entry_cost"])
+
+
+class TestContrarianBook:
+    """`include_declined=True` adds the gate's rejections, tagged `recommended`.
+
+    A withheld gate (`gate_pass is None`) is neither a recommendation nor a
+    rejection and must appear in neither population.
+    """
+
+    def test_declined_rows_are_excluded_by_default(self, ledger_stub):
+        ledger_stub([_pred(ticker="AAA", gate_pass=True),
+                     _pred(ticker="BBB", gate_pass=False)])
+        book = portfolio.build_book()
+        assert list(book["ticker"]) == ["AAA"]
+
+    def test_include_declined_adds_them_tagged(self, ledger_stub):
+        ledger_stub([_pred(ticker="AAA", gate_pass=True),
+                     _pred(ticker="BBB", gate_pass=False)])
+        book = portfolio.build_book(include_declined=True).set_index("ticker")
+        assert bool(book.loc["AAA", "recommended"]) is True
+        assert bool(book.loc["BBB", "recommended"]) is False
+
+    def test_withheld_rows_never_appear_even_with_declined_included(self, ledger_stub):
+        ledger_stub([_pred(ticker="AAA", gate_pass=True),
+                     _pred(ticker="BBB", gate_pass=False),
+                     _pred(ticker="CCC", gate_pass=None)])
+        book = portfolio.build_book(include_declined=True)
+        assert set(book["ticker"]) == {"AAA", "BBB"}
+
+    def test_by_recommended_splits_settled_pnl(self, ledger_stub):
+        preds = [_pred(ticker="AAA", gate_pass=True, row_id="A-row"),
+                 _pred(ticker="BBB", gate_pass=False, row_id="B-row")]
+        outcomes = [
+            {"row_id": "A-row", "status": "resolved", "reason": None,
+             "realized_pnl": 0.2, "realized_win": True,
+             "realized_entry_cost": 6.0, "realized_exit_value": 7.2},
+            {"row_id": "B-row", "status": "resolved", "reason": None,
+             "realized_pnl": -0.3, "realized_win": False,
+             "realized_entry_cost": 6.0, "realized_exit_value": 4.2},
+        ]
+        ledger_stub(preds, outcomes=outcomes)
+        book = portfolio.build_book(include_declined=True)
+        summary = portfolio.summarize(book)
+        by_rec = summary["by_recommended"]
+        assert by_rec["recommended"]["pnl"] > 0
+        assert by_rec["declined"]["pnl"] < 0
+
+    def test_a_single_population_summary_has_no_split(self, ledger_stub):
+        """Without include_declined there is only one population — nothing to
+        split, and the key should not appear implying a comparison that was
+        never measured."""
+        ledger_stub([_pred(ticker="AAA", gate_pass=True)])
+        book = portfolio.build_book()
+        summary = portfolio.summarize(book)
+        assert "by_recommended" not in summary

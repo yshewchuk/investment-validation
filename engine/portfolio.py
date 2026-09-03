@@ -14,6 +14,19 @@ row where the gate was withheld — out-of-domain name, missing features, no
 chain — is not a recommendation you could have acted on, and counting those
 would be reading the board's silence as a buy.
 
+**The contrarian book.** `build_book(include_declined=True)` adds every row the
+gate looked at and REJECTED (`gate_pass is False`) — never the withheld ones —
+tagged `recommended=False`, priced and sized exactly like a real trade would
+have been. It answers "what did we pass on", the mirror question to the book
+itself: a gate earning its keep should show a positive book and a flat-to-
+negative contrarian one, on the SAME pricing path, so the comparison is not
+two reports that might quietly disagree on method.
+
+Splitting by strategy or by recommended/declined is one table, filtered —
+`book["strategy"]` and `book["recommended"]` carry both dimensions already;
+nothing about the underlying trade population changes and there is no reason
+to build three separate books when a reader can filter one.
+
 **One purchase per trade.** The same upcoming event is proposed again every
 night until it enters, so a book that bought each row would hold the same
 straddle five times. The buy is taken on the FIRST night the trade was
@@ -80,7 +93,8 @@ OUTCOME_MERGE_COLUMNS = (
 
 
 def build_book(contracts: int | None = None,
-               capital_per_trade: float = CAPITAL_PER_TRADE) -> pd.DataFrame:
+               capital_per_trade: float = CAPITAL_PER_TRADE,
+               *, include_declined: bool = False) -> pd.DataFrame:
     """One row per distinct recommended trade, with its state and P&L.
 
     Sized by equal DOLLARS per trade by default. Pass ``contracts`` to size by
@@ -116,10 +130,17 @@ def build_book(contracts: int | None = None,
     preds["as_of"] = pd.to_datetime(preds["as_of"])
     preds["event_date"] = pd.to_datetime(preds["event_date"])
 
-    rec = preds[preds["gate_pass"] == True].copy()  # noqa: E712 — None must not pass
+    # `gate_pass` is True (recommended), False (the gate looked and declined)
+    # or None (the gate never got to decide — out-of-domain, missing features,
+    # a disabled structure). None is neither a recommendation nor a rejection
+    # and belongs in neither book: including it in the contrarian side would
+    # answer "what did withheld rows do", not "what did the gate say no to".
+    wanted = [True, False] if include_declined else [True]
+    rec = preds[preds["gate_pass"].isin(wanted)].copy()
     if rec.empty:
         return pd.DataFrame()
     book = rec.sort_values("as_of").reset_index(drop=True)
+    book["recommended"] = book["gate_pass"] == True  # noqa: E712 — explicit, not falsy-None
 
     outcomes = pd.DataFrame(ledger.read_outcomes())
     # `realized_entry_cost` / `realized_exit_value` are written only on a
@@ -174,7 +195,43 @@ def build_book(contracts: int | None = None,
     return book.sort_values(["event_date", "ticker"]).reset_index(drop=True)
 
 
+def _summarize_settled(settled: pd.DataFrame) -> dict[str, Any]:
+    """P&L stats for one settled population — the shared arithmetic behind
+    both the top-level summary and each `recommended`/`declined` split."""
+    out: dict[str, Any] = {
+        "n_settled": int(len(settled)),
+        "pnl": float(settled["pnl"].sum(skipna=True)) if len(settled) else 0.0,
+        "capital_settled": float(settled["capital"].sum(skipna=True)) if len(settled) else 0.0,
+    }
+    if not len(settled):
+        return out
+    out["return_on_capital"] = (
+        out["pnl"] / out["capital_settled"] if out["capital_settled"] else float("nan")
+    )
+    out["win_rate"] = float((settled["pnl"] > 0).mean())
+    out["mean_trade_return"] = float(
+        pd.to_numeric(settled["realized_pnl"], errors="coerce").mean()
+    )
+    out["best"] = float(settled["pnl"].max())
+    out["worst"] = float(settled["pnl"].min())
+    out["by_strategy"] = {
+        str(k): {"n": int(len(g)), "pnl": float(g["pnl"].sum(skipna=True)),
+                 "mean_ret": float(pd.to_numeric(g["realized_pnl"], errors="coerce").mean())}
+        for k, g in settled.groupby("strategy")
+    }
+    return out
+
+
 def summarize(book: pd.DataFrame) -> dict[str, Any]:
+    """Stats over `book`. Top-level numbers are the RECOMMENDED population —
+    unchanged shape for every existing caller.
+
+    When `book` also carries declined rows (`build_book(include_declined=True)`
+    was used), `by_recommended` gives the same breakdown split by
+    `recommended` — the book and its contrarian counterpart side by side, so
+    "the gate adds value" is a comparison you can see in one summary rather
+    than two separately-run reports that might drift apart in method.
+    """
     if book.empty:
         return {"n_recommended": 0}
     settled = book[book["state"] == "settled"]
@@ -182,24 +239,16 @@ def summarize(book: pd.DataFrame) -> dict[str, Any]:
         "n_recommended": int(len(book)),
         "by_state": {k: int(v) for k, v in book["state"].value_counts().items()},
         "capital_committed": float(book["capital"].sum(skipna=True)),
-        "n_settled": int(len(settled)),
-        "pnl": float(settled["pnl"].sum(skipna=True)) if len(settled) else 0.0,
-        "capital_settled": float(settled["capital"].sum(skipna=True)) if len(settled) else 0.0,
     }
-    if len(settled):
-        out["return_on_capital"] = (
-            out["pnl"] / out["capital_settled"] if out["capital_settled"] else float("nan")
-        )
-        out["win_rate"] = float((settled["pnl"] > 0).mean())
-        out["mean_trade_return"] = float(
-            pd.to_numeric(settled["realized_pnl"], errors="coerce").mean()
-        )
-        out["best"] = float(settled["pnl"].max())
-        out["worst"] = float(settled["pnl"].min())
-        out["by_strategy"] = {
-            str(k): {"n": int(len(g)), "pnl": float(g["pnl"].sum(skipna=True)),
-                     "mean_ret": float(pd.to_numeric(g["realized_pnl"], errors="coerce").mean())}
-            for k, g in settled.groupby("strategy")
+    out.update(_summarize_settled(settled))
+    if "recommended" in book.columns and book["recommended"].nunique() > 1:
+        out["by_recommended"] = {
+            ("recommended" if flag else "declined"): {
+                "n_recommended": int(len(pop)),
+                "capital_committed": float(pop["capital"].sum(skipna=True)),
+                **_summarize_settled(pop[pop["state"] == "settled"]),
+            }
+            for flag, pop in book.groupby("recommended")
         }
     return out
 
@@ -225,6 +274,20 @@ def render(book: pd.DataFrame, summary: dict) -> str:
         for k, v in (summary.get("by_strategy") or {}).items():
             L.append(f"    {k:<12s} n={v['n']:<4d} P&L ${v['pnl']:+,.0f}  mean {v['mean_ret']:+.2%}")
         L.append("")
+    by_rec = summary.get("by_recommended")
+    if by_rec:
+        L += ["  RECOMMENDED vs DECLINED — the gate's own contrarian check:", ""]
+        for label in ("recommended", "declined"):
+            block = by_rec.get(label)
+            if not block:
+                continue
+            L.append(f"    {label.upper()} (n={block['n_recommended']}, "
+                     f"{block.get('n_settled', 0)} settled):")
+            if block.get("n_settled"):
+                L.append(f"      P&L ${block['pnl']:+,.0f}  "
+                         f"mean {block['mean_trade_return']:+.2%}  "
+                         f"win {block['win_rate']:.1%}")
+        L.append("")
     cols = ["as_of", "ticker", "strategy", "event_date", "state",
             "entry_cost", "realized_pnl", "pnl"]
     view = book[cols].copy()
@@ -248,10 +311,14 @@ def main(argv=None) -> int:
     ap.add_argument("--contracts", type=int, default=None,
                     help="size by a fixed contract count instead of equal dollars")
     ap.add_argument("--capital-per-trade", type=float, default=CAPITAL_PER_TRADE)
+    ap.add_argument("--include-declined", action="store_true",
+                    help="also book the gate's rejections, tagged recommended=False — "
+                         "the contrarian check")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
     book = build_book(contracts=args.contracts,
-                      capital_per_trade=args.capital_per_trade)
+                      capital_per_trade=args.capital_per_trade,
+                      include_declined=args.include_declined)
     summary = summarize(book)
     print(render(book, summary))
     if args.json:

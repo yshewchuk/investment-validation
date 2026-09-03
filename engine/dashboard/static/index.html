@@ -144,10 +144,27 @@
   <div class="panel">
     <h3>Every recommendation, taken at the recommended time</h3>
     <div class="badge">Frozen predictions only — nothing here is re-scored.
-      A row counts only where the gate actually said pass; a withheld gate is
-      not a buy. Each trade is bought once, at the LAST view of it at or before
-      its entry — the verdict you would actually have acted on, since the gate
-      changes its mind as chains arrive.</div>
+      Each trade is bought once, at the LAST view of it at or before its entry
+      — the verdict you would actually have acted on, since the gate changes
+      its mind as chains arrive. <b>Declined</b> shows the gate's own
+      contrarian check: every row it looked at and REJECTED, priced and sized
+      the same way — a gate earning its keep should leave this book flat to
+      negative while the recommended one is positive. A withheld gate (never
+      reached a verdict) is neither and appears in neither book.</div>
+    <div class="controls">
+      <label>Strategy
+        <select id="bk-f-strategy">
+          <option value="">all</option>
+        </select>
+      </label>
+      <label>Book
+        <select id="bk-f-recommended">
+          <option value="true">recommended</option>
+          <option value="false">declined</option>
+          <option value="">both</option>
+        </select>
+      </label>
+    </div>
     <div class="kv" id="bk-kv"></div>
   </div>
   <div class="panel">

@@ -947,13 +947,19 @@ def build_book(contracts: int = 1) -> dict:
     re-run until it agrees with you, and this cannot, which is the whole reason
     it is worth a tab.
 
+    Carries BOTH the book and its contrarian counterpart (every row the gate
+    declined, `recommended=False`) in one payload — the client filters by
+    `strategy` and `recommended`, so a per-strategy or recommended-vs-declined
+    view is a filter on one dataset rather than a second render path that could
+    drift from the first.
+
     Never raises: an empty or missing ledger renders an empty book, because a
     dashboard that will not load is worse than one that says "nothing yet".
     """
     try:
         from engine import portfolio
 
-        book = portfolio.build_book(contracts=contracts)
+        book = portfolio.build_book(contracts=contracts, include_declined=True)
         summary = portfolio.summarize(book)
         rows = json.loads(book.to_json(orient="records", date_format="iso")) if len(book) else []
     except Exception as exc:  # noqa: BLE001 — a panel must not take the board down
