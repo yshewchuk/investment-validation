@@ -56,6 +56,13 @@ CONVENTIONS = {
         "BMO = close(t-1) -> close(t); AMC = close(t) -> close(t+1) "
         "(validated, EXP-000)."
     ),
+    "orats_implied_zero_sentinel": (
+        "ORATS `impliedMove` uses 0 to mean \"no quote\", not \"no expected "
+        "movement\" — 25.8% of `daily_market` rows, outnumbering true null "
+        "119:1, driven by liquidity (31.5% zero at $0.2B vs 1.6% at $82B). "
+        "Masked to NaN at normalization (EXP-110); the absence itself is kept "
+        "as the `has_implied_quote` feature (EXP-111)."
+    ),
     "oquants_implied_pre_2022": (
         "oquants implied moves before 2022 are reconstructions, not live "
         "quotes; flagged `implied_reconstructed=True`."

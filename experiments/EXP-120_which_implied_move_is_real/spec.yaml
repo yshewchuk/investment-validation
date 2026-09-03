@@ -1,0 +1,179 @@
+id: EXP-120
+title: "which implied move is real"
+kind: data-validation
+role: denominator
+strategy: "*"
+programme: target-validation
+prior: [EXP-110, EXP-111, EXP-117]
+
+hypothesis: >
+  The board's headline signal, `model_vs_market`, divides a VALIDATED numerator
+  (predicted abs_move; EXP-117 triangulated the realized target against Polygon)
+  by an UNVALIDATED denominator. The two available implied-move series disagree
+  far too much to both be right: on 102,008 panel events where both are present
+  and positive, corr 0.6079, median |diff| 2.44pp, ORATS median 7.71 against
+  oquants 6.15, and the disagreement GROWS (median 2.08pp in 2017 to 3.32pp in
+  2026). Neither has ever been checked against an independent construction.
+
+  A third measurement can be built from primitives already on disk: the option
+  chains. Reconstructing the event-implied move from the chain and comparing
+  both vendors against it identifies which series `model_vs_market` should
+  divide by — or establishes that neither is usable and the board should use
+  the quoted straddle premium directly.
+
+known_before_registration:
+  # Stated so no one later mistakes these for findings of this experiment.
+  vendor_disagreement: >
+    corr 0.6079, median |diff| 2.44pp, 1.9% within 0.1pp, 7.8% within 0.5pp,
+    90.7% differ by >10% relative, on 102,008 events.
+  not_the_total_straddle: >
+    Neither vendor is quoting the full straddle premium. Against 18,813
+    replayed STR-THRU straddles, `straddle - oquants` and `straddle - ORATS`
+    both RISE strongly with DTE (Spearman +0.67, +0.60) while the vendor gap
+    FALLS (-0.32). Both vendors quote an event-specific move; the straddle
+    carries DTE-dependent non-event time value on top. This is why the raw
+    straddle premium cannot itself adjudicate.
+  vs_realized: >
+    As a direct forecast of realized |move|: oquants MAE 4.577pp, ORATS 5.643pp;
+    realized/implied median 0.634 (oquants) vs 0.531 (ORATS); correlation with
+    realized |move| nearly identical (0.3059 vs 0.3101). Suggestive, NOT
+    decisive - a good implied move is not an unbiased forecast, it carries a
+    variance risk premium.
+
+definition:
+  file: DEFINITION.md
+  reconstruction_primary: two_expiry_chain
+  reconstruction_fallback: iv_decomposition
+  circularity_risk: >
+    The fallback uses ORATS iv30 and exErnIv30. If ORATS computes impliedMove
+    from that same decomposition, the fallback CANNOT adjudicate between the
+    vendors - it would reproduce ORATS by construction. The two-expiry
+    reconstruction uses only chain bid/ask and is therefore the primary. If
+    Stage 0 coverage forces the fallback, the verdict is reported as
+    "ORATS-dependent" and no winner is declared on it.
+
+stage0:
+  status: closed
+  ran: "2026-09-03"
+  findings:
+    coverage: >
+      52,390 events have a chain at the last pre-print close, but only 406
+      (0.8%) carry BOTH a pre-print and a post-print expiry. Median 2 expiries
+      per event. Cause is structural, not a data gap: chains were pulled to
+      price STR-THRU, so the DTE window targeted the expiry STRADDLING the
+      print - an expiry that dies before the print was never wanted, so it was
+      never stored. Spread evenly over 2018-2026 (32-58/yr), so it is not an
+      era effect.
+    gate: >
+      NOT MET (406 < 3,000). Per the registered rule the two-expiry
+      reconstruction becomes a limited-sample secondary and no winner may be
+      declared from the ORATS-dependent fallback.
+  consequence: >
+    The registered primary cannot be answered at scale on stored data. Rather
+    than relax the rule after seeing it fail, Stage 1 is re-scoped to the two
+    questions the available data CAN answer, both registered below before
+    measurement.
+
+stage1:
+  status: closed
+  ran: "2026-09-03"
+  q1_result: >
+    median |decomposition - ORATS| = 2.636pp on n=49,926 (corr 0.881, 2.5%
+    within 0.5pp; medians 5.68 vs 8.42). Registered reading at >=1.0pp:
+    "ORATS is something else". ORATS impliedMove is NOT reproducible from
+    ORATS' own iv30/exErnIv30, which voids the circularity concern that had
+    barred the decomposition from adjudicating.
+  q2_result: >
+    FAILED its own registered falsification criterion. n=396; median
+    |oquants-chain| 5.78pp and |ORATS-chain| 7.80pp, both WORSE than the ~2.4pp
+    the vendors disagree with each other by; reconstructed median implied move
+    0.09%, and 35% of events gave var_event <= 0. Cause: E1 expires before the
+    print so it is very short-dated, and short-dated ATM IV is a bad
+    extrapolation for the diffusive rate at E2's horizon. Reported as a broken
+    measurement; its -2.018pp vendor gap is NOT quoted as evidence.
+  unregistered_secondary: >
+    Specified AFTER q1 was seen and labelled as such in REPORT.md. Both vendors
+    measured against the decomposition, n=92,309: median |oquants-dec| 0.614pp
+    vs |ORATS-dec| 2.469pp; oquants closer in 18 of 19 years (95%).
+  status_of_the_original_primary: >
+    UNANSWERED. Cost to answer it: one extra expiry per event anchor (the last
+    expiry before the print), ~290 ORATS calls per historical session covered.
+
+stage2:
+  status: proposed
+  proposal: >
+    Promote the iv30/exErnIv30 decomposition to a COMPUTED LIVE denominator.
+    Derivable nightly from fields already pulled, zero new API calls, tracks the
+    better-calibrated vendor to 0.6pp, and unlike oquants it exists for events
+    that have not happened yet. To be pre-registered before measurement.
+  registered_at: "2026-09-03T03:47:00+00:00"
+  q1_what_is_the_orats_number: >
+    Run the fallback decomposition (iv30, exErnIv30) on all ~52k events and
+    measure its distance to ORATS impliedMove. This CANNOT adjudicate between
+    vendors - that is exactly why it is being run. If the fallback reproduces
+    ORATS to within ~0.2pp median, ORATS impliedMove IS the iv30/exErnIv30
+    decomposition, which identifies what the board's denominator actually
+    measures and tells us oquants is measuring something else. If it does NOT
+    reproduce ORATS, then ORATS uses a construction we cannot see, and the
+    denominator stays unexplained.
+    Registered reading: median |fallback - ORATS| <= 0.2pp => "ORATS is the
+    decomposition"; >= 1.0pp => "ORATS is something else"; in between =>
+    inconclusive.
+  q2_independent_check_on_406: >
+    Run the chain-only two-expiry reconstruction on the 406 events and report
+    which vendor it sits closer to, with a bootstrap CI on the difference of
+    median absolute errors. Registered as EVIDENCE, NOT A VERDICT: n=406 across
+    9 years cannot satisfy the >=70%-of-years consistency rule, and it will not
+    be reported as if it had.
+  q3_what_it_would_take: >
+    Record the pull that WOULD answer the primary: one extra expiry per event
+    anchor. Cost it in ORATS calls so the decision to buy it is a number, not
+    a feeling.
+  question: >
+    On how many events do the stored chains carry BOTH a pre-print expiry (no
+    event inside it) and a post-print expiry, at the last pre-print close?
+    Zero API calls.
+  gate: >
+    >= 3,000 events with both expiries -> the two-expiry reconstruction is the
+    primary. Below that, it is reported as a limited-sample secondary and the
+    headline falls to the ORATS-dependent fallback, labelled as such.
+
+primary_spec:
+  measurement: >
+    Per event, |vendor - reconstruction| in percentage points, for
+    vendor in {oquants implied_move, ORATS or_implied}.
+  acceptance:
+    # Consistency, not magnitude - the standard this programme uses.
+    winner_rule: >
+      A vendor WINS only if its median |vendor - reconstruction| is lower in
+      >= 70% of out-of-sample YEARS, and the pooled Wilcoxon signed-rank test
+      on the paired per-event absolute errors gives p <= 0.05. A pooled median
+      win in < 70% of years is reported as NO WINNER.
+    neither_rule: >
+      If BOTH vendors have a pooled median |vendor - reconstruction| > 2.0pp,
+      the registered conclusion is that NEITHER is usable as the denominator,
+      regardless of which is closer.
+    survives_best_year: >
+      The winner must keep its sign after dropping its single best year.
+  reported_secondary:
+    - correlation of each vendor with the reconstruction
+    - median signed bias per vendor (direction of the error, not just size)
+    - the same split by market-cap band and by DTE bucket
+    - coverage: events where the reconstruction is computable at all
+
+decision_if:
+  oquants_wins: >
+    oquants is not available live (it lists realized events only), so the board
+    cannot simply switch. The action is to derive a live denominator that tracks
+    oquants - candidate: the chain reconstruction itself, computed nightly.
+  orats_wins: >
+    `model_vs_market` stands as-is; the finding is recorded and the column keeps
+    its current source.
+  no_winner_or_neither: >
+    `model_vs_market` is demoted from "the programme's core signal" in the board
+    legend, and the chain-premium comparison the board already computes
+    (`premium_vs_fair`) becomes the headline instead.
+
+data_snapshot: aa48a1b9828ddf859fb1f6ca301fd8840b4d81f5f1d3b2e3d5b32dfc648a56b0
+api_calls_budget: 0
+preregistered_at: "2026-09-03T03:32:16+00:00"

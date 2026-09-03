@@ -246,12 +246,34 @@ def normalize_ticker(
     out["src_mcap"] = np.where(out["mcap_usd"].notna(), "orats.cores", None)
 
     out, clipped = clip_implausible(out)
+
+    # ORATS writes `impliedMove == 0` to mean "no quote", not "no expected
+    # movement": zero outnumbered true null 119:1 across 9.0M rows (25.8%), in
+    # every year since 2009, and it is a LIQUIDITY fact — 31.5% zero at $0.2B
+    # against 1.6% at $82B (EXP-110, EXP-111). Left in, it tells a model the
+    # market expects nothing on precisely the events that move most: mean
+    # realized |move| 6.87% where it is zero against 5.75% where it is not.
+    #
+    # This is a sentinel, not an implausible value, so it is masked here rather
+    # than by widening `clip_implausible`'s range — the range says what a real
+    # quote can be, and zero is not a quote at all.
+    #
+    # EXP-111 landed `has_implied_quote` FIRST, on purpose: the absence is real
+    # information and nulling the magic number without preserving it would have
+    # deleted a signal the models were using.
+    implied = pd.to_numeric(out.get("implied_move"), errors="coerce")
+    sentinel = implied.notna() & (implied <= 0)
+    n_sentinel = int(sentinel.sum())
+    if n_sentinel:
+        out.loc[sentinel, "implied_move"] = np.nan
+
     report = {
         "ticker": ticker,
         "rows": int(len(out)),
         "mcap_rows": mcap_rows,
         "cores_only_rows": cores_only_rows,
         "clipped": clipped,
+        "implied_sentinel_nulled": n_sentinel,
         "first": str(out["date"].min().date()) if len(out) else None,
         "last": str(out["date"].max().date()) if len(out) else None,
     }

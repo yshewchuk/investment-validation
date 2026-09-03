@@ -1332,3 +1332,63 @@ class TestLadderRowsRoundTrip:
         ]
         ids.append(compact_row(base | {"strike": 370.0})["row_id"])
         assert len(set(ids)) == len(ids)
+
+
+class TestImpliedMoveSentinel:
+    """ORATS writes `impliedMove == 0` for "no quote" (EXP-110).
+
+    Left in, it tells a model the market expects no movement on precisely the
+    events that move most. The normalizer masks it; `has_implied_quote`
+    (EXP-111) keeps the absence as information.
+    """
+
+    def test_zero_is_nulled_but_a_real_quote_survives(self):
+        import numpy as np
+        from engine.data.normalize.common import clip_implausible
+
+        # The range check alone does NOT catch it — the lower bound is
+        # inclusive, which is why this needed its own step.
+        frame = pd.DataFrame({"implied_move": [0.0, 4.2, -1.0, 120.0]})
+        clipped, _ = clip_implausible(frame)
+        assert clipped["implied_move"].iloc[0] == 0.0, "range check keeps zero"
+
+        implied = pd.to_numeric(frame["implied_move"], errors="coerce")
+        sentinel = implied.notna() & (implied <= 0)
+        assert list(sentinel) == [True, False, True, False]
+
+    def test_the_convention_is_recorded(self):
+        from engine.data.schemas import CONVENTIONS
+
+        assert "orats_implied_zero_sentinel" in CONVENTIONS
+        assert "has_implied_quote" in CONVENTIONS["orats_implied_zero_sentinel"]
+
+    def test_a_withheld_gate_says_why(self):
+        """Both decline paths used to `return` in silence, which is
+        indistinguishable on the board from never having been asked."""
+        from pathlib import Path
+
+        src = Path("engine/score.py").read_text()
+        gate = src[src.index("def _score_gate"):]
+        gate = gate[:gate.index("def _compare_layers")]
+        # every `return` that is not the prediction path carries a flag
+        assert gate.count("MISSING_FEATURES") == 2
+        assert "non-finite" in gate
+
+    def test_a_gate_note_does_not_run_into_the_analog_note(self):
+        """Both layers append to `detail`, and the analog layer writes first.
+
+        The first version put the separator INSIDE the appended fragment and
+        then `.strip()`ed it off, producing "…dte_bandgate gate_midfill…" on
+        255 live rows. The join has to live between the parts.
+        """
+        from pathlib import Path
+
+        src = Path("engine/score.py").read_text()
+        gate = src[src.index("def _score_gate"):]
+        gate = gate[:gate.index("def _compare_layers")]
+        assert 'f"{result.detail}; {note}"' in gate
+        # Not `assert ".strip()" not in gate` — the comment above the fix names
+        # `.strip()` as the cause, and a test that trips on its own explanation
+        # is a test that punishes documenting the bug.
+        code = "\n".join(l for l in gate.splitlines() if not l.lstrip().startswith("#"))
+        assert ").strip()" not in code

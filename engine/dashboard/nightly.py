@@ -254,7 +254,26 @@ CHAIN_FIELDS = (
     "ticker,tradeDate,expirDate,dte,strike,stockPrice,callBidPrice,callAskPrice,"
     "putBidPrice,putAskPrice,callMidIv,putMidIv,smvVol,delta,spotPrice"
 )
-CHAIN_DTE = "1,45"
+#: DTE window for the forward chain pull.
+#:
+#: 75, not 45, because 45 days is less than TWO monthly cycles. STR-RUNUP
+#: selects `first_dte_at_least(30)`, and for a name with no weeklies the first
+#: monthly at or past 30 DTE swings between ~30 and ~63 days out depending on
+#: where in the cycle you are — so a 45-day window loses it for about half of
+#: every month. Measured on the 1,105 pairs held at 2026-09-02: the October
+#: monthly (2026-10-16) appeared in ZERO of them, having been 45–50 DTE on
+#: every date that pulled successfully, and only 269 pairs — the names that
+#: have weeklies — held any expiry at all past the September monthly. STR-RUNUP
+#: could resolve on 3 of 245 rows as a result.
+#:
+#: This costs no quota: ORATS bills per (tradeDate, ticker-batch), not per row.
+#: It costs store size and rebuild time, which is the trade being made.
+#:
+#: Widening does NOT heal chains already held — `skip_held` is a content check
+#: on the (ticker, date) pair and cannot see that what we hold is too narrow.
+#: A pair pulled at the old window stays at the old window until something
+#: re-pulls it deliberately.
+CHAIN_DTE = "1,75"
 
 #: Trading sessions the nightly refreshes, counting back from ``as_of``.
 #: Two, because ORATS publishes a session around midnight: a run in the evening

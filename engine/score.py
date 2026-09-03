@@ -1252,11 +1252,26 @@ class Scorer:
         if not self._gate_in_domain(request, features):
             result.flag("OUT_OF_DOMAIN")
             return
+        # A gate that declines says WHY. Both branches used to `return` in
+        # silence, which put an unexplained `n/a` on the board — indistinguishable
+        # from a name the gate had never been asked about. It matters more since
+        # the implied-move sentinel was nulled (EXP-110): a name with no quoted
+        # implied move now has a non-finite `im`, and withholding on it is the
+        # right call, but only if the row says so.
         missing = [f for f in artifact.features if f not in features.columns]
         if missing:
+            result.flag("MISSING_FEATURES")
+            result.detail = f"gate {entry.id} needs {missing}"
             return
         X = features[list(artifact.features)].to_numpy(dtype=float)
         if not np.isfinite(X).all():
+            absent = [f for f, ok in zip(artifact.features, np.isfinite(X[0])) if not ok]
+            result.flag("MISSING_FEATURES")
+            # `.strip()` on the fragment ate the separating space and ran the
+            # analog detail straight into this one ("…dte_bandgate gate_…").
+            # The join belongs between the parts, not inside one of them.
+            note = f"gate {entry.id}: non-finite {absent}"
+            result.detail = f"{result.detail}; {note}" if result.detail else note
             return
         result.gate_score = float(artifact.predict(X)[0])
         result.gate_threshold = entry.threshold
