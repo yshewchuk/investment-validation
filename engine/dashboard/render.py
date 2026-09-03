@@ -123,7 +123,7 @@ def _write_json(path: Path, payload: Any) -> None:
 def _js_name(stem: str) -> str:
     return {
         "board": "BOARD", "meta": "META", "health": "HEALTH", "flags": "FLAGS",
-        "strategies": "STRATEGIES", "models": "MODELS",
+        "strategies": "STRATEGIES", "models": "MODELS", "book": "BOOK",
     }.get(stem)
 
 
@@ -920,6 +920,29 @@ def _bundle_as_of(bundle: Path) -> str:
         return "snapshot"
 
 
+def build_book(contracts: int = 1) -> dict:
+    """book.json: the hypothetical P&L of every recommendation, from the ledger.
+
+    The board says what to do; this says what happened when it said it. It reads
+    only frozen predictions paired with settled outcomes — a backtest can be
+    re-run until it agrees with you, and this cannot, which is the whole reason
+    it is worth a tab.
+
+    Never raises: an empty or missing ledger renders an empty book, because a
+    dashboard that will not load is worse than one that says "nothing yet".
+    """
+    try:
+        from engine import portfolio
+
+        book = portfolio.build_book(contracts=contracts)
+        summary = portfolio.summarize(book)
+        rows = json.loads(book.to_json(orient="records", date_format="iso")) if len(book) else []
+    except Exception as exc:  # noqa: BLE001 — a panel must not take the board down
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}",
+                "summary": {}, "rows": []}
+    return {"available": True, "contracts": contracts, "summary": summary, "rows": rows}
+
+
 def render_bundle(
     scores: pd.DataFrame,
     out: Path | str,
@@ -1013,6 +1036,7 @@ def render_bundle(
     _write_pair(out / "data", "flags", flags_payload)
 
     _write_pair(out / "data", "strategies", build_strategies(registry=registry))
+    _write_pair(out / "data", "book", build_book())
 
     # Per-input evidence, if it has been built. Absent is a legitimate state —
     # it is rebuilt only when a champion changes, not nightly — and the view

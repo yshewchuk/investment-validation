@@ -21,6 +21,7 @@
 <div class="tabs" id="subtabs-trades">
   <div class="tab active" data-tab="board">Upcoming prints</div>
   <div class="tab" data-tab="explorer">Ticker / strike explorer</div>
+  <div class="tab" data-tab="book">Hypothetical book</div>
 </div>
 
 <div class="tabs hidden" id="subtabs-models">
@@ -126,6 +127,20 @@
       <h3>Past analog trades on this name</h3>
       <div class="tablewrap" id="x-analogs"></div>
     </div>
+  </div>
+</div>
+
+<div id="view-book" class="hidden">
+  <div class="panel">
+    <h3>Every recommendation, taken at the recommended time</h3>
+    <div class="badge">Frozen predictions only — nothing here is re-scored.
+      A row counts only where the gate actually said pass; a withheld gate is
+      not a buy. Each trade is bought once, on the first night it appeared.</div>
+    <div class="kv" id="bk-kv"></div>
+  </div>
+  <div class="panel">
+    <h3>The book</h3>
+    <div class="tablewrap" id="bk-table"></div>
   </div>
 </div>
 

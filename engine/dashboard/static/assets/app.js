@@ -13,6 +13,7 @@
 const BOARD = window.BOARD || { rows: [] };
 const META = window.META || {};
 const HEALTH = window.HEALTH || {};
+const BOOK = window.BOOK || {};
 const FLAGS = window.FLAGS || { flags: [] };
 const STRATEGIES = window.STRATEGIES || {};
 let MODELS = {};        /* filled when the Models area is first opened */
@@ -62,8 +63,8 @@ function cellColor(x) {
 /* ---------------------------------------------------------------- tabs */
 
 /* Two areas: finding trades, and understanding the models that rank them. */
-const AREA_VIEWS = { trades: ["board", "explorer"], models: ["modelx", "derivation", "health"] };
-const ALL_VIEWS = ["board", "explorer", "modelx", "derivation", "health"];
+const AREA_VIEWS = { trades: ["board", "explorer", "book"], models: ["modelx", "derivation", "health"] };
+const ALL_VIEWS = ["board", "explorer", "book", "modelx", "derivation", "health"];
 
 function switchTab(name) {
   document.querySelectorAll(".tab[data-tab]").forEach(
@@ -959,6 +960,71 @@ function initDerivation() {
 
 /* ---------------------------------------------------------------- health */
 
+/* The hypothetical book. States are kept distinct on purpose: an open trade
+   and one that could not be priced are both "not settled", and collapsing them
+   would let the book quietly drop the trades it failed to follow. */
+const BK_STATE = {
+  settled: ["settled", "the event happened and the replay priced it"],
+  open: ["open", "the event has not happened yet — capital committed"],
+  awaiting_exit: ["awaiting exit", "printed, but its exit chain is not published yet"],
+  unresolvable: ["unresolvable", "the exit chain should exist and it still cannot be priced"],
+};
+
+function renderBook() {
+  const kv = document.getElementById("bk-kv");
+  const tbl = document.getElementById("bk-table");
+  if (!kv || !tbl) return;
+  const s = BOOK.summary || {};
+  if (!BOOK.available || !(BOOK.rows || []).length) {
+    kv.innerHTML = "<div class='badge'>No recommendations in the ledger yet — "
+      + "no row has gate_pass=true.</div>";
+    tbl.innerHTML = "";
+    return;
+  }
+  const st = s.by_state || {};
+  const money = (v) => (v === null || v === undefined || isNaN(v) ? "–"
+    : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 }));
+  const parts = [
+    ["recommendations", (s.n_recommended || 0) + " distinct trades"],
+    ["contracts each", BOOK.contracts],
+    ["capital committed", money(s.capital_committed)],
+    ["settled", (s.n_settled || 0) + " of " + (s.n_recommended || 0)],
+  ];
+  if (s.n_settled) {
+    parts.push(["P&L (settled)", money(s.pnl)]);
+    parts.push(["return on capital", (100 * s.return_on_capital).toFixed(2) + "%"]);
+    parts.push(["win rate", (100 * s.win_rate).toFixed(1) + "%"]);
+  }
+  Object.keys(st).forEach((k) => parts.push([(BK_STATE[k] || [k])[0], st[k]]));
+  kv.innerHTML = parts
+    .map((p) => esc(p[0]) + ": <span class='mono'>" + esc(String(p[1])) + "</span>")
+    .join("<br>");
+
+  const rows = (BOOK.rows || []).slice().sort((a, b) =>
+    String(a.event_date).localeCompare(String(b.event_date)));
+  const head = ["recommended", "ticker", "strategy", "event", "state",
+                "premium", "return", "P&L"];
+  let html = "<table><thead><tr>" + head.map((h) => "<th>" + esc(h) + "</th>").join("")
+    + "</tr></thead><tbody>";
+  rows.forEach((r) => {
+    const meta = BK_STATE[r.state] || [r.state, ""];
+    const ret = r.realized_pnl === null || r.realized_pnl === undefined
+      ? "–" : (100 * r.realized_pnl).toFixed(2) + "%";
+    html += "<tr>"
+      + "<td class='mono'>" + esc(String(r.as_of || "").slice(0, 10)) + "</td>"
+      + "<td>" + esc(r.ticker) + "</td>"
+      + "<td>" + esc(r.strategy) + "</td>"
+      + "<td class='mono'>" + esc(String(r.event_date || "").slice(0, 10)) + "</td>"
+      + "<td title='" + esc(meta[1]) + "'>" + esc(meta[0]) + "</td>"
+      + "<td class='mono'>" + (r.entry_cost === null || r.entry_cost === undefined
+        ? "–" : fmt(r.entry_cost, 2)) + "</td>"
+      + "<td class='mono'>" + esc(ret) + "</td>"
+      + "<td class='mono'>" + esc(money(r.pnl)) + "</td>"
+      + "</tr>";
+  });
+  tbl.innerHTML = html + "</tbody></table>";
+}
+
 function renderHealth() {
   const kv = document.getElementById("h-kv");
   const fresh = META.freshness || {};
@@ -1071,6 +1137,7 @@ function init() {
   initExplorerControls();
   initDerivation();
   renderHealth();
+  renderBook();
 }
 
 init();

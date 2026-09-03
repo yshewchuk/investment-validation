@@ -1055,3 +1055,61 @@ class TestChainRefreshCoversTheGap:
         )
         assert out["sessions"] == ["2026-09-04", "2026-09-03"], out["sessions"]
         assert "2026-09-07" not in f.asked
+
+
+class TestBookPanel:
+    """The ledger surfaced in the UI.
+
+    The panel exists to be inspected, so the thing that matters is that it
+    never takes the board down and never quietly drops a trade.
+    """
+
+    def test_it_carries_the_rows_and_the_summary(self, monkeypatch):
+        from engine.dashboard import render
+
+        book = pd.DataFrame([{
+            "as_of": pd.Timestamp("2026-08-28"), "ticker": "AAA",
+            "strategy": "STR-THRU", "event_date": pd.Timestamp("2026-08-31"),
+            "state": "settled", "entry_cost": 6.0, "realized_pnl": 0.25,
+            "pnl": 150.0, "capital": 600.0, "contracts": 1,
+        }])
+        monkeypatch.setattr("engine.portfolio.build_book", lambda contracts=1: book)
+        payload = render.build_book()
+        assert payload["available"] is True
+        assert len(payload["rows"]) == 1
+        assert payload["rows"][0]["ticker"] == "AAA"
+        assert payload["summary"]["n_settled"] == 1
+
+    def test_a_broken_ledger_renders_empty_rather_than_failing(self, monkeypatch):
+        """A dashboard that will not load is worse than one saying 'nothing yet'."""
+        from engine.dashboard import render
+
+        def boom(contracts=1):
+            raise RuntimeError("ledger unreadable")
+
+        monkeypatch.setattr("engine.portfolio.build_book", boom)
+        payload = render.build_book()
+        assert payload["available"] is False
+        assert payload["rows"] == []
+        assert "ledger unreadable" in payload["error"]
+
+    def test_an_empty_ledger_is_available_but_empty(self, monkeypatch):
+        from engine.dashboard import render
+
+        monkeypatch.setattr("engine.portfolio.build_book", lambda contracts=1: pd.DataFrame())
+        payload = render.build_book()
+        assert payload["available"] is True and payload["rows"] == []
+
+    def test_the_js_wrapper_is_named_so_the_page_can_read_it(self):
+        from engine.dashboard.render import _js_name
+
+        assert _js_name("book") == "BOOK"
+
+    def test_every_state_the_book_emits_has_a_ui_label(self):
+        """A state with no label renders as a raw enum, and `unresolvable`
+        rendering as a blank is how a dropped trade hides."""
+        from pathlib import Path
+
+        app = Path("engine/dashboard/static/assets/app.js").read_text()
+        for state in ("settled", "open", "awaiting_exit", "unresolvable"):
+            assert f"{state}:" in app or f'"{state}"' in app, state
