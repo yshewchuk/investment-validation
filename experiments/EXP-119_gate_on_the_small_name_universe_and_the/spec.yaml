@@ -1,0 +1,83 @@
+id: EXP-119
+title: "gate on the small-name universe and the threshold ladder"
+hypothesis: "The small-name slice - replayed mid-fill trades (fill_alpha=0.5, provenance engine.replay) on names with market cap below $1B plus the computed-moves universe (619 feature-complete STR-THRU rows, 266 STR-RUNUP rows, measured at pre-registration) - carries the highest ungated base return in the STR-THRU book (+10.4%/trade). A gate using the champion machinery exactly (gate_mod.FEATURES, HistGBM fit with unchanged hyperparameters, walk-forward, choose_threshold quantile rule) can select within the slice: at the pre-registered HEADLINE top-20% cutoff applied to each arm's pooled walk-forward OOS predictions, the gated mean is > 0 with a seeded 10,000-resample bootstrap 95% CI that excludes zero and has half-width <= 10pp (PASS). Arm A trains and tests on the slice alone with the pre-registered relaxation min_train_rows=100 (THRU OOS 2024-26, ~452 rows; RUNUP OOS 2025-26, ~151 rows). Arm B trains on the full universe (EXP-118 protocol, min_train_rows=500) and scores slice rows only (OOS 2020-26). Secondary, pre-registered shape test on the SAME pooled OOS scores: gated_mean(top 10%) > gated_mean(top 20%) > gated_mean(top 30%), reported with CIs; monotone means the ranking carries information at the top of the slice. Falsified if neither A-thru nor B-thru PASSes at the headline cutoff - then the slice exposure is real but unselectable with current features, the OUT_OF_DOMAIN guard stays, and the route back in is new features (spread, quote quality, liquidity), not more threshold tuning. No outcome triggers trying more cutoffs until one passes."
+type: confirmatory
+kind: gate-slice
+role: gate
+strategy: STR-THRU
+programme: gate-refresh
+prior: [EXP-105, EXP-107, EXP-117, EXP-118]
+price_source: engine.replay pricing over ORATS chains (bid/ask), fill_alpha grid {0, .25, .5, .75, 1}, mid headline
+
+primary_spec:
+  arm: a_thru
+  universe: >
+    Slice = replayed mid-fill trades whose ticker satisfies bucket_mcap(exp(mcap_log)) == "<1B"
+    (mcap below $1e9, engine.data.coverage.MCAP_BUCKETS) OR is one of the computed-moves names
+    in data/raw/computed_moves/ (the EXP-117 universe).
+  machinery: >
+    Champion gate exactly: gate_mod.FEATURES, gate_mod.fit (HistGradientBoostingRegressor,
+    unchanged hyperparameters), expanding-window walk-forward by calendar year, threshold =
+    choose_threshold quantile of scored predictions. Only the train/test universe and
+    min_train_rows vary, as pre-registered below.
+  train_set: slice only
+  test_set: slice, first_test_year 2024
+  min_train_rows: 100   # pre-registered relaxation (engine default 500 makes the slice untestable)
+  threshold_ladder: [0.10, 0.20, 0.30]
+  headline_cutoff: 0.20
+  bootstrap: {resamples: 10000, seed: 20260829, ci: 0.95}
+
+arms:
+  # All four are pre-registered before any of them executes. a_thru is the
+  # headline; the others are secondary and labelled as such.
+  a_thru:  {strategy: STR-THRU,  train: slice, test: "slice 2024-26", first_test_year: 2024, min_train_rows: 100, status: primary}
+  a_runup: {strategy: STR-RUNUP, train: slice, test: "slice 2025-26", first_test_year: 2025, min_train_rows: 100, status: secondary (exploratory power)}
+  b_thru:  {strategy: STR-THRU,  train: "full universe (EXP-118 protocol)", test: "slice rows 2020-26", first_test_year: 2020, min_train_rows: 500, status: secondary}
+  b_runup: {strategy: STR-RUNUP, train: "full universe (EXP-118 protocol)", test: "slice rows 2020-26", first_test_year: 2020, min_train_rows: 500, status: secondary}
+
+success_criteria:
+  # Per arm, judged at the headline 20% cutoff with 10,000 seeded bootstrap
+  # resamples of the pooled OOS gated trades:
+  #   PASS          gated mean > 0 AND bootstrap 95% CI excludes zero AND CI half-width <= 10pp
+  #   INCONCLUSIVE  CI includes zero OR wider than 10pp (expected at these n's; a finding)
+  #   FAIL          CI excludes zero from below
+  # Shape test (secondary): gated_mean(10%) > gated_mean(20%) > gated_mean(30%),
+  # reported with CIs. The ladder is read off ONE walk-forward run per arm -
+  # same scores, three cutoffs - so comparing them is not multiple fitting.
+  a_thru:  {headline_cutoff: 0.20, gated_mean_above: 0.0, ci_excludes_zero: true, ci_half_width_at_most: 0.10}
+  a_runup: {headline_cutoff: 0.20, gated_mean_above: 0.0, ci_excludes_zero: true, ci_half_width_at_most: 0.10}
+  b_thru:  {headline_cutoff: 0.20, gated_mean_above: 0.0, ci_excludes_zero: true, ci_half_width_at_most: 0.10}
+  b_runup: {headline_cutoff: 0.20, gated_mean_above: 0.0, ci_excludes_zero: true, ci_half_width_at_most: 0.10}
+
+decision_rule:
+  # Chosen before results, so the results cannot choose it (plan section 5).
+  outcome_1: "A-thru PASS at the headline cutoff -> build a dedicated small-name gate for STR-THRU; the slice trades under its own gate and the OUT_OF_DOMAIN guard is replaced by it. RUNUP slice stays guarded unless A-runup also passes."
+  outcome_2: "A fails/inconclusive but B-thru PASS -> keep one gate, refresh the champion on the full universe (train_all --role gate); guard comes off because the decision rule is then measured on the universe it trades."
+  outcome_3: "Neither passes -> the slice is not tradeable on gate decisions. Guard stays; the exposure is recorded as a constraint on the search and the route back in is features the slice needs (spread, quote quality, liquidity), not threshold tuning."
+
+baselines:
+  # Reported, not tested - measured on different row sets, never placed in the
+  # same comparison column as the arm verdicts.
+  ungated_slice_mean: "per-arm ungated slice mean, full span and OOS window"
+  champion_registry: "registry gate evals for context only (different row set)"
+
+universe_funnel:
+  - {stage: "replayed STR-THRU trades (mid-fill rows)", events: 19190, note: "Tier-2 trades table, provenance engine.replay, 2018-26"}
+  - {stage: "replayed STR-RUNUP trades (mid-fill rows)", events: 6607, note: "Tier-2 trades table, provenance engine.replay, 2018-26"}
+  - {stage: "slice membership, feature-complete", events: 619, note: "STR-THRU: 616 <1B + 37 computed-moves, 34 overlap (STR-RUNUP: 266)"}
+
+data_snapshot: ab15273a440034cfc305109b7b5f0c14e808f5c91d4e1106a8d8fd52c0b9bf1e
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+promotion_path: >
+  This experiment does not promote a model. Its outcome feeds the guard
+  decision per decision_rule above: a dedicated small-name gate registration
+  (outcome 1), a champion refresh via engine.models.training.train_all --role
+  gate (outcome 2), or the guard standing (outcome 3).
+preregistered_at: "2026-09-02T12:30:37+00:00"
