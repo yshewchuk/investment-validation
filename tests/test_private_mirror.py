@@ -81,7 +81,16 @@ class TestCollection:
 
         # Docs, code and result artifacts. Ballooning here means a data glob has
         # crept into the allowlist, which is the failure worth catching.
-        assert rest < 10_000_000, f"non-growth payload is {rest:,} bytes — check the allowlist"
+        #
+        # Raised from 10MB when EXP-125 landed, AFTER inspecting the
+        # composition rather than assuming it: figures 4.51MB (six per
+        # experiment, 25 experiments), metrics json 2.68MB, ledger outcomes and
+        # the pre-dedup archive 1.34MB, reports 0.78MB, code 0.42MB. No data
+        # glob had crept in — this is per-experiment evidence accumulating, and
+        # the ceiling was set when there were a third as many experiments. If
+        # this fires again, inspect the breakdown before touching the number:
+        # a single extension jumping is the signal it exists for.
+        assert rest < 20_000_000, f"non-growth payload is {rest:,} bytes — check the allowlist"
         # Raised from 30MB when EXP-121 landed. A transaction log carries every
         # leg's quotes at both ends, so its size scales with LEG COUNT, not just
         # trade count: STR-THRU's 17,666 two-leg trades are 4.1MB, TWIN-P's
