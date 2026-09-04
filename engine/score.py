@@ -38,7 +38,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -235,6 +235,17 @@ class ScoreRequest:
     #: lets the board show a trade several days out. `None` keeps the strict
     #: behaviour: no chain for the entry date, no price.
     quote_max_age_sessions: int | None = None
+    #: Parameters handed to the structure factory, for a structure whose SHAPE
+    #: varies per event rather than being fixed by its strategy code — a
+    #: per-event tent width, a different back DTE, a shifted anchor. Without
+    #: this the scorer can only ever price a strategy's default parameterisation,
+    #: which is why every variant so far has had to be a separate replay rather
+    #: than something the live board could show.
+    #:
+    #: The factory validates its own arguments, so an unknown key raises rather
+    #: than being silently ignored — a structure quietly priced at its default
+    #: while the row claims otherwise is the failure this must not have.
+    structure_params: Mapping[str, Any] | None = None
 
     def key(self) -> str:
         """Stable identity, for the deterministic bootstrap seed."""
@@ -249,6 +260,12 @@ class ScoreRequest:
             self.variant or "",
             "" if self.decision_offset is None else f"d{self.decision_offset:+d}",
             "" if self.quote_max_age_sessions is None else f"q{self.quote_max_age_sessions}",
+            # Two events priced at different structure parameters are different
+            # TRADES, so they must not share an identity or a bootstrap seed.
+            # Sorted, so an equal dict always renders equal.
+            "" if not self.structure_params else ",".join(
+                f"{k}={self.structure_params[k]!r}" for k in sorted(self.structure_params)
+            ),
         ]
         return "|".join(parts)
 
@@ -670,7 +687,13 @@ class Scorer:
         another follows it by design: overriding both would let a straddle's call
         and put drift onto different strikes and stop being a straddle.
         """
-        structure = STRUCTURES[request.strategy]()
+        try:
+            structure = STRUCTURES[request.strategy](**dict(request.structure_params or {}))
+        except TypeError as exc:
+            raise ValueError(
+                f"{request.strategy}: structure_params {dict(request.structure_params or {})} "
+                f"not accepted by its factory — {exc}"
+            ) from exc
         if request.decision_offset is not None:
             structure = Structure(
                 name=structure.name, legs=structure.legs,

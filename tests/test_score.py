@@ -757,3 +757,56 @@ class TestScoreResult:
         result = scorer.score(request(), chain_index=chain_index)
         for flag in result.flags:
             assert flag in score_mod.FLAGS
+
+
+class TestStructureParams:
+    """A structure whose SHAPE varies per event, priced through the live scorer.
+
+    Until this existed the scorer could only price a strategy's default
+    parameterisation, so every variant — a different back DTE, a shifted
+    anchor, a per-event tent width — had to be a separate replay and could
+    never appear on the board.
+    """
+
+    def test_params_reach_the_legs(self, scorer, chain_index):
+        from engine.structures import twin_peak
+
+        narrow = scorer._structure(request(strategy="CAL-P"))
+        assert narrow.params.get("back_dte") == 20          # the default
+        wide = scorer._structure(
+            request(strategy="CAL-P", structure_params={"back_dte": 45}))
+        assert wide.params.get("back_dte") == 45
+
+    def test_an_unknown_parameter_raises_rather_than_being_ignored(self, scorer):
+        """A structure quietly priced at its default while the row claims
+        otherwise is the failure this must not have."""
+        with pytest.raises(ValueError, match="not accepted by its factory"):
+            scorer._structure(request(strategy="CAL-P",
+                                      structure_params={"nonsense": 1}))
+
+    def test_a_bad_value_still_raises_from_the_factory(self, scorer):
+        with pytest.raises(Exception):
+            scorer._structure(request(strategy="TWIN-P",
+                                      structure_params={"width_moneyness": -1.0}))
+
+    def test_different_params_are_different_trades(self):
+        """They must not share an identity — or a deterministic bootstrap seed."""
+        a = ScoreRequest(ticker="X", strategy="TWIN-P",
+                         structure_params={"width_moneyness": 0.03})
+        b = ScoreRequest(ticker="X", strategy="TWIN-P",
+                         structure_params={"width_moneyness": 0.05})
+        none = ScoreRequest(ticker="X", strategy="TWIN-P")
+        assert len({a.key(), b.key(), none.key()}) == 3
+
+    def test_the_key_does_not_depend_on_dict_ordering(self):
+        a = ScoreRequest(ticker="X", strategy="TWIN-P",
+                         structure_params={"steps": 1, "anchor_offset": 2})
+        b = ScoreRequest(ticker="X", strategy="TWIN-P",
+                         structure_params={"anchor_offset": 2, "steps": 1})
+        assert a.key() == b.key()
+
+    def test_no_params_is_unchanged(self, scorer):
+        """The nightly path passes nothing, and must behave exactly as before."""
+        assert (scorer._structure(request(strategy="STR-THRU")).to_dict()
+                == scorer._structure(
+                    request(strategy="STR-THRU", structure_params=None)).to_dict())
