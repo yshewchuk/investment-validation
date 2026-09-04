@@ -30,13 +30,23 @@ import pandas as pd
 from engine import paths
 from engine.data import manifest, store, validate
 from engine.data.features import panel as panel_mod
+from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
 
 __all__ = ["rebuild", "RebuildResult", "TABLE_ORDER"]
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
-TABLE_ORDER = ("events", "daily", "securities", "chains", "option_daily", "trades", "panel")
+TABLE_ORDER = (
+    "events",
+    "daily",
+    "securities",
+    "chains",
+    "option_daily",
+    "trades",
+    "panel",
+    "tier4",
+)
 
 
 @dataclass
@@ -344,12 +354,35 @@ def build_panel_table() -> dict:
     }
 
 
+def build_tier4_table(since=None) -> dict:
+    """Tier 4 — the feature-model forecasts.
+
+    Runs after the panel because it reads it, and before the manifest because
+    the snapshot records its hash. Tier 3 changing at date D makes every
+    forecast from D onward stale — not only the rows whose own inputs moved —
+    so a partial Tier-3 rebuild must be followed by ``--since D`` here rather
+    than by nothing.
+    """
+    _banner("tier 4 — feature-model forecasts")
+    report = tier4_mod.build_table(since=since)
+    print(
+        f"  wrote {report['rows']:,} rows, {report['with_forecast']:,} with a "
+        f"forecast → {report['path']}",
+        flush=True,
+    )
+    return report
+
+
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
 
 
-def rebuild(tables: tuple[str, ...] = TABLE_ORDER, sample: int | None = None) -> RebuildResult:
+def rebuild(
+    tables: tuple[str, ...] = TABLE_ORDER,
+    sample: int | None = None,
+    tier4_since=None,
+) -> RebuildResult:
     started = time.time()
     paths.ensure_dirs()
     result = RebuildResult()
@@ -362,6 +395,7 @@ def rebuild(tables: tuple[str, ...] = TABLE_ORDER, sample: int | None = None) ->
         "option_daily": lambda: build_option_daily_table(sample),
         "trades": build_trades_table,
         "panel": build_panel_table,
+        "tier4": lambda: build_tier4_table(tier4_since),
     }
     for name in TABLE_ORDER:
         if name not in tables:
@@ -396,10 +430,16 @@ def main(argv: list[str] | None = None) -> int:
         help="limit each table to N source units (tickers/files) — for tests",
     )
     ap.add_argument("--json", default=None, help="write the run report to this path")
+    ap.add_argument(
+        "--tier4-since",
+        default=None,
+        help="rebuild Tier 4 only from this date's fold forward, carrying earlier "
+        "rows over; the correct follow-up to a Tier-2 correction at that date",
+    )
     args = ap.parse_args(argv)
 
     tables = tuple(args.table) if args.table else TABLE_ORDER
-    result = rebuild(tables=tables, sample=args.sample)
+    result = rebuild(tables=tables, sample=args.sample, tier4_since=args.tier4_since)
     if args.json:
         Path(args.json).write_text(json.dumps(result.as_dict(), indent=1, default=str))
     return 0

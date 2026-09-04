@@ -251,8 +251,48 @@ def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
     return frame.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
-def load_panel(path=None) -> pd.DataFrame:
-    """The Tier-3 causal panel."""
+#: Tier-4 columns joined onto the panel by ``load_panel(with_forecasts=True)``.
+#: ``pred_abs_move`` is the forecast; the rest is the provenance that makes a
+#: stale or partially rebuilt table visible to whoever reads it.
+FORECAST_COLUMNS = ("pred_abs_move", "model_id", "fold_start", "tier3_snapshot")
+
+
+@lru_cache(maxsize=1)
+def _forecasts_cached(path_str: str, mtime: float) -> pd.DataFrame:
+    frame = (
+        pd.read_parquet(path_str) if path_str.endswith(".parquet") else pd.read_csv(path_str)
+    )
+    frame["event_date"] = pd.to_datetime(frame["event_date"])
+    return frame
+
+
+@lru_cache(maxsize=1)
+def _panel_with_forecasts(panel_key: tuple, forecast_key: tuple) -> pd.DataFrame:
+    panel = _panel_cached(*panel_key)
+    forecasts = _forecasts_cached(*forecast_key)
+    joined = panel.merge(
+        forecasts[["ticker", "event_date", *FORECAST_COLUMNS]],
+        left_on=["ticker", "date"],
+        right_on=["ticker", "event_date"],
+        how="left",
+    ).drop(columns=["event_date"])
+    return joined.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def load_panel(path=None, *, with_forecasts: bool = False) -> pd.DataFrame:
+    """The Tier-3 causal panel, optionally joined to Tier-4 forecasts.
+
+    The join is **opt-in** on purpose. Tier 3 is a deterministic function of
+    Tier 2 and is pinned by ``data_snapshot``; Tier 4 holds model output and
+    moves whenever a champion is promoted. A caller that silently received
+    forecast columns would be depending on a model without any record of it, so
+    asking for them here is what puts that dependency on the record — and what
+    tells a report which of the two provenance hashes it has to cite.
+
+    A NULL ``pred_abs_move`` means *no forecast*, never zero: the event predates
+    the first fold, or its features are incomplete. Consumers must decline to
+    size a structure rather than size it at nothing.
+    """
     path = paths.PANEL if path is None else path
     if not path.exists():
         alt = path.with_suffix(".csv.gz")
@@ -263,7 +303,20 @@ def load_panel(path=None) -> pd.DataFrame:
                 f"{path} missing — build Tier 3 with `python3 -m engine.data.rebuild "
                 "--table panel`"
             )
-    return _panel_cached(str(path), path.stat().st_mtime)
+    panel_key = (str(path), path.stat().st_mtime)
+    if not with_forecasts:
+        return _panel_cached(*panel_key)
+
+    tier4 = paths.TIER4
+    if not tier4.exists():
+        alt = tier4.with_suffix(".csv.gz")
+        if not alt.exists():
+            raise FileNotFoundError(
+                f"{tier4} missing — build Tier 4 with "
+                "`python3 -m engine.data.features.tier4`"
+            )
+        tier4 = alt
+    return _panel_with_forecasts(panel_key, (str(tier4), tier4.stat().st_mtime))
 
 
 def panel_for_ticker(ticker: str, panel: pd.DataFrame | None = None) -> pd.DataFrame:

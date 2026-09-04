@@ -1,7 +1,8 @@
 # Tier 4 Guide — Feature Models
 
 **Version:** 1.0 · **Date:** 2026-09-04 · **Owner:** YS + Claude
-**Status:** design, agreed on paper, no code written.
+**Status:** steps 1–3 built and tested (`engine/data/features/tier4.py`, the
+registry graph fields, `load_panel(with_forecasts=True)`); steps 4–6 pending.
 **Objective:** make a model's forecast available as a feature — causally, and
 without making Tier 3 depend on a model.
 
@@ -162,10 +163,14 @@ modules deliberately — that separation IS the record of what is used where.
 
 ## 8. Build order
 
-1. `engine/data/features/tier4.py` — build with `--since`, monthly folds,
-   provenance columns. Standalone and testable before anything consumes it.
-2. Registry `tier` / `produces` / `consumes`, and the snapshot covering Tier 4.
-3. `load_panel(with_forecasts=True)` — the read-time join, so consumers opt in.
+1. **DONE** `engine/data/features/tier4.py` — build with `--since`, monthly
+   folds, provenance columns. Wired into `engine.data.rebuild` after `panel`,
+   with `--tier4-since` for the follow-up a Tier-2 correction requires.
+2. **DONE** Registry `tier` / `produces` / `consumes`, plus `producers()`,
+   `consumers()` and `tier4_graph()`. The Tier-4 hash lands in `SNAPSHOT` as
+   `tier4_sha256`, deliberately *beside* `snapshot_hash` and not inside it —
+   see §10.
+3. **DONE** `load_panel(with_forecasts=True)` — the read-time join, opt-in.
 4. Scorer: pass `structure_params` from the Tier-4 forecast. The plumbing
    already exists (`ScoreRequest.structure_params`, commit `65037e0`).
 5. An arithmetic gate for TWIN-P (`c < w`, spread, mcap) — the scorer currently
@@ -173,6 +178,30 @@ modules deliberately — that separation IS the record of what is used where.
 6. Enable TWIN-P; the ledger starts recording forward evidence.
 
 Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
+
+### What the build settled that the design left open
+
+* **Scorable and trainable are different sets.** A prediction needs complete
+  features; only training also needs a realized target. An event that has not
+  printed yet has no `abs_move` and must still get a forecast — that is the
+  entire point of materialising one. Conflating the two would have left every
+  upcoming event, the only ones still tradeable, holding a NULL.
+* **The table is TOTAL over Tier 3.** Every Tier-3 event gets a row, NULL where
+  no forecast was possible. If Tier 4 held only the rows it could predict, a
+  *missing* row would be ambiguous between "no forecast available" and "this
+  table is stale", and only one of those is acceptable to a consumer.
+* **The carry-over is guarded three ways** (`_carried_prefix`): a cadence
+  change, a different `model_id`, and Tier-3 events appearing inside the
+  retained prefix each refuse `--since` rather than stitch together two halves
+  that answer to different definitions of causality.
+* **`--since` rounds DOWN to its fold boundary**, because a fold is the unit of
+  recomputation: half a month cannot be rebuilt without fitting the model its
+  other half already used. The rounding recomputes a superset, which is
+  identical to what was there, so the §9 equivalence holds either way.
+* **A leak test needs a leak to catch.** `test_a_model_fit_on_everything_would_
+  fail_that_test` refits on the full sample and asserts the stored values no
+  longer reproduce. Without it, the causality test could pass by being unable
+  to distinguish anything at all.
 
 ## 9. Acceptance tests
 

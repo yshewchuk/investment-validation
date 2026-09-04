@@ -22,7 +22,7 @@ ledger's `health.json`, all of which now exist.**
 | `phase4_implementation.md` | **Phase 4 completion pass — report legibility, ledger, audit receipts (the how; wins where it disagrees with the spec guide)** | Phases 0–2 |
 | `phase5_forward_test.md` | Paper trading, fill-quality measurement | Phases 1–4 |
 | `phase6_thesis_overlay.md` | AI-correction overlay | Phases 2, 3 |
-| `tier4_feature_models.md` | **Tier 4 — a model's forecast as a feature, causally** | Phase 0 (data tiers); design only |
+| `tier4_feature_models.md` | **Tier 4 — a model's forecast as a feature, causally** | Phase 0 (data tiers); table built, scorer wiring pending |
 
 ## Environment (verified 2026-08-29)
 

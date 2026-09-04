@@ -148,7 +148,10 @@
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "Trained on engine.replay STR-RUNUP trades at alpha=0.5 over an unselected event universe.",
-   "threshold": 0.05241643967787771
+   "threshold": 0.05241643967787771,
+   "tier": "decision",
+   "produces": null,
+   "consumes": []
   },
   {
    "id": "gate_midfill_str_thru",
@@ -296,7 +299,10 @@
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "Trained on engine.replay STR-THRU trades at alpha=0.5 over an unselected event universe.",
-   "threshold": 0.06645278722543568
+   "threshold": 0.06645278722543568,
+   "tier": "decision",
+   "produces": null,
+   "consumes": []
   },
   {
    "id": "opf_implied_t1_gbm",
@@ -382,7 +388,10 @@
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "Decision days pooled with days_before_print as a feature. Features are as-of the decision date only \u2014 the panel's market-state block is read at the close being predicted and would leak.",
-   "threshold": null
+   "threshold": null,
+   "tier": "feature",
+   "produces": null,
+   "consumes": []
   },
   {
    "id": "size_v1_3",
@@ -460,7 +469,10 @@
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "v1.3 architecture. `or_implied` replaces the legacy `implied_move`, which cannot be sourced for an unrealized event.",
-   "threshold": null
+   "threshold": null,
+   "tier": "feature",
+   "produces": "pred_abs_move",
+   "consumes": []
   },
   {
    "id": "size_v1_4",
@@ -541,7 +553,10 @@
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "v1.4 architecture. `or_implied` replaces the legacy `implied_move`, which cannot be sourced for an unrealized event. v1.4 adds the absolute-valued inputs promoted by EXP-109: mean_prior_abs_move, abs_dist_ema, abs_dist_high \u2014 the magnitudes behind V-shaped signed features that the blend's linear half cannot represent.",
-   "threshold": null
+   "threshold": null,
+   "tier": "feature",
+   "produces": "pred_abs_move",
+   "consumes": []
   }
  ]
 }

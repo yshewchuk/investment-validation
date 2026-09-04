@@ -116,6 +116,12 @@ FEATURES = DATA / "features"
 SNAPSHOT_FILE = FEATURES / "SNAPSHOT"
 PANEL = FEATURES / "panel.parquet"
 
+#: Tier 4 — the feature-model forecasts, keyed on (ticker, event_date). Narrow
+#: by design: keys, model outputs and provenance, never a copy of Tier 3. It
+#: carries its own hash rather than joining the Tier-3 snapshot, so a rebuild
+#: here cannot invalidate an experiment that never read a forecast.
+TIER4 = FEATURES / "tier4_forecasts.parquet"
+
 MANIFEST = DATA / "MANIFEST.md"
 
 REPORTS = ROOT / "reports"

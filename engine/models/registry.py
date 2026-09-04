@@ -39,6 +39,9 @@ from engine import paths
 
 __all__ = [
     "ROLES",
+    "MODEL_TIERS",
+    "ROLE_TIER",
+    "TIER4_COLUMNS",
     "RegistryError",
     "ModelArtifact",
     "RegistryEntry",
@@ -60,6 +63,29 @@ ROLES = ("size", "implied_t1", "gate")
 #: Strategy scope. ``"*"`` means the model is strategy-agnostic (the size model
 #: predicts a property of the *event*, not of any structure traded around it).
 ANY_STRATEGY = "*"
+
+#: Where a model sits in the dependency graph.
+#:
+#: ``feature``   its output can be materialised as a Tier-4 column and read by
+#:               other models as an input
+#: ``decision``  it consumes features to make a call, and nothing reads it back
+#:
+#: The registry is the only place that can answer "what breaks if I re-promote
+#: the size model", and it could not answer it while it recorded *what* each
+#: model eats but never *which models feed which*.
+MODEL_TIERS = ("feature", "decision")
+
+#: The tier a role occupies by default. Not a guess — it is what the roles
+#: already mean, so an entry written before these fields existed lands on the
+#: right value without anyone editing it.
+ROLE_TIER = {"size": "feature", "implied_t1": "feature", "gate": "decision"}
+
+#: The Tier-4 vocabulary: the columns a feature model may declare it produces
+#: and a decision model may declare it consumes. It lives here rather than in
+#: ``engine.data.features.tier4`` so the registry can validate the dependency
+#: graph without importing the layer it describes; ``tests/test_tier4.py`` holds
+#: the two in agreement.
+TIER4_COLUMNS = ("pred_abs_move",)
 
 REGISTRY_PATH = paths.ENGINE / "models" / "registry.json"
 
@@ -270,12 +296,49 @@ class RegistryEntry:
     #: candidate passes. Stored with the model because it is part of the
     #: decision rule, not a dashboard preference.
     threshold: float | None = None
+    #: Position in the dependency graph — see :data:`MODEL_TIERS`. Left empty,
+    #: it is filled from :data:`ROLE_TIER`.
+    tier: str = ""
+    #: The Tier-4 column this model materialises, for feature models. ``None``
+    #: means the model is a feature model whose output is not (yet) written to
+    #: Tier 4 — trained and evaluated, but nothing downstream reads it as data.
+    produces: str | None = None
+    #: Tier-4 columns this model reads, for decision models. This is the half of
+    #: the graph that says which forecasts a promotion would disturb.
+    consumes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
             raise RegistryError(f"{self.id}: unknown role {self.role!r}")
         if not self.features:
             raise RegistryError(f"{self.id}: empty feature list")
+        self.tier = self.tier or ROLE_TIER.get(self.role, "decision")
+        if self.tier not in MODEL_TIERS:
+            raise RegistryError(f"{self.id}: unknown tier {self.tier!r}; known: {MODEL_TIERS}")
+        if self.tier == "feature":
+            if self.consumes:
+                raise RegistryError(
+                    f"{self.id}: a feature model may not declare `consumes` — Tier 4 is "
+                    "one layer deep on purpose, and a forecast built from another "
+                    "forecast would need a fold order this build cannot express"
+                )
+            if self.produces is not None and self.produces not in TIER4_COLUMNS:
+                raise RegistryError(
+                    f"{self.id}: produces {self.produces!r}, which is not a Tier-4 "
+                    f"column; known: {TIER4_COLUMNS}"
+                )
+        else:
+            if self.produces is not None:
+                raise RegistryError(
+                    f"{self.id}: a decision model produces no Tier-4 column "
+                    f"(got {self.produces!r})"
+                )
+            unknown = sorted(set(self.consumes) - set(TIER4_COLUMNS))
+            if unknown:
+                raise RegistryError(
+                    f"{self.id}: consumes {unknown}, which are not Tier-4 columns; "
+                    f"known: {TIER4_COLUMNS}"
+                )
 
     @property
     def key(self) -> tuple[str, str]:
@@ -325,6 +388,38 @@ class Registry:
             if entry.id == model_id:
                 return entry
         raise RegistryError(f"no registry entry {model_id!r}")
+
+    # -- the dependency graph ---------------------------------------------
+
+    def producers(self, column: str, *, champions_only: bool = True) -> list[RegistryEntry]:
+        """Entries that materialise ``column`` into Tier 4."""
+        return [
+            e
+            for e in self.entries
+            if e.produces == column and (e.champion or not champions_only)
+        ]
+
+    def consumers(self, column: str, *, champions_only: bool = True) -> list[RegistryEntry]:
+        """Entries that read ``column`` out of Tier 4.
+
+        The answer to "what breaks if I re-promote the size model": every one of
+        these was fit against forecasts a promotion would replace.
+        """
+        return [
+            e
+            for e in self.entries
+            if column in e.consumes and (e.champion or not champions_only)
+        ]
+
+    def tier4_graph(self) -> dict[str, dict[str, list[str]]]:
+        """``{column: {"produced_by": [...], "consumed_by": [...]}}`` for champions."""
+        return {
+            column: {
+                "produced_by": [e.id for e in self.producers(column)],
+                "consumed_by": [e.id for e in self.consumers(column)],
+            }
+            for column in TIER4_COLUMNS
+        }
 
     def champion(self, role: str, strategy: str = ANY_STRATEGY) -> RegistryEntry:
         """The champion for a role, preferring a strategy-specific entry.
@@ -419,8 +514,26 @@ class Registry:
                 )
             if entry.role == "gate" and entry.champion and entry.threshold is None:
                 problems.append(f"{entry.id}: champion gate carries no threshold")
-            if not check_artifacts:
-                continue
+
+        # A Tier-4 column with two champion producers has no defined value, and
+        # a consumer of a column nobody builds would read NULL forever.
+        for column in TIER4_COLUMNS:
+            producers = self.producers(column)
+            if len(producers) > 1:
+                problems.append(
+                    f"Tier-4 column {column!r} is produced by more than one champion: "
+                    f"{[e.id for e in producers]}"
+                )
+            consumers = self.consumers(column)
+            if consumers and not producers:
+                problems.append(
+                    f"Tier-4 column {column!r} is consumed by {[e.id for e in consumers]} "
+                    "but no champion produces it"
+                )
+
+        if not check_artifacts:
+            return problems
+        for entry in self.entries:
             try:
                 self.load(entry)
             except RegistryError as exc:

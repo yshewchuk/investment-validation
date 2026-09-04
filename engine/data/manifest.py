@@ -32,6 +32,19 @@ def _panel_digest() -> str | None:
     return store.file_sha256(paths.PANEL) if paths.PANEL.exists() else None
 
 
+def _tier4_digest() -> str | None:
+    """The Tier-4 hash — recorded beside the snapshot, deliberately not inside it.
+
+    Tier 4 holds model forecasts, so it moves whenever a champion is promoted.
+    Folding it into :func:`snapshot_hash` would make every such promotion
+    invalidate the provenance of experiments that never read a forecast, which
+    is the exact coupling Tier 4 exists to avoid. An experiment that reads
+    forecasts pins this hash *as well*; one that does not pins the snapshot
+    alone. Reports must say which — see ``guides/tier4_feature_models.md`` §10.
+    """
+    return store.file_sha256(paths.TIER4) if paths.TIER4.exists() else None
+
+
 def snapshot_hash(stats: dict | None = None) -> str:
     """Deterministic identifier for the current state of the whole store."""
     stats = stats if stats is not None else collect_stats()
@@ -56,6 +69,7 @@ def write_snapshot(stats: dict | None = None, path: Path | None = None) -> str:
                 "format": store.table_format(),
                 "tables": stats,
                 "panel_sha256": _panel_digest(),
+                "tier4_sha256": _tier4_digest(),
             },
             indent=1,
             sort_keys=True,
