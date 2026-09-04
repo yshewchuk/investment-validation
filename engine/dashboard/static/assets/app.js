@@ -137,11 +137,60 @@ function renderFlagsBanner() {
    invited reading the score as a probability — it is a predicted return,
    and the comparison against the threshold is the whole decision. */
 function gatePill(row) {
+  /* Some strategies are decided by ARITHMETIC on the entry close, not by a
+     fitted model: reward greater than risk, a crossable spread, a large enough
+     name. Those rows have a verdict and no score, and rendering the score slot
+     as "fail –" read as a missing number rather than as a different kind of
+     decision. The rule's own reason is in the detail line, which the row
+     expands to show. */
+  const isRule = String(row.model_versions && row.model_versions.gate || "")
+    .indexOf("entry-rule") === 0;
+  if (isRule) {
+    const why = " rule";
+    if (row.gate_pass === true) return '<span class="pill pass" title="Passed every term of the pre-registered arithmetic entry rule. Open the row for the terms.">PASS' + why + "</span>";
+    if (row.gate_pass === false) return '<span class="pill fail" title="Failed at least one term of the arithmetic entry rule. Open the row to see which.">fail' + why + "</span>";
+    return '<span class="pill na" title="The entry rule could not be evaluated — a fact it needs is missing, most often because no option chain has been priced yet. Undetermined is not a rejection.">n/a rule</span>';
+  }
   const thr = row.gate_threshold === null || row.gate_threshold === undefined
     ? "" : " " + (row.gate_pass === true ? "&ge; " : "&lt; ") + pct(row.gate_threshold, 1);
   if (row.gate_pass === true) return '<span class="pill pass">PASS ' + signedPct(row.gate_score, 1) + thr + "</span>";
   if (row.gate_pass === false) return '<span class="pill fail">fail ' + signedPct(row.gate_score, 1) + thr + "</span>";
   return '<span class="pill na">n/a</span>';
+}
+
+/* A structure whose SHAPE came from a forecast has to show the forecast and the
+   shape it produced, or the row is a recommendation nobody can check.
+
+   This is deliberately NOT the same number as the print row's estimate above
+   it. That one is the champion artifact's; this one is the monthly fold model's
+   — the fit that actually placed these strikes. They agree closely and are not
+   the same fit, and a row that claims to be forecast-sized should show the
+   forecast that sized it. */
+function forecastCell(r) {
+  if (r.forecast_abs_move === null || r.forecast_abs_move === undefined) return "";
+  let band = "";
+  if (r.forecast_p10 !== null && r.forecast_p10 !== undefined
+      && r.forecast_p90 !== null && r.forecast_p90 !== undefined) {
+    band = " <span class='band' title='80% band, from the held-out errors of folds STRICTLY BEFORE this one — the same pool the stored table used. Wide because the size model is genuinely uncertain: out-of-sample MAE is about 3.9pp.'>"
+      + fmt(r.forecast_p10, 1) + "–" + fmt(r.forecast_p90, 1) + "</span>";
+  }
+  return fmt(r.forecast_abs_move, 1) + "%" + band
+    + " <span class='badge' title='From the Tier-4 fold model that placed this structure, not from the champion refit. Monthly cadence, fit only on events before the month began.'>fold</span>";
+}
+
+/* The geometry the entry rule actually tested. `w` is read off the LISTED
+   strikes, not the width the forecast asked for: on a coarse ladder the two
+   differ several-fold, and `cost < w` against a width the market never offered
+   would be testing a trade that does not exist. */
+function geometryCell(r) {
+  if (r.structure_width === null || r.structure_width === undefined) return "";
+  const ratio = (r.cost_over_width === null || r.cost_over_width === undefined)
+    ? null : r.cost_over_width;
+  const verdict = ratio === null ? ""
+    : " <span class='badge' title='Debit over tent width. Below 1.0 the maximum profit (2w − c) exceeds the maximum loss (c), which is the rule&apos;s reward term.'>c/w "
+      + fmt(ratio, 2) + "</span>";
+  return "<span class='band' title='Half the distance between the doubled at-the-money long and its neighbouring short, in dollars, read off the strikes the ladder actually lists.'>w "
+    + fmt(r.structure_width, 2) + "</span>" + verdict;
 }
 
 /* Gate passes while the model Monte-Carlo forecast is negative: two
@@ -237,7 +286,14 @@ function ratioCell(r) {
 function printRow(members) {
   const head = members[0];
   const byDriver = (name) => members.find((m) => m.driver_name === name) || {};
+  /* Every strategy on a print shares the event, so the estimate belongs on the
+     print row. It normally comes from the row carrying the `abs_move` driver.
+     A print whose only structures are forecast-sized has no such row — TWIN-P
+     has no payoff driver by design — and the header used to go blank on an
+     event the board does in fact have a forecast for. */
   const move = byDriver("abs_move");
+  const sized = members.find((m) => m.forecast_abs_move !== null
+                                 && m.forecast_abs_move !== undefined) || {};
   const t1 = byDriver("implied_t1");
   const passes = members.filter((m) => m.gate_pass === true).length;
   /* PROJECTED_CALENDAR is a statement about the DATE, so it is said next to
@@ -252,7 +308,8 @@ function printRow(members) {
     + "<td><strong>" + esc(head.ticker) + "</strong>"
     + (passes ? " <span class='pill pass'>" + passes + "</span>" : "") + "</td>"
     + "<td colspan='2'></td>"
-    + "<td>" + driverCell(move) + "</td>"
+    + "<td>" + (move.driver_prediction === null || move.driver_prediction === undefined
+        ? forecastCell(sized) || "–" : driverCell(move)) + "</td>"
     + "<td>" + impliedCell(head) + "</td>"
     + "<td>" + ratioCell(move) + "</td>"
     + "<td>" + (t1.driver_prediction === null || t1.driver_prediction === undefined
@@ -273,8 +330,9 @@ function strategyRow(r, disabled, winCell, premium) {
     + "<td></td><td></td>"
     + "<td><span class='band'>└</span> " + esc(r.strategy) + "</td>"
     + "<td>" + esc(r.entry_date || "–") + " → " + esc(r.exit_date || "–") + "</td>"
-    + "<td></td><td></td><td></td><td></td>"
-    + "<td>" + premium + "</td>"
+    + "<td>" + forecastCell(r) + "</td>"
+    + "<td></td><td></td><td></td>"
+    + "<td>" + premium + (premium && geometryCell(r) ? "<br>" : "") + geometryCell(r) + "</td>"
     + "<td>" + gatePill(r) + splitBadge(r) + "</td>"
     + "<td>" + (r.rank || "–") + "</td>"
     + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
@@ -1070,25 +1128,21 @@ const BK_STATE = {
    recommended/declined) the server's `by_strategy` and `by_recommended`
    summaries only ever split ONE at a time — the arithmetic mirrors
    engine.portfolio._summarize_settled exactly so the two cannot disagree. */
-function summarizeBookRows(rows) {
-  const settled = rows.filter((r) => r.state === "settled");
-  const sum = (arr, f) => arr.reduce((a, r) => a + (f(r) || 0), 0);
-  const out = {
-    n_recommended: rows.length,
-    capital_committed: sum(rows, (r) => r.capital),
-    by_state: {},
-    n_settled: settled.length,
-  };
-  rows.forEach((r) => { out.by_state[r.state] = (out.by_state[r.state] || 0) + 1; });
-  if (settled.length) {
-    out.pnl = sum(settled, (r) => r.pnl);
-    out.capital_settled = sum(settled, (r) => r.capital);
-    out.return_on_capital = out.capital_settled ? out.pnl / out.capital_settled : NaN;
-    out.win_rate = settled.filter((r) => r.pnl > 0).length / settled.length;
-    const rets = settled.map((r) => r.realized_pnl).filter((v) => v !== null && v !== undefined);
-    out.mean_trade_return = rets.length ? sum(settled, (r) => r.realized_pnl) / rets.length : NaN;
-  }
-  return out;
+/* The summary for the current filter, LOOKED UP rather than computed.
+
+   This function used to sum P&L, divide for return on capital and count wins
+   in the browser. That broke the board's rule that the UI formats and never
+   computes — and the rule earns its keep here: the nightly self-check re-scores
+   what the renderer wrote, so a number derived in the client sits outside that
+   coverage. A wrong win rate on this tab would never have been caught.
+
+   The renderer now writes one summary per (strategy, recommended) combination
+   under `BOOK.summaries`, keyed "<strategy>|<recommended>" with ALL/all
+   meaning unfiltered. */
+function bookSummary(fStrategy, fRecommended) {
+  const key = (fStrategy || "ALL") + "|" + (fRecommended === "" || fRecommended === undefined
+    ? "all" : fRecommended);
+  return (BOOK.summaries || {})[key] || {};
 }
 
 function bookFilterOptions() {
@@ -1127,7 +1181,7 @@ function renderBook() {
   if (fStrategy) rows = rows.filter((r) => r.strategy === fStrategy);
   if (fRecommended !== "") rows = rows.filter((r) => String(r.recommended) === fRecommended);
 
-  const s = summarizeBookRows(rows);
+  const s = bookSummary(fStrategy, fRecommended);
   const st = s.by_state || {};
   const money = (v) => (v === null || v === undefined || isNaN(v) ? "–"
     : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 }));

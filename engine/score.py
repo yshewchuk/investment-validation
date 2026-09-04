@@ -728,9 +728,25 @@ class Scorer:
         were the requested one — the numbers would be real and about a different
         trade.
 
-        Only *independent* selectors are overridden. A leg declared ``same_as``
-        another follows it by design: overriding both would let a straddle's call
-        and put drift onto different strikes and stop being a straddle.
+        Only *independent* selectors are overridden — those that name no other
+        leg. A leg declared ``same_as`` another follows it by design: overriding
+        both would let a straddle's call and put drift onto different strikes
+        and stop being a straddle.
+
+        The test is ``leg.strike.refs``, not ``kind != "same_as"``. That
+        distinction was invisible while ``same_as`` was the only cross-leg
+        selector and became a real defect the moment it was not: CND-P and
+        TWIN-P resolve their strikes through ``offset_from``, ``mirror`` and
+        ``grid_step``, and naming a strike used to replace EVERY leg with a
+        fixed one. A laddered TWIN-P collapsed all seven legs onto a single
+        strike — four long and four short at the same price, a position worth
+        exactly zero at every settlement, costing four spreads. It priced, it
+        scored, and it was labelled TWIN-P.
+
+        Latent rather than live when it was found: ``strike_ladder`` only
+        ladders rows the gate passed, TWIN-P passes almost none, CND-P is
+        disabled, and ladder rows never enter the ledger. The ATM board was
+        never affected. Fixed here because "almost none" is not none.
         """
         try:
             structure = STRUCTURES[request.strategy](**dict(request.structure_params or {}))
@@ -754,7 +770,7 @@ class Scorer:
         legs = []
         for leg in structure.legs:
             strike_sel = leg.strike
-            if request.strike is not None and leg.strike.kind != "same_as":
+            if request.strike is not None and not leg.strike.refs:
                 strike_sel = StrikeSelector(kind="fixed", strike=float(request.strike))
             expiry_sel = leg.expiry
             if request.expiry is not None:

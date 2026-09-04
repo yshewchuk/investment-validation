@@ -89,7 +89,7 @@ _BOARD_FIELDS = (
     # forecast asked for.
     "forecast_abs_move", "forecast_p10", "forecast_p90", "forecast_sd",
     "forecast_model", "forecast_fold", "structure_params",
-    "structure_width", "rel_spread",
+    "structure_width", "cost_over_width", "rel_spread",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",
     "implied_move", "implied_move_at_entry", "model_vs_market",
@@ -292,8 +292,21 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
         if entry_cost_pct is not None and fair_pct not in (None, 0.0)
         else None
     )
+    # Debit over tent width — the arithmetic entry rule's reward term, made
+    # legible. Derived HERE for the same reason `model_vs_market` is: the UI
+    # formats and never computes, so every number shown is covered by the
+    # nightly self-check. A division between two legitimate fields in the
+    # client reads as legitimate and would slip past `ui_no_compute`.
+    structure_width = record.get("structure_width")
+    cost_over_width = (
+        float(entry_cost) / float(structure_width)
+        if entry_cost is not None and structure_width not in (None, 0.0)
+        else None
+    )
+
     row = {
         "row_id": _row_identity(record),
+        "cost_over_width": cost_over_width,
         "entry_cost_pct": entry_cost_pct,
         "model_fair_pct": fair_pct,
         "premium_vs_fair": premium_vs_fair,
@@ -991,6 +1004,60 @@ def _bundle_as_of(bundle: Path) -> str:
         return "snapshot"
 
 
+#: How the client keys a book summary: ``"<strategy>|<recommended>"``, with
+#: ``ALL`` and ``all`` meaning unfiltered. Shared with ``app.js`` by convention,
+#: and by ``checks/phase3_checks.py::ui_no_compute``, which fails if the client
+#: reads a field the renderer never wrote.
+BOOK_ALL = "ALL"
+
+#: Every key a book summary can carry, in the order `portfolio.summarize`
+#: builds them. Emitted in full — NULL where a population has nothing to say —
+#: so the payload's SHAPE does not depend on whether the ledger happens to hold
+#: settled rows yet. A payload that changes shape with its content forces the
+#: client to be defensive and makes `ui_no_compute` unable to learn the schema
+#: from an empty instance, which is how the Book tab escaped that check.
+BOOK_SUMMARY_KEYS = (
+    "n_recommended", "by_state", "capital_committed", "n_settled", "pnl",
+    "capital_settled", "return_on_capital", "win_rate", "mean_trade_return",
+    "best", "worst", "by_strategy", "by_recommended",
+)
+
+
+def book_summary_key(strategy: str | None, recommended: str | None) -> str:
+    return f"{strategy or BOOK_ALL}|{recommended or 'all'}"
+
+
+def _book_summaries(book, summarize) -> dict:
+    """One summary per filter the Book tab offers.
+
+    The client used to compute these — summing P&L, dividing for return on
+    capital, counting wins — over whatever subset the filters produced. That
+    broke the board's own rule that the UI FORMATS and never computes, and the
+    rule is not a style preference: the nightly self-check re-scores what the
+    renderer wrote, so a number the client derived is outside its coverage
+    entirely. A wrong win rate on this tab would never have been caught.
+
+    Precomputing every combination is cheap — a handful of strategies times
+    three states, each a small object — and it puts the book's arithmetic in
+    the same place as the board's.
+    """
+    def shaped(values: dict) -> dict:
+        return {key: values.get(key) for key in BOOK_SUMMARY_KEYS}
+
+    out: dict[str, dict] = {}
+    if book is None or not len(book):
+        return {book_summary_key(None, None): shaped({"n_recommended": 0})}
+    strategies = [BOOK_ALL, *sorted(str(v) for v in book["strategy"].dropna().unique())]
+    for strategy in strategies:
+        scope = book if strategy == BOOK_ALL else book[book["strategy"] == strategy]
+        for label, wanted in (("all", None), ("true", True), ("false", False)):
+            subset = scope
+            if wanted is not None and "recommended" in scope.columns:
+                subset = scope[scope["recommended"] == wanted]
+            out[book_summary_key(strategy, label)] = shaped(summarize(subset))
+    return out
+
+
 def build_book(contracts: int = 1) -> dict:
     """book.json: the hypothetical P&L of every recommendation, from the ledger.
 
@@ -1014,10 +1081,16 @@ def build_book(contracts: int = 1) -> dict:
         book = portfolio.build_book(contracts=contracts, include_declined=True)
         summary = portfolio.summarize(book)
         rows = json.loads(book.to_json(orient="records", date_format="iso")) if len(book) else []
+        summaries = _book_summaries(book, portfolio.summarize)
+        # The row schema, declared rather than inferred. With an empty ledger
+        # there are no rows to read field names off, and a check that learns a
+        # payload's shape by sampling one instance learns nothing from zero.
+        columns = [str(c) for c in book.columns]
     except Exception as exc:  # noqa: BLE001 — a panel must not take the board down
         return {"available": False, "error": f"{type(exc).__name__}: {exc}",
-                "summary": {}, "rows": []}
-    return {"available": True, "contracts": contracts, "summary": summary, "rows": rows}
+                "summary": {}, "summaries": {}, "columns": [], "rows": []}
+    return {"available": True, "contracts": contracts, "summary": summary,
+            "summaries": summaries, "columns": columns, "rows": rows}
 
 
 def render_bundle(

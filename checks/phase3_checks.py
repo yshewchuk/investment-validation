@@ -785,6 +785,31 @@ def check_ui_no_compute() -> str:
             if isinstance(block.get(nested), dict):
                 known |= set(block[nested])
 
+    # book.json is renderer output too, and the check did not read it — so the
+    # Book tab's numbers were the one part of the page this rule did not cover,
+    # which is exactly where the client had quietly started computing its own
+    # P&L, return on capital and win rate. Reading it here is what makes the
+    # rule true of the whole page rather than of most of it.
+    book_path = out / "data" / "book.json"
+    if book_path.exists():
+        book = json.loads(book_path.read_text())
+        known |= set(book)
+        for block in ("summary",):
+            if isinstance(book.get(block), dict):
+                known |= set(book[block])
+                for nested in book[block].values():
+                    if isinstance(nested, dict):
+                        known |= set(nested)
+        for summary in (book.get("summaries") or {}).values():
+            if isinstance(summary, dict):
+                known |= set(summary)
+                for nested in summary.values():
+                    if isinstance(nested, dict):
+                        known |= set(nested)
+        known |= set(book.get("columns") or [])
+        for row in book.get("rows") or []:
+            known |= set(row)
+
     models = json.loads((out / "data" / "models.json").read_text())
     known |= set(models)
     for block in (models.get("models") or {}).values():

@@ -279,3 +279,42 @@ class TestContrarianBook:
         book = portfolio.build_book()
         summary = portfolio.summarize(book)
         assert "by_recommended" not in summary
+
+
+class TestTheDeclaredSchema:
+    """An empty book must have the same SHAPE as a full one.
+
+    It used to be a bare `DataFrame()` with no columns, so every consumer
+    discovered the schema from an instance that happened to have rows. That is
+    fine until there are none — and the dashboard's `ui_no_compute` check learns
+    which fields the renderer writes by reading the payload, so from a zero-row
+    book it learned nothing. That gap is how the Book tab's P&L, return on
+    capital and win rate came to be computed in the browser, outside the
+    self-check's coverage entirely.
+    """
+
+    def test_an_empty_book_still_declares_every_column(self):
+        from engine.portfolio import BOOK_COLUMNS, empty_book
+
+        frame = empty_book()
+        assert len(frame) == 0
+        assert tuple(frame.columns) == BOOK_COLUMNS
+
+    def test_a_book_with_no_predictions_is_shaped_not_bare(self, monkeypatch):
+        from engine import ledger, portfolio
+
+        monkeypatch.setattr(ledger, "canonical_predictions", lambda: [])
+        frame = portfolio.build_book()
+        assert list(frame.columns) == list(portfolio.BOOK_COLUMNS)
+
+    def test_a_real_book_carries_everything_declared(self, monkeypatch):
+        # The declaration is only useful while it matches what a populated book
+        # actually has. A column added to one and not the other would leave a
+        # consumer reading a field that exists in exactly one of the two states.
+        from engine import portfolio
+
+        book = portfolio.build_book(include_declined=True)
+        if not len(book):
+            pytest.skip("no ledger rows in this environment")
+        missing = [c for c in portfolio.BOOK_COLUMNS if c not in book.columns]
+        assert not missing, f"a populated book is missing declared columns {missing}"

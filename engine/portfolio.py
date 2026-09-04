@@ -58,7 +58,7 @@ import pandas as pd
 
 from engine import ledger
 
-__all__ = ["build_book", "summarize", "render", "CONTRACT_MULTIPLIER"]
+__all__ = ["build_book", "empty_book", "BOOK_COLUMNS", "summarize", "render", "CONTRACT_MULTIPLIER"]
 
 #: Shares per option contract. One straddle contract costs 100x the quoted
 #: per-share premium, and P&L scales with it.
@@ -92,6 +92,31 @@ OUTCOME_MERGE_COLUMNS = (
 )
 
 
+#: The columns :func:`build_book` guarantees, empty ledger or not.
+#:
+#: An empty book used to be a bare ``DataFrame()`` with no columns at all, so
+#: every consumer had to discover the schema from an instance that happened to
+#: have rows. That is fine until there are none: the dashboard's
+#: ``ui_no_compute`` check learns which fields the renderer writes by reading
+#: the payload, and from a zero-row book it learned nothing — which is how the
+#: Book tab's numbers escaped the rule that the UI formats and never computes.
+#:
+#: A non-empty book carries MORE than these (whatever ``canonical_predictions``
+#: supplies); these are the ones this module constructs and consumers may rely
+#: on. ``tests/test_portfolio.py`` holds the declaration against reality.
+BOOK_COLUMNS = (
+    "row_id", "ticker", "strategy", "event_date", "as_of", "entry_cost",
+    "gate_pass", "exp_pnl_model", "win_model", "recommended",
+    "status", "realized_pnl", "realized_entry_cost", "realized_exit_value",
+    "reason", "state", "contracts", "sizing", "capital", "pnl",
+)
+
+
+def empty_book() -> pd.DataFrame:
+    """A book with no rows and every guaranteed column."""
+    return pd.DataFrame({c: pd.Series(dtype="object") for c in BOOK_COLUMNS})
+
+
 def build_book(contracts: int | None = None,
                capital_per_trade: float = CAPITAL_PER_TRADE,
                *, include_declined: bool = False) -> pd.DataFrame:
@@ -119,7 +144,7 @@ def build_book(contracts: int | None = None,
     # gate was still withholding and drop a real recommendation.
     preds = pd.DataFrame(ledger.canonical_predictions())
     if preds.empty:
-        return pd.DataFrame()
+        return empty_book()
     score = preds["score"].apply(lambda s: s or {})
     preds["gate_pass"] = score.apply(lambda s: s.get("gate_pass"))
     preds["exp_pnl_model"] = score.apply(lambda s: s.get("exp_pnl_model"))
@@ -138,7 +163,7 @@ def build_book(contracts: int | None = None,
     wanted = [True, False] if include_declined else [True]
     rec = preds[preds["gate_pass"].isin(wanted)].copy()
     if rec.empty:
-        return pd.DataFrame()
+        return empty_book()
     book = rec.sort_values("as_of").reset_index(drop=True)
     book["recommended"] = book["gate_pass"] == True  # noqa: E712 — explicit, not falsy-None
 

@@ -697,7 +697,16 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
     from engine.fills import FillModel
     from engine.score import UNSCORABLE, ScoreRequest, ladder_strike, unscorable_result
 
+    # A forecast-sized structure is placed BY the forecast — TWIN-P's plateau
+    # sits at 1.5w from the anchor, chosen so the predicted move lands on it.
+    # Re-anchoring it at +/-2.5% keeps the arithmetic coherent (the dependent
+    # legs follow) but breaks the only claim the row makes: that this tent is
+    # placed on this forecast. A ladder of tents placed nowhere in particular
+    # is not the "what if I picked another strike" view the explorer is for.
+    from engine.forecast_sizing import FORECAST_SIZED
+
     live = board[board["gate_pass"].fillna(False).astype(bool)]
+    live = live[~live["strategy"].isin(set(FORECAST_SIZED))]
     offsets = [
         step * sign
         for step in (STRIKE_STEP * k for k in range(1, alt_strikes + 1))
