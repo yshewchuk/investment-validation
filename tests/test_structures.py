@@ -22,6 +22,7 @@ from engine.structures import (
     straddle_through,
     structure_return,
     twin_peak,
+    twin_peak_5,
 )
 
 
@@ -540,6 +541,10 @@ def _condor_strikes(price):
     return {leg.name: leg.strike for leg in price.legs}
 
 
+#: Quarter-`w` steps either side of the anchor, for payoff-shape sweeps.
+_QUARTER_STEPS = [i / 4.0 for i in range(-24, 25)]
+
+
 def _terminal_payoff(price, spot_at_expiry: float) -> float:
     """Intrinsic value of the whole structure at expiry, long-positive."""
     total = 0.0
@@ -864,3 +869,151 @@ class TestTwinPeak:
     def test_width_moneyness_must_be_positive(self):
         with pytest.raises(ValueError, match="width_moneyness must be positive"):
             twin_peak(width_moneyness=0.0)
+
+
+# --------------------------------------------------------------------------
+# TWIN-P5 — the same twin peak over five strikes
+# --------------------------------------------------------------------------
+
+
+class TestTwinPeakFive:
+    """Five strikes, eight contracts, and the same zero floor.
+
+    TWIN-P's binding constraint is `cost < w` — reward beats risk — not the
+    ladder. So the five-strike shape exists to buy the same peak for less, and
+    what these tests pin down is that it does so without giving up the property
+    that makes the loss defined: net contracts sum to zero over strikes
+    symmetric about `A`, so both tails cancel to exactly zero.
+    """
+
+    def test_it_is_not_in_the_registry(self):
+        """`STRUCTURES` is the live board's default universe and the source of
+        the dashboard's strategy panel, which lists disabled keys too. A shape
+        that exists to be measured by EXP-126 belongs in neither until that
+        experiment has reported."""
+        assert "TWIN-P5" not in STRUCTURES
+        assert twin_peak_5().name == "TWIN-P5"
+
+    @pytest.mark.parametrize("m", [2, 3])
+    def test_eight_contracts_over_five_put_strikes(self, condor_snapshot, m):
+        price = price_structure(twin_peak_5(wing_multiple=m), condor_snapshot, MID)
+        assert [leg.right for leg in price.legs] == ["P"] * 5
+        assert sum(leg.qty for leg in price.legs) == 8.0
+        assert len({leg.expiry for leg in price.legs}) == 1
+
+    @pytest.mark.parametrize("m", [2, 3])
+    def test_four_bought_four_sold(self, condor_snapshot, m):
+        price = price_structure(twin_peak_5(wing_multiple=m), condor_snapshot, MID)
+        bought = sum(l.qty for l in price.legs if l.side == "buy")
+        sold = sum(l.qty for l in price.legs if l.side == "sell")
+        assert bought == 4.0 and sold == 4.0
+
+    @pytest.mark.parametrize("m", [2, 3])
+    def test_the_strikes_are_exact_multiples_of_a(self, condor_snapshot, m):
+        k = _twin_strikes(price_structure(twin_peak_5(wing_multiple=m),
+                                          condor_snapshot, MID))
+        a, spacing = k["atm"], k["up1"] - k["atm"]
+        assert spacing > 0
+        assert k["dn1"] == pytest.approx(a - spacing)
+        assert k["up_wing"] == pytest.approx(a + m * spacing)
+        assert k["dn_wing"] == pytest.approx(a - m * spacing)
+
+    @pytest.mark.parametrize("m", [2, 3])
+    def test_terminal_payoff_never_goes_below_zero(self, condor_snapshot, m):
+        price = price_structure(twin_peak_5(wing_multiple=m), condor_snapshot, MID)
+        k = _twin_strikes(price)
+        a, spacing = k["atm"], k["up1"] - k["atm"]
+        grid = [0.0] + [a + step * spacing for step in _QUARTER_STEPS] + [10_000.0]
+        assert min(_terminal_payoff(price, s) for s in grid) >= -1e-9
+
+    def test_the_tight_wing_peaks_at_a_and_pays_nothing_at_a_flat_print(
+        self, condor_snapshot
+    ):
+        """`m = 2` is the cheapest of the three shapes and this is what it costs:
+        a dead-flat print pays zero, where the seven-strike tent pays `w`."""
+        price = price_structure(twin_peak_5(wing_multiple=2), condor_snapshot, MID)
+        k = _twin_strikes(price)
+        a, spacing = k["atm"], k["up1"] - k["atm"]
+        assert _terminal_payoff(price, a + spacing) == pytest.approx(spacing)
+        assert _terminal_payoff(price, a - spacing) == pytest.approx(spacing)
+        assert _terminal_payoff(price, a) == pytest.approx(0.0)
+        assert _terminal_payoff(price, a + 2 * spacing) == pytest.approx(0.0)
+        assert _terminal_payoff(price, a - 2 * spacing) == pytest.approx(0.0)
+
+    def test_the_wide_wing_is_the_seven_strike_shape_with_the_plateau_collapsed(
+        self, condor_snapshot
+    ):
+        """`m = 3` keeps TWIN-P's peak (`2a`) and its dip at a flat print (`a`)
+        and only gives up the plateau shoulders and the ±4a wings."""
+        price = price_structure(twin_peak_5(wing_multiple=3), condor_snapshot, MID)
+        k = _twin_strikes(price)
+        a, spacing = k["atm"], k["up1"] - k["atm"]
+        assert _terminal_payoff(price, a + spacing) == pytest.approx(2 * spacing)
+        assert _terminal_payoff(price, a - spacing) == pytest.approx(2 * spacing)
+        assert _terminal_payoff(price, a) == pytest.approx(spacing)
+        assert _terminal_payoff(price, a + 3 * spacing) == pytest.approx(0.0)
+        assert _terminal_payoff(price, a - 3 * spacing) == pytest.approx(0.0)
+
+    @pytest.mark.parametrize("m,share", [(2, 2.0), (3, 1.0)])
+    def test_it_is_dominated_by_the_seven_strike_tent_at_the_same_spacing(
+        self, condor_snapshot, m, share
+    ):
+        """The whole reason a five-strike version can widen the traded universe.
+
+        At the same spacing, `share x` the five-strike payoff sits at or below
+        the seven-strike payoff at every price — `share` being the ratio of
+        their peaks. No-arbitrage then puts `share x` its cost at or below the
+        seven-strike cost, so its reward:risk is at or above the seven-strike's
+        on the same event and the set of events clearing `cost < max profit`
+        can only grow. That is arithmetic, not a measurement; what it costs in
+        coverage is what EXP-126 measures.
+        """
+        seven = price_structure(twin_peak(steps=1), condor_snapshot, MID)
+        five = price_structure(twin_peak_5(wing_multiple=m, steps=1),
+                               condor_snapshot, MID)
+        k = _twin_strikes(seven)
+        a, spacing = k["atm"], k["up1"] - k["atm"]
+        assert _twin_strikes(five)["atm"] == a
+        for step in _QUARTER_STEPS:
+            s = a + step * spacing
+            assert (share * _terminal_payoff(five, s)
+                    <= _terminal_payoff(seven, s) + 1e-9), f"at {step:+.2f}a"
+
+    def test_a_ladder_that_cannot_carry_the_wing_is_refused(self, condor_rows):
+        rows = condor_rows[
+            ~((condor_rows["strike"] == 92.5) & (condor_rows["right"] == "P"))
+        ]
+        snap = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+            event_date=pd.Timestamp("2024-05-02"), rows=rows, spot=101.0, session="AMC",
+        )
+        with pytest.raises(StructureError, match="not listed"):
+            price_structure(twin_peak_5(wing_multiple=3), snap, MID)
+
+    def test_width_moneyness_sizes_the_peak_to_a_target_share_of_spot(
+        self, condor_snapshot
+    ):
+        narrow = _twin_strikes(price_structure(
+            twin_peak_5(width_moneyness=0.025), condor_snapshot, MID))
+        wide = _twin_strikes(price_structure(
+            twin_peak_5(width_moneyness=0.05), condor_snapshot, MID))
+        assert (wide["up1"] - wide["atm"]) > (narrow["up1"] - narrow["atm"])
+        for k in (narrow, wide):
+            a, spacing = k["atm"], k["up1"] - k["atm"]
+            assert k["dn_wing"] == pytest.approx(a - 2 * spacing)
+            assert k["up_wing"] == pytest.approx(a + 2 * spacing)
+
+    def test_the_wing_multiple_is_two_or_three(self):
+        with pytest.raises(ValueError, match="wing_multiple must be 2 or 3"):
+            twin_peak_5(wing_multiple=4)
+
+    def test_width_moneyness_must_be_positive(self):
+        with pytest.raises(ValueError, match="width_moneyness must be positive"):
+            twin_peak_5(width_moneyness=0.0)
+
+    def test_the_declared_width_legs_name_the_spacing(self, condor_snapshot):
+        """`width_legs` is what a consumer reads the spacing off, and the peak
+        is not `2a` for both wings — so `wing_multiple` travels with it."""
+        params = twin_peak_5(wing_multiple=2).params
+        assert params["width_legs"] == ("atm", "up1")
+        assert params["wing_multiple"] == 2

@@ -1,0 +1,170 @@
+id: EXP-126
+title: "Five strikes or seven: letting each event pick the twin peak it can afford"
+kind: strategy-validation
+strategy: TWIN-P5
+programme: structure-validation
+prior: [EXP-121, EXP-122, EXP-123, EXP-124, EXP-125]
+type: confirmatory
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+hypothesis: >
+  TWIN-P reaches the board on 90 events out of 13,560 priced, and the reason is
+  one term: cost < w rejects 98.6% of them, median c/w 1.54. That term is
+  "reward beats risk" written for a seven-strike shape, so the way to widen the
+  traded universe is not to relax it - it is to offer the event a shape that
+  buys the same peak for less.
+
+  A five-strike twin peak does. Same eight contracts, same all-put single
+  expiry, same mirror symmetry and the same zero floor, but the ladder only
+  has to list A, A+/-a and A+/-m*a. Sized so the peak lands on the same
+  forecast move, its payoff is pointwise dominated by the seven-strike tent, so
+  no-arbitrage puts its reward:risk at or above the seven-strike's on the same
+  event. Letting each event pick the better of the two therefore cannot shrink
+  the traded universe and should materially grow it.
+
+  Falsified if the chooser does not at least DOUBLE the traded universe against
+  the seven-strike arm on this same snapshot, or if it doubles it while turning
+  the mid-fill mean negative or pushing breakeven alpha above 0.45.
+
+known_before_registration:
+  the_binding_constraint_is_reward_not_the_ladder: >
+    EXP-125's predicted arm, re-counted on its own artifact before this spec was
+    written: 13,560 events priced, 7,864 refused as structure_unresolved. Of the
+    priced events 4,064 (30.0%) pass the spread filter and 7,227 (53.3%) the
+    $10B mcap floor, but only 186 (1.4%) pass cost < w - median c/w 1.54. All
+    three together leave 90 events on 79 distinct tickers. The ladder is not
+    what is starving this strategy; the price of the shape is.
+  the_five_strike_shape_is_arithmetically_cheaper_per_unit_of_peak: >
+    Not a measurement - a dominance argument, verified as a unit test
+    (tests/test_structures.py::TestTwinPeakFive). At a common spacing a, with
+    payoffs written per unit of a:
+      seven-strike (w = a):  [1, 2, 2, 1, 0] at |x| = 0a..4a, peak 2a
+      five-strike m = 3:     [1, 2, 1, 0]    at |x| = 0a..3a, peak 2a
+      five-strike m = 2:     [0, 1, 0]       at |x| = 0a..2a, peak 1a
+    1x the m=3 payoff and 2x the m=2 payoff each sit at or below the
+    seven-strike payoff at EVERY price. A dominated payoff cannot cost more, so
+    (peak - cost)/cost is at or above the seven-strike's for both, and every
+    event clearing the seven-strike reward term clears the five-strike one.
+    The universe can only grow. How MUCH it grows is the empirical question,
+    and it is entirely a question of how much slack there is in the domination
+    - which lives exactly where the five-strike shape pays nothing and the
+    seven-strike still pays: at a dead-flat print, and out at 3-4a.
+  what_that_slack_costs: >
+    The dominance is bought by giving up coverage. m=3 loses the plateau
+    shoulders and pulls the wings from +/-4a to +/-3a. m=2 additionally pays
+    ZERO at a dead-flat print, where the seven-strike tent pays w. EXP-125's
+    traded set landed 16.7% beyond a wing and 52.2% inside +/-2w, so both edges
+    of the distribution are populated and neither give-up is free.
+  where_the_seven_strike_arm_landed: >
+    EXP-125 primary, forecast-sized, mid fills: +11.82%/trade over 90 OOS
+    trades, breakeven alpha 0.44, 6/9 years positive, 16.7% dead beyond a wing,
+    median w 2.86% of spot, median c/w 0.94 on the traded set. Run on data
+    snapshot 0f01d8d7...; this experiment rebuilds that arm on the CURRENT
+    snapshot so every arm here shares one universe.
+
+definition:
+  shapes: >
+    Three, all eight contracts, all puts, all one post-event expiry, all with a
+    zero floor so max loss is the debit.
+      seven  - TWIN-P as it stands: A(x2), A+/-w, A+/-2w, A+/-4w.
+      five_wide  - TWIN-P5 wing_multiple 3: A(x2), A+/-a (x2 short), A+/-3a.
+                   The seven-strike shape with the plateau collapsed to a point:
+                   same peak 2a, same dip a at a flat print, wings pulled in.
+      five_tight - TWIN-P5 wing_multiple 2: A(x2), A+/-a (x2 short), A+/-2a.
+                   The cheapest of the three, and the only one that pays
+                   nothing at a dead-flat print.
+    Every strike is exact mirror arithmetic off A and A+a and every one must be
+    LISTED; an event whose ladder cannot carry a shape simply does not offer it.
+  sizing: >
+    The peak goes where the move is predicted to land, which is EXP-125's rule
+    generalised rather than a new one. seven keeps its plateau centre on the
+    forecast (w = pred_abs_move / 150). Both five-strike shapes peak at exactly
+    +/-a, so a = pred_abs_move / 100. Widths are bucketed to 0.1% of spot before
+    replay and then snapped to the ticker's own ladder, as in EXP-125.
+  predictions: >
+    size_v1_4 WALK-FORWARD OUT-OF-SAMPLE predictions only, cached at
+    data/models/size_v1_4_oos_predictions.parquet (85,616 rows, 2013-2026, fit
+    on years < Y for each test year Y). The final refit model would place every
+    strike with hindsight.
+  entry_filters: >
+    EXP-123's registered rule, with its reward term written in the one form
+    that reduces to the original on the seven-strike shape:
+      - all of a shape's strikes listed at exact mirror arithmetic
+      - cost < peak / 2, decided ONCE on mid quotes. Equivalently max profit
+        (peak - cost) exceeds max loss (cost). On seven this IS cost < w, since
+        its peak is 2w; on five_wide it is cost < a; on five_tight, cost < a/2.
+      - mean relative bid-ask spread across the eight legs <= 25%
+      - market cap >= $10B
+  the_chooser: >
+    Per event, among the shapes that priced AND pass all three entry filters,
+    take the one with the highest reward:risk = (peak - cost)/cost, decided once
+    on mid quotes at the entry close. No shape passing means no trade, exactly
+    as today. Ties (within 1e-9) go to the seven-strike shape - the incumbent,
+    and the one whose coverage is widest.
+  the_risks_this_run_measures:
+    priced_away: >
+      A cheaper shape is cheaper because it pays less. If the market prices the
+      give-up correctly, the chooser buys a bigger universe of trades that are
+      each worth proportionally less and the mean falls to meet it. The
+      per-arm table, not the chooser's headline, is where that shows.
+    a_max_statistic_over_shapes: >
+      Choosing the best of three reward:risk numbers computed off quoted mids is
+      a max-statistic. On a wide market the shape that looks cheapest may be the
+      one whose mid is least real. The report must show the chosen shape's
+      realized spread alongside its reward:risk, and the single-shape arms so
+      the chooser's gain over the best fixed shape is visible rather than
+      assumed.
+    a_new_dead_zone_in_the_middle: >
+      five_tight's dead zone is not only at the wings - it pays zero at the
+      anchor. WHERE THE PRINTS LANDED must therefore report the share landing
+      near the CENTRE as well as beyond the wings, or a null result cannot be
+      told apart from the centre eating the treatment.
+
+primary_spec:
+  universe: ">= $10B, all entry filters, 2018-2026"
+  structure: "per-event choice over {seven, five_wide, five_tight} by reward:risk, e+0 x+1"
+  sizing: "peak on pred_abs_move (size_v1_4 walk-forward OOS)"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+  acceptance:
+    more_names: "traded events >= 2x the seven-strike arm on this same snapshot"
+    still_pays: "mid-fill mean/trade > 0 and breakeven alpha <= 0.45"
+    consistency: "positive mid-fill mean in >= 70% of out-of-sample years"
+    not_just_dilution: >
+      capital-weighted return on capital at least the seven-strike arm's on this
+      same snapshot - a wider universe has to be worth more in dollars, not only
+      in row count
+    universe_floor: ">= 250 events, or reported as too thin to carry"
+
+grid:
+  # Every arm runs. The single-shape arms are the benchmarks the chooser has to
+  # beat on universe size; choose_fit is the other selection criterion, run so
+  # the choice of criterion is measured rather than assumed. None of them is
+  # promotable in place of the primary.
+  arm: [seven, five_wide, five_tight, choose_fit]
+
+required_outputs:
+  - "traded events AND distinct tickers per arm, against the seven-strike arm — the point of the experiment"
+  - "entry-rule funnel per arm: priced / f_reward / f_spread / f_mcap / passes"
+  - "which shape the chooser picked — by count, by year, and by share of net P&L"
+  - "the chooser's mid-fill mean against every single-shape arm's"
+  - "WHERE THE PRINTS LANDED per arm — beyond the wings AND near the centre"
+  - "realized reward:risk and relative spread of the chosen shape, together"
+  - "capital-weighted return on capital per arm, not only mean/trade"
+  - "breakeven alpha against the 0.45 bar"
+  - "per-year table with n"
+  - "defined-risk falsification: any trade losing more than its debit"
+  - "tail injection on |move| (mandatory, has_short_leg=true)"
+
+data_snapshot: ed1d7e6e628fb57bd7f7077dac26616384a5eaf80bc0e88f843f4c429a77eda5
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-04T21:38:57+00:00"

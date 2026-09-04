@@ -52,6 +52,7 @@ __all__ = [
     "straddle_runup",
     "put_condor",
     "twin_peak",
+    "twin_peak_5",
     "STRUCTURES",
     "price_structure",
     "structure_return",
@@ -1052,6 +1053,105 @@ def twin_peak(
     )
 
 
+def twin_peak_5(
+    wing_multiple: int = 2,
+    steps: int = 1,
+    anchor_offset: int = 0,
+    width_moneyness: float | None = None,
+    entry_offset: int = 0,
+    exit_offset: int = 1,
+    decision_offset: int | None = None,
+) -> Structure:
+    """TWIN-P5 — the twin peak on FIVE strikes instead of seven.
+
+    Same eight contracts, same all-put single-expiry construction, same exact
+    mirror arithmetic — but the ladder only has to list five prices::
+
+        A - m·a  BUY  1      A      BUY  2      A + m·a  BUY  1
+        A - a    SELL 2      A + a  SELL 2
+
+    ``a`` is the peak spacing (``steps`` ladder positions, or ``width_moneyness``
+    of spot snapped to the ladder) and ``m`` is ``wing_multiple``. Net contracts
+    sum to zero and the strikes are symmetric about ``A``, so the deep-ITM tail
+    cancels to exactly zero and max loss is the debit — the same risk claim
+    :func:`twin_peak` makes, for the same reason.
+
+    Two wings are supported, and they are different structures::
+
+        m = 2   0 at A, PEAK a at A±a, 0 at A±2a
+        m = 3   a at A, PEAK 2a at A±a, 0 at A±3a
+
+    ``m = 3`` is the seven-strike tent with its plateau collapsed to a point:
+    identical peak (``2a``), identical dip at a dead-flat print (``a``), wings
+    pulled in from ``±4a`` to ``±3a``. ``m = 2`` gives up the flat print
+    entirely — it pays nothing if the stock does not move — and is the cheapest
+    of the three shapes.
+
+    **Why a five-strike version exists at all.** TWIN-P's binding constraint is
+    not the ladder, it is ``cost < w``: on EXP-125's 13,560 priced events only
+    186 (1.4%) cleared it, median ``c/w`` 1.54, and 90 events survived all three
+    entry filters. That term is ``reward > risk`` written for the seven-strike
+    shape, so the way to widen the traded universe is a shape that buys the same
+    peak for less. Both wings here do, and the domination is arithmetic rather
+    than empirical: sized so the peak lands on the same forecast move, each
+    five-strike payoff is pointwise below the corresponding multiple of the
+    seven-strike payoff, so no-arbitrage puts its reward:risk at or above the
+    seven-strike's on the same event, and the set of events clearing
+    ``reward > risk`` can only grow. What that costs is coverage — the wings
+    come in, and ``m = 2`` also gives up the dead-flat print — which is what
+    EXP-126 measures rather than assumes.
+    """
+    if int(wing_multiple) not in (2, 3):
+        raise ValueError(f"wing_multiple must be 2 or 3, got {wing_multiple!r}")
+    if int(steps) < 1:
+        raise ValueError(f"steps must be a positive integer, got {steps!r}")
+    if width_moneyness is not None and not width_moneyness > 0:
+        raise ValueError(f"width_moneyness must be positive, got {width_moneyness!r}")
+    m = int(wing_multiple)
+    expiry = ExpirySelector(kind="first_post_event")
+    atm = StrikeSelector("bracket", side="below", steps=int(anchor_offset) or None)
+    # A±2a is the mirror of A about A+a; A±3a is the mirror of A−a about A+a.
+    # Both are exact arithmetic on already-resolved strikes and both must be
+    # LISTED, so an event whose ladder cannot carry the wing is refused rather
+    # than approximated — the symmetry is what makes the tails cancel.
+    up_wing = (StrikeSelector("mirror", ref="atm", about="up1") if m == 2
+               else StrikeSelector("mirror", ref="dn1", about="up1"))
+    dn_wing = (StrikeSelector("mirror", ref="atm", about="dn1") if m == 2
+               else StrikeSelector("mirror", ref="up1", about="dn1"))
+    return Structure(
+        name="TWIN-P5",
+        description=(
+            f"Five-strike twin peak: doubled ATM long, doubled shorts at +/-a, "
+            f"wings at +/-{m}a, all puts, one post-event expiry."
+        ),
+        legs=(
+            LegSpec("atm", PUT, BUY, expiry, atm, qty=2.0),
+            LegSpec("up1", PUT, SELL, expiry,
+                    StrikeSelector("offset_from", ref="atm",
+                                   moneyness=float(width_moneyness))
+                    if width_moneyness is not None
+                    else StrikeSelector("grid_step", ref="atm", steps=int(steps)),
+                    qty=2.0),
+            LegSpec("dn1", PUT, SELL, expiry,
+                    StrikeSelector("mirror", ref="up1", about="atm"), qty=2.0),
+            LegSpec("up_wing", PUT, BUY, expiry, up_wing),
+            LegSpec("dn_wing", PUT, BUY, expiry, dn_wing),
+        ),
+        entry_offset=entry_offset,
+        exit_offset=exit_offset,
+        decision_offset=decision_offset,
+        params={"wing_multiple": m, "steps": int(steps),
+                "anchor_offset": int(anchor_offset),
+                "width_moneyness": width_moneyness,
+                # Same declaration as TWIN-P's: the pair of legs whose LISTED
+                # strikes define the spacing the reward term is measured in.
+                # The peak height is not `a` for both wings — m=2 peaks at `a`
+                # and m=3 at `2a` — so a consumer must read `wing_multiple`
+                # too rather than assume TWIN-P's `2w`.
+                "width_legs": ("atm", "up1")},
+    )
+
+
 #: Factories keyed by strategy code, so specs can name a structure as a string.
 STRUCTURES = {
     "CAL-P": put_calendar,
@@ -1059,4 +1159,12 @@ STRUCTURES = {
     "STR-RUNUP": straddle_runup,
     "CND-P": put_condor,
     "TWIN-P": twin_peak,
+    # TWIN-P5 is deliberately ABSENT. This dict is the live board's default
+    # strategy universe (engine.score.score_calendar) and the source of the
+    # dashboard's strategy panel, which lists every key — enabled or disabled
+    # with a reason. A structure that exists only to be measured by EXP-126 has
+    # no business on either until that experiment has reported and someone has
+    # decided. engine.replay takes an explicit `structure=`, so the experiment
+    # prices it without registry membership; add the key here only at promotion,
+    # together with a DISABLED_STRATEGIES reason or a gate.
 }
