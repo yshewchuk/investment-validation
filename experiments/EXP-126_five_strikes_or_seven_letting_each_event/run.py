@@ -220,6 +220,8 @@ def main() -> None:
                   f"mean {100*s['mean']:+.2f}%, on capital "
                   f"{100*s['return_on_capital']:+.2f}%", flush=True)
 
+    already_ran = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
+
     # Primary first, then the grid cells, so the ledger reads in that order.
     for key in ["choose_rr", "choose_fit", "seven", "five_wide", "five_tight"]:
         ev = rows.get(key)
@@ -232,8 +234,16 @@ def main() -> None:
             cell["primary_spec"] = dict(spec["primary_spec"])
             cell["primary_spec"]["structure"] = f"grid cell: {key}"
             cell["grid_cell"] = True
+        # Every arm gets its OWN report and figures. Writing only the primary's
+        # left the arm that mattered most — five_wide, the one that beat the
+        # incumbent on capital — with nothing but a metrics blob, which is not
+        # a result anybody can read. Grid cells land under `arms/<key>/` so
+        # they cannot overwrite the primary's REPORT.md or its figures.
+        arm_dir = HERE if is_primary else HERE / "arms" / key
+        for sub in ("results", "figures"):
+            (arm_dir / sub).mkdir(parents=True, exist_ok=True)
         result = evaluate(
-            cell, ev, gate=None, run_dir=HERE,
+            cell, ev, gate=None, run_dir=arm_dir,
             # Per-event widths: a shifted-date reprice would need the forecast
             # re-derived at the shifted date, so the same exemption EXP-125 took.
             repricer=None,
@@ -241,11 +251,17 @@ def main() -> None:
             input_files=[shapes_mod.SHAPES[s].trades_path()
                          for s in sorted(set(ev["shape"]))],
             extra_sections=lambda r, k=key: sections(summary, funnels, k),
-            write_report=is_primary,
+            write_report=True,
         )
-        lib.record_evaluation(HERE, cell, result.results)
-        print(f"[EXP-126] {key}: report {result.report_path or '(grid cell)'}",
-              flush=True)
+        # The ledger is a multiple-testing record, not a run log: re-running an
+        # identical spec to regenerate its report is not a new test, so its row
+        # is appended once and only once.
+        if lib.spec_hash(cell) in already_ran:
+            print(f"[EXP-126] {key}: ledger row already recorded, not duplicated",
+                  flush=True)
+        else:
+            lib.record_evaluation(HERE, cell, result.results)
+        print(f"[EXP-126] {key}: report {result.report_path}", flush=True)
 
 
 if __name__ == "__main__":
