@@ -104,6 +104,29 @@ MAX_ANALOG_TRADES = 50
 #: still small enough to keep board.json inside the mobile budget.
 BUNDLE_PRECISION = 6
 
+#: What ORATS `impliedMove` has to be multiplied by to become an EXPECTED
+#: ABSOLUTE MOVE, the quantity the numerator of `model_vs_market` predicts.
+#:
+#: EXP-122 measured it against a construction with no model in it: at one day
+#: to expiry the ATM straddle IS E|move|, because `C(K) + P(K) = E|S - K|` is an
+#: identity and there is almost no diffusive time value left on top of the
+#: event. On 2,766 such events the straddle sat 0.188pp from oquants and 3.123pp
+#: from ORATS, with oquants closer in 9 years of 9.
+#:
+#: The correction is a constant because the data says it is one: median ratio
+#: 0.6450, mean 0.6444, IQR/median 0.161, and the yearly median never leaves
+#: 0.616-0.674 across nine years. It is NOT sqrt(2/pi) = 0.7979 — the registered
+#: convention hypothesis was refuted — so this is an empirical factor and not a
+#: derivation, and what ORATS actually computes remains unexplained.
+#:
+#: Applied ONLY to the displayed ratio. The gate features (`im` and its lags)
+#: are deliberately left alone: they were fitted against `or_implied` as it is,
+#: and rescaling a feature under an already-trained tree moves the data relative
+#: to frozen split thresholds — measured to change predictions by up to 0.106,
+#: so it is a retrain, not a rescale. The bias misleads a human reading a ratio;
+#: it does not mislead a model that learned in those units.
+ORATS_EMOVE_FACTOR = 0.645
+
 
 def _clean(value: Any) -> Any:
     """Make a value strict-JSON safe at the bundle's display precision.
@@ -248,7 +271,7 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
     driver_prediction = record.get("driver_prediction")
     implied_move = record.get("implied_move")
     model_vs_market = (
-        float(driver_prediction) / float(implied_move)
+        float(driver_prediction) / (float(implied_move) * ORATS_EMOVE_FACTOR)
         if record.get("driver_name") == "abs_move"
         and driver_prediction is not None
         and implied_move not in (None, 0.0)

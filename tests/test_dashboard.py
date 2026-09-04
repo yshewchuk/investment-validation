@@ -1466,3 +1466,44 @@ class TestChainAnchorFollowsWhatIsPublished:
         assert _newest_published({}, default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
         assert _newest_published({"endpoints": {"x": {}}},
                                  default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
+
+
+class TestImpliedMoveConvention:
+    """`model_vs_market` divides a predicted E|move| by a vendor number that is
+    not in that convention. EXP-122 measured the gap against a model-free
+    construction; this pins the correction so it cannot drift silently.
+    """
+
+    def test_the_factor_matches_what_exp_122_measured(self):
+        from engine.dashboard.render import ORATS_EMOVE_FACTOR
+
+        # median 0.6450, mean 0.6444 on 2,766 one-DTE events, yearly medians
+        # 0.616-0.674. Not sqrt(2/pi) — that hypothesis was refuted at 0.645.
+        assert ORATS_EMOVE_FACTOR == pytest.approx(0.645)
+        assert ORATS_EMOVE_FACTOR != pytest.approx((2 / 3.141592653589793) ** 0.5, abs=1e-3)
+
+    def test_the_ratio_is_corrected_not_raw(self):
+        from engine.dashboard.render import ORATS_EMOVE_FACTOR, compact_row
+
+        record = {"ticker": "AAA", "strategy": "STR-THRU",
+                  "event_date": "2026-09-10", "strike": 100.0,
+                  "driver_name": "abs_move", "driver_prediction": 6.45,
+                  "implied_move": 10.0, "entry_cost": None, "spot": None}
+        row = compact_row(record, rank=1)
+        # 6.45 / (10.0 * 0.645) = 1.0 — the model expects exactly what the
+        # market does. Uncorrected it would read 0.645 and look cheap.
+        assert row["model_vs_market"] == pytest.approx(1.0)
+        assert row["model_vs_market"] != pytest.approx(0.645)
+
+    def test_the_gate_features_are_left_alone(self):
+        """Rescaling a feature under an already-trained tree moves the data
+        relative to frozen thresholds — a retrain, not a rescale. The
+        correction must not leak into what the model consumes."""
+        from pathlib import Path
+
+        src = Path("engine/dashboard/render.py").read_text()
+        head = src.split("ORATS_EMOVE_FACTOR = 0.645")[1]
+        assert head.count("ORATS_EMOVE_FACTOR") == 1, (
+            "the factor is applied in more than one place — it belongs only on "
+            "the displayed ratio, never on a model input"
+        )
