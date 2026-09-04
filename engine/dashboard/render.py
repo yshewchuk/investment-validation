@@ -82,6 +82,13 @@ _BOARD_FIELDS = (
     "exp_pnl_analog", "win_analog", "ci_low", "ci_high",
     "n_analogs", "analog_widened",
     "gate_score", "gate_threshold", "gate_pass",
+    # A structure whose SHAPE came from a forecast has to show the forecast and
+    # the shape it produced. Without them the row is a recommendation nobody can
+    # check: `w` decides the `cost < w` term, and it is read off the LISTED
+    # strikes, which on a coarse ladder can be several times the width the
+    # forecast asked for.
+    "forecast_abs_move", "forecast_model", "forecast_fold", "structure_params",
+    "structure_width", "rel_spread",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",
     "implied_move", "implied_move_at_entry", "model_vs_market",
@@ -556,6 +563,7 @@ def build_strategies(registry=None) -> dict:
     per-ticker files as ``model_inputs``. This is the shape; those are the
     values that went through it.
     """
+    from engine.entry_rules import rule_for
     from engine.features import DRIVER_NOTES, feature_note
     from engine.payoff import PAYOFF_DRIVER
     from engine.score import DISABLED_STRATEGIES
@@ -638,6 +646,26 @@ def build_strategies(registry=None) -> dict:
             if driver
             else None,
             "gate": describe(champion("gate", name)),
+            # A strategy gated by arithmetic has no registry entry to describe,
+            # and rendering "gate: none" for an ENABLED strategy reads as a
+            # missing model rather than as the deliberate design it is. The page
+            # says which terms decide it and where they were registered.
+            "entry_rule": (
+                {
+                    "terms": [
+                        {"name": term.name, "fails_when": term.describes}
+                        for term in rule.terms
+                    ],
+                    "evidence": rule.evidence,
+                    "note": (
+                        "Arithmetic on the entry close — nothing fitted, so it "
+                        "decides every row rather than the rows a training "
+                        "window happens to reach."
+                    ),
+                }
+                if (rule := rule_for(name)) is not None
+                else None
+            ),
             "layers": {
                 "model": (
                     "The champion predicts the driver from the features below. That "

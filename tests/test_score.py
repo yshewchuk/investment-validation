@@ -254,10 +254,18 @@ class TestDisabledStrategies:
         this instead of shipping silently onto the live board.
 
         A structure only belongs in `score_calendar`'s default universe once
-        SOMETHING has decided it is ready — a promoted gate, or the CAL-P/CND-P
-        precedent of an explicit disable-with-reason. `STRUCTURES` has no third
-        state; being merely defined is not being ready.
+        SOMETHING has decided it is ready — a promoted gate, a pre-registered
+        arithmetic entry rule, or the CAL-P/CND-P precedent of an explicit
+        disable-with-reason. `STRUCTURES` has no fourth state; being merely
+        defined is not being ready.
+
+        The entry-rule branch is not a loophole. An arithmetic rule is a
+        universe definition registered in an experiment's spec before it ran
+        (engine/entry_rules.py), and it decides every row rather than the rows
+        a training window happens to reach — which is more coverage than a gate
+        gives, not less.
         """
+        from engine.entry_rules import rule_for
         from engine.models.registry import load_registry
         from engine.score import DISABLED_STRATEGIES
         from engine.structures import STRUCTURES
@@ -266,13 +274,14 @@ class TestDisabledStrategies:
         unaccounted = [
             name for name in STRUCTURES
             if name not in DISABLED_STRATEGIES
+            and rule_for(name) is None
             and not (registry and registry.has_champion("gate", name))
         ]
         assert not unaccounted, (
-            f"{unaccounted} are in STRUCTURES with no promoted gate and no "
-            "DISABLED_STRATEGIES entry — they will be scored on the live "
-            "board by default. Add a DISABLED_STRATEGIES reason until a gate "
-            "is promoted."
+            f"{unaccounted} are in STRUCTURES with no promoted gate, no entry "
+            "rule and no DISABLED_STRATEGIES entry — they will be scored on "
+            "the live board by default. Add a DISABLED_STRATEGIES reason until "
+            "one of those exists."
         )
 
 
@@ -810,3 +819,197 @@ class TestStructureParams:
         assert (scorer._structure(request(strategy="STR-THRU")).to_dict()
                 == scorer._structure(
                     request(strategy="STR-THRU", structure_params=None)).to_dict())
+
+
+# --------------------------------------------------------------------------
+# forecast-sized structures and arithmetic entry rules (Tier 4, steps 4-6)
+# --------------------------------------------------------------------------
+
+#: A one-point ladder, so TWIN-P's seven mirrored strikes are all listed.
+LADDER = tuple(float(k) for k in range(60, 141))
+
+
+@pytest.fixture
+def dense_chain():
+    """A dense ladder with CONVEX put prices.
+
+    The convexity is load-bearing. TWIN-P's net contracts sum to zero and its
+    strikes are symmetric about the anchor, so under a price that is LINEAR in
+    strike every term cancels and the debit is exactly zero — which is the
+    structure's own tail-cancelling property, and which would make `cost < w`
+    vacuously true. A quadratic price is the smallest thing that gives the
+    trade a debit at all.
+    """
+    rows = []
+    for strike in LADDER:
+        mid = 100.0 * (strike / 100.0) ** 2
+        for right in ("C", "P"):
+            rows.append(
+                {
+                    "ticker": TICKER, "obs_date": ENTRY,
+                    "expiry": pd.Timestamp("2024-05-03"), "dte": 1,
+                    "strike": strike, "right": right,
+                    "bid": mid - 0.05, "ask": mid + 0.05, "spot": 100.0,
+                    "quote_repaired": False,
+                }
+            )
+    entry = pd.DataFrame(rows)
+    exit_rows = entry.copy()
+    exit_rows["obs_date"] = EXIT
+    return ChainIndex({(TICKER, ENTRY): entry, (TICKER, EXIT): exit_rows})
+
+
+@pytest.fixture
+def forecast(monkeypatch):
+    """Inject a fold model instead of fitting one — the VALUE is the subject.
+
+    Returns a mutable dict so a test can change the forecast and re-score,
+    which is the only way to assert that the shape follows the forecast rather
+    than being fixed by the strategy.
+    """
+    from engine.data.features import tier4 as tier4_mod
+
+    state = {"value": 6.0}
+
+    class Fake:
+        model_id = "size_fake"
+        fold_start = pd.Timestamp("2024-05-01")
+        tier3_snapshot = "snap-test"
+        features = ("mean_prior_abs_move",)
+
+        def predict(self, frame):
+            return np.full(len(frame), state["value"])
+
+    monkeypatch.setattr(tier4_mod, "serving_model", lambda *a, **k: Fake())
+    return state
+
+
+def twin(**kwargs) -> ScoreRequest:
+    return request(strategy="TWIN-P", **kwargs)
+
+
+class TestForecastSizedStructures:
+    """The forecast sets the shape, BEFORE anything is priced.
+
+    The ordering is the whole point of Tier 4. `_features` reads `entry_cost`,
+    `spot` and `dte_entry`; pricing needs the strikes; the strikes need `w`;
+    `w` needs the forecast. That is a cycle unless the forecast comes from
+    features that touch no chain, which is exactly what the size model's
+    fourteen inputs are. These tests fix that ordering in place.
+    """
+
+    def test_the_forecast_sets_the_width_before_pricing(
+        self, scorer, dense_chain, forecast
+    ):
+        # 6.0% forecast / 1.5 (the plateau centre) = 4.0% of a 100 spot.
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.forecast_abs_move == pytest.approx(6.0)
+        assert result.forecast_model == "size_fake"
+        assert result.structure_params["width_moneyness"] == pytest.approx(0.04)
+        assert result.structure_width == pytest.approx(4.0)
+        assert result.entry_cost is not None and result.entry_cost > 0
+
+    def test_a_different_forecast_produces_a_different_structure(
+        self, scorer, dense_chain, forecast
+    ):
+        narrow = scorer.score(twin(), chain_index=dense_chain)
+        forecast["value"] = 12.0
+        wide = scorer.score(twin(), chain_index=dense_chain)
+        assert narrow.structure_width == pytest.approx(4.0)
+        assert wide.structure_width == pytest.approx(8.0)
+        # Two events priced at different shapes are different TRADES, so they
+        # must not share an identity.
+        assert wide.digest() != narrow.digest()
+
+    def test_the_width_is_read_off_the_listed_strikes_not_the_request(
+        self, scorer, dense_chain, forecast
+    ):
+        # 6.3% / 1.5 asks for a $4.20 tent; the ladder lists whole points, so
+        # the trade that EXISTS is $4 wide. A rule testing the requested width
+        # would be testing a trade nobody can place — and on a coarse real
+        # ladder the gap is far larger than this.
+        forecast["value"] = 6.3
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.structure_params["width_moneyness"] == pytest.approx(0.042)
+        assert result.structure_width == pytest.approx(4.0)
+
+    def test_no_forecast_means_no_structure_and_no_price(
+        self, scorer, dense_chain, forecast
+    ):
+        # Declining is correct, not degraded. Pricing the factory's DEFAULT
+        # width instead would put a real number on the board for a trade nobody
+        # chose, on a row claiming to be forecast-sized.
+        forecast["value"] = float("nan")
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert "NO_FORECAST" in result.flags
+        assert result.entry_cost is None
+        assert result.structure_width is None
+        assert result.gate_pass is None
+
+    def test_an_absurd_forecast_is_refused_rather_than_clipped(
+        self, scorer, dense_chain, forecast
+    ):
+        forecast["value"] = 400.0
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert "NO_FORECAST" in result.flags
+        assert result.entry_cost is None
+
+    def test_a_caller_supplied_shape_wins_over_the_forecast(
+        self, scorer, dense_chain, forecast
+    ):
+        # An explicit `structure_params` is a deliberate override — an
+        # experiment replaying one width across many events — and must not be
+        # silently replaced by whatever the model happens to say today.
+        result = scorer.score(
+            twin(structure_params={"width_moneyness": 0.08}), chain_index=dense_chain
+        )
+        assert result.forecast_abs_move is None
+        assert result.structure_width == pytest.approx(8.0)
+
+
+class TestArithmeticEntryRule:
+    """A strategy with no registered gate is decided by its rule, or not at all."""
+
+    def test_the_rule_decides_and_labels_itself(self, scorer, dense_chain, forecast):
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.model_versions.get("gate") == "entry-rule:TWIN-P"
+        # A rule has a verdict, not a score. Reporting a number here would
+        # invite a threshold comparison that means nothing.
+        assert result.gate_score is None
+        assert result.gate_threshold is None
+        assert "TWIN-P entry rule" in (result.detail or "")
+
+    def test_a_small_name_fails_the_rule_and_says_which_term(
+        self, scorer, dense_chain, forecast
+    ):
+        # The fixture panel carries mcap 5e9, under the registered $10B floor.
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.gate_pass is False
+        assert "market cap" in result.detail
+
+    def test_a_strategy_with_neither_gate_nor_rule_gets_no_verdict(self, scorer):
+        # The rule is a floor, never an override: `_apply_entry_rule` is only
+        # reached when the registry has nothing, and it returns silently when
+        # the strategy has no rule either.
+        from engine.entry_rules import rule_for
+
+        assert rule_for("STR-THRU") is None
+        result = scorer.score(request(strategy="STR-THRU"))
+        assert "entry-rule" not in str(result.model_versions.get("gate", ""))
+
+    def test_an_unpriced_row_is_undetermined_rather_than_declined(
+        self, scorer, forecast
+    ):
+        # No chain, so no cost and no width. "We could not tell" must not
+        # render as a decision against the trade.
+        result = scorer.score(twin())
+        assert result.gate_pass is None
+        assert "undetermined" in (result.detail or "")
+
+    def test_rel_spread_is_the_mean_over_every_entry_leg(
+        self, scorer, dense_chain, forecast
+    ):
+        result = scorer.score(twin(), chain_index=dense_chain)
+        strikes = (100.0, 104.0, 108.0, 116.0, 96.0, 92.0, 84.0)
+        expected = float(np.mean([0.10 / (100.0 * (k / 100.0) ** 2) for k in strikes]))
+        assert result.rel_spread == pytest.approx(expected)

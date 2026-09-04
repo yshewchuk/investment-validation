@@ -37,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -48,6 +48,8 @@ from engine.analogs import AnalogMatcher, AnalogSet, bucket_frame
 from engine.audit import FeatureVector, assert_causal, assert_decision_causal
 from engine.calendar import trading_calendar
 from engine.data import manifest, store
+from engine.data.features import tier4
+from engine.entry_rules import rule_for
 from engine.features import (
     DAILY_STATE_COLUMNS,
     EVENT_HISTORY_FEATURES,
@@ -60,6 +62,11 @@ from engine.features import (
     session_for,
 )
 from engine.fills import BAD_QUOTE_COST_PCT, MID, FillModel
+from engine.forecast_sizing import (
+    FORECAST_SIZED,
+    describe as describe_sizing,
+    forecast_params,
+)
 from engine.models.registry import Registry, RegistryError, load_registry
 from engine.payoff import PayoffError, PayoffMap, fit_payoff, simulate_returns
 from engine.replay import ChainIndex, legs_spot_dte, load_chain_index, plan_events
@@ -90,14 +97,6 @@ DISABLED_STRATEGIES = {
         "never been backtested. EXP-046b tested straddle legs at T-14 unwound "
         "pre-print — a different structure. Phase 2 backlog 1-2 must run first."
     ),
-    "TWIN-P": (
-        "Registered in STRUCTURES so its experiment can price it; nothing has "
-        "measured it yet. Eight legs against a deliberately small debit is the "
-        "open question — CND-P failed at mid fills on four legs — and no "
-        "resolvability, fill or gate evidence exists. It reaches the live "
-        "board's default strategy list by sharing that registry, which is the "
-        "only reason it needs an entry here."
-    ),
     "CND-P": (
         "EXP-121 registered and ran the risk-mechanics validation (defined-risk "
         "falsification, assignment exposure, the oracle ceiling) but nothing has "
@@ -126,6 +125,11 @@ FLAGS = (
     "QUOTE_REPAIRED",
     "PROJECTED_CALENDAR",
     "OUT_OF_DOMAIN",
+    # A structure whose shape comes from a forecast, on an event that has none.
+    # Distinct from MISSING_FEATURES: the model ran, the row simply cannot be
+    # given a shape, and pricing a default-width one instead would put a number
+    # on the board for a trade nobody chose.
+    "NO_FORECAST",
 )
 
 #: A ticker with fewer prior events than this is the regime where the size model
@@ -300,6 +304,28 @@ class ScoreResult:
     gate_threshold: float | None = None
     gate_pass: bool | None = None
 
+    # structure geometry, read off the priced legs
+    #: Mean relative spread across the entry legs. One leg's spread says little;
+    #: eight legs is sixteen crossings round trip, and this is what an
+    #: arithmetic entry rule tests before it lets that happen.
+    rel_spread: float | None = None
+    #: The structure's own width parameter in dollars, for a structure that
+    #: declares which two legs define it (`params["width_legs"]`). `w` for
+    #: TWIN-P, and the term `cost < w` is tested against.
+    structure_width: float | None = None
+
+    # forecast sizing (Tier 4)
+    #: The forecast that set this structure's shape, in percent of spot.
+    forecast_abs_move: float | None = None
+    #: Which feature model produced it, and which fold's fit. A row sized by a
+    #: forecast has to say which model sized it — otherwise a champion
+    #: promotion silently changes what the board recommended and nothing
+    #: records that it did.
+    forecast_model: str | None = None
+    forecast_fold: pd.Timestamp | None = None
+    #: The parameters actually handed to the structure factory.
+    structure_params: dict | None = None
+
     # the trade being scored
     entry_date: pd.Timestamp | None = None
     exit_date: pd.Timestamp | None = None
@@ -398,7 +424,7 @@ class ScoreResult:
         out = asdict(self)
         for key in (
             "as_of", "event_date", "entry_date", "exit_date", "expiry",
-            "evidence_cutoff", "quote_date",
+            "evidence_cutoff", "quote_date", "forecast_fold",
         ):
             value = out.get(key)
             out[key] = str(pd.Timestamp(value).date()) if value is not None else None
@@ -451,6 +477,9 @@ class Scorer:
         self._recalibrations: dict[tuple[str, float, object], object] = {}
         self._recal_pairs = None
         self._quotes: dict[tuple[str, object], float | None] = {}
+        #: Tier-4 fold models, one fit per fold per process. A board spans at
+        #: most two folds, so this bounds an otherwise per-row cost.
+        self._serving_models: dict[pd.Timestamp, object] = {}
         self._verify = verify_artifacts
 
     # -- setup -------------------------------------------------------------
@@ -605,6 +634,15 @@ class Scorer:
         )
         if self.calendar.is_projected(window.exit_date):
             result.flag("PROJECTED_CALENDAR")
+
+        # -- the shape, for a structure whose shape comes from a forecast ---
+        # Before pricing, which is the whole point: the strikes cannot be
+        # chosen until the width is known, and the width comes from a model
+        # whose features are entirely pricing-free. See engine/forecast_sizing.
+        if request.strategy in FORECAST_SIZED and not request.structure_params:
+            request, structure = self._size_from_forecast(request, result, structure)
+            if structure is None:
+                return result
 
         # -- the live chain: entry cost, strike, and the moneyness label ----
         self._price_entry(request, structure, result, chain_index)
@@ -835,6 +873,8 @@ class Scorer:
         result.strike = float(priced.legs[0].strike)
         result.expiry = priced.legs[0].expiry
         result.dte_entry = int(priced.legs[0].dte)
+        result.rel_spread = _mean_relative_spread(priced)
+        result.structure_width = _structure_width(structure, priced)
         if priced.any_wide_market:
             result.flag("WIDE_MARKET")
         # EXP-117: a straddle costing more than BAD_QUOTE_COST_PCT of spot is
@@ -1285,9 +1325,101 @@ class Scorer:
                     return False
         return True
 
+    # -- forecast sizing (Tier 4) -----------------------------------------
+
+    def _serving(self, fold):
+        """The Tier-4 fold model, fit or cached once per fold per process.
+
+        Fitting is ~6 seconds and a three-week board spans at most two folds,
+        so this is the difference between a board that costs seconds and one
+        that refits per row.
+        """
+        key = pd.Timestamp(fold)
+        if key not in self._serving_models:
+            self._serving_models[key] = tier4.serving_model(
+                key, panel=self.context.panel
+            )
+        return self._serving_models[key]
+
+    def _size_from_forecast(self, request, result, structure):
+        """Set the structure's shape from the feature model's forecast.
+
+        Returns ``(request, structure)``, with ``structure`` ``None`` when the
+        event cannot be sized. Declining is the correct outcome and not a
+        degraded one: pricing the factory's DEFAULT width instead would put a
+        real number on the board for a trade nobody chose, and the row would
+        claim to be forecast-sized while being nothing of the kind.
+
+        The request is replaced rather than mutated so that everything
+        downstream — the bootstrap seed, the recorded parameters, the structure
+        rebuild — sees the same parameterisation.
+        """
+        try:
+            served = self._serving(
+                tier4.serving_fold(result.event_date, result.as_of)
+            )
+        except Exception as exc:  # a board must not die on one unfit fold
+            result.flag("NO_FORECAST")
+            result.detail = f"{request.strategy}: no fold model — {exc}"
+            return request, None
+
+        # The pricing columns are still empty here, and that is the point: the
+        # size model reads none of them. `_features` runs again after pricing
+        # for the layers that DO need them; it deduplicates its own flags, and
+        # the second call is what the gate and analog layers see.
+        features = self._features(request, result)
+        missing = [f for f in served.features if f not in features.columns]
+        if missing:
+            result.flag("NO_FORECAST")
+            result.detail = f"{request.strategy}: forecast needs {missing}"
+            return request, None
+
+        forecast = float(served.predict(features)[0])
+        params = forecast_params(request.strategy, forecast)
+        result.forecast_model = served.model_id
+        result.forecast_fold = served.fold_start
+        if pd.notna(forecast):
+            result.forecast_abs_move = forecast
+        if params is None:
+            result.flag("NO_FORECAST")
+            result.detail = describe_sizing(request.strategy, None)
+            return request, None
+
+        result.structure_params = dict(params)
+        sized = replace(request, structure_params=dict(params))
+        return sized, self._structure(sized)
+
+    # -- arithmetic entry rules -------------------------------------------
+
+    def _apply_entry_rule(self, request, result, features) -> None:
+        """Gate a strategy that has an arithmetic rule instead of a model.
+
+        Reached only when the registry has no gate for the strategy, so a
+        promoted model always wins: the rule is the floor, never an override.
+        """
+        rule = rule_for(request.strategy)
+        if rule is None:
+            return
+        verdict = rule.evaluate(
+            {
+                "cost": result.entry_cost,
+                "w": result.structure_width,
+                "rel_spread": result.rel_spread,
+                "mcap_usd": _feature_value(features, "mcap_usd"),
+            }
+        )
+        result.model_versions["gate"] = f"entry-rule:{rule.strategy}"
+        result.gate_pass = verdict.passed
+        if verdict.passed is None:
+            result.flag("MISSING_FEATURES")
+        result.detail = (
+            f"{result.detail}; {verdict.detail}" if result.detail else verdict.detail
+        )
+
     def _score_gate(self, request, result, features) -> None:
         loaded = self.model("gate", request.strategy)
         if loaded is None:
+            self._apply_entry_rule(request, result, features)
             return
         entry, artifact = loaded
         result.model_versions["gate"] = entry.id
@@ -1539,6 +1671,46 @@ def _trading_days_before(calendar, entry_date, event_date, session) -> float:
         )
     except (KeyError, ValueError):
         return float("nan")
+
+
+def _mean_relative_spread(priced) -> float | None:
+    """Mean ``(ask − bid) / mid`` over the entry legs, or ``None``.
+
+    The mean rather than the max: one wide wing on an eight-leg structure is a
+    different problem from eight uniformly wide legs, and the cost that decides
+    whether the trade is crossable is the total, which the mean tracks.
+    """
+    values = []
+    for leg in priced.legs:
+        mid = 0.5 * (float(leg.bid) + float(leg.ask))
+        if mid > 0:
+            values.append((float(leg.ask) - float(leg.bid)) / mid)
+    return float(np.mean(values)) if values else None
+
+
+def _structure_width(structure, priced) -> float | None:
+    """The structure's own ``w``, for one that declares which legs define it.
+
+    Read off the PRICED legs rather than recomputed from the width parameter,
+    because the parameter is a target and the strike is what the ladder
+    actually listed. An entry rule comparing cost against a target width the
+    market never offered would be testing a trade that does not exist.
+    """
+    names = structure.params.get("width_legs")
+    if not names:
+        return None
+    try:
+        lo, hi = (float(priced.leg(name).strike) for name in names)
+    except (KeyError, ValueError):
+        return None
+    return abs(hi - lo)
+
+
+def _feature_value(features, column: str) -> float | None:
+    if column not in features.columns or features.empty:
+        return None
+    value = features[column].iloc[0]
+    return float(value) if pd.notna(value) else None
 
 
 def _as_float(value) -> float:

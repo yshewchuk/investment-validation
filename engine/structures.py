@@ -1043,7 +1043,12 @@ def twin_peak(
         exit_offset=exit_offset,
         decision_offset=decision_offset,
         params={"steps": int(steps), "anchor_offset": int(anchor_offset),
-                "width_moneyness": width_moneyness},
+                "width_moneyness": width_moneyness,
+                # Which two legs define `w`. Declared rather than inferred so a
+                # consumer (the arithmetic entry rule's `cost < w`) reads the
+                # width off the LISTED strikes the ladder actually gave, not off
+                # the target it was asked for.
+                "width_legs": ("atm", "up1")},
     )
 
 

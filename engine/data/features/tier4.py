@@ -535,3 +535,130 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
+
+
+# --------------------------------------------------------------------------
+# serving
+# --------------------------------------------------------------------------
+
+#: Where the served fold's artifact is cached. Only the CURRENT fold's model
+#: needs to persist: the historical ones are deterministic given the seed and
+#: the Tier-3 snapshot, so they regenerate on rebuild rather than accumulating
+#: ~168 joblib files nobody reads.
+SERVING_DIR = paths.DATA / "models" / "tier4"
+
+
+@dataclass(frozen=True)
+class ServingModel:
+    """The fitted fold model the live scorer uses, plus what it was fit from."""
+
+    estimator: object
+    model_id: str
+    fold_start: pd.Timestamp
+    tier3_snapshot: str
+    features: tuple[str, ...]
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        """Forecasts for ``frame``, NaN wherever a feature is missing.
+
+        NaN rather than an exception because the caller is a live board: one
+        name with an incomplete feature row must not take the page down, and a
+        NULL forecast already means "decline to size" everywhere downstream.
+        """
+        values = _matrix(frame, self.features)
+        out = np.full(len(frame), np.nan)
+        ok = np.isfinite(values).all(axis=1)
+        if ok.any():
+            out[ok] = np.asarray(self.estimator.predict(values[ok]), dtype=float).ravel()
+        return out
+
+
+def serving_fold(event_date, as_of) -> pd.Timestamp:
+    """Which fold's model may size a trade decided at ``as_of`` for ``event_date``.
+
+    The event's own fold, unless that fold has not begun yet — a model for next
+    month would be fit on events between now and then, which have not happened.
+    So the served fold is the earlier of the two, and the live board falls back
+    to an OLDER model rather than an impossible one.
+
+    Consequence, stated rather than hidden: a Tier-4 row and a live forecast for
+    the same event agree exactly when the trade is decided inside the event's
+    own month, which on a three-week board is nearly always. When it is not, the
+    live row was sized by the previous fold's model, and the score says which.
+    """
+    event_fold = pd.Timestamp(fold_start_of([pd.Timestamp(event_date)]).iloc[0])
+    decision_fold = pd.Timestamp(fold_start_of([pd.Timestamp(as_of)]).iloc[0])
+    return min(event_fold, decision_fold)
+
+
+def _serving_path(model_id: str, fold: pd.Timestamp, snapshot: str) -> Path:
+    return SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib"
+
+
+def serving_model(
+    fold_start,
+    *,
+    panel: pd.DataFrame | None = None,
+    model: FeatureModel | None = None,
+    cache: bool = True,
+) -> ServingModel:
+    """The fold's fitted model, from cache or freshly fit.
+
+    This is what makes §5's claim true rather than hopeful: the historical build
+    and the live scorer both reach a fold's model through :func:`fit_fold`, so
+    there is one fitted estimator per fold and no second code path that could
+    drift from it.
+
+    The cache key carries the Tier-3 snapshot, so a panel rebuild writes a
+    different file instead of silently serving a model fit on data that no
+    longer exists.
+    """
+    from engine.features import load_panel  # deferred: engine.features reads Tier 4
+
+    model = size_feature_model() if model is None else model
+    fold = pd.Timestamp(fold_start)
+    snapshot = store.file_sha256(paths.PANEL)
+    path = _serving_path(model.model_id, fold, snapshot)
+
+    if cache and path.exists():
+        import joblib
+
+        stored = joblib.load(path)
+        if (
+            stored.get("model_id") == model.model_id
+            and pd.Timestamp(stored.get("fold_start")) == fold
+            and stored.get("tier3_snapshot") == snapshot
+            and tuple(stored.get("features", ())) == tuple(model.features)
+        ):
+            return ServingModel(
+                estimator=stored["estimator"],
+                model_id=model.model_id,
+                fold_start=fold,
+                tier3_snapshot=snapshot,
+                features=tuple(model.features),
+            )
+
+    panel = load_panel() if panel is None else panel
+    _, trainable = training_frames(panel, model)
+    served = ServingModel(
+        estimator=fit_fold(trainable, model, fold),
+        model_id=model.model_id,
+        fold_start=fold,
+        tier3_snapshot=snapshot,
+        features=tuple(model.features),
+    )
+    if cache:
+        import joblib
+
+        paths.assert_writable(SERVING_DIR).mkdir(parents=True, exist_ok=True)
+        joblib.dump(
+            {
+                "estimator": served.estimator,
+                "model_id": served.model_id,
+                "fold_start": str(fold.date()),
+                "tier3_snapshot": snapshot,
+                "features": list(served.features),
+            },
+            path,
+        )
+    return served

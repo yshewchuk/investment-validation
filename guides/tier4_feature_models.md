@@ -1,8 +1,13 @@
 # Tier 4 Guide — Feature Models
 
 **Version:** 1.0 · **Date:** 2026-09-04 · **Owner:** YS + Claude
-**Status:** steps 1–3 built and tested (`engine/data/features/tier4.py`, the
-registry graph fields, `load_panel(with_forecasts=True)`); steps 4–6 pending.
+**Status:** built, all six steps. Table on disk (116,795 rows / 85,618
+forecasts / 164 folds), TWIN-P enabled on the live board behind an arithmetic
+entry rule. `python3 checks/tier4_checks.py` — 9/9 GREEN, 2026-09-04:
+causality and live/historical agreement both max |diff| 7.1e-15 over 200 rows,
+`--since` equivalence exactly 0, a full-sample refit diverges by 1.75pp (so the
+leak test can see a leak), and the Tier-3 snapshot hash is byte-identical
+before and after Tier 4 exists.
 **Objective:** make a model's forecast available as a feature — causally, and
 without making Tier 3 depend on a model.
 
@@ -171,11 +176,17 @@ modules deliberately — that separation IS the record of what is used where.
    `tier4_sha256`, deliberately *beside* `snapshot_hash` and not inside it —
    see §10.
 3. **DONE** `load_panel(with_forecasts=True)` — the read-time join, opt-in.
-4. Scorer: pass `structure_params` from the Tier-4 forecast. The plumbing
-   already exists (`ScoreRequest.structure_params`, commit `65037e0`).
-5. An arithmetic gate for TWIN-P (`c < w`, spread, mcap) — the scorer currently
-   assumes gates come from the registry, so this is its own small mechanism.
-6. Enable TWIN-P; the ledger starts recording forward evidence.
+4. **DONE** Scorer sizes the structure from the forecast, *before* pricing —
+   `engine/forecast_sizing.py` plus `Scorer._size_from_forecast`. The forecast
+   comes from `tier4.serving_model(serving_fold(...))`, the same `fit_fold`
+   the table was built with.
+5. **DONE** `engine/entry_rules.py` — arithmetic gates, applied in
+   `Scorer._apply_entry_rule` only where the registry has no gate, so a
+   promoted model always wins.
+6. **DONE** TWIN-P removed from `DISABLED_STRATEGIES`. The readiness test in
+   `tests/test_score.py` now accepts an entry rule alongside a promoted gate;
+   that is a widening of "something decided it is ready", not a loophole — an
+   arithmetic rule decides *every* row, which is more coverage than a gate.
 
 Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
 
@@ -201,7 +212,21 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
 * **A leak test needs a leak to catch.** `test_a_model_fit_on_everything_would_
   fail_that_test` refits on the full sample and asserts the stored values no
   longer reproduce. Without it, the causality test could pass by being unable
-  to distinguish anything at all.
+  to distinguish anything at all. `checks/tier4_checks.py::leak_is_detectable`
+  is the same assertion against the real champion.
+* **The width an entry rule tests is the LISTED one, not the target.**
+  `_structure_width` reads `w` off the priced legs. This is not fussiness: on
+  the first live board, IRS carried a 3.97% forecast — a $0.40 target width on
+  a $15.23 stock — and its ladder lists $2.50 steps, so the tent came out 6×
+  wider than asked. A rule comparing cost against the *requested* width would
+  have been testing a trade that does not exist.
+* **TWIN-P gets no payoff map, deliberately.** Its exit value is a function of
+  the realized move, but a twin-peaked one, and `PAYOFF_DRIVER`'s linear
+  `intercept + slope × driver` cannot represent a shape that rises, falls and
+  rises again. It scores `NO_PAYOFF_MAP` and is decided by the entry rule
+  alone. That is a real limitation of the model layer for this structure, and
+  it is recorded in `engine/payoff.py` rather than papered over with a map
+  that would happily fit.
 
 ## 9. Acceptance tests
 
@@ -212,11 +237,46 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   from a mid date; the frames are identical. Non-negotiable — if incremental
   and full disagree, every backfill silently corrupts.
 - **Live and historical agree.** The scorer's forecast for an event in month M
-  equals the Tier-4 value for the same event, byte for byte.
+  equals the Tier-4 value for the same event. MEASURED, 2026-09-04: 400 events
+  across 119 folds, max |live − table| = 3.55e-15, 230 of 400 bit-identical.
+  Not byte-for-byte, and the reason is worth keeping: the MLP half of the blend
+  is not associative across batch shapes, so the *same fitted model* returns
+  values a few ULPs apart depending on how many rows it scores at once. The
+  claim that holds is "one fitted estimator per fold, reached through
+  `fit_fold` by both paths" — which is the property that matters, and which
+  a bitwise assertion would have failed for a reason unrelated to causality.
+- **The fold served live is never one that has not begun.** `serving_fold`
+  returns the earlier of the event's fold and the decision's fold, so an event
+  in next month is sized by THIS month's model rather than by one fit on events
+  that have not happened. Agreement above is therefore exact for a trade
+  decided inside the event's own month, which on a three-week board is the
+  normal case, and the score records `forecast_fold` when it is not.
 - **Tier 3 is unchanged.** Its hash before and after Tier 4 exists is
   identical. If Tier 4 can move Tier 3's hash, the layering has failed.
 - **NULL is not zero.** A consumer given a row with no forecast declines to
   size a structure rather than sizing it at zero.
+
+## 10a. First live board, 2026-09-04
+
+Measured on the real 21-day calendar the day the wiring landed. 153 rows, 76
+forecasts produced, 24 priced, the entry rule decided on 23 — and **none
+passed**.
+
+That is not a defect; it is EXP-125's finding reproducing live. `cost / w` ran
+1.07 to 1.98 across all 24 priced rows: the debit is above the tent width on
+every one. Forecast-sizing fixes the geometry and collapses the universe, which
+is what EXP-125 measured when `c < w` cut it to 90 events.
+
+The mechanism is now visible in the data rather than inferred. Sizing to a
+forecast pushes the wings to ±4w ≈ ±16-20% of spot, into strikes whose relative
+spreads run 20-150%; and on a coarse ladder the realized `w` overshoots the
+target several-fold. Both terms then fail together.
+
+**What this buys is forward evidence at zero risk of a bad fill**: the ledger
+records what the rule would have taken, on names it declines, every night. If
+`c < w` is genuinely unreachable on tradeable names, that shows up as a long
+run of empty books rather than as an argument — and that is a cheaper way to
+learn it than trading it.
 
 ## 10. What this costs, stated plainly
 
