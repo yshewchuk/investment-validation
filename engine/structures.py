@@ -285,7 +285,19 @@ class StrikeSelector:
                 raise StructureError(
                     f"no listed strike {self.side} spot {spot:.4f} at this expiry"
                 )
-            return float(side[-1] if self.side == "below" else side[0])
+            anchor = float(side[-1] if self.side == "below" else side[0])
+            if not self.steps:
+                return anchor
+            # `steps` walks the ladder from the bracketing strike, so a whole
+            # structure can be shifted off the money without leaving the grid.
+            hit = np.flatnonzero(np.isclose(grid, anchor))
+            target = int(hit[0]) + int(self.steps)
+            if not 0 <= target < grid.size:
+                raise StructureError(
+                    f"{self.steps:+d} steps from the bracketing strike {anchor:.4f} "
+                    f"runs off the ladder ({grid.size} listed strikes)"
+                )
+            return float(grid[target])
 
         if self.kind == "grid_step":
             if self.ref not in resolved:
@@ -938,6 +950,7 @@ def put_condor(
 
 def twin_peak(
     steps: int = 1,
+    anchor_offset: int = 0,
     entry_offset: int = 0,
     exit_offset: int = 1,
     decision_offset: int | None = None,
@@ -982,7 +995,15 @@ def twin_peak(
     if int(steps) < 1:
         raise ValueError(f"steps must be a positive integer, got {steps!r}")
     expiry = ExpirySelector(kind="first_post_event")
-    atm = StrikeSelector("bracket", side="below")
+    # anchor_offset shifts the WHOLE structure along the ladder. The mirror
+    # symmetry is untouched, so the tails still cancel to exactly zero — only
+    # where the tent sits relative to spot changes. EXP-123 measured a put
+    # structure decaying much faster to the upside (exit/debit 0.14 deep-up
+    # against 0.36 deep-down, 0.89 against 1.48 on the ramps) with a move
+    # distribution that is very nearly symmetric, so buying room on the side
+    # that decays fastest is the one lever left once short calls are off the
+    # table.
+    atm = StrikeSelector("bracket", side="below", steps=int(anchor_offset) or None)
     return Structure(
         name="TWIN-P",
         description=(
@@ -1007,7 +1028,7 @@ def twin_peak(
         entry_offset=entry_offset,
         exit_offset=exit_offset,
         decision_offset=decision_offset,
-        params={"steps": int(steps)},
+        params={"steps": int(steps), "anchor_offset": int(anchor_offset)},
     )
 
 

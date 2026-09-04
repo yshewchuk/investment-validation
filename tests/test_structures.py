@@ -809,3 +809,37 @@ class TestTwinPeak:
     def test_steps_must_be_positive(self):
         with pytest.raises(ValueError, match="steps must be a positive integer"):
             twin_peak(steps=0)
+
+    def test_anchor_offset_shifts_the_whole_structure(self, condor_snapshot):
+        """EXP-123's only remaining lever, with short calls off the table.
+
+        A put structure decays much faster to the upside — measured exit/debit
+        0.14 deep-up against 0.36 deep-down — while the move distribution is
+        very nearly symmetric. Shifting buys room on the side that decays
+        fastest.
+        """
+        base = _twin_strikes(price_structure(twin_peak(), condor_snapshot, MID))
+        up = _twin_strikes(price_structure(twin_peak(anchor_offset=1),
+                                           condor_snapshot, MID))
+        assert up["atm"] > base["atm"]
+        for leg in ("dn4", "dn2", "dn1", "atm", "up1", "up2", "up4"):
+            assert up[leg] > base[leg]
+
+    def test_a_shifted_structure_keeps_the_zero_floor(self, condor_snapshot):
+        """The mirror symmetry is what cancels the tails; shifting must not
+        break it, or the loss stops being capped at the debit."""
+        price = price_structure(twin_peak(anchor_offset=1), condor_snapshot, MID)
+        k = _twin_strikes(price)
+        a, w = k["atm"], k["up1"] - k["atm"]
+        assert k["up2"] == pytest.approx(a + 2 * w)
+        assert k["dn4"] == pytest.approx(a - 4 * w)
+        grid = [0.0, a - 40, a - 4 * w, a - w, a, a + w, a + 4 * w, a + 40, 10_000.0]
+        assert min(_terminal_payoff(price, s) for s in grid) >= -1e-9
+
+    def test_a_shift_that_runs_off_the_ladder_is_refused(self, condor_rows):
+        snap = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+            event_date=pd.Timestamp("2024-05-02"), rows=condor_rows,
+            spot=101.0, session="AMC")
+        with pytest.raises(StructureError):
+            price_structure(twin_peak(steps=1, anchor_offset=50), snap, MID)

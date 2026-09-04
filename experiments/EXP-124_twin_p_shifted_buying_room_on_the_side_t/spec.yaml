@@ -1,0 +1,116 @@
+id: EXP-124
+title: "TWIN-P shifted: buying room on the side that decays fastest"
+kind: strategy-validation
+strategy: TWIN-P
+programme: structure-validation
+prior: [EXP-121, EXP-122, EXP-123]
+type: confirmatory
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+hypothesis: >
+  TWIN-P loses on up moves. EXP-123 established that this is NOT because up
+  moves are larger - the move distribution is very nearly symmetric - but
+  because an all-put structure is worth far less when it is wrong to the
+  upside. Shifting the whole structure one strike up the ladder moves
+  probability mass out of the band that decays fastest and into the plateau.
+
+  Falsified if the shifted variant does not beat the unshifted +2.61%/trade at
+  mid, OR if it beats the mean while failing breakeven alpha <= 0.45. Clearing
+  one and not the other is not a pass: EXP-123 already showed a positive mean
+  that execution does not survive.
+
+known_before_registration:
+  # All measured on EXP-123's own 1,147-event primary before this was written.
+  the_asymmetry_is_in_valuation_not_in_moves: >
+    Up moves: n=592, median |move| 3.58%, mean 5.12%, p90 11.33%. Down moves:
+    n=554, median 3.70%, mean 4.93%, p90 10.10%. Down moves are marginally
+    LARGER at the median, blow-through rates are 21.1% up against 19.1% down,
+    and conditional on blowing through the down side travels slightly further
+    (6.30w against 6.16w). The distribution does not explain the P&L gap.
+  what_does_explain_it: >
+    Exit value over debit, at equivalent distances: deep tails 0.14 up against
+    0.36 down; ramps 0.89 up against 1.48 down; plateaus 1.36 up against 1.70
+    down. Both tails settle to zero AT EXPIRY, but the trade exits at the first
+    post-print close with roughly two days left, and that is where they
+    diverge - a deep-down print leaves seven in-the-money puts with vol bid up,
+    a deep-up print leaves seven out-of-the-money puts with vol crushed.
+    Interpretation, not measurement: exit IV was not read directly.
+  segment_returns: >
+    deep DOWN -55.33% (n=219, win 15.5%), down ramp +52.37%, down plateau
+    +81.60%, ATM dip +82.20% (win 100%), up plateau +52.34%, up ramp -6.85%,
+    deep UP -78.06% (n=242, win 1.7%). Down moves mean +19.95%, up moves
+    -13.71%.
+  width_is_not_the_lever: >
+    steps=2 left median |move| at 3.27w against steps=1's 3.14w. The c < w
+    filter re-selects: to stay cheap it picks events where w is small relative
+    to the move, pinning the structure to the same place on the move
+    distribution whatever width is nominally chosen. Shifting is a different
+    lever and is not subject to that mechanism.
+  why_not_calls: >
+    A call-side upper half is the natural fix and is unavailable: the account
+    cannot sell calls. Recorded so this experiment is not later read as having
+    overlooked it.
+  holding_longer_was_tested_and_rejected: >
+    Valued at the terminal tent with NO exit spread and NO assignment cost - an
+    optimistic bound - holding to expiry gives mean -2.07% and median -65.12%
+    against +2.61% and +2.63% for the current exit, with 46.5% total losses and
+    4 of 9 positive years against 6. Median |move| widens 3.14w to 3.70w over a
+    median two extra days. Not pursued.
+
+definition:
+  structure: >
+    TWIN-P steps=1 with anchor_offset=+1: the doubled long sits one listed
+    strike ABOVE the bracketing strike, so the whole tent shifts up the ladder.
+    Mirror symmetry is untouched - the tails still cancel to exactly zero and
+    max loss is still the debit - only the tent's position relative to spot
+    changes.
+  entry_filters:
+    # Unchanged from EXP-123 so the comparison is like for like.
+    - "all seven strikes listed at exactly A, A+/-w, A+/-2w, A+/-4w"
+    - "net debit c < w, decided ONCE on mid quotes"
+    - "mean relative bid-ask spread across the eight legs <= 25%"
+    - "market cap >= $10B"
+  the_risk_this_run_measures: >
+    Shifting up moves the doubled long from just out of the money to just in
+    the money, so the debit RISES. c < w will therefore fire less often and the
+    universe will shrink. If it shrinks below ~400 events the comparison is too
+    thin to carry and that is reported rather than worked around.
+
+primary_spec:
+  universe: "anchor_offset=+1, steps=1, >= $10B, all four entry filters, 2018-2026"
+  structure: "TWIN-P steps=1 anchor_offset=+1, e+0 x+1"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+  acceptance:
+    beats_baseline: "mid-fill mean above EXP-123's +2.61% on the same filters"
+    breakeven_alpha: "<= 0.45, the same bar EXP-123 failed at 0.489"
+    consistency: "positive mid-fill mean in >= 70% of out-of-sample years"
+    universe_floor: ">= 400 events, or the result is reported as too thin to carry"
+
+grid:
+  # offset 0 is EXP-123's measured baseline, re-run here so the comparison is
+  # made on identical code rather than across two runs.
+  anchor_offset: [0, 1, 2]
+
+required_outputs:
+  - "mid-fill mean against the +2.61% baseline, and breakeven alpha against 0.45"
+  - "the segment table (deep down / ramps / plateaus / ATM dip / deep up) for each offset"
+  - "exit value over debit by segment, the quantity the shift is meant to move"
+  - "share of prints landing beyond each wing, by offset"
+  - "entry-rule funnel per offset — what the rising debit costs in universe size"
+  - "per-year table with n"
+  - "defined-risk falsification: any trade losing more than its debit, classified"
+  - "tail injection on |move| (mandatory, has_short_leg=true)"
+
+data_snapshot: 0f01d8d79a6315b96cece8cf793252d5f63650957422b03318467d6328f67b5a
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-04T00:05:23+00:00"
