@@ -117,6 +117,9 @@ tr.disabled td { color: var(--dim); }
 .pill.fail { background: #f8514922; color: var(--red); border: 1px solid var(--red); }
 .pill.na { background: #30363d; color: var(--dim); }
 .pill.warn { background: #d2992233; color: var(--amber); border: 1px solid var(--amber); }
+/* The evidence behind a verdict — same slot on every pill, subordinate to
+   the verdict word so the column scans as PASS/FAIL/N/A first. */
+.pill-why { opacity: .72; font-weight: 400; }
 .pill.info { background: #58a6ff22; color: var(--blue); border: 1px solid var(--blue); }
 
 .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }

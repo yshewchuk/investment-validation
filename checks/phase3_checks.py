@@ -871,6 +871,61 @@ def check_ui_no_compute() -> str:
 # --------------------------------------------------------------------------
 
 
+#: Every verdict word a pill may carry. One family, one casing — a reader
+#: scanning the decision column should not have to learn a dialect per row.
+VERDICT_WORDS = {"PASS", "FAIL", "N/A", "TAKEN", "DECLINED"}
+
+#: The N/A reasons in use, each a DIFFERENT fact about why no decision exists.
+#: Listed so adding one is a deliberate edit: "a gate looked and declined" and
+#: "nothing ever looked" are opposite claims, and collapsing them loses the
+#: only thing the reader needed.
+NA_REASONS = {"disabled", "not sized", "not scored", "undetermined", "withheld"}
+
+
+@check("pill_vocabulary", needs_data=False,
+       description="verdict pills speak one vocabulary, in one casing")
+def check_pill_vocabulary() -> str:
+    """The decision column used to mix `PASS`, `fail`, `n/a` and `n/a rule`.
+
+    Three casings for one family of answer made the column read as noise. Worse,
+    the reason was encoded in the word itself, so a bare `n/a` covered "the gate
+    declined", "nothing was priced" and "this strategy is not scored at all" —
+    opposite facts rendered identically.
+
+    This pins the vocabulary rather than the wording: every verdict comes from
+    one small set, in one casing, and every N/A carries a reason from a listed
+    set. Adding a reason is then a deliberate edit.
+    """
+    app = (ROOT / "engine" / "dashboard" / "static" / "assets" / "app.js").read_text()
+
+    calls = re.findall(r'verdictPill\(\s*"(\w+)"\s*,\s*([^,]+?)\s*,\s*(".*?"|\w+)', app)
+    _require(calls, "no verdictPill calls found — has the helper been renamed?")
+
+    verdicts, reasons = set(), set()
+    for _kind, verdict, evidence in calls:
+        verdict = verdict.strip()
+        if verdict.startswith('"'):
+            verdicts.add(verdict.strip('"'))
+        if verdict.strip('"') == "N/A" and evidence.startswith('"'):
+            reasons.add(evidence.strip('"'))
+
+    unknown = sorted(verdicts - VERDICT_WORDS)
+    _require(not unknown, f"pills carry unlisted verdict words {unknown}")
+
+    lower = sorted(v for v in verdicts if v != v.upper())
+    _require(not lower, f"verdict words are not upper case: {lower} — one casing, or the column reads as noise")
+
+    stray = sorted(reasons - NA_REASONS)
+    _require(not stray, f"N/A pills carry unlisted reasons {stray}")
+
+    # The old forms, gone rather than merely unused.
+    for dead in (">fail ", ">fail<", ">n/a<", ">n/a rule<", "'pill pass'>taken<"):
+        _require(dead not in app, f"an old-style pill label survives: {dead!r}")
+
+    return (f"{len(calls)} pills, verdicts {sorted(verdicts)}, "
+            f"N/A reasons {sorted(reasons)}")
+
+
 @check("calp_unvalidated", needs_data=False,
        description="CAL-P renders as unvalidated, matching the scorer's disabled state")
 def check_calp_unvalidated() -> str:
@@ -1054,6 +1109,7 @@ ORDER = [
     "secret_scan",
     "access_rule",
     "ui_no_compute",
+    "pill_vocabulary",
     "calp_unvalidated",
     "server_local",
     "board_budget",

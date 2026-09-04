@@ -136,26 +136,97 @@ function renderFlagsBanner() {
    percent units as the P&L columns, because "PASS 0.10" beside "+55.2%"
    invited reading the score as a probability — it is a predicted return,
    and the comparison against the threshold is the whole decision. */
+/* ONE shape for every verdict on the page: the verdict word, then the evidence
+   that produced it, dimmed and subordinate.
+
+   The pills used to be a mix — `PASS` shouting, `fail` whispering, `n/a` and
+   `n/a rule` encoding their reason in the word itself, and the Book tab using
+   the same two colours for `taken`/`declined`. Three casings for one family of
+   answer made the column read as noise, and a reader had to learn which
+   dialect each row spoke before they could compare two of them.
+
+   The verdict is always upper case and always first, so the eye can scan the
+   column. The reason is always second and always in the same slot, so a score,
+   a rule name and a withholding reason are read the same way. */
+function verdictPill(kind, verdict, evidence, title) {
+  return '<span class="pill ' + kind + '"' + (title ? ' title="' + esc(title) + '"' : "")
+    + ">" + verdict
+    + (evidence ? " <span class='pill-why'>" + evidence + "</span>" : "")
+    + "</span>";
+}
+
+/* The DECISION layer, in whichever form this strategy's decision takes.
+
+   Every N/A says WHY, and the reasons are not interchangeable. "A gate looked
+   and declined" and "nothing ever looked" are opposite facts about a row, and
+   rendering both as a bare n/a asked the reader to guess which. Rendering both
+   as "withheld" would be worse: it would assert the wrong one. */
 function gatePill(row) {
+  const flags = row.flags || [];
+
+  /* The strategy is not scored at all. Nothing looked, so nothing was
+     withheld — 402 rows on a typical board, and calling them withheld claims a
+     decision that was never attempted. */
+  if (flags.indexOf("UNVALIDATED_STRUCTURE") !== -1) {
+    return verdictPill("na", "N/A", "disabled",
+      "This structure is registered but deliberately not scored — no backtest "
+      + "supports it yet. See the Strategies tab for the reason on record.");
+  }
+
+  /* Never reached a decision: the structure could not be built, so nothing was
+     priced and no rule or gate ever ran. Distinct from a gate that LOOKED and
+     withheld — the flags column says NO_FORECAST, but the pill is where the eye
+     goes, and the two used to render identically. */
+  if (flags.indexOf("NO_FORECAST") !== -1) {
+    return verdictPill("na", "N/A", "not sized",
+      "This structure's shape comes from a forecast, and this event has none "
+      + "usable — so no strikes, no price, and nothing to decide. Not a "
+      + "rejection: no decision was reached.");
+  }
+
   /* Some strategies are decided by ARITHMETIC on the entry close, not by a
-     fitted model: reward greater than risk, a crossable spread, a large enough
-     name. Those rows have a verdict and no score, and rendering the score slot
-     as "fail –" read as a missing number rather than as a different kind of
-     decision. The rule's own reason is in the detail line, which the row
-     expands to show. */
+     fitted model: reward above risk, a crossable spread, a large enough name.
+     Those rows have a verdict and no score. */
   const isRule = String(row.model_versions && row.model_versions.gate || "")
     .indexOf("entry-rule") === 0;
   if (isRule) {
-    const why = " rule";
-    if (row.gate_pass === true) return '<span class="pill pass" title="Passed every term of the pre-registered arithmetic entry rule. Open the row for the terms.">PASS' + why + "</span>";
-    if (row.gate_pass === false) return '<span class="pill fail" title="Failed at least one term of the arithmetic entry rule. Open the row to see which.">fail' + why + "</span>";
-    return '<span class="pill na" title="The entry rule could not be evaluated — a fact it needs is missing, most often because no option chain has been priced yet. Undetermined is not a rejection.">n/a rule</span>';
+    if (row.gate_pass === true) {
+      return verdictPill("pass", "PASS", "rule",
+        "Passed every term of the pre-registered arithmetic entry rule. Open the row for the terms.");
+    }
+    if (row.gate_pass === false) {
+      return verdictPill("fail", "FAIL", "rule",
+        "Failed at least one term of the arithmetic entry rule. Open the row to see which.");
+    }
+    return verdictPill("na", "N/A", "undetermined",
+      "The entry rule ran and could not tell — a fact it needs is missing, "
+      + "almost always because no option chain has been priced yet. "
+      + "Undetermined is not a rejection, and it usually resolves when a chain arrives.");
   }
+
   const thr = row.gate_threshold === null || row.gate_threshold === undefined
     ? "" : " " + (row.gate_pass === true ? "&ge; " : "&lt; ") + pct(row.gate_threshold, 1);
-  if (row.gate_pass === true) return '<span class="pill pass">PASS ' + signedPct(row.gate_score, 1) + thr + "</span>";
-  if (row.gate_pass === false) return '<span class="pill fail">fail ' + signedPct(row.gate_score, 1) + thr + "</span>";
-  return '<span class="pill na">n/a</span>';
+  if (row.gate_pass === true) {
+    return verdictPill("pass", "PASS", signedPct(row.gate_score, 1) + thr);
+  }
+  if (row.gate_pass === false) {
+    return verdictPill("fail", "FAIL", signedPct(row.gate_score, 1) + thr);
+  }
+  /* A gate that RAN and declined, versus one that never ran at all. The
+     registry gate records its id on the row the moment it loads, so the row
+     itself says which happened — no guessing, and no claiming a decision that
+     was never attempted. */
+  const gateRan = !!(row.model_versions && row.model_versions.gate);
+  if (!gateRan) {
+    return verdictPill("na", "N/A", "not scored",
+      "No decision layer ran on this row — most often the quote failed a "
+      + "sanity ceiling, so scoring stopped before the gate. Nothing looked, "
+      + "so nothing was withheld.");
+  }
+  return verdictPill("na", "N/A", "withheld",
+    "The gate looked and declined to decide — the name sits outside the "
+    + "champion's training universe, or an input it needs is missing. A "
+    + "decision withheld is not a rejection.");
 }
 
 /* A structure whose SHAPE came from a forecast has to show the forecast and the
@@ -306,7 +377,8 @@ function printRow(members) {
     + "<td><strong>" + esc(head.event_date) + "</strong>" + projected
     + "<br><span class='badge'>" + esc(head.session || "") + "</span></td>"
     + "<td><strong>" + esc(head.ticker) + "</strong>"
-    + (passes ? " <span class='pill pass'>" + passes + "</span>" : "") + "</td>"
+    + (passes ? " " + verdictPill("pass", passes, "pass",
+        passes + " of this print's structures passed their decision rule.") : "") + "</td>"
     + "<td colspan='2'></td>"
     + "<td>" + (move.driver_prediction === null || move.driver_prediction === undefined
         ? forecastCell(sized) || "–" : driverCell(move)) + "</td>"
@@ -1212,7 +1284,11 @@ function renderBook() {
     const ret = r.realized_pnl === null || r.realized_pnl === undefined
       ? "–" : (100 * r.realized_pnl).toFixed(2) + "%";
     const call = r.recommended
-      ? "<span class='pill pass'>taken</span>" : "<span class='pill fail'>declined</span>";
+      ? verdictPill("pass", "TAKEN", "", "The gate recommended this trade.")
+      : verdictPill("fail", "DECLINED", "",
+          "The gate looked at this trade and said no. It is carried here, priced "
+          + "and sized exactly as a real one, so the contrarian book can be read "
+          + "against the book itself.");
     html += "<tr>"
       + "<td class='mono'>" + esc(String(r.as_of || "").slice(0, 10)) + "</td>"
       + "<td>" + esc(r.ticker) + "</td>"
