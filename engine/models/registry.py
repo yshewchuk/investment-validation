@@ -85,7 +85,12 @@ ROLE_TIER = {"size": "feature", "implied_t1": "feature", "gate": "decision"}
 #: ``engine.data.features.tier4`` so the registry can validate the dependency
 #: graph without importing the layer it describes; ``tests/test_tier4.py`` holds
 #: the two in agreement.
-TIER4_COLUMNS = ("pred_abs_move",)
+TIER4_COLUMNS = (
+    "pred_abs_move",
+    "pred_abs_move_p10",
+    "pred_abs_move_p90",
+    "pred_abs_move_sd",
+)
 
 REGISTRY_PATH = paths.ENGINE / "models" / "registry.json"
 

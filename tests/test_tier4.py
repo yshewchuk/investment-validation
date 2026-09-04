@@ -539,3 +539,218 @@ class TestTheReadTimeJoin:
         monkeypatch.setattr(paths, "TIER4", tmp_path / "absent.parquet")
         with pytest.raises(FileNotFoundError, match="engine.data.features.tier4"):
             load_panel(panel_path, with_forecasts=True)
+
+
+class TestTheInterval:
+    """The 80% band and the residual SD, and the causality they inherit.
+
+    An interval computed from errors the model had not yet made is the same
+    leak as a forecast computed from data it had not yet seen — wearing a
+    different hat, and not visible to the point-forecast tests at all.
+    """
+
+    def test_the_band_brackets_the_forecast(self, built):
+        # Restricted to non-negative forecasts, and that is not a dodge. The
+        # floor at zero is unconditional, so a NEGATIVE prediction — which this
+        # fixture's linear target can produce and the real size model does not
+        # (0 of 85,618, min +0.39) — ends up below its own p10. That is the
+        # floor working: a magnitude cannot be negative, and the row is refused
+        # by `forecast_params` before it can size anything.
+        banded = built.dropna(subset=["pred_abs_move_p10", "pred_abs_move_p90"])
+        banded = banded[banded["pred_abs_move"] >= 0]
+        assert len(banded) > 0
+        assert (banded["pred_abs_move_p10"] <= banded["pred_abs_move"]).all()
+        assert (banded["pred_abs_move"] <= banded["pred_abs_move_p90"]).all()
+
+    def test_the_band_is_ordered_everywhere(self, built):
+        banded = built.dropna(subset=["pred_abs_move_p10", "pred_abs_move_p90"])
+        assert (banded["pred_abs_move_p10"] <= banded["pred_abs_move_p90"]).all()
+
+    def test_a_negative_forecast_is_floored_and_never_sized(self, built):
+        from engine.forecast_sizing import forecast_params
+
+        negative = built[built["pred_abs_move"] < 0].dropna(subset=["pred_abs_move_p10"])
+        assert len(negative) > 0, "fixture must produce one to be a real test"
+        assert (negative["pred_abs_move_p10"] == 0.0).all()
+        for value in negative["pred_abs_move"]:
+            assert forecast_params("TWIN-P", value) is None
+
+    def test_the_lower_bound_is_never_negative(self, built):
+        # The target is a MAGNITUDE. An interval whose floor is below zero is
+        # reporting an outcome that cannot happen.
+        banded = built["pred_abs_move_p10"].dropna()
+        assert len(banded) > 0
+        assert (banded >= 0).all()
+
+    def test_the_sd_is_positive_where_it_exists(self, built):
+        sd = built["pred_abs_move_sd"].dropna()
+        assert len(sd) > 0
+        assert (sd > 0).all()
+
+    def test_a_band_always_says_how_many_errors_it_came_from(self, built):
+        banded = built["pred_abs_move_sd"].notna()
+        assert built.loc[banded, "resid_n"].notna().all()
+        assert (built.loc[banded, "resid_n"] >= tier4.MIN_RESIDUALS).all()
+        assert built.loc[~banded, "resid_n"].isna().all()
+
+    def test_the_earliest_folds_carry_no_band(self, built):
+        # Nothing has been predicted yet, so there are no held-out errors to
+        # build one from. A band from four residuals would be a number that
+        # reads as a confidence interval and is not one.
+        scored = built[built["pred_abs_move"].notna()]
+        first = scored["fold_start"].min()
+        assert scored.loc[scored["fold_start"] == first, "pred_abs_move_sd"].isna().all()
+        assert scored["pred_abs_move_sd"].notna().any(), "no fold ever gets a band"
+
+    def test_the_band_appears_once_and_stays(self, built):
+        # Monotone in fold order: the pool only grows, so a fold that has a band
+        # is never followed by one that lost it.
+        scored = built[built["pred_abs_move"].notna()]
+        by_fold = scored.groupby("fold_start")["pred_abs_move_sd"].apply(
+            lambda s: bool(s.notna().any())
+        )
+        seen = False
+        for has_band in by_fold.sort_index():
+            if has_band:
+                seen = True
+            assert not (seen and not has_band), "a fold lost a band it already had"
+
+    def test_a_row_with_no_forecast_has_no_band(self, built):
+        blank = built[built["pred_abs_move"].isna()]
+        assert blank["pred_abs_move_p10"].isna().all()
+        assert blank["pred_abs_move_p90"].isna().all()
+        assert blank["pred_abs_move_sd"].isna().all()
+        assert blank["resid_n"].isna().all()
+
+    def test_the_band_uses_only_earlier_folds(self, panel, built):
+        # Reproduce one fold's band by hand from the residuals of everything
+        # before it, and nothing else.
+        _, trainable = training_frames(panel, MODEL)
+        realized = trainable.set_index(["ticker", "date"])[MODEL.target]
+        scored = built[built["pred_abs_move"].notna() & built["pred_abs_move_sd"].notna()]
+        fold = scored["fold_start"].min()  # the FIRST fold that got a band
+
+        earlier = built[
+            built["pred_abs_move"].notna() & (built["fold_start"] < fold)
+        ]
+        keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
+        truth = realized.reindex(keys).to_numpy(dtype=float)
+        made = earlier["pred_abs_move"].to_numpy(dtype=float)
+        ok = np.isfinite(truth) & np.isfinite(made)
+
+        rows = scored[scored["fold_start"] == fold]
+        p10, p90, sd, n = tier4.interval_for(
+            rows["pred_abs_move"].to_numpy(), made[ok], (truth - made)[ok]
+        )
+        assert np.allclose(p10, rows["pred_abs_move_p10"].to_numpy())
+        assert np.allclose(p90, rows["pred_abs_move_p90"].to_numpy())
+        assert np.allclose(sd, rows["pred_abs_move_sd"].to_numpy())
+        assert np.allclose(n, rows["resid_n"].to_numpy(dtype=float))
+
+
+class TestIntervalMechanics:
+    """`interval_for` on its own, including the conditioned branch the
+    synthetic panel is too small to reach."""
+
+    def test_a_thin_pool_produces_nothing(self):
+        rng = np.random.default_rng(3)
+        pred = rng.uniform(1, 10, 40)
+        p10, p90, sd, n = tier4.interval_for(np.array([5.0]), pred, rng.normal(size=40))
+        assert np.isnan(p10).all() and np.isnan(p90).all() and np.isnan(sd).all()
+        assert np.isnan(n).all()
+
+    def test_a_flat_pool_gives_every_row_the_same_width(self):
+        rng = np.random.default_rng(4)
+        pool_pred = rng.uniform(1, 10, 1000)
+        pool_res = rng.normal(0, 2, 1000)
+        preds = np.array([3.0, 8.0])
+        p10, p90, sd, n = tier4.interval_for(preds, pool_pred, pool_res)
+        assert np.allclose(p90 - p10, (p90 - p10)[0])
+        assert sd[0] == pytest.approx(sd[1])
+        assert n[0] == 1000
+
+    def test_a_large_pool_conditions_the_band_on_the_prediction(self):
+        # EXP-115's finding: error scales with the prediction, so one pool for
+        # every row understates the band at the top of the range. With enough
+        # residuals the deciles kick in and the widths must differ.
+        rng = np.random.default_rng(5)
+        pool_pred = rng.uniform(1, 20, 40_000)
+        pool_res = rng.normal(0, 1, 40_000) * pool_pred  # error grows with size
+        p10, p90, sd, _ = tier4.interval_for(np.array([2.0, 18.0]), pool_pred, pool_res)
+        assert (p90 - p10)[1] > (p90 - p10)[0] * 2
+        assert sd[1] > sd[0]
+
+    def test_a_nan_prediction_gets_no_band(self):
+        rng = np.random.default_rng(6)
+        p10, p90, sd, n = tier4.interval_for(
+            np.array([np.nan]), rng.uniform(1, 10, 1000), rng.normal(size=1000)
+        )
+        assert np.isnan(p10).all() and np.isnan(sd).all() and np.isnan(n).all()
+
+    def test_the_floor_clips_a_band_that_runs_below_zero(self):
+        rng = np.random.default_rng(7)
+        pool_pred = rng.uniform(1, 10, 1000)
+        pool_res = rng.normal(-5, 1, 1000)  # residuals push the band well negative
+        p10, _, _, _ = tier4.interval_for(np.array([0.5]), pool_pred, pool_res)
+        assert p10[0] == 0.0
+
+
+class TestTheServingBand:
+    """A live band and a stored one come from the same pool, or they are two
+    answers to one question."""
+
+    @pytest.fixture
+    def wired(self, panel, built, tmp_path, monkeypatch):
+        from engine import paths
+
+        panel_path = tmp_path / "panel.parquet"
+        panel.to_parquet(panel_path, index=False)
+        monkeypatch.setattr(paths, "PANEL", panel_path)
+        monkeypatch.setattr(paths, "TIER4", tmp_path / "tier4_forecasts.parquet")
+        write_forecasts(built)
+        return built
+
+    def test_the_served_band_reproduces_the_stored_one(self, panel, wired):
+        stored = wired
+        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "fold_start"].max()
+        served = tier4.serving_model(fold, panel=panel, model=MODEL, cache=False)
+        rows = stored[stored["fold_start"] == fold]
+
+        p10, p90, sd, n = served.interval(rows["pred_abs_move"].to_numpy(dtype=float))
+        assert np.allclose(p10, rows["pred_abs_move_p10"].to_numpy(dtype=float))
+        assert np.allclose(p90, rows["pred_abs_move_p90"].to_numpy(dtype=float))
+        assert np.allclose(sd, rows["pred_abs_move_sd"].to_numpy(dtype=float))
+        assert np.allclose(n, rows["resid_n"].to_numpy(dtype=float))
+
+    def test_the_pool_stops_at_the_fold(self, panel, wired):
+        # The served pool must not contain the fold's own errors, or a live
+        # band would be narrower than the one the backtest recorded for exactly
+        # the reason that makes it wrong.
+        stored = wired
+        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "fold_start"].max()
+        served = tier4.serving_model(fold, panel=panel, model=MODEL, cache=False)
+        expected = int(
+            (stored["pred_abs_move"].notna() & (stored["fold_start"] < fold)).sum()
+        )
+        assert served.pool_pred.size == expected
+        assert served.pool_res.size == expected
+
+    def test_no_table_means_no_band_rather_than_a_made_up_one(
+        self, panel, tmp_path, monkeypatch
+    ):
+        from engine import paths
+
+        panel_path = tmp_path / "panel.parquet"
+        panel.to_parquet(panel_path, index=False)
+        monkeypatch.setattr(paths, "PANEL", panel_path)
+        monkeypatch.setattr(paths, "TIER4", tmp_path / "absent.parquet")
+
+        served = tier4.serving_model(
+            pd.Timestamp("2015-06-01"), panel=panel, model=MODEL, cache=False
+        )
+        assert served.pool_pred.size == 0
+        _, _, sd, _ = served.interval([5.0])
+        assert np.isnan(sd).all()
+        # ...and the point forecast still works. A missing band must not take
+        # the forecast down with it.
+        assert np.isfinite(served.predict(_prepare(panel).head(1))).all()

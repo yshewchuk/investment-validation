@@ -880,6 +880,18 @@ def forecast(monkeypatch):
         def predict(self, frame):
             return np.full(len(frame), state["value"])
 
+        def interval(self, predictions):
+            values = np.asarray(predictions, dtype=float)
+            if state.get("band") is False:  # the fold has no residual pool yet
+                nan = np.full(values.shape, np.nan)
+                return nan, nan, nan, nan
+            return (
+                np.maximum(values - 2.0, 0.0),
+                values + 3.0,
+                np.full(values.shape, 1.5),
+                np.full(values.shape, 900.0),
+            )
+
     monkeypatch.setattr(tier4_mod, "serving_model", lambda *a, **k: Fake())
     return state
 
@@ -1013,3 +1025,36 @@ class TestArithmeticEntryRule:
         strikes = (100.0, 104.0, 108.0, 116.0, 96.0, 92.0, 84.0)
         expected = float(np.mean([0.10 / (100.0 * (k / 100.0) ** 2) for k in strikes]))
         assert result.rel_spread == pytest.approx(expected)
+
+
+class TestTheForecastBandOnTheBoard:
+    """A forecast without a width is half an answer; a fabricated one is worse."""
+
+    def test_the_band_travels_with_the_forecast(self, scorer, dense_chain, forecast):
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.forecast_abs_move == pytest.approx(6.0)
+        assert result.forecast_p10 == pytest.approx(4.0)
+        assert result.forecast_p90 == pytest.approx(9.0)
+        assert result.forecast_sd == pytest.approx(1.5)
+
+    def test_the_band_is_ordered_around_the_point(self, scorer, dense_chain, forecast):
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.forecast_p10 <= result.forecast_abs_move <= result.forecast_p90
+
+    def test_a_fold_with_no_pool_yields_no_band_but_still_a_forecast(
+        self, scorer, dense_chain, forecast
+    ):
+        # Tier 4 unbuilt, or the earliest folds. The structure must still be
+        # sized — the width comes from the point forecast, not from the band.
+        forecast["band"] = False
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert result.forecast_abs_move == pytest.approx(6.0)
+        assert result.structure_width == pytest.approx(4.0)
+        assert result.forecast_p10 is None
+        assert result.forecast_sd is None
+
+    def test_the_band_reaches_the_rendered_board(self):
+        from engine.dashboard.render import _BOARD_FIELDS
+
+        for field in ("forecast_abs_move", "forecast_p10", "forecast_p90", "forecast_sd"):
+            assert field in _BOARD_FIELDS

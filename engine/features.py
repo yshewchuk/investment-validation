@@ -252,9 +252,22 @@ def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
 
 
 #: Tier-4 columns joined onto the panel by ``load_panel(with_forecasts=True)``.
-#: ``pred_abs_move`` is the forecast; the rest is the provenance that makes a
-#: stale or partially rebuilt table visible to whoever reads it.
-FORECAST_COLUMNS = ("pred_abs_move", "model_id", "fold_start", "tier3_snapshot")
+#: ``pred_abs_move`` is the forecast and ``_p10``/``_p90``/``_sd`` describe how
+#: wrong it is likely to be; the rest is the provenance that makes a stale or
+#: partially rebuilt table visible to whoever reads it. ``resid_n`` is how many
+#: held-out errors the band came from — a reader judging a wide interval needs
+#: to know whether it is wide because the model is uncertain or because the
+#: pool was thin.
+FORECAST_COLUMNS = (
+    "pred_abs_move",
+    "pred_abs_move_p10",
+    "pred_abs_move_p90",
+    "pred_abs_move_sd",
+    "resid_n",
+    "model_id",
+    "fold_start",
+    "tier3_snapshot",
+)
 
 
 @lru_cache(maxsize=1)

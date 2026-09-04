@@ -87,7 +87,8 @@ _BOARD_FIELDS = (
     # check: `w` decides the `cost < w` term, and it is read off the LISTED
     # strikes, which on a coarse ladder can be several times the width the
     # forecast asked for.
-    "forecast_abs_move", "forecast_model", "forecast_fold", "structure_params",
+    "forecast_abs_move", "forecast_p10", "forecast_p90", "forecast_sd",
+    "forecast_model", "forecast_fold", "structure_params",
     "structure_width", "rel_spread",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",

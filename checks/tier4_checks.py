@@ -349,6 +349,81 @@ def check_totality() -> str:
     )
 
 
+@check("interval", description="the 80% band is ordered, in support, and causal")
+def check_interval() -> str:
+    """The band's own properties, on the real table.
+
+    The interval is a second thing that can leak. It is built from held-out
+    errors, and errors the model had not yet made would widen or narrow it with
+    hindsight — invisible to every check on the point forecast.
+    """
+    frame = table()
+    banded = frame.dropna(subset=["pred_abs_move_p10", "pred_abs_move_p90"])
+    _require(len(banded) > 0, "no row carries an interval")
+
+    _require(
+        bool((banded["pred_abs_move_p10"] <= banded["pred_abs_move_p90"]).all()),
+        "an interval is inverted",
+    )
+    _require(bool((banded["pred_abs_move_p10"] >= 0).all()), "an interval reaches below zero")
+    negative = int((frame["pred_abs_move"].dropna() < 0).sum())
+    _require(
+        negative == 0,
+        f"{negative:,} forecasts are negative — a predicted MAGNITUDE below zero "
+        "means the model is being served outside its support",
+    )
+    _require(
+        bool((banded["pred_abs_move_p10"] <= banded["pred_abs_move"]).all()),
+        "a forecast sits below its own p10",
+    )
+    _require(
+        bool((banded["pred_abs_move"] <= banded["pred_abs_move_p90"]).all()),
+        "a forecast sits above its own p90",
+    )
+
+    sd = frame["pred_abs_move_sd"].dropna()
+    _require(bool((sd > 0).all()), "a residual SD is non-positive")
+    _require(
+        bool(frame.loc[sd.index, "resid_n"].notna().all()),
+        "a band does not say how many errors it came from",
+    )
+    _require(
+        bool((frame["resid_n"].dropna() >= tier4.MIN_RESIDUALS).all()),
+        f"a band was built from fewer than {tier4.MIN_RESIDUALS} residuals",
+    )
+
+    # Causality: reproduce one fold's band from the residuals of everything
+    # strictly before it, and nothing else.
+    model = tier4.size_feature_model()
+    _, trainable = tier4.training_frames(panel(), model)
+    realized = trainable.set_index(["ticker", "date"])[model.target]
+    scored = frame[frame["pred_abs_move"].notna()]
+    fold = scored.loc[scored["pred_abs_move_sd"].notna(), "fold_start"].min()
+
+    earlier = scored[scored["fold_start"] < fold]
+    keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
+    truth = realized.reindex(keys).to_numpy(dtype=float)
+    made = earlier["pred_abs_move"].to_numpy(dtype=float)
+    ok = np.isfinite(truth) & np.isfinite(made)
+    rows = scored[scored["fold_start"] == fold]
+    p10, p90, spread, n = tier4.interval_for(
+        rows["pred_abs_move"].to_numpy(dtype=float), made[ok], (truth - made)[ok]
+    )
+    _require(
+        np.allclose(p10, rows["pred_abs_move_p10"].to_numpy(dtype=float))
+        and np.allclose(p90, rows["pred_abs_move_p90"].to_numpy(dtype=float))
+        and np.allclose(spread, rows["pred_abs_move_sd"].to_numpy(dtype=float)),
+        f"fold {pd.Timestamp(fold).date()}'s band does not reproduce from the "
+        "residuals of earlier folds alone",
+    )
+    width = (banded["pred_abs_move_p90"] - banded["pred_abs_move_p10"]).median()
+    return (
+        f"{len(banded):,} banded, median width {width:.2f}pp, "
+        f"median SD {sd.median():.2f}pp, pools {int(frame['resid_n'].min()):,}"
+        f"-{int(frame['resid_n'].max()):,}"
+    )
+
+
 @check("registry_graph", description="one champion produces the forecast, and it is the one used")
 def check_registry_graph() -> str:
     from engine.models.registry import load_registry
@@ -429,6 +504,7 @@ def check_sizing() -> str:
 
 ORDER = [
     "totality",
+    "interval",
     "registry_graph",
     "read_join",
     "sizing",

@@ -57,7 +57,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -117,6 +117,10 @@ COLUMNS = (
     "ticker",
     "event_date",
     "pred_abs_move",
+    "pred_abs_move_p10",
+    "pred_abs_move_p90",
+    "pred_abs_move_sd",
+    "resid_n",
     "model_id",
     "fold_start",
     "tier3_snapshot",
@@ -126,7 +130,17 @@ COLUMNS = (
 #: these as NULL must decline to size a structure rather than sizing it at zero;
 #: the TWIN-P entry filters already drop such rows, but that is a property to
 #: state rather than to inherit by luck.
-FORECAST_COLUMNS = ("pred_abs_move",)
+FORECAST_COLUMNS = (
+    "pred_abs_move",
+    "pred_abs_move_p10",
+    "pred_abs_move_p90",
+    "pred_abs_move_sd",
+)
+
+#: Flat-pool floor: fewer held-out residuals than this and the row carries no
+#: interval at all. An 80% band from 40 errors is not a distribution, and a
+#: number that looks like a confidence interval is read as one.
+MIN_RESIDUALS = 250
 
 
 # --------------------------------------------------------------------------
@@ -262,6 +276,96 @@ def training_frames(panel: pd.DataFrame, model: FeatureModel):
 
 
 # --------------------------------------------------------------------------
+# uncertainty
+# --------------------------------------------------------------------------
+
+
+def _pool_stats(residuals: np.ndarray) -> tuple[float, float, float, int]:
+    """``(q10, q90, sd, n)`` of a residual pool."""
+    clean = residuals[np.isfinite(residuals)]
+    if clean.size < MIN_RESIDUALS:
+        return float("nan"), float("nan"), float("nan"), int(clean.size)
+    return (
+        float(np.quantile(clean, 0.10)),
+        float(np.quantile(clean, 0.90)),
+        float(clean.std(ddof=1)),
+        int(clean.size),
+    )
+
+
+def interval_for(
+    predictions: np.ndarray, pool_pred: np.ndarray, pool_res: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """80% band and residual SD for ``predictions``, from a held-out pool.
+
+    Residuals are signed ``y_true − y_pred``, so a draw ADDS to a prediction to
+    make a plausible realization — the convention ``WalkForwardResult.residuals``
+    established and the scorer already relies on.
+
+    Conditioned on where the prediction falls, via
+    :func:`engine.models.registry.bucket_residuals` — the same decile machinery
+    EXP-115 promoted, reused rather than reimplemented. A big forecast and a
+    small one have differently-shaped errors, and one pool for both understates
+    the band at the top of the range and overstates it at the bottom. A bucket
+    thinner than its floor falls back to the flat pool, so conditioning can only
+    refine the estimate and never leave a sparse region with a pool too thin to
+    be a distribution.
+
+    BOTH bounds are floored at zero. The target is a MAGNITUDE, so an interval
+    reaching below zero is reporting an outcome that cannot occur, and on real
+    data the lower bound would cross often — the champion's MAE is ~3.9pp
+    against a median forecast near 5pp.
+
+    Flooring only the lower bound was the first version and it was wrong: a
+    prediction far enough below zero puts ``p90`` under the floor while ``p10``
+    sits on it, and the band comes out INVERTED. Clipping both keeps
+    ``p10 <= p90`` unconditionally, and a degenerate ``[0, 0]`` is a visible
+    signal that the point estimate itself left the support rather than a
+    plausible-looking interval hiding it. (No real forecast has: 0 of 85,618,
+    minimum +0.39. The fixture's linear target can, which is how this surfaced.)
+    """
+    predictions = np.asarray(predictions, dtype=float)
+    p10 = np.full(predictions.shape, np.nan)
+    p90 = np.full(predictions.shape, np.nan)
+    sd = np.full(predictions.shape, np.nan)
+    n = np.full(predictions.shape, np.nan)
+
+    flat = np.asarray(pool_res, dtype=float)
+    flat_stats = _pool_stats(flat)
+    if flat_stats[3] < MIN_RESIDUALS:
+        return p10, p90, sd, n
+
+    buckets = registry_mod.bucket_residuals(pool_pred, pool_res)
+    if buckets is None:
+        q10, q90, spread, count = flat_stats
+        known = np.isfinite(predictions)
+        p10[known] = np.maximum(predictions[known] + q10, 0.0)
+        p90[known] = np.maximum(predictions[known] + q90, 0.0)
+        sd[known] = spread
+        n[known] = count
+        return p10, p90, sd, n
+
+    edges, pools = buckets["edges"], buckets["pools"]
+    floor = int(buckets.get("min_pool", 0))
+    # Ten buckets, so the stats are computed once each rather than per row.
+    stats = [
+        _pool_stats(pool) if pool.size >= floor else flat_stats for pool in pools
+    ]
+    index = np.clip(
+        np.searchsorted(edges, predictions, side="right") - 1, 0, len(pools) - 1
+    )
+    for i, (q10, q90, spread, count) in enumerate(stats):
+        rows = np.isfinite(predictions) & (index == i)
+        if not rows.any():
+            continue
+        p10[rows] = np.maximum(predictions[rows] + q10, 0.0)
+        p90[rows] = np.maximum(predictions[rows] + q90, 0.0)
+        sd[rows] = spread
+        n[rows] = count
+    return p10, p90, sd, n
+
+
+# --------------------------------------------------------------------------
 # the build
 # --------------------------------------------------------------------------
 
@@ -298,7 +402,9 @@ def normalize(frame: pd.DataFrame) -> pd.DataFrame:
     # the --since equivalence assertion fail on a table that is in fact correct.
     out["ticker"] = out["ticker"].astype("string")
     out["event_date"] = pd.to_datetime(out["event_date"]).astype("datetime64[us]")
-    out["pred_abs_move"] = pd.to_numeric(out["pred_abs_move"], errors="coerce").astype(float)
+    for column in ("pred_abs_move", *FORECAST_COLUMNS[1:]):
+        out[column] = pd.to_numeric(out[column], errors="coerce").astype(float)
+    out["resid_n"] = pd.to_numeric(out["resid_n"], errors="coerce").astype("Int64")
     out["model_id"] = out["model_id"].astype("string")
     out["fold_start"] = pd.to_datetime(out["fold_start"]).astype("datetime64[us]")
     out["tier3_snapshot"] = out["tier3_snapshot"].astype("string")
@@ -353,6 +459,26 @@ def _carried_prefix(existing: pd.DataFrame, keys: pd.DataFrame, cut: pd.Timestam
     return merged.drop(columns=["_merge"])
 
 
+def _seed_residuals(carried: pd.DataFrame, realized: pd.Series):
+    """``(predictions, residuals)`` from an already-built prefix, in fold order.
+
+    A full build starts these empty and grows them; a ``--since`` build starts
+    from the rows it carried over. Both reach the same pool at the first
+    recomputed fold, which is what the equivalence test asserts.
+    """
+    empty = (np.empty(0, dtype=float), np.empty(0, dtype=float))
+    if carried.empty:
+        return empty
+    scored = carried.dropna(subset=["pred_abs_move"])
+    if scored.empty:
+        return empty
+    keys = pd.MultiIndex.from_arrays([scored["ticker"], scored["event_date"]])
+    truth = realized.reindex(keys).to_numpy(dtype=float)
+    made = scored["pred_abs_move"].to_numpy(dtype=float)
+    usable = np.isfinite(truth) & np.isfinite(made)
+    return made[usable], (truth - made)[usable]
+
+
 def build_forecasts(
     panel: pd.DataFrame,
     *,
@@ -398,6 +524,21 @@ def build_forecasts(
 
     predictions = pd.Series(np.nan, index=scorable.index, dtype=float)
     fitted_for = pd.Series(pd.NaT, index=scorable.index, dtype="datetime64[us]")
+    band = {c: pd.Series(np.nan, index=scorable.index, dtype=float)
+            for c in ("p10", "p90", "sd", "n")}
+
+    # The held-out residual pool, grown fold by fold. At fold F it holds the
+    # errors of every EARLIER fold and nothing else, so the interval carries the
+    # same causality as the point forecast — an 80% band computed from the
+    # errors a model had not yet made would be exactly the leak `fold_start`
+    # exists to prevent, wearing a different hat.
+    #
+    # A --since build seeds it from the carried prefix, whose stored forecasts
+    # ARE the earlier folds' predictions. That is what keeps the incremental
+    # path equivalent to a full one here too.
+    realized = trainable.set_index(["ticker", "date"])[model.target]
+    pool_pred, pool_res = _seed_residuals(carried, realized)
+
     skipped = 0
     for fold in folds:
         stamp = pd.Timestamp(fold)
@@ -407,13 +548,30 @@ def build_forecasts(
             skipped += 1
             continue
         estimator = fit_fold(trainable, model, stamp)
-        predictions.loc[test] = np.asarray(
+        made = np.asarray(
             estimator.predict(_matrix(scorable.loc[test], model.features)), dtype=float
         ).ravel()
+        predictions.loc[test] = made
         fitted_for.loc[test] = stamp
+
+        p10, p90, sd, n = interval_for(made, pool_pred, pool_res)
+        for key, values in (("p10", p10), ("p90", p90), ("sd", sd), ("n", n)):
+            band[key].loc[test] = values
+
+        # Only now does this fold join the pool, and only where the event has
+        # actually printed — an unrealized event has no error to contribute.
+        priced_keys = pd.MultiIndex.from_arrays(
+            [scorable.loc[test, "ticker"], scorable.loc[test, "date"]]
+        )
+        truth = realized.reindex(priced_keys).to_numpy(dtype=float)
+        usable = np.isfinite(truth) & np.isfinite(made)
+        if usable.any():
+            pool_pred = np.concatenate([pool_pred, made[usable]])
+            pool_res = np.concatenate([pool_res, truth[usable] - made[usable]])
+
         log(
-            f"fold {stamp.date()}: train {n_train:,} → {len(test):,} forecast(s) "
-            f"[{time.time() - started:.0f}s]"
+            f"fold {stamp.date()}: train {n_train:,} → {len(test):,} forecast(s), "
+            f"residual pool {pool_res.size:,} [{time.time() - started:.0f}s]"
         )
     if skipped:
         log(f"{skipped} fold(s) skipped for a training pool under {MIN_TRAIN_ROWS:,}")
@@ -423,6 +581,10 @@ def build_forecasts(
             "ticker": scorable["ticker"].to_numpy(),
             "event_date": pd.to_datetime(scorable["date"]).astype("datetime64[us]").to_numpy(),
             "pred_abs_move": predictions.to_numpy(),
+            "pred_abs_move_p10": band["p10"].to_numpy(),
+            "pred_abs_move_p90": band["p90"].to_numpy(),
+            "pred_abs_move_sd": band["sd"].to_numpy(),
+            "resid_n": band["n"].to_numpy(),
             "fold_start": fitted_for.to_numpy(),
         }
     )
@@ -557,6 +719,13 @@ class ServingModel:
     fold_start: pd.Timestamp
     tier3_snapshot: str
     features: tuple[str, ...]
+    #: The held-out ``(prediction, residual)`` pool for folds strictly before
+    #: this one — the same pool the build used for the same fold, read back
+    #: from the stored table rather than recomputed. Empty when Tier 4 has not
+    #: been built, in which case a live forecast comes with no band, which is
+    #: the correct answer rather than a fabricated one.
+    pool_pred: np.ndarray = field(default_factory=lambda: np.empty(0))
+    pool_res: np.ndarray = field(default_factory=lambda: np.empty(0))
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         """Forecasts for ``frame``, NaN wherever a feature is missing.
@@ -571,6 +740,15 @@ class ServingModel:
         if ok.any():
             out[ok] = np.asarray(self.estimator.predict(values[ok]), dtype=float).ravel()
         return out
+
+    def interval(self, predictions):
+        """``(p10, p90, sd, n)`` for ``predictions``, from this fold's own pool.
+
+        The same function and the same pool the build used, so a live band and
+        a stored one for the same event agree for the same reason their centres
+        do — one implementation, reached from both sides.
+        """
+        return interval_for(np.asarray(predictions, dtype=float), self.pool_pred, self.pool_res)
 
 
 def serving_fold(event_date, as_of) -> pd.Timestamp:
@@ -593,6 +771,33 @@ def serving_fold(event_date, as_of) -> pd.Timestamp:
 
 def _serving_path(model_id: str, fold: pd.Timestamp, snapshot: str) -> Path:
     return SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib"
+
+
+def _pool_before(fold, model: FeatureModel, panel: pd.DataFrame):
+    """The held-out ``(prediction, residual)`` pool for folds before ``fold``.
+
+    Read back from the STORED table rather than recomputed. That is the cheap
+    way and also the correct one: recomputing would mean re-predicting every
+    historical row, and any drift between that computation and the build's
+    would show up as a live band that disagrees with the recorded one for no
+    visible reason.
+    """
+    empty = (np.empty(0, dtype=float), np.empty(0, dtype=float))
+    stored = load_forecasts()
+    if stored is None:
+        return empty
+    earlier = stored[
+        stored["pred_abs_move"].notna() & (stored["fold_start"] < pd.Timestamp(fold))
+    ]
+    if earlier.empty:
+        return empty
+    _, trainable = training_frames(panel, model)
+    realized = trainable.set_index(["ticker", "date"])[model.target]
+    keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
+    truth = realized.reindex(keys).to_numpy(dtype=float)
+    made = earlier["pred_abs_move"].to_numpy(dtype=float)
+    ok = np.isfinite(truth) & np.isfinite(made)
+    return made[ok], (truth - made)[ok]
 
 
 def serving_model(
@@ -630,22 +835,30 @@ def serving_model(
             and stored.get("tier3_snapshot") == snapshot
             and tuple(stored.get("features", ())) == tuple(model.features)
         ):
+            pool_pred, pool_res = _pool_before(
+                fold, model, load_panel() if panel is None else panel
+            )
             return ServingModel(
                 estimator=stored["estimator"],
                 model_id=model.model_id,
                 fold_start=fold,
                 tier3_snapshot=snapshot,
                 features=tuple(model.features),
+                pool_pred=pool_pred,
+                pool_res=pool_res,
             )
 
     panel = load_panel() if panel is None else panel
     _, trainable = training_frames(panel, model)
+    pool_pred, pool_res = _pool_before(fold, model, panel)
     served = ServingModel(
         estimator=fit_fold(trainable, model, fold),
         model_id=model.model_id,
         fold_start=fold,
         tier3_snapshot=snapshot,
         features=tuple(model.features),
+        pool_pred=pool_pred,
+        pool_res=pool_res,
     )
     if cache:
         import joblib

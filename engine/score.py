@@ -317,6 +317,13 @@ class ScoreResult:
     # forecast sizing (Tier 4)
     #: The forecast that set this structure's shape, in percent of spot.
     forecast_abs_move: float | None = None
+    #: Its 80% band and the SD of the held-out errors behind it, from the SAME
+    #: fold model and the same residual pool the stored table used. A width
+    #: borrowed from a different fit than the centre would be two answers to
+    #: one question.
+    forecast_p10: float | None = None
+    forecast_p90: float | None = None
+    forecast_sd: float | None = None
     #: Which feature model produced it, and which fold's fit. A row sized by a
     #: forecast has to say which model sized it — otherwise a champion
     #: promotion silently changes what the board recommended and nothing
@@ -1380,6 +1387,13 @@ class Scorer:
         result.forecast_fold = served.fold_start
         if pd.notna(forecast):
             result.forecast_abs_move = forecast
+            p10, p90, sd, _ = served.interval([forecast])
+            # NaN when Tier 4 has not been built or the fold's pool is too thin.
+            # No band is the right answer there; a fabricated one is not.
+            if np.isfinite(sd[0]):
+                result.forecast_p10 = float(p10[0])
+                result.forecast_p90 = float(p90[0])
+                result.forecast_sd = float(sd[0])
         if params is None:
             result.flag("NO_FORECAST")
             result.detail = describe_sizing(request.strategy, None)

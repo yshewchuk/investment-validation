@@ -3,11 +3,13 @@
 **Version:** 1.0 · **Date:** 2026-09-04 · **Owner:** YS + Claude
 **Status:** built, all six steps. Table on disk (116,795 rows / 85,618
 forecasts / 164 folds), TWIN-P enabled on the live board behind an arithmetic
-entry rule. `python3 checks/tier4_checks.py` — 9/9 GREEN, 2026-09-04:
+entry rule. `python3 checks/tier4_checks.py` — 10/10 GREEN, 2026-09-04:
 causality and live/historical agreement both max |diff| 7.1e-15 over 200 rows,
 `--since` equivalence exactly 0, a full-sample refit diverges by 1.75pp (so the
 leak test can see a leak), and the Tier-3 snapshot hash is byte-identical
-before and after Tier 4 exists.
+before and after Tier 4 exists — verified across a COMPLETE Tier-4 rebuild,
+which is the strongest form of that test available. Bands on 85,312 of 85,618
+forecasts, median width 10.51pp, median residual SD 4.64pp.
 **Objective:** make a model's forecast available as a feature — causally, and
 without making Tier 3 depend on a model.
 
@@ -74,9 +76,49 @@ Grain: one row per `(ticker, event_date)` — the same grain as Tier 3.
 |---|---|
 | `ticker`, `event_date` | join key into Tier 3 |
 | `pred_abs_move` | the forecast, in percent, walk-forward |
+| `pred_abs_move_p10` / `_p90` | the 80% band around it |
+| `pred_abs_move_sd` | SD of the held-out errors the band came from |
+| `resid_n` | how many held-out errors that was |
 | `model_id` | which registry entry produced it (`size_v1_4`) |
 | `fold_start` | first date of the period this row's model was fit BEFORE |
 | `tier3_snapshot` | the Tier-3 hash the training data came from |
+
+### The interval, and why it is stored rather than computed
+
+A point forecast without a width is half an answer, and the dashboard already
+shows an 80% band — but it draws that band from the *registry artifact's*
+residual pool, computed fresh at score time. That was fine while one model
+served everything. It is not fine now: with TWIN-P sized by a monthly fold
+model, the centre would come from one fit and the width from another.
+
+`bucket_residuals` says the prediction↔residual pairing is "only available at
+training time, because by the time an artifact is loaded the predictions are
+gone." **The Tier-4 build is exactly that moment** — it holds every fold's
+out-of-sample prediction next to the realized `abs_move`. So the band is
+computed there, from the same fold model that produced the centre, and stored.
+
+Three properties it inherits and one it adds:
+
+* **Same fold causality.** At fold `F` the pool holds the errors of every
+  EARLIER fold and nothing else. A band built from errors the model had not yet
+  made is the same leak `fold_start` exists to prevent, wearing a different hat
+  — and invisible to every check on the point forecast, which is why
+  `checks/tier4_checks.py::interval` reproduces a fold's band by hand.
+* **Same `--since` equivalence.** An incremental build seeds the pool from the
+  carried prefix, whose stored forecasts *are* the earlier folds' predictions.
+* **Conditioned, not flat.** Reuses EXP-115's decile buckets rather than
+  reimplementing them, so a large forecast gets a wider band than a small one;
+  a thin bucket falls back to the flat pool.
+* **Floored at zero — BOTH bounds.** The target is a magnitude. Flooring only
+  the lower bound was the first version and it inverts the band whenever the
+  point estimate itself sits below zero. No real forecast does (0 of 85,618,
+  minimum +0.39), but the synthetic fixture's linear target can, which is how
+  it surfaced — and an inverted interval on the board would have been read as
+  data corruption rather than as a clipping artefact.
+
+Below `MIN_RESIDUALS` held-out errors there is no band at all. An 80% interval
+from forty errors is not a distribution, and a number shaped like a confidence
+interval is read as one.
 
 `model_id` and `fold_start` are not decoration. **A partially rebuilt Tier 4
 must be distinguishable from a complete one**, and a row that cannot say which
@@ -255,6 +297,9 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   identical. If Tier 4 can move Tier 3's hash, the layering has failed.
 - **NULL is not zero.** A consumer given a row with no forecast declines to
   size a structure rather than sizing it at zero.
+- **The band is ordered, in support, and causal.** `p10 <= p90`, both at or
+  above zero, and one fold's band reproduces from the residuals of earlier
+  folds alone.
 
 ## 10a. First live board, 2026-09-04
 
