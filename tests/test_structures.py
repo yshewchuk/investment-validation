@@ -843,3 +843,24 @@ class TestTwinPeak:
             spot=101.0, session="AMC")
         with pytest.raises(StructureError):
             price_structure(twin_peak(steps=1, anchor_offset=50), snap, MID)
+
+    def test_width_moneyness_sizes_the_tent_to_a_target_share_of_spot(self, condor_snapshot):
+        """The per-event sizing path: place the plateau on a FORECAST move
+        rather than on wherever the ticker's listing convention falls."""
+        narrow = _twin_strikes(price_structure(
+            twin_peak(width_moneyness=0.025), condor_snapshot, MID))
+        wide = _twin_strikes(price_structure(
+            twin_peak(width_moneyness=0.05), condor_snapshot, MID))
+        assert (wide["up1"] - wide["atm"]) > (narrow["up1"] - narrow["atm"])
+        for k in (narrow, wide):                       # symmetry survives both
+            a, w = k["atm"], k["up1"] - k["atm"]
+            assert k["dn4"] == pytest.approx(a - 4 * w)
+            assert k["up4"] == pytest.approx(a + 4 * w)
+
+    def test_a_sized_tent_the_ladder_cannot_carry_is_refused(self, condor_snapshot):
+        with pytest.raises(StructureError, match="not listed"):
+            price_structure(twin_peak(width_moneyness=0.10), condor_snapshot, MID)
+
+    def test_width_moneyness_must_be_positive(self):
+        with pytest.raises(ValueError, match="width_moneyness must be positive"):
+            twin_peak(width_moneyness=0.0)

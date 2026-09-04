@@ -951,6 +951,7 @@ def put_condor(
 def twin_peak(
     steps: int = 1,
     anchor_offset: int = 0,
+    width_moneyness: float | None = None,
     entry_offset: int = 0,
     exit_offset: int = 1,
     decision_offset: int | None = None,
@@ -994,6 +995,8 @@ def twin_peak(
     """
     if int(steps) < 1:
         raise ValueError(f"steps must be a positive integer, got {steps!r}")
+    if width_moneyness is not None and not width_moneyness > 0:
+        raise ValueError(f"width_moneyness must be positive, got {width_moneyness!r}")
     expiry = ExpirySelector(kind="first_post_event")
     # anchor_offset shifts the WHOLE structure along the ladder. The mirror
     # symmetry is untouched, so the tails still cancel to exactly zero — only
@@ -1012,8 +1015,19 @@ def twin_peak(
         ),
         legs=(
             LegSpec("atm", PUT, BUY, expiry, atm, qty=2.0),
+            # `w` comes either from the ticker's own granularity (`steps`
+            # positions along its ladder) or from a target share of spot
+            # (`width_moneyness`), snapped to whatever that ladder lists. The
+            # second exists so the tent can be sized per event — placing the
+            # plateau on a FORECAST move rather than on wherever the listing
+            # convention happens to fall. Either way the remaining six strikes
+            # are exact mirror arithmetic and must be listed, so the symmetry
+            # that cancels the tails survives both.
             LegSpec("up1", PUT, SELL, expiry,
-                    StrikeSelector("grid_step", ref="atm", steps=int(steps))),
+                    StrikeSelector("offset_from", ref="atm",
+                                   moneyness=float(width_moneyness))
+                    if width_moneyness is not None
+                    else StrikeSelector("grid_step", ref="atm", steps=int(steps))),
             LegSpec("up2", PUT, SELL, expiry,
                     StrikeSelector("mirror", ref="atm", about="up1")),
             LegSpec("up4", PUT, BUY, expiry,
@@ -1028,7 +1042,8 @@ def twin_peak(
         entry_offset=entry_offset,
         exit_offset=exit_offset,
         decision_offset=decision_offset,
-        params={"steps": int(steps), "anchor_offset": int(anchor_offset)},
+        params={"steps": int(steps), "anchor_offset": int(anchor_offset),
+                "width_moneyness": width_moneyness},
     )
 
 

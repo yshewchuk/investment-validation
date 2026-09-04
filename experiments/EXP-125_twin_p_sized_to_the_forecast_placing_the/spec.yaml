@@ -1,0 +1,127 @@
+id: EXP-125
+title: "TWIN-P sized to the forecast: placing the plateau where the move is predicted to land"
+kind: strategy-validation
+strategy: TWIN-P
+programme: structure-validation
+prior: [EXP-121, EXP-122, EXP-123, EXP-124]
+type: confirmatory
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+hypothesis: >
+  Every TWIN-P variant so far has sized its tent from the ticker's strike
+  granularity, which is set by share price and listing convention and has
+  nothing to do with how far the name moves on earnings. Sizing per event so
+  the plateau sits on the PREDICTED move places maximum payoff on the modal
+  outcome for that specific name.
+
+  This can only work if the sizing signal beats the market's own forecast -
+  otherwise better geometry is simply priced away, and the market charges more
+  for a structure more likely to pay. It does beat it, measured before
+  registration on identical rows.
+
+  Falsified if the sized variant does not beat BOTH the fixed-width primary
+  (+5.47%, EXP-124 offset +1) AND the registered implied-sized control, or if
+  it beats them while failing breakeven alpha <= 0.45. Beating a fixed grid is
+  not the claim; beating the market's own sizing is.
+
+known_before_registration:
+  the_forecast_beats_the_market: >
+    size_v1_4 walk-forward OOS against both vendors on the SAME 85,616 events:
+    MAE 3.796pp (model) against 4.637 (oquants) and 5.758 (ORATS); correlation
+    0.462 against 0.315 and 0.319; bias -0.239 against +1.505 and +3.122. The
+    model wins in all 14 years without exception. Bias-correcting oquants by
+    x0.634 narrows it to 3.981 but does not close it. One honest wrinkle: the
+    scaled vendor has a BETTER median absolute error (2.450 against 2.627) -
+    the model wins on the mean, i.e. in the tails, and loses in the middle.
+    For this structure the tails are what kill, so it cuts the right way, but
+    it is recorded rather than glossed.
+  geometry_improves_but_gets_priced: >
+    On 12,462 resolvable events, sizing to the implied move cuts the share
+    landing beyond +/-4w from 7.3% to 1.9% and lifts the share inside +/-2w
+    from 77.4% to 84.6%. Sizing to the REALIZED move (oracle) gives 0.0% and
+    96.6%. But a structure that nearly always pays prices at nearly its 2w
+    maximum, so geometry alone is not edge - which is why the implied-sized
+    control is registered here as the thing to beat, not the fixed grid.
+  what_the_cheapness_filter_actually_selects: >
+    c < w does not select cheap structures on quiet names. It selects
+    structures TINY relative to the stock: median w of 1.08% of spot against
+    4.96% for the rest, a 4.6x difference. That is why 39.6% of the traded set
+    blows past a wing while only 7.3% of the resolvable universe does. Holding
+    mcap and spread fixed, the cheap set returns +2.61% with 39.6% dead and the
+    not-cheap set -1.72% with 9.4% dead: great reward:risk with a terrible hit
+    rate against the reverse. Both regimes lose, which is the market pricing
+    the trade-off correctly.
+  where_the_fixed_width_variants_landed: >
+    EXP-123 offset 0: +2.61%/trade, breakeven alpha 0.4887, 1,147 events.
+    EXP-124 offset +1: +5.47%, 0.4785, 925 events - the measured optimum.
+    Offset +2: +1.32%, 0.4948, 774 events. Total dead mass across the three:
+    39.6% / 37.5% / 37.3% - shifting RELOCATES the dead zone and never shrinks
+    it. All three fail the 0.45 breakeven bar and none reaches 70% of years.
+
+definition:
+  structure: >
+    TWIN-P with width_moneyness set per event to pred_abs_move / 150, so the
+    plateau centre (1.5w) lands on the predicted move, snapped to the ticker's
+    own listed ladder. The remaining six strikes stay exact mirror arithmetic
+    and must be listed, so the symmetry that cancels the tails is unchanged.
+  predictions: >
+    size_v1_4 WALK-FORWARD OUT-OF-SAMPLE predictions only, cached at
+    data/models/size_v1_4_oos_predictions.parquet (85,616 rows, 2013-2026,
+    fit on years < Y for each test year Y). Using the final refit model would
+    place every strike with hindsight and make the whole result meaningless.
+  registered_control: >
+    The identical rule sized by IMPLIED move instead of predicted -
+    width_moneyness = implied_move / 150. Model-free, no leakage, and it is the
+    real benchmark: if it does as well, the size model adds nothing and the
+    finding is "size to something", not "the forecast works".
+  entry_filters:
+    # Unchanged from EXP-123/124 so the comparison is like for like.
+    - "all seven strikes listed at exactly A, A+/-w, A+/-2w, A+/-4w"
+    - "net debit c < w, decided ONCE on mid quotes"
+    - "mean relative bid-ask spread across the eight legs <= 25%"
+    - "market cap >= $10B"
+  the_risk_this_run_measures: >
+    c < w re-selects. It pinned |move| to ~3.14w whatever fixed width was
+    chosen, and it may simply undo per-event sizing the same way. The report
+    must show WHERE THE PRINTS LANDED, not only the mean, or a null result
+    cannot be told apart from the filter eating the treatment.
+
+primary_spec:
+  universe: ">= $10B, all four entry filters, 2018-2026"
+  structure: "TWIN-P width_moneyness = pred_abs_move/150 per event, e+0 x+1"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+  acceptance:
+    beats_fixed_width: "mid-fill mean above EXP-124 offset +1's +5.47%"
+    beats_implied_control: "mid-fill mean above the implied-sized arm"
+    breakeven_alpha: "<= 0.45, the bar every fixed-width variant failed"
+    consistency: "positive mid-fill mean in >= 70% of out-of-sample years"
+    universe_floor: ">= 400 events, or reported as too thin to carry"
+
+grid:
+  # Both arms run; the implied arm is the registered control, not a cell whose
+  # result can be promoted if it happens to win.
+  sizing: [predicted, implied]
+
+required_outputs:
+  - "mid-fill mean against +5.47% (fixed width) AND against the implied-sized control"
+  - "breakeven alpha against the 0.45 bar"
+  - "WHERE THE PRINTS LANDED — the tent-position table, both arms, against the fixed-width 39.6% dead"
+  - "realized w as a share of spot, both arms, against fixed width's 1.08%"
+  - "entry-rule funnel per arm — what per-event sizing costs in universe size"
+  - "per-year table with n"
+  - "defined-risk falsification: any trade losing more than its debit"
+  - "tail injection on |move| (mandatory, has_short_leg=true)"
+
+data_snapshot: 0f01d8d79a6315b96cece8cf793252d5f63650957422b03318467d6328f67b5a
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-04T03:19:09+00:00"
