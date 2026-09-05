@@ -1,0 +1,164 @@
+id: EXP-128
+title: "What survives the print: a walk-forward model for the earnings IV crush"
+kind: feature-model-validation
+strategy: "*"
+programme: tier4-feature-models
+prior: [EXP-040, EXP-043, EXP-109, EXP-115, EXP-116]
+type: confirmatory
+price_source: "Tier-2 daily_market (ORATS iv30 / iv10 / exern_iv30), no chains"
+
+hypothesis: >
+  Implied vol collapses after an earnings print, and how far it collapses is
+  predictable from state observable at the last pre-print close. A walk-forward
+  model of the crush beats every model-free baseline available at that close on
+  BOTH mean absolute error and root mean squared error, and does so in at least
+  70% of out-of-sample years.
+
+  Falsified if it fails either error measure against the best baseline, or if
+  the win is not consistent across years, or if its 80% interval does not cover
+  between 78% and 82% of held-out outcomes. A model that beats a constant only
+  on average, or only because one regime dominates, is not a feature the board
+  can size anything from.
+
+known_before_registration:
+  the_target_exists_and_is_well_covered: >
+    Measured from Tier 2 before this spec was written. For each event, the last
+    pre-print close is the session before a BMO print and the print's own
+    session for AMC; the post-print close is the next session after that.
+    145,798 events across the whole history carry both an iv30 reading and a
+    gap of at most 5 calendar days between them. Restricted to 2013+, the
+    window Tier 4 covers, that is 118,303 of 119,658 events - 98.9%. Coverage
+    is not the constraint here, which is unusual for this programme and is why
+    the experiment is worth running before the column is designed around it.
+  the_crush_is_large_real_and_stable_across_regimes: >
+    On the 2013+ pairs: iv30 falls at 83.2% of prints, median -13.68%, mean
+    -11.85%, sd 38.4pp. iv10 falls harder - median -18.45%. The median yearly
+    crush ranges -10.2% (2016) to -19.9% (2019) across fourteen years with no
+    trend and no regime where it disappears. This is not a marginal effect
+    being fished for; it is a large one whose SIZE is the open question.
+  a_free_structural_baseline_already_exists_and_it_is_strong: >
+    ORATS publishes exern_iv30 - the ex-earnings 30-day implied vol - at the
+    same pre-print close. It is, by construction, an estimate of what iv30
+    becomes once the earnings component is removed, which is exactly what the
+    print does. Measured as a predictor of the realized crush ratio on the
+    2013+ pairs (n=117,512): r 0.670, RMSE 28.88pp, MAE 15.13pp, bias -4.61pp.
+    It over-predicts the crush: the median ratio of post-print iv30 to
+    pre-print exern_iv30 is 1.018, so the print leaves slightly MORE vol
+    standing than stripping the earnings term implies.
+  the_baselines_disagree_about_which_is_best_and_that_shapes_acceptance: >
+    Against the same 117,512 rows, a constant equal to the full-sample median
+    crush scores MAE 14.29pp / RMSE 38.44pp / r 0.000, and the structural
+    baseline scores MAE 15.13pp / RMSE 28.88pp / r 0.670. Each wins one measure
+    and loses the other: the structural anchor gets the tails right and the
+    middle wrong, the constant the reverse. A 50/50 blend of the two beats both
+    on MAE (13.73pp) while keeping most of the correlation. So "beat the
+    baseline" is ambiguous unless the baseline is named per measure, and this
+    spec names it as THE BEST OF THE THREE ON EACH MEASURE SEPARATELY.
+    Registering a single baseline would let the model win by picking its
+    opponent after the fact - the same defect EXP-126 found in mean-per-trade.
+  what_the_program_already_learned_about_promotion_measures: >
+    Mean per trade was removed from promote.decide on 2026-09-04 because a
+    chooser arm reported +0.49% mean while losing 0.5% a year. The analogue
+    here is average error: a model can win MAE by shrinking toward the median
+    and never predicting a large crush at all, which is precisely the case a
+    consumer needs it for. Hence BOTH error measures, plus per-year
+    consistency, plus interval calibration - and hence the decile-spread
+    requirement below, which a shrunken model cannot satisfy.
+
+definition:
+  target: >
+    crush_pct = 100 * (post_iv30 / pre_iv30 - 1), where pre_iv30 is ORATS iv30
+    at the last pre-print close for the event's session and post_iv30 is iv30
+    at the next session. Rows with a gap over 5 calendar days, a non-finite
+    reading, or pre_iv30 <= 0 are dropped rather than imputed - a missing
+    quote is not a zero crush.
+    The RATIO rather than the level, because that is what the Tier-4 column
+    means and what a consumer subtracts. The level is recoverable from it
+    exactly: pre_iv30 is known at the decision close, so predicting one is
+    predicting the other, and the parameterisation is a choice about the
+    model's inductive bias and about what its band is a band AROUND.
+  features: >
+    The Tier-3 panel row for the event, which is anchored at the last pre-print
+    close - the same anchor the target's pre-print leg is read at. That is the
+    event-history block, the regime block, the ORATS market-state block and
+    mcap_log. exern_iv30 (panel column or_exern30) is IN the feature set: the
+    structural baseline should be available to the model, so that beating it
+    means adding something to it rather than rediscovering it.
+    or_exern_z252 is excluded - it is quarantined (engine.features).
+  causality: >
+    Fold-based, exactly as Tier 4 defines it: for a row in period P the model
+    is fit on events with date < P.start, monthly cadence, no full-sample refit
+    anywhere in the pipeline. The target is realized AFTER the print, so it
+    cannot leak into the panel; the risk here is entirely in the training set,
+    which is what fold_start exists to make auditable.
+  the_risks_this_run_measures:
+    the_anchor_may_be_the_whole_signal: >
+      If the model's advantage over the structural baseline vanishes when
+      or_exern30 is dropped from the feature set, then what has been built is a
+      recalibration of an ORATS column, not a model. That is a legitimate and
+      useful thing to have - but it should be SHIPPED as that, cheaply, rather
+      than as a fourteen-feature champion. The ablation arm is mandatory.
+    shrinkage_masquerading_as_accuracy: >
+      A model that predicts the median everywhere scores well on MAE and is
+      useless. Decile spread on the held-out set is the guard: the realized
+      crush in the top predicted decile must differ from the bottom by more
+      than the structural baseline achieves.
+    iv10_is_the_horizon_that_matters_and_the_noisier_one: >
+      TWIN-P5 and STR-THRU both hold a first-post-event expiry, which is days
+      away, so iv10 describes their residual value better than iv30 does. It
+      also crushes harder and is noisier. It runs as a grid arm rather than the
+      primary so the headline is not chosen after seeing which horizon won.
+
+primary_spec:
+  universe: "every Tier-3 event 2013-2026 with a usable (pre, post) iv30 pair"
+  target: crush_pct_iv30
+  model: "HistGradientBoostingRegressor, the implied_t1 architecture, seed 20260829"
+  folds: "monthly, fit on < fold_start, engine.data.features.tier4.fit_fold"
+  interval: "80% band from held-out residuals, EXP-115 decile buckets, >= 250 errors"
+  acceptance:
+    beats_every_baseline_on_both_measures: >
+      walk-forward OOS MAE below 13.73pp AND RMSE below 28.88pp - the best of
+      {constant median, structural exern/iv, 50/50 blend} on each measure
+      separately, recomputed on the same rows the model is scored on
+    consistent: "lower MAE than the best baseline in >= 70% of OOS years"
+    not_shrunken: "held-out top-vs-bottom predicted-decile spread > 20pp"
+    calibrated: "the 80% interval covers 78-82% of held-out outcomes"
+    coverage_floor: ">= 80,000 scored rows, or reported as too thin to carry"
+
+grid:
+  arm:
+    - iv10            # same model, crush_pct_iv10 as the target
+    - no_exern        # or_exern30 dropped: is the anchor the whole signal?
+    - level           # predict post_iv30 directly instead of the ratio
+    - linear          # OLS on the same features: is the GBM earning its keep?
+
+required_outputs:
+  - "MAE and RMSE against all three baselines, on identical rows"
+  - "per-year MAE for model and best baseline, with n"
+  - "held-out decile table: predicted crush vs realized crush"
+  - "interval coverage, overall and by predicted decile"
+  - "the no_exern ablation against the primary - stated as a number, not a note"
+  - "coverage: rows scored / rows in the Tier-3 universe, and why the rest were dropped"
+  - "residual distribution by market-cap decile and by pre-print iv30 decile"
+
+what_shipping_this_would_require: >
+  Recorded here because it is known NOW and would otherwise be discovered by
+  whoever wires the column. A Tier-4 producer for this target cannot reuse the
+  size model's interval settings: interval_for floors BOTH band bounds, and the
+  crush is negative at 83% of prints, so a floored band would be [0, 0] on the
+  large majority of rows. That is not an inverted interval, so no existing
+  check would object to it. The producer must declare interval_floor=None -
+  the parameter exists as of 2026-09-05 and is pinned by
+  tests/test_tier4.py::test_a_signed_target_keeps_its_negative_band.
+  Nothing is added to tier4.PRODUCES until this experiment names a champion; an
+  all-NULL column group would be a claim the board has a crush forecast.
+
+data_snapshot: ed1d7e6e628fb57bd7f7077dac26616384a5eaf80bc0e88f843f4c429a77eda5
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+promotion_target: "tier4 producer pred_iv_crush_30"
+api_calls_budget: 0
+preregistered_at: "2026-09-05T01:48:39+00:00"

@@ -92,7 +92,16 @@ def table() -> pd.DataFrame:
 
 
 def _sample(n: int = SAMPLE) -> pd.DataFrame:
-    scored = table().dropna(subset=["pred_abs_move"])
+    """Rows carrying at least one producer's forecast.
+
+    Not "rows with a ``pred_abs_move``": the producers do not cover the same
+    events — 2,131 rows carry an implied-move forecast and no size forecast —
+    so keying the sample on one column would leave the other's thinnest region
+    permanently unsampled. Each caller drops the rows its own column is NULL on.
+    """
+    frame = table()
+    have = frame[list(tier4.PRODUCES)].notna().any(axis=1)
+    scored = frame[have]
     rng = np.random.default_rng(20260904)
     idx = rng.choice(len(scored), size=min(n, len(scored)), replace=False)
     return scored.iloc[idx]
@@ -112,37 +121,52 @@ def check_causality() -> str:
     model. This refits each sampled row's fold from scratch on events strictly
     before it and demands the stored number back.
     """
-    model = tier4.size_feature_model()
-    _, trainable = tier4.training_frames(panel(), model)
-    prepared = model.prepare(panel()).set_index(["ticker", "date"])
-
-    worst, checked = 0.0, 0
-    for fold, group in _sample().groupby("fold_start"):
-        estimator = tier4.fit_fold(trainable, model, fold)
-        keys = [(r.ticker, pd.Timestamp(r.event_date)) for r in group.itertuples(index=False)]
-        keys = [k for k in keys if k in prepared.index]
-        if not keys:
+    parts = []
+    for produces in tier4.PRODUCES:
+        model = tier4.feature_model(produces)
+        fold_col = tier4.column_group(produces)[6]
+        sample = _sample().dropna(subset=[produces])
+        if sample.empty:
+            parts.append(f"{produces}: NOT BUILT")
             continue
-        rows = prepared.loc[keys]
-        got = np.asarray(
-            estimator.predict(rows[list(model.features)].to_numpy(dtype=float)), dtype=float
-        ).ravel()
-        want = (
-            group.set_index(["ticker", "event_date"])
-            .loc[keys, "pred_abs_move"]
-            .to_numpy(dtype=float)
-        )
-        worst = max(worst, float(np.abs(got - want).max()))
-        checked += len(keys)
+        _, trainable = tier4.training_frames(panel(), model)
+        prepared = model.prepare(panel()).set_index(["ticker", "date"])
 
-    _require(checked > 0, "no sampled row could be reproduced — the sample is broken")
-    _require(
-        worst <= TOLERANCE,
-        f"a stored forecast does not reproduce from a fit on < fold_start "
-        f"(max |diff| {worst:.3e} over {checked} rows) — a Tier-4 row may have "
-        "been built from a model that saw its own period",
-    )
-    return f"{checked} rows, max |diff| {worst:.2e}"
+        worst, checked = 0.0, 0
+        for fold, group in sample.groupby(fold_col):
+            estimator = tier4.fit_fold(trainable, model, fold)
+            keys = [
+                (r.ticker, pd.Timestamp(r.event_date))
+                for r in group.itertuples(index=False)
+            ]
+            keys = [k for k in keys if k in prepared.index]
+            if not keys:
+                continue
+            rows = prepared.loc[keys]
+            got = np.asarray(
+                estimator.predict(rows[list(model.features)].to_numpy(dtype=float)),
+                dtype=float,
+            ).ravel()
+            want = (
+                group.set_index(["ticker", "event_date"])
+                .loc[keys, produces]
+                .to_numpy(dtype=float)
+            )
+            worst = max(worst, float(np.abs(got - want).max()))
+            checked += len(keys)
+
+        _require(
+            checked > 0,
+            f"{produces}: no sampled row could be reproduced — the sample is broken",
+        )
+        _require(
+            worst <= TOLERANCE,
+            f"{produces}: a stored forecast does not reproduce from a fit on < "
+            f"fold_start (max |diff| {worst:.3e} over {checked} rows) — a Tier-4 "
+            "row may have been built from a model that saw its own period",
+        )
+        parts.append(f"{produces}: {checked} rows, max |diff| {worst:.2e}")
+    return " · ".join(parts)
 
 
 @check("leak_is_detectable", description="a full-sample refit fails the causality check")
@@ -161,7 +185,11 @@ def check_leak_is_detectable() -> str:
         model.seed,
     )
     prepared = model.prepare(panel()).set_index(["ticker", "date"])
-    rows = _sample(400)
+    # Rows this producer actually scored. `_sample` returns rows carrying ANY
+    # producer's forecast, and `prepare` does not filter for completeness — so
+    # without this the size model's OLS half is handed a NaN feature row for an
+    # event only another producer could score.
+    rows = _sample(400).dropna(subset=["pred_abs_move"])
     keys = [
         (r.ticker, pd.Timestamp(r.event_date))
         for r in rows.itertuples(index=False)
@@ -214,13 +242,16 @@ def check_since_equivalence() -> str:
         f"{int((merged['_merge'] != 'both').sum()):,} rows differ in KEY between the "
         "stored table and an incremental rebuild",
     )
-    diff = (merged["pred_abs_move"] - merged["pred_abs_move_new"]).abs()
-    worst = float(diff.max(skipna=True) or 0.0)
-    both_null = merged["pred_abs_move"].isna() == merged["pred_abs_move_new"].isna()
-    _require(
-        bool(both_null.all()),
-        f"{int((~both_null).sum()):,} rows disagree on whether a forecast EXISTS",
-    )
+    worst = 0.0
+    for produces in tier4.PRODUCES:
+        diff = (merged[produces] - merged[f"{produces}_new"]).abs()
+        worst = max(worst, float(diff.max(skipna=True) or 0.0))
+        both_null = merged[produces].isna() == merged[f"{produces}_new"].isna()
+        _require(
+            bool(both_null.all()),
+            f"{produces}: {int((~both_null).sum()):,} rows disagree on whether a "
+            "forecast EXISTS",
+        )
     _require(
         worst <= TOLERANCE,
         f"incremental and stored forecasts differ by up to {worst:.3e} from "
@@ -243,30 +274,39 @@ def check_agreement() -> str:
     keeps it that way — a second code path for live scoring is exactly how the
     board and the backtest come to disagree about what was recommended.
     """
-    model = tier4.size_feature_model()
-    prepared = model.prepare(panel()).set_index(["ticker", "date"])
-    worst, checked = 0.0, 0
-    for fold, group in _sample().groupby("fold_start"):
-        served = tier4.serving_model(fold, panel=panel(), cache=False)
-        for row in group.itertuples(index=False):
-            key = (row.ticker, pd.Timestamp(row.event_date))
-            if key not in prepared.index:
-                continue
-            _require(
-                tier4.serving_fold(row.event_date, row.event_date) == pd.Timestamp(fold),
-                f"{key}: the fold served for a same-month decision is not the "
-                "fold the table used",
-            )
-            live = float(served.predict(prepared.loc[[key]])[0])
-            worst = max(worst, abs(live - float(row.pred_abs_move)))
-            checked += 1
-    _require(checked > 0, "nothing was compared")
-    _require(
-        worst <= TOLERANCE,
-        f"the live serving path and the stored table disagree by up to {worst:.3e} "
-        "— the board would recommend a shape the backtest never measured",
-    )
-    return f"{checked} rows, max |diff| {worst:.2e}"
+    parts = []
+    for produces in tier4.PRODUCES:
+        model = tier4.feature_model(produces)
+        fold_col = tier4.column_group(produces)[6]
+        sample = _sample().dropna(subset=[produces])
+        if sample.empty:
+            parts.append(f"{produces}: NOT BUILT")
+            continue
+        prepared = model.prepare(panel()).set_index(["ticker", "date"])
+        worst, checked = 0.0, 0
+        for fold, group in sample.groupby(fold_col):
+            served = tier4.serving_model(fold, panel=panel(), model=model, cache=False)
+            for row in group.itertuples(index=False):
+                key = (row.ticker, pd.Timestamp(row.event_date))
+                if key not in prepared.index:
+                    continue
+                _require(
+                    tier4.serving_fold(row.event_date, row.event_date) == pd.Timestamp(fold),
+                    f"{key}: the fold served for a same-month decision is not the "
+                    "fold the table used",
+                )
+                live = float(served.predict(prepared.loc[[key]])[0])
+                worst = max(worst, abs(live - float(getattr(row, produces))))
+                checked += 1
+        _require(checked > 0, f"{produces}: nothing was compared")
+        _require(
+            worst <= TOLERANCE,
+            f"{produces}: the live serving path and the stored table disagree by up "
+            f"to {worst:.3e} — the board would recommend a shape the backtest never "
+            "measured",
+        )
+        parts.append(f"{produces}: {checked} rows, max |diff| {worst:.2e}")
+    return " · ".join(parts)
 
 
 # --------------------------------------------------------------------------
@@ -313,6 +353,13 @@ def check_tier3_untouched() -> str:
 
 @check("totality", description="every Tier-3 event has a row; NULL is never zero")
 def check_totality() -> str:
+    """Totality once, then every producer's own NULL and provenance discipline.
+
+    Looping over :data:`tier4.PRODUCES` rather than naming one column is the
+    point: a group added and never built would otherwise sail through a check
+    written against ``pred_abs_move``, and an all-NULL column that nothing
+    complains about is exactly how a consumer ends up sizing from nothing.
+    """
     frame, tier3 = table(), panel()
     _require(
         len(frame) == len(tier3),
@@ -323,105 +370,123 @@ def check_totality() -> str:
     keys3 = set(map(tuple, tier3[["ticker", "date"]].astype(str).to_numpy()))
     _require(keys4 == keys3, f"{len(keys3 - keys4):,} Tier-3 events have no Tier-4 row")
 
-    blank = frame[frame["pred_abs_move"].isna()]
-    _require(
-        not (frame["pred_abs_move"] == 0).any(),
-        "a forecast of exactly zero is stored — NULL must not have been filled",
-    )
-    _require(
-        bool(blank["model_id"].isna().all() and blank["fold_start"].isna().all()),
-        "a row carries provenance without a forecast",
-    )
-    scored = frame[frame["pred_abs_move"].notna()]
-    _require(
-        bool(scored["model_id"].notna().all() and scored["fold_start"].notna().all()),
-        "a forecast is stored without saying which model and fold produced it",
-    )
-    _require(
-        bool((scored["fold_start"] <= scored["event_date"]).all()),
-        "a row's fold starts after its own event",
-    )
-    legal = tier4.fold_start_of(scored["fold_start"]).to_numpy() == scored["fold_start"].to_numpy()
-    _require(bool(legal.all()), f"{int((~legal).sum()):,} rows have an illegal fold_start")
-    return (
-        f"{len(frame):,} rows, {len(scored):,} forecast "
-        f"({len(scored)/len(frame):.1%}), {scored['fold_start'].nunique()} folds"
-    )
+    parts = []
+    for produces in tier4.PRODUCES:
+        point, _, _, _, _, model_id, fold_start = tier4.column_group(produces)
+        scored = frame[frame[point].notna()]
+        if scored.empty:
+            parts.append(f"{produces}: NOT BUILT")
+            continue
+        blank = frame[frame[point].isna()]
+        _require(
+            not (frame[point] == 0).any(),
+            f"{produces}: a forecast of exactly zero is stored — NULL must not "
+            "have been filled",
+        )
+        _require(
+            bool(blank[model_id].isna().all() and blank[fold_start].isna().all()),
+            f"{produces}: a row carries provenance without a forecast",
+        )
+        _require(
+            bool(scored[model_id].notna().all() and scored[fold_start].notna().all()),
+            f"{produces}: a forecast is stored without saying which model and "
+            "fold produced it",
+        )
+        _require(
+            bool((scored[fold_start] <= scored["event_date"]).all()),
+            f"{produces}: a row's fold starts after its own event",
+        )
+        legal = (
+            tier4.fold_start_of(scored[fold_start]).to_numpy()
+            == scored[fold_start].to_numpy()
+        )
+        _require(
+            bool(legal.all()),
+            f"{produces}: {int((~legal).sum()):,} rows have an illegal fold_start",
+        )
+        parts.append(
+            f"{produces}: {len(scored):,} ({len(scored)/len(frame):.1%}), "
+            f"{scored[fold_start].nunique()} folds"
+        )
+    return f"{len(frame):,} rows · " + " · ".join(parts)
 
 
 @check("interval", description="the 80% band is ordered, in support, and causal")
 def check_interval() -> str:
-    """The band's own properties, on the real table.
+    """The band's own properties, on the real table, for every producer.
 
     The interval is a second thing that can leak. It is built from held-out
     errors, and errors the model had not yet made would widen or narrow it with
     hindsight — invisible to every check on the point forecast.
     """
     frame = table()
-    banded = frame.dropna(subset=["pred_abs_move_p10", "pred_abs_move_p90"])
-    _require(len(banded) > 0, "no row carries an interval")
+    parts = []
+    for produces in tier4.PRODUCES:
+        point, p10c, p90c, sdc, resid_c, _, fold_c = tier4.column_group(produces)
+        model = tier4.feature_model(produces)
+        scored = frame[frame[point].notna()]
+        if scored.empty:
+            parts.append(f"{produces}: NOT BUILT")
+            continue
+        banded = frame.dropna(subset=[p10c, p90c])
+        _require(len(banded) > 0, f"{produces}: no row carries an interval")
 
-    _require(
-        bool((banded["pred_abs_move_p10"] <= banded["pred_abs_move_p90"]).all()),
-        "an interval is inverted",
-    )
-    _require(bool((banded["pred_abs_move_p10"] >= 0).all()), "an interval reaches below zero")
-    negative = int((frame["pred_abs_move"].dropna() < 0).sum())
-    _require(
-        negative == 0,
-        f"{negative:,} forecasts are negative — a predicted MAGNITUDE below zero "
-        "means the model is being served outside its support",
-    )
-    _require(
-        bool((banded["pred_abs_move_p10"] <= banded["pred_abs_move"]).all()),
-        "a forecast sits below its own p10",
-    )
-    _require(
-        bool((banded["pred_abs_move"] <= banded["pred_abs_move_p90"]).all()),
-        "a forecast sits above its own p90",
-    )
+        _require(bool((banded[p10c] <= banded[p90c]).all()), f"{produces}: an interval is inverted")
+        if model.interval_floor is not None:
+            _require(
+                bool((banded[p10c] >= model.interval_floor).all()),
+                f"{produces}: an interval reaches below its declared floor",
+            )
+            negative = int((frame[point].dropna() < model.interval_floor).sum())
+            _require(
+                negative == 0,
+                f"{produces}: {negative:,} forecasts sit below the floor — the "
+                "model is being served outside its support",
+            )
+        _require(bool((banded[p10c] <= banded[point]).all()), f"{produces}: a forecast sits below its own p10")
+        _require(bool((banded[point] <= banded[p90c]).all()), f"{produces}: a forecast sits above its own p90")
 
-    sd = frame["pred_abs_move_sd"].dropna()
-    _require(bool((sd > 0).all()), "a residual SD is non-positive")
-    _require(
-        bool(frame.loc[sd.index, "resid_n"].notna().all()),
-        "a band does not say how many errors it came from",
-    )
-    _require(
-        bool((frame["resid_n"].dropna() >= tier4.MIN_RESIDUALS).all()),
-        f"a band was built from fewer than {tier4.MIN_RESIDUALS} residuals",
-    )
+        sd = frame[sdc].dropna()
+        _require(bool((sd > 0).all()), f"{produces}: a residual SD is non-positive")
+        _require(
+            bool(frame.loc[sd.index, resid_c].notna().all()),
+            f"{produces}: a band does not say how many errors it came from",
+        )
+        _require(
+            bool((frame[resid_c].dropna() >= tier4.MIN_RESIDUALS).all()),
+            f"{produces}: a band was built from fewer than {tier4.MIN_RESIDUALS} residuals",
+        )
 
-    # Causality: reproduce one fold's band from the residuals of everything
-    # strictly before it, and nothing else.
-    model = tier4.size_feature_model()
-    _, trainable = tier4.training_frames(panel(), model)
-    realized = trainable.set_index(["ticker", "date"])[model.target]
-    scored = frame[frame["pred_abs_move"].notna()]
-    fold = scored.loc[scored["pred_abs_move_sd"].notna(), "fold_start"].min()
+        # Causality: reproduce one fold's band from the residuals of everything
+        # strictly before it, and nothing else.
+        _, trainable = tier4.training_frames(panel(), model)
+        realized = trainable.set_index(["ticker", "date"])[model.target]
+        fold = scored.loc[scored[sdc].notna(), fold_c].min()
 
-    earlier = scored[scored["fold_start"] < fold]
-    keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
-    truth = realized.reindex(keys).to_numpy(dtype=float)
-    made = earlier["pred_abs_move"].to_numpy(dtype=float)
-    ok = np.isfinite(truth) & np.isfinite(made)
-    rows = scored[scored["fold_start"] == fold]
-    p10, p90, spread, n = tier4.interval_for(
-        rows["pred_abs_move"].to_numpy(dtype=float), made[ok], (truth - made)[ok]
-    )
-    _require(
-        np.allclose(p10, rows["pred_abs_move_p10"].to_numpy(dtype=float))
-        and np.allclose(p90, rows["pred_abs_move_p90"].to_numpy(dtype=float))
-        and np.allclose(spread, rows["pred_abs_move_sd"].to_numpy(dtype=float)),
-        f"fold {pd.Timestamp(fold).date()}'s band does not reproduce from the "
-        "residuals of earlier folds alone",
-    )
-    width = (banded["pred_abs_move_p90"] - banded["pred_abs_move_p10"]).median()
-    return (
-        f"{len(banded):,} banded, median width {width:.2f}pp, "
-        f"median SD {sd.median():.2f}pp, pools {int(frame['resid_n'].min()):,}"
-        f"-{int(frame['resid_n'].max()):,}"
-    )
+        earlier = scored[scored[fold_c] < fold]
+        keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
+        truth = realized.reindex(keys).to_numpy(dtype=float)
+        made = earlier[point].to_numpy(dtype=float)
+        ok = np.isfinite(truth) & np.isfinite(made)
+        rows = scored[scored[fold_c] == fold]
+        p10, p90, spread, n = tier4.interval_for(
+            rows[point].to_numpy(dtype=float), made[ok], (truth - made)[ok],
+            floor=model.interval_floor,
+        )
+        _require(
+            np.allclose(p10, rows[p10c].to_numpy(dtype=float))
+            and np.allclose(p90, rows[p90c].to_numpy(dtype=float))
+            and np.allclose(spread, rows[sdc].to_numpy(dtype=float)),
+            f"{produces}: fold {pd.Timestamp(fold).date()}'s band does not "
+            "reproduce from the residuals of earlier folds alone",
+        )
+        width = (banded[p90c] - banded[p10c]).median()
+        parts.append(
+            f"{produces}: {len(banded):,} banded, width {width:.2f}pp, "
+            f"SD {sd.median():.2f}pp, pools {int(frame[resid_c].min()):,}"
+            f"-{int(frame[resid_c].max()):,}"
+        )
+    return " · ".join(parts)
 
 
 @check("registry_graph", description="one champion produces the forecast, and it is the one used")
@@ -433,19 +498,28 @@ def check_registry_graph() -> str:
     _require(not problems, f"registry problems: {problems}")
 
     graph = registry.tier4_graph()
-    producers = graph["pred_abs_move"]["produced_by"]
-    _require(
-        len(producers) == 1,
-        f"pred_abs_move is produced by {producers} — exactly one champion must",
-    )
-    stored = sorted(table()["model_id"].dropna().unique().tolist())
-    _require(
-        stored == producers,
-        f"the table was built by {stored} but the champion producer is {producers} — "
-        "a promotion has happened and Tier 4 has not been rebuilt "
-        "(guides/tier4_feature_models.md §6)",
-    )
-    return f"{producers[0]} → pred_abs_move, consumed by {graph['pred_abs_move']['consumed_by']}"
+    frame, parts = table(), []
+    for produces in tier4.PRODUCES:
+        producers = graph.get(produces, {}).get("produced_by", [])
+        _require(
+            len(producers) == 1,
+            f"{produces} is produced by {producers} — exactly one champion must. "
+            "A registered feature model declares its Tier-4 column through the "
+            "`produces` field; without it the dependency graph cannot answer "
+            "what a re-promotion breaks.",
+        )
+        stored = sorted(frame[tier4.column_group(produces)[5]].dropna().unique().tolist())
+        if not stored:
+            parts.append(f"{producers[0]} → {produces} (NOT BUILT)")
+            continue
+        _require(
+            stored == producers,
+            f"{produces} was built by {stored} but the champion producer is "
+            f"{producers} — a promotion has happened and Tier 4 has not been "
+            "rebuilt (guides/tier4_feature_models.md §6)",
+        )
+        parts.append(f"{producers[0]} → {produces}")
+    return " · ".join(parts)
 
 
 # --------------------------------------------------------------------------
@@ -468,12 +542,15 @@ def check_read_join() -> str:
         set(FORECAST_COLUMNS) <= set(joined.columns),
         "with_forecasts=True did not add the forecast columns",
     )
-    have = int(joined["pred_abs_move"].notna().sum())
-    _require(
-        have == int(table()["pred_abs_move"].notna().sum()),
-        "the join lost or duplicated forecasts",
-    )
-    return f"{have:,} of {len(joined):,} panel rows carry a forecast"
+    parts = []
+    for produces in tier4.PRODUCES:
+        have = int(joined[produces].notna().sum())
+        _require(
+            have == int(table()[produces].notna().sum()),
+            f"{produces}: the join lost or duplicated forecasts",
+        )
+        parts.append(f"{produces} {have:,}")
+    return f"{len(joined):,} panel rows · " + " · ".join(parts)
 
 
 @check("sizing", description="the forecast sizes a structure, and declines when it cannot")

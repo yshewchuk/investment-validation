@@ -130,5 +130,13 @@ venv/
 # structure nobody chose while reporting success.
 !/engine/models/structures.json
 
-# Claude Code personal overrides (never publish a local settings file)
-.claude/settings.local.json
+# Claude Code state, entirely. `settings.local.json` alone was not enough: the
+# default-deny above re-allows directories (`!*/`) and then every `.py`, so a
+# git WORKTREE checked out under .claude/ — which is where Claude Code puts
+# them — has its whole source tree swept back in. Found 2026-09-05 with an 18MB
+# `.claude/worktrees/tier4-build` staged for commit by `git add .`.
+#
+# This is the general hole, not one stray directory: any nested checkout under
+# an allowed directory inherits the code allowances. Blocking the tool's own
+# state directory closes the case that actually occurs.
+.claude/

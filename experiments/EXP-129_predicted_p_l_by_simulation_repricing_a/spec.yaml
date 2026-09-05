@@ -1,0 +1,290 @@
+id: EXP-129
+title: "A P&L gate for the twin peak: replacing cost < peak/2 with a simulated expectation"
+kind: entry-rule-replacement
+strategy: TWIN-P5
+programme: tier4-feature-models
+prior: [EXP-115, EXP-123, EXP-125, EXP-126, EXP-128]
+type: confirmatory
+price_source: ORATS chains (bid/ask) for the entry; chains where quoted and Black-Scholes elsewhere for the simulated exit
+
+hypothesis: >
+  TWIN-P5's reward term is arithmetic and blunt. `cost < peak / 2` asks one
+  question - is the debit under half the maximum payoff - and answers it without
+  reference to where the print is likely to land. It rejects 98.6% of priced
+  events, and EXP-123 measured what the survivors look like: structures TINY
+  relative to the stock, median w 1.08% of spot against 4.96% unfiltered, with
+  39.6% of traded events blowing through a wing against 7.3% of all resolvable
+  ones. The term is not selecting good trades. It is selecting cheap ones, and
+  cheap is a proxy that happens to correlate with defined risk.
+
+  Both inputs to the real question now exist as forecasts with calibrated error
+  distributions: the move (size_v1_4) and the IV crush (iv_crush_v1_gbm). So the
+  structure can be repriced under simulated outcomes and gated on its EXPECTED
+  RETURN instead. Expected return is the quantity the arithmetic term is a proxy
+  for, and unlike the proxy it knows where the forecast says the print will land.
+
+  Falsified if, over the same universe and the same liquidity guards, gating on
+  simulated expected return does not beat `cost < peak / 2` on CAGR, on Sharpe
+  per trade, and on the share of out-of-sample years positive - the three
+  measures promote.decide turns on since 2026-09-04. A gate that merely trades
+  MORE, or that trades more at a worse book, is a failure of this experiment.
+
+known_before_registration:
+  what_is_being_replaced_and_what_is_not: >
+    ONLY the reward term. The entry rule's other two clauses - mean relative
+    spread <= 25% across the eight legs, market cap >= $10B - stay in every arm
+    including the benchmark. They are tradeability guards, not edge claims: a
+    market this structure cannot cross is disqualifying however good the
+    forecast, and no simulation can conjure a quote that is not there. Removing
+    them would confound a gate comparison with a liquidity experiment.
+  the_universe_this_opens_up: >
+    Counted on EXP-126's own cached five_wide universe - the shape this spec is
+    about - rather than inherited from EXP-125's seven-strike numbers, which
+    describe a different and much more expensive shape.
+    15,747 priced events. 2,899 pass spread AND mcap on 612 tickers: that is the
+    candidate pool. 393 of those also pass cost < peak/2, which is the traded
+    set today. So dropping the reward term widens the pool 7.4x, not by the two
+    orders of magnitude the seven-strike funnel would suggest - TWIN-P5 is
+    cheaper per unit of peak, so the reward term bites far less hard on it.
+    Stated because an earlier draft of this spec quoted EXP-125's 1.4% pass rate
+    as though it applied here. It does not, and a 7.4x widening is a materially
+    easier thing for a new gate to beat than a 100x one.
+  the_support_of_the_reward_ratio_sweep: >
+    Measured on the candidate pool before the grid below was fixed, so the swept
+    range spans the data rather than wasting cells outside it. cost/peak runs
+    min 0.275, p25 0.542, median 0.619, p75 0.672, max 0.902:
+      r=0.3 admits 3 events, r=0.4 admits 65, r=0.5 admits 393 (the incumbent),
+      r=0.6 admits 1,217, r=0.7 admits 2,535, r=0.8 admits 2,891, r=0.9+ all.
+    Two consequences. r=0.2 admits NOTHING and is dropped from the grid. And
+    every event in the pool already satisfies cost < peak, so the `with_floor`
+    arm is a no-op ON THIS DATA - it is kept anyway, because it is a claim about
+    what the rule GUARANTEES rather than about what it happens to remove here,
+    and a future universe may contain such trades.
+    This calibration reads only the cost/peak DISTRIBUTION, never a return, so
+    it selects the grid's support and cannot select its outcome.
+  forecast_coverage_on_the_pool_is_high_and_that_is_not_guaranteed_elsewhere: >
+    Of the 2,899 candidates, 2,899 (100%) carry pred_abs_move and 2,802 (96.7%)
+    carry pred_iv_crush_30, so 2,802 are gateable. The crush model's 64.6%
+    coverage of Tier 4 overall does not bite here because the pool is already
+    restricted to large, liquid, quotable names - exactly the ones the crush
+    model covers. The headline must still report this, and must not generalise
+    96.7% to the wider universe.
+  the_exit_is_not_at_expiry_so_crush_matters: >
+    Measured over 1,214 sampled 2024-2026 events priced at TWIN-P's own exit
+    (first post-event expiry, exit one session after the print): median 9 DTE
+    REMAINING, p25 3, p75 16, and only 15.0% within 1 DTE. The exit value cannot
+    be shortcut to intrinsic and the crush is live when the position closes.
+  move_and_crush_are_dependent_and_linear_correlation_hides_it: >
+    On 115,195 events carrying both realized values: Pearson r(|move|, crush) =
+    +0.0284, which reads as independence. Spearman rho = -0.0951, the median
+    crush walks monotonically from -13.51% in the smallest |move| decile to
+    -18.53% in the ninth, and the conditional SD nearly doubles, 14.9 -> 27.3.
+    The dependence lives in the higher moments, where a Gaussian copula fitted
+    on r = 0.028 would find nothing. For a payoff that is a BAND rather than a
+    monotone function of the move, the shape of the joint distribution is the
+    expected value. Hence paired draws, and hence an arm that measures the
+    pairing rather than assuming it.
+  the_repricing_step_bounds_the_accuracy_not_the_sample_count: >
+    Black-Scholes from (IV, DTE, spot, strike) against 132,023 real quoted puts,
+    DTE 3-60, mid > $0.05: median |error| 3.88% of mid, 58.8% within 5%. The
+    error is structured by moneyness - 14.41% median for |delta| < 0.10 on a
+    median $0.40 contract, against 2.02% at |delta| 0.55-0.75. TWIN-P5's wings
+    are those contracts. More draws shrink the estimate's variance and do
+    nothing to this bias.
+  the_risk_this_change_carries_that_the_incumbent_does_not: >
+    `cost < peak / 2` is an ARITHMETIC GUARANTEE. It cannot be wrong about a
+    given event: max profit exceeds max loss by construction, whatever any model
+    believes. A simulated expectation is a MODEL OUTPUT, so a model failure now
+    ADMITS trades rather than merely mis-ranking them, and the failure mode is
+    silent - an over-optimistic exit price on a cheap wing reads as edge. This
+    is a real elevation of risk and it is the reason `with_floor` is an arm: it
+    keeps `cost < peak`, a strictly weaker arithmetic backstop that refuses only
+    the trades that cannot profit at ANY outcome, and measures what that costs.
+
+definition:
+  the_simulation: >
+    For each candidate event, with the structure sized by the Tier-4 forecast:
+      1. Draw N = 4,000 paired residuals (e_move, e_crush) from the joint pool
+         of held-out errors, bucketed on the predicted move by EXP-115's decile
+         machinery. Paired means both come from the SAME historical event, so
+         the dependence travels with them: no copula is fitted, no correlation
+         estimated.
+      2. m = pred_abs_move + e_move (floored at 0 - it is a magnitude);
+         c = pred_iv_crush_30 + e_crush. Apply m with a random sign, which is
+         exact rather than an approximation: TWIN-P5 is symmetric about its
+         anchor, so its payoff depends on |move| only.
+      3. Reprice every leg at spot*(1 +/- m/100), vol sigma_pre*(1 + c/100), and
+         the DTE remaining at the exit date.
+      4. exp_pnl_sim = mean over draws of (exit value - debit) / debit;
+         win_sim = share of draws with a positive return; record p10/p90.
+    Seeded per (snapshot, event) as engine.score already seeds its draws, so a
+    rerun is bit-identical.
+  the_gate: >
+    The PRIMARY gate is exp_pnl_sim > 0, and nothing else. A threshold with no
+    free parameter, chosen so the headline cannot be tuned after the fact.
+  the_threshold_sweep_and_why_it_is_declared_here: >
+    A gate needs a threshold and the right one is not knowable in advance, so
+    the sweep below runs as a REGISTERED GRID. Declaring it up front is the
+    whole point: sweeping thresholds and reporting the best cell is exactly the
+    post-hoc selection that produced five_wide in EXP-126 - a grid cell that
+    saw all nine years and was promoted anyway, which is why that promotion
+    needed a note rather than a changelog line.
+    So: every cell runs, every cell gets its own LEDGER row, and NO CELL IS
+    PROMOTABLE IN PLACE OF THE PRIMARY. What the sweep is for is the SHAPE of
+    the selectivity/quality tradeoff - how CAGR, Sharpe, year-consistency and
+    universe size move together as the bar rises - because a curve that is flat
+    across a wide band of thresholds is a different and far more trustworthy
+    finding than a single cell that happens to peak.
+    Two families, and neither is fitted in-sample:
+      absolute  exp_pnl_sim > t for t in {0, 0.05, 0.10, 0.25, 0.50}. No
+                estimation at all, so no leakage is possible.
+      quantile  the top {50%, 20%, 10%} of exp_pnl_sim, with the cutoff computed
+                from PRIOR YEARS ONLY and applied forward, never in-sample.
+    A third gate on a DIFFERENT quantity also runs: win_sim > 0.5. For a payoff
+    that is a band rather than a monotone function of the move, expected return
+    and probability of profit can disagree sharply - a structure with a high
+    chance of a small win is not the same trade as a low chance of a large one -
+    and which of the two a twin peak should be gated on is an open question this
+    is the cheapest way to answer.
+  sweeping_the_incumbents_constant_too_and_why_that_matters: >
+    `cost < peak / 2` is ONE POINT. Beating one point does not show the P&L
+    machinery is better than the arithmetic rule - it may only show that 0.5 was
+    the wrong constant. The ratio was pre-registered in EXP-123 and, as far as
+    the ledger records, has never been swept, so nobody knows whether 0.4 or 0.7
+    would have served the strategy better all along.
+    So the benchmark gets the same treatment as the challenger: cost < r * peak
+    for r across {0.2 ... 1.0}, producing an arithmetic CURVE to set against the
+    P&L curve. r = 1.0 is the weakest arithmetic bar there is - it refuses only
+    trades that cannot profit at any outcome - and it is the natural floor.
+    THE COMPARISON MUST BE AT MATCHED SELECTIVITY. A gate taking 200 trades and
+    one taking 2,000 are not comparable on CAGR, and the honest way to read two
+    curves is at equal gated-event count. If the arithmetic curve matches or
+    dominates the P&L curve there, then two forecast models plus a repricing
+    model are buying nothing that a better constant would not, and that is the
+    most valuable result this experiment could produce - it is one line of
+    arithmetic against roughly a thousand of machinery.
+  how_the_two_curves_are_scored_against_each_other: >
+    Deliberately asymmetric, in the benchmark's favour, and stated so it cannot
+    be quietly reversed later.
+    The PRIMARY acceptance stays against the REGISTERED incumbent, cost < peak/2
+    - that is the rule actually in production and beating it is the operative
+    question. The primary gate is fixed at exp_pnl_sim > 0 and is not tuned.
+    The curve-versus-curve comparison is a labelled DIAGNOSTIC, not an
+    acceptance criterion, because "best of nine arithmetic cells" is a
+    max-statistic and holding a single untuned challenger to it would be unfair
+    in the other direction. If the arithmetic curve dominates at matched
+    selectivity, that is reported as a finding against the P&L approach - in the
+    headline, not a footnote - and it should weigh heavily on whether any of
+    this reaches the board, even though it does not mechanically falsify.
+  the_multiple_testing_cost_stated_plainly: >
+    This spec registers twenty-one gate configurations - thirteen on the P&L
+    side, eight on the arithmetic side - against one registered incumbent. That
+    is twenty-two chances to find a cell that wins by luck, on a universe where
+    the incumbent admits 1.4% of events. The ledger records every one, and both
+    families must be reported AS CURVES with the primary and the incumbent
+    marked, never as a leaderboard.
+  causality: >
+    The residual pool at fold F holds errors from folds strictly BEFORE F for
+    both models, paired on (ticker, event_date) inside that pool. Same
+    discipline Tier 4's stored bands already carry.
+  the_risks_this_run_measures:
+    a_forecast_of_a_forecast: >
+      exp_pnl_sim compounds two model errors and passes them through a repricing
+      model with a third, none unbiased at the wings. The gate comparison is the
+      guard: a mis-centred expectation that still selects a better book is
+      useful, a well-centred one that does not is not.
+    the_crush_model_did_not_clear_its_own_bar: >
+      EXP-128 failed its registered coverage floor - 71,864 scored rows against
+      80,000 - and was materialised on the user's explicit call. Its forecast
+      covers 75,418 of 116,795 Tier-4 rows. An event with no crush forecast is
+      NOT gated on a default; it is reported as ungateable, and the headline
+      states what share of the candidate pool that is. If that share is large,
+      the honest reading is that the P&L gate cannot yet replace the arithmetic
+      one across the whole universe even if it wins where it applies.
+    a_wider_book_is_not_automatically_a_better_one: >
+      EXP-126 already produced the counterexample: the chooser arm traded 3,673
+      events for a CAGR of -0.52% and a 79% drawdown while reporting +0.49%
+      mean per trade. Universe size is reported, never scored.
+
+primary_spec:
+  universe: >
+    every event where TWIN-P5 priced, passes spread <= 25% and mcap >= $10B, and
+    carries both Tier-4 forecasts. The reward term is NOT applied. 2018-2026.
+  gate: "exp_pnl_sim > 0"
+  benchmark: "cost < peak / 2, applied to the identical universe"
+  draws: 4000
+  seed: 0
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+  acceptance:
+    beats_the_arithmetic_gate_on_the_promotion_measures: >
+      higher CAGR, higher Sharpe per trade, and a higher share of out-of-sample
+      years positive than the cost < peak/2 benchmark on the identical universe
+    not_bought_with_risk: >
+      max drawdown no worse than 1.5x the benchmark's, and breakeven alpha <= 0.45
+    consistent: "positive mid-fill mean in >= 70% of out-of-sample years"
+    universe_floor: ">= 250 gated events, or reported as too thin to carry"
+    coverage_reported: >
+      share of the candidate pool carrying both forecasts, stated in the
+      headline rather than a footnote
+
+grid:
+  # Every cell runs and every cell is secondary. None is promotable in place of
+  # the primary; the threshold family is reported as a curve, not a leaderboard.
+  arm:
+    - with_floor       # keep cost < peak as an arithmetic backstop under the P&L gate
+    - independent      # unpaired residual draws — measures whether the pairing matters
+    - bs_only          # Black-Scholes for every leg — measures what a real quoted exit buys
+    - move_only        # crush held at its predicted value — does the crush model earn its place?
+    - draws_500        # is 4,000 draws more than the estimate needs?
+    - win_sim_50       # gate on P(profit) > 0.5 instead of expected return
+  threshold:           # absolute, unfitted — exp_pnl_sim > t
+    - 0.05
+    - 0.10
+    - 0.25
+    - 0.50
+  quantile:            # top share by a PRIOR-YEAR cutoff, applied forward
+    - 0.50
+    - 0.20
+    - 0.10
+  reward_ratio:        # THE BENCHMARK'S OWN CONSTANT, swept. cost < r * peak.
+    - 0.3              # admits 3 of 2,899 — reported, not expected to carry
+    - 0.4
+    - 0.5              # the incumbent, cost < peak/2
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 1.0              # the weakest arithmetic bar: can this trade profit AT ALL?
+
+required_outputs:
+  - "head to head: gated events, tickers, CAGR, Sharpe, years positive, return on capital, max drawdown — P&L gate vs cost < peak/2 on identical rows"
+  - "THE THRESHOLD CURVE: gated events, CAGR, Sharpe and years-positive at every absolute and quantile cutoff, plotted against selectivity, with the primary marked and the benchmark as a horizontal line"
+  - "whether the curve is FLAT across a band of thresholds or peaks at one — stated as a finding, since a peak is what an overfit gate looks like"
+  - "THE ARITHMETIC CURVE: the same table for cost < r * peak across every r, so the incumbent's constant is measured rather than assumed"
+  - "BOTH CURVES ON ONE AXIS, plotted against gated-event count — rules compared at MATCHED SELECTIVITY, not at their own preferred operating points"
+  - "an explicit verdict on whether the P&L machinery beats a better-chosen constant, stated in the headline either way"
+  - "expected-return gating vs win-probability gating: the two gated sets, their overlap, and both books"
+  - "the funnel for both rules: priced / spread / mcap / forecasts present / gated"
+  - "coverage: share of the candidate pool with both forecasts, and the book restricted to it"
+  - "WHERE THE PRINTS LANDED for each rule — beyond a wing AND near the centre"
+  - "win_sim calibration: predicted vs realized win rate, five buckets, with n"
+  - "paired vs independent: difference in gated set, in CAGR, and in simulated dispersion"
+  - "the share of simulated exit legs priced from a real chain rather than Black-Scholes"
+  - "per-year table with n for both rules"
+  - "breakeven alpha for both rules against the 0.45 bar"
+  - "defined-risk falsification: any trade losing more than its debit"
+  - "scatter of exp_pnl_sim against realized return, not only a statistic"
+
+data_snapshot: ed1d7e6e628fb57bd7f7077dac26616384a5eaf80bc0e88f843f4c429a77eda5
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: "TWIN-P5 entry rule, reward term"
+api_calls_budget: 0
+preregistered_at: "2026-09-05T03:22:59+00:00"

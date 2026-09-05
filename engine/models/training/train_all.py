@@ -36,6 +36,7 @@ from engine.models.registry import (
     register,
 )
 from engine.models.training import gate as gate_mod
+from engine.models.training import iv_crush as crush_mod
 from engine.models.training import implied_t1 as implied_mod
 from engine.models.training import size_model as size_mod
 from engine.models.training.common import SEED, log
@@ -180,6 +181,56 @@ def train_implied_t1(*, seed: int = SEED, dry_run: bool = False) -> dict:
         evidence="reports/phase1_models.md",
         seed=seed,
         notes=artifact.notes,
+    )
+    return _finalize(artifact, entry, result, dry_run)
+
+
+def train_iv_crush(*, seed: int = SEED, dry_run: bool = False) -> dict:
+    log("=== iv_crush: 30-day implied vol across the print ===")
+    panel = load_panel()
+    dataset = crush_mod.prepare(panel)
+    model, result = crush_mod.train(dataset, seed=seed)
+
+    notes = (
+        "Target is SIGNED — iv30 falls at 83.2% of prints — so the Tier-4 "
+        "producer declares interval_floor=None; a magnitude model's zero floor "
+        "would clip most bands to [0, 0] without inverting one. EXP-128 cleared "
+        "MAE, RMSE, year-consistency, decile spread and interval calibration and "
+        "FAILED its registered coverage floor (71,864 scored rows against 80,000) "
+        "because the arm consumed every numeric panel column; a curated feature "
+        "list is the next iteration. Materialised on the user's explicit call "
+        "with that shortfall on the record."
+    )
+    artifact = ModelArtifact(
+        model=model,
+        role="iv_crush",
+        features=crush_mod.FEATURES,
+        residuals=result.residuals,
+        target=crush_mod.TARGET,
+        train_years=tuple(result.years),
+        metrics=result.metrics,
+        params={"max_gap_days": crush_mod.MAX_GAP_DAYS},
+        seed=seed,
+        notes=notes,
+    )
+    entry = RegistryEntry(
+        id="iv_crush_v1_gbm",
+        role="iv_crush",
+        strategy=ANY_STRATEGY,
+        artifact=str((ARTIFACT_DIR / "iv_crush_v1_gbm.joblib").relative_to(paths.ROOT)),
+        artifact_sha256="",
+        features=list(crush_mod.FEATURES),
+        target=crush_mod.TARGET,
+        train_window=f"walk-forward, OOS {min(result.years)}-{max(result.years)}",
+        train_years=list(result.years),
+        eval={k: v for k, v in result.metrics.items() if k != "by_year"},
+        champion=True,
+        promoted=date.today().isoformat(),
+        evidence="experiments/EXP-128_what_survives_the_print_a_walk_forward_m",
+        seed=seed,
+        notes=notes,
+        tier="feature",
+        produces="pred_iv_crush_30",
     )
     return _finalize(artifact, entry, result, dry_run)
 

@@ -72,16 +72,69 @@ remember.
 
 Grain: one row per `(ticker, event_date)` — the same grain as Tier 3.
 
+Two keys, then **one column group per producer**. A producer is a feature
+model whose output is materialised here; each contributes the same eight
+columns, named off the one its forecast lands in.
+
 | column | meaning |
 |---|---|
 | `ticker`, `event_date` | join key into Tier 3 |
-| `pred_abs_move` | the forecast, in percent, walk-forward |
-| `pred_abs_move_p10` / `_p90` | the 80% band around it |
-| `pred_abs_move_sd` | SD of the held-out errors the band came from |
-| `resid_n` | how many held-out errors that was |
-| `model_id` | which registry entry produced it (`size_v1_4`) |
-| `fold_start` | first date of the period this row's model was fit BEFORE |
-| `tier3_snapshot` | the Tier-3 hash the training data came from |
+| `<name>` | the forecast, walk-forward |
+| `<name>_p10` / `_p90` | the 80% band around it |
+| `<name>_sd` | SD of the held-out errors the band came from |
+| `<name>_resid_n` | how many held-out errors that was |
+| `<name>_model_id` | which registry entry produced it |
+| `<name>_fold_start` | first date of the period this row's model was fit BEFORE |
+| `tier3_snapshot` | the Tier-3 hash this ROW's training data came from — shared by every producer |
+
+| producer | model | target | horizon |
+|---|---|---|---|
+| `pred_abs_move` | `size_v1_4` | \|move\| as a % of spot | the event |
+| `pred_im_t1_d14` | `opf_implied_t1_gbm` | quoted implied move at the last pre-print close | decided 14 trading days out |
+
+### Which provenance is per producer, and which is not
+
+`model_id` and `fold_start` are per producer because they differ *inside one
+build*. One column cannot name two models; and both producers refit monthly but
+skip different folds — the size model has enough training rows in 2013, the
+implied-move model does not — so one `fold_start` would be a claim about both
+that is true of neither.
+
+`tier3_snapshot` is **not** per producer. Every producer is fit from the same
+panel in the same pass, so one hash answers for the whole row.
+
+It was briefly split, and the reasoning was wrong in an instructive way: a
+`--produces` flag had been added so a new producer could be built without
+recomputing the existing ones, which made a two-producer table a stitch of two
+Tier-3 states and forced the column apart to describe it. But this module
+*already* refuses that state — `_carried_prefix` rejects a carry-over whose
+stored `model_id` is not the model about to run, on the grounds that a champion
+promotion invalidates Tier 4 in full. A full rebuild is ~168 fits, minutes not
+hours (§5). The flag bought nothing that mattered and cost the simplest
+invariant the table has: **every number in a row came from one Tier 3.**
+
+What *is* per row — and predates producers entirely — is that a `--since` build
+stamps only the rows it recomputed and leaves the carried prefix with the hash
+it was built under. That is what
+`tests/test_tier4.py::test_a_partial_build_is_visible_in_the_provenance`
+protects, and one shared column does it fine.
+
+### The horizon lives in the column name
+
+`pred_im_t1_d14` is not `pred_im_t1`. The implied-move model is fit per decision
+day — `DECISION_DAYS` runs from 25 down to 2 — so "the predicted T−1 implied
+move" is not one number, it is one per horizon. Fourteen because that is
+`straddle_runup`'s default `entry_offset`: a stored column can only serve the
+forecast the trade is actually decided on. Adding T−7 later is then a new
+column rather than a silent reinterpretation of this one, which is the same
+argument `fold_start` rests on.
+
+That producer also does **not** read the Tier-3 panel row for its event. Its
+features are the event-history block plus the daily market state at the
+*decision* date, where the panel's market-state block is anchored at the last
+pre-print close — the very quantity being predicted. So `FeatureModel.prepare`
+builds its own frame from Tier 2, and that is why `FeatureModel` carries a
+callable rather than a list of column names.
 
 ### The interval, and why it is stored rather than computed
 
@@ -109,12 +162,26 @@ Three properties it inherits and one it adds:
 * **Conditioned, not flat.** Reuses EXP-115's decile buckets rather than
   reimplementing them, so a large forecast gets a wider band than a small one;
   a thin bucket falls back to the flat pool.
-* **Floored at zero — BOTH bounds.** The target is a magnitude. Flooring only
-  the lower bound was the first version and it inverts the band whenever the
-  point estimate itself sits below zero. No real forecast does (0 of 85,618,
-  minimum +0.39), but the synthetic fixture's linear target can, which is how
-  it surfaced — and an inverted interval on the board would have been read as
-  data corruption rather than as a clipping artefact.
+* **Floored at zero — BOTH bounds, and it is a per-producer parameter.** Both
+  producers so far predict a magnitude. Flooring only the lower bound was the
+  first version and it inverts the band whenever the point estimate itself sits
+  below zero. No real forecast does (0 of 85,618, minimum +0.39), but the
+  synthetic fixture's linear target can, which is how it surfaced — and an
+  inverted interval on the board would have been read as data corruption rather
+  than as a clipping artefact.
+
+  It is `FeatureModel.interval_floor` rather than a constant because the floor
+  is a claim about the TARGET. A producer for something signed — an IV crush is
+  negative at 83% of prints — would have every band clipped to `[0, 0]` by a
+  hard zero, and no existing check would object, because `[0, 0]` is not
+  inverted. Such a producer passes `floor=None`.
+
+  Making it a parameter surfaced a live bug: `interval_for`'s bucket branch
+  already had a local named `floor` holding the minimum POOL SIZE, 250. The new
+  parameter was shadowed by it and every band came back `[250, 250]` — two
+  plausible numbers in the target's units, produced by a row count. The local
+  is now `min_pool`, and `test_the_bucket_min_pool_is_not_the_interval_floor`
+  pins the distinction.
 
 Below `MIN_RESIDUALS` held-out errors there is no band at all. An 80% interval
 from forty errors is not a distribution, and a number shaped like a confidence
@@ -188,6 +255,14 @@ is not avoidable: it is what "fit on strictly-before" means.
 The build therefore takes `--since` and is **idempotent and resumable**: rows
 before `since` are untouched, rows from `since` forward are recomputed.
 
+There is **no** flag to rebuild one producer and carry the others. Adding a
+producer, or re-promoting any model that feeds one, means rebuilding the whole
+table — every group, one panel, one pass. That is affordable precisely because
+§5 chose monthly: ~168 fits per producer.
+
+`_carried_prefix` still checks `<name>_model_id` per group, because a `--since`
+build has to know which model wrote the prefix it is about to keep.
+
 ## 7. The registry gains a tier
 
 The registry tracks `(id, role, strategy, features, target)` but cannot express
@@ -202,6 +277,16 @@ consumes:  Tier-4 columns read, for decision models
 
 So "what breaks if I re-promote the size model" stops being a question someone
 has to remember the answer to.
+
+**Registering a producer means setting `produces` on its registry entry.**
+Nothing derives it: `train_all` does not set the field, so a champion that
+feeds Tier 4 while leaving it NULL is invisible to `tier4_graph()` — the model
+gets refit every build, its numbers land in the table, and the one structure
+that is supposed to answer "what depends on this" does not know it exists.
+`opf_implied_t1_gbm` was in exactly that state until `pred_im_t1_d14` was
+added; `checks/tier4_checks.py::registry_graph` now requires exactly one
+declared producer per column in `PRODUCES`, so the next one cannot be forgotten
+quietly.
 
 Feature definitions are already shared (`EVENT_HISTORY_FEATURES`,
 `DAILY_STATE_COLUMNS` in `engine/features.py`) as is the walk-forward machinery

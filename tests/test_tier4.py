@@ -14,6 +14,7 @@ corrupts the table and nothing downstream would notice.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -81,6 +82,12 @@ MODEL = FeatureModel(
     seed=1,
 )
 
+#: These tests exercise ONE producer with a bitwise-reproducible fit. The other
+#: registered producer is a real champion whose artifact and event window are
+#: not available to a unit test, so every build here names the group it means.
+_ONLY = ("pred_abs_move",)
+_MODELS = {"pred_abs_move": MODEL}
+
 
 @pytest.fixture
 def panel() -> pd.DataFrame:
@@ -111,7 +118,7 @@ def panel() -> pd.DataFrame:
 @pytest.fixture
 def built(panel, monkeypatch):
     monkeypatch.setattr(tier4, "FIRST_FOLD", pd.Timestamp("2013-01-01"))
-    return build_forecasts(panel, model=MODEL, tier3_snapshot="snap", log=lambda _m: None)
+    return build_forecasts(panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None)
 
 
 # --------------------------------------------------------------------------
@@ -125,7 +132,7 @@ class TestARowNeverSeesItsOwnPeriod:
         scored = built[built["pred_abs_move"].notna()]
         assert len(scored) > 0
 
-        for fold, group in list(scored.groupby("fold_start"))[::7]:
+        for fold, group in list(scored.groupby("pred_abs_move_fold_start"))[::7]:
             model = fit_fold(trainable, MODEL, fold)
             rows = panel.merge(
                 group[["ticker", "event_date", "pred_abs_move"]],
@@ -178,7 +185,8 @@ class TestSinceEquivalence:
     def test_incremental_matches_a_full_rebuild(self, panel, built, since):
         incremental = build_forecasts(
             panel,
-            model=MODEL,
+            produces=_ONLY,
+            models=_MODELS,
             since=since,
             existing=built,
             tier3_snapshot="snap",
@@ -188,11 +196,11 @@ class TestSinceEquivalence:
 
     def test_since_is_rounded_down_to_its_fold(self, panel, built):
         mid = build_forecasts(
-            panel, model=MODEL, since="2014-07-14", existing=built,
+            panel, produces=_ONLY, models=_MODELS, since="2014-07-14", existing=built,
             tier3_snapshot="snap", log=lambda _m: None,
         )
         start = build_forecasts(
-            panel, model=MODEL, since="2014-07-01", existing=built,
+            panel, produces=_ONLY, models=_MODELS, since="2014-07-01", existing=built,
             tier3_snapshot="snap", log=lambda _m: None,
         )
         pd.testing.assert_frame_equal(mid, start)
@@ -201,7 +209,7 @@ class TestSinceEquivalence:
         # The point of storing tier3_snapshot per row rather than per file: a
         # table stitched from two Tier-3 states says so.
         rebuilt = build_forecasts(
-            panel, model=MODEL, since="2015-01-01", existing=built,
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=built,
             tier3_snapshot="different", log=lambda _m: None,
         )
         assert set(rebuilt["tier3_snapshot"].unique()) == {"snap", "different"}
@@ -216,13 +224,13 @@ class TestSinceEquivalence:
 class TestCarryOverGuards:
     def test_a_cadence_change_refuses_the_carry_over(self, panel, built):
         tampered = built.copy()
-        stamped = tampered["fold_start"].notna()
-        tampered.loc[stamped, "fold_start"] = tampered.loc[stamped, "fold_start"] + pd.Timedelta(
+        stamped = tampered["pred_abs_move_fold_start"].notna()
+        tampered.loc[stamped, "pred_abs_move_fold_start"] = tampered.loc[stamped, "pred_abs_move_fold_start"] + pd.Timedelta(
             days=3
         )
         with pytest.raises(Tier4Error, match="cadence"):
             build_forecasts(
-                panel, model=MODEL, since="2015-01-01", existing=tampered,
+                panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=tampered,
                 tier3_snapshot="snap", log=lambda _m: None,
             )
 
@@ -230,7 +238,8 @@ class TestCarryOverGuards:
         other = replace(MODEL, model_id="test_size_v2")
         with pytest.raises(Tier4Error, match="promotion invalidates Tier 4"):
             build_forecasts(
-                panel, model=other, since="2015-01-01", existing=built,
+                panel, produces=_ONLY, models={"pred_abs_move": other},
+                since="2015-01-01", existing=built,
                 tier3_snapshot="snap", log=lambda _m: None,
             )
 
@@ -240,7 +249,7 @@ class TestCarryOverGuards:
         thinned = built[built["event_date"] != built["event_date"].min()]
         with pytest.raises(Tier4Error, match="permanent holes"):
             build_forecasts(
-                panel, model=MODEL, since="2015-01-01", existing=thinned,
+                panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=thinned,
                 tier3_snapshot="snap", log=lambda _m: None,
             )
 
@@ -255,8 +264,8 @@ class TestTotalityAndNulls:
         early = built[built["event_date"] < FIRST_FOLD]
         assert len(early) > 0
         assert early["pred_abs_move"].isna().all()
-        assert early["model_id"].isna().all()
-        assert early["fold_start"].isna().all()
+        assert early["pred_abs_move_model_id"].isna().all()
+        assert early["pred_abs_move_fold_start"].isna().all()
 
     def test_null_is_not_zero(self, built):
         # A consumer that reads a NULL forecast as 0.0 would size a structure to
@@ -268,14 +277,14 @@ class TestTotalityAndNulls:
 
     def test_a_row_with_a_forecast_always_names_its_model_and_fold(self, built):
         scored = built[built["pred_abs_move"].notna()]
-        assert scored["model_id"].notna().all()
-        assert scored["fold_start"].notna().all()
-        assert (scored["fold_start"] <= scored["event_date"]).all()
+        assert scored["pred_abs_move_model_id"].notna().all()
+        assert scored["pred_abs_move_fold_start"].notna().all()
+        assert (scored["pred_abs_move_fold_start"] <= scored["event_date"]).all()
 
     def test_no_row_carries_provenance_without_a_forecast(self, built):
         blank = built[built["pred_abs_move"].isna()]
-        assert blank["model_id"].isna().all()
-        assert blank["fold_start"].isna().all()
+        assert blank["pred_abs_move_model_id"].isna().all()
+        assert blank["pred_abs_move_fold_start"].isna().all()
 
     def test_an_unrealized_event_still_gets_a_forecast(self, panel, monkeypatch):
         # The distinction that makes Tier 4 usable live: a prediction needs
@@ -287,7 +296,7 @@ class TestTotalityAndNulls:
         last = upcoming["date"] == upcoming["date"].max()
         upcoming.loc[last, "abs_move"] = np.nan
         frame = build_forecasts(
-            upcoming, model=MODEL, tier3_snapshot="snap", log=lambda _m: None
+            upcoming, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None
         )
         tail = frame[frame["event_date"] == upcoming["date"].max()]
         assert tail["pred_abs_move"].notna().all()
@@ -304,13 +313,13 @@ class TestFolds:
         ]
 
     def test_every_stored_fold_start_is_a_legal_boundary(self, built):
-        stamped = built["fold_start"].dropna()
+        stamped = built["pred_abs_move_fold_start"].dropna()
         assert len(stamped) > 0
         assert (fold_start_of(stamped).to_numpy() == stamped.to_numpy()).all()
 
     def test_a_thin_training_pool_is_skipped_rather_than_fit(self, panel, monkeypatch):
         monkeypatch.setattr(tier4, "MIN_TRAIN_ROWS", 10**9)
-        frame = build_forecasts(panel, model=MODEL, tier3_snapshot="snap", log=lambda _m: None)
+        frame = build_forecasts(panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None)
         assert frame["pred_abs_move"].isna().all()
 
     def test_fit_fold_refuses_a_pool_under_the_floor(self, panel):
@@ -329,7 +338,7 @@ class TestSchema:
     def test_a_duplicate_tier3_key_is_refused(self, panel):
         doubled = pd.concat([panel, panel.head(1)], ignore_index=True)
         with pytest.raises(Tier4Error, match="duplicate"):
-            build_forecasts(doubled, model=MODEL, tier3_snapshot="snap", log=lambda _m: None)
+            build_forecasts(doubled, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None)
 
 
 class TestLiveAndHistoricalAgree:
@@ -339,12 +348,12 @@ class TestLiveAndHistoricalAgree:
         # table agree by construction rather than by a test that hopes they do.
         # This asserts the construction, on the fold that is currently "live".
         _, trainable = training_frames(panel, MODEL)
-        live_fold = built["fold_start"].max()
+        live_fold = built["pred_abs_move_fold_start"].max()
         served = fit_fold(trainable, MODEL, live_fold)
 
         rows = panel[fold_start_of(panel["date"]).to_numpy() == live_fold]
         rows = _prepare(rows)
-        stored = built[built["fold_start"] == live_fold]
+        stored = built[built["pred_abs_move_fold_start"] == live_fold]
         merged = rows.merge(
             stored[["ticker", "event_date", "pred_abs_move"]],
             left_on=["ticker", "date"],
@@ -367,7 +376,7 @@ class TestTier3IsUnchanged:
         monkeypatch.setattr(tier4, "FIRST_FOLD", pd.Timestamp("2013-01-01"))
         monkeypatch.setattr(paths, "TIER4", tmp_path / "tier4_forecasts.parquet")
         frame = build_forecasts(
-            panel, model=MODEL, tier3_snapshot=before, log=lambda _m: None
+            panel, produces=_ONLY, models=_MODELS, tier3_snapshot=before, log=lambda _m: None
         )
         write_forecasts(frame)
 
@@ -589,24 +598,24 @@ class TestTheInterval:
 
     def test_a_band_always_says_how_many_errors_it_came_from(self, built):
         banded = built["pred_abs_move_sd"].notna()
-        assert built.loc[banded, "resid_n"].notna().all()
-        assert (built.loc[banded, "resid_n"] >= tier4.MIN_RESIDUALS).all()
-        assert built.loc[~banded, "resid_n"].isna().all()
+        assert built.loc[banded, "pred_abs_move_resid_n"].notna().all()
+        assert (built.loc[banded, "pred_abs_move_resid_n"] >= tier4.MIN_RESIDUALS).all()
+        assert built.loc[~banded, "pred_abs_move_resid_n"].isna().all()
 
     def test_the_earliest_folds_carry_no_band(self, built):
         # Nothing has been predicted yet, so there are no held-out errors to
         # build one from. A band from four residuals would be a number that
         # reads as a confidence interval and is not one.
         scored = built[built["pred_abs_move"].notna()]
-        first = scored["fold_start"].min()
-        assert scored.loc[scored["fold_start"] == first, "pred_abs_move_sd"].isna().all()
+        first = scored["pred_abs_move_fold_start"].min()
+        assert scored.loc[scored["pred_abs_move_fold_start"] == first, "pred_abs_move_sd"].isna().all()
         assert scored["pred_abs_move_sd"].notna().any(), "no fold ever gets a band"
 
     def test_the_band_appears_once_and_stays(self, built):
         # Monotone in fold order: the pool only grows, so a fold that has a band
         # is never followed by one that lost it.
         scored = built[built["pred_abs_move"].notna()]
-        by_fold = scored.groupby("fold_start")["pred_abs_move_sd"].apply(
+        by_fold = scored.groupby("pred_abs_move_fold_start")["pred_abs_move_sd"].apply(
             lambda s: bool(s.notna().any())
         )
         seen = False
@@ -620,7 +629,7 @@ class TestTheInterval:
         assert blank["pred_abs_move_p10"].isna().all()
         assert blank["pred_abs_move_p90"].isna().all()
         assert blank["pred_abs_move_sd"].isna().all()
-        assert blank["resid_n"].isna().all()
+        assert blank["pred_abs_move_resid_n"].isna().all()
 
     def test_the_band_uses_only_earlier_folds(self, panel, built):
         # Reproduce one fold's band by hand from the residuals of everything
@@ -628,24 +637,24 @@ class TestTheInterval:
         _, trainable = training_frames(panel, MODEL)
         realized = trainable.set_index(["ticker", "date"])[MODEL.target]
         scored = built[built["pred_abs_move"].notna() & built["pred_abs_move_sd"].notna()]
-        fold = scored["fold_start"].min()  # the FIRST fold that got a band
+        fold = scored["pred_abs_move_fold_start"].min()  # the FIRST fold that got a band
 
         earlier = built[
-            built["pred_abs_move"].notna() & (built["fold_start"] < fold)
+            built["pred_abs_move"].notna() & (built["pred_abs_move_fold_start"] < fold)
         ]
         keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
         truth = realized.reindex(keys).to_numpy(dtype=float)
         made = earlier["pred_abs_move"].to_numpy(dtype=float)
         ok = np.isfinite(truth) & np.isfinite(made)
 
-        rows = scored[scored["fold_start"] == fold]
+        rows = scored[scored["pred_abs_move_fold_start"] == fold]
         p10, p90, sd, n = tier4.interval_for(
             rows["pred_abs_move"].to_numpy(), made[ok], (truth - made)[ok]
         )
         assert np.allclose(p10, rows["pred_abs_move_p10"].to_numpy())
         assert np.allclose(p90, rows["pred_abs_move_p90"].to_numpy())
         assert np.allclose(sd, rows["pred_abs_move_sd"].to_numpy())
-        assert np.allclose(n, rows["resid_n"].to_numpy(dtype=float))
+        assert np.allclose(n, rows["pred_abs_move_resid_n"].to_numpy(dtype=float))
 
 
 class TestIntervalMechanics:
@@ -687,6 +696,83 @@ class TestIntervalMechanics:
         )
         assert np.isnan(p10).all() and np.isnan(sd).all() and np.isnan(n).all()
 
+    def test_a_table_from_an_older_layout_is_refused_not_null_filled(self):
+        """The failure mode is silence, so the guard has to be total.
+
+        `normalize` reindexes onto COLUMNS. A file missing a column comes back
+        with that column NULL, and "no forecast for any event" is exactly what
+        an unbuilt table looks like — so a stale file would read as a valid
+        empty one. Checking that every declared column is PRESENT catches every
+        older layout, including ones nobody enumerated.
+        """
+        import pandas as _pd
+
+        frame = _pd.DataFrame({c: [] for c in COLUMNS})
+        stale = frame.drop(columns=["pred_im_t1_d14_fold_start"])
+        with pytest.raises(Tier4Error, match="older layout"):
+            tier4._assert_current_schema(stale, Path("t.parquet"))
+        # The current layout passes untouched.
+        assert tier4._assert_current_schema(frame, Path("t.parquet")) is frame
+
+    def test_a_signed_target_keeps_its_negative_band(self):
+        """`floor=None` is what makes a producer with a signed target possible.
+
+        Both producers so far predict a magnitude, so zero is the right clip
+        for them and was hard-coded. An IV crush is negative at 83% of prints:
+        a hard zero would collapse every one of its bands to [0, 0] — and
+        [0, 0] is not inverted, so the interval check would pass while every
+        band said nothing.
+        """
+        rng = np.random.default_rng(11)
+        pool_pred = rng.uniform(-30, 5, 2000)
+        pool_res = rng.normal(0, 6, 2000)
+        preds = np.array([-20.0, -5.0])
+        floored = tier4.interval_for(preds, pool_pred, pool_res)
+        signed = tier4.interval_for(preds, pool_pred, pool_res, floor=None)
+
+        # Every lower bound is clipped away, and the deep row loses its band
+        # entirely: [0, 0] on a forecast of -20.
+        assert (floored[0] == 0).all()
+        assert floored[0][0] == 0 and floored[1][0] == 0
+        assert (signed[1] > signed[0]).all()
+        assert (signed[0] < 0).all()
+        # The centre still sits inside its own band.
+        assert (signed[0] <= preds).all() and (preds <= signed[1]).all()
+
+    def test_the_bucket_min_pool_is_not_the_interval_floor(self):
+        """A regression: the two were both called `floor` and one shadowed the other.
+
+        `bucket_residuals` carries a MIN_POOL count — 250 — and conditioning
+        used a local named `floor` for it. Adding a `floor` PARAMETER made the
+        count clip the band, so every row came back [250, 250]: a plausible
+        pair of numbers in the target's units, produced by a row count.
+        """
+        rng = np.random.default_rng(12)
+        pool_pred = rng.uniform(1, 20, 40_000)
+        pool_res = rng.normal(0, 1, 40_000) * pool_pred
+        p10, p90, _, n = tier4.interval_for(np.array([2.0, 18.0]), pool_pred, pool_res)
+        assert not (p10 == tier4.MIN_RESIDUALS).any()
+        assert not (p90 == tier4.MIN_RESIDUALS).any()
+        assert (p90 > p10).all()
+
+    def test_each_producer_declares_the_floor_its_target_needs(self):
+        """A magnitude floors at zero; a signed target must not.
+
+        `pred_iv_crush_30` is negative at 83% of prints. Floored, every one of
+        its bands would be [0, 0] — which no check would flag, because [0, 0]
+        is not inverted.
+        """
+        expected = {
+            "pred_abs_move": 0.0,
+            "pred_im_t1_d14": 0.0,
+            "pred_iv_crush_30": None,
+        }
+        for produces in tier4.PRODUCES:
+            model = tier4.feature_model(produces)
+            assert model.interval_floor == expected[produces], (
+                f"{produces} declares floor {model.interval_floor!r}"
+            )
+
     def test_the_floor_clips_a_band_that_runs_below_zero(self):
         rng = np.random.default_rng(7)
         pool_pred = rng.uniform(1, 10, 1000)
@@ -712,25 +798,25 @@ class TestTheServingBand:
 
     def test_the_served_band_reproduces_the_stored_one(self, panel, wired):
         stored = wired
-        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "fold_start"].max()
+        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
         served = tier4.serving_model(fold, panel=panel, model=MODEL, cache=False)
-        rows = stored[stored["fold_start"] == fold]
+        rows = stored[stored["pred_abs_move_fold_start"] == fold]
 
         p10, p90, sd, n = served.interval(rows["pred_abs_move"].to_numpy(dtype=float))
         assert np.allclose(p10, rows["pred_abs_move_p10"].to_numpy(dtype=float))
         assert np.allclose(p90, rows["pred_abs_move_p90"].to_numpy(dtype=float))
         assert np.allclose(sd, rows["pred_abs_move_sd"].to_numpy(dtype=float))
-        assert np.allclose(n, rows["resid_n"].to_numpy(dtype=float))
+        assert np.allclose(n, rows["pred_abs_move_resid_n"].to_numpy(dtype=float))
 
     def test_the_pool_stops_at_the_fold(self, panel, wired):
         # The served pool must not contain the fold's own errors, or a live
         # band would be narrower than the one the backtest recorded for exactly
         # the reason that makes it wrong.
         stored = wired
-        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "fold_start"].max()
+        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
         served = tier4.serving_model(fold, panel=panel, model=MODEL, cache=False)
         expected = int(
-            (stored["pred_abs_move"].notna() & (stored["fold_start"] < fold)).sum()
+            (stored["pred_abs_move"].notna() & (stored["pred_abs_move_fold_start"] < fold)).sum()
         )
         assert served.pool_pred.size == expected
         assert served.pool_res.size == expected

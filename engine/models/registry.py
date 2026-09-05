@@ -57,8 +57,11 @@ __all__ = [
 #:
 #: ``size``        predicted |earnings move|, in percent of spot
 #: ``implied_t1``  predicted quoted implied move at the last pre-print close
+#: ``iv_crush``    predicted change in 30-day implied vol across the print, as a
+#:                 percent of the pre-print level — negative at 83% of prints,
+#:                 and the only role so far whose target is SIGNED
 #: ``gate``        predicted per-trade return at mid fills — the selection signal
-ROLES = ("size", "implied_t1", "gate")
+ROLES = ("size", "implied_t1", "iv_crush", "gate")
 
 #: Strategy scope. ``"*"`` means the model is strategy-agnostic (the size model
 #: predicts a property of the *event*, not of any structure traded around it).
@@ -78,7 +81,12 @@ MODEL_TIERS = ("feature", "decision")
 #: The tier a role occupies by default. Not a guess — it is what the roles
 #: already mean, so an entry written before these fields existed lands on the
 #: right value without anyone editing it.
-ROLE_TIER = {"size": "feature", "implied_t1": "feature", "gate": "decision"}
+ROLE_TIER = {
+    "size": "feature",
+    "implied_t1": "feature",
+    "iv_crush": "feature",
+    "gate": "decision",
+}
 
 #: The Tier-4 vocabulary: the columns a feature model may declare it produces
 #: and a decision model may declare it consumes. It lives here rather than in
@@ -90,6 +98,14 @@ TIER4_COLUMNS = (
     "pred_abs_move_p10",
     "pred_abs_move_p90",
     "pred_abs_move_sd",
+    "pred_im_t1_d14",
+    "pred_im_t1_d14_p10",
+    "pred_im_t1_d14_p90",
+    "pred_im_t1_d14_sd",
+    "pred_iv_crush_30",
+    "pred_iv_crush_30_p10",
+    "pred_iv_crush_30_p90",
+    "pred_iv_crush_30_sd",
 )
 
 REGISTRY_PATH = paths.ENGINE / "models" / "registry.json"

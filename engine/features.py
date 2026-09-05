@@ -46,6 +46,7 @@ from engine.audit import FeatureVector, assert_causal, assert_decision_causal
 from engine.calendar import BMO, trading_calendar
 from engine.data import store
 from engine.data.features import panel as panel_mod
+from engine.data.features import tier4 as tier4_table
 
 __all__ = [
     "ABSOLUTE_FEATURES",
@@ -252,22 +253,17 @@ def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
 
 
 #: Tier-4 columns joined onto the panel by ``load_panel(with_forecasts=True)``.
-#: ``pred_abs_move`` is the forecast and ``_p10``/``_p90``/``_sd`` describe how
-#: wrong it is likely to be; the rest is the provenance that makes a stale or
-#: partially rebuilt table visible to whoever reads it. ``resid_n`` is how many
-#: held-out errors the band came from — a reader judging a wide interval needs
-#: to know whether it is wide because the model is uncertain or because the
-#: pool was thin.
-FORECAST_COLUMNS = (
-    "pred_abs_move",
-    "pred_abs_move_p10",
-    "pred_abs_move_p90",
-    "pred_abs_move_sd",
-    "resid_n",
-    "model_id",
-    "fold_start",
-    "tier3_snapshot",
-)
+#: Each producer contributes a point forecast, a ``_p10``/``_p90``/``_sd`` band
+#: describing how wrong it is likely to be, and the provenance that makes a
+#: stale or partially rebuilt table visible to whoever reads it.
+#: ``<name>_resid_n`` is how many held-out errors the band came from — a reader
+#: judging a wide interval needs to know whether it is wide because the model is
+#: uncertain or because the pool was thin.
+#:
+#: Derived from the table's own definition rather than restated. Two producers
+#: now contribute seven columns each; a hand-maintained copy of that list is one
+#: champion promotion away from silently dropping a column from every join.
+FORECAST_COLUMNS = tier4_table.COLUMNS[len(tier4_table.KEY_COLUMNS):]
 
 
 @lru_cache(maxsize=1)
