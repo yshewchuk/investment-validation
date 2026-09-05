@@ -1,0 +1,163 @@
+id: EXP-130
+title: "A monthly trailing cutoff for the P&L gate: faster regime adaptation than a calendar year"
+kind: entry-rule-replacement
+strategy: TWIN-P5
+programme: tier4-feature-models
+prior: [EXP-123, EXP-125, EXP-126, EXP-128, EXP-129]
+type: mechanism-robustness
+price_source: ORATS chains (bid/ask) for the entry; chains where quoted and Black-Scholes elsewhere for the simulated exit
+
+hypothesis: >
+  EXP-129's quantile gate sets its bar from PRIOR CALENDAR YEARS. That is a
+  coarse clock: a cutoff fixed in January is still being applied in December,
+  eleven months after the last data that informed it, and a regime that turns in
+  March is not answered until the following January.
+
+  Recomputing the same top-20% bar EVERY MONTH over a TRAILING TWELVE MONTHS
+  should adapt faster while holding the same amount of history behind each
+  estimate. Falsified if the monthly rule does not beat the annual one on CAGR,
+  on Sharpe per trade, and on the share of out-of-sample years positive - the
+  three measures promote.decide turns on - or if it fails to beat the incumbent
+  cost < peak/2 on the same three.
+
+what_this_run_can_and_cannot_establish: >
+  IT IS NOT AN INDEPENDENT CONFIRMATION OF EXP-129, and calling it one would be
+  the single most misleading thing this spec could do. It runs on the SAME 2,802
+  candidate events, the same simulated expectations and the same realized
+  outcomes. Nothing here is held out.
+
+  What it CAN establish: whether the edge survives a change in the cutoff
+  mechanism, and whether faster adaptation helps or hurts. A result that
+  evaporates when the clock changes from yearly to monthly was a property of one
+  arbitrary boundary, not of the signal - and that is worth knowing cheaply.
+
+  What only the forward test can establish: whether any of this holds on prints
+  the simulation never saw. EXP-129's gate was found in a 21-cell sweep and this
+  spec varies a cell of it further; the multiple-testing debt is real and the
+  ledger carries it. Phase 5 is the creditor.
+
+known_before_registration:
+  the_trailing_window_is_always_well_populated: >
+    Measured on EXP-129's own simulated set before this spec was written. Across
+    the 92 months that have a full trailing year behind them, the window holds a
+    median of 324 events, a minimum of 197, and NEVER fewer than 100. An 80th
+    percentile is well determined at every point, so the monthly rule is not
+    trading a noisier bar for a fresher one - it is getting the freshness for
+    free.
+  the_month_itself_is_lumpy_and_that_is_earnings_seasonality: >
+    Events per month: median 24, p10 5, p90 54, min 1, max 89. The CUTOFF comes
+    from the 300-odd events in the trailing window, not from the month, so a
+    one-event month is gated against a well-estimated bar. But it does mean the
+    admitted count per month will swing hard, and a month admitting zero is a
+    normal outcome rather than a defect.
+  what_the_annual_rule_did_and_where_it_was_slow: >
+    EXP-129's top_20pct: 481 events on an 8/8 year record, CAGR 27.09%, Sharpe
+    1.60 - the best Sharpe in that experiment's table. Its realized share swung
+    9.7% (2023) to 31.4% (2024) against a 20% target, which is the adaptation
+    working; but the cutoffs it selected drifted monotonically down, 0.0768 in
+    2019 to 0.0560 in 2024, meaning the bar was chasing a moving distribution
+    with a one-year lag the whole way.
+  the_cold_start_is_real_and_belongs_in_the_headline: >
+    The annual rule skips 2018 entirely - 417 events, no prior year to set a bar
+    from. A trailing-12-month rule skips the first twelve MONTHS instead, which
+    is a smaller hole in the same place. Neither is a defect: a live deployment
+    has exactly this cold start, and a rule that pretends otherwise is scoring
+    itself on data it would not have had.
+  the_selection_debt_this_inherits: >
+    EXP-129 registered 21 gate configurations. top_20pct was one of them, and it
+    had the best Sharpe of the lot, which is precisely the property that makes a
+    cell tempting and unreliable. This spec varies that cell rather than
+    confirming it, so the debt grows rather than clears. Stated here so the
+    report cannot present a win as vindication.
+
+definition:
+  the_gate: >
+    For an event in calendar month M, the cutoff is the 80th percentile of
+    exp_pnl_sim over every gateable event with an event_date in
+    [M - 12 months, M) - strictly before M begins. The event is admitted if its
+    own exp_pnl_sim is at or above that cutoff.
+    Recomputed at every month boundary. A month whose trailing window holds
+    fewer than MIN_WINDOW events is not gated at all, and its events are
+    reported as ungateable rather than admitted or rejected by default.
+  causality: >
+    The window ends strictly before the month it gates, so no event is ever
+    ranked against its own month or any later one. This is the same monthly
+    boundary Tier 4 refits its models on, deliberately: a cutoff and a fold that
+    disagree about when a month begins would be two different definitions of
+    causality inside one pipeline.
+  the_simulation_is_unchanged: >
+    Same exp_pnl_sim as EXP-129 - paired draws, repriced legs, SHA-256 seeded,
+    bit-identical across processes. Only the CUTOFF RULE changes. That is what
+    makes the comparison clean: any difference is the clock, not the model.
+  the_risks_this_run_measures:
+    faster_is_not_automatically_better: >
+      A shorter memory tracks a real regime change sooner and also tracks noise
+      sooner. The 6-month arm exists to find the point where that trade turns,
+      and the 24-month arm to check the annual rule was not simply too SHORT.
+      If the 6, 12 and 24 month windows all land within noise of each other, the
+      honest reading is that the clock does not matter and EXP-129's annual
+      result was not slow - it was fine.
+    the_noise_floor_is_known_and_small_differences_mean_nothing: >
+      EXP-129 measured Monte Carlo noise at roughly 7 events and 0.26pp of mean
+      per trade between two runs of the same code. Any difference below that is
+      not a finding, and the report must say so where it applies.
+
+primary_spec:
+  universe: "EXP-129's candidate pool: TWIN-P5 priced, spread <= 25%, mcap >= $10B, both Tier-4 forecasts present"
+  gate: "top 20% of exp_pnl_sim, cutoff recomputed monthly over a trailing 12 months, window strictly before the month"
+  benchmarks:
+    - "EXP-129 top_20pct — the same quantile on a prior-calendar-year cutoff"
+    - "cost < peak/2 — the rule in production"
+  min_window: 100
+  draws: 4000
+  seed: 0
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, fraction 0.05
+  acceptance:
+    beats_the_annual_rule: >
+      higher CAGR, higher Sharpe per trade, and a share of OOS years positive at
+      least as high as EXP-129's top_20pct on the identical universe
+    beats_the_incumbent: >
+      the same three measures against cost < peak/2 on the identical universe
+    adapts_measurably: >
+      the monthly cutoff series must move MORE than the annual one within a
+      year - stated as the standard deviation of the cutoff within each calendar
+      year - or the mechanism is not doing what it claims regardless of outcome
+    not_bought_with_risk: >
+      max drawdown no worse than the annual rule's AT MATCHED SELECTIVITY, read
+      off the gated-event count rather than at each rule's own operating point
+    universe_floor: ">= 250 gated events, or reported as too thin to carry"
+
+grid:
+  window_months:       # is twelve the right memory?
+    - 6
+    - 24
+  quantile:            # is the top fifth the right share?
+    - 0.10
+    - 0.30
+  arm:
+    - annual           # EXP-129's rule, rerun here so the comparison is on identical rows
+    - incumbent        # cost < peak/2 on the same rows
+
+required_outputs:
+  - "head to head: monthly vs annual vs incumbent — events, tickers, CAGR, Sharpe, years positive, max drawdown, return on capital"
+  - "THE CUTOFF SERIES: monthly and annual cutoffs on one time axis, so 'adapts faster' is visible rather than asserted"
+  - "within-year standard deviation of each cutoff series — the acceptance criterion for adaptation, as a number"
+  - "admitted share per month and per year, against the 20% target"
+  - "window sweep: 6 vs 12 vs 24 months on all three measures, with the noise floor marked"
+  - "quantile sweep: 10 vs 20 vs 30 percent"
+  - "the cold-start hole: how many events each rule cannot gate, and when"
+  - "per-year table with n for every rule"
+  - "max drawdown AT MATCHED SELECTIVITY, not at each rule's own operating point"
+  - "breakeven alpha for every rule against the 0.45 bar, and against the incumbent's own 0.460"
+
+data_snapshot: ed1d7e6e628fb57bd7f7077dac26616384a5eaf80bc0e88f843f4c429a77eda5
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+has_short_leg: true
+promotion_target: "TWIN-P5 entry rule, reward term"
+api_calls_budget: 0
+preregistered_at: "2026-09-05T05:33:15+00:00"
