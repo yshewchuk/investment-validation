@@ -1,0 +1,142 @@
+id: EXP-132
+title: "Dropping the oquants implied move: can ORATS history serve every champion"
+kind: feature-substitution
+strategy: "*"
+programme: data-independence
+prior: [EXP-040, EXP-109, EXP-111, EXP-116, EXP-120, EXP-122]
+type: confirmatory
+price_source: "Tier-3 panel; no chains, no vendor calls"
+
+hypothesis: >
+  Every champion in the programme carries exactly ONE oquants-derived feature:
+  mean_prior_implied_move, the running mean of prior events' oquants implied
+  move. size_v1_4, opf_implied_t1_gbm, iv_crush_v1_gbm and both gates all list
+  it. Nothing else any of them reads comes from oquants.
+
+  If an ORATS-derived history feature serves as well, the programme drops its
+  last implied-move dependency on a vendor with two known failure modes: it
+  does not cover forward events, and it does not cover every ticker.
+
+  Falsified if any champion's walk-forward OOS accuracy degrades on the
+  consistency tests this programme promotes on - years improved and Wilcoxon,
+  not a magnitude threshold - or if coverage falls far enough to cost more rows
+  than the substitution saves.
+
+known_before_registration:
+  the_two_series_are_not_the_same_quantity_and_that_is_established: >
+    EXP-122 settled this against a model-free construction. At the last
+    pre-print close, when the first surviving expiry has DTE = 1, the ATM
+    straddle measures E|move| exactly - an identity, not an approximation.
+    Measured against 3,949 such events: median |oquants - straddle| 0.188pp
+    against |ORATS - straddle| 3.123pp, with oquants closer in 9 of 9 years,
+    and a straddle/oquants ratio of 1.034 against a predicted 1.00.
+    So oquants IS E|move| to 3%, and ORATS is something else - 1.55x the
+    model-free measurement, where even a 1-sigma convention would be 1.25x.
+    This experiment is therefore NOT asking which vendor is right. EXP-122
+    answered that. It asks whether the champions care.
+  how_far_apart_they_are_on_the_panel: >
+    Measured before this spec was written, on the 102,008 events carrying both:
+    correlation 0.608, median difference +1.955pp with ORATS reading HIGH,
+    median |difference| 2.435pp, and only 7.8% of events within 0.5pp. The gap
+    WIDENS - median |diff| 1.836pp in 2007-2014 against 3.052pp in 2024-2026,
+    which matches the drift EXP-122 measured against the straddle.
+  what_the_replacement_looks_like: >
+    The running mean of prior events' or_implied, per ticker, computed exactly
+    as mean_prior_implied_move is: expanding, strictly prior, no lookahead.
+    On 112,288 rows carrying both, the two correlate 0.700 with medians 7.098
+    (oquants-derived) and 7.662 (ORATS-derived).
+    A monotone rescaling of one input is the kind of change a tree model
+    absorbs and a linear model does not, and the size champion is HALF LINEAR -
+    an OLS + MLP blend. That is the arm most at risk and the reason this is not
+    assumed to be free.
+  the_coverage_cost_is_real_and_measured: >
+    mean_prior_implied_move is present on 99.5% of panel rows; the ORATS-derived
+    replacement on 96.1%. Walk-forward drops any row with a non-finite feature,
+    so the substitution costs ~3.4% of the training set before it changes a
+    single prediction. Reported per model, never netted against accuracy.
+  the_inconsistency_this_would_also_fix: >
+    16 tickers are absent from the oquants cache and served by
+    engine/data/pulls/computed_moves.py, whose implied move comes from ORATS.
+    So mean_prior_implied_move ALREADY carries two different quantities
+    depending on the ticker - 43 panel rows, medians 5.86 against 5.14. Tiny
+    today and universal the moment computed_moves is extended to the full
+    universe, which is the direction the programme is heading for its own
+    reasons (the oquants cache does not cover forward events and was last
+    written 2026-08-27).
+
+definition:
+  the_feature: >
+    mean_prior_or_implied: per ticker, the expanding mean of or_implied over
+    events STRICTLY BEFORE the one being scored. Same recursion, same causality
+    and the same "no prior events means null" rule as the incumbent, so the two
+    differ only in which series they average.
+  the_arms: >
+    Each champion is retrained twice on IDENTICAL ROWS - the intersection where
+    both history features exist - so a difference is the feature and not the
+    sample. That is EXP-116's correction and it is not optional here: the
+    replacement's thinner coverage would otherwise flatter it by dropping the
+    hardest rows.
+  the_richer_arm: >
+    `ema_variant` additionally supplies ema4/ema8/ema12 of prior or_implied
+    beside the mean. The incumbent has no EMA of implied move at all - only of
+    the realized move - so this asks whether ORATS history can do BETTER rather
+    than merely as well, which is the outcome that would settle the question
+    rather than merely permit it.
+  the_risks_this_run_measures:
+    the_linear_half_of_the_size_blend: >
+      size_v1_4 is an equal-weight OLS + MLP blend. A rescaled input is free for
+      the MLP and is not free for the OLS half, which is exactly why EXP-109's
+      absolute-valued features mattered. If one champion degrades, this is the
+      one, and its arm carries the most weight in the verdict.
+    a_wash_is_not_a_win: >
+      Equal accuracy on both is the RESULT THIS EXPECTS, and it is enough:
+      identical accuracy plus one fewer vendor dependency is a strict
+      improvement. But it must be demonstrated per model, not pooled - a mean
+      across five champions can hide one that broke.
+    the_gates_train_on_far_fewer_rows: >
+      6,607 and 19,190 trades against 116,795 panel events. A 3.4% coverage loss
+      is a different quantity there, and their arms are the most likely to move
+      on sample noise rather than on the feature.
+
+primary_spec:
+  universe: "every panel event carrying BOTH history features, 2013-2026"
+  models: "all five champions, retrained walk-forward on identical rows"
+  seed: 20260829
+  acceptance:
+    no_champion_degrades: >
+      for each of the five, the ORATS arm's walk-forward OOS MAE is not worse
+      than the incumbent's by more than the run-to-run noise of the incumbent
+      itself, measured by refitting the incumbent at two seeds
+    consistent: >
+      years-improved >= 40% and Wilcoxon p > 0.05 against the incumbent for
+      each champion - i.e. no DETECTABLE degradation, rather than a demonstrated
+      improvement
+    coverage_reported: >
+      rows lost to the substitution, per model, stated beside the accuracy and
+      never netted against it
+    the_gates_keep_their_lift: >
+      top-quintile gate lift within noise of the incumbent's, since a gate that
+      ranks worse is worse whatever its MAE says
+
+grid:
+  arm:
+    - ema_variant       # mean + ema4/8/12 of prior or_implied
+    - drop_entirely     # no prior-implied feature at all — is it earning its place?
+
+required_outputs:
+  - "per champion: incumbent vs ORATS arm — n, MAE, RMSE, r, decile spread, years improved, Wilcoxon p"
+  - "the incumbent refit at a second seed, so 'within noise' is a measured quantity and not an assertion"
+  - "rows lost to the substitution, per model"
+  - "gate lift at the top quintile for both gate champions"
+  - "the drop_entirely arm beside both — if removing the feature costs nothing, neither vendor's history matters and the whole question dissolves"
+  - "size_v1_4 broken out into its OLS and MLP halves, since only one of them is scale-sensitive"
+
+data_snapshot: 4ebd48337a850fa2b505619fd35026ca090a8f88b17799d2c7300e9ff703a1f2
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: false
+promotion_target: "the panel's implied-move history feature, and with it the oquants dependency"
+api_calls_budget: 0
+preregistered_at: "2026-09-05T12:49:27+00:00"
