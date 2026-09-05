@@ -1025,11 +1025,17 @@ def check_registry_current() -> str:
     from engine.models.registry import artifact_sha256, load_registry
     from engine.models.training import gate as gate_mod
     from engine.models.training import implied_t1 as implied_mod
+    from engine.models.training import iv_crush as crush_mod
     from engine.models.training import size_model as size_mod
 
+    # One entry per ROLE in the registry. A role missing here is reported as
+    # "no training module", which is the right answer when there genuinely is
+    # none and a false alarm when someone added a role and forgot this map —
+    # the case on 2026-09-05, when `iv_crush` was registered.
     code = {
         "size": set(size_mod.FEATURES),
         "implied_t1": set(implied_mod.FEATURES),
+        "iv_crush": set(crush_mod.FEATURES),
         "gate": set(gate_mod.FEATURES),
     }
     registry_path = ROOT / "engine" / "models" / "registry.json"

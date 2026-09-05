@@ -160,3 +160,13 @@ tr.disabled td { color: var(--dim); }
 tr.tickerrow > td { background: rgba(88,166,255,0.06); border-top: 2px solid var(--line, #30363d); }
 tr.subrow > td:first-child, tr.subrow > td:nth-child(2) { border-top: none; }
 tr.subrow > td { padding-top: 4px; padding-bottom: 4px; }
+
+/* The order ticket: which legs to buy and sell. Sides are colour-coded because
+   a five-leg put structure with two shorts is easy to misread, and a reversed
+   leg is not a small mistake. */
+.order-ticket table.ticket td { padding: 2px 8px; }
+.order-ticket tr.leg-buy td:first-child { color: #1f77b4; }
+.order-ticket tr.leg-sell td:first-child { color: #d62728; }
+.order-ticket tfoot td { border-top: 1px solid var(--line, #ccc); }
+.order-ticket .pos { color: #2ca02c; }
+.order-ticket .neg { color: #d62728; }

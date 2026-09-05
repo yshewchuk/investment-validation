@@ -309,7 +309,7 @@
    "role": "iv_crush",
    "strategy": "*",
    "artifact": "data/models/iv_crush_v1_gbm.joblib",
-   "artifact_sha256": "10ba15738e04983acd21b685d36340d70e17f65773fc8f049bc10df56a132e71",
+   "artifact_sha256": "6cdb5b7dd26b4bf67ecf14c95acf337090c45a169e3f9857b4538f46c6795598",
    "features": [
     "n_prior",
     "mean_prior_move",
@@ -381,7 +381,7 @@
     "oos_years": 14
    },
    "champion": true,
-   "promoted": "2026-09-04",
+   "promoted": "2026-09-05",
    "evidence": "experiments/EXP-128_what_survives_the_print_a_walk_forward_m",
    "seed": 20260829,
    "notes": "Target is SIGNED \u2014 iv30 falls at 83.2% of prints \u2014 so the Tier-4 producer declares interval_floor=None; a magnitude model's zero floor would clip most bands to [0, 0] without inverting one. EXP-128 cleared MAE, RMSE, year-consistency, decile spread and interval calibration and FAILED its registered coverage floor (71,864 scored rows against 80,000) because the arm consumed every numeric panel column; a curated feature list is the next iteration. Materialised on the user's explicit call with that shortfall on the record.",

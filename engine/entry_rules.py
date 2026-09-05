@@ -170,19 +170,67 @@ TWIN_P_RULE = EntryRule(
 )
 
 
-#: TWIN-P5 — promoted off EXP-126, and gated by the SAME three terms.
+def _expected_pnl_clears_the_bar(facts: Mapping) -> bool | None:
+    """``exp_pnl_sim >= pnl_cutoff`` — the top fifth of the trailing six months.
+
+    THE TERM THAT REPLACED ``cost < peak / 2`` FOR TWIN-P5, on 2026-09-05.
+
+    The arithmetic term asked whether max profit beat max loss and answered it
+    without reference to where the print was likely to land. This asks what the
+    structure is expected to return, given a forecast of the move, a forecast of
+    the IV crush, and the calibrated error distribution of both.
+
+    **What changes in kind, not just in accuracy.** ``cost < peak / 2`` is an
+    arithmetic GUARANTEE: it cannot be wrong about an event, whatever any model
+    believes. This is a model output, so a model failure now ADMITS trades
+    rather than merely mis-ranking them, and it fails silently — an
+    over-optimistic exit price on a cheap wing reads as edge. That is a real
+    elevation of risk and it was accepted knowingly; see
+    ``guides/pnl_gate_promotion.md``.
+
+    **The bar is relative and recomputed monthly**, over a trailing six months.
+    Not because six months predicts better than twelve — no window from 6 to 36
+    months is distinguishable on returns — but because it holds the admitted
+    share close to a fifth: yearly SD 0.027 against 0.051 at twelve months. The
+    requirement is a bounded, predictable trade count.
+
+    Undetermined when either fact is missing, which is the case whenever the
+    simulation declined: no forecast, no pre-print vol, a residual pool too
+    thin, or a trailing window under 100 events. Never a rejection.
+    """
+    value, bar = _number(facts, "exp_pnl_sim"), _number(facts, "pnl_cutoff")
+    if value is None or bar is None:
+        return None
+    return value >= bar
+
+
+#: TWIN-P5 — the shape promoted off EXP-126, the GATE promoted off EXP-129/131.
 #:
-#: Not an oversight that nothing was loosened. EXP-126 widened the traded
-#: universe by changing the SHAPE, not the rule: on identical filters the wide
-#: five-strike wing took 393 trades on 217 tickers against TWIN-P's 90 on 79,
-#: returned +7.77% on capital against +5.52%, and was positive in 9 of 9
-#: out-of-sample years and 4 of 4 crisis regimes. A cheaper shape passes
-#: ``cost < peak / 2`` more often on its own merits; relaxing the term as well
-#: would have bought universe with risk instead of with geometry.
+#: The reward term is gone and the two liquidity guards are untouched. That
+#: split is deliberate: spread and market cap are tradeability facts, and no
+#: simulation can conjure a quote that is not there, so they bind whatever the
+#: forecast says. Only the term that was a PROXY for expected return has been
+#: replaced by expected return itself.
+#:
+#: Held out on 2023-2026, with the window and quantile chosen from 2018-2022
+#: alone: 287 events against the incumbent's 154, final equity 2.53x against
+#: 1.68x, Sharpe 1.54 against 1.15, breakeven alpha 0.445 against 0.461, 4/4
+#: years positive for both. What it did NOT clear is distinguishability — a
+#: block bootstrap on the held-out CAGR difference spans [-28.99, +43.71]pp.
+#: Four years cannot separate these rules and this gate is live on a decision
+#: the statistics could not make.
 TWIN_P5_RULE = EntryRule(
     strategy="TWIN-P5",
-    terms=TWIN_P_RULE.terms,
-    evidence="EXP-126 spec.yaml, pre-registered; promoted 2026-09-04",
+    terms=(
+        Term("expected_pnl",
+             "simulated expected return is below the trailing top-20% bar",
+             _expected_pnl_clears_the_bar, needs=("exp_pnl_sim", "pnl_cutoff")),
+        Term("spread", f"mean relative spread exceeds {MAX_REL_SPREAD:.0%}",
+             _spread_is_crossable, needs=("rel_spread",)),
+        Term("mcap", f"market cap below ${MCAP_FLOOR/1e9:.0f}B",
+             _name_is_large_enough, needs=("mcap_usd",)),
+    ),
+    evidence="EXP-129 + EXP-131 held out on 2023-2026; promoted 2026-09-05",
 )
 
 

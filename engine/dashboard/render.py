@@ -90,6 +90,12 @@ _BOARD_FIELDS = (
     "forecast_abs_move", "forecast_p10", "forecast_p90", "forecast_sd",
     "forecast_model", "forecast_fold", "structure_params",
     "structure_width", "cost_over_width", "rel_spread",
+    # The actual order. A recommendation that does not say which strikes to buy
+    # and sell is not one — see ScoreResult.legs.
+    "legs",
+    # What the gate decided on, for the strategies gated by simulated expected
+    # return rather than by arithmetic.
+    "exp_pnl_sim", "win_sim",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",
     "implied_move", "implied_move_at_entry", "model_vs_market",

@@ -20,6 +20,7 @@ import pytest
 from engine.entry_rules import (
     MAX_REL_SPREAD,
     MCAP_FLOOR,
+    TWIN_P5_RULE,
     TWIN_P_RULE,
     EntryRule,
     Term,
@@ -191,3 +192,53 @@ class TestARuleIsGeneral:
             evidence="test",
         )
         assert rule.evaluate({}).passed is None
+
+
+class TestTheTwinP5PnLGate:
+    """The term that replaced `cost < peak/2` on 2026-09-05.
+
+    The replacement changed the gate's KIND, not just its accuracy. The
+    arithmetic term could not be wrong about an event; this one is a model
+    output, so a failure admits trades rather than mis-ranking them. These pin
+    the properties that keep that failure loud.
+    """
+
+    def test_it_clears_the_bar_or_it_does_not(self):
+        base = {"rel_spread": 0.10, "mcap_usd": 5e10}
+        assert TWIN_P5_RULE.evaluate({**base, "exp_pnl_sim": 0.09, "pnl_cutoff": 0.06}).passed
+        assert TWIN_P5_RULE.evaluate({**base, "exp_pnl_sim": 0.03, "pnl_cutoff": 0.06}).passed is False
+
+    def test_the_bar_is_inclusive(self):
+        base = {"rel_spread": 0.10, "mcap_usd": 5e10}
+        assert TWIN_P5_RULE.evaluate({**base, "exp_pnl_sim": 0.06, "pnl_cutoff": 0.06}).passed
+
+    def test_a_missing_expectation_is_undetermined_not_a_rejection(self):
+        """The whole reason `_simulated_pnl` returns {} instead of zeros.
+
+        A defaulted 0.0 would sit just under a bar that is a small positive
+        number, and every unsimulable row would read as a considered decline.
+        """
+        base = {"rel_spread": 0.10, "mcap_usd": 5e10}
+        for missing in ({"pnl_cutoff": 0.06}, {"exp_pnl_sim": 0.09}, {}):
+            verdict = TWIN_P5_RULE.evaluate({**base, **missing})
+            assert verdict.passed is None
+            assert "expected_pnl" in verdict.detail
+
+    def test_the_liquidity_guards_survived_the_promotion(self):
+        """Only the term that was a PROXY for expected return was replaced.
+
+        No simulation can conjure a quote that is not there, so spread and
+        market cap bind whatever the forecast says.
+        """
+        names = [t.name for t in TWIN_P5_RULE.terms]
+        assert names == ["expected_pnl", "spread", "mcap"]
+        clears = {"exp_pnl_sim": 0.20, "pnl_cutoff": 0.06}
+        assert TWIN_P5_RULE.evaluate({**clears, "rel_spread": 0.90, "mcap_usd": 5e10}).passed is False
+        assert TWIN_P5_RULE.evaluate({**clears, "rel_spread": 0.10, "mcap_usd": 1e8}).passed is False
+
+    def test_twin_p_still_gates_on_arithmetic(self):
+        """The promotion is TWIN-P5's alone. TWIN-P keeps a rule that cannot be
+        wrong about an event, which is the thing being given up here."""
+        assert [t.name for t in TWIN_P_RULE.terms] == ["reward", "spread", "mcap"]
+        assert TWIN_P_RULE.evaluate(
+            {"cost": 0.4, "peak": 1.0, "rel_spread": 0.1, "mcap_usd": 5e10}).passed

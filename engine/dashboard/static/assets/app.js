@@ -669,6 +669,63 @@ function renderStrikeGrid(data, gridEl, detailEl) {
   });
 }
 
+/* THE ORDER TICKET — which legs, at which strikes, in what size.
+ *
+ * The header above deliberately does not name a strike, and the reason is
+ * measured: 34% of the time spot moves enough overnight to shift the ATM
+ * strike, and buying yesterday's costs 0.86% on those. That advice works for a
+ * one-leg ATM trade — re-resolve it at order time and you are done.
+ *
+ * It does not work for a five-leg structure. You cannot re-resolve the geometry
+ * without knowing it, so this shows BOTH: the spacing relative to the anchor,
+ * which is what the shape actually is and is stable overnight, and the absolute
+ * strikes AS QUOTED, which are what the debit was computed from and which have
+ * to be re-resolved on the day.
+ */
+function renderOrderTicket(r) {
+  const legs = r.legs || [];
+  if (!legs.length) return "";
+  const anchor = (legs.find((l) => l.name === "atm") || legs[0]).strike;
+  const spot = r.spot;
+  const rows = legs.map((l) => {
+    const side = String(l.side || "").toUpperCase();
+    const offset = (l.strike - anchor);
+    const offPct = spot ? (100 * offset / spot) : null;
+    return "<tr class='" + (side === "BUY" ? "leg-buy" : "leg-sell") + "'>"
+      + "<td><b>" + side + "</b></td>"
+      + "<td>" + fmt(l.qty, 0) + "&times;</td>"
+      + "<td>" + esc(l.right === "P" ? "put" : "call") + "</td>"
+      + "<td class='mono'>" + fmt(l.strike, 2) + "</td>"
+      + "<td class='mono'>" + (offset === 0 ? "anchor"
+          : (offset > 0 ? "+" : "") + fmt(offset, 2)
+            + (offPct === null ? "" : " <span class='muted'>(" + (offPct > 0 ? "+" : "")
+              + fmt(offPct, 2) + "% of spot)</span>")) + "</td>"
+      + "<td class='mono'>" + (l.bid === null ? "–" : fmt(l.bid, 2)) + " / "
+          + (l.ask === null ? "–" : fmt(l.ask, 2)) + "</td>"
+      + "<td class='mono " + (l.cash_flow < 0 ? "neg" : "pos") + "'>"
+          + (l.cash_flow === null ? "–" : (l.cash_flow > 0 ? "+" : "") + fmt(l.cash_flow, 2))
+          + "</td>"
+      + "<td>" + (l.wide_market ? "<span class='badge warn'>wide</span>" : "") + "</td>"
+      + "</tr>";
+  }).join("");
+  const net = legs.reduce((a, l) => a + (l.cash_flow || 0), 0);
+  return "<div class='layer order-ticket'><h4>The order</h4>"
+    + "<div class='badge'>strikes as quoted at the <b>" + esc(r.quote_date || r.entry_date || "–")
+    + "</b> close. <b>Re-resolve the anchor to ATM when you place the order</b> and "
+    + "shift every leg by the same amount — the SPACING is the structure, the "
+    + "absolute strikes are one day's snapshot.</div>"
+    + "<div class='tablewrap'><table class='ticket'><thead><tr>"
+    + "<th>Side</th><th>Qty</th><th>Type</th><th>Strike</th><th>vs anchor</th>"
+    + "<th>bid / ask</th><th>cash</th><th></th></tr></thead><tbody>"
+    + rows + "</tbody><tfoot><tr><td colspan='6'><b>net debit</b></td>"
+    + "<td class='mono'><b>" + fmt(-net, 2) + "</b></td><td></td></tr></tfoot></table></div>"
+    + (r.exp_pnl_sim === null || r.exp_pnl_sim === undefined ? ""
+       : "<div class='badge'>simulated expected return <b>" + signedPct(r.exp_pnl_sim, 2)
+         + "</b>" + (r.win_sim === null || r.win_sim === undefined ? ""
+             : " · profitable in <b>" + pct(r.win_sim, 0) + "</b> of draws") + "</div>")
+    + "</div>";
+}
+
 function renderRowDetail(r, detailEl) {
   detailEl.classList.remove("hidden");
   const layer = (title, pnl, win, extra) =>
@@ -743,6 +800,7 @@ function renderRowDetail(r, detailEl) {
         + (r.quote_age_sessions === 1 ? "" : "s") + " before</b> your fill"
       : " · premium quoted at that close")
     + " · buy whatever is ATM when you place the order</div>"
+    + renderOrderTicket(r)
     + '<div class="detail-grid">'
     + layer("Model layer", r.exp_pnl_model, r.win_model, modelExtra)
     + layer("Analog layer", r.exp_pnl_analog, r.win_analog, analogExtra)

@@ -306,6 +306,23 @@ class ScoreResult:
     n_analogs: int = 0
     analog_widened: int = 0
 
+    #: The simulated expectation the TWIN-P5 gate turns on, and the share of
+    #: draws that finished profitable. Recorded whether or not the row trades:
+    #: a reader judging a decline needs the number it was declined on.
+    exp_pnl_sim: float | None = None
+    win_sim: float | None = None
+
+    #: The resolved legs, in the order the structure declares them — what to
+    #: BUY and SELL, at which strike, in what quantity, and the quote each
+    #: price came from.
+    #:
+    #: A row that recommends a five-strike structure and does not say which five
+    #: strikes is not actionable: the reader has to rebuild the geometry from
+    #: `structure_params` and a ladder they cannot see. The snapped strikes are
+    #: also not the ones the forecast asked for — median 2.1% off, p90 15.1% —
+    #: so the shape on the board is the only authority on what to trade.
+    legs: list = field(default_factory=list)
+
     # gate
     gate_score: float | None = None
     gate_threshold: float | None = None
@@ -463,6 +480,10 @@ class ScoreResult:
 # --------------------------------------------------------------------------
 
 
+#: Distinguishes "not looked up yet" from "looked up, and the answer is None".
+_UNSET = object()
+
+
 class Scorer:
     """Holds the loaded models, trades, and data context for a scoring run.
 
@@ -481,6 +502,16 @@ class Scorer:
         snapshot: str | None = None,
         verify_artifacts: bool = True,
     ):
+        # Lazily-built inputs for the expected-P&L gate, per INSTANCE so a
+        # differently-configured environment cannot inherit them. _UNSET rather
+        # than None because None is a real, cacheable answer here: "the pool
+        # could not be built", which must not be retried on every row.
+        self._pool = _UNSET
+        self._pre_iv = _UNSET
+        self._crush = _UNSET
+        self._crush_frame = _UNSET
+        self._latest_iv = _UNSET
+
         self.registry = registry if registry is not None else load_registry()
         self.snapshot = snapshot if snapshot is not None else _snapshot_hash()
         self.context = context or FeatureContext.load()
@@ -921,6 +952,29 @@ class Scorer:
 
         result.entry_cost = float(priced.cost)
         result.spot = float(priced.spot)
+        # Kept for the expected-P&L gate, which has to reprice these exact legs
+        # at simulated outcomes. Stashed on the instance rather than added to
+        # the dataclass: it is working state for one scoring pass, and putting
+        # ResolvedLeg objects in a serialised result would put chain quotes into
+        # the ledger and the dashboard payload.
+        result._priced_legs = tuple(priced.legs)
+        result.legs = [
+            {
+                "name": leg.name,
+                "side": leg.side,
+                "right": leg.right,
+                "qty": float(leg.qty),
+                "strike": float(leg.strike),
+                "expiry": str(pd.Timestamp(leg.expiry).date()),
+                "dte": int(leg.dte),
+                "bid": None if leg.bid is None else float(leg.bid),
+                "ask": None if leg.ask is None else float(leg.ask),
+                "price": None if leg.price is None else float(leg.price),
+                "cash_flow": None if leg.cash_flow is None else float(leg.cash_flow),
+                "wide_market": bool(leg.wide_market),
+            }
+            for leg in priced.legs
+        ]
         result.strike = float(priced.legs[0].strike)
         result.expiry = priced.legs[0].expiry
         result.dte_entry = int(priced.legs[0].dte)
@@ -1379,17 +1433,18 @@ class Scorer:
 
     # -- forecast sizing (Tier 4) -----------------------------------------
 
-    def _serving(self, fold):
+    def _serving(self, fold, *, produces: str = "pred_abs_move"):
         """The Tier-4 fold model, fit or cached once per fold per process.
 
         Fitting is ~6 seconds and a three-week board spans at most two folds,
         so this is the difference between a board that costs seconds and one
         that refits per row.
         """
-        key = pd.Timestamp(fold)
+        key = (pd.Timestamp(fold), produces)
         if key not in self._serving_models:
+            model = tier4.feature_model(produces) if produces != "pred_abs_move" else None
             self._serving_models[key] = tier4.serving_model(
-                key, panel=self.context.panel
+                key[0], panel=self.context.panel, model=model
             )
         return self._serving_models[key]
 
@@ -1459,15 +1514,20 @@ class Scorer:
         rule = rule_for(request.strategy)
         if rule is None:
             return
-        verdict = rule.evaluate(
-            {
-                "cost": result.entry_cost,
-                "w": result.structure_width,
-                "peak": result.structure_peak,
-                "rel_spread": result.rel_spread,
-                "mcap_usd": _feature_value(features, "mcap_usd"),
-            }
-        )
+        facts = {
+            "cost": result.entry_cost,
+            "w": result.structure_width,
+            "peak": result.structure_peak,
+            "rel_spread": result.rel_spread,
+            "mcap_usd": _feature_value(features, "mcap_usd"),
+        }
+        # The simulated expectation, for the strategies whose rule asks for it.
+        # Computed only when a term needs it: TWIN-P still gates on arithmetic
+        # and must not pay for a simulation it does not read.
+        if any(need in ("exp_pnl_sim", "pnl_cutoff")
+               for term in rule.terms for need in term.needs):
+            facts.update(self._simulated_pnl(request, result, features))
+        verdict = rule.evaluate(facts)
         result.model_versions["gate"] = f"entry-rule:{rule.strategy}"
         result.gate_pass = verdict.passed
         if verdict.passed is None:
@@ -1475,6 +1535,209 @@ class Scorer:
         result.detail = (
             f"{result.detail}; {verdict.detail}" if result.detail else verdict.detail
         )
+
+    def _crush_table(self):
+        """The realized-crush frame, read ONCE per scorer.
+
+        ``iv_crush.crush_frame()`` reads every ``daily_market`` row — ~9M — to
+        pair each event's pre- and post-print vol. Two callers needed it and
+        each was calling it, so a nightly paid that read twice before this
+        existed. Cached as an empty frame on failure, so a missing table costs
+        one attempt rather than one per row.
+        """
+        if self._crush_frame is _UNSET:
+            from engine.models.training import iv_crush
+
+            try:
+                self._crush_frame = iv_crush.crush_frame()
+            except Exception:
+                self._crush_frame = pd.DataFrame(
+                    columns=["ticker", "event_date", "pre_iv30", "crush_pct_iv30"])
+        return self._crush_frame
+
+    def _residual_pool(self):
+        """The paired ``(move, crush)`` error pool, built once per process.
+
+        From Tier 4's stored forecasts against the realized outcomes: the move
+        from the panel, the crush from Tier 2's pre/post print vol pair. Both
+        errors for an event come from that event, which is what carries the
+        dependence between them without anyone estimating it.
+        """
+        from engine import pnl_sim
+
+        # Cached on the INSTANCE, never on the class. A class-level cache
+        # survives into a differently-configured environment — the nightly's
+        # replay builds a synthetic panel, and a pool retained from real data
+        # made some rows score against one universe and some against another,
+        # which surfaced as four unexplained selfcheck mismatches.
+        if self._pool is not _UNSET:
+            return self._pool
+        try:
+            from engine.data.features import tier4
+            from engine.features import load_panel
+            from engine.models.training import iv_crush
+
+            panel = load_panel()[["ticker", "date", "abs_move"]].rename(
+                columns={"date": "event_date"})
+            forecasts = tier4.load_forecasts()[
+                ["ticker", "event_date", "pred_abs_move", "pred_iv_crush_30"]]
+            crush = self._crush_table()[["ticker", "event_date", "crush_pct_iv30"]]
+            h = forecasts.merge(panel, on=["ticker", "event_date"], how="inner")
+            h = h.merge(crush, on=["ticker", "event_date"], how="inner")
+            h["err_move"] = h["abs_move"] - h["pred_abs_move"]
+            h["err_crush"] = h["crush_pct_iv30"] - h["pred_iv_crush_30"]
+            pool = pnl_sim.ResidualPool(h.dropna(subset=["err_move", "err_crush"]))
+        except Exception:
+            pool = None
+        self._pool = pool
+        return pool
+
+    def _pre_print_iv(self, request, result, features=None) -> float | None:
+        """iv30 at the last pre-print close — the level the crush multiplies.
+
+        For a FORWARD event that close has not happened, so there is nothing to
+        look up. The backtest never surfaced this because every event it scored
+        had already printed. The live answer is the most recent iv30 the panel
+        holds for the name, which is what a trader would use and which the crush
+        forecast is itself conditioned on — recorded as a substitution rather
+        than silently equated with the historical anchor.
+        """
+        # `pre_iv30` is a Tier-3 column as of 2026-09-05, so the live feature
+        # frame already carries it — for a FORWARD event too, which is the whole
+        # reason it was moved there. The Tier-2 pairing below is the fallback
+        # for a panel built before that.
+        if features is not None and "pre_iv30" in getattr(features, "columns", ()):
+            value = _feature_value(features, "pre_iv30")
+            if value is not None and value == value:
+                return float(value)
+        if self._pre_iv is _UNSET:
+            try:
+                frame = self._crush_table()[["ticker", "event_date", "pre_iv30"]]
+                self._pre_iv = {(t, pd.Timestamp(d)): v for t, d, v
+                                in zip(frame.ticker, frame.event_date, frame.pre_iv30)}
+            except Exception:
+                self._pre_iv = {}
+        stored = self._pre_iv.get((request.ticker, pd.Timestamp(result.event_date)))
+        if stored is not None and stored == stored:
+            return float(stored)
+        return self._latest_iv30(request.ticker, result.event_date)
+
+    def _latest_iv30(self, ticker: str, before) -> float | None:
+        """The newest iv30 for ``ticker`` strictly before ``before``.
+
+        Strictly before, because a forward event's own date is in the future and
+        anything at or after it would not exist yet.
+        """
+        if self._latest_iv is _UNSET:
+            try:
+                frame = self._crush_table()[["ticker", "event_date", "pre_iv30"]].dropna()
+                frame = frame.sort_values("event_date")
+                self._latest_iv = {t: g for t, g in frame.groupby("ticker")}
+            except Exception:
+                self._latest_iv = {}
+        rows = self._latest_iv.get(ticker)
+        if rows is None or rows.empty:
+            return None
+        earlier = rows[rows["event_date"] < pd.Timestamp(before)]
+        return float(earlier["pre_iv30"].iloc[-1]) if len(earlier) else None
+
+    def _crush_forecast(self, request, result, features=None) -> float | None:
+        """``pred_iv_crush_30`` — SERVED for a forward event, stored for a past one.
+
+        The stored Tier-4 table only covers events that have printed, so reading
+        it alone made every FORWARD row undetermined and took TWIN-P5 off the
+        board entirely. The size forecast never had this problem because it goes
+        through ``tier4.serving_model``; this now does the same, and falls back
+        to the stored value for a historical row where the two agree by
+        construction (§5 of the Tier-4 guide).
+        """
+        from engine.data.features import tier4
+
+        if self._crush is _UNSET:
+            try:
+                frame = tier4.load_forecasts()[["ticker", "event_date", "pred_iv_crush_30"]]
+                self._crush = {(t, pd.Timestamp(d)): v for t, d, v
+                               in zip(frame.ticker, frame.event_date, frame.pred_iv_crush_30)}
+            except Exception:
+                self._crush = {}
+        stored = self._crush.get((request.ticker, pd.Timestamp(result.event_date)))
+        if stored is not None and stored == stored:
+            return float(stored)
+        if features is None:
+            return None
+        try:
+            served = self._serving(
+                tier4.serving_fold(result.event_date, result.as_of),
+                produces="pred_iv_crush_30",
+            )
+            value = float(served.predict(features)[0])
+            return value if value == value else None
+        except Exception:
+            return None
+
+    def _expectation(self, request, result, features=None) -> dict | None:
+        """Simulate this event's return distribution, or ``None`` if it cannot.
+
+        The exit legs are the entry legs with their sides reversed — the
+        position is closed, so what was bought is sold. Their strikes and
+        expiry are fixed at entry, and only the DTE remaining differs, which is
+        exactly what the exit date supplies.
+        """
+        from engine import pnl_sim
+
+        legs = getattr(result, "_priced_legs", None)
+        if not legs or result.event_date is None:
+            return None
+        pool = self._residual_pool()
+        if pool is None:
+            return None
+        exit_legs = [
+            {"strike": float(leg.strike), "qty": float(leg.qty),
+             "side": "sell" if str(leg.side).lower() == "buy" else "buy"}
+            for leg in legs
+        ]
+        dte_exit = None
+        if result.expiry is not None and result.exit_date is not None:
+            dte_exit = float((pd.Timestamp(result.expiry) - pd.Timestamp(result.exit_date)).days)
+        return pnl_sim.expected_pnl(
+            exit_legs=exit_legs,
+            spot=result.spot,
+            entry_cost=result.entry_cost,
+            pre_iv30=self._pre_print_iv(request, result, features),
+            pred_abs_move=result.forecast_abs_move,
+            pred_iv_crush=self._crush_forecast(request, result, features),
+            dte_exit=dte_exit,
+            event_date=result.event_date,
+            pool=pool,
+            key=request.strategy,
+        )
+
+    def _simulated_pnl(self, request, result, features=None) -> dict:
+        """``exp_pnl_sim`` and the trailing bar it must clear, or an empty dict.
+
+        Empty rather than zeros: every missing input has to reach the rule as a
+        MISSING FACT so the verdict is undetermined. A simulated expectation
+        defaulted to zero would sit exactly on a gate whose bar is a small
+        positive number, and the row would read as a considered rejection.
+        """
+        from engine import pnl_sim
+
+        out: dict = {}
+        try:
+            history = pnl_sim.load_history()
+            if history is not None:
+                bar = pnl_sim.trailing_cutoff(history, result.event_date)
+                if bar is not None:
+                    out["pnl_cutoff"] = bar
+            sim = self._expectation(request, result, features)
+            if sim is not None:
+                out["exp_pnl_sim"] = sim["exp_pnl_sim"]
+                result.exp_pnl_sim = sim["exp_pnl_sim"]
+                result.win_sim = sim["win_sim"]
+        except Exception as exc:  # a board must not die on one unsimulable row
+            result.detail = (f"{result.detail}; expected-P&L unavailable: {exc}"
+                             if result.detail else f"expected-P&L unavailable: {exc}")
+        return out
 
     def _score_gate(self, request, result, features) -> None:
         loaded = self.model("gate", request.strategy)

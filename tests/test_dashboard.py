@@ -1507,3 +1507,79 @@ class TestImpliedMoveConvention:
             "the factor is applied in more than one place — it belongs only on "
             "the displayed ratio, never on a model input"
         )
+
+
+class TestTheOrderTicket:
+    """The board must say which strikes to buy and sell.
+
+    A row recommending a five-leg structure without naming the legs is not
+    actionable: the reader would have to rebuild the geometry from
+    `structure_params` and a ladder they cannot see — and the snapped strikes
+    are not the ones the forecast asked for (median 2.1% off, p90 15.1%), so
+    the shape on the board is the only authority on what to trade.
+    """
+
+    def test_legs_reach_the_board_payload(self):
+        from engine.dashboard.render import _BOARD_FIELDS
+
+        assert "legs" in _BOARD_FIELDS
+        assert "exp_pnl_sim" in _BOARD_FIELDS, "the gate's decision must be visible"
+
+    def test_a_leg_carries_everything_an_order_needs(self):
+        from engine.score import ScoreResult
+
+        field = ScoreResult.__dataclass_fields__.get("legs")
+        assert field is not None
+        assert field.default_factory is list, "legs default to empty, never None"
+
+    def test_the_renderer_shows_spacing_as_well_as_absolute_strikes(self):
+        """Both, and for a measured reason.
+
+        The header deliberately withholds a single ATM strike: 34% of the time
+        spot moves enough overnight to shift it, costing 0.86%. That advice
+        works for one leg — re-resolve at order time. It cannot work for five,
+        because the geometry has to be known to be re-resolved, so the ticket
+        shows the stable spacing beside the as-quoted strikes.
+        """
+        from pathlib import Path
+
+        js = (Path(__file__).resolve().parents[1] / "engine" / "dashboard"
+              / "static" / "assets" / "app.js").read_text()
+        assert "function renderOrderTicket" in js
+        assert "renderOrderTicket(r)" in js, "defined but never called"
+        assert "vs anchor" in js, "the spacing column is the part that survives overnight"
+        assert "Re-resolve the anchor to ATM" in js, "the caveat has to travel with the strikes"
+        assert "leg-buy" in js and "leg-sell" in js, "a reversed leg is not a small mistake"
+
+
+class TestTheNightlyRebuildsTheTiers:
+    """A refresh that moves Tier 2 and stops leaves Tier 3 and Tier 4 stale.
+
+    Found 2026-09-05: the panel was three days behind `daily_market`, so 161
+    events had printed and were in neither tier. That is not cosmetic — every
+    forecast-sized structure reads Tier 4, and a model served for a FORWARD
+    event needs panel columns only a rebuild produces.
+    """
+
+    def test_the_tier_rebuild_is_on_by_default_and_can_be_skipped(self):
+        import inspect
+
+        from engine.dashboard.nightly import run_nightly
+
+        params = inspect.signature(run_nightly).parameters
+        assert "tiers" in params
+        assert params["tiers"].default is True, "stale tiers must be the exception"
+
+    def test_a_tier_failure_degrades_rather_than_stopping_the_night(self):
+        """A stale panel scores yesterday's universe — wrong, but visible.
+        A nightly that refuses to render leaves the board dark, which is worse
+        and harder to notice."""
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1] / "engine" / "dashboard"
+               / "nightly.py").read_text()
+        block = src[src.index("# -- 2b. Tier 3 and Tier 4"):]
+        block = block[:block.index("# -- earnings-date changes")]
+        assert "tiers_degraded" in block, "a skipped rebuild has to raise a flag"
+        assert "NightlyStop" not in block, "a tier failure must not stop the night"
+        assert 'rebuild_tables(("panel", "tier4"))' in block, "panel before tier4 — tier4 reads it"

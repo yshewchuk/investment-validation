@@ -840,3 +840,56 @@ class TestTheServingBand:
         # ...and the point forecast still works. A missing band must not take
         # the forecast down with it.
         assert np.isfinite(served.predict(_prepare(panel).head(1))).all()
+
+
+class TestThePnLGateSimulator:
+    """`engine.pnl_sim` — the machinery the TWIN-P5 gate turns on."""
+
+    def test_a_move_draw_past_minus_100_percent_cannot_produce_a_negative_spot(self):
+        """The bug that silently poisoned means before it was caught.
+
+        The move residual pool is heavy-tailed. Untruncated, a down draw beyond
+        -100% put spot below zero, `log(S/K)` returned NaN, and the mean of
+        every affected event was quietly destroyed — no error, no flag.
+        """
+        from engine import pnl_sim
+
+        floor = pnl_sim.MIN_SPOT_FRACTION
+        assert 0 < floor < 0.01
+        value = float(pnl_sim.black_scholes_put(100 * floor, 100.0, 0.03, 0.4))
+        assert np.isfinite(value)
+        assert value == pytest.approx(100.0, abs=0.05), "a stock at zero makes the put worth its strike"
+
+    def test_the_pricer_is_intrinsic_at_expiry(self):
+        from engine import pnl_sim
+
+        assert float(pnl_sim.black_scholes_put(90, 100, 0.0, 0.4)) == pytest.approx(10.0)
+        assert float(pnl_sim.black_scholes_put(110, 100, 0.0, 0.4)) == pytest.approx(0.0)
+
+    def test_the_cutoff_window_ends_strictly_before_the_month_it_gates(self):
+        """An event must never be ranked against itself or anything later."""
+        from engine import pnl_sim
+
+        history = pd.DataFrame({
+            "event_date": pd.date_range("2024-01-01", periods=400, freq="D"),
+            "exp_pnl_sim": np.linspace(-0.5, 0.5, 400),
+        })
+        bar = pnl_sim.trailing_cutoff(history, "2024-07-15", window_months=6, quantile=0.20)
+        assert bar is not None
+        inside = history[(history.event_date >= "2024-01-01") & (history.event_date < "2024-07-01")]
+        assert bar == pytest.approx(float(np.quantile(inside.exp_pnl_sim, 0.80)))
+
+    def test_a_thin_window_yields_no_bar_rather_than_a_fabricated_one(self):
+        from engine import pnl_sim
+
+        history = pd.DataFrame({
+            "event_date": pd.to_datetime(["2024-06-01"] * 20),
+            "exp_pnl_sim": np.linspace(0, 1, 20),
+        })
+        assert pnl_sim.trailing_cutoff(history, "2024-07-15") is None
+
+    def test_the_registered_window_and_quantile_are_what_exp131_confirmed(self):
+        from engine import pnl_sim
+
+        assert pnl_sim.WINDOW_MONTHS == 6
+        assert pnl_sim.QUANTILE == 0.20

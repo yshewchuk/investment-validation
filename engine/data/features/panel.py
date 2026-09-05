@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+from engine.calendar import AMC
 from engine.data import store
 
 __all__ = [
@@ -56,6 +57,8 @@ __all__ = [
     "add_regime_features",
     "add_runup_features",
     "add_orats_features",
+    "add_pre_print_vol",
+    "PRE_PRINT_FEATURES",
     "build_panel",
     "PANEL_COLUMNS",
 ]
@@ -79,6 +82,15 @@ ORATS_FEATURES = {
     "fexern90_30": "or_fexern90_30",
 }
 
+#: Tier-2 vol terms read at the SESSION-AWARE pre-print close. Defined here
+#: because :data:`PANEL_COLUMNS` names them; the builder is below.
+PRE_PRINT_FEATURES = {
+    "iv30": "pre_iv30",
+    "iv10": "pre_iv10",
+    "exern_iv30": "pre_exern_iv30",
+    "exern_iv10": "pre_exern_iv10",
+}
+
 PANEL_COLUMNS = (
     ["ticker", "k", "date", "quarter", "move", "abs_move", "implied_move", "n_prior",
      "mean_prior_move", "mean_prior_abs_move"]
@@ -89,6 +101,7 @@ PANEL_COLUMNS = (
        "signed_streak", "ema12r_abs", "dist_high", "dist_ema", "ret5", "ret10", "ret20"]
     + list(ORATS_FEATURES.values())
     + ["or_exern_z252", "mcap_log", "mcap_usd", "mcap_asof"]
+    + list(PRE_PRINT_FEATURES.values())
 )
 
 #: Per-block observation dates written by the three market-state builders: the
@@ -675,6 +688,80 @@ def add_orats_features(
 # --------------------------------------------------------------------------
 
 
+def add_pre_print_vol(
+    df: pd.DataFrame,
+    daily: pd.DataFrame | None = None,
+    events: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Vol terms at the LAST SESSION BEFORE THE PRINT, session-aware.
+
+    The ORATS block above anchors strictly before ``event_date`` for both
+    sessions — a deliberate legacy conservatism that is never a leak and is one
+    session stale on AMC names. These columns are the version that is not
+    stale: for a BMO print the anchor is the session before ``event_date``,
+    because that morning's print has already moved the event-date close; for an
+    AMC print it is ``event_date`` itself, because the print lands after that
+    close. Verified over 146,774 events: BMO anchors strictly before at
+    100.0000%, AMC on the event date at 99.59% (the rest simply did not quote
+    that day) and on-or-before at 100%.
+
+    **Why these have to be panel columns and not a scorer-time rebuild.** The
+    ``iv_crush`` model consumes them. Pairing pre- and post-print vol out of
+    Tier 2 costs a read of ~9M rows and — decisively — is impossible for an
+    event that has not printed. Without them in the panel that model can be
+    trained and cannot be SERVED, which on 2026-09-05 left every forward
+    TWIN-P5 row ungated and took the strategy off the board.
+
+    Pre-print, causal, and a deterministic function of Tier 2 — which is the
+    definition of a Tier-3 column. The realized crush that pairs with them is
+    an OUTCOME and stays out, beside ``abs_move`` in spirit but computed by the
+    model that needs it.
+    """
+    if daily is None:
+        needed = ["ticker", "date", *PRE_PRINT_FEATURES.keys()]
+        _log("reading tier-2 daily_market for pre-print vol …")
+        daily = store.read_table("daily_market", columns=needed)
+    if events is None:
+        events = store.read_table(
+            "earnings_events", columns=["ticker", "event_date", "session"])
+
+    sessions = {
+        (str(t), pd.Timestamp(d).normalize()): str(sn)
+        for t, d, sn in zip(events["ticker"], events["event_date"], events["session"])
+        if sn is not None and not pd.isna(sn)
+    }
+    daily = daily.sort_values(["ticker", "date"]).reset_index(drop=True)
+    sizes = daily.groupby("ticker", sort=True).size()
+    starts = sizes.cumsum().shift(1).fillna(0).astype(int)
+    spans = {t: (int(a), int(a) + int(n))
+             for t, a, n in zip(sizes.index, starts.values, sizes.values)}
+    dates = daily["date"].to_numpy()
+
+    out = df.copy()
+    n_rows = len(out)
+    idx = np.full(n_rows, -1)
+    for i, (ticker, when) in enumerate(zip(out["ticker"].to_numpy(),
+                                           pd.to_datetime(out["date"]).to_numpy())):
+        span = spans.get(str(ticker))
+        if span is None:
+            continue
+        lo, hi = span
+        session = sessions.get((str(ticker), pd.Timestamp(when).normalize()), AMC)
+        # AMC prints after the close, so that close is still pre-print; BMO
+        # prints before it, so the last clean quote is the session before.
+        side = "right" if session == AMC else "left"
+        j = np.searchsorted(dates[lo:hi], when, side=side) - 1
+        if j >= 0:
+            idx[i] = lo + j
+
+    found = idx >= 0
+    for source, column in PRE_PRINT_FEATURES.items():
+        values = daily[source].to_numpy(dtype=float)
+        out[column] = np.where(found, values[np.where(found, idx, 0)], np.nan)
+    _log(f"pre-print vol: {int(found.sum()):,}/{n_rows:,} events anchored")
+    return out
+
+
 def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     """Full Tier-3 causal panel, built from Tier 1 (moves/prices) and Tier 2."""
     _log("block 1/4 — causal events from oquants moves")
@@ -683,8 +770,10 @@ def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     panel = add_regime_features(panel)
     _log("block 3/4 — run-up and distance features")
     panel = add_runup_features(panel)
-    _log("block 4/4 — ORATS state from tier 2")
+    _log("block 4/5 — ORATS state from tier 2")
     panel = add_orats_features(panel, daily=daily)
+    _log("block 5/5 — session-aware pre-print vol")
+    panel = add_pre_print_vol(panel)
 
     # The per-block anchor dates are provenance for a *caller-supplied* as-of,
     # and the panel's as-of is always the event date, which every row already

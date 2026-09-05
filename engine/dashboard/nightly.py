@@ -898,6 +898,7 @@ def run_nightly(
     bundle_dir: Path | str | None = None,
     target: Path | str | None = None,
     refresh: bool = True,
+    tiers: bool = True,
     publish: bool = True,
     backup: bool = False,
     backfill: bool = True,
@@ -1016,6 +1017,36 @@ def run_nightly(
         report.flags.append({"kind": "validation_red", "detail": detail})
         _write_flag_report(as_of, report.flags, report.steps)
         raise NightlyStop("validate", detail)
+
+    # -- 2b. Tier 3 and Tier 4 ------------------------------------------------
+    # The panel is a deterministic function of Tier 2 and Tier 4 is a
+    # deterministic function of the panel, so a refresh that moves Tier 2 and
+    # stops leaves BOTH stale — and staleness there is not cosmetic. Every
+    # forecast-sized structure reads Tier 4, and a model that has to be SERVED
+    # for a forward event needs panel columns that only a rebuild produces.
+    # Found 2026-09-05 with the panel three days behind Tier 2: 161 events had
+    # printed and were in neither tier.
+    #
+    # Degrades rather than stops. A stale panel scores yesterday's universe,
+    # which is wrong but visible; a nightly that refuses to render leaves the
+    # board dark, which is worse and less visible.
+    if refresh and tiers:
+        from engine.data.rebuild import rebuild as rebuild_tables
+
+        try:
+            tier_result = rebuild_tables(("panel", "tier4"))
+            report.steps["tiers"] = {
+                "rebuilt": ["panel", "tier4"],
+                "elapsed_s": getattr(tier_result, "elapsed_s", None),
+            }
+        except Exception as exc:
+            report.steps["tiers"] = {"degraded": True,
+                                     "error": f"{type(exc).__name__}: {exc}"[:300]}
+            report.flags.append({
+                "kind": "tiers_degraded",
+                "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
+                           f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
+            })
 
     # -- earnings-date changes (needs the refreshed calendar) ----------------
     # Only against a PREVIOUS run's calendar: with no prior state every event
@@ -1251,6 +1282,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bundle", default=None, help="bundle dir (default dashboard/earnings)")
     parser.add_argument("--target", default=None, help="publish target dir")
     parser.add_argument("--no-refresh", action="store_true")
+    parser.add_argument("--no-tiers", action="store_true",
+                        help="skip the Tier-3 / Tier-4 rebuild (they follow a refresh by default)")
     parser.add_argument("--no-publish", action="store_true")
     parser.add_argument("--no-backfill", action="store_true")
     parser.add_argument("--backup", action="store_true", help="run the git + private-mirror sync")
@@ -1276,6 +1309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle_dir=args.bundle,
             target=args.target,
             refresh=not args.no_refresh,
+            tiers=not args.no_tiers,
             publish=not args.no_publish,
             backup=args.backup,
             backfill=not args.no_backfill,

@@ -53,6 +53,7 @@ __all__ = [
     "fit",
     "crush_frame",
     "prepare",
+    "PANEL_VOL_COLUMNS",
     "train",
 ]
 
@@ -65,6 +66,11 @@ TARGET = "crush_pct_iv30"
 #: forward-filling one reports the crush as exactly zero on precisely the
 #: illiquid names where it is largest.
 MAX_GAP_DAYS = 5
+
+#: The pre-print vol terms this model reads, which are TIER-3 PANEL COLUMNS.
+#: Listed so `prepare` can refuse a stale panel loudly instead of failing later
+#: as an unservable champion.
+PANEL_VOL_COLUMNS = ("pre_iv30", "pre_iv10", "pre_exern_iv30", "pre_exern_iv10")
 
 #: The feature list EXP-128 measured: every numeric panel column that is not an
 #: outcome, a key, quarantined, or unavailable live.
@@ -172,12 +178,32 @@ def crush_frame(events=None, daily=None) -> pd.DataFrame:
 def prepare(panel: pd.DataFrame) -> pd.DataFrame:
     """The panel row for each event, joined to that event's realized crush.
 
-    The join is INNER on purpose. An event with no usable ``(pre, post)`` pair
-    has no target to learn from and no pre-print vol to predict from, so it is
-    not a row this model declines to score — it is a row this model has nothing
-    to say about, and Tier 4 records that as a NULL forecast.
+    **Only the TARGET comes from Tier 2 now.** The four pre-print vol terms this
+    model reads — ``pre_iv30``, ``pre_iv10``, ``pre_exern_iv30``,
+    ``pre_exern_iv10`` — are Tier-3 panel columns as of 2026-09-05, and that
+    move is what makes the model servable at all: they are pre-print, causal and
+    deterministic from Tier 2, and while they lived only in this module's
+    pairing they could be reconstructed for an event that had PRINTED and never
+    for one that had not. The board scores events that have not printed, so
+    every forward row came back ungated and TWIN-P5 went dark.
+
+    The realized crush stays out of Tier 3 deliberately: it is an OUTCOME, like
+    ``abs_move``, and it is read here from the two closes that bracket the
+    print. Tier 3 holding only the pre-print side is the leak rule working, not
+    a gap in the panel.
+
+    The join is INNER on the target. An event with no usable ``(pre, post)``
+    pair has nothing to learn from — not a row this model declines to score, a
+    row it has nothing to say about, which Tier 4 records as a NULL forecast.
     """
-    crush = crush_frame()
+    missing = [c for c in PANEL_VOL_COLUMNS if c not in panel.columns]
+    if missing:
+        raise ValueError(
+            f"the panel is missing {missing} — rebuild Tier 3 "
+            "(`python3 -m engine.data.rebuild --table panel`). Without them this "
+            "model can be trained and cannot be served."
+        )
+    crush = crush_frame()[["ticker", "event_date", TARGET]]
     joined = panel.merge(
         crush, left_on=["ticker", "date"], right_on=["ticker", "event_date"], how="inner"
     )

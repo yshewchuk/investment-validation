@@ -1,0 +1,126 @@
+id: EXP-131
+title: "Held out: the trailing six-month top-20% gate on 2023-2026, chosen from 2018-2022 alone"
+kind: entry-rule-replacement
+strategy: TWIN-P5
+programme: tier4-feature-models
+prior: [EXP-123, EXP-125, EXP-126, EXP-128, EXP-129, EXP-130]
+type: confirmatory
+price_source: ORATS chains (bid/ask) for the entry; chains where quoted and Black-Scholes elsewhere for the simulated exit
+
+hypothesis: >
+  EXP-129 found a P&L gate that beats cost < peak/2 at every matched
+  selectivity. EXP-130 then found that WHICH P&L gate cannot be distinguished:
+  windows from 6 to 36 months, and fixed thresholds from 0 to 0.05, all fall
+  inside a +/-4pp bootstrap interval on a 0.05pp difference. Every ranking among
+  them so far has been noise, and every one of them was chosen after seeing the
+  answer.
+
+  This run makes the choice defensible rather than lucky. The rule - top 20% of
+  exp_pnl_sim on a trailing six-month cutoff - is SELECTED using 2018-2022 only,
+  and evaluated on 2023-2026, which the selection never touched.
+
+  Falsified if the held-out book does not beat cost < peak/2 on CAGR, on Sharpe
+  per trade, and on the share of held-out years positive.
+
+why_this_split_is_legitimate_and_where_it_is_still_weak: >
+  Legitimate: measured before this spec was written, a window sweep on 2018-2022
+  ALONE picks 6 months on Sharpe (2.00, against 1.98 at 9m and 1.90 at 12m). The
+  window this experiment tests is therefore re-derivable without any late data,
+  so 2023-2026 is a genuine holdout FOR THE WINDOW CHOICE.
+
+  Still weak, and stated so it cannot be quietly forgotten:
+    - 6m wins the early period by 0.02 of Sharpe over 9m. The choice is
+      re-derivable but it is not robustly re-derivable, and a different seed or
+      a different early cut could easily have named 9m or 24m.
+    - The DECISION TO USE A P&L GATE AT ALL came from EXP-129, which saw every
+      year. Only the window is held out here, not the family.
+    - The simulation feeding exp_pnl_sim is causal per event - walk-forward
+      Tier-4 forecasts, residual pools drawn from strictly earlier events - but
+      the models behind it were trained over the whole span.
+  So this is a confirmation of the WINDOW, one level of the selection stack. The
+  forward test remains the only thing that confirms the stack.
+
+known_before_registration:
+  the_operating_reason_for_this_rule_is_not_performance: >
+    Recorded because it is the actual reason the rule was chosen and the report
+    must not dress it up as a performance finding. On EXP-130's numbers no
+    window is distinguishable from any other on returns. What IS deterministic
+    is volume stability: realized share of candidates admitted, against a 20%
+    target, has a yearly standard deviation of 0.027 at six months against 0.051
+    at twelve and 0.074 for a calendar-year rule, and a yearly range of
+    0.18-0.28 against 0.10-0.31 for the annual rule.
+    The user's stated requirement is a predictable, bounded trade count. A
+    trailing six-month bar delivers that roughly twice as tightly as twelve
+    months. That is the case for this rule.
+  monthly_lumpiness_is_not_fixed_by_any_window: >
+    Month-to-month share SD is 0.169 at BOTH six and twelve months, because
+    what varies month to month is how many earnings land in it - median 24
+    events, min 1, max 89 - not where the bar sits. The shorter window buys
+    stability ACROSS YEARS and nothing across months, and the report must not
+    claim otherwise.
+  the_cold_start_cost_of_choosing_six_months: >
+    A six-month window cannot clear the 100-event floor as early as a twelve
+    month one: 230 ungateable events against 131. Paid knowingly.
+  what_the_incumbent_does_on_this_holdout: >
+    Computed in the run, not assumed. cost < peak/2 is applied to the same
+    2023-2026 rows so the comparison is a rule against a rule on identical data.
+
+definition:
+  selection_period: "2018-2022. Used ONLY to fix the window (6 months) and the quantile (0.20)."
+  holdout_period: "2023-2026. Never consulted in choosing the rule."
+  the_gate: >
+    For an event in month M, the bar is the 80th percentile of exp_pnl_sim over
+    gateable events dated in [M - 6 months, M), strictly before M begins. The
+    event trades if its own exp_pnl_sim is at or above that bar. The trailing
+    window is allowed to reach back into the selection period, because a live
+    deployment in 2023 would have had 2022's events in hand - withholding them
+    would model a constraint that does not exist.
+  the_simulation_is_unchanged: "EXP-129's exp_pnl_sim, read from disk, not recomputed."
+  the_risks_this_run_measures:
+    a_holdout_of_four_years_is_short: >
+      2023-2026 holds roughly 1,280 candidates and will gate a few hundred. A
+      bootstrap on the held-out difference is mandatory, and a win inside its
+      interval is not a win.
+    the_regime_may_simply_differ: >
+      2024 was the richest year in the sample by admitted share for every rule
+      tested. A holdout dominated by one unusual year tests that year more than
+      it tests the rule, so the per-year table carries as much weight as the
+      headline.
+
+primary_spec:
+  universe: "EXP-129's candidate pool restricted to 2023-2026"
+  gate: "top 20% of exp_pnl_sim, trailing 6-month monthly cutoff, min window 100 events"
+  benchmark: "cost < peak/2 on identical held-out rows"
+  fills: "full alpha grid; mid headline"
+  equity: cashflow mode, fraction 0.05
+  acceptance:
+    beats_the_incumbent_on_the_holdout: "higher CAGR, higher Sharpe per trade, and years positive at least equal"
+    distinguishable: "block bootstrap 90% CI on the mean-per-trade difference excludes zero"
+    volume_is_stable: "yearly admitted share within 0.15-0.30 in every held-out year"
+    fill_margin: "breakeven alpha <= 0.45, and no worse than the incumbent's on the same rows"
+    universe_floor: ">= 150 gated events, or reported as too thin to carry"
+
+grid:
+  arm:
+    - window_9m       # the runner-up on the selection period — does the holdout separate them?
+    - window_12m
+    - quantile_10
+    - quantile_30
+
+required_outputs:
+  - "held-out head to head: gate vs incumbent — events, CAGR, Sharpe, max drawdown, RoC, breakeven alpha, years positive"
+  - "block bootstrap 90% CI on the held-out mean-per-trade difference"
+  - "per-year table for the holdout, with n — a win carried by one year must be visible as one"
+  - "admitted share per held-out year against the 20% target"
+  - "selection-period vs holdout performance for the SAME rule — the degradation is the finding"
+  - "the same table for 9m and 12m, so the holdout says whether the window choice mattered at all"
+
+data_snapshot: ed1d7e6e628fb57bd7f7077dac26616384a5eaf80bc0e88f843f4c429a77eda5
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+has_short_leg: true
+promotion_target: "TWIN-P5 entry rule, reward term"
+api_calls_budget: 0
+preregistered_at: "2026-09-05T05:55:22+00:00"

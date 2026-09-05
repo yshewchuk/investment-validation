@@ -218,6 +218,14 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades):
         daily = _daily_subset(rows["ticker"].unique(), years=years)
         data = gate.build_dataset(rows, panel=panel, daily=daily)
         return data, gate.TARGET, list(gate.FEATURES)
+    if role == "iv_crush":
+        from engine.models.training import iv_crush
+
+        # Panel row joined to the realized crush, which is read from Tier 2
+        # rather than the panel: the target lives on BOTH sides of the print and
+        # Tier 3 by construction holds only the pre-print side. That is the leak
+        # rule working, not a gap.
+        return iv_crush.prepare(panel), iv_crush.TARGET, list(iv_crush.FEATURES)
     if role == "implied_t1":
         from engine.models.training import implied_t1
         from engine.models.training.train_all import _events_with_session
