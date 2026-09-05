@@ -362,6 +362,9 @@ class ScoreResult:
     forecast_fold: pd.Timestamp | None = None
     #: The parameters actually handed to the structure factory.
     structure_params: dict | None = None
+    #: Complete selection rule, including defaults and explicit ladder overrides.
+    structure_spec: dict | None = None
+    variant: str | None = None
 
     # the trade being scored
     entry_date: pd.Timestamp | None = None
@@ -873,6 +876,10 @@ class Scorer:
         the entry rather than the fill, and must be labelled that way wherever
         it is shown.
         """
+        from engine.jsonio import json_safe
+        result.structure_spec = json_safe(asdict(structure))
+        result.structure_params = dict(request.structure_params or {})
+        result.variant = request.variant
         result.quote_max_age_sessions = request.quote_max_age_sessions
         result.quote_date = result.quote_date or result.entry_date
         if structure.decided_early:

@@ -291,17 +291,30 @@ def _ledger_sandbox(tmp: Path):
 
 
 def _prediction_row(ledger, as_of="2026-10-15", ticker="AAPL", win=0.55):
+    from dataclasses import asdict
+    from engine.ledger_settlement import POLICY
+    from engine.structures import straddle_through
     rid = ledger.row_id(as_of, ticker, "STR-THRU", None, "2026-10-23")
     return {
         "schema_version": ledger.SCHEMA_VERSION, "row_id": rid, "written_at": "t",
         "as_of": as_of, "decision_ts": f"{as_of}T20:00:00+00:00", "ticker": ticker,
         "event_id": f"{ticker}-e", "event_date": "2026-10-16", "session": "AMC",
         "strategy": "STR-THRU", "structure": {},
+        "settlement": {"policy": POLICY, "spec_version": 1,
+                       "structure_spec": asdict(straddle_through())},
         "intended_prices": {"alpha": 0.5, "entry_cost": 1.0},
         "score": {"win_model": win, "exp_pnl_model": 0.03},
         "model_versions": {}, "snapshot_hash": "abc", "audit_receipt": None,
         "supersedes": None, "supersede_reason": None,
     }
+
+
+def _prediction_calendar():
+    from engine import ledger
+    return pd.DataFrame([
+        {k: r[k] for k in ("event_id", "ticker", "event_date", "session")}
+        for r in ledger.read_predictions()
+    ])
 
 
 @check("ledger_append_only", needs_data=False,
@@ -337,10 +350,13 @@ def check_ledger_append_only() -> str:
 @check("outcome_idempotent", needs_data=False,
        description="scoring twice writes one outcome; unresolvable rows are recorded")
 def check_outcome_idempotent() -> str:
+    from engine import ledger
     from engine import replay as replay_mod
 
     original_ledger = paths.LEDGER
     original_replay = replay_mod.replay
+    original_calendar = ledger._settlement_calendar
+    ledger._settlement_calendar = _prediction_calendar
     try:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = _ledger_sandbox(Path(tmp))
@@ -363,15 +379,16 @@ def check_outcome_idempotent() -> str:
 
             _require(first["resolved"] == 1 and first["unresolvable"] == 1,
                      f"unexpected first pass: {first}")
-            _require(second["resolved"] == 0 and len(outcomes) == 2,
-                     "re-running the scorer duplicated outcome rows")
+            _require(second["resolved"] == 0 and len(outcomes) == 3,
+                     "a resolved row must be terminal; an unresolvable row must retry")
             unresolvable = [o for o in outcomes if o["status"] == "unresolvable"]
-            _require(len(unresolvable) == 1 and unresolvable[0]["reason"],
+            _require(len(unresolvable) == 2 and unresolvable[0]["reason"],
                      "an unresolvable prediction was dropped instead of recorded")
-            return "1 resolved, 1 unresolvable recorded, re-run idempotent"
+            return "1 terminal resolved row, 1 unresolvable row retried append-only"
     finally:
         paths.LEDGER = original_ledger
         replay_mod.replay = original_replay
+        ledger._settlement_calendar = original_calendar
 
 
 # --------------------------------------------------------------------------
@@ -461,10 +478,13 @@ def check_leak_poison() -> str:
 @check("calibration_trigger", needs_data=False,
        description="50 scored predictions regenerate the report and health.json")
 def check_calibration_trigger() -> str:
+    from engine import ledger
     from engine import replay as replay_mod
 
     original_ledger = paths.LEDGER
     original_replay = replay_mod.replay
+    original_calendar = ledger._settlement_calendar
+    ledger._settlement_calendar = _prediction_calendar
     try:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = _ledger_sandbox(Path(tmp))
@@ -505,6 +525,7 @@ def check_calibration_trigger() -> str:
     finally:
         paths.LEDGER = original_ledger
         replay_mod.replay = original_replay
+        ledger._settlement_calendar = original_calendar
 
 
 # --------------------------------------------------------------------------

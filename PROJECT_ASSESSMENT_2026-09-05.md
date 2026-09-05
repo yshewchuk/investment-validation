@@ -24,6 +24,17 @@ Severity indicates impact on experimental validity or operational correctness. A
 
 ### F01 — Critical: forward settlement drops recorded contract identity and reprices entry
 
+**Remediation update (September 5).** The working-tree fix defines predictions
+as recorded selection rules and freezes their complete structure specifications.
+Settlement preserves explicit contract requests and parameter variants,
+reports contract and entry-cost divergence, and reconciles canonical calendar
+identity. See [ledger settlement policy](guides/ledger_settlement.md).
+Existing resolved outcomes remain unchanged and are labeled unverified where
+contract evidence was not recorded. Entry repricing can occur before first
+settlement; resolved outcomes are terminal. Simulated ORATS quote fills are
+within the documented ledger scope; this finding does not require brokerage
+integration. The original evidence below describes the assessed revision.
+
 **Evidence.** [engine/ledger.py](engine/ledger.py), around lines 343–362, records strike, expiry, entry/exit information, intended alpha, and entry cost. In `score_outcomes`, around lines 472–560, settlement calls the same replay engine used for backtests. The constructed frame omits strike, expiry, variant, and structure parameters. Results are matched by `(strategy, event_id, fill_alpha)`, and the outcome uses the fresh replay return, entry cost, and exit value. The frozen intended entry price is not used to calculate the result.
 
 **Impact.** Alternate strikes or expiries can settle against the default reconstructed trade or remain unresolved. Changes in raw data, normalization, or strategy defaults can alter entry pricing after the prediction was frozen. Parameterized structures cannot be reliably settled from this reduced identity.

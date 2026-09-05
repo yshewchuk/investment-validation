@@ -5,11 +5,11 @@
     python3 -m engine.ledger calibrate
     python3 -m engine.ledger status
 
-Every backtest in this program shares a code path with the thing it is trying
-to validate. The ledger does not: predictions are written **before** outcomes
-exist, in a file nobody may rewrite, and scored afterwards by re-pricing the
-same structure through :mod:`engine.replay`. It is the out-of-time,
-out-of-code-path test that catches what the backtests cannot.
+Predictions are written before outcomes exist. Settlement is independent of
+model and gate selection, but deliberately shares the backtest pricing path
+in :mod:`engine.replay`. Outcomes are simulated ORATS quote fills. The frozen
+selection rule resolves contracts at its declared decision/entry close; the
+board contracts and cost are estimates whose divergence is reported.
 
 Layout::
 
@@ -43,10 +43,11 @@ import pandas as pd
 
 from engine import paths
 from engine.jsonio import json_safe
+from engine.ledger_settlement import POLICY, comparison, recorded_structure, selection_key
 
 #: Bumped when a prediction row's shape changes. Rows carry it so a reader
 #: five schema versions later can still tell what it is holding.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Newly scored outcomes that trigger a calibration recompute (plan §P4.2).
 CALIBRATION_TRIGGER = 50
@@ -140,20 +141,25 @@ def read_outcomes() -> list[dict]:
     return rows
 
 
-def trade_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+def trade_key(row: Mapping[str, Any]) -> tuple[str, ...]:
     """The identity of a TRADE, stable across the nights it was proposed on.
 
-    ``row_id`` cannot do this. It is keyed on ``(as_of, ticker, strategy,
+    Legacy ``row_id`` cannot do this. It is keyed on ``(as_of, ticker, strategy,
     strike, expiry)``, so the same trade gets a new id every night, a different
     one again once a chain arrives and a strike resolves, and — because it
     carries no event date — the same id can describe two different events.
 
-    A trade is one ticker, one strategy, one event. Everything else is a
-    restatement of the same intention.
+    Legacy rows have only ticker/strategy/event identity. New rows additionally
+    distinguish recorded selection rules and fill assumptions, so alternate
+    strikes and parameter variants survive calibration deduplication.
     """
-    return (str(row.get("ticker")), str(row.get("strategy")),
+    key = (str(row.get("ticker")), str(row.get("strategy")),
             str(pd.Timestamp(row["event_date"]).date())
             if row.get("event_date") else "")
+    settlement = row.get("settlement")
+    if settlement and settlement.get("structure_spec"):
+        return key + (selection_key(settlement, (row.get("intended_prices") or {}).get("alpha")),)
+    return key
 
 
 def _priced(row: Mapping[str, Any]) -> bool:
@@ -178,7 +184,7 @@ def canonical_predictions(rows: Sequence[Mapping[str, Any]] | None = None) -> li
     :func:`build_prediction_rows` began recording one row per trade.
     """
     rows = list(rows if rows is not None else read_predictions())
-    best: dict[tuple[str, str, str], dict] = {}
+    best: dict[tuple[str, ...], dict] = {}
     for row in rows:
         key = trade_key(row)
         if not key[2]:
@@ -342,6 +348,18 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
         event_date = pd.to_datetime(record.get("event_date"))
         rid = row_id(as_of, record.get("ticker"), record.get("strategy"),
                      record.get("strike"), record.get("expiry"))
+        settlement = json_safe({
+            "policy": POLICY, "spec_version": 1,
+            "structure_spec": record.get("structure_spec"),
+            "structure_params": record.get("structure_params"),
+            "variant": record.get("variant"),
+        })
+        alpha = record.get("fill", record.get("fill_alpha", 0.5))
+        if alpha is None or pd.isna(alpha):
+            alpha = 0.5
+        if settlement.get("structure_spec"):
+            recorded_structure(settlement)
+            rid += "|" + str(event_date.date()) + "|" + selection_key(settlement, alpha)
         rows.append({
             "schema_version": SCHEMA_VERSION,
             "row_id": rid,
@@ -353,11 +371,14 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
             "event_date": str(event_date.date()) if pd.notna(event_date) else None,
             "session": record.get("session"),
             "strategy": record.get("strategy"),
+            "settlement": settlement,
             "structure": {"strike": record.get("strike"), "expiry": record.get("expiry"),
+                          "legs": record.get("legs"),
                           "entry_date": record.get("entry_date"),
                           "exit_date": record.get("exit_date"),
                           "dte_entry": record.get("dte_entry")},
-            "intended_prices": {"alpha": record.get("fill"),
+            "intended_prices": {"alpha": alpha,
+                                "quote_date": record.get("quote_date"),
                                 "entry_cost": record.get("entry_cost"),
                                 "spot": record.get("spot")},
             "score": record,
@@ -469,15 +490,19 @@ def _write_outcomes(rows: Sequence[Mapping[str, Any]]) -> Path | None:
     return path
 
 
-def score_outcomes(through=None, *, resolved_at=None) -> dict:
-    """Join realized P&L onto every prediction whose event has passed.
+def _settlement_calendar() -> pd.DataFrame:
+    from engine.data import store
+    return store.read_table("earnings_events",
+                            columns=["event_id", "ticker", "event_date", "session"])
 
-    The realized side is priced through :mod:`engine.replay` — the same path
-    the backtests use — so a ledger-vs-backtest gap can never be a pricing
-    difference. Predictions that cannot be resolved are written as outcomes
-    with ``status="unresolvable"`` and a reason, never dropped: silently
-    omitting the ones whose chains never arrived would bias the ledger toward
-    liquid names, which is the one bias it exists to be free of.
+
+def score_outcomes(through=None, *, resolved_at=None) -> dict:
+    """Settle recorded selection rules with simulated ORATS quote fills.
+
+    The rule, including fixed strikes/expiries, comes from the prediction.
+    Its board cost remains an estimate; replay supplies the simulated entry
+    cost and reports the difference. Missing legacy specs are not inferred
+    from current defaults. Resolved outcomes remain terminal.
     """
     from engine import replay as replay_mod
 
@@ -487,79 +512,126 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
     if not pending:
         return {"resolved": 0, "unresolvable": 0, "path": None}
 
-    frame = pd.DataFrame([{
-        "row_id": r["row_id"], "event_id": r.get("event_id"), "ticker": r["ticker"],
-        "event_date": pd.Timestamp(r["event_date"]), "session": r.get("session"),
-        "strategy": r["strategy"],
-        "alpha": (r.get("intended_prices") or {}).get("alpha", 0.5),
-        "entry_cost": (r.get("intended_prices") or {}).get("entry_cost"),
-        "event_date_at_prediction": r["event_date"],
-    } for r in pending])
-
-    priced: dict[tuple[str, str], dict] = {}
-    for strategy, group in frame.groupby("strategy"):
-        events = group[["event_id", "ticker", "event_date", "session"]].drop_duplicates()
-        events = events[events["event_id"].notna()]
-        if not len(events):
+    calendar = _settlement_calendar()
+    groups, errors, checks = {}, {}, {}
+    for row in pending:
+        rid = row["row_id"]
+        candidates = calendar[
+            (calendar["event_id"].astype(str) == str(row.get("event_id")))
+            & (calendar["ticker"] == row["ticker"])
+        ].drop_duplicates()
+        check = {"event_date_changed": None, "session_changed": None,
+                 "calendar_status": "missing" if candidates.empty else "ambiguous",
+                 "calendar_checked_at": resolved_at.isoformat()}
+        checks[rid] = check
+        if len(candidates) != 1:
+            errors[rid] = "canonical event identity missing or ambiguous; calendar reconciliation required"
+            continue
+        current = candidates.iloc[0]
+        current_date = str(pd.Timestamp(current["event_date"]).date())
+        date_changed = current_date != row["event_date"]
+        session_changed = str(current["session"]) != str(row.get("session"))
+        check.update(event_date_changed=date_changed, session_changed=session_changed,
+                     canonical_event_date=current_date, canonical_session=current["session"],
+                     calendar_status="changed" if date_changed or session_changed else "matched")
+        if date_changed or session_changed:
+            errors[rid] = "canonical event date/session changed; recorded schedule requires reconciliation"
             continue
         try:
-            result = replay_mod.replay(strategy, events.reset_index(drop=True),
-                                       progress_every=0)
-        except (KeyError, ValueError) as exc:      # unknown strategy, empty plan
-            print(f"  [ledger] {strategy}: replay unavailable — {exc}", flush=True)
+            settlement = row.get("settlement") or {}
+            structure = recorded_structure(settlement)
+            alpha = (row.get("intended_prices") or {}).get("alpha")
+            alpha = 0.5 if alpha is None else float(alpha)
+            if not np.isfinite(alpha) or not 0 <= alpha <= 1:
+                raise ValueError("intended alpha must be finite and between zero and one")
+            key = (row["strategy"], selection_key(settlement, alpha))
+            group = groups.setdefault(key, {"structure": structure, "alpha": alpha,
+                                            "variant": settlement.get("variant"), "rows": []})
+            group["rows"].append(row)
+        except (KeyError, TypeError, ValueError) as exc:
+            errors[rid] = f"unreproducible settlement: {exc}"
+
+    # A replay is shared only by identical recorded rules and fill assumptions.
+    # Assign results back to row_id, never to a global event/strategy/alpha key.
+    priced = {}
+    for i, ((strategy, _), group) in enumerate(groups.items(), 1):
+        print(f"  [ledger] replay group {i}/{len(groups)}: {strategy}, "
+              f"{len(group['rows'])} predictions", flush=True)
+        events = pd.DataFrame([{
+            "event_id": r["event_id"], "ticker": r["ticker"],
+            "event_date": pd.Timestamp(r["event_date"]), "session": r.get("session"),
+        } for r in group["rows"]]).drop_duplicates()
+        try:
+            result = replay_mod.replay(
+                strategy, events.reset_index(drop=True), structure=group["structure"],
+                variant=group["variant"], alphas=[group["alpha"]],
+                include_legs=True, progress_every=25,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            for row in group["rows"]:
+                errors[row["row_id"]] = f"recorded replay unavailable: {exc}"
             continue
         trades = result.trades
-        if not len(trades):
-            continue
-        for record in trades.to_dict(orient="records"):
-            # The STRATEGY is part of the key. Without it every strategy's
-            # replay overwrote the previous one's entry for the same event, and
-            # since `groupby` walks them alphabetically the last one (STR-THRU)
-            # was handed to CAL-P and STR-RUNUP as their own realized return.
-            # Three structurally different trades — one holds through the print,
-            # one exits before it, one is a calendar — reported an identical
-            # number, and STR-RUNUP reported outcomes for events whose chains
-            # the replay had just said it could not price.
-            priced[(strategy, str(record["event_id"]),
-                    f"{float(record['fill_alpha']):.2f}")] = record
+        for row in group["rows"]:
+            if trades.empty:
+                continue
+            matches = trades[
+                (trades["event_id"].astype(str) == str(row["event_id"]))
+                & (trades["ticker"] == row["ticker"])
+                & (trades["fill_alpha"] == group["alpha"])
+            ]
+            if len(matches) != 1:
+                errors[row["row_id"]] = "recorded replay has no unique trade at intended alpha"
+                continue
+            trade = matches.iloc[0].to_dict()
+            frozen = row.get("structure") or {}
+            if any(
+                frozen.get(field) is not None
+                and (trade.get(field) is None
+                     or pd.Timestamp(frozen[field]) != pd.Timestamp(trade[field]))
+                for field in ("entry_date", "exit_date")
+            ):
+                errors[row["row_id"]] = "replayed schedule differs from recorded entry/exit dates"
+                continue
+            if trade.get("exit_date") is not None and pd.Timestamp(trade["exit_date"]) > through:
+                errors[row["row_id"]] = "recorded exit is after settlement cutoff"
+                continue
+            if not np.isfinite(trade.get("ret", np.nan)) or not np.isfinite(trade.get("entry_cost", np.nan)):
+                errors[row["row_id"]] = "recorded replay returned nonfinite pricing"
+                continue
+            priced[row["row_id"]] = trade
 
-    rows: list[dict] = []
-    for row, record in zip(pending, frame.to_dict(orient="records")):
-        key = (str(record["strategy"]), str(record["event_id"]),
-               f"{float(record['alpha'] or 0.5):.2f}")
-        trade = priced.get(key)
+    rows = []
+    for row in pending:
+        rid = row["row_id"]
+        trade = priced.get(rid)
         base = {
-            "schema_version": SCHEMA_VERSION,
-            "row_id": row["row_id"],
-            "resolved_at": resolved_at.isoformat(),
-            "ticker": row["ticker"],
-            "strategy": row["strategy"],
-            "event_date": row["event_date"],
+            "schema_version": SCHEMA_VERSION, "row_id": rid,
+            "resolved_at": resolved_at.isoformat(), "ticker": row["ticker"],
+            "strategy": row["strategy"], "event_date": row["event_date"],
+            "settlement": row.get("settlement"),
+            "settlement_source": "orats_quote_simulation",
             "predicted_win": (row.get("score") or {}).get("win_model"),
             "predicted_pnl": (row.get("score") or {}).get("exp_pnl_model"),
             "predicted_win_analog": (row.get("score") or {}).get("win_analog"),
             "gate_pass": (row.get("score") or {}).get("gate_pass"),
+            **checks[rid],
         }
         if trade is None:
             rows.append(base | {
                 "status": "unresolvable",
-                "reason": ("no priced replay for this event at the intended alpha — "
-                           "the exit chain never arrived, or the event moved"),
+                "reason": errors.get(rid, "no priced replay for the recorded rule; entry/exit evidence unavailable"),
                 "realized_pnl": None, "realized_win": None,
             })
             continue
-        realized = float(trade.get("ret", np.nan))
-        rows.append(base | {
-            "status": "resolved",
-            "reason": None,
-            "fill_alpha_used": float(trade.get("fill_alpha", np.nan)),
-            "realized_pnl": realized,
-            "realized_win": bool(realized > 0),
-            "realized_entry_cost": float(trade.get("entry_cost", np.nan)),
-            "realized_exit_value": float(trade.get("exit_value", np.nan)),
+        realized = float(trade["ret"])
+        rows.append(base | comparison(row, trade) | {
+            "status": "resolved", "reason": None,
+            "fill_alpha_used": float(trade["fill_alpha"]),
+            "realized_pnl": realized, "realized_win": bool(realized > 0),
+            "realized_entry_cost": float(trade["entry_cost"]),
+            "realized_exit_value": float(trade["exit_value"]),
             "exit_source": trade.get("exit_mode") or "chain",
-            "event_date_changed": str(pd.Timestamp(trade["event_date"]).date())
-                                  != row["event_date"],
         })
 
     path = _write_outcomes(rows)
@@ -594,6 +666,10 @@ def scored_pairs() -> pd.DataFrame:
         if outcome is None:
             continue
         score = pred.get("score") or {}
+        diagnostics = comparison(pred, {
+            "entry_cost": outcome.get("realized_entry_cost"),
+            **(outcome.get("realized_structure") or {}),
+        })
         rows.append({
             "row_id": pred["row_id"],
             "trade_key": pred["trade_key"],
@@ -604,12 +680,39 @@ def scored_pairs() -> pd.DataFrame:
             "predicted_pnl": score.get("exp_pnl_model"),
             "realized_win": outcome.get("realized_win"),
             "realized_pnl": outcome.get("realized_pnl"),
+            "settlement_policy": (outcome.get("settlement") or {}).get("policy") or "legacy_unverified",
+            "contract_matched": outcome.get("contract_matched"),
+            "contract_comparison_basis": outcome.get("contract_comparison_basis", "unavailable"),
+            "entry_cost_drift_fraction": outcome.get(
+                "entry_cost_drift_fraction", diagnostics["entry_cost_drift_fraction"]),
         })
     if not rows:
         return pd.DataFrame(columns=["row_id", "trade_key", "strategy", "event_date",
                                      "gate_pass", "predicted_win", "predicted_pnl",
-                                     "realized_win", "realized_pnl"])
+                                     "realized_win", "realized_pnl", "settlement_policy",
+                                     "contract_matched", "contract_comparison_basis",
+                                     "entry_cost_drift_fraction"])
     return pd.DataFrame(rows)
+
+
+def settlement_summary(pairs: pd.DataFrame | None = None) -> dict:
+    """Describe canonical settled rows, including the limits of legacy evidence."""
+    pairs = scored_pairs() if pairs is None else pairs
+    if pairs.empty:
+        return {"scored": 0, "legacy_unverified": 0, "contracts_compared": 0,
+                "contract_mismatches": 0, "all_legs_compared": 0,
+                "costs_compared": 0, "median_abs_entry_cost_drift_fraction": None}
+    matched = pairs["contract_matched"].dropna()
+    drift = pairs["entry_cost_drift_fraction"].dropna().abs()
+    return {
+        "scored": len(pairs),
+        "legacy_unverified": int((pairs["settlement_policy"] == "legacy_unverified").sum()),
+        "contracts_compared": len(matched),
+        "contract_mismatches": int((matched == False).sum()),  # noqa: E712
+        "all_legs_compared": int((pairs["contract_comparison_basis"] == "all_legs").sum()),
+        "costs_compared": len(drift),
+        "median_abs_entry_cost_drift_fraction": float(drift.median()) if len(drift) else None,
+    }
 
 
 def _strategy_calibration(frame: pd.DataFrame) -> dict:
@@ -675,6 +778,7 @@ def write_health(per_strategy: Mapping[str, Any], *, n_scored: int) -> Path:
         "n_predictions": len(predictions),
         "latest_prediction_as_of": latest,
         "per_strategy": dict(per_strategy),
+        "settlement_diagnostics": settlement_summary(),
         "champion_versions": champions,
         "snapshot_hash": snapshot_hash,
         "data_freshness": {"latest_prediction_as_of": latest},
@@ -747,7 +851,14 @@ def calibrate(*, force: bool = False, trigger: int = CALIBRATION_TRIGGER) -> dic
                    {"stage": "outcomes resolved", "events": n_now,
                     "note": "priced through engine.replay after the event",
                     "headline": True}],
-        "extra_sections": _per_strategy_sections(per_strategy),
+        "extra_sections": _per_strategy_sections(per_strategy) + [{
+            "title": "Settlement evidence",
+            "note": "Simulated ORATS quote fills. Legacy outcomes retain their original P&L; "
+                    "their contract identity is unverified. Drift compares entry cost with the board estimate.",
+            "columns": ["measurement", "value"],
+            "align": ["---", "---:"],
+            "rows": [[k, v] for k, v in settlement_summary(pairs).items()],
+        }],
     }
     report_path = Report(context).write(out_dir)
     write_health(per_strategy, n_scored=n_now)
@@ -801,6 +912,7 @@ def status() -> dict:
         "calibration_due": due,
         "n_scored": n_now,
         "n_at_last_report": last,
+        "settlement_diagnostics": settlement_summary(),
         "health": str(health_path()) if health_path().exists() else None,
     }
 

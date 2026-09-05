@@ -1,6 +1,6 @@
 """engine.ledger — the append-only prediction ledger and its outcome scorer.
 
-The ledger is the program's only out-of-time, out-of-code-path validator, so
+The ledger records predictions before outcomes and shares replay pricing, so
 the tests pin the properties that make it evidence rather than notes: nothing
 can be rewritten, a correction leaves the original readable, the file date
 follows the decision date rather than the clock, and an outcome that cannot be
@@ -9,6 +9,7 @@ resolved is RECORDED as unresolvable instead of quietly dropped.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,8 @@ import pandas as pd
 import pytest
 
 from engine import ledger
+from engine.ledger_settlement import POLICY
+from engine.structures import STRUCTURES
 
 
 @pytest.fixture()
@@ -24,6 +27,10 @@ def ledger_root(tmp_path, monkeypatch):
     from engine import paths
 
     monkeypatch.setattr(paths, "LEDGER", tmp_path / "ledger")
+    monkeypatch.setattr(ledger, "_settlement_calendar", lambda: pd.DataFrame(
+        [{k: r[k] for k in ("event_id", "ticker", "event_date", "session")}
+         for r in ledger.read_predictions()],
+        columns=["event_id", "ticker", "event_date", "session"]))
     return tmp_path / "ledger"
 
 
@@ -41,6 +48,8 @@ def _prediction(as_of="2026-10-15", ticker="AAPL", strategy="STR-THRU",
         "event_date": "2026-10-16",
         "session": "AMC",
         "strategy": strategy,
+        "settlement": {"policy": POLICY, "spec_version": 1,
+                       "structure_spec": asdict(STRUCTURES[strategy]())},
         "structure": {"strike": None, "expiry": "2026-10-23"},
         "intended_prices": {"alpha": 0.5, "entry_cost": 8.42},
         "score": {"win_model": win, "exp_pnl_model": pnl, "gate_pass": True},
@@ -328,11 +337,201 @@ class TestOutcomeScoring:
         from engine import replay as replay_mod
 
         ledger.write_predictions([_prediction()])
-        moved = self._priced()
-        moved["event_date"] = pd.Timestamp("2026-10-19")
-        monkeypatch.setattr(replay_mod, "replay", _fake_replay(moved))
+        moved = ledger._settlement_calendar()
+        moved["event_date"] = "2026-10-19"
+        monkeypatch.setattr(ledger, "_settlement_calendar", lambda: moved)
+        def forbidden(*args, **kwargs):
+            pytest.fail("a changed calendar must not replay a different schedule")
+        monkeypatch.setattr(replay_mod, "replay", forbidden)
         ledger.score_outcomes(through="2026-10-20")
         assert ledger.read_outcomes()[0]["event_date_changed"] is True
+        assert ledger.read_outcomes()[0]["status"] == "unresolvable"
+
+
+class TestRecordedSettlement:
+    """Exercise actual planning and quote pricing, with only data access replaced."""
+
+    def _row(self, *, strike=95.0, expiry="2024-05-03", spec=None, alpha=0.5):
+        spec = spec or asdict(STRUCTURES["STR-THRU"]())
+        row = _prediction(
+            as_of="2024-05-02", ticker="TEST", event_id="TEST_2024-05-02",
+            event_date="2024-05-02",
+            structure={"strike": strike, "expiry": expiry},
+            intended_prices={"alpha": alpha, "entry_cost": 2.0, "quote_date": "2024-05-01"},
+            settlement={"policy": POLICY, "spec_version": 1, "structure_spec": spec},
+        )
+        row["row_id"] += "|" + ledger.selection_key(row["settlement"], alpha)
+        return row
+
+    def _real_replay(self, monkeypatch):
+        from engine import replay
+        from engine.calendar import TradingCalendar
+        from tests.test_replay import chain
+        entry = chain("TEST", "2024-05-02")
+        exit_ = chain("TEST", "2024-05-03")
+        exit_.loc[exit_["strike"] == 105, ["bid", "ask"]] *= 2
+        index = replay.ChainIndex({
+            ("TEST", pd.Timestamp("2024-05-02")): entry,
+            ("TEST", pd.Timestamp("2024-05-03")): exit_,
+        })
+        calendar = TradingCalendar(pd.bdate_range("2024-03-01", "2024-06-01"))
+        original = replay.replay
+        def with_data(*args, **kwargs):
+            return original(*args, **kwargs, index=index, calendar=calendar)
+        monkeypatch.setattr(replay, "replay", with_data)
+
+    def test_stale_atm_estimate_reports_contract_and_cost_drift(self, ledger_root, monkeypatch):
+        self._real_replay(monkeypatch)
+        ledger.write_predictions([self._row(expiry="2024-05-24")])
+        ledger.score_outcomes(through="2024-05-03")
+        out = ledger.read_outcomes()[0]
+        assert out["status"] == "resolved"
+        assert out["contract_matched"] is False
+        assert out["expiry_matched"] is False
+        assert out["realized_structure"]["strike"] == 100
+        assert len(out["realized_structure"]["legs"]) == 2
+        assert out["intended_entry_cost"] == 2
+        assert out["realized_entry_cost"] == pytest.approx(3.4)
+        assert out["entry_cost_drift"] == pytest.approx(1.4)
+        assert out["entry_cost_drift_fraction"] == pytest.approx(0.7)
+        assert out["realized_pnl"] == pytest.approx(0)
+        assert out["settlement_source"] == "orats_quote_simulation"
+
+    def test_explicit_strikes_and_expiries_do_not_share_an_outcome(self, ledger_root, monkeypatch):
+        from engine.score import Scorer, ScoreRequest
+        self._real_replay(monkeypatch)
+        for strike, expiry in ((100, "2024-05-03"), (105, "2024-05-03"),
+                               (100, "2024-05-24")):
+            spec = asdict(Scorer._structure(None, ScoreRequest(
+                "TEST", "STR-THRU", strike=strike, expiry=pd.Timestamp(expiry))))
+            ledger.write_predictions([self._row(strike=strike, expiry=expiry, spec=spec)])
+        ledger.score_outcomes(through="2024-05-03")
+        outcomes = ledger.read_outcomes()
+        by_contract = {(o["realized_structure"]["strike"],
+                        o["realized_structure"]["expiry"]): o for o in outcomes}
+        assert by_contract[100, "2024-05-03"]["realized_pnl"] == pytest.approx(0)
+        assert by_contract[105, "2024-05-03"]["realized_pnl"] == pytest.approx(1)
+        assert by_contract[100, "2024-05-24"]["realized_entry_cost"] == pytest.approx(6.8)
+        assert all(o["contract_matched"] for o in outcomes)
+        assert len(ledger.scored_pairs()) == 3
+
+    @pytest.mark.parametrize("alpha, cost", [(0, 3.8), (0.37, 3.504), (1, 3.0)])
+    def test_exact_alpha_including_zero_is_used(self, ledger_root, monkeypatch, alpha, cost):
+        self._real_replay(monkeypatch)
+        ledger.write_predictions([self._row(alpha=alpha)])
+        ledger.score_outcomes(through="2024-05-03")
+        out = ledger.read_outcomes()[0]
+        assert out["fill_alpha_used"] == alpha
+        assert out["realized_entry_cost"] == pytest.approx(cost)
+
+    def test_later_factory_defaults_cannot_change_recorded_rule(self, ledger_root, monkeypatch):
+        self._real_replay(monkeypatch)
+        ledger.write_predictions([self._row()])
+        def forbidden():
+            pytest.fail("settlement must not consult the current factory")
+        monkeypatch.setitem(STRUCTURES, "STR-THRU", forbidden)
+        assert ledger.score_outcomes(through="2024-05-03")["resolved"] == 1
+
+    @pytest.mark.parametrize("corruption", ["missing", "partial", "version"])
+    def test_missing_spec_is_not_guessed_from_defaults(self, ledger_root, monkeypatch, corruption):
+        from engine import replay
+        row = self._row()
+        if corruption == "missing":
+            row.pop("settlement")
+            row["schema_version"] = 1
+        elif corruption == "partial":
+            row["settlement"]["structure_spec"]["legs"][0].pop("qty")
+        else:
+            row["settlement"]["spec_version"] = 999
+        ledger.write_predictions([row])
+        def forbidden(*args, **kwargs):
+            pytest.fail("a missing specification must not be guessed")
+        monkeypatch.setattr(replay, "replay", forbidden)
+        assert ledger.score_outcomes(through="2024-05-03")["unresolvable"] == 1
+        assert "unreproducible" in ledger.read_outcomes()[0]["reason"]
+
+    def test_date_derived_event_id_disappearing_is_not_a_false_match(self, ledger_root, monkeypatch):
+        ledger.write_predictions([self._row()])
+        moved = ledger._settlement_calendar()
+        moved["event_date"] = "2024-05-06"
+        moved["event_id"] = "TEST_2024-05-06"
+        monkeypatch.setattr(ledger, "_settlement_calendar", lambda: moved)
+        assert ledger.score_outcomes(through="2024-05-07")["unresolvable"] == 1
+        out = ledger.read_outcomes()[0]
+        assert out["calendar_status"] == "missing"
+        assert out["event_date_changed"] is None
+
+    def test_exit_after_cutoff_is_not_settled(self, ledger_root, monkeypatch):
+        self._real_replay(monkeypatch)
+        ledger.write_predictions([self._row()])
+        assert ledger.score_outcomes(through="2024-05-02")["unresolvable"] == 1
+        assert "cutoff" in ledger.read_outcomes()[0]["reason"]
+
+    def test_recorded_schedule_cannot_silently_move(self, ledger_root, monkeypatch):
+        self._real_replay(monkeypatch)
+        row = self._row()
+        row["structure"]["entry_date"] = "2024-05-01"
+        ledger.write_predictions([row])
+        assert ledger.score_outcomes(through="2024-05-03")["unresolvable"] == 1
+        assert "schedule differs" in ledger.read_outcomes()[0]["reason"]
+
+    def test_ambiguous_replay_is_not_last_row_wins(self, ledger_root, monkeypatch):
+        from engine import replay
+        ledger.write_predictions([self._row()])
+        trades = pd.DataFrame([
+            {"event_id": "TEST_2024-05-02", "ticker": "TEST", "fill_alpha": 0.5,
+             "strike": strike, "entry_cost": 3.4, "exit_value": 3.4, "ret": 0}
+            for strike in (100, 105)
+        ])
+        monkeypatch.setattr(replay, "replay", _fake_replay(trades))
+        assert ledger.score_outcomes(through="2024-05-03")["unresolvable"] == 1
+        assert "unique trade" in ledger.read_outcomes()[0]["reason"]
+
+    def test_comparison_checks_back_legs_and_quantities(self):
+        from engine.ledger_settlement import comparison
+        leg = {"name": "front", "right": "P", "side": "buy", "qty": 1,
+               "strike": 100, "expiry": "2024-05-03"}
+        back = leg | {"name": "back", "expiry": "2024-05-24"}
+        row = self._row(strike=100)
+        row["structure"]["legs"] = [leg, back]
+        trade = {"strike": 100, "expiry": "2024-05-03", "entry_cost": 2,
+                 "entry_legs": [leg, back | {"qty": 2}]}
+        result = comparison(row, trade)
+        assert result["strike_matched"] and result["expiry_matched"]
+        assert result["contract_matched"] is False
+        assert result["contract_comparison_basis"] == "all_legs"
+
+    def test_snapshot_identity_preserves_variants_with_same_preview_contract(self, ledger_root):
+        from engine.structures import put_calendar
+        board = pd.DataFrame([
+            {"ticker": "TEST", "strategy": "CAL-P", "event_date": "2024-05-02",
+             "entry_date": "2024-05-02", "session": "AMC", "strike": 100,
+             "expiry": "2024-05-03", "fill": alpha, "variant": f"back-{dte}",
+             "structure_params": {"back_dte": dte},
+             "structure_spec": asdict(put_calendar(back_dte=dte))}
+            for dte, alpha in ((20, 0.5), (45, 0.5), (45, 0))
+        ])
+        rows = ledger.build_prediction_rows(board, as_of="2024-05-02")
+        assert len({r["row_id"] for r in rows}) == 3
+        assert len({ledger.trade_key(r) for r in rows}) == 3
+        assert rows[1]["settlement"]["structure_params"] == {"back_dte": 45}
+        assert rows[2]["intended_prices"]["alpha"] == 0
+
+    def test_legacy_summary_uses_original_cost_but_does_not_invent_contracts(self, ledger_root):
+        row = self._row()
+        row.pop("settlement")
+        ledger.write_predictions([row])
+        ledger._write_outcomes([{
+            "row_id": row["row_id"], "resolved_at": "2024-05-03",
+            "status": "resolved", "realized_entry_cost": 3.0,
+            "realized_pnl": 0.2, "realized_win": True,
+        }])
+        before = ledger.read_outcomes()
+        summary = ledger.settlement_summary()
+        assert summary["legacy_unverified"] == 1
+        assert summary["contracts_compared"] == 0
+        assert summary["median_abs_entry_cost_drift_fraction"] == pytest.approx(0.5)
+        assert ledger.read_outcomes() == before
 
 
 class TestCalibrationTrigger:

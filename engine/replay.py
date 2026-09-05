@@ -377,6 +377,7 @@ def replay_one(
     index: ChainIndex,
     *,
     alphas: Sequence[float] = ALPHA_GRID,
+    include_legs: bool = False,
 ) -> tuple[list[dict], str | None]:
     """Price one planned event at every alpha. Returns ``(rows, skip_reason)``.
 
@@ -509,6 +510,12 @@ def replay_one(
                 "ret": result["ret"],
                 "spot_entry": entry.spot,
                 "spot_exit": exit_.spot,
+                **({"entry_legs": [
+                    {"name": leg.name, "right": leg.right, "side": leg.side,
+                     "qty": leg.qty, "strike": leg.strike, "expiry": leg.expiry,
+                     "bid": leg.bid, "ask": leg.ask, "price": leg.price}
+                    for leg in entry.legs
+                ]} if include_legs else {}),
                 "strike": entry.legs[0].strike,
                 "expiry": entry.legs[0].expiry,
                 "dte_entry": int(entry.legs[0].dte),
@@ -597,6 +604,7 @@ def replay(
     calendar: TradingCalendar | None = None,
     index: ChainIndex | None = None,
     progress_every: int = 2000,
+    include_legs: bool = False,
 ) -> ReplayResult:
     """Plan, load, and price every event for one strategy.
 
@@ -630,7 +638,8 @@ def replay(
     rows: list[dict] = []
     skipped = dict(plan.skipped)
     for i, plan_row in enumerate(plan.frame.to_dict("records")):
-        priced, reason = replay_one(structure, plan_row, index, alphas=alphas)
+        priced, reason = replay_one(structure, plan_row, index, alphas=alphas,
+                                   include_legs=include_legs)
         if reason is not None:
             skipped[reason] = skipped.get(reason, 0) + 1
         rows.extend(priced)

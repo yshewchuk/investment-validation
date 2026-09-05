@@ -820,6 +820,19 @@ class TestStructureParams:
                 == scorer._structure(
                     request(strategy="STR-THRU", structure_params=None)).to_dict())
 
+    def test_priced_score_carries_reproducible_rule_and_request_params(self, scorer, chain_index):
+        from engine.ledger_settlement import POLICY, recorded_structure
+        from engine.jsonio import json_safe
+        req = request(structure_params={"exit_offset": 2}, strike=100.0,
+                      expiry=pd.Timestamp("2024-05-24"), variant="custom-exit")
+        result = scorer.score(req, chain_index=chain_index)
+        record = json.loads(json.dumps(result.as_dict()))
+        restored = recorded_structure({"policy": POLICY, "spec_version": 1,
+                                       "structure_spec": record["structure_spec"]})
+        assert json_safe(restored.to_dict()) == json_safe(scorer._structure(req).to_dict())
+        assert record["structure_params"] == {"exit_offset": 2}
+        assert record["variant"] == "custom-exit"
+
 
 # --------------------------------------------------------------------------
 # forecast-sized structures and arithmetic entry rules (Tier 4, steps 4-6)
