@@ -29,6 +29,7 @@ Bundle layout::
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import shutil
@@ -876,15 +877,32 @@ def _copy_static(out: Path, static_dir: Path | None = None) -> list[str]:
         raise FileNotFoundError(f"dashboard static templates missing at {src}")
     files: list[str] = []
     (out / "assets").mkdir(parents=True, exist_ok=True)
-    for name in ("index.html",):
-        shutil.copyfile(src / name, out / name)
-        files.append(name)
+
     assets = src / "assets"
+    digests: dict[str, str] = {}
     if assets.exists():
         for path in sorted(assets.iterdir()):
             if path.is_file():
                 shutil.copyfile(path, out / "assets" / path.name)
                 files.append(f"assets/{path.name}")
+                digests[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+    # Cache-bust the asset references with a content hash.
+    #
+    # Releases are versioned; asset FILENAMES were not, and index.html asked for
+    # a bare `assets/app.js`. A returning browser therefore kept serving the
+    # copy it had — so a JS change could be built, published and live, and still
+    # invisible. That happened on 2026-09-05: the order ticket shipped and could
+    # not be seen, and the failure looks exactly like a rendering bug, which is
+    # what makes it expensive.
+    #
+    # The query string changes only when the file's CONTENT does, so an
+    # unchanged asset still hits cache and a changed one cannot.
+    html = (src / "index.html").read_text()
+    for name, digest in digests.items():
+        html = html.replace(f'"assets/{name}"', f'"assets/{name}?v={digest}"')
+    (out / "index.html").write_text(html)
+    files.append("index.html")
     return files
 
 
@@ -975,6 +993,12 @@ def write_single_file(bundle: Path | str, out: Path | str | None = None) -> Path
     bundle = Path(bundle)
     out = Path(out) if out is not None else bundle.parent / f"earnings-board-{_bundle_as_of(bundle)}.html"
     html = (bundle / "index.html").read_text()
+
+    # Asset references carry a `?v=<content hash>` for cache busting (see
+    # `_copy_static`). Strip it before inlining: a single file references
+    # nothing, so the hash has nothing to bust and would only survive as a
+    # dangling attribute the "references nothing" test rightly rejects.
+    html = re.sub(r'(assets/app\.(?:js|css))\?v=[0-9a-f]+', r"\1", html)
 
     css = (bundle / "assets" / "app.css").read_text()
     html = html.replace(

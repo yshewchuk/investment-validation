@@ -181,6 +181,16 @@ ABSOLUTE_FEATURES: dict[str, str] = {
 }
 
 
+#: Daily-state column -> the panel's pre-print name for the same quantity.
+#: Used by `entry_feature_frame` so a model trained on the panel's columns can
+#: be served from decision-date state.
+PRE_PRINT_ALIASES = {
+    "iv30": "pre_iv30",
+    "iv10": "pre_iv10",
+    "exern_iv30": "pre_exern_iv30",
+    "exern_iv10": "pre_exern_iv10",
+}
+
 #: Availability indicators: one column saying whether a quoted value exists at
 #: all, beside the value itself.
 #:
@@ -721,6 +731,13 @@ def live_features(
     frame = panel_mod.add_runup_features(frame, as_of_column="_as_of")
     daily = ctx.ticker_daily(ticker) if ctx.daily is not None else None
     frame = panel_mod.add_orats_features(frame, daily=daily, as_of_column="_as_of")
+    # Session-aware pre-print vol, run here for the same reason the block above
+    # is: the panel path produces these columns, so the live path must too. A
+    # model listing them would otherwise serve from the panel and report
+    # MISSING_FEATURES live — the training/serving skew this whole function is
+    # written to avoid, and the one that took TWIN-P5 off the board on
+    # 2026-09-05 in its earlier form.
+    frame = panel_mod.add_pre_print_vol(frame, daily=daily, as_of_column="_as_of")
     # The same derivation `load_panel` applies on read. Without it here the
     # live path would silently omit these and every forward row would report
     # MISSING_FEATURES for a model that lists them — the panel path would serve
@@ -1069,6 +1086,7 @@ def entry_feature_frame(
     frame = requests.copy()
     frame["event_date"] = pd.to_datetime(frame["event_date"])
     frame[as_of_column] = pd.to_datetime(frame[as_of_column])
+    # (pre-print vol aliases are added at the end — see PRE_PRINT_ALIASES)
 
     panel_frame = load_panel() if panel is None else panel
     history_cols = [c for c in EVENT_HISTORY_FEATURES if c in panel_frame.columns]
@@ -1081,6 +1099,25 @@ def entry_feature_frame(
     frame["days_to_print"] = (
         frame["event_date"] - frame[as_of_column]
     ).dt.days.astype(float)
+    # The pre-print vol terms, under the names the panel gives them.
+    #
+    # There are three feature paths in this programme — `build_panel`,
+    # `live_features` and this one — and a model is only servable if ALL of
+    # them produce its inputs. `iv_crush` reads `pre_iv30` and friends; the
+    # panel builds them with a session-aware anchor, and this builder reads the
+    # daily state AT THE DECISION DATE, which for a decision taken at the last
+    # pre-print close is the same quote. Aliasing is therefore exact at that
+    # anchor and an approximation before it.
+    #
+    # How rough an approximation is measured rather than assumed: using a quote
+    # k sessions early misses the true pre-print iv30 by a median 4.4% at k=1,
+    # 8.2% at k=5 and 16.7% at k=21. A board reaching five weeks out is feeding
+    # the crush model a materially stale level, which is a property of looking
+    # that far ahead and not of this alias.
+    for source, target in PRE_PRINT_ALIASES.items():
+        if target not in frame.columns and source in frame.columns:
+            frame[target] = frame[source]
+
     return frame
 
 

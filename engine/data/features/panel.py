@@ -692,6 +692,7 @@ def add_pre_print_vol(
     df: pd.DataFrame,
     daily: pd.DataFrame | None = None,
     events: pd.DataFrame | None = None,
+    as_of_column: str = "date",
 ) -> pd.DataFrame:
     """Vol terms at the LAST SESSION BEFORE THE PRINT, session-aware.
 
@@ -740,8 +741,14 @@ def add_pre_print_vol(
     out = df.copy()
     n_rows = len(out)
     idx = np.full(n_rows, -1)
+    # `as_of_column` exists for the same reason the other blocks have one: a
+    # decision taken earlier than the last pre-print close must not anchor on
+    # the event date, which would reach FORWARD of the decision. For a forward
+    # event the searchsorted below then lands on the newest close available,
+    # which is the right estimate of a pre-print quote that does not exist yet.
+    when_col = as_of_column if as_of_column in out.columns else "date"
     for i, (ticker, when) in enumerate(zip(out["ticker"].to_numpy(),
-                                           pd.to_datetime(out["date"]).to_numpy())):
+                                           pd.to_datetime(out[when_col]).to_numpy())):
         span = spans.get(str(ticker))
         if span is None:
             continue

@@ -370,7 +370,13 @@ def check_offline_bundle() -> str:
     remote = [u for u in external if u.startswith(("http://", "https://", "//"))]
     _require(not remote, f"index.html references remote assets: {remote}")
     for url in external:
-        _require((out / url).exists(), f"index.html references a missing asset: {url}")
+        # Assets carry a `?v=<content hash>` for cache busting, which is part of
+        # the URL and not part of the PATH. Resolving it as a filename asks
+        # whether a file called `app.css?v=d7fa…` exists, which it never does —
+        # so the query is stripped before the existence check while everything
+        # else about the reference is still checked.
+        path = url.split("?", 1)[0].split("#", 1)[0]
+        _require((out / path).exists(), f"index.html references a missing asset: {url}")
 
     for path in list(out.rglob("*.js")) + list(out.rglob("*.css")):
         text = _strip_comments(path.read_text())

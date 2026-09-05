@@ -1583,3 +1583,39 @@ class TestTheNightlyRebuildsTheTiers:
         assert "tiers_degraded" in block, "a skipped rebuild has to raise a flag"
         assert "NightlyStop" not in block, "a tier failure must not stop the night"
         assert 'rebuild_tables(("panel", "tier4"))' in block, "panel before tier4 — tier4 reads it"
+
+
+class TestAssetCacheBusting:
+    """A published JS change has to actually reach a returning browser.
+
+    Releases are versioned; asset FILENAMES were not, and `index.html` asked
+    for a bare `assets/app.js`. So a change could be built, published and live
+    and still be invisible — which presents as a rendering bug and costs a
+    debugging round-trip. It did, on 2026-09-05, with the order ticket.
+    """
+
+    def test_asset_references_carry_a_content_hash(self, tmp_path):
+        import re
+
+        from engine.dashboard.render import _copy_static
+
+        _copy_static(tmp_path)
+        html = (tmp_path / "index.html").read_text()
+        assert not re.search(r'"assets/app\.(?:js|css)"', html), (
+            "a bare asset reference is cacheable forever"
+        )
+        for name in ("app.js", "app.css"):
+            assert re.search(rf'assets/{re.escape(name)}\?v=[0-9a-f]{{12}}', html), name
+
+    def test_the_hash_follows_the_CONTENT_not_the_run(self, tmp_path):
+        """Unchanged assets must still hit cache — busting everything every
+        night would defeat the point."""
+        import re
+
+        from engine.dashboard.render import _copy_static
+
+        a, b = tmp_path / "a", tmp_path / "b"
+        _copy_static(a)
+        _copy_static(b)
+        grab = lambda p: re.findall(r'assets/app\.js\?v=([0-9a-f]+)', (p / "index.html").read_text())
+        assert grab(a) == grab(b), "two renders of identical assets must agree"
