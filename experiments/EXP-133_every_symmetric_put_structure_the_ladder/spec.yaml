@@ -1,0 +1,272 @@
+id: EXP-133
+title: "Every symmetric put structure the ladder can carry, chosen per event by simulated P&L"
+kind: structure-selection
+strategy: TWIN-P5
+programme: structure-validation
+prior: [EXP-121, EXP-123, EXP-124, EXP-125, EXP-126, EXP-129, EXP-130, EXP-131]
+type: exploratory
+price_source: >
+  ORATS chains (bid/ask, validated +/-2-3%). Entry and exit priced off real
+  quotes through the same FillModel arithmetic engine.structures.price_structure
+  uses, proved equal to it on a sampled cross-check that aborts the run on
+  disagreement. Simulated exits are Black-Scholes on Tier-4 forecasts, exactly
+  as EXP-129 and the live engine.pnl_sim do.
+
+hypothesis: >
+  TWIN-P5 replaced TWIN-P because five strikes bought the same peak for less
+  and quadrupled the traded universe (90 -> 393 trades, 79 -> 217 tickers).
+  The obvious next move is to keep going: fewer strikes need less ladder
+  granularity, so four strikes and three should fit more tickers still, and
+  a per-event choice among all of them - at a width chosen per event rather
+  than by one sizing formula - should pick up P&L that a single fixed shape
+  leaves on the table.
+
+  This experiment does not write those shapes down. It ENUMERATES every
+  all-put structure that is mirror-symmetric about a listed strike, whose
+  contracts sum to zero, whose payoff floor is zero, and which fits in eight
+  contracts - the four properties TWIN-P already has - then prices every one
+  of them the ticker's ladder can carry at every width the registered rules
+  admit, and lets each event pick the one with the highest simulated expected
+  P&L.
+
+  Primary: per event, the argmax of exp_pnl_sim over every admissible
+  candidate, gated by the trailing six-month top-20% rule EXP-131 confirmed.
+
+  FALSIFIED if any of:
+    - the primary does not at least DOUBLE the traded-event count of the
+      TWIN-P5 incumbent arm on this same universe (the motivating claim);
+    - the primary's mid-fill CAGR or per-trade Sharpe is below the
+      incumbent's, or it is positive in fewer out-of-sample years;
+    - the primary does not beat the random_pick arm on CAGR - in which case
+      the effect is universe expansion, not selection, and the chooser is
+      not what produced it.
+
+known_before_registration:
+  four_strikes_and_three_cannot_express_a_twin_peak: >
+    This is arithmetic, established before the spec was written, and it cuts
+    against the motivating intuition rather than supporting it. Enumerating
+    every quantity vector satisfying the four properties on 3, 4, 5 and 7
+    strikes with at most eight contracts yields exactly EIGHT families, and
+    exactly TWO of them are twin-peaked:
+      N=3  q=(-2,1)         centre-peaked   the long put butterfly
+      N=4  q=(0,-1,1)       centre-peaked   the long put condor (CND-P's shape)
+      N=5  q=(-4,1,1)       centre-peaked
+      N=5  q=(-2,-1,2)      centre-peaked
+      N=5  q=(2,-2,1)       TWIN-PEAKED     TWIN-P5, at every wing >= 2*d1
+      N=7  q=(-2,-1,1,1)    centre-peaked
+      N=7  q=(-2,1,-1,1)    centre-peaked
+      N=7  q=(2,-1,-1,1)    TWIN-PEAKED     TWIN-P, at d = (1,2,4)
+    Both incumbents fall out of the enumeration instead of being inserted into
+    it, which is the check that the four properties are the right four.
+    The consequence: dropping from five strikes to four does NOT buy a cheaper
+    twin peak. It buys a different thesis - a tent that pays most at a dead
+    flat print. Under this experiment's own width rules the wings are placed
+    at or beyond the predicted move, so a centre-peaked family is being asked
+    to pay off where the forecast says the stock will NOT land. If the 3- and
+    4-strike arms nonetheless win the argmax often, the first hypothesis to
+    test is model error, not discovery. `family.py` carries the enumeration and
+    `test_family.py` carries it as a test.
+  the_chooser_is_a_max_statistic_over_roughly_ten_thousand_candidates: >
+    10,755 (family, spacing, anchor) patterns exist before an event is seen,
+    and the width rules typically leave hundreds to low thousands admissible
+    per event. EXP-126 registered a per-event chooser over THREE shapes as its
+    primary and it was falsified: ranking by reward:risk traded 3,673 events
+    for a CAGR of -0.52% and a 79% drawdown, because a cheapness-seeking rule
+    lands on the worst shape 92% of the time. Ranking by simulated expected
+    P&L is a better criterion - EXP-129 showed it beats cost < peak/2 at every
+    matched selectivity - but it is still a maximum over a large number of
+    noisy, model-derived numbers, and the winner's curse is the default
+    expectation here rather than a tail risk. Three defences are registered
+    below (split-half selection, the random_pick null, the candidate-count
+    consistency test) and none of them is expected to be sufficient on its own.
+  the_simulation_is_weakest_exactly_where_the_argmax_will_look: >
+    EXP-129 measured Black-Scholes against 132,023 real quoted puts: 3.88% from
+    the mid at the median, but 14.41% for |delta| < 0.10 on a median $0.40
+    contract. This experiment's width rules admit wings out to
+    pred_abs_move + 3*sd of spot - a median band of roughly 5% to 18% of spot -
+    so the widest candidates are made almost entirely of exactly those
+    contracts. A chooser maximising a Black-Scholes expectation will be drawn
+    to them. The report must show realized against simulated by wing distance.
+  what_the_incumbent_does_on_this_universe: >
+    Computed in the run, not assumed, as an arm on identical events: TWIN-P5
+    wing 3, spacing a = pred_abs_move / 100 of spot, anchor at the money, the
+    same trailing six-month top-20% gate. EXP-126/131's published figures for
+    reference only, on an earlier snapshot: 393 trades on 217 tickers, CAGR
+    12.98%, trade Sharpe 1.10, 9/9 OOS years positive, breakeven alpha 0.467.
+  the_gate_bar_has_to_be_recomputed_per_arm: >
+    engine.pnl_sim.trailing_cutoff reads a stored history of exp_pnl_sim built
+    from one fixed structure. Every arm here changes the distribution that
+    quantity is drawn from - an argmax over a thousand candidates has a higher
+    mean and a fatter right tail than a single shape - so applying the stored
+    bar would admit a different share of a different quantity and the arms
+    would not be comparable. Each arm therefore computes its own trailing
+    cutoff from its OWN chosen-candidate history, strictly before the month
+    being gated, on the same six-month window, 0.20 quantile and 100-event
+    floor EXP-131 confirmed.
+  the_account_cannot_sell_calls: >
+    Every enumerated family is all-put for that reason. The enumeration is
+    complete for put-only structures and says nothing about what a call side
+    would add - see the account constraint, not an oversight.
+
+definition:
+  the_four_properties: >
+    A candidate is a set of LISTED strikes, mirror-symmetric in DOLLARS about
+    an anchor strike A, carrying signed contract counts q:
+      1. tails cancel:  q0 + 2*sum(q_t) = 0, so below the lowest strike the
+         position settles to exactly zero;
+      2. zero floor:    payoff >= 0 at every strike. The payoff is piecewise
+         linear with breakpoints only at strikes, so this is nonnegativity
+         everywhere, and with (1) it is what makes max loss the debit;
+      3. debit:         implied by (2), stated separately because ret, the
+         P&L gate and sizing are all quoted on a positive debit;
+      4. eight contracts: |q0| + 2*sum|q_t| <= 8, TWIN-P's own size, so the
+         sixteen round-trip spread crossings do not grow.
+    Scaled duplicates are removed (gcd = 1): doubling every leg leaves ret
+    unchanged and is the same trade. Every strike must be LISTED and every
+    mirror exact in dollars - an event whose ladder cannot carry a candidate
+    does not offer it, exactly as TWIN-P and TWIN-P5 already work.
+  the_anchor: >
+    The axis of symmetry sits at the listed strike at or below spot, or one or
+    two ladder positions ABOVE it (the user's rule: ATM, ATM+1, ATM+2).
+    Downward shifts are excluded by registration: EXP-123 measured the put
+    structure decaying fastest on up moves (exit/debit 0.14 deep-up against
+    0.36 deep-down), so the room worth buying is above.
+  the_width_rules: >
+    With spot Px, forecast pred_abs_move m (percent), its held-out error SD s
+    (percent, Tier 4 pred_abs_move_sd), and a candidate whose outermost strikes
+    sit D dollars either side of the anchor A:
+      - it must SPAN the predicted move:   A - D < Px*(1 - m/100)
+                                       and A + D > Px*(1 + m/100)
+      - it must not exceed three SDs:      A - D >= Px*(1 - (m + 3s)/100)
+                                       and A + D <= Px*(1 + (m + 3s)/100)
+    Both bounds are written on BOTH outer strikes rather than on a half-width,
+    which is what makes an off-centre anchor pay for itself: shifting the axis
+    up by delta tightens the admissible band at both ends by delta. The upper
+    bound is the mirror of the user's lower one, stated here because the user's
+    wording ("less wide than the predicted move + 3 std dev") fixes a width and
+    this is the placement it implies for a structure that may be off centre.
+  the_ladder_bound: "No wing beyond 20 ladder positions from the anchor. A termination bound; the run reports how often it binds."
+  sizing: >
+    There is none. EXP-125 and EXP-126 sized one shape from a formula
+    (w = pred_abs_move/150, a = pred_abs_move/100); here the width is a
+    dimension of the search, and the forecast enters only through the two
+    width rules above and through the simulation. The incumbent arm keeps the
+    formula so the comparison is against the rule as it actually stands.
+  predictions: >
+    Tier 4 walk-forward out-of-sample forecasts only - pred_abs_move,
+    pred_abs_move_sd, pred_iv_crush_30 - joined on (ticker, event_date), plus
+    pre_iv30 from the crush frame. Fit on events strictly before each fold.
+  the_simulation: >
+    engine.pnl_sim's, unchanged: 4,000 PAIRED (move error, crush error) draws
+    from a residual pool restricted to events that had already printed,
+    conditioned on the predicted move by decile, seeded per (key, event_date)
+    with SHA-256 so a rerun is bit-identical. Exit legs repriced by
+    Black-Scholes at the drawn spot and the drawn post-crush vol over the DTE
+    remaining at exit.
+    ONE efficiency, and it is exact rather than an approximation: expected
+    return is LINEAR in the contract vector given the per-strike mean simulated
+    exit values, so the 4,000 draws are evaluated once per event per LADDER
+    STRIKE and every candidate is then a dot product. It computes the same
+    number as simulating each candidate separately, and the run asserts that
+    against engine.pnl_sim.expected_pnl on a sample.
+  split_half_selection: >
+    Draws 1-2,000 SELECT the candidate; draws 2,001-4,000 supply the
+    exp_pnl_sim the gate then ranks. Both halves are drawn from the same pool
+    for the same event, so this removes the winner's curse from the gated
+    QUANTITY - the selected candidate's expected P&L is estimated on draws that
+    did not choose it - and removes none of the model error, which is shared by
+    both halves. The gap between the two halves is a required output and is the
+    experiment's own measurement of how much of the argmax is Monte-Carlo luck.
+  the_gate: >
+    EXP-131's rule, per arm, on that arm's own history: an event in month M
+    trades if its exp_pnl_sim (held-out half) is at or above the 80th
+    percentile of the arm's gateable events dated in [M - 6 months, M).
+    Fewer than 100 events in the window leaves the event UNDETERMINED - not
+    admitted, not rejected, and counted separately.
+  entry_filters: >
+    Applied before the gate, unchanged from EXP-129's candidate pool - the two
+    that are not the rule under test:
+      - mean relative bid-ask spread across the legs <= 25%
+      - market cap >= $10B
+    The arithmetic reward term (cost < peak/2) is NOT applied: EXP-129/131
+    replaced it with the P&L gate, and this experiment inherits that decision.
+  dates: "entry at the last pre-print close (e+0), exit at the first post-print close (x+1), one post-event expiry, contracts pinned from entry to exit."
+  the_risks_this_run_measures:
+    the_winners_curse:
+      "random_pick is the null: a uniformly random admissible candidate per
+       event, same gate, fixed seed. If the primary does not beat it, the
+       chooser did nothing and the universe did everything."
+    reading_model_error_rather_than_edge:
+      "Spearman rho between an event's admissible-candidate count and its
+       (simulated minus realized) return, over traded events, with a two-sided
+       p. A chooser that is mining Black-Scholes error gets MORE optimistic
+       the more candidates it is given; a chooser reading real structure does
+       not. Registered as a consistency test, not a magnitude cutoff."
+    the_thesis_inverting_underneath_the_search:
+      "Share of trades taken in centre-peaked families, by year, alongside the
+       twin-peaked ones. A book that is 80% condors is not a twin-peak
+       programme with a wider universe, whatever its CAGR, and the report must
+       say so in the same table as the returns."
+    execution:
+      "Realized relative spread and wing distance of the CHOSEN candidate, and
+       breakeven alpha against the 0.45 bar. A search over widths will find the
+       wide ones, and wide all-put wings are where mid is least real."
+
+primary_spec:
+  universe: ">= $10B, mean leg spread <= 25%, 2018-2026"
+  structure: "per-event argmax of exp_pnl_sim over every admissible candidate (all 8 families, all admissible widths, anchors 0/1/2)"
+  selection: "draws 1-2000; gate value from draws 2001-4000"
+  gate: "trailing 6-month top 20% of the arm's own exp_pnl_sim, min 100 events"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+  acceptance:
+    more_names: "traded events >= 2x the incumbent arm on this same universe"
+    beats_the_incumbent: "mid-fill CAGR and per-trade Sharpe at or above the incumbent's, and OOS years positive at or above it"
+    choosing_beats_not_choosing: "mid-fill CAGR above the random_pick arm's"
+    still_pays: "breakeven alpha <= 0.45"
+    defined_risk_holds: "no trade loses more than its debit, at any alpha"
+    universe_floor: ">= 250 traded events, or reported as too thin to carry"
+
+grid:
+  # Every arm runs on the same events and the same gate machinery. None is
+  # promotable in place of the primary; each isolates one thing the primary
+  # confounds.
+  arm:
+    - best_all          # PRIMARY: argmax over everything
+    - best_twin_only    # argmax restricted to the two twin-peaked families — width/anchor choice without shape choice
+    - best_twin_p5      # argmax restricted to TWIN-P5's family — the incumbent shape at a chosen width
+    - best_n5_n7        # argmax restricted to 5 and 7 strikes — is the 4/3-strike half of the search doing anything?
+    - random_pick       # the null: uniform over admissible candidates, seed 0
+    - incumbent         # TWIN-P5 wing 3, a = pred_abs_move/100, anchor 0 — the rule as it stands
+    - oracle_realized   # DIAGNOSTIC ONLY, never promotable: argmax of the REALIZED return. The ceiling the chooser is shooting at.
+
+required_outputs:
+  - "the enumeration itself: eight families, which are twin-peaked, and the payoff profile of each"
+  - "per FAMILY and per SHAPE: times structurally admissible, times chosen as most profitable, times traded through the gate — the three tallies this experiment was asked for"
+  - "the same three tallies broken out by anchor offset (0/1/2)"
+  - "traded events AND distinct tickers per arm, against the incumbent arm"
+  - "funnel per arm: priced / spread / mcap / gateable / gated"
+  - "per-year table with n, and share of OOS years positive, per arm"
+  - "mid-fill CAGR, trade Sharpe, return on capital, max drawdown per arm"
+  - "breakeven alpha against the 0.45 bar"
+  - "share of trades in centre-peaked families, by year"
+  - "chosen width as a multiple of the predicted move, and wing distance in percent of spot, distributions"
+  - "simulated minus realized return: by arm, by wing distance, and by admissible-candidate count (the consistency test)"
+  - "selection half against gate half: how much of the argmax is Monte-Carlo luck"
+  - "how often the 20-position ladder bound and the width rules each bound the search"
+  - "defined-risk falsification: any trade losing more than its debit"
+  - "pricer equivalence receipt: sampled candidates priced both ways, max absolute difference"
+  - "tail injection on |move| (mandatory, has_short_leg=true)"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-05T20:50:03+00:00"
