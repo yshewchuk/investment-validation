@@ -83,7 +83,7 @@ FEATURES: tuple[str, ...] = (
     "n_prior", "mean_prior_move", "mean_prior_abs_move", "ema2_prior_move",
     "ema4_prior_move", "ema8_prior_move", "ema12_prior_move", "ema2_prior_abs_move",
     "ema4_prior_abs_move", "ema8_prior_abs_move", "ema12_prior_abs_move",
-    "mean_prior_implied_move", "spy_ret21", "spy_ret63", "spy_ret252",
+    "mean_prior_or_implied", "spy_ret21", "spy_ret63", "spy_ret252",
     "spy_dd252", "spy_vol20", "signed_streak", "ema12r_abs", "dist_high",
     "dist_ema", "ret5", "ret10", "ret20", "or_implied", "or_skewing",
     "or_contango", "or_rvol30", "or_exern30", "or_iv30", "or_iee", "or_fwd90_30",

@@ -85,7 +85,17 @@ _KEY_COLUMNS = ("ticker", "k", "date", "quarter", "year", "mcap_asof")
 #: ``daily_market`` and is available for upcoming events — and champion feature
 #: lists must use that instead. :func:`assert_live_available` enforces it at
 #: registry-load time, so this cannot be rediscovered in production.
-LIVE_UNAVAILABLE = ("implied_move",)
+#: Retired 2026-09-05, and kept as an empty tuple rather than deleted because
+#: `assert_live_available` is the guard that stops a non-servable column being
+#: adopted by accident, and the next such column should find the machinery here.
+#:
+#: It held `implied_move` — the oquants quote, genuinely pre-print and
+#: impossible to source for an unrealized event. The panel no longer carries
+#: that column at all: the realized move is computed from prices and the
+#: implied move comes from ORATS `daily_market`, both of which exist for a
+#: forward event. The trap this guarded stopped existing rather than being
+#: worked around.
+LIVE_UNAVAILABLE: tuple[str, ...] = ()
 
 #: Panel columns that are still COMPUTED but must never reach a model.
 #:
@@ -623,7 +633,10 @@ def advance_history(last_row) -> dict[str, float]:
     n = int(last_row["n_prior"])
     move = float(last_row["move"])
     abs_move = float(last_row["abs_move"])
-    implied = last_row["implied_move"]
+    # The ORATS quote for the event just completed, which is what the running
+    # implied mean now averages. `implied_move` — the oquants column this used
+    # to read — no longer exists on the panel.
+    implied = last_row.get("or_implied")
 
     out: dict[str, float] = {"n_prior": n + 1}
     for mean_col, value in (
@@ -635,17 +648,18 @@ def advance_history(last_row) -> dict[str, float]:
             (float(prev) * n + value) / (n + 1) if pd.notna(prev) else float("nan")
         )
 
-    # The implied-move mean is taken over *known* implied values only. The panel
-    # carries no count of those, so advancing it assumes every prior event had
-    # one — true for all 115,500 panel rows, and asserted by the equivalence
-    # check rather than trusted.
-    prev_implied = last_row["mean_prior_implied_move"]
+    # The implied-move mean now averages `or_implied` — the ORATS quote — and
+    # is advanced the same way as the move means above. It used to average the
+    # oquants `implied_move`, over KNOWN values only, with a comment noting the
+    # panel carried no count of those; that column is gone as of 2026-09-05
+    # (see panel.add_implied_history) and with it the special case.
+    prev_implied = last_row.get("mean_prior_or_implied")
     if pd.notna(prev_implied) and pd.notna(implied):
-        out["mean_prior_implied_move"] = (float(prev_implied) * n + float(implied)) / (n + 1)
+        out["mean_prior_or_implied"] = (float(prev_implied) * n + float(implied)) / (n + 1)
     elif pd.notna(prev_implied):
-        out["mean_prior_implied_move"] = float(prev_implied)
+        out["mean_prior_or_implied"] = float(prev_implied)
     else:
-        out["mean_prior_implied_move"] = float("nan")
+        out["mean_prior_or_implied"] = float("nan")
 
     for span in panel_mod.SPANS:
         alpha = 2.0 / (span + 1.0)
@@ -705,7 +719,6 @@ def live_features(
         "quarter": quarter,
         "move": np.nan,
         "abs_move": np.nan,
-        "implied_move": np.nan,
         "year": int(event_date.year),
         **history,
     }
@@ -976,7 +989,7 @@ EVENT_HISTORY_FEATURES: tuple[str, ...] = (
     "n_prior",
     "mean_prior_move",
     "mean_prior_abs_move",
-    "mean_prior_implied_move",
+    "mean_prior_or_implied",
     "ema2_prior_move",
     "ema4_prior_move",
     "ema8_prior_move",
@@ -1001,7 +1014,7 @@ FEATURE_NOTES: dict[str, str] = {
     "n_prior": "How many past prints this name has in the panel — the sample the other history features average over.",
     "mean_prior_move": "Mean SIGNED reaction to past prints, in %. Direction is unpredictable at the event level, so this is a level/drift term, not a bet.",
     "mean_prior_abs_move": "Mean ABSOLUTE reaction to past prints, in %. The plainest estimate of how much this name usually moves.",
-    "mean_prior_implied_move": "Mean implied move the market quoted before past prints, in %. The baseline the size model is trying to beat.",
+    "mean_prior_or_implied": "Mean ORATS-quoted implied move before past prints, in %. The baseline the size model is trying to beat. Replaced the oquants-derived mean on 2026-09-05 (EXP-132); the two are different quantities — EXP-122 put oquants at E|move| and ORATS at 1.55x a model-free straddle.",
     "ema12r_abs": "Ratio of the fast to the slow EMA of past absolute moves — is this name moving more than it used to?",
     "signed_streak": "Run length of consecutive same-direction reactions.",
     "im": "Implied move quoted for THIS print, in %, from the option market.",

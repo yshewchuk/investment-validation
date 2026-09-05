@@ -18,8 +18,10 @@ vendor-supplied:
   (auto_adjust=False — split-adjusted, not dividend-adjusted), the series
   EXP-117 validated exact against Polygon truth (99.5% within 0.5pp, median
   diff 0.000);
-* implied move: Tier-2 ``daily_market.implied_move`` at the last close
-  strictly before the print (the panel's own as-of convention);
+* implied move: NO LONGER WRITTEN. The panel takes it from ORATS
+  ``daily_market`` directly (panel.add_implied_history), so emitting it here
+  would have duplicated the same series under a second name — which is exactly
+  what the oquants column had become once its vendor was dropped;
 * quarters: ordinal within the calendar year (a label; no model consumes it).
 
 Events with no close on either side of the window, or a window wider than
@@ -50,12 +52,26 @@ MIN_SCOREABLE = 12
 MAX_GAP_CALENDAR_DAYS = 5
 
 
-def target_tickers() -> tuple[list[str], dict]:
-    """Scoreable on the ORATS calendar, absent from oquants, with daily rows.
+def target_tickers(*, all_scoreable: bool = False) -> tuple[list[str], dict]:
+    """Scoreable on the ORATS calendar, with daily rows.
 
     The daily-market requirement is load-bearing: the champion size model
     needs or_implied / or_rvol30 / mcap_log, and a ticker with no
     daily_market rows would stay MISSING_FEATURES even with history rows.
+
+    ``all_scoreable`` drops the "absent from oquants" condition, which is what
+    turns this from a universe EXTENSION into a realized-move SOURCE. The panel
+    merges per field (see ``build_events``): the computed realized move wins
+    wherever it exists, oquants keeps ``implied_move``, and an event only this
+    pull has is added outright.
+
+    Two reasons the wider mode is the right default going forward. The oquants
+    cache has no fetcher in this repository and lags — on 2026-09-05 it ended
+    2026-08-31 while Tier 2 held prints through 09-04, so 103 events could not
+    reach the panel at all. And the realized move computed here is the better
+    measurement: EXP-117 validated it at 99.5% within 0.5pp against Polygon,
+    and the 2026-09-05 arbitration found it matching oquants to the cent on
+    92.5% of the events where oquants and ORATS spot disagreed.
     """
     ev = store.read_table(
         "earnings_events",
@@ -72,11 +88,13 @@ def target_tickers() -> tuple[list[str], dict]:
     dm = store.read_table("daily_market", columns=["ticker"])
     dm_tickers = set(dm["ticker"].astype(str))
 
-    targets = sorted((scoreable - oq_tickers) & dm_tickers)
+    pool = scoreable if all_scoreable else (scoreable - oq_tickers)
+    targets = sorted(pool & dm_tickers)
     report = {
+        "mode": "all_scoreable" if all_scoreable else "extension_only",
         "scoreable_on_orats_calendar": len(scoreable),
-        "already_in_oquants": len(scoreable & oq_tickers),
-        "no_daily_market_rows": sorted((scoreable - oq_tickers) - dm_tickers),
+        "also_in_oquants": len(scoreable & oq_tickers),
+        "no_daily_market_rows": len(pool - dm_tickers),
         "targets": len(targets),
     }
     return targets, report
@@ -84,9 +102,19 @@ def target_tickers() -> tuple[list[str], dict]:
 
 def fetch_history(f: Fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | None:
     """yfinance Close series (split-adjusted, not dividend-adjusted)."""
-    rec = f.fetch("yfinance", "history", {"ticker": ticker, "period": "max"},
-                  note="computed-moves")
-    if rec.status != 200:
+    # The Fetcher RAISES on a non-200 rather than returning one, so the status
+    # guard below never fired and a single delisted ticker took the whole run
+    # down — BF_B, at 352 of 2,857, after 351 successful fetches. A universe
+    # pull must survive its worst member: one name with no price history is a
+    # fact about that name, not a reason to abandon the other 2,505.
+    from engine.data.sources.base import FetchError
+
+    try:
+        rec = f.fetch("yfinance", "history", {"ticker": ticker, "period": "max"},
+                      note="computed-moves")
+    except (FetchError, OSError, ValueError):
+        return None
+    if rec is None or rec.status != 200:
         return None
     try:
         frame = pd.read_csv(io.BytesIO(rec.body))
@@ -97,8 +125,22 @@ def fetch_history(f: Fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | No
     date_col = frame.columns[0]
     # yfinance writes the index with per-row UTC offsets that flip at DST;
     # parse through UTC, then drop the tz — the trade date survives intact.
+    # Parse through UTC to survive the per-row offsets yfinance writes (they
+    # flip at DST), then drop the tz AND NORMALIZE TO MIDNIGHT.
+    #
+    # The normalize is load-bearing and its absence was a silent one-session
+    # error. Dropping the tz on a -05:00 midnight leaves 05:00, so a caller
+    # searching for `np.datetime64("2012-01-24")` — midnight — lands BEFORE
+    # that row and anchors on the previous session. Every computed move was
+    # then the day before the print: AAPL 2012-01-24 came out at -1.64%, which
+    # is the 23rd's move, against a true +6.24%.
+    #
+    # Found 2026-09-05 by rebuilding the panel from this pull at scale and
+    # checking the result against the values it replaced: 49% of shared events
+    # differed by more than 1pp and the SIGNS disagreed 27% of the time, which
+    # is what a one-day shift looks like rather than a measurement difference.
     dates = pd.to_datetime(frame[date_col], errors="coerce", utc=True)
-    dates = dates.dt.tz_localize(None)
+    dates = dates.dt.tz_localize(None).dt.normalize()
     closes = pd.to_numeric(frame["Close"], errors="coerce").to_numpy(dtype=float)
     ok = dates.notna() & np.isfinite(closes) & (closes > 0)
     dates = dates[ok].to_numpy(dtype="datetime64[ns]")
@@ -176,12 +218,15 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--confirm", action="store_true")
     ap.add_argument("--tickers", default=None, help="comma-separated override")
+    ap.add_argument("--all-scoreable", action="store_true",
+                    help="every scoreable ticker, not only those oquants lacks — "
+                         "the realized-move SOURCE mode")
     args = ap.parse_args(argv)
     if not args.dry_run and not args.confirm:
         print("pass --dry-run or --confirm", file=sys.stderr)
         return 2
 
-    targets, selection = target_tickers()
+    targets, selection = target_tickers(all_scoreable=args.all_scoreable)
     if args.tickers:
         keep = {t.strip().upper() for t in args.tickers.split(",")}
         targets = [t for t in targets if t in keep]
@@ -206,7 +251,17 @@ def main(argv=None) -> int:
     started = time.time()
     written = no_history = too_few = 0
     for i, tk in enumerate(targets):
-        series = fetch_history(f, tk)
+        # A ticker already written this run is skipped, so an interrupted pull
+        # resumes instead of refetching 2,857 names from the top.
+        if (out_dir / f"moves_{tk}.json").exists():
+            written += 1
+            continue
+        try:
+            series = fetch_history(f, tk)
+        except Exception as exc:  # nothing about one name may stop the universe
+            print(f"  [{i+1}/{len(targets)}] {tk}: FAILED {type(exc).__name__}", flush=True)
+            no_history += 1
+            continue
         if series is None:
             no_history += 1
             print(f"  [{i+1}/{len(targets)}] {tk}: no yfinance history", flush=True)

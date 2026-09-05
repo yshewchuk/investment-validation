@@ -79,7 +79,7 @@ FEATURES = (
     "dist_ema",
     "spy_vol20",
     "spy_dd252",
-    "mean_prior_implied_move",
+    "mean_prior_or_implied",
     "or_implied",
     "or_rvol30",
     "mcap_log",
@@ -87,6 +87,17 @@ FEATURES = (
 
 #: The research list, kept only so the substitution can be measured. Never
 #: registered — it contains a feature no live event can supply.
+#: The legacy research model's ten inputs, recorded as they WERE — a historical
+#: fact, not a live list. Two of them, `mean_prior_implied_move` and
+#: `implied_move`, no longer exist on the panel: both were oquants-derived and
+#: were retired on 2026-09-05 (see panel.add_implied_history and EXP-132).
+#:
+#: So `compare_feature_sets` can no longer evaluate this set, and that is the
+#: right outcome rather than a gap to paper over — the comparison it existed to
+#: make (what does substituting `or_implied` for `implied_move` cost?) has been
+#: made, twice, and both times decided against the legacy series. Kept verbatim
+#: because rewriting it to today's names would erase the record of what was
+#: actually compared.
 LEGACY_FEATURES = (
     "ema12r_abs",
     "mean_prior_move",
@@ -158,6 +169,21 @@ def compare_feature_sets(panel: pd.DataFrame, *, seed: int = SEED, first_test_ye
     subset would win on coverage rather than on merit.
     """
     data = prepare(panel)
+    # The legacy list names columns the panel no longer carries (implied_move,
+    # mean_prior_implied_move — dropped once the oquants implied series was
+    # retired). Evaluating it is then not merely unwise but impossible, so the
+    # comparison reports that plainly instead of raising a KeyError deep in a
+    # walk-forward, or quietly substituting today's columns under yesterday's
+    # names and calling the result the same comparison.
+    missing = [c for c in LEGACY_FEATURES if c not in data.columns]
+    if missing:
+        log(f"legacy feature set is no longer evaluable: the panel does not "
+            f"carry {', '.join(missing)}")
+        return {"servable": walk_forward(
+            data, FEATURES, TARGET, fit,
+            first_test_year=first_test_year, seed=seed).metrics,
+            "legacy": None, "legacy_missing": missing}
+
     both = list(dict.fromkeys([*FEATURES, *LEGACY_FEATURES]))
     complete = np.isfinite(data[both].to_numpy(dtype=float)).all(axis=1)
     complete &= np.isfinite(data[TARGET].to_numpy(dtype=float))

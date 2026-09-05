@@ -134,7 +134,7 @@ def bucket_frame(
     # would put them in different buckets for no reason. `or_implied` remains the
     # fallback for callers that only have the event-level figure.
     implied = column("implied_at_entry", "or_implied")
-    prior = column("mean_prior_implied_move")
+    prior = column("mean_prior_or_implied")
     ratio = implied / prior.replace(0, np.nan)
     out["implied_ratio"] = ratio
     if implied_edges is None:

@@ -162,10 +162,43 @@ class TestSizeModel:
         assert_live_available(size_mod.FEATURES)
 
     def test_the_legacy_list_is_not(self):
-        from engine.features import UnservableFeature, assert_live_available
+        """The legacy list is unservable — but no longer for the old reason.
 
-        with pytest.raises(UnservableFeature):
-            assert_live_available(size_mod.LEGACY_FEATURES)
+        It used to trip ``assert_live_available`` because ``implied_move`` sat
+        on ``LIVE_UNAVAILABLE``. That tuple is empty now: the column was not
+        quarantined, it was removed from the panel outright, so the guard has
+        nothing to catch and the real invariant is that the panel cannot supply
+        these names at all.
+        """
+        from engine.data.features import panel as panel_mod
+
+        missing = set(size_mod.LEGACY_FEATURES) - set(panel_mod.PANEL_COLUMNS)
+        assert "implied_move" in missing
+        assert "mean_prior_implied_move" in missing
+
+    def test_comparison_degrades_when_the_legacy_columns_are_gone(self):
+        """A panel without the legacy columns must not raise a KeyError.
+
+        The legacy list names two columns the panel stopped carrying when the
+        oquants implied series was retired. The comparison then has nothing to
+        compare against, and saying so is the honest outcome — the failure mode
+        this guards is a KeyError surfacing five minutes into a walk-forward,
+        which is where it actually surfaced.
+        """
+        rng = np.random.default_rng(0)
+        n = 400
+        frame = pd.DataFrame({f: rng.normal(size=n) for f in size_mod.FEATURES})
+        frame["abs_move"] = np.abs(rng.normal(size=n)) * 3
+        frame["n_prior"] = 10
+        frame["year"] = rng.integers(2012, 2015, size=n)
+        frame["or_implied"] = np.abs(frame["or_implied"]) * 5
+        frame["or_rvol30"] = np.abs(frame["or_rvol30"]) * 30
+
+        out = size_mod.compare_feature_sets(frame, first_test_year=2013)
+        assert out["legacy"] is None
+        assert set(out["legacy_missing"]) == {"implied_move",
+                                              "mean_prior_implied_move"}
+        assert "servable" in out
 
     def test_or_implied_replaces_implied_move(self):
         assert "or_implied" in size_mod.FEATURES

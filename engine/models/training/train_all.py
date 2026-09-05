@@ -76,10 +76,15 @@ def train_size(*, seed: int = SEED, dry_run: bool = False) -> dict:
     panel = load_panel()
     model, result = size_mod.train(panel, seed=seed)
     comparison = size_mod.compare_feature_sets(panel, seed=seed)
-    log(
-        f"servable vs legacy feature list: r {comparison['servable']['r']:.4f} "
-        f"vs {comparison['legacy']['r']:.4f}"
-    )
+    if comparison.get("legacy"):
+        log(
+            f"servable vs legacy feature list: r {comparison['servable']['r']:.4f} "
+            f"vs {comparison['legacy']['r']:.4f}"
+        )
+    else:
+        log(f"servable feature list: r {comparison['servable']['r']:.4f} "
+            f"(no legacy comparison — panel lacks "
+            f"{', '.join(comparison.get('legacy_missing', []))})")
 
     # Residuals grouped by the decile of the prediction that produced them.
     # The pairing exists only here — `result.frame` carries `pred` beside the
@@ -318,7 +323,12 @@ def _finalize(artifact: ModelArtifact, entry: RegistryEntry, result, dry_run: bo
 # CLI
 # --------------------------------------------------------------------------
 
-ROLE_ORDER = ("size", "implied_t1", "gate")
+#: ``iv_crush`` was absent here until 2026-09-05 while ``train_iv_crush``
+#: existed and the registry carried the champion — so the only thing that had
+#: ever fit it was EXP-128's own run, and ``train_all`` silently trained four
+#: of the five champions. A Tier-3 change then refreshed every model except
+#: that one, which is the failure this ordering exists to prevent.
+ROLE_ORDER = ("size", "implied_t1", "gate", "iv_crush")
 
 
 def main(argv=None) -> int:
@@ -352,6 +362,8 @@ def main(argv=None) -> int:
                 report["models"].append(
                     train_gate(strategy, seed=args.seed, dry_run=args.dry_run)
                 )
+        elif role == "iv_crush":
+            report["models"].append(train_iv_crush(seed=args.seed, dry_run=args.dry_run))
 
     if not args.dry_run:
         problems = load_registry().validate()

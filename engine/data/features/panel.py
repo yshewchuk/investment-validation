@@ -58,6 +58,7 @@ __all__ = [
     "add_runup_features",
     "add_orats_features",
     "add_pre_print_vol",
+    "add_implied_history",
     "PRE_PRINT_FEATURES",
     "build_panel",
     "PANEL_COLUMNS",
@@ -92,11 +93,11 @@ PRE_PRINT_FEATURES = {
 }
 
 PANEL_COLUMNS = (
-    ["ticker", "k", "date", "quarter", "move", "abs_move", "implied_move", "n_prior",
+    ["ticker", "k", "date", "quarter", "move", "abs_move", "n_prior",
      "mean_prior_move", "mean_prior_abs_move"]
     + [f"ema{s}_prior_move" for s in SPANS]
     + [f"ema{s}_prior_abs_move" for s in SPANS]
-    + ["mean_prior_implied_move", "year",
+    + ["mean_prior_or_implied", "year",
        "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
        "signed_streak", "ema12r_abs", "dist_high", "dist_ema", "ret5", "ret10", "ret20"]
     + list(ORATS_FEATURES.values())
@@ -172,7 +173,6 @@ def _causal_ema(history: list[float], span: int) -> float | None:
 def history_features(
     prior_moves: Sequence[float],
     prior_abs: Sequence[float],
-    prior_implied: Sequence[float | None],
 ) -> dict[str, float | None]:
     """Event-history features for the event that follows the given history.
 
@@ -185,13 +185,15 @@ def history_features(
     catch — so there is one.
 
     ``prior_*`` must contain events strictly before the one being scored.
+
+    The implied-move history is NOT here. It averages ``or_implied``, which a
+    LATER block produces, so it cannot be computed from the moves files this
+    one reads — see :func:`add_implied_history`.
     """
-    known_implied = [x for x in prior_implied if x is not None and not pd.isna(x)]
     out: dict[str, float | None] = {
         "n_prior": len(prior_moves),
         "mean_prior_move": float(np.mean(prior_moves)) if len(prior_moves) else None,
         "mean_prior_abs_move": float(np.mean(prior_abs)) if len(prior_abs) else None,
-        "mean_prior_implied_move": float(np.mean(known_implied)) if known_implied else None,
     }
     for span in SPANS:
         out[f"ema{span}_prior_move"] = _causal_ema(list(prior_moves), span)
@@ -203,30 +205,66 @@ def build_events(moves_dir: Path | None = None,
                  extra_moves_dirs: Sequence[Path] = ()) -> pd.DataFrame:
     """The base causal panel: one row per admitted (ticker, event).
 
-    ``extra_moves_dirs`` hold synthesized oquants-format files — the EXP-117
-    universe extension for tickers oquants does not carry (target provenance:
-    COMPUTED, see engine/data/pulls/computed_moves.py). A ticker present in
-    the primary dir is never shadowed by a synthesized one.
+    ``extra_moves_dirs`` hold synthesized oquants-format files — originally the
+    EXP-117 universe extension for tickers oquants does not carry (target
+    provenance: COMPUTED, see engine/data/pulls/computed_moves.py).
+
+    **Merged per EVENT, not per file.** It used to be per file: a ticker present
+    in the primary dir was skipped entirely in the extras. That is right for a
+    universe extension and wrong for a FORWARD gap, which is the case that
+    matters now — the oquants cache is fetched periodically and has no fetcher
+    in this repository, so it lags. On 2026-09-05 it ended at 2026-08-31 while
+    Tier 2 held prints through 09-04, and a file-level merge meant no
+    synthesized file could supply them for the 1,900 tickers oquants carries.
+
+    **The synthesized source wins outright.** Both ``move``/``abs_move`` and
+    ``implied_move`` come from it wherever it has the event; oquants supplies
+    only what it does not cover.
+
+    Realized move: session-aware close-to-close on yfinance, validated by
+    EXP-117 at 99.5% within 0.5pp against Polygon truth, and found by the
+    2026-09-05 arbitration to match oquants to the cent on 92.5% of the events
+    where oquants and ORATS spot disagreed. Computing it ourselves removes a
+    vendor from the critical path without changing what the number means.
+
+    Implied move: ORATS ``daily_market.implied_move`` at the last pre-print
+    close. This is NOT the same quantity oquants quotes — EXP-122 measured
+    oquants at E|move| to 3% and ORATS at 1.55x a model-free straddle — so the
+    switch shifts ``mean_prior_implied_move`` by a systematic ~+1.95pp across
+    the whole panel and every champion must be retrained. EXP-132 is what
+    licenses it: the ORATS-derived history was BETTER for iv_crush and
+    implied_t1, within noise for both gates, and worse for size_v1_4 by 0.0036
+    against its own 0.0033 seed-noise band.
+
+    A per-field split was tried first — computed realized, oquants implied —
+    and rejected. It looked conservative and was worse: oquants covers history
+    and not the present, so implied_move would have switched series at exactly
+    the boundary between the training data and the live board. A discontinuity
+    there is harder to reason about than a uniform shift, and it sits where it
+    does the most damage.
+
+    The merge is per EVENT rather than per file so a forward gap can be closed
+    at all: the oquants cache has no fetcher in this repository and lags.
     """
     moves_dir = moves_dir or paths.RAW_OQUANTS_MOVES
-    files = sorted(moves_dir.glob("moves_*.json"))
-    if extra_moves_dirs:
-        seen = {p.name for p in files}
-        for extra in extra_moves_dirs:
-            extra_path = Path(extra)
-            if not extra_path.exists():
-                continue
-            files += sorted(p for p in extra_path.glob("moves_*.json")
-                            if p.name not in seen)
+    files = [(p, "oquants") for p in sorted(moves_dir.glob("moves_*.json"))]
+    for extra in extra_moves_dirs:
+        extra_path = Path(extra)
+        if extra_path.exists():
+            files += [(p, "computed") for p in sorted(extra_path.glob("moves_*.json"))]
     if not files:
         raise FileNotFoundError(f"no oquants moves files under {moves_dir}")
 
-    rows: list[dict] = []
-    skipped_empty = 0
     started = time.time()
-    for i, path in enumerate(files):
+    skipped_empty = 0
+    # PASS 1 — merge the per-ticker series, field by field. The history block
+    # is NOT built here: `mean_prior_move` and its EMAs are functions of prior
+    # REALIZED moves, so recomputing those means the history has to be derived
+    # from the merged series rather than from either source's own.
+    merged: dict[str, dict[str, dict]] = {}
+    for i, (path, origin) in enumerate(files):
         if i % 500 == 0:
-            _log(f"events {i}/{len(files)} files, {len(rows)} rows, {time.time()-started:.0f}s")
+            _log(f"events {i}/{len(files)} files, {time.time()-started:.0f}s")
         doc = json.loads(path.read_text())
         ticker = doc.get("ticker") or path.name[len("moves_") : -len(".json")]
         data = doc.get("data") or {}
@@ -236,41 +274,52 @@ def build_events(moves_dir: Path | None = None,
             continue
         moves = data.get("realized_moves") or []
         abs_moves = data.get("abs_realized_moves") or []
-        implied = data.get("implied_moves") or []
         quarters = data.get("quarters") or []
         n = len(dates)
-        if not (len(moves) == len(abs_moves) == len(implied) == len(quarters) == n):
+        if not (len(moves) == len(abs_moves) == len(quarters) == n):
             _log(f"SKIP {ticker}: ragged arrays")
             continue
+        book = merged.setdefault(ticker, {})
+        for k in range(n):
+            day = str(dates[k])[:10]
+            rec = book.setdefault(day, {"date": dates[k], "quarter": quarters[k]})
+            # The synthesized source wins both fields where it has the event.
+            if origin == "computed" or "move" not in rec:
+                rec["move"], rec["abs_move"] = moves[k], abs_moves[k]
+                rec["src"] = origin
 
+    # PASS 2 — history from the merged series, in date order.
+    rows: list[dict] = []
+    recomputed = 0
+    for ticker, book in merged.items():
         prior_moves: list[float] = []
         prior_abs: list[float] = []
-        prior_implied: list = []
-        for k in range(n):
+        for day in sorted(book):
+            rec = book[day]
+            k = len(prior_moves)
             if k >= MIN_HISTORY:
-                row = {
+                rows.append({
                     "ticker": ticker,
                     "k": k,
-                    "date": dates[k],
-                    "quarter": quarters[k],
-                    "move": moves[k],
-                    "abs_move": abs_moves[k],
-                    "implied_move": implied[k],
-                    "year": int(str(dates[k])[:4]),
-                    **history_features(prior_moves, prior_abs, prior_implied),
-                }
-                rows.append(row)
-            prior_moves.append(moves[k])
-            prior_abs.append(abs_moves[k])
-            prior_implied.append(implied[k])
+                    "date": rec["date"],
+                    "quarter": rec.get("quarter"),
+                    "move": rec.get("move"),
+                    "abs_move": rec.get("abs_move"),
+                    "year": int(str(rec["date"])[:4]),
+                    **history_features(prior_moves, prior_abs),
+                })
+                recomputed += rec.get("src") == "computed"
+            prior_moves.append(rec.get("move"))
+            prior_abs.append(rec.get("abs_move"))
 
-    _log(f"events: {len(rows)} rows from {len(files)} files ({skipped_empty} empty)")
+    rows.sort(key=lambda r: (r["ticker"], str(r["date"])))
+    _log(f"events: {len(rows)} rows from {len(files)} files ({skipped_empty} empty; "
+         f"{recomputed} events from the synthesized source)")
     if not rows:
         # Shape matters even when empty: a caller that goes on to add regime and
         # run-up features must not hit a KeyError instead of an empty result.
-        columns = ["ticker", "k", "date", "quarter", "move", "abs_move", "implied_move",
-                   "n_prior", "mean_prior_move", "mean_prior_abs_move",
-                   "mean_prior_implied_move", "year"]
+        columns = ["ticker", "k", "date", "quarter", "move", "abs_move",
+                   "n_prior", "mean_prior_move", "mean_prior_abs_move", "year"]
         columns += [f"ema{s}_prior_move" for s in SPANS]
         columns += [f"ema{s}_prior_abs_move" for s in SPANS]
         empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in columns})
@@ -769,6 +818,45 @@ def add_pre_print_vol(
     return out
 
 
+def add_implied_history(df: pd.DataFrame) -> pd.DataFrame:
+    """``mean_prior_or_implied`` — the running mean of prior quoted implied moves.
+
+    A separate block, and it has to be, because it averages ``or_implied``,
+    which :func:`add_orats_features` produces. The event-history block runs
+    first and cannot see it.
+
+    **This replaced an oquants-derived feature and the column behind it.** The
+    panel used to carry ``implied_move`` — the oquants quote — and average it
+    into ``mean_prior_implied_move``. Two things retired that on 2026-09-05:
+
+    * The vendor cannot serve it. Its cache has no fetcher in this repository,
+      it lags (2026-08-31 while Tier 2 held prints through 09-04), and it does
+      not cover every ticker — so the column blocked Tier 3 from advancing and
+      carried two different quantities depending on the ticker.
+    * EXP-132 measured the substitution across all five champions: the
+      ORATS-derived history was BETTER for iv_crush and implied_t1, within
+      noise for both gates, and worse for size_v1_4 by 0.0036 against its own
+      0.0033 seed-noise band.
+
+    The two series are NOT the same quantity — EXP-122 put oquants at E|move|
+    to 3% and ORATS at 1.55x a model-free straddle — so this shifts the feature
+    by a systematic ~+1.95pp and every champion was retrained for it. That is
+    the cost; the benefit is a panel that can advance without a vendor.
+
+    Strictly prior, expanding, per ticker: the same recursion the event-history
+    block uses, so the two remain comparable.
+    """
+    out = df.sort_values(["ticker", "date"]).copy()
+    prior = out.groupby("ticker")["or_implied"].shift(1)
+    out["mean_prior_or_implied"] = (
+        prior.groupby(out["ticker"]).expanding().mean().reset_index(level=0, drop=True)
+    )
+    have = out["mean_prior_or_implied"].notna()
+    _log(f"implied history: {int(have.sum()):,}/{len(out):,} events "
+         f"({have.mean():.1%}) have a prior quoted implied move")
+    return out
+
+
 def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     """Full Tier-3 causal panel, built from Tier 1 (moves/prices) and Tier 2."""
     _log("block 1/4 — causal events from oquants moves")
@@ -777,10 +865,12 @@ def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     panel = add_regime_features(panel)
     _log("block 3/4 — run-up and distance features")
     panel = add_runup_features(panel)
-    _log("block 4/5 — ORATS state from tier 2")
+    _log("block 4/6 — ORATS state from tier 2")
     panel = add_orats_features(panel, daily=daily)
-    _log("block 5/5 — session-aware pre-print vol")
+    _log("block 5/6 — session-aware pre-print vol")
     panel = add_pre_print_vol(panel)
+    _log("block 6/6 — implied-move history from ORATS")
+    panel = add_implied_history(panel)
 
     # The per-block anchor dates are provenance for a *caller-supplied* as-of,
     # and the panel's as-of is always the event date, which every row already

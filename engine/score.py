@@ -549,7 +549,7 @@ class Scorer:
         out["event_date"] = pd.to_datetime(out["event_date"])
         panel = self.context.panel
         columns = [
-            "ticker", "date", "mcap_usd", "or_implied", "mean_prior_implied_move",
+            "ticker", "date", "mcap_usd", "or_implied", "mean_prior_or_implied",
             "abs_move", "n_prior",
         ]
         available = [c for c in columns if c in panel.columns]
@@ -1366,7 +1366,7 @@ class Scorer:
 
     def _score_analogs(self, request, result, features) -> None:
         implied = features.get("im")
-        prior = features.get("mean_prior_implied_move")
+        prior = features.get("mean_prior_or_implied")
         ratio = None
         if implied is not None and prior is not None:
             a, b = implied.iloc[0], prior.iloc[0]
