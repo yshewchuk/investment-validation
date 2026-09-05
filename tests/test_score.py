@@ -74,7 +74,7 @@ def panel():
                     "implied_move": 6.0,
                     "n_prior": k + 4,
                     "mean_prior_move": 1.0, "mean_prior_abs_move": 5.0,
-                    "mean_prior_implied_move": 6.0,
+                    "mean_prior_or_implied": 6.0,
                     "ema2_prior_move": 1.0, "ema4_prior_move": 1.0,
                     "ema8_prior_move": 1.0, "ema12_prior_move": 1.0,
                     "ema2_prior_abs_move": 5.0, "ema4_prior_abs_move": 5.0,

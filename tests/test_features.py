@@ -24,10 +24,10 @@ class TestAdvanceHistory:
             "n_prior": 10,
             "move": 6.0,
             "abs_move": 6.0,
-            "implied_move": 5.0,
+            "or_implied": 5.0,
             "mean_prior_move": 1.0,
             "mean_prior_abs_move": 4.0,
-            "mean_prior_implied_move": 5.5,
+            "mean_prior_or_implied": 5.5,
         }
         for span in panel_mod.SPANS:
             base[f"ema{span}_prior_move"] = 2.0
@@ -46,7 +46,7 @@ class TestAdvanceHistory:
 
     def test_implied_mean_is_exact(self):
         out = features.advance_history(self.row())
-        assert out["mean_prior_implied_move"] == pytest.approx((5.5 * 10 + 5.0) / 11)
+        assert out["mean_prior_or_implied"] == pytest.approx((5.5 * 10 + 5.0) / 11)
 
     def test_ema_resumes_the_panel_recursion(self):
         out = features.advance_history(self.row())
@@ -62,23 +62,23 @@ class TestAdvanceHistory:
         assert not np.isnan(out["ema2_prior_move"])
 
     def test_a_missing_implied_carries_the_mean_forward(self):
-        out = features.advance_history(self.row(implied_move=np.nan))
-        assert out["mean_prior_implied_move"] == pytest.approx(5.5)
+        out = features.advance_history(self.row(or_implied=np.nan))
+        assert out["mean_prior_or_implied"] == pytest.approx(5.5)
 
     def test_matches_a_full_recomputation_over_a_known_history(self):
         """Advancing must agree with recomputing from scratch, given full history."""
         rng = np.random.default_rng(0)
         moves = rng.normal(0, 5, 30).tolist()
         abs_moves = [abs(m) for m in moves]
-        implied = rng.uniform(3, 9, 30).tolist()
 
-        # The panel's row for event 20, then advanced to event 21.
-        at_20 = panel_mod.history_features(moves[:20], abs_moves[:20], implied[:20])
-        row = pd.Series({**at_20, "move": moves[20], "abs_move": abs_moves[20],
-                         "implied_move": implied[20]})
+        # `history_features` no longer takes an implied series: the running
+        # implied mean is built by `add_implied_history` from the ORATS quote,
+        # not from the oquants column the panel used to carry.
+        at_20 = panel_mod.history_features(moves[:20], abs_moves[:20])
+        row = pd.Series({**at_20, "move": moves[20], "abs_move": abs_moves[20]})
         advanced = features.advance_history(row)
 
-        direct = panel_mod.history_features(moves[:21], abs_moves[:21], implied[:21])
+        direct = panel_mod.history_features(moves[:21], abs_moves[:21])
         for key, value in direct.items():
             if value is None:
                 continue
@@ -86,17 +86,31 @@ class TestAdvanceHistory:
 
 
 class TestLiveUnavailable:
-    def test_flags_the_legacy_implied_move_feature(self):
+    def test_flags_an_unservable_feature(self, monkeypatch):
+        """The guard still fires — on a stand-in, since nothing real trips it.
+
+        This named `implied_move` until 2026-09-05, when the column left the
+        panel entirely and LIVE_UNAVAILABLE became empty. The machinery is kept
+        for the next realized-only column (see its docstring), so it keeps a
+        test; an untested guard is one nobody learns has broken.
+        """
+        monkeypatch.setattr(features, "LIVE_UNAVAILABLE", ("a_realized_only_column",))
         with pytest.raises(features.UnservableFeature, match="or_implied"):
-            features.assert_live_available(["ema12r_abs", "implied_move"])
+            features.assert_live_available(["ema12r_abs", "a_realized_only_column"])
 
     def test_passes_a_servable_list(self):
         features.assert_live_available(["ema12r_abs", "or_implied", "mcap_log"])
 
-    def test_implied_move_is_excluded_from_nothing_but_models(self):
-        """It stays a panel column — it is only barred from a champion's inputs."""
-        assert "implied_move" in features.PANEL_FEATURE_COLUMNS
-        assert "implied_move" in features.LIVE_UNAVAILABLE
+    def test_the_legacy_implied_move_is_gone_from_the_panel(self):
+        """Not quarantined — removed. The trap stopped existing.
+
+        The realized move is computed from prices and the implied move comes
+        from ORATS `daily_market`, and both exist for an event that has not
+        happened yet. There is no longer a column to bar from a model.
+        """
+        assert "implied_move" not in features.PANEL_FEATURE_COLUMNS
+        assert "mean_prior_implied_move" not in features.PANEL_FEATURE_COLUMNS
+        assert features.LIVE_UNAVAILABLE == ()
 
     def test_outcomes_are_never_features(self):
         for column in features.OUTCOME_COLUMNS:

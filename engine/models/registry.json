@@ -476,7 +476,7 @@
    "notes": "Decision days pooled with days_before_print as a feature. Features are as-of the decision date only \u2014 the panel's market-state block is read at the close being predicted and would leak.",
    "threshold": null,
    "tier": "feature",
-   "produces": null,
+   "produces": "pred_im_t1_d14",
    "consumes": []
   },
   {
@@ -637,7 +637,7 @@
    "notes": "v1.4 architecture. `or_implied` replaces the legacy `implied_move`, which cannot be sourced for an unrealized event. v1.4 adds the absolute-valued inputs promoted by EXP-109: mean_prior_abs_move, abs_dist_ema, abs_dist_high \u2014 the magnitudes behind V-shaped signed features that the blend's linear half cannot represent.",
    "threshold": null,
    "tier": "feature",
-   "produces": null,
+   "produces": "pred_abs_move",
    "consumes": []
   }
  ]

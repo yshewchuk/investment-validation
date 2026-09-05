@@ -192,9 +192,22 @@ class TestIntegrityChecks:
 
 
 class TestValidate:
-    def test_flags_an_unservable_feature(self):
+    def test_flags_an_unservable_feature(self, monkeypatch):
+        """The guard still works, on a column standing in for the real one.
+
+        This used to pass `implied_move`, which sat on LIVE_UNAVAILABLE. That
+        tuple is empty as of 2026-09-05 — the column was removed from the panel
+        rather than quarantined — so nothing real trips the guard any more. The
+        machinery is kept deliberately (see the LIVE_UNAVAILABLE docstring) for
+        the next column that needs it, and a guard nothing tests is a guard
+        nobody finds out has broken.
+        """
+        import engine.features as feat
+
+        monkeypatch.setattr(feat, "LIVE_UNAVAILABLE", ("a_realized_only_column",))
         registry = reg.Registry(
-            entries=[entry(features=["ema12r_abs", "implied_move"], champion=True)]
+            entries=[entry(features=["ema12r_abs", "a_realized_only_column"],
+                           champion=True)]
         )
         problems = registry.validate(check_artifacts=False)
         assert any("could never be served live" in p for p in problems)
@@ -245,3 +258,35 @@ class TestPersistence:
         loaded = reg.load_registry(path)
         assert len(loaded.entries) == 1
         assert loaded.get("m1").train_window == "new"
+
+
+class TestTier4ProducerDeclarations:
+    """Every Tier-4 column must be claimed by exactly one champion.
+
+    `checks/tier4_checks.py::registry_graph` enforces this, but only at check
+    time — long after a retrain has already overwritten the registry. The field
+    was dropped on 2026-09-05 by a routine retrain because only `train_iv_crush`
+    passed `produces=`, so `pred_abs_move` came back declared by nobody while
+    the RETIRED `size_v1_3` entry still claimed it.
+    """
+
+    def test_every_producer_has_exactly_one_champion(self):
+        from engine.data.features import tier4
+        from engine.models.registry import load_registry
+
+        reg = load_registry()
+        champions = [e for e in reg.entries if e.champion]
+        for column in tier4.PRODUCES:
+            claimants = [e.id for e in champions if e.produces == column]
+            assert len(claimants) == 1, (
+                f"{column} is produced by {claimants} — exactly one champion must"
+            )
+
+    def test_the_champion_of_each_tier4_role_declares_its_column(self):
+        from engine.data.features import tier4
+        from engine.models.registry import load_registry
+
+        reg = load_registry()
+        for column in tier4.PRODUCES:
+            entry = next(e for e in reg.entries if e.champion and e.produces == column)
+            assert entry.features, f"{entry.id} declares {column} with no features"

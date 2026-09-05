@@ -365,11 +365,16 @@ def build_tier4_table(since=None) -> dict:
     """
     _banner("tier 4 — feature-model forecasts")
     report = tier4_mod.build_table(since=since)
-    print(
-        f"  wrote {report['rows']:,} rows, {report['with_forecast']:,} with a "
-        f"forecast → {report['path']}",
-        flush=True,
-    )
+    # One line per producer, not a single total. The table stopped being
+    # single-producer when Tier 4 generalized to N of them, and this caller was
+    # not updated with it — so a rebuild that had done all 446 fold fits died on
+    # `KeyError: 'with_forecast'` while printing its own success, after the
+    # parquet was already on disk but before the snapshot recorded its hash.
+    print(f"  wrote {report['rows']:,} rows → {report['path']}", flush=True)
+    for name, stats in report.get("producers", {}).items():
+        n = stats["with_forecast"]
+        print(f"    {name}: {n:,} with a forecast "
+              f"({n / max(report['rows'], 1):.1%})", flush=True)
     return report
 
 

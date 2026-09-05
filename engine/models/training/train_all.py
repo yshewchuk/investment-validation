@@ -140,6 +140,13 @@ def train_size(*, seed: int = SEED, dry_run: bool = False) -> dict:
         evidence="reports/phase1_models.md",
         seed=seed,
         notes=artifact.notes,
+        # `produces` is not decoration: checks/tier4_checks.py::registry_graph
+        # asserts exactly one champion declares each Tier-4 column, so a retrain
+        # that omits it leaves the column produced by nobody and the graph
+        # unable to say what a re-promotion breaks. Only train_iv_crush set it
+        # until 2026-09-05, which meant every size/implied_t1 retrain silently
+        # cleared a field that had been filled in by hand.
+        produces="pred_abs_move",
     )
     return _finalize(artifact, entry, result, dry_run)
 
@@ -186,6 +193,7 @@ def train_implied_t1(*, seed: int = SEED, dry_run: bool = False) -> dict:
         evidence="reports/phase1_models.md",
         seed=seed,
         notes=artifact.notes,
+        produces="pred_im_t1_d14",
     )
     return _finalize(artifact, entry, result, dry_run)
 

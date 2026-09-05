@@ -44,7 +44,7 @@ def trades(
             "spot_entry": spot,
             "strike": spot * (1 + moneyness_pct / 100.0),
             "or_implied": 5.0 * implied_ratio,
-            "mean_prior_implied_move": 5.0,
+            "mean_prior_or_implied": 5.0,
             "event_date": pd.Timestamp(f"{year}-06-01"),
             "exit_date": pd.Timestamp(f"{year}-06-02"),
         },
