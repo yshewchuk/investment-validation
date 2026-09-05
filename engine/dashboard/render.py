@@ -581,6 +581,7 @@ def build_strategies(registry=None) -> dict:
     from engine.features import DRIVER_NOTES, feature_note
     from engine.payoff import PAYOFF_DRIVER
     from engine.score import DISABLED_STRATEGIES
+    from engine.structure_registry import superseded_by
     from engine.structures import STRUCTURES
 
     if registry is None:
@@ -643,10 +644,19 @@ def build_strategies(registry=None) -> dict:
             }
             for leg in getattr(structure, "legs", [])
         ]
+        beaten = superseded_by(name)
         out[name] = {
             "name": name,
-            "enabled": name not in DISABLED_STRATEGIES,
+            "enabled": name not in DISABLED_STRATEGIES and beaten is None,
             "disabled_reason": DISABLED_STRATEGIES.get(name),
+            # Superseded is reported separately from disabled so the panel can
+            # say "beaten by X, here is the evidence" rather than implying the
+            # shape was never validated.
+            "superseded_by": beaten.strategy if beaten else None,
+            "superseded_evidence": (
+                f"{beaten.evidence} — {beaten.notes}".strip(" —")
+                if beaten else None
+            ),
             "structure": {
                 "legs": legs,
                 "entry_offset": int(structure.entry_offset),
@@ -749,16 +759,22 @@ def build_meta(
                 continue
 
     from engine.score import DISABLED_STRATEGIES
+    from engine.structure_registry import superseded_by
     from engine.structures import STRUCTURES
 
-    strategies = {
-        name: (
-            {"enabled": False, "detail": DISABLED_STRATEGIES[name]}
-            if name in DISABLED_STRATEGIES
-            else {"enabled": True}
-        )
-        for name in sorted(STRUCTURES)
-    }
+    def _state(name: str) -> dict:
+        if name in DISABLED_STRATEGIES:
+            return {"enabled": False, "detail": DISABLED_STRATEGIES[name]}
+        beaten = superseded_by(name)
+        if beaten is not None:
+            return {
+                "enabled": False,
+                "superseded_by": beaten.strategy,
+                "detail": f"superseded by {beaten.strategy} ({beaten.evidence})",
+            }
+        return {"enabled": True}
+
+    strategies = {name: _state(name) for name in sorted(STRUCTURES)}
 
     snapshot = next(
         (r.get("snapshot_hash") for r in records if r.get("snapshot_hash")), ""

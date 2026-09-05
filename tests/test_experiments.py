@@ -145,8 +145,10 @@ class TestRegistryTable:
 
 
 class TestDecide:
-    def _m(self, mean, sharpe, ploss, tail=True, regimes=None):
-        return {"mean": mean, "sharpe_trade": sharpe,
+    def _m(self, cagr, sharpe, ploss, tail=True, regimes=None):
+        # `cagr`, not `mean`: rule (a) turns on compounded growth, because
+        # mean-per-trade can be positive on a book that loses money (EXP-126).
+        return {"cagr": cagr, "mean": cagr, "sharpe_trade": sharpe,
                 "mc": {"p_loss": ploss},
                 "stress": {"regimes": regimes or {"2022": {"n": 40, "mean": 0.05}},
                            "tail_injection": {"available": True} if tail else {}}}
@@ -156,7 +158,7 @@ class TestDecide:
                                          self._m(0.03, 1.2, 0.10), prereg_valid=True)
         assert ok, reasons
 
-    def test_worse_mean_refused(self):
+    def test_worse_cagr_refused(self):
         ok, _ = promote_mod.decide(self._m(0.02, 1.5, 0.08),
                                    self._m(0.03, 1.2, 0.10), prereg_valid=True)
         assert not ok
@@ -184,10 +186,12 @@ class TestDecide:
 
 
 class TestDecideFullShape:
-    def _results(self, mean, sharpe=1.0, p_loss=0.1, prereg=True, checklist_fails=0,
-                 tail=None, brier=None):
+    def _results(self, cagr, sharpe=1.0, p_loss=0.1, prereg=True, checklist_fails=0,
+                 tail=None, brier=None, years=None):
         doc = {
-            "headline": {"mean": mean, "sharpe_trade": sharpe, "n": 100},
+            "headline": {"cagr": cagr, "mean": cagr, "sharpe_trade": sharpe, "n": 100,
+                         "years_positive": (years or (9, 9))[0],
+                         "years_evaluated": (years or (9, 9))[1]},
             "mc": {"by_fraction": {"0.05": {"p_loss": p_loss}}},
             "stress": {"regimes": {"2022": {"n": 40, "mean": 0.05}},
                        "tail_injection": tail if tail is not None else {"available": True}},
@@ -216,6 +220,38 @@ class TestDecideFullShape:
                                          self._results(0.03))
         assert not ok
         assert any("(e)" in r for r in reasons)
+
+    def test_a_less_consistent_challenger_is_refused(self):
+        """Rule (a3): "consistent profit", made mechanical.
+
+        A challenger can compound faster and still be the worse asset if it
+        does it in fewer years — one enormous season carrying eight thin ones
+        is a different bet from a profit that shows up most years.
+        """
+        ok, reasons = promote_mod.decide(
+            self._results(0.10, sharpe=1.5, years=(4, 9)),
+            self._results(0.03, sharpe=1.0, years=(6, 9)))
+        assert not ok
+        assert any("(a3)" in r and "FAIL" in r for r in reasons)
+
+    def test_equal_consistency_still_passes(self):
+        ok, reasons = promote_mod.decide(
+            self._results(0.10, sharpe=1.5, years=(6, 9)),
+            self._results(0.03, sharpe=1.0, years=(6, 9)))
+        assert ok, reasons
+
+    def test_drawdown_warns_but_does_not_block(self):
+        """A challenger trading four times as often carries a deeper absolute
+        drawdown at the same fractional sizing for reasons unrelated to edge
+        quality. Sharpe and rule (b) already price risk; this is loud, not
+        fatal."""
+        challenger = self._results(0.10, sharpe=1.5)
+        champion = self._results(0.03, sharpe=1.0)
+        challenger["headline"]["max_dd"] = 0.30
+        champion["headline"]["max_dd"] = 0.10
+        ok, reasons = promote_mod.decide(challenger, champion)
+        assert ok, reasons
+        assert any(r.startswith("WARN max drawdown") for r in reasons)
 
     def test_brier_skill_rule(self):
         ok, reasons = promote_mod.decide(self._results(0.05, brier=-0.10),

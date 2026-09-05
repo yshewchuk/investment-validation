@@ -52,17 +52,24 @@ __all__ = [
 #: to it by construction. What it is worth at exit is set by the implied move
 #: the market is quoting at that moment, which is what the ``implied_t1`` model
 #: predicts.
-#: ``TWIN-P`` is deliberately absent, and not because it lacks trades. Its exit
-#: value IS a function of the realized move — it is held through the print — but
-#: the function is TWIN-PEAKED: zero beyond +/-4w, maximum on the band between w
-#: and 2w in either direction, and dipping again at a dead-flat print. A linear
-#: `intercept + slope * driver` map cannot represent a shape that rises, falls
-#: and rises again; fitting one would produce a confident number that is wrong
-#: in a specific, predictable direction — overstating the flat prints the
-#: structure pays least on. So TWIN-P scores with NO_PAYOFF_MAP and is decided
-#: by its arithmetic entry rule alone (engine/entry_rules.py). That is a real
-#: limitation of the model layer for this structure, recorded here rather than
-#: papered over with a map that would fit.
+#: ``TWIN-P`` and ``TWIN-P5`` are deliberately absent, and not because they lack
+#: trades. Their exit value IS a function of the realized move — both are held
+#: through the print — but the function is TWIN-PEAKED: for TWIN-P, zero beyond
+#: +/-4w, maximum on the band between w and 2w in either direction, and dipping
+#: again at a dead-flat print. A linear `intercept + slope * driver` map cannot
+#: represent a shape that rises, falls and rises again; fitting one would
+#: produce a confident number that is wrong in a specific, predictable
+#: direction — overstating the flat prints the structure pays least on. So both
+#: score with NO_PAYOFF_MAP and are decided by their arithmetic entry rule
+#: alone (engine/entry_rules.py). That is a real limitation of the model layer
+#: for these structures, recorded here rather than papered over with a map that
+#: would fit.
+#:
+#: TWIN-P5 inherits the limitation exactly rather than escaping it. Five strikes
+#: instead of seven change where the peaks sit, not that there are two of them:
+#: the promoted wide wing still pays `2a` at +/-a, dips to `a` at the anchor and
+#: reaches zero at +/-3a. A straight line through that is no more honest than it
+#: was for the seven-strike tent.
 PAYOFF_DRIVER = {
     "STR-THRU": "abs_move",
     "STR-RUNUP": "im_t1",

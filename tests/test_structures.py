@@ -886,13 +886,20 @@ class TestTwinPeakFive:
     symmetric about `A`, so both tails cancel to exactly zero.
     """
 
-    def test_it_is_not_in_the_registry(self):
-        """`STRUCTURES` is the live board's default universe and the source of
-        the dashboard's strategy panel, which lists disabled keys too. A shape
-        that exists to be measured by EXP-126 belongs in neither until that
-        experiment has reported."""
-        assert "TWIN-P5" not in STRUCTURES
+    def test_it_is_registered_and_defaults_to_the_promoted_wing(self):
+        """Registered at promotion (EXP-126), not before — `STRUCTURES` is the
+        live board's default universe and the source of the dashboard's
+        strategy panel, which lists disabled keys too.
+
+        The default wing is the one that was MEASURED. `STRUCTURES["TWIN-P5"]()`
+        takes no arguments, so a default of 2 would have let the board build the
+        arm that lost — CAGR -10.01% against the promoted wing's +12.98% — by
+        omission rather than by choice.
+        """
+        assert STRUCTURES["TWIN-P5"] is twin_peak_5
         assert twin_peak_5().name == "TWIN-P5"
+        assert twin_peak_5().params["wing_multiple"] == 3
+        assert twin_peak_5().params["peak_multiple"] == 2.0
 
     @pytest.mark.parametrize("m", [2, 3])
     def test_eight_contracts_over_five_put_strikes(self, condor_snapshot, m):
@@ -994,14 +1001,21 @@ class TestTwinPeakFive:
         self, condor_snapshot
     ):
         narrow = _twin_strikes(price_structure(
-            twin_peak_5(width_moneyness=0.025), condor_snapshot, MID))
+            twin_peak_5(wing_multiple=2, width_moneyness=0.025), condor_snapshot, MID))
         wide = _twin_strikes(price_structure(
-            twin_peak_5(width_moneyness=0.05), condor_snapshot, MID))
+            twin_peak_5(wing_multiple=2, width_moneyness=0.05), condor_snapshot, MID))
         assert (wide["up1"] - wide["atm"]) > (narrow["up1"] - narrow["atm"])
         for k in (narrow, wide):
             a, spacing = k["atm"], k["up1"] - k["atm"]
             assert k["dn_wing"] == pytest.approx(a - 2 * spacing)
             assert k["up_wing"] == pytest.approx(a + 2 * spacing)
+
+    def test_the_peak_multiple_follows_the_wing(self):
+        """What the entry rule reads to test `cost < peak / 2`. The wide wing
+        peaks at `2a` like the seven-strike tent; the tight wing peaks at `a`,
+        and a rule that assumed otherwise would gate it at twice its risk."""
+        assert twin_peak_5(wing_multiple=3).params["peak_multiple"] == 2.0
+        assert twin_peak_5(wing_multiple=2).params["peak_multiple"] == 1.0
 
     def test_the_wing_multiple_is_two_or_three(self):
         with pytest.raises(ValueError, match="wing_multiple must be 2 or 3"):

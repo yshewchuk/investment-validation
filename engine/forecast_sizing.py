@@ -34,6 +34,7 @@ __all__ = [
     "WIDTH_MAX",
     "FORECAST_SIZED",
     "twin_p_params",
+    "twin_p5_params",
     "forecast_params",
 ]
 
@@ -67,9 +68,35 @@ def twin_p_params(pred_abs_move: float) -> dict | None:
     return {"width_moneyness": width}
 
 
+#: TWIN-P5 peaks at exactly ``+/-a`` rather than across a plateau, so the
+#: forecast goes on the peak itself and the divisor is 1, not
+#: :data:`PLATEAU_CENTRE`. Getting this wrong is not a rounding: sizing the
+#: five-strike shape through 1.5 would put its peak at two thirds of the
+#: predicted move and its wings at twice it, which is a different trade from
+#: the one EXP-126 measured.
+FIVE_STRIKE_PEAK = 1.0
+
+
+def twin_p5_params(pred_abs_move: float) -> dict | None:
+    """``width_moneyness`` for TWIN-P5, or ``None`` if the forecast cannot size it."""
+    try:
+        forecast = float(pred_abs_move)
+    except (TypeError, ValueError):
+        return None
+    if not forecast > 0 or forecast != forecast:
+        return None
+    width = (forecast / 100.0) / FIVE_STRIKE_PEAK
+    if not WIDTH_MIN <= width <= WIDTH_MAX:
+        return None
+    return {"width_moneyness": width}
+
+
 #: Strategies whose shape is set per event by a Tier-4 forecast, and the rule
 #: that turns the forecast into structure parameters.
-FORECAST_SIZED: dict[str, Callable[[float], dict | None]] = {"TWIN-P": twin_p_params}
+FORECAST_SIZED: dict[str, Callable[[float], dict | None]] = {
+    "TWIN-P": twin_p_params,
+    "TWIN-P5": twin_p5_params,
+}
 
 
 def forecast_params(strategy: str, pred_abs_move: float) -> dict | None:

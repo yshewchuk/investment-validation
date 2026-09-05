@@ -124,6 +124,11 @@ venv/
 !/engine/models/**/
 !/engine/models/**/*.py
 !/engine/models/registry.json
+# Which SHAPE each structure family trades. Same kind of thing as the
+# registry manifest and public for the same reason: a clone without it
+# silently falls back to the incumbent champion, so the code would run a
+# structure nobody chose while reporting success.
+!/engine/models/structures.json
 
 # Claude Code personal overrides (never publish a local settings file)
 .claude/settings.local.json

@@ -50,6 +50,7 @@ from engine.calendar import trading_calendar
 from engine.data import manifest, store
 from engine.data.features import tier4
 from engine.entry_rules import rule_for
+from engine.structure_registry import live_strategies, superseded_by
 from engine.features import (
     DAILY_STATE_COLUMNS,
     EVENT_HISTORY_FEATURES,
@@ -125,6 +126,12 @@ FLAGS = (
     "QUOTE_REPAIRED",
     "PROJECTED_CALENDAR",
     "OUT_OF_DOMAIN",
+    # A validated structure that simply lost to a better one in its family.
+    # Deliberately NOT UNVALIDATED_STRUCTURE: that flag means "nobody has shown
+    # this works", and stamping it on a shape with three completed experiments
+    # behind it would misreport the evidence rather than the decision. See
+    # engine/structure_registry.py.
+    "SUPERSEDED",
     # A structure whose shape comes from a forecast, on an event that has none.
     # Distinct from MISSING_FEATURES: the model ran, the row simply cannot be
     # given a shape, and pricing a default-width one instead would put a number
@@ -313,6 +320,12 @@ class ScoreResult:
     #: declares which two legs define it (`params["width_legs"]`). `w` for
     #: TWIN-P, and the term `cost < w` is tested against.
     structure_width: float | None = None
+    #: Terminal payoff at the structure's peak, in dollars — `structure_width`
+    #: times the shape's declared `peak_multiple`. The reward term is
+    #: `cost < peak / 2`, which is `cost < w` only for a shape whose peak is
+    #: `2w`; carrying the peak explicitly is what keeps that rule honest when a
+    #: shape peaks somewhere else (TWIN-P5's tight wing peaks at `a`, not `2a`).
+    structure_peak: float | None = None
 
     # forecast sizing (Tier 4)
     #: The forecast that set this structure's shape, in percent of spot.
@@ -594,6 +607,21 @@ class Scorer:
             snapshot_hash=self.snapshot,
         )
 
+        beaten = superseded_by(request.strategy)
+        if beaten is not None:
+            # Live on the board as a row that names its successor, not as a
+            # silent omission: an operator who cannot see that TWIN-P stopped
+            # trading, and what replaced it, will assume a data outage.
+            if request.event_date is not None:
+                result.event_date = pd.Timestamp(request.event_date).normalize()
+                result.session = request.session
+            result.flag("SUPERSEDED")
+            result.detail = (
+                f"{request.strategy} is superseded by {beaten.strategy} "
+                f"({beaten.evidence})"
+                + (f" — {beaten.notes}" if beaten.notes else "")
+            )
+            return result
         if request.strategy in DISABLED_STRATEGIES:
             # Carry the event identity even though nothing is scored. The row
             # still appears on the board, and one with a blank date reads as a
@@ -898,6 +926,7 @@ class Scorer:
         result.dte_entry = int(priced.legs[0].dte)
         result.rel_spread = _mean_relative_spread(priced)
         result.structure_width = _structure_width(structure, priced)
+        result.structure_peak = _structure_peak(structure, result.structure_width)
         if priced.any_wide_market:
             result.flag("WIDE_MARKET")
         # EXP-117: a straddle costing more than BAD_QUOTE_COST_PCT of spot is
@@ -1434,6 +1463,7 @@ class Scorer:
             {
                 "cost": result.entry_cost,
                 "w": result.structure_width,
+                "peak": result.structure_peak,
                 "rel_spread": result.rel_spread,
                 "mcap_usd": _feature_value(features, "mcap_usd"),
             }
@@ -1596,7 +1626,7 @@ def score_calendar(
     engine = scorer or _scorer()
     as_of = pd.Timestamp(as_of).normalize() if as_of is not None else pd.Timestamp.today().normalize()
     horizon = as_of + pd.Timedelta(days=horizon_days)
-    strategies = list(strategies) if strategies is not None else sorted(STRUCTURES)
+    strategies = list(strategies) if strategies is not None else live_strategies(sorted(STRUCTURES))
 
     events = store.read_table(
         "earnings_events", columns=["event_id", "ticker", "event_date", "session"]
@@ -1716,6 +1746,22 @@ def _mean_relative_spread(priced) -> float | None:
         if mid > 0:
             values.append((float(leg.ask) - float(leg.bid)) / mid)
     return float(np.mean(values)) if values else None
+
+
+def _structure_peak(structure, width: float | None) -> float | None:
+    """The shape's terminal payoff at its peak, in dollars.
+
+    ``None`` when the structure does not declare a ``peak_multiple`` — the
+    reward term then reports UNDETERMINED rather than silently testing a
+    number it made up.
+    """
+    multiple = structure.params.get("peak_multiple")
+    if multiple is None or width is None:
+        return None
+    try:
+        return float(multiple) * float(width)
+    except (TypeError, ValueError):
+        return None
 
 
 def _structure_width(structure, priced) -> float | None:

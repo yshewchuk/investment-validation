@@ -101,6 +101,7 @@ METRIC_KEYS = (
     "n", "mean", "median", "std", "win_rate", "profit_factor",
     "sharpe_trade", "sharpe_equity", "sortino", "max_dd", "tail_ratio",
     "dollar_weighted", "by_year", "breakeven_alpha", "capacity", "deployment", "mc",
+    "cagr", "years_positive", "years_evaluated",
 )
 
 #: The fill alphas every result is reported at (worst/mid/best plus the quarter
@@ -830,6 +831,48 @@ def _max_drawdown(curve: pd.Series) -> float:
     return float(abs(dd.min()))
 
 
+def cagr(equity: pd.Series) -> float:
+    """Compounded annual growth rate of an equity curve.
+
+    ``None``-safe by returning NaN: a curve with under two points, a
+    non-positive terminal value, or a zero-length span has no growth RATE, and
+    inventing one would put a number on a promotion decision that no data
+    supports. A book that ends at or below zero returns -1.0 — a total loss is
+    a real answer, not a missing one.
+    """
+    if equity is None or len(equity) < 2:
+        return float("nan")
+    start, end = float(equity.iloc[0]), float(equity.iloc[-1])
+    if start <= 0:
+        return float("nan")
+    years = (equity.index[-1] - equity.index[0]).days / 365.25
+    if years <= 0:
+        return float("nan")
+    if end <= 0:
+        return -1.0
+    return float((end / start) ** (1.0 / years) - 1.0)
+
+
+def years_positive(by_year: Mapping[str, Any] | None) -> tuple[int, int]:
+    """``(years with a positive mean, years evaluated)`` — consistency, counted.
+
+    The promotion rules read this as "does not get worse", which is the
+    mechanical form of wanting a profit that shows up most years rather than
+    one that arrives in a single good season.
+    """
+    if not by_year:
+        return 0, 0
+    total = 0
+    positive = 0
+    for row in by_year.values():
+        mean = row.get("mean") if isinstance(row, Mapping) else row
+        if mean is None or (isinstance(mean, float) and mean != mean):
+            continue
+        total += 1
+        positive += int(float(mean) > 0)
+    return positive, total
+
+
 def sharpe_equity(equity_curve: pd.Series) -> float:
     """Annualized Sharpe of an event-driven equity curve, on a daily grid.
 
@@ -1494,6 +1537,17 @@ def evaluate(
         alpha_sweep(selected, alphas)) if len(selected) else None
     headline["sharpe_equity"] = sharpe_equity(eq5["equity"])
     headline["max_dd"] = eq5["max_dd"]
+    # Compounded annual growth of the 5%-sized book, and how many evaluated
+    # years it was positive in. These are the promotion measures: mean-per-trade
+    # says what one trade is worth, and a strategy is not one trade. EXP-126
+    # made the difference concrete — its chooser arm reported mean +0.49%, which
+    # reads as profitable, while the money it managed LOST 0.5% a year and drew
+    # down 79%. A measure that can call that outcome positive cannot be the one
+    # a promotion turns on.
+    headline["cagr"] = cagr(eq5["equity"])
+    positive, evaluated = years_positive(headline["by_year"])
+    headline["years_positive"] = positive
+    headline["years_evaluated"] = evaluated
     headline["max_concurrency"] = eq5["max_concurrency"]
     # The leverage the 5%-sized run actually used — visible whether or not a
     # cap was set. Per-trade sizing with concurrent positions silently deploys

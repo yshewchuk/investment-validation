@@ -6,7 +6,8 @@
 
 A challenger is promoted only if ALL of:
 
-  (a) it beats the champion on walk-forward OOS mean AND sharpe_trade,
+  (a) it beats the champion on CAGR AND sharpe_trade, and is positive in no
+      smaller a share of evaluated years,
   (b) MC P(loss) at 5% sizing does not worsen,
   (c) it survives the stress battery (no new red regime cell, tail injection
       present whenever a short leg exists),
@@ -65,6 +66,9 @@ def metrics_view(doc: Mapping[str, Any]) -> dict[str, Any]:
     cal = doc.get("calibration") or {}
     return {
         "mean": headline.get("mean"),
+        "cagr": headline.get("cagr"),
+        "years_positive": headline.get("years_positive"),
+        "years_evaluated": headline.get("years_evaluated"),
         "sharpe_trade": headline.get("sharpe_trade"),
         "win_rate": headline.get("win_rate"),
         "max_dd": headline.get("max_dd"),
@@ -99,7 +103,7 @@ def decide(
     (the shape every real challenger carries — see :func:`metrics_view`) or
     flat metrics dicts for hand-written baselines. ``tol`` is a non-negative
     indifference band: the challenger must beat the champion by more than
-    ``tol`` on mean and Sharpe (zero by default — any tie keeps the champion,
+    ``tol`` on CAGR and Sharpe (zero by default — any tie keeps the champion,
     because the champion has already survived a season of scrutiny).
     Returns ``(promote, reasons)`` — reasons are human-readable either way.
     """
@@ -112,19 +116,38 @@ def decide(
     if checklist_fails is None:
         checklist_fails = int(c["checklist_fails"] or 0)
 
-    if None in (c["mean"], h["mean"], c["sharpe_trade"], h["sharpe_trade"]):
+    if None in (c["cagr"], h["cagr"], c["sharpe_trade"], h["sharpe_trade"]):
         reasons.append(
-            "FAIL (a) missing mean/sharpe_trade — the champion baseline must be "
+            "FAIL (a) missing cagr/sharpe_trade — the champion baseline must be "
             "an evaluate() result (or a complete hand-written equivalent)")
     else:
-        if c["mean"] > h["mean"] + tol:
-            reasons.append(f"PASS (a1) OOS mean {c['mean']:+.4f} > champion {h['mean']:+.4f}")
+        if c["cagr"] > h["cagr"] + tol:
+            reasons.append(f"PASS (a1) CAGR {100*c['cagr']:+.2f}% > champion {100*h['cagr']:+.2f}%")
         else:
-            reasons.append(f"FAIL (a1) OOS mean {c['mean']:+.4f} does not beat champion {h['mean']:+.4f}")
+            reasons.append(f"FAIL (a1) CAGR {100*c['cagr']:+.2f}% does not beat champion {100*h['cagr']:+.2f}%")
         if c["sharpe_trade"] > h["sharpe_trade"] + tol:
             reasons.append(f"PASS (a2) sharpe_trade {c['sharpe_trade']:.3f} > champion {h['sharpe_trade']:.3f}")
         else:
             reasons.append(f"FAIL (a2) sharpe_trade {c['sharpe_trade']:.3f} does not beat champion {h['sharpe_trade']:.3f}")
+        cs, ce = c["years_positive"], c["years_evaluated"]
+        hs, he = h["years_positive"], h["years_evaluated"]
+        if None in (cs, ce, hs, he) or not ce or not he:
+            reasons.append("WARN (a3) no per-year consistency on one side; rule not applied")
+        elif cs / ce >= hs / he:
+            reasons.append(
+                f"PASS (a3) positive in {cs}/{ce} years >= champion {hs}/{he}")
+        else:
+            reasons.append(
+                f"FAIL (a3) positive in {cs}/{ce} years, worse than champion {hs}/{he}")
+
+    # Drawdown WARNS, it does not block. A challenger trading four times as
+    # often at the same fractional sizing carries a deeper absolute drawdown
+    # for reasons that have nothing to do with edge quality, and Sharpe plus
+    # rule (b)'s MC P(loss) already price the risk. Loud, not fatal.
+    if c["max_dd"] is not None and h["max_dd"] is not None and c["max_dd"] > h["max_dd"]:
+        reasons.append(
+            f"WARN max drawdown {100*c['max_dd']:.1f}% deepens champion "
+            f"{100*h['max_dd']:.1f}%")
 
     if c["p_loss_5"] is None:
         reasons.append("FAIL (b) challenger carries no MC P(loss) at 5% sizing")

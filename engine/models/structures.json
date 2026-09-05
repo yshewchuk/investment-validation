@@ -1,0 +1,12 @@
+{
+  "_comment": "Which SHAPE each structure family trades. One champion per family; the others are superseded, not disabled \u2014 they stay in engine.structures.STRUCTURES so old experiments replay and so a promotion can be rolled back. See engine/structure_registry.py.",
+  "champions": [
+    {
+      "family": "twin-peak",
+      "strategy": "TWIN-P5",
+      "promoted": "2026-09-04",
+      "evidence": "EXP-126 grid cell five_wide; promote.decide all-green 2026-09-04",
+      "notes": "CAGR 12.98% vs 6.14%, Sharpe 1.10 vs 0.85, positive in 9/9 OOS years vs 6/9, 393 trades on 217 tickers vs 90 on 79. Loses on max drawdown (14.3% vs 9.8%) and on breakeven alpha (0.467 vs 0.444) \u2014 it needs better fills than the shape it replaced. Promoted on a post-hoc arm: the registered primary (choose_rr) was falsified."
+    }
+  ]
+}

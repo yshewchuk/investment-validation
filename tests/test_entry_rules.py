@@ -36,8 +36,18 @@ from engine.forecast_sizing import (
 
 
 def facts(**over):
+    """Entry-rule facts, with TWIN-P's geometry as the default.
+
+    `peak` defaults to `2 * w` because that IS TWIN-P's peak; a caller
+    overriding `w` alone therefore still describes a coherent seven-strike
+    structure. A shape whose peak is not `2w` — TWIN-P5's tight wing — passes
+    `peak` explicitly, which is the whole point of the rule reading it.
+    """
     base = {"cost": 1.0, "w": 2.0, "rel_spread": 0.10, "mcap_usd": 50e9}
     base.update(over)
+    if "peak" not in over:
+        width = base.get("w")
+        base["peak"] = 2.0 * width if isinstance(width, (int, float)) and width == width else None
     return base
 
 
@@ -52,7 +62,7 @@ class TestTheThreeOutcomes:
         assert verdict.passed is False
         assert verdict.terms["reward"] is False
         assert verdict.terms["spread"] is True
-        assert "tent width" in verdict.detail
+        assert "peak payoff" in verdict.detail
 
     def test_every_failing_term_is_named_not_just_the_first(self):
         # The rule is reported term by term so each one's cost stays countable.
@@ -60,7 +70,7 @@ class TestTheThreeOutcomes:
         assert verdict.passed is False
         assert verdict.detail.count(";") == 2
 
-    @pytest.mark.parametrize("absent", ["cost", "w", "rel_spread", "mcap_usd"])
+    @pytest.mark.parametrize("absent", ["cost", "peak", "rel_spread", "mcap_usd"])
     def test_a_missing_fact_is_undetermined_not_a_rejection(self, absent):
         verdict = TWIN_P_RULE.evaluate(facts(**{absent: None}))
         assert verdict.passed is None
@@ -83,11 +93,24 @@ class TestTheTwinPTerms:
         assert TWIN_P_RULE.evaluate(facts(cost=2.0, w=2.0)).passed is False
         assert TWIN_P_RULE.evaluate(facts(cost=1.999, w=2.0)).passed is True
 
+    def test_the_reward_term_reads_the_peak_not_the_width(self):
+        """The same cost and spacing, two shapes, two answers.
+
+        TWIN-P5's tight wing peaks at `a` where TWIN-P peaks at `2a`, so at
+        `cost = 1.5` against `a = 2` the seven-strike shape still has reward
+        beating risk and the tight five-strike shape does not. A rule written
+        as `cost < w` cannot tell them apart and would admit the second at
+        twice the risk it priced.
+        """
+        assert TWIN_P_RULE.evaluate(facts(cost=1.5, w=2.0, peak=4.0)).passed is True
+        assert TWIN_P_RULE.evaluate(facts(cost=1.5, w=2.0, peak=2.0)).passed is False
+
     def test_a_zero_width_is_undetermined_not_a_free_pass(self):
         # cost < 0 is impossible, so `cost < w` with w = 0 would always reject —
         # but a zero width means the legs collapsed, which is a broken structure
         # and not a judgement about the trade.
         assert TWIN_P_RULE.evaluate(facts(w=0.0)).passed is None
+        assert TWIN_P_RULE.evaluate(facts(peak=0.0)).passed is None
 
     def test_the_spread_threshold_is_inclusive(self):
         assert TWIN_P_RULE.evaluate(facts(rel_spread=MAX_REL_SPREAD)).passed is True
@@ -137,7 +160,7 @@ class TestSizing:
         assert twin_p_params(WIDTH_MAX * PLATEAU_CENTRE * 100) is not None
 
     def test_only_declared_strategies_are_forecast_sized(self):
-        assert set(FORECAST_SIZED) == {"TWIN-P"}
+        assert set(FORECAST_SIZED) == {"TWIN-P", "TWIN-P5"}
         assert forecast_params("STR-THRU", 7.5) is None
 
     def test_the_parameter_is_one_the_factory_accepts(self):

@@ -27,7 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
-__all__ = ["Term", "Verdict", "EntryRule", "ENTRY_RULES", "TWIN_P_RULE", "rule_for"]
+__all__ = ["Term", "Verdict", "EntryRule", "ENTRY_RULES", "TWIN_P_RULE",
+           "TWIN_P5_RULE", "rule_for"]
 
 
 def _number(facts: Mapping, key: str) -> float | None:
@@ -121,7 +122,7 @@ MCAP_FLOOR = 10e9
 
 
 def _reward_beats_risk(facts: Mapping) -> bool | None:
-    """``cost < w`` — max profit ``2w − c`` exceeds max loss ``c``.
+    """``cost < peak / 2`` — max profit ``peak − c`` exceeds max loss ``c``.
 
     The single most selective term, and the one that decides what the strategy
     even is: EXP-123 measured it selecting structures TINY relative to the stock
@@ -130,11 +131,19 @@ def _reward_beats_risk(facts: Mapping) -> bool | None:
     did. Keeping it is a deliberate choice to trade a narrow, cheap tent rather
     than to widen until the wings stop being hit — widening re-selects the
     universe through this same term and pins the move back at ~3.14w.
+
+    **Written against the peak, not against ``w``.** Both are the same test on
+    TWIN-P, whose peak is ``2w``, and the numbers above are unchanged by this
+    phrasing. They stop being the same test the moment a shape peaks somewhere
+    else: TWIN-P5's wide wing peaks at ``2a`` and its tight wing at ``a``, so a
+    rule hard-coded to ``cost < w`` would let the tight shape onto the board at
+    twice the risk it had priced. The structure declares its own
+    ``peak_multiple``; this reads it.
     """
-    cost, width = _number(facts, "cost"), _number(facts, "w")
-    if cost is None or width is None or width <= 0:
+    cost, peak = _number(facts, "cost"), _number(facts, "peak")
+    if cost is None or peak is None or peak <= 0:
         return None
-    return cost < width
+    return cost < peak / 2.0
 
 
 def _spread_is_crossable(facts: Mapping) -> bool | None:
@@ -150,8 +159,8 @@ def _name_is_large_enough(facts: Mapping) -> bool | None:
 TWIN_P_RULE = EntryRule(
     strategy="TWIN-P",
     terms=(
-        Term("reward", "cost is not below the tent width w", _reward_beats_risk,
-             needs=("cost", "w")),
+        Term("reward", "cost is not below half the peak payoff", _reward_beats_risk,
+             needs=("cost", "peak")),
         Term("spread", f"mean relative spread exceeds {MAX_REL_SPREAD:.0%}",
              _spread_is_crossable, needs=("rel_spread",)),
         Term("mcap", f"market cap below ${MCAP_FLOOR/1e9:.0f}B",
@@ -161,8 +170,27 @@ TWIN_P_RULE = EntryRule(
 )
 
 
+#: TWIN-P5 — promoted off EXP-126, and gated by the SAME three terms.
+#:
+#: Not an oversight that nothing was loosened. EXP-126 widened the traded
+#: universe by changing the SHAPE, not the rule: on identical filters the wide
+#: five-strike wing took 393 trades on 217 tickers against TWIN-P's 90 on 79,
+#: returned +7.77% on capital against +5.52%, and was positive in 9 of 9
+#: out-of-sample years and 4 of 4 crisis regimes. A cheaper shape passes
+#: ``cost < peak / 2`` more often on its own merits; relaxing the term as well
+#: would have bought universe with risk instead of with geometry.
+TWIN_P5_RULE = EntryRule(
+    strategy="TWIN-P5",
+    terms=TWIN_P_RULE.terms,
+    evidence="EXP-126 spec.yaml, pre-registered; promoted 2026-09-04",
+)
+
+
 #: Strategies gated by arithmetic rather than by a registered model.
-ENTRY_RULES: dict[str, EntryRule] = {"TWIN-P": TWIN_P_RULE}
+ENTRY_RULES: dict[str, EntryRule] = {
+    "TWIN-P": TWIN_P_RULE,
+    "TWIN-P5": TWIN_P5_RULE,
+}
 
 
 def rule_for(strategy: str) -> EntryRule | None:

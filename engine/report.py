@@ -366,6 +366,17 @@ METRIC_SPEC: dict[str, tuple[Any, str, str]] = {
                         "total P&L / total premium paid — what the average DOLLAR "
                         "returned, as opposed to the average trade"),
     "breakeven_alpha": (num, "breakeven alpha", "the fill quality at which the strategy makes exactly zero"),
+    "cagr": (pct, "CAGR",
+             "compounded annual growth of the 5%-sized walk-forward book. The "
+             "promotion measure, because mean/trade says what ONE trade is "
+             "worth and a strategy is not one trade — EXP-126's chooser arm "
+             "reported mean +0.49% while the money it managed lost 0.5% a year"),
+    "years_positive": (num, "years positive",
+                       "out-of-sample years with a positive mean — consistency, "
+                       "counted rather than eyeballed off the by-year chart"),
+    "years_evaluated": (num, "years evaluated",
+                        "out-of-sample years the headline covers, the denominator "
+                        "for `years positive`"),
 }
 
 #: Canonical headline keys that are nested blocks rather than scalar cells:

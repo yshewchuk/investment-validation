@@ -1049,12 +1049,17 @@ def twin_peak(
                 # consumer (the arithmetic entry rule's `cost < w`) reads the
                 # width off the LISTED strikes the ladder actually gave, not off
                 # the target it was asked for.
-                "width_legs": ("atm", "up1")},
+                "width_legs": ("atm", "up1"),
+                # Terminal payoff at the peak, in units of `w`. Declared for the
+                # same reason: the entry rule's `reward beats risk` is
+                # `cost < peak / 2`, and only the structure knows that this
+                # shape's peak is `2w` rather than `w`.
+                "peak_multiple": 2.0},
     )
 
 
 def twin_peak_5(
-    wing_multiple: int = 2,
+    wing_multiple: int = 3,
     steps: int = 1,
     anchor_offset: int = 0,
     width_moneyness: float | None = None,
@@ -1145,10 +1150,12 @@ def twin_peak_5(
                 "width_moneyness": width_moneyness,
                 # Same declaration as TWIN-P's: the pair of legs whose LISTED
                 # strikes define the spacing the reward term is measured in.
-                # The peak height is not `a` for both wings — m=2 peaks at `a`
-                # and m=3 at `2a` — so a consumer must read `wing_multiple`
-                # too rather than assume TWIN-P's `2w`.
-                "width_legs": ("atm", "up1")},
+                "width_legs": ("atm", "up1"),
+                # The peak is NOT the same multiple for both wings — m=3 peaks
+                # at `2a`, m=2 at `a` — so the reward term must read this
+                # rather than assume. A board that gated an m=2 structure on
+                # m=3's arithmetic would be buying twice the risk it priced.
+                "peak_multiple": 2.0 if m == 3 else 1.0},
     )
 
 
@@ -1159,12 +1166,8 @@ STRUCTURES = {
     "STR-RUNUP": straddle_runup,
     "CND-P": put_condor,
     "TWIN-P": twin_peak,
-    # TWIN-P5 is deliberately ABSENT. This dict is the live board's default
-    # strategy universe (engine.score.score_calendar) and the source of the
-    # dashboard's strategy panel, which lists every key — enabled or disabled
-    # with a reason. A structure that exists only to be measured by EXP-126 has
-    # no business on either until that experiment has reported and someone has
-    # decided. engine.replay takes an explicit `structure=`, so the experiment
-    # prices it without registry membership; add the key here only at promotion,
-    # together with a DISABLED_STRATEGIES reason or a gate.
+    # Promoted 2026-09-04 off EXP-126, replacing TWIN-P as the board's
+    # twin-peak structure. The default wing is 3 — the arm that was measured —
+    # so `STRUCTURES["TWIN-P5"]()` can never build the m=2 shape by omission.
+    "TWIN-P5": twin_peak_5,
 }
