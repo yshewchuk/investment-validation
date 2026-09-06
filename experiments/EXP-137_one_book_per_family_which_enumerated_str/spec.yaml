@@ -1,0 +1,164 @@
+id: EXP-137
+title: "One book per family: which enumerated structures are actually alive"
+kind: structure-comparison
+strategy: TWIN-P5
+programme: structure-validation
+prior: [EXP-121, EXP-126, EXP-133, EXP-134]
+type: exploratory
+price_source: >
+  ORATS chains (bid/ask), priced through the same FillModel arithmetic
+  engine.structures.price_structure uses and proved equal to it on a sample
+  spread across every year. Held positions settle at the Tier-2 daily_market
+  close on the expiry date.
+
+hypothesis: >
+  EXP-134's primary chooses among eight enumerated families per event, and its
+  funded book splits 42.7% long put condor, 17.8% wide five-strike butterfly,
+  14.5% TWIN-P5, 7.4% TWIN-P, 6.7% notched seven, 5.3% butterfly, 4.1% and
+  1.5% for the last two. Those shares say which family WINS AN ARGMAX. They do
+  not say which family can carry a book, and the two are different questions:
+  a family that is second-best on every event would show a share near zero and
+  still be a perfectly good strategy.
+
+  This experiment answers the second question. Each of the eight families gets
+  its OWN complete book: on every event it can carry, it trades, at the width
+  and anchor its own rules pick. Same universe, same filters, same gate
+  machinery, same exit convention, same margin - eight strategies, compared
+  like for like.
+
+  Registered primary: the long put condor family (0,-1,1) - the largest share
+  of EXP-134's book and the family CND-P already occupies - traded on every
+  admissible event.
+
+  FALSIFIED if the condor family's own book does not beat the TWIN-P5 family's
+  own book on return on capital and share of out-of-sample years positive.
+
+known_before_registration:
+  argmax_share_is_not_evidence_of_being_alive_or_dead: >
+    The reason this experiment exists. In EXP-134 the notched seven
+    (-2,1,-1,1) took 6.7% of trades for a mean of +0.5%, and the three-strike
+    butterfly (-2,1) took 5.3% for a mean of +64.9%. Neither number is that
+    family's performance: both are its performance CONDITIONAL ON WINNING an
+    argmax against seven rivals, which is a selected sample and flattering by
+    construction. A family that never wins may still be alive; a family that
+    wins often may be winning only where the estimate is noisiest.
+  the_family_that_produced_the_worst_artifacts_is_already_near_zero: >
+    Three of EXP-133's four most extreme trades were the notched seven
+    (-2,1,-1,1) - seven strikes gives it the most adjacent triples in which to
+    find a convexity violation, and its alternating +1,-1,+1 pattern is close
+    to a butterfly of butterflies. With the no-arbitrage filter on it earns
+    +0.5% over 45 trades. Prior expectation, stated so it cannot be claimed
+    afterwards: this family is dead and the filter already killed it.
+  what_the_condor_family_actually_is: >
+    (0,-1,1) is CND-P's shape - long the wings, short inside - which has been
+    in STRUCTURES since EXP-121. What differs here is that the width and the
+    anchor are chosen per event rather than fixed, and that the axis of
+    symmetry may sit ON a listed strike rather than between two. If the condor
+    family carries a book, the promotable object is a generalised CND-P, not a
+    new structure.
+  volume_will_not_be_equal_and_the_intersection_slice_is_why: >
+    Families differ in how often a ladder can carry them: three strikes fit
+    almost anywhere, seven rarely. Comparing eight books of different sizes
+    over different events is not like for like however carefully each is run.
+    The COMMON UNIVERSE slice - events where every one of the eight families is
+    admissible and tradeable - is therefore a required output, and it is the
+    comparison the primary is read on.
+  centre_peaked_families_are_short_the_move: >
+    Six of the eight are centre-peaked and want a quiet print; only TWIN-P5 and
+    TWIN-P are twin-peaked. This experiment compares them on the same events
+    anyway, which means it compares two theses, not eight variants of one. The
+    report must group them by payoff shape and never present a single ranking
+    as though the families were interchangeable.
+
+definition:
+  the_eight_books: >
+    One arm per enumerated family. On each event, among that family's
+    candidates that are listed, satisfy both width rules, have a zero payoff
+    floor in dollars, pass the entry no-arbitrage check and quote inside the
+    25% mean leg spread, take the one with the highest simulated expected P&L.
+    Selection uses draws 1-2,000; draws 2,001-4,000 supply the gated number.
+    The family is the only thing held fixed: width and anchor are chosen per
+    event exactly as EXP-134 chooses them.
+  gated_and_ungated: >
+    Both, and both are reported. UNGATED trades every event the family can
+    carry and is the answer to "is this family alive at all" - it is the
+    unselected population EXP-133's design note calls for. GATED applies
+    EXP-131's trailing six-month top-20% rule on the arm's own history and is
+    the book anyone would actually run. A family that is positive ungated and
+    negative gated has a gate problem, not a structure problem, and the pair is
+    what tells them apart.
+  the_common_universe: >
+    The subset of events on which ALL EIGHT families are tradeable. Every arm
+    is additionally reported restricted to it, so the eight books cover
+    identical events and identical count. This is the like-for-like comparison.
+  unchanged_from_exp_134: >
+    Candidate enumeration, width rules, anchors 0/1/2, ladder bound 20, the
+    three no-arbitrage conditions on the entry curve, the 25% spread filter,
+    the $10B market cap floor, the conditional exit (close when the post-print
+    curve is arithmetically consistent, hold to expiry when it is not), and the
+    cash-secured margin at 50% of current equity from a $100,000 start.
+  the_risks_this_run_measures:
+    eight_books_is_eight_more_tests:
+      "Eight arms on one universe is eight chances for one to look good. The
+       ledger records every arm, no arm is promotable on this run, and the
+       report ranks families with their n and their overlap stated rather than
+       presenting a leaderboard."
+    a_family_can_be_alive_and_unfundable:
+      "Seven-strike structures on expensive underlyings secure the most cash.
+       Return on capital is reported before margin and the funded count after,
+       so a family that works but cannot be paid for is visible as exactly
+       that."
+    the_common_universe_may_be_tiny:
+      "Requiring all eight to be tradeable at once could leave too few events
+       to read. Its size is a required output and if it is below 100 events the
+       slice is reported as too thin rather than interpreted."
+
+primary_spec:
+  universe: ">= $10B, spread <= 25%, no-arbitrage-consistent entry strikes, 2018-2026"
+  structure: "the long put condor family (0,-1,1), width and anchor chosen per event"
+  gate: "reported both ungated and at EXP-131's trailing six-month top 20%"
+  exit: "conditional - close if the post-print curve is arb-consistent, else hold to expiry"
+  margin: "cash-secured, 50% of current equity across open positions, $100,000 start"
+  fills: "full alpha grid; mid headline"
+  acceptance:
+    beats_twin_p5_family: "return on capital and share of OOS years positive above the (2,-2,1) family's own book, on the common universe"
+    alive_ungated: "positive return on capital ungated, so the result is not an artifact of the gate"
+    defined_risk_holds: "no trade loses more than its debit"
+    universe_floor: ">= 250 gated trades, or reported as too thin to carry"
+
+grid:
+  family:
+    - N3q-2_1        # butterfly
+    - N4q0_-1_1      # long put condor  <- PRIMARY
+    - N5q-4_1_1      # wide butterfly on five strikes
+    - N5q-2_-1_2     # centre-peaked five, doubled wings
+    - N5q2_-2_1      # TWIN-P5
+    - N7q-2_-1_1_1   # centre-peaked seven, stepped ramp
+    - N7q-2_1_-1_1   # notched seven
+    - N7q2_-1_-1_1   # TWIN-P
+  selection: [gated, ungated]
+  slice: [all_events, common_universe]
+
+required_outputs:
+  - "one row per family: n, tickers, mean, median, return on capital, Sharpe, years positive, ungated AND gated"
+  - "the same eight rows restricted to the common universe, with its size stated"
+  - "families grouped by payoff shape — centre-peaked against twin-peaked — never one flat ranking"
+  - "how often each family is admissible at all, so share-of-argmax and ability-to-trade are separated"
+  - "funded count and median cash secured per family"
+  - "chosen width as a multiple of the predicted move, per family"
+  - "share of prints landing outside the structure, per family"
+  - "defined-risk falsification per family"
+  - "per-year table with n for the primary"
+  - "pricer equivalence receipt sampled across every year"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-06T01:32:45+00:00"
