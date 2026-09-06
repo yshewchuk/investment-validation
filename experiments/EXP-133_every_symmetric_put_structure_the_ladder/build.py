@@ -445,7 +445,19 @@ def price_event(row, entry_rows, exit_rows, pool, *, rng_pick) -> dict | None:
         value = _net(GRID.qty, idx, sell_x, buy_x)
         priced[alpha] = (cost, value)
     cost_mid, value_mid = priced[MID]
-    admissible &= cost_mid > MIN_MEANINGFUL_COST
+    # `engine.replay.replay_one` refuses an event outright — across EVERY alpha —
+    # as soon as one alpha prices it at or below MIN_MEANINGFUL_COST, because a
+    # structure that opens for a credit at one fill assumption has no
+    # return-on-debit and its alpha sweep would otherwise be computed on a
+    # different sample at every alpha. The same rule has to hold per CANDIDATE
+    # here, since a candidate is what an event offers. The first build applied
+    # it at mid only, which left the sweep comparing 12,437 rows at alpha 0.5
+    # against 5,188 at alpha 1.0 and made `breakeven_alpha` an interpolation
+    # between two different books.
+    priceable = np.ones(len(GRID), dtype=bool)
+    for alpha in ALPHA_GRID:
+        priceable &= priced[alpha][0] > MIN_MEANINGFUL_COST
+    admissible &= priceable
 
     # Mean relative spread across the legs that exist — EXP-126's filter, and
     # the one thing standing between a width search and the widest quotes on
@@ -683,7 +695,7 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
         tally[f"argmax_{arm}"] = np.zeros(n, dtype=np.int64)
     skips: dict[str, int] = {}
     parts, ev_rows = [], []
-    equivalence = None
+    equivalence: list[dict] = []
 
     for year, block in events.groupby("_year", sort=True):
         rows = keyframe.reindex(block["event_id"]).dropna(subset=["entry_date"])
@@ -718,8 +730,14 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
                     f"error:{type(exc).__name__}", 0) + 1
                 continue
 
-            if equivalence is None and ev["tradeable"].any():
-                equivalence = check_equivalence(ev, row, entry_rows, exit_rows, pool)
+            # Sample the cross-check across the WHOLE run, not just the first
+            # event that offered a candidate. The first build checked one event
+            # and the receipt described itself as "a sampled cross-check",
+            # which overstated what had been verified.
+            if ev["tradeable"].any() and len(equivalence) < EQUIV_EVENTS:
+                if rng_pick.random() < EQUIV_RATE or len(equivalence) == 0:
+                    equivalence.append(
+                        check_equivalence(ev, row, entry_rows, exit_rows, pool))
 
             tally["listed"] += ev["listed"]
             tally["admissible"] += ev["admissible"]
@@ -776,7 +794,8 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
         "events_priced": int(len(event_summary)),
         "skips": skips,
         "patterns": int(n),
-        "equivalence": equivalence,
+        "equivalence": _equiv_summary(equivalence),
+        "equivalence_events": equivalence,
         "elapsed_s": round(time.time() - started, 1),
     }
     trades.to_parquet(out_trades, index=False)
@@ -812,7 +831,30 @@ def _incumbent_sim(ev, leg_idx, leg_qty, cost_mid):
 #: refuses to continue. Dollar prices here are O(1)-O(100), so 1e-9 is
 #: float64 summation noise and nothing else.
 EQUIV_TOL = 1e-9
-EQUIV_SAMPLE = 24
+#: Candidates cross-checked per sampled event, and how many events to sample.
+#: Spread across the whole run rather than taken from the front, so the receipt
+#: covers every year, every family and every ladder shape the run actually met.
+EQUIV_SAMPLE = 12
+EQUIV_EVENTS = 150
+EQUIV_RATE = 0.01
+
+
+def _equiv_summary(receipts: list[dict]) -> dict:
+    """Roll the per-event receipts into the one line the report prints."""
+    if not receipts:
+        return {}
+    return {
+        "events_checked": len(receipts),
+        "candidates_sampled": sum(r["candidates_sampled"] for r in receipts),
+        "price_comparisons": sum(r["price_comparisons"] for r in receipts),
+        "price_max_abs_diff": max(r["price_max_abs_diff"] for r in receipts),
+        "price_skipped_no_structure": sum(r["price_skipped_no_structure"] for r in receipts),
+        "sim_comparisons": sum(r["sim_comparisons"] for r in receipts),
+        "sim_max_abs_diff": max(r["sim_max_abs_diff"] for r in receipts),
+        "tolerance": EQUIV_TOL,
+        "first_event": receipts[0]["ticker"] + " " + receipts[0]["event_date"][:10],
+        "last_event": receipts[-1]["ticker"] + " " + receipts[-1]["event_date"][:10],
+    }
 
 
 def check_equivalence(ev, row, entry_rows, exit_rows, pool) -> dict:

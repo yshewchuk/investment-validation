@@ -117,6 +117,15 @@ def book_stats(mid: pd.DataFrame) -> dict:
     curve = equity.get("equity")
     curve = (pd.Series(np.asarray(curve, dtype=float), index=pd.to_datetime(curve.index))
              if curve is not None and len(curve) >= 2 else None)
+    # An equity curve that reaches zero or goes negative has left the domain
+    # every metric below it is defined on. CAGR of a negative terminal value is
+    # not a small number, it is not a number; a drawdown past -100% is not a
+    # deep drawdown, it is an account that no longer exists. The first build
+    # printed -100% and +6.5e21% into a results table as though they were
+    # measurements. They are suppressed here and the reason is reported.
+    ruined = curve is not None and bool((curve <= 0).any() or not np.isfinite(curve).all())
+    if ruined:
+        curve = None
     stats = trade_stats(mid["ret"], mid["event_date"])
     per_year = mid.groupby(mid["event_date"].dt.year)["ret"].mean()
     cost = pd.to_numeric(mid["entry_cost"], errors="coerce")
@@ -134,6 +143,7 @@ def book_stats(mid: pd.DataFrame) -> dict:
         "return_on_capital": float(pnl.sum() / cost.sum()) if cost.sum() else float("nan"),
         "years_positive": int((per_year > 0).sum()),
         "years": int(per_year.size),
+        "equity_ruined": bool(ruined),
         "centre_share": float(centre.mean()),
         "n_strikes_median": float(mid["n_strikes"].median()),
         "width_over_forecast_median": float(mid["width_over_forecast"].median()),
@@ -193,6 +203,89 @@ def optimism_consistency(mid: pd.DataFrame) -> dict:
 
 
 # --------------------------------------------------------------------------
+# quote quality: is the price the chooser optimised against a real one?
+# --------------------------------------------------------------------------
+
+
+def _exp126_fidelity(incumbent: pd.DataFrame | None) -> list[list[str]]:
+    """Price the incumbent arm against EXP-126's stored five_wide artifact.
+
+    Two independent implementations of TWIN-P5 wing 3, on the same events and
+    the same chains. Agreement here is what licenses reading the incumbent as
+    the program's own shape rather than as this experiment's reconstruction
+    of it.
+    """
+    src = (ROOT / "experiments" / "EXP-126_five_strikes_or_seven_letting_each_event"
+           / "results" / "trades_five_wide.parquet")
+    if not src.exists() or incumbent is None:
+        return [["EXP-126 artifact not on disk", "—", "—"]]
+    old = pd.read_parquet(src)
+    old = old[np.isclose(old["fill_alpha"].astype(float), MID)]
+    new = incumbent[np.isclose(incumbent["fill_alpha"].astype(float), MID)]
+    j = old.merge(new, on="event_id", suffixes=("_126", "_133"))
+    same = (np.isclose(j["entry_cost_126"], j["entry_cost_133"], rtol=1e-9, atol=1e-9)
+            & np.isclose(j["exit_value_126"], j["exit_value_133"], rtol=1e-9, atol=1e-9))
+    return [
+        ["events priced", f"{old['event_id'].nunique():,}", "(reported after the filter)"],
+        ["... after the 25% mean leg-spread filter",
+         f"{int(old['f_spread'].fillna(False).sum()):,}", f"{new['event_id'].nunique():,}"],
+        ["shared events compared", f"{len(j):,}", f"{len(j):,}"],
+        ["entry cost AND exit value bit-identical", f"{100*same.mean():.1f}%",
+         f"{100*same.mean():.1f}%"],
+    ]
+
+
+def quote_quality(mid: pd.DataFrame) -> pd.DataFrame:
+    """Per trade: does its own entry mid surface obey no-arbitrage, and what
+    does its exit lean on?
+
+    A put curve must be NON-DECREASING and CONVEX in strike. Both follow from
+    static replication and neither needs a model: if ``P(K2)`` exceeds the
+    linear interpolation of its neighbours, a butterfly on those three strikes
+    is a non-negative payoff bought for a credit. A vendor mid surface is a
+    smoothed estimate, not a tradeable quote, and it violates these routinely
+    in thin strikes — which does not matter until something SEARCHES over
+    combinations of those strikes, at which point every violation is a free
+    lunch the search will find.
+
+    The exit columns are separate and simpler: the program filters entry
+    spreads and does not filter exit spreads at all, so a long leg with no bid
+    is still credited at ``ask / 2`` on the way out.
+    """
+    def one(blob):
+        d = json.loads(blob)
+        curve = sorted({l["strike"]: 0.5 * (l["bid"] + l["ask"]) for l in d["entry"]}.items())
+        K = np.array([k for k, _ in curve]); P = np.array([p for _, p in curve])
+        mono = int((np.diff(P) < -1e-9).sum())
+        conv = 0
+        for i in range(len(K) - 2):
+            lam = (K[i + 2] - K[i + 1]) / (K[i + 2] - K[i])
+            if P[i + 1] > lam * P[i] + (1 - lam) * P[i + 2] + 1e-9:
+                conv += 1
+        half = sum(l["qty"] * (l["ask"] - l["bid"]) / 2.0 for l in d["entry"])
+        return pd.Series({
+            "mono_viol": mono, "conv_viol": conv,
+            "half_spread": half,
+            "zero_bid_exit": sum(1 for l in d["exit"] if l["bid"] == 0.0),
+            "wide_exit": sum(1 for l in d["exit"] if l["wide_market"]),
+            # The exit revalued so a zero bid means what it says: a long you are
+            # selling gets nothing, a short you are buying back pays the ask.
+            "exit_honest": sum(
+                (l["qty"] * (0.0 if l["bid"] == 0.0 else 0.5 * (l["bid"] + l["ask"])))
+                if l["side"] == "sell" else
+                -(l["qty"] * (l["ask"] if l["bid"] == 0.0 else 0.5 * (l["bid"] + l["ask"])))
+                for l in d["exit"]),
+        })
+
+    out = mid["legs"].apply(one)
+    out["arb_violation"] = (out["mono_viol"] > 0) | (out["conv_viol"] > 0)
+    out["spread_to_debit"] = out["half_spread"] / mid["entry_cost"].to_numpy()
+    out["ret_honest"] = (out["exit_honest"].to_numpy()
+                         - mid["entry_cost"].to_numpy()) / mid["entry_cost"].to_numpy()
+    return out
+
+
+# --------------------------------------------------------------------------
 # the tallies the experiment was asked for
 # --------------------------------------------------------------------------
 
@@ -242,7 +335,7 @@ def posthoc_section() -> dict:
 
 
 def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
-             acceptance, defended):
+             acceptance, defended, quality_rows, fidelity_rows):
     """Every required output in spec.yaml that engine.report does not produce."""
     fams = [
         [f"N={f.n_strikes}", f"({f.q0},{','.join(str(q) for q in f.tail)})",
@@ -257,10 +350,12 @@ def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
         arm_rows_out.append([
             f"**{key}**" if key == arm else key,
             f"{s['n']:,}", f"{s['tickers']:,}",
-            f"{100*s['cagr']:+.2f}%" if s["cagr"] == s["cagr"] else "n/a",
+            "**ruined**" if s.get("equity_ruined") else (
+                f"{100*s['cagr']:+.2f}%" if s["cagr"] == s["cagr"] else "n/a"),
             f"{s['sharpe_trade']:.2f}" if s["sharpe_trade"] == s["sharpe_trade"] else "n/a",
             f"{100*s['mean']:+.2f}%", f"{100*s['return_on_capital']:+.2f}%",
-            f"{100*s['max_dd']:.1f}%" if s["max_dd"] == s["max_dd"] else "n/a",
+            "—" if s.get("equity_ruined") else (
+                f"{100*s['max_dd']:.1f}%" if s["max_dd"] == s["max_dd"] else "n/a"),
             f"{s['years_positive']}/{s['years']}",
             f"{s['breakeven_alpha']:.3f}" if s.get("breakeven_alpha") is not None else "never",
             f"{100*s['centre_share']:.0f}%",
@@ -376,7 +471,10 @@ def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
         {
             "title": "Every arm, one universe, one gate each",
             "note": (
-                "`centre` is the share of the arm's trades taken in a "
+                "**ruined** in the CAGR column means the equity curve reached zero "
+            "or went negative, at which point CAGR, drawdown and terminal value "
+            "are undefined rather than large — see the note under this table. "
+            "`centre` is the share of the arm's trades taken in a "
                 "centre-peaked family — a book that is mostly condors is not a "
                 "twin-peak programme with a wider universe, whatever its CAGR. "
                 "`random_pick` is the null: a uniformly random admissible "
@@ -387,7 +485,15 @@ def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
                         "on capital", "max DD", "years+", "breakeven a", "centre"],
             "align": ["---"] + ["---:"] * 10,
             "rows": arm_rows_out,
-            "body": ["", f"EXP-131's published TWIN-P5 book, on an earlier snapshot "
+            "body": ["", "A curve marked **ruined** is not a bad result, it is an "
+                     "arithmetic one: `build_equity` sizes `contracts = fraction x "
+                     "equity / entry_cost`, so a one-cent debit buys 5% of the "
+                     "account divided by a penny. When such a position closes at a "
+                     "NEGATIVE exit value — the short legs cost more to buy back "
+                     "than the longs fetch — the loss is a multiple of the whole "
+                     "account and equity crosses zero. Read mean, median and return "
+                     "on capital for those arms, never CAGR.",
+                     "", f"EXP-131's published TWIN-P5 book, on an earlier snapshot "
                      f"and a different universe, for orientation only: "
                      f"{EXP131_REFERENCE['n']} trades, CAGR "
                      f"{100*EXP131_REFERENCE['cagr']:.2f}%, Sharpe "
@@ -403,6 +509,23 @@ def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
             "body": ["", "`gateable` needs a residual pool of at least 250 paired "
                      "errors AND a trailing window of at least 100 events; below "
                      "either, the event is UNDETERMINED rather than rejected."],
+        },
+        {
+            "title": "Is the incumbent arm really TWIN-P5? — against EXP-126's artifact",
+            "note": (
+                "The incumbent arm exists to be the benchmark, so its fidelity has "
+                "to be shown rather than asserted. EXP-126's `trades_five_wide` "
+                "parquet is on disk; these are the same events priced by two "
+                "independent implementations. The row counts differ for one reason "
+                "and it is not the structure: EXP-126's headline `priced` is BEFORE "
+                "the 25% spread filter and this arm emits only after it."
+            ),
+            "columns": ["stage", "EXP-126 five_wide", "EXP-133 incumbent"],
+            "align": ["---", "---:", "---:"],
+            "rows": fidelity_rows,
+            "body": ["", "The residual difference is EXP-126 bucketing each event's "
+                     "target spacing to 0.1% of spot before replay, where this run "
+                     "uses the exact target — a performance device there, not a rule."],
         },
         {
             "title": f"The three tallies, per family ({arm})",
@@ -450,6 +573,28 @@ def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
                      f"{100*events['ladder_bound_binds'].mean():.1f}% of events; "
                      f"the median ladder carried {events['ladder_steps'].median():.0f} "
                      f"quoted strikes at the traded expiry."],
+        },
+        {
+            "title": "Is the price the chooser optimised against a real one?",
+            "note": (
+                "A put curve must be non-decreasing and convex in strike — both "
+                "follow from static replication, neither needs a model. A vendor "
+                "MID surface is a smoothed estimate and violates them routinely "
+                "in thin strikes, which does not matter until something searches "
+                "over combinations of those strikes. `arb` is the share of an "
+                "arm's trades whose own seven-or-fewer strikes carry a violation; "
+                "`s2d` is the total entry half-spread over the net debit — how "
+                "uncertain the price is in units of the price; `zero-bid exit` "
+                "is the share with a long leg credited at `ask/2` on the way out, "
+                "which nothing in the program filters."
+            ),
+            "columns": ["arm", "n", "arb", "P&L on those", "median s2d",
+                        "zero-bid exit", "wide exit", "mean mid", "mean zero-bid honest"],
+            "align": ["---"] + ["---:"] * 8,
+            "rows": quality_rows,
+            "body": ["", "The gradient down the `arb` column is the mechanism: an "
+                     "arm with no freedom meets the same surface as an arm with "
+                     "all of it, and only the second one is able to go looking."],
         },
         {
             "title": "Defined risk — where the claim stops being true",
@@ -523,13 +668,19 @@ def sections(summary, funnels, tallies, decided, events, meta, arm, consistency,
                  f"{meta['equivalence']['sim_comparisons']:,}",
                  f"{meta['equivalence']['sim_max_abs_diff']:.2e}"],
             ],
-            "body": ["", f"{meta['equivalence']['price_skipped_no_structure']} of "
-                     f"{meta['equivalence']['candidates_sampled']} sampled candidates "
-                     "could not take the first path: a family with no contract at its "
-                     "own axis (the four-strike condor) has no `Structure` to mirror "
-                     "about, because `LegSpec` requires a positive qty. Those are "
-                     "covered by the second check and by identical code, not by the "
-                     "first."],
+            "body": ["", f"Sampled over {meta['equivalence']['events_checked']} events "
+                     f"spread across the whole run "
+                     f"({meta['equivalence']['candidates_sampled']:,} candidates), not "
+                     "taken from the front. An earlier build checked ONE event and "
+                     "described itself as a sampled cross-check; that was an "
+                     "overstatement and this is the correction.",
+                     "",
+                     f"{meta['equivalence']['price_skipped_no_structure']} sampled "
+                     "candidates could not take the first path: a family with no "
+                     "contract at its own axis (the four-strike condor) has no "
+                     "`Structure` to mirror about, because `LegSpec` requires a "
+                     "positive qty. Those are covered by the second check and by "
+                     "identical code, not by the first."],
         },
     ]
 
@@ -610,6 +761,27 @@ def main(record: bool = True) -> None:
     tallies.to_parquet(RESULTS / "tallies_gated.parquet", index=False)
     consistency = optimism_consistency(
         decided[PRIMARY][decided[PRIMARY]["traded"]])
+    fidelity_rows = _exp126_fidelity(books.get("incumbent"))
+    quality = {}
+    quality_rows = []
+    for arm in build_mod.ARMS:
+        k = books.get(arm)
+        if k is None or k.empty:
+            continue
+        m = k[np.isclose(k["fill_alpha"].astype(float), MID)].reset_index(drop=True)
+        q = quote_quality(m)
+        quality[arm] = q
+        bad = q["arb_violation"]
+        pnl = pd.to_numeric(m["pnl"], errors="coerce")
+        quality_rows.append([
+            arm, f"{len(m):,}", f"{100*bad.mean():.1f}%",
+            f"{100*pnl[bad].sum()/pnl.sum():.1f}%" if pnl.sum() else "n/a",
+            f"{q['spread_to_debit'].median():.2f}",
+            f"{100*(q['zero_bid_exit']>0).mean():.1f}%",
+            f"{100*(q['wide_exit']>0).mean():.1f}%",
+            f"{100*m['ret'].mean():+.1f}%", f"{100*q['ret_honest'].mean():+.1f}%",
+        ])
+
     prim, inc = decided[PRIMARY], decided["incumbent"]
     prim_all = trades[trades["arm"] == PRIMARY]
     inc_all = trades[trades["arm"] == "incumbent"]
@@ -672,7 +844,7 @@ def main(record: bool = True) -> None:
             input_files=[RESULTS / "candidates.parquet"],
             extra_sections=lambda r, a=arm: sections(
                 summary, funnels, tallies, decided, events, meta, a, consistency,
-                acceptance, defended),
+                acceptance, defended, quality_rows, fidelity_rows),
             write_report=True,
         )
         if not record:
