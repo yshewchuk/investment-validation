@@ -1,0 +1,212 @@
+id: EXP-134
+title: "Priced right, funded, and held: structure search under no-arbitrage, cash-secured margin and a real exit"
+kind: structure-selection
+strategy: TWIN-P5
+programme: structure-validation
+prior: [EXP-121, EXP-123, EXP-125, EXP-126, EXP-129, EXP-131, EXP-133]
+type: confirmatory
+price_source: >
+  ORATS chains (bid/ask). Entry and exit priced through the same FillModel
+  arithmetic engine.structures.price_structure uses, proved equal to it on a
+  sample spread across every year. Expiry settlement uses the Tier-2
+  daily_market close on the expiry date.
+
+hypothesis: >
+  EXP-133 searched 12,600 symmetric put structures per event and its primary
+  looked like it won. It did not: the search was finding places where the
+  vendor's MID surface is internally inconsistent and booking the
+  inconsistency as free money. On the corrected build 44.6% of its traded
+  entries still sit on a put curve that violates no-arbitrage, against 1.0%
+  for the fixed-shape incumbent, and the gradient across arms runs with how
+  much freedom each arm has to go looking.
+
+  Three things were missing, and each is a constraint the real account has
+  that the backtest did not:
+
+    PRICED RIGHT  a candidate whose own strikes carry a monotonicity, slope or
+                  convexity violation is not priced at all. Checkable at the
+                  decision, from the entry chain alone.
+    FUNDED        every short put is cash-secured in full at strike x 100, and
+                  total secured across all open positions may not exceed 50%
+                  of current marked equity. The account starts at $100,000 and
+                  capacity travels with it.
+    HELD          the exit is not assumed. Closing into a quote that violates
+                  no-arbitrage is not a trade anyone would make, so the
+                  registered rule closes at the first post-print close when
+                  the exit curve is arithmetically consistent and holds to
+                  expiry when it is not.
+
+  Under all three, the per-event choice of the most profitable structure is
+  tested honestly for the first time.
+
+  FALSIFIED if the primary does not beat the TWIN-P5 incumbent - run under the
+  identical three constraints - on return on capital AND on share of
+  out-of-sample years positive; or if it fails to beat the random_pick null on
+  return on capital; or if any trade loses more than its debit.
+
+known_before_registration:
+  the_no_arb_filter_is_a_pricing_fact_not_a_strategy_rule: >
+    A one-expiry put curve must satisfy three static conditions, none of which
+    needs a model: P(K) non-decreasing in K; every vertical spread worth no
+    more than its strike width; and every butterfly non-negative. A vendor MID
+    surface is a smoothed estimate, not a tradeable quote, and violates them
+    routinely in thin strikes. That does not matter until something SEARCHES
+    over combinations of those strikes, at which point every violation is a
+    free lunch the search will find. Measured on EXP-133's corrected book:
+    entry violations 44.6% for the full search against 1.0% for the incumbent;
+    the worst single case priced a structure with a guaranteed non-negative
+    payoff, maximum $12.50, at 2.5 cents.
+  the_exit_surface_is_worse_than_the_entry_surface_for_everyone: >
+    Measured on EXP-133 and NOT caused by the search: TWIN-P5's entries violate
+    no-arbitrage on 1.0% of trades and its EXITS on 30.8% - monotonicity 7.0%,
+    slope bound 17.5%, convexity 19.4%. Exits land the day after the print,
+    often at 0-1 DTE, where quotes are widest and stalest. Every published
+    twin-peak result is marked out through those quotes on roughly a third of
+    its trades. This experiment does not fix that for the past; it stops
+    assuming it away for the future.
+  holding_to_expiry_makes_defined_risk_exact: >
+    The terminal payoff of every enumerated family is non-negative by
+    construction. Settled at the expiry close on EXP-133's book the minimum
+    realized payoff was exactly $0.0000 across 1,430 trades and the share
+    losing more than the debit went 5.0% -> 0.0%. It is not free: prints
+    landing outside the structure rise 25.7% -> 31.0% because the move that
+    matters becomes the multi-day move, and the incumbent's return on capital
+    falls 6.2% -> 3.7% because closing right after the print is what captures
+    the vol crush. The CONDITIONAL rule measured 4.6% on capital with a better
+    median than either fixed convention and zero defined-risk failures, which
+    is why it is the registered primary.
+  what_the_margin_constraint_costs_before_it_is_applied: >
+    Measured on EXP-133's traded books. Median cash secured for ONE contract:
+    $48,600 for the incumbent, $36,200 for the full search, median four short
+    puts per structure. Against 50% of a $100,000 account only 50.7% of the
+    incumbent's trades and 62.7% of the search's can be funded at one contract
+    - and that is BEFORE concurrency, which on an unconstrained book runs ~16
+    positions deep and here can rarely exceed one. The unfundable trades are
+    high-priced underlyings: median spot $252 against $70 for the fundable
+    ones. Ticker price becomes an entry filter nobody wrote down, and
+    fixed-fraction sizing stops binding entirely.
+  fixed_fraction_sizing_is_not_the_rule_that_decides_size_here: >
+    5% of equity divided by a debit of a dollar asks for tens of contracts.
+    Margin allows one. Every size in this experiment is set by the secured
+    requirement, not by the sizing rule the program has used since Phase 2,
+    and the report must say so rather than presenting a fraction that never
+    binds.
+  what_exp_133_got_wrong_and_why_it_is_not_repeated: >
+    EXP-133's build applied engine.replay's zero-cost rule at mid only, where
+    replay applies it across EVERY fill alpha. That left its alpha sweep
+    comparing 12,437 rows at mid against 5,188 at best fill and made its
+    breakeven alpha an interpolation between two different books; it also let
+    sub-penny debits survive. Fixed before this spec was written - the rule
+    now holds per candidate at every alpha - and the same build code is
+    reused, so the fix is inherited rather than reimplemented.
+
+definition:
+  the_candidate_set: >
+    Unchanged from EXP-133 and reused, not rewritten: the eight enumerated
+    families on 3/4/5/7 strikes, mirror-symmetric about a listed strike at
+    ATM / ATM+1 / ATM+2, contracts summing to zero, zero payoff floor in
+    dollars, at most eight contracts, at most 20 ladder positions out. Width
+    rules unchanged: the outer strikes must span the predicted move and stay
+    inside predicted move + 3 SD, both written on BOTH outer strikes.
+  the_no_arbitrage_filter: >
+    A candidate is priced only if the entry MID curve, restricted to the
+    strikes that candidate uses, satisfies all three conditions: non-decreasing
+    in strike, every adjacent vertical no wider in value than in strike, and
+    every adjacent butterfly non-negative. Tolerance 1e-9 on dollar prices.
+    Decided at the entry close from the entry chain alone - no look-ahead.
+  the_margin_constraint: >
+    Every SHORT put leg secures strike x 100 x qty in cash per contract, held
+    from entry until the position closes. Long puts secure nothing; there is
+    no spread offset, because the account has no spread margin. At each entry,
+    total secured across every open position plus the new one may not exceed
+    50% of CURRENT marked equity (cash plus open positions valued at cost).
+    Contracts are whole. If ONE contract cannot be funded the trade does not
+    happen and the event is NOT re-selected to a cheaper structure - the
+    user's registered instruction. Account starts at $100,000; capacity grows
+    and shrinks with equity. Secured cash is a funding requirement, not
+    capital consumed, so return on capital remains quoted on the debit.
+  the_exit: >
+    At the first post-print close, the exit chain is checked for the same three
+    no-arbitrage conditions on the strikes held. Consistent - close there.
+    Inconsistent - hold to expiry and settle at the terminal payoff against the
+    daily_market close on the expiry date. Both branches are observable at the
+    moment of the decision.
+  the_objective: >
+    Unchanged and deliberately so: per event, the admissible candidate with the
+    highest simulated expected P&L, draws 1-2,000 selecting and draws
+    2,001-4,000 supplying the number the gate ranks. The user's instruction is
+    to trade the most profitable structure and let the account decide whether
+    it can be funded, rather than to re-rank on affordability.
+  the_gate: "EXP-131's, per arm, on the arm's own history: trailing six months, top 20%, 100-event floor."
+  entry_filters: "mean relative leg spread <= 25%; market cap >= $10B. Unchanged from EXP-129."
+  the_risks_this_run_measures:
+    the_margin_cap_may_simply_delete_the_experiment:
+      "If concurrency collapses to one and half the universe cannot be funded,
+       the traded count may fall below anything worth evaluating. The funnel
+       reports funded / unfunded and the reason, and a book too thin to carry
+       is reported as such rather than padded."
+    the_no_arb_filter_may_delete_the_edge:
+      "If the search's advantage over the incumbent was entirely the
+       violations, the filter removes it and the arms converge. That is a
+       result, not a failure, and the report must show the arms converging
+       rather than quietly reporting the survivor."
+    holding_ties_up_secured_cash_for_longer:
+      "The hold branch keeps a position open to expiry, so it competes with the
+       margin cap for headroom and can block later trades. Measured as trades
+       refused for margin under each exit convention, not assumed small."
+    assignment_is_real_now:
+      "Holding to expiry means ITM short puts are assigned. Cash-securing makes
+       that fundable by construction, but pin risk can leave a residual share
+       position over a weekend. Reported as the share of trades finishing with
+       any ITM short leg."
+
+primary_spec:
+  universe: ">= $10B, mean leg spread <= 25%, no-arbitrage-consistent entry strikes, 2018-2026"
+  structure: "per-event argmax of exp_pnl_sim over every admissible candidate"
+  margin: "cash-secured, 50% of current equity across all open positions, $100,000 start"
+  exit: "close at the first post-print close if that curve is arb-consistent, else hold to expiry"
+  gate: "trailing 6-month top 20% of the arm's own exp_pnl_sim, min 100 events"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  acceptance:
+    beats_the_incumbent: "return on capital and share of OOS years positive at or above the incumbent arm run under the identical three constraints"
+    choosing_beats_not_choosing: "return on capital above the random_pick arm"
+    defined_risk_holds: "no trade loses more than its debit, at any alpha"
+    still_pays: "breakeven alpha <= 0.45, computed on ONE sample across the whole alpha grid"
+    universe_floor: ">= 250 funded trades, or reported as too thin to carry"
+
+grid:
+  arm:
+    - best_all           # PRIMARY
+    - best_twin_only     # the two twin-peaked families only
+    - best_twin_p5       # TWIN-P5's family at a chosen width
+    - random_pick        # the null: uniform over admissible, seed 0
+    - incumbent          # TWIN-P5 wing 3, a = pred/100, under the same three constraints
+  exit_convention:
+    - conditional        # PRIMARY: close if the exit curve is consistent, else hold
+    - close_x1           # what every prior twin-peak experiment assumed
+    - hold_expiry        # defined risk exact, vol crush given up
+
+required_outputs:
+  - "no-arbitrage funnel: candidates lost to each of the three conditions, per event"
+  - "entry AND exit violation rates per arm, against EXP-133's uncorrected figures"
+  - "margin funnel: events where one contract could not be funded, and why"
+  - "contracts actually bought, and whether margin or fixed-fraction sizing bound"
+  - "realized concurrency and peak secured, against the 50% cap"
+  - "the three exit conventions side by side, per arm"
+  - "share of trades finishing with an ITM short leg (assignment exposure)"
+  - "the three tallies per family: admissible, chosen, traded"
+  - "per-year table with n; return on capital; breakeven alpha on one sample"
+  - "defined-risk falsification at every alpha"
+  - "pricer equivalence receipt, sampled across every year"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-05T23:31:04+00:00"
