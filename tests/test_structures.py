@@ -1031,3 +1031,198 @@ class TestTwinPeakFive:
         params = twin_peak_5(wing_multiple=2).params
         assert params["width_legs"] == ("atm", "up1")
         assert params["wing_multiple"] == 2
+
+
+class TestCoarseLadderCollision:
+    """Two legs on one contract is not a structure — refuse, don't approximate.
+
+    KEN on the 2026-09-06 board is the case that found this. Spot 68.98, a $5
+    ladder, and a CND-PS sized at `width_moneyness=0.0146` — so `up1` wanted
+    ~$1.01 above the 65 anchor and `up2` wanted ~$2.01 above it, and both
+    snapped to the only listed strike between: 70. Mirrored down, `dn1` and
+    `dn2` both landed on 60. What reached the board was `sell 70 / buy 70` and
+    `sell 60 / buy 60` — a position of exactly nothing, priced at a net debit
+    of exactly nothing, ranked against real structures.
+    """
+
+    @staticmethod
+    def _coarse_rows(step: float = 5.0, spot: float = 68.98) -> pd.DataFrame:
+        """KEN's ladder: a $5 grid under a spot that sits between two rungs."""
+        obs = pd.Timestamp("2026-09-04")
+        expiry, dte = pd.Timestamp("2026-09-18"), 14
+        rows = []
+        strike = 40.0
+        while strike <= 100.0 + 1e-9:
+            for right in ("C", "P"):
+                intrinsic = (max(strike - spot, 0.0) if right == "P"
+                             else max(spot - strike, 0.0))
+                mid = intrinsic + 2.0
+                rows.append({
+                    "ticker": "KEN", "obs_date": obs, "expiry": expiry, "dte": dte,
+                    "strike": round(strike, 4), "right": right,
+                    "bid": round(mid - 0.5, 4), "ask": round(mid + 0.5, 4),
+                    "iv": 0.6, "delta": -0.5 if right == "P" else 0.5, "spot": spot,
+                })
+            strike += step
+        return pd.DataFrame(rows)
+
+    @pytest.fixture
+    def coarse(self) -> ChainSnapshot:
+        return ChainSnapshot(
+            ticker="KEN", obs_date=pd.Timestamp("2026-09-04"),
+            event_date=pd.Timestamp("2026-09-07"), rows=self._coarse_rows(),
+            spot=68.98, session="AMC",
+        )
+
+    def test_a_condor_whose_inner_and_outer_collapse_is_refused(self, coarse):
+        structure = STRUCTURES["CND-PS"](width_moneyness=0.014593)
+        with pytest.raises(StructureError, match="too coarse"):
+            price_structure(structure, coarse, MID)
+
+    def test_the_message_names_both_legs_and_the_contract(self, coarse):
+        structure = STRUCTURES["CND-PS"](width_moneyness=0.014593)
+        with pytest.raises(StructureError) as excinfo:
+            price_structure(structure, coarse, MID)
+        message = str(excinfo.value)
+        assert "up1 and up2" in message
+        assert "dn1 and dn2" in message
+        assert "P 70" in message and "P 60" in message
+
+    def test_it_catches_a_collapse_that_does_not_net_to_zero(self, coarse):
+        """BFLY-P5's collapse is two BUYS on one strike, not a wash.
+
+        Contracts still sum to zero, so the defined-risk claim survives and
+        nothing downstream notices — but `peak_multiple` says `inner + outer`
+        and the position no longer has that peak. A netting test would pass
+        this row; the contract-distinctness test is what catches it.
+        """
+        structure = STRUCTURES["BFLY-P5"](width_moneyness=0.009729)
+        with pytest.raises(StructureError, match="too coarse"):
+            price_structure(structure, coarse, MID)
+
+    def test_the_same_shape_prices_on_a_ladder_dense_enough_to_carry_it(self):
+        """The refusal is about the ladder, not the structure.
+
+        Same width, same spot, a $1 grid instead of $5 — `up1` and `up2` now
+        have separate rungs to land on and the condor resolves four distinct
+        strikes.
+        """
+        snapshot = ChainSnapshot(
+            ticker="KEN", obs_date=pd.Timestamp("2026-09-04"),
+            event_date=pd.Timestamp("2026-09-07"),
+            rows=self._coarse_rows(step=1.0), spot=68.98, session="AMC",
+        )
+        price = price_structure(
+            STRUCTURES["CND-PS"](width_moneyness=0.014593), snapshot, MID
+        )
+        strikes = {leg.name: leg.strike for leg in price.legs}
+        assert len({(l.right, l.strike, l.expiry) for l in price.legs}) == len(price.legs)
+        assert strikes["up1"] != strikes["up2"]
+        assert strikes["dn1"] != strikes["dn2"]
+
+    def test_a_calendar_may_share_a_strike_across_expiries(self, chain_rows):
+        """The key is the CONTRACT, not the strike.
+
+        CAL-P puts both legs on one strike by construction and STR-THRU puts a
+        call and a put on one strike — neither is two legs on one contract, and
+        a guard keyed on strike alone would refuse both.
+        """
+        snapshot = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2024-05-01"),
+            event_date=pd.Timestamp("2024-05-02"), rows=chain_rows, session="AMC",
+        )
+        calendar = price_structure(put_calendar(), snapshot, MID)
+        assert len({leg.strike for leg in calendar.legs}) == 1
+        assert len({leg.expiry for leg in calendar.legs}) == len(calendar.legs)
+
+        straddle = price_structure(straddle_through(), snapshot, MID)
+        assert len({leg.strike for leg in straddle.legs}) == 1
+        assert {leg.right for leg in straddle.legs} == {"C", "P"}
+
+
+class TestEveryStructureKeepsItsLegsAStrikeApart:
+    """No structure may place two legs closer than one listed strike.
+
+    Stated as distance, this is "at least one strike width between any two legs
+    of the same right and expiry". Stated as contracts, it is "no two legs on
+    the same contract" — and the two are the SAME condition here, because every
+    selector (`bracket`, `offset_from`, `grid_step`, `mirror`) returns a listed
+    strike and `price_structure` then refuses a leg with no matching chain row.
+    Distinct listed strikes are one grid step apart by construction.
+
+    So this sweeps the whole registry rather than the two families that were
+    caught: every structure, against ladders from fine to far too coarse for the
+    width being asked for. Each priced structure must satisfy the distance
+    property; each ladder too coarse to satisfy it must raise instead of
+    quietly returning a smaller structure wearing a bigger one's name.
+    """
+
+    SPOT = 68.98
+
+    @staticmethod
+    def _ladder(step: float, spot: float = 68.98) -> pd.DataFrame:
+        obs = pd.Timestamp("2026-09-04")
+        rows = []
+        for expiry, dte in ((pd.Timestamp("2026-09-11"), 7),
+                            (pd.Timestamp("2026-09-18"), 14)):
+            strike = round(spot * 0.4 / step) * step
+            while strike <= spot * 1.6:
+                for right in ("C", "P"):
+                    intrinsic = (max(strike - spot, 0.0) if right == "P"
+                                 else max(spot - strike, 0.0))
+                    mid = intrinsic + 2.0
+                    rows.append({
+                        "ticker": "TEST", "obs_date": obs, "expiry": expiry,
+                        "dte": dte, "strike": round(strike, 4), "right": right,
+                        "bid": round(mid - 0.4, 4), "ask": round(mid + 0.4, 4),
+                        "iv": 0.6, "delta": -0.5 if right == "P" else 0.5,
+                        "spot": spot,
+                    })
+                strike = round(strike + step, 4)
+        return pd.DataFrame(rows)
+
+    @pytest.mark.parametrize("name", sorted(STRUCTURES))
+    @pytest.mark.parametrize("step", [0.5, 1.0, 2.5, 5.0, 10.0])
+    @pytest.mark.parametrize("width_moneyness", [None, 0.01, 0.025, 0.05, 0.1])
+    def test_no_two_legs_land_within_one_strike(self, name, step, width_moneyness):
+        rows = self._ladder(step)
+        snapshot = ChainSnapshot(
+            ticker="TEST", obs_date=pd.Timestamp("2026-09-04"),
+            event_date=pd.Timestamp("2026-09-07"), rows=rows,
+            spot=self.SPOT, session="AMC",
+        )
+        try:
+            structure = STRUCTURES[name](width_moneyness=width_moneyness)
+        except TypeError:
+            # A family with no width parameter — STR-THRU, STR-RUNUP, CAL-P.
+            if width_moneyness is not None:
+                pytest.skip(f"{name} takes no width_moneyness")
+            structure = STRUCTURES[name]()
+
+        try:
+            price = price_structure(structure, snapshot, MID)
+        except StructureError:
+            # Refusing is the correct outcome for a ladder that cannot carry
+            # the shape. What is forbidden is returning one that violates the
+            # distance property.
+            return
+
+        grid = sorted({float(s) for s in rows["strike"].unique()})
+        for right in {leg.right for leg in price.legs}:
+            for expiry in {leg.expiry for leg in price.legs}:
+                strikes = sorted(
+                    leg.strike for leg in price.legs
+                    if leg.right == right and leg.expiry == expiry
+                )
+                assert len(strikes) == len(set(strikes)), (
+                    f"{name} at step={step} width={width_moneyness}: two "
+                    f"{right} legs on one strike at {expiry.date()} — {strikes}"
+                )
+                # Distinct AND listed is what makes the gap at least one
+                # strike width: there is nothing between two adjacent rungs.
+                for lo, hi in zip(strikes, strikes[1:]):
+                    assert lo in grid and hi in grid, (
+                        f"{name} at step={step}: leg strike off the listed grid "
+                        f"({lo}, {hi})"
+                    )
+                    assert hi > lo, f"{name}: unordered strikes {strikes}"

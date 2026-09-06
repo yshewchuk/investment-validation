@@ -724,6 +724,43 @@ def price_structure(
             )
         )
 
+    # Two legs on the same contract are not a structure. `offset_from` already
+    # refuses to snap back onto its own anchor, but that guard is
+    # one-dimensional: CND-PS places `up1` and `up2` by INDEPENDENT offsets from
+    # the same anchor, and neither knows the other exists. On a ladder coarser
+    # than the inner width both snap to the first listed strike above the
+    # anchor, and the result priced as a real trade — KEN on 2026-09-07 resolved
+    # sell 70 / buy 70 and sell 60 / buy 60, a position of exactly nothing, for
+    # a net debit of exactly nothing.
+    #
+    # BFLY-P5 collapses the same way WITHOUT netting to zero, which is the worse
+    # case: contracts still sum to zero so the defined-risk claim still holds,
+    # and what reaches the board is a three-strike butterfly carrying a
+    # five-strike structure's `peak_multiple`. The gate's reward term is then
+    # measured on a peak the position does not have.
+    #
+    # A ladder that cannot carry the shape is refused here rather than
+    # approximated, exactly as the `mirror` selector refuses a wing that is not
+    # listed. Reference legs are included: a zero-qty leg exists so others can
+    # mirror about its strike, and one sitting on top of a traded strike means
+    # the symmetry it was placed to define has already collapsed.
+    contracts: dict[tuple[str, float, pd.Timestamp], list[str]] = {}
+    for leg in out:
+        contracts.setdefault((leg.right, leg.strike, leg.expiry), []).append(leg.name)
+    collided = sorted(
+        (names, key) for key, names in contracts.items() if len(names) > 1
+    )
+    if collided:
+        detail = "; ".join(
+            f"{' and '.join(names)} both resolve to {right} {strike:g} "
+            f"{pd.Timestamp(expiry).date()}"
+            for names, (right, strike, expiry) in collided
+        )
+        raise StructureError(
+            f"{structure.name}: the listed strikes are too coarse for this "
+            f"shape — {detail}"
+        )
+
     return StructurePrice(
         structure=structure.name,
         ticker=snapshot.ticker,
