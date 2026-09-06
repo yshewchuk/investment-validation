@@ -94,6 +94,11 @@ _BOARD_FIELDS = (
     # The actual order. A recommendation that does not say which strikes to buy
     # and sell is not one — see ScoreResult.legs.
     "legs",
+    # The terminal payoff of those legs, computed by the renderer. A leg table
+    # does not say what the trade WANTS, and the board now carries both theses:
+    # twin-peaked structures that pay on a move and centre-peaked ones that pay
+    # on a flat print read identically as a list of legs.
+    "payoff_curve",
     # What the gate decided on, for the strategies gated by simulated expected
     # return rather than by arithmetic.
     "exp_pnl_sim", "win_sim",
@@ -272,6 +277,7 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
         if entry_cost is not None and spot
         else None
     )
+    record["payoff_curve"] = payoff_curve(record)
     # Derived HERE, not in the client. The board's rule is that the UI formats
     # and never computes, so the nightly self-check covers every number shown.
     # This ratio first shipped as arithmetic in app.js, which `ui_no_compute`
@@ -719,6 +725,68 @@ def build_strategies(registry=None) -> dict:
             },
         }
     return out
+
+
+#: How many points the payoff polyline carries. Enough for the corners of a
+#: seven-strike shape to be exact and small enough that a board with hundreds of
+#: rows does not grow by megabytes.
+PAYOFF_POINTS = 96
+
+
+def payoff_curve(record: Mapping[str, Any]) -> dict | None:
+    """Terminal payoff of a scored row's legs, computed HERE and not in the UI.
+
+    The board's rule is that the client formats and never computes. A payoff
+    curve is the strongest case for breaking it — it is a shape, not a number —
+    and that is exactly why it must not be: the first version of this shipped as
+    arithmetic in ``app.js``, where ``ui_no_compute`` would not have caught it,
+    because that check compares the FIELD NAMES a client reads against the ones
+    the renderer wrote and a sum over ``strike`` and ``qty`` reads as
+    legitimate. The same trap the ``model_vs_market`` ratio fell into.
+
+    Why the board needs it at all: a five-leg order ticket does not say what the
+    trade WANTS. A twin peak pays most on a move of about one spacing either
+    way; a condor or butterfly pays most if the stock does not move. Those read
+    identically as a list of legs and are opposite theses, and the board now
+    carries eight such structures plus a chooser that picks between them.
+
+    Puts only — every current structure is all-put — and ``None`` for anything
+    else rather than a curve with a silently missing term.
+    """
+    legs = [l for l in (record.get("legs") or []) if float(l.get("qty") or 0)]
+    if not legs or any(str(l.get("right", "P")).upper() != "P" for l in legs):
+        return None
+    try:
+        strikes = [float(l["strike"]) for l in legs]
+        signs = [1.0 if str(l["side"]).lower() == "buy" else -1.0 for l in legs]
+        qty = [float(l["qty"]) for l in legs]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    lo, hi = min(strikes), max(strikes)
+    pad = max((hi - lo) * 0.35, 1e-6)
+    x0, x1 = lo - pad, hi + pad
+
+    def value(spot: float) -> float:
+        return sum(sg * q * max(k - spot, 0.0)
+                   for sg, q, k in zip(signs, qty, strikes))
+
+    xs = [x0 + (x1 - x0) * i / (PAYOFF_POINTS - 1) for i in range(PAYOFF_POINTS)]
+    ys = [value(x) for x in xs]
+    peak = max(ys)
+    # Twin-peaked when the maximum sits AWAY from the axis of symmetry. Decided
+    # on the payoff itself rather than on a label, so a structure cannot be
+    # described as something its own legs contradict.
+    centre = value(0.5 * (lo + hi))
+    return {
+        "x": [round(x, 4) for x in xs],
+        "y": [round(y, 4) for y in ys],
+        "max": round(peak, 4),
+        "min": round(min(ys), 4),
+        "strikes": [{"strike": k, "qty": q, "side": "buy" if sg > 0 else "sell"}
+                    for k, q, sg in zip(strikes, qty, signs)],
+        "shape": "centre" if centre >= peak - 1e-9 else "twin",
+    }
 
 
 def _offset_note(offset: int) -> str:

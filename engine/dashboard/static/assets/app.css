@@ -170,3 +170,14 @@ tr.subrow > td { padding-top: 4px; padding-bottom: 4px; }
 .order-ticket tfoot td { border-top: 1px solid var(--line, #ccc); }
 .order-ticket .pos { color: #2ca02c; }
 .order-ticket .neg { color: #d62728; }
+
+/* Payoff diagram — drawn client-side from the legs in the order ticket. */
+.payoff .pf { width: 100%; height: auto; display: block; }
+.pf-axis { stroke: #30363d; stroke-width: 1; }
+.pf-line { fill: none; stroke: #58a6ff; stroke-width: 2; }
+.pf-fill { fill: #58a6ff; opacity: 0.13; stroke: none; }
+.pf-tick { stroke: #6e7681; stroke-width: 1; }
+.pf-spot { stroke: #d29922; stroke-width: 1; stroke-dasharray: 3 3; }
+.pf-lbl { fill: #8b949e; font-size: 10px; }
+.pf-buy { fill: #3fb950; }
+.pf-sell { fill: #f85149; }

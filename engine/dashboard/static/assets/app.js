@@ -669,6 +669,55 @@ function renderStrikeGrid(data, gridEl, detailEl) {
   });
 }
 
+/* THE PAYOFF AT EXPIRY — drawn from `payoff_curve`, which the RENDERER computed.
+ *
+ * Nothing here calculates. The board's rule is that the UI formats and never
+ * computes, so the nightly self-check can cover every number shown; the first
+ * version of this function summed `max(K - S, 0)` over the legs in JavaScript,
+ * which `ui_no_compute` would NOT have caught, because that check compares the
+ * field names a client reads against the ones the renderer wrote and a sum over
+ * `strike` and `qty` reads as legitimate. Same trap `model_vs_market` fell into.
+ *
+ * Why the board needs it: a five-leg order ticket does not say what the trade
+ * WANTS. A twin peak pays most on a move of about one spacing either way; a
+ * condor or butterfly pays most if the stock does not move. Those read
+ * identically as a list of legs and are opposite theses, and the board now
+ * carries both plus a chooser that picks between them per event.
+ */
+function payoffDiagram(r) {
+  const c = r.payoff_curve;
+  if (!c || !c.x || !c.x.length) return "";
+  const W = 560, H = 150, M = 26;
+  const x0 = c.x[0], x1 = c.x[c.x.length - 1], yMax = c.max || 1;
+  const px = (x) => M + (W - 2 * M) * (x - x0) / (x1 - x0);
+  const py = (y) => H - M - (H - 2 * M) * (y / yMax);
+  const path = c.x.map((x, i) =>
+    (i ? "L" : "M") + px(x).toFixed(1) + " " + py(c.y[i]).toFixed(1)).join(" ");
+  const spot = (r.spot && r.spot > x0 && r.spot < x1)
+    ? "<line x1='" + px(r.spot).toFixed(1) + "' y1='" + M + "' x2='" + px(r.spot).toFixed(1)
+      + "' y2='" + (H - M) + "' class='pf-spot'/><text x='" + px(r.spot).toFixed(1)
+      + "' y='" + (M - 8) + "' class='pf-lbl' text-anchor='middle'>spot</text>" : "";
+  const ticks = (c.strikes || []).map((l) =>
+      "<line x1='" + px(l.strike).toFixed(1) + "' y1='" + (H - M) + "' x2='"
+      + px(l.strike).toFixed(1) + "' y2='" + (H - M + 4) + "' class='pf-tick'/>"
+    + "<text x='" + px(l.strike).toFixed(1) + "' y='" + (H - M + 15) + "' class='pf-lbl "
+      + (l.side === "buy" ? "pf-buy" : "pf-sell") + "' text-anchor='middle'>"
+      + (l.side === "buy" ? "+" : "\u2212") + fmt(l.qty, 0) + "</text>").join("");
+  return "<div class='layer payoff'><h4>Payoff at expiry</h4>"
+    + "<svg viewBox='0 0 " + W + " " + H + "' class='pf'>"
+    + "<line x1='" + M + "' y1='" + (H - M) + "' x2='" + (W - M) + "' y2='" + (H - M)
+      + "' class='pf-axis'/>"
+    + "<path d='" + path + " L " + px(x1).toFixed(1) + " " + py(0).toFixed(1)
+      + " L " + px(x0).toFixed(1) + " " + py(0).toFixed(1) + " Z' class='pf-fill'/>"
+    + "<path d='" + path + "' class='pf-line'/>" + ticks + spot
+    + "<text x='" + M + "' y='" + (M - 8) + "' class='pf-lbl'>max " + fmt(c.max, 2)
+      + "</text></svg>"
+    + "<div class='badge'>" + (c.shape === "centre"
+        ? "<b>Centre-peaked</b> — pays most if the stock does not move. Short the event."
+        : "<b>Twin-peaked</b> — pays most on a move of about one spacing either way.")
+    + " Zero outside the wings; max loss is the debit, <b>at expiry</b>.</div></div>";
+}
+
 /* THE ORDER TICKET — which legs, at which strikes, in what size.
  *
  * The header above deliberately does not name a strike, and the reason is
@@ -723,7 +772,7 @@ function renderOrderTicket(r) {
        : "<div class='badge'>simulated expected return <b>" + signedPct(r.exp_pnl_sim, 2)
          + "</b>" + (r.win_sim === null || r.win_sim === undefined ? ""
              : " · profitable in <b>" + pct(r.win_sim, 0) + "</b> of draws") + "</div>")
-    + "</div>";
+    + "</div>" + payoffDiagram(r);
 }
 
 function renderRowDetail(r, detailEl) {
