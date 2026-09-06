@@ -68,12 +68,21 @@ monotonically to 0.074 (p = 1.9e-8), and the >$200B bucket puts **33.9%** of
 its mass in the 1-2x band against **26.9%** for <$2B, a 7pp swing into exactly
 where the twin peaks pay most.
 
-| arm | top-1 | mean gap | **gap spread** | twin share | chooser return |
-|---|---:|---:|---:|---:|---:|
-| uncorrected | 24.7% | +9.7pp | 6.5pp | 36.8% | +16.24% |
-| **cap** (primary) | **25.2%** | +8.3pp | **4.0pp** | 40.8% | +15.94% |
-| debias | 24.3% | **−0.4pp** | **0.5pp** | 47.4% | +15.89% |
-| both | 24.5% | −0.4pp | 0.4pp | 46.4% | +15.87% |
+| arm | top-1 | mean gap | **gap spread** | twin share | chooser return | **spread captured** |
+|---|---:|---:|---:|---:|---:|---:|
+| uncorrected | 24.7% | +9.7pp | 6.5pp | 36.8% | +16.24% | **17.0%** |
+| **cap** (primary) | **25.2%** | +8.3pp | **4.0pp** | 40.8% | +15.94% | 15.9% |
+| debias | 24.3% | **−0.4pp** | **0.5pp** | 47.4% | +15.89% | 16.3% |
+| both | 24.5% | −0.4pp | 0.4pp | 46.4% | +15.87% | 15.8% |
+
+The last column is the payoff measure that matters: the share of the
+random-to-oracle return spread the chooser actually captures,
+`(chooser − random) / (oracle − random)`, which normalises out the fact that
+cap conditioning also moves the oracle and random baselines. **Doing nothing
+captures the most.** Every adjustment lands below the uncorrected 17.0%,
+including the primary. So the top-1 improvement to 25.2% does not survive
+translation into money: the extra hits are on events where being right is
+worth less.
 
 Cap conditioning was applied to **94.0%** of draws, so this is not a treatment
 that failed to reach its universe.
@@ -118,14 +127,20 @@ untested mechanism and the more promising place to look next.
 
 ## 6. What to keep
 
-- **Cap-conditioning the residual pool** is right on correctness grounds
-  regardless of the hit rate: the pool genuinely is not the traded universe,
-  the fix reaches 94% of draws, and it halves the family spread the argmax
-  ranks on. It is a candidate for `engine.pnl_sim`, which would move every
-  published gate number and so needs its own registration.
+- **Cap-conditioning the residual pool** is right on correctness grounds, but
+  that is the *only* ground it is right on: the pool genuinely is not the
+  traded universe, the fix reaches 94% of draws, and it halves the family
+  spread the argmax ranks on — and it still captures less of the
+  random-to-oracle spread (15.9%) than leaving the pool alone (17.0%). So it
+  is a correctness fix that costs money on this sample, not an improvement.
+  It is a candidate for `engine.pnl_sim`, which would move every published
+  gate number and so needs its own registration; that registration has to
+  carry the 1.1pp capture cost as a known debit, not bury it.
 - **The empirical `ratio` draw** removes the atom at zero at no cost and with
   no fitted parameter. Also a candidate for the engine.
-- Neither is promoted here.
+- Neither is promoted here. On the one measure that pays — spread captured —
+  the uncorrected chooser beats all three treatments, so nothing in EXP-139
+  earns a change to the live path.
 
 ## 7. Disclosures
 
