@@ -77,6 +77,7 @@ from engine.structures import (
     LegSpec,
     StrikeSelector,
     Structure,
+    LadderTooCoarse,
     StructureError,
 )
 
@@ -137,6 +138,12 @@ FLAGS = (
     # given a shape, and pricing a default-width one instead would put a number
     # on the board for a trade nobody chose.
     "NO_FORECAST",
+    # Two legs resolved onto one contract, so the structure was refused. Kept
+    # apart from NO_CHAIN deliberately: the chain is present and correct, and a
+    # reader who sees NO_CHAIN goes and re-pulls quotes that are already fine.
+    # What is too coarse is the ticker's listed strike ladder relative to the
+    # width asked for — see guides/coarse_ladder_collision.md.
+    "COARSE_LADDER",
 )
 
 #: A ticker with fewer prior events than this is the regime where the size model
@@ -967,6 +974,15 @@ class Scorer:
         )
         try:
             priced = price_structure(structure, snapshot, request.fill)
+        except LadderTooCoarse as exc:
+            # The chain is fine; this ticker's strikes are too far apart to
+            # carry the shape. The message names the legs that collided, and it
+            # is the only thing on the row that says so — so it is written to
+            # `detail` here rather than left to a caller.
+            result.flag("COARSE_LADDER")
+            result.detail = str(exc)
+            self._note_chain_age(request, result)
+            return
         except (StructureError, ValueError):
             result.flag("NO_CHAIN")
             self._note_chain_age(request, result)
@@ -1328,7 +1344,13 @@ class Scorer:
         # it is why a current chain is the binding requirement for the P&L
         # columns rather than something a fallback could paper over.
         if result.entry_cost is None or result.entry_cost <= 0 or result.spot is None:
-            result.flag("NO_CHAIN")
+            # A row that was already refused keeps the reason it was refused
+            # for. Without this guard the coarse-ladder rows pick NO_CHAIN up
+            # here too — pricing failed, so of course there is no cost — and
+            # reach the board carrying both flags, which is exactly the
+            # mislabel COARSE_LADDER exists to remove.
+            if "COARSE_LADDER" not in result.flags:
+                result.flag("NO_CHAIN")
             return
         payoff = self.payoff(strategy, request.fill.alpha, result.evidence_cutoff)
         if payoff is None:
@@ -1870,11 +1892,13 @@ UNSCORABLE = (KeyError, StructureError)
 def unscorable_result(
     request: ScoreRequest, *, as_of, snapshot: str, exc: Exception
 ) -> ScoreResult:
-    """The NO_CHAIN placeholder for a row the engine cannot price.
+    """The placeholder for a row the engine cannot price.
 
     Shared rather than inlined because the dashboard self-check re-scores board
     rows through a second path: if it built its own placeholder, the two could
-    drift and every unpriceable row would read as a self-check mismatch.
+    drift and every unpriceable row would read as a self-check mismatch. That
+    is also why the flag is chosen from the exception TYPE here — both paths
+    must reach the same one from the same failure.
     """
     result = ScoreResult(
         ticker=request.ticker,
@@ -1884,7 +1908,7 @@ def unscorable_result(
         snapshot_hash=snapshot,
         detail=str(exc),
     )
-    result.flag("NO_CHAIN")
+    result.flag("COARSE_LADDER" if isinstance(exc, LadderTooCoarse) else "NO_CHAIN")
     return result
 
 

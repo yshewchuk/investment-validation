@@ -1226,3 +1226,50 @@ class TestEveryStructureKeepsItsLegsAStrikeApart:
                         f"({lo}, {hi})"
                     )
                     assert hi > lo, f"{name}: unordered strikes {strikes}"
+
+
+class TestLadderTooCoarseIsItsOwnFailure:
+    """The refusal has to be distinguishable from every other one.
+
+    `price_structure` raises for many reasons — no expiry survives the print, a
+    mirrored wing is not listed, the chain has no rows at the expiry. Callers
+    collapse all of those into NO_CHAIN, which is right for most of them and
+    wrong for this one: here the chain is present and correct, and a reader who
+    sees NO_CHAIN goes and re-pulls quotes that are already fine.
+    """
+
+    def test_it_is_a_structure_error_so_existing_callers_still_catch_it(self):
+        from engine.structures import LadderTooCoarse
+        assert issubclass(LadderTooCoarse, StructureError)
+
+    def test_the_collision_raises_the_subclass_not_the_base(self):
+        from engine.structures import LadderTooCoarse
+        rows = TestCoarseLadderCollision._coarse_rows()
+        snapshot = ChainSnapshot(
+            ticker="KEN", obs_date=pd.Timestamp("2026-09-04"),
+            event_date=pd.Timestamp("2026-09-07"), rows=rows,
+            spot=68.98, session="AMC",
+        )
+        with pytest.raises(LadderTooCoarse):
+            price_structure(
+                STRUCTURES["CND-PS"](width_moneyness=0.014593), snapshot, MID
+            )
+
+    def test_other_resolution_failures_stay_the_base_class(self):
+        """A wing that is not listed is NOT a coarse-ladder refusal.
+
+        Both are "the ladder cannot carry this", but only the collision means
+        two legs share a contract. Widening the subclass to cover every ladder
+        complaint would put COARSE_LADDER on rows the flag does not describe.
+        """
+        from engine.structures import LadderTooCoarse
+        rows = TestCoarseLadderCollision._coarse_rows()
+        snapshot = ChainSnapshot(
+            ticker="KEN", obs_date=pd.Timestamp("2026-09-04"),
+            event_date=pd.Timestamp("2026-09-07"), rows=rows,
+            spot=68.98, session="AMC",
+        )
+        # A width far wider than the ladder reaches: the wings run off it.
+        with pytest.raises(StructureError) as excinfo:
+            price_structure(twin_peak(width_moneyness=0.9), snapshot, MID)
+        assert not isinstance(excinfo.value, LadderTooCoarse)

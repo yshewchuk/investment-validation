@@ -155,11 +155,37 @@ Checked rather than reasoned:
 So no published experimental result moves. CND-PS and BFLY-P5 were only ever
 priced by the board, which is exactly where the 70 rows were found.
 
-## Known rough edge, not fixed here
+## COARSE_LADDER, because NO_CHAIN was the wrong thing to say
 
-A refused row reaches the board through `unscorable_result`, which flags it
-`NO_CHAIN`. For these 70 rows the chain exists and is fine — it is the ladder
-that is too coarse. The `detail` string carries the accurate reason, but the
-flag does not, and `NO_CHAIN` is now doing duty for two different conditions.
-Worth a distinct flag; left alone here because `unscorable_result` is shared
-with the dashboard self-check and changing its flags is a separate change.
+A refused row used to be flagged `NO_CHAIN`, and for these 70 rows that is not
+merely imprecise, it is actionable and wrong: `NO_CHAIN` tells a reader to go
+and re-pull quotes, and the UI even renders the age of the newest chain beside
+it so they can judge whether a refresh helps. Here the chain is present and
+correct. Nothing about a refresh changes the answer — only a denser ladder or a
+wider structure does.
+
+So the collision now raises `LadderTooCoarse(StructureError)`. A subclass
+rather than a message, because three callers have to tell it apart and a string
+comparison is not a contract. It stays a `StructureError`, so `UNSCORABLE` and
+every existing `except` still catch it and nothing that used to be handled
+stops being handled.
+
+Three places consume the type:
+
+- `Scorer._price` flags `COARSE_LADDER` and — new — writes the exception
+  message to `detail`. That branch previously set no detail at all, so a refused
+  row reached the board saying nothing about why it was refused.
+- `unscorable_result`, the shared placeholder the dashboard self-check
+  re-scores through, picks the flag from the exception type so both paths reach
+  the same one from the same failure.
+- `app.js` renders it as `COARSE_LADDER (strikes too far apart)` with the
+  colliding legs on hover, alongside the existing `NO_CHAIN (newest Nd old)`.
+
+**And a second NO_CHAIN, further down, that the first fix missed.** The
+expected-P&L step flags `NO_CHAIN` whenever there is no entry cost — which is
+of course true of a row whose pricing was refused. So the first version of this
+change produced rows carrying BOTH flags, and the board would still have said
+NO_CHAIN. A row that was already refused now keeps the reason it was refused
+for. The test that caught it is the one asserting `"NO_CHAIN" not in flags`
+rather than only `"COARSE_LADDER" in flags` — worth remembering that asserting
+the presence of the new thing would have passed.

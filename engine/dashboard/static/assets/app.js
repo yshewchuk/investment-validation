@@ -294,8 +294,16 @@ function flagBadges(row) {
        whether a refresh fixes this row or the name was never covered. */
     const label = f === "NO_CHAIN" && row.chain_age_days !== null && row.chain_age_days !== undefined
       ? "NO_CHAIN (newest " + row.chain_age_days + "d old)"
-      : f === "NO_CHAIN" && !row.chain_last_obs ? "NO_CHAIN (never pulled)" : f;
-    out.push('<span class="pill ' + klass + '" title="' + esc(row.chain_last_obs || "") + '">' + esc(label) + "</span>");
+      : f === "NO_CHAIN" && !row.chain_last_obs ? "NO_CHAIN (never pulled)"
+      /* The opposite situation to NO_CHAIN, and it reads like it unless the
+         badge says so: the chain is fine, the strike ladder is too coarse for
+         the width. Re-pulling quotes will not change it. */
+      : f === "COARSE_LADDER" ? "COARSE_LADDER (strikes too far apart)"
+      : f;
+    /* `detail` already names the legs that collided; showing it on hover keeps
+       the badge short without hiding which two they were. */
+    const tip = f === "COARSE_LADDER" ? (row.detail || "") : (row.chain_last_obs || "");
+    out.push('<span class="pill ' + klass + '" title="' + esc(tip) + '">' + esc(label) + "</span>");
   });
   return out.join(" ");
 }

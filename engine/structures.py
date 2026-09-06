@@ -47,6 +47,8 @@ __all__ = [
     "ResolvedLeg",
     "StructurePrice",
     "ChainSnapshot",
+    "StructureError",
+    "LadderTooCoarse",
     "put_calendar",
     "straddle_through",
     "straddle_runup",
@@ -68,6 +70,21 @@ BUY, SELL = "buy", "sell"
 
 class StructureError(Exception):
     """A structure could not be resolved against the given chain."""
+
+
+class LadderTooCoarse(StructureError):
+    """Two legs of one structure resolved onto the same contract.
+
+    A subclass rather than a message, because callers have to tell this apart
+    from every other resolution failure and the difference is actionable. The
+    chain is PRESENT and correct here — refreshing quotes changes nothing. What
+    is too small is the gap between this ticker's listed strikes relative to the
+    width being asked for, so only a denser ladder or a wider structure makes
+    the event tradeable.
+
+    The board flags it `COARSE_LADDER` for exactly that reason: reporting it as
+    NO_CHAIN sends a reader to re-pull data that is already fine.
+    """
 
 
 # --------------------------------------------------------------------------
@@ -756,7 +773,7 @@ def price_structure(
             f"{pd.Timestamp(expiry).date()}"
             for names, (right, strike, expiry) in collided
         )
-        raise StructureError(
+        raise LadderTooCoarse(
             f"{structure.name}: the listed strikes are too coarse for this "
             f"shape — {detail}"
         )

@@ -1408,3 +1408,106 @@ class TestDynamicShortVol:
         frame = self._rows().drop(columns=["event_date"])
         with pytest.raises(KeyError, match="event_date"):
             dynamic_short_vol(frame)
+
+
+class TestCoarseLadderFlag:
+    """A refused-for-collision row must not read as a missing chain.
+
+    NO_CHAIN is actionable: it tells a reader to re-pull, and the UI even
+    renders the age of the newest chain beside it so they can judge whether a
+    refresh helps. On these rows the chain is present and correct — 70 of 1,648
+    on the 2026-09-06 board — and every one of those readings would have been
+    wrong. See guides/coarse_ladder_collision.md.
+    """
+
+    def test_the_flag_is_registered(self):
+        assert "COARSE_LADDER" in score_mod.FLAGS
+
+    def test_the_shared_placeholder_flags_it_apart_from_no_chain(self):
+        """`unscorable_result` is the path the dashboard self-check re-scores
+        through, so it must reach the same flag from the same exception."""
+        from engine.structures import LadderTooCoarse, StructureError
+
+        request = ScoreRequest(ticker="KEN", strategy="CND-PS", as_of=None,
+                               event_date=pd.Timestamp("2026-09-07"))
+        coarse = score_mod.unscorable_result(
+            request, as_of=pd.Timestamp("2026-09-06"), snapshot="x",
+            exc=LadderTooCoarse("CND-PS: the listed strikes are too coarse"),
+        )
+        assert "COARSE_LADDER" in coarse.flags
+        assert "NO_CHAIN" not in coarse.flags
+
+        missing = score_mod.unscorable_result(
+            request, as_of=pd.Timestamp("2026-09-06"), snapshot="x",
+            exc=StructureError("no expiry survives"),
+        )
+        assert "NO_CHAIN" in missing.flags
+        assert "COARSE_LADDER" not in missing.flags
+
+    def test_the_placeholder_keeps_the_message_that_names_the_legs(self):
+        """The flag says the class of failure; only the detail says which two
+        legs collided, and it is the sole record of that on the row."""
+        from engine.structures import LadderTooCoarse
+
+        request = ScoreRequest(ticker="KEN", strategy="CND-PS", as_of=None,
+                               event_date=pd.Timestamp("2026-09-07"))
+        result = score_mod.unscorable_result(
+            request, as_of=pd.Timestamp("2026-09-06"), snapshot="x",
+            exc=LadderTooCoarse(
+                "CND-PS: the listed strikes are too coarse for this shape — "
+                "up1 and up2 both resolve to P 70 2026-09-18"),
+        )
+        assert "up1 and up2" in result.detail
+
+    def test_it_survives_the_round_trip_onto_a_board_row(self):
+        """The flag has to reach the served row, or the UI cannot show it."""
+        from engine.structures import LadderTooCoarse
+
+        request = ScoreRequest(ticker="KEN", strategy="CND-PS", as_of=None,
+                               event_date=pd.Timestamp("2026-09-07"))
+        row = score_mod.unscorable_result(
+            request, as_of=pd.Timestamp("2026-09-06"), snapshot="x",
+            exc=LadderTooCoarse("CND-PS: too coarse — up1 and up2"),
+        ).as_dict()
+        assert "COARSE_LADDER" in row["flags"]
+
+    def test_the_scorer_flags_it_where_it_prices(
+        self, scorer, dense_chain, forecast, monkeypatch
+    ):
+        """The other path: the scorer's own `except` around `price_structure`.
+
+        That branch used to collapse every `StructureError` into NO_CHAIN and
+        set no detail at all, so a refused row reached the board saying nothing
+        about why. Patched at the source module because the scorer imports
+        `price_structure` inside the function, so the lookup happens at call
+        time.
+        """
+        import engine.structures as structures_mod
+        from engine.structures import LadderTooCoarse
+
+        def refuse(*args, **kwargs):
+            raise LadderTooCoarse(
+                "CND-PS: the listed strikes are too coarse for this shape — "
+                "up1 and up2 both resolve to P 70 2026-09-18"
+            )
+
+        monkeypatch.setattr(structures_mod, "price_structure", refuse)
+        result = scorer.score(request(), chain_index=dense_chain)
+        assert "COARSE_LADDER" in result.flags
+        assert "NO_CHAIN" not in result.flags
+        assert "up1 and up2" in (result.detail or "")
+
+    def test_an_ordinary_resolution_failure_still_reads_as_no_chain(
+        self, scorer, dense_chain, forecast, monkeypatch
+    ):
+        """The negative control: only the collision gets the new flag."""
+        import engine.structures as structures_mod
+        from engine.structures import StructureError
+
+        def refuse(*args, **kwargs):
+            raise StructureError("no expiry survives")
+
+        monkeypatch.setattr(structures_mod, "price_structure", refuse)
+        result = scorer.score(request(), chain_index=dense_chain)
+        assert "NO_CHAIN" in result.flags
+        assert "COARSE_LADDER" not in result.flags
