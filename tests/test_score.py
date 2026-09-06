@@ -527,13 +527,37 @@ class TestGateDomain:
         assert result.gate_score is None
         assert result.gate_pass is None
 
-    def test_a_computed_moves_name_gets_no_decision(self, scorer, monkeypatch):
-        from engine import score as sm
+    def test_a_computed_moves_name_now_gets_a_decision(self, scorer):
+        """Having a computed move is no longer grounds to withhold.
 
+        The clause this replaces refused any ticker with a file in
+        COMPUTED_MOVES, on the reasoning that those were names oquants does not
+        carry and no gate had trained on. Moves are now computed for EVERY
+        ticker, so 2,814 of the 2,852 are names oquants carries too, and the
+        panel that trains the gates is built with
+        `extra_moves_dirs=(COMPUTED_MOVES,)` — so the clause had inverted into
+        refusing the universe the champions were actually trained on: 70% of
+        every STR-THRU and STR-RUNUP row on the live board.
+        """
         self._stub_gate(scorer)
-        monkeypatch.setattr(sm, "_computed_moves_names", lambda: frozenset({TICKER}))
         result = self._result()
         features = pd.DataFrame({"mcap_log": [np.log(2e10)]})
+        scorer._score_gate(request(), result, features)
+        assert "OUT_OF_DOMAIN" not in result.flags
+        assert result.gate_pass is not None
+
+    def test_the_market_cap_floor_is_untouched_by_that_removal(self, scorer):
+        """The two clauses were independent and only one of them went.
+
+        EXP-118 showed retraining on the expanded `<1B` universe does not clear
+        the champions, so the size floor is still the reason a champion may
+        decline to decide.
+        """
+        from engine.score import GATE_MCAP_FLOOR
+
+        self._stub_gate(scorer)
+        result = self._result()
+        features = pd.DataFrame({"mcap_log": [np.log(GATE_MCAP_FLOOR / 10)]})
         scorer._score_gate(request(), result, features)
         assert "OUT_OF_DOMAIN" in result.flags
         assert result.gate_pass is None

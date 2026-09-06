@@ -152,21 +152,21 @@ THIN_HISTORY_EVENTS = 4
 
 #: Market-cap floor of the gates' training universe. The `<1B` slice joined the
 #: target set 2026-09-01 (engine/data/pulls/sep2026_plan.py) with near-zero
-#: prior coverage, one day after the gates were promoted on 2026-08-30, and
-#: EXP-118 showed retraining on the expanded universe does not clear the
-#: champions. Until a gate trained on the expanded universe promotes, the
-#: decision is withheld for names the champion never saw: a gate call on a
-#: name outside its evidence is an undetermined result, not a trade.
+#: prior coverage, and EXP-118 showed retraining on the expanded universe does
+#: not clear the champions. Until a gate trained on the expanded universe
+#: promotes, the decision is withheld for names the champion never saw: a gate
+#: call on a name outside its evidence is an undetermined result, not a trade.
+#:
+#: NOT re-examined when the computed-moves clause was removed on 2026-09-06,
+#: and it should be. That clause was justified by the same "promoted before the
+#: universe expanded" argument, and the registry now records both champion
+#: gates as promoted 2026-09-05 rather than 2026-08-30 — while the panel they
+#: trained on carries 22,416 pre-2026 rows below this floor across 1,429
+#: tickers. Whether those rows reached the replay trade set is the open
+#: question; EXP-118's conclusion is what holds the floor up, so retiring it
+#: needs an experiment rather than a reading of the dates.
 GATE_MCAP_FLOOR = 1e9
 
-
-def _computed_moves_names() -> frozenset:
-    """The EXP-117 universe: names the oquants panel does not carry, scored
-    from synthesized moves — absent from every promoted gate's training data
-    by construction."""
-    return frozenset(
-        p.stem[len("moves_"):] for p in paths.COMPUTED_MOVES.glob("moves_*.json")
-    )
 
 #: |strike/spot − 1| within this is "at the money" — the only region the current
 #: evidence covers.
@@ -1466,15 +1466,34 @@ class Scorer:
     def _gate_in_domain(self, request, features) -> bool:
         """Is this name inside the champion gate's training universe?
 
-        The gates were promoted 2026-08-30 on a universe with near-zero `<1B`
-        coverage and no computed-moves names; both joined the board 2026-09-01.
-        EXP-118 showed retraining on the expanded universe does not clear the
-        champions, so the champions stand — which is only coherent if the gate
-        also refuses to decide the names it was never validated on. A gate call
-        on an out-of-domain name is an undetermined result, not a trade.
+        A gate call on a name the champion never saw is an undetermined result,
+        not a trade — so this exists to withhold rather than to decide. What it
+        must NOT do is withhold on names the champion did see.
+
+        **The computed-moves clause was removed 2026-09-06.** It refused any
+        ticker with a file in `paths.COMPUTED_MOVES`, on the reasoning that
+        those were the EXP-117 names the oquants panel does not carry and that
+        no gate had trained on. Both halves stopped being true:
+
+        * Moves are now computed for every ticker rather than only the ones
+          oquants misses, so the directory no longer identifies that
+          subpopulation. Of its 2,852 names, **2,814 (98.7%) are names oquants
+          also carries** — ADBE and CASY among them. The clause had inverted
+          into refusing the very universe the gates were trained on: 130 of the
+          live board's 188 tickers, 266 of its 289 OUT_OF_DOMAIN rows, and 70%
+          of every STR-THRU and STR-RUNUP row.
+        * `engine/data/features/panel.py` builds the panel with
+          `extra_moves_dirs=(paths.COMPUTED_MOVES,)`, so those names are IN the
+          training data. Both champion gates were promoted 2026-09-05, the same
+          day the computed moves landed. Even the 15 genuinely computed-only
+          board names carry pre-2026 panel history — KEN 11 rows, CRESY 36,
+          IBEX 7 — so "absent by construction" was false for them too.
+
+        The market-cap floor below is a separate rule and still stands: EXP-118
+        showed retraining on the expanded `<1B` universe does not clear the
+        champions, so the champions stand only if they decline the sizes they
+        were never validated on.
         """
-        if request.ticker in _computed_moves_names():
-            return False
         if "mcap_log" in features.columns:
             mcap_log = pd.to_numeric(features["mcap_log"], errors="coerce")
             if len(mcap_log) and np.isfinite(mcap_log.iloc[0]):
