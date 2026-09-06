@@ -110,6 +110,51 @@ Two things went in:
 The second is the one that generalises: it states the requirement over the
 registry rather than over the two families that happened to be noticed.
 
+## Were the experiments affected? No — and the reason is structural
+
+The fix is in `engine/structures.py`, the ONE pricing path, so the question is
+real: a defect there is not confined to the dashboard. It is confined anyway,
+by a difference in how the two paths size a structure.
+
+**The board sizes in dollars.** It sets `width_moneyness` per event from the
+forecast, which switches `_symmetric_put_ladder` from `grid_step` to
+`offset_from` — and it is only in that mode that two legs are placed by
+independent dollar offsets from one anchor:
+
+| family | `width_moneyness=None` | width set |
+|---|---|---|
+| CND-PS | `grid_step` x2 | **`offset_from` x2 off `atm`** |
+| BFLY-P5 | `grid_step` x2 | **`offset_from` x2 off `atm`** |
+| TWIN-P, TWIN-P5 | `grid_step` x1 | `offset_from` x1, rest `mirror` |
+| CND-P | `offset_from` x1 | (takes no `width_moneyness`) |
+
+Only CND-PS and BFLY-P5 have two, and only with a width set. Every other family
+places at most one offset and mirrors the rest, and `mirror` refuses a strike
+that is not listed.
+
+**The experiments size in ladder positions.** EXP-134, 137, 138, 139 and 141 all
+`import family` from EXP-133, whose `to_structure` builds every candidate from
+`bracket` + `grid_step` + `mirror` and takes its offsets from
+`itertools.combinations`, which yields strictly increasing distinct integers.
+Distinct positions map to distinct rungs. The collision cannot be expressed.
+
+Checked rather than reasoned:
+
+- All **12,600** enumerated patterns: 0 request two legs at one ladder
+  position, 0 request a leg at the anchor's own position, and the selectors
+  across all 12,030 buildable ones are `bracket` 12,030 / `grid_step` 34,260 /
+  `mirror` 34,260 — **`offset_from` appears zero times.**
+- The four families the experiments replay with a dollar width — TWIN-P,
+  TWIN-P5 at m=3 and m=2, CND-P — priced across 5 ladder granularities x 6
+  spots x 7 widths, 840 combinations: **0 collisions.**
+- Every experiment that passes `width_moneyness` passes it to `twin_peak` or
+  `twin_peak_5` (EXP-125, 126, 133, 134, 137, 138, 139). No experiment names
+  CND-PS or BFLY-P5 at all — those two were added to the registry on
+  2026-09-06 for forward tracking and have never been backtested.
+
+So no published experimental result moves. CND-PS and BFLY-P5 were only ever
+priced by the board, which is exactly where the 70 rows were found.
+
 ## Known rough edge, not fixed here
 
 A refused row reaches the board through `unscorable_result`, which flags it
