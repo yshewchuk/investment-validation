@@ -705,7 +705,15 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
     # is not the "what if I picked another strike" view the explorer is for.
     from engine.forecast_sizing import FORECAST_SIZED
 
+    from engine.structures import STRUCTURES
+
     live = board[board["gate_pass"].fillna(False).astype(bool)]
+    # A ladder row is "the same structure at another strike", so the strategy
+    # has to BE a structure. DYN-SV is a chooser over structures and has no
+    # legs of its own: laddering it asked the engine to re-score a name it
+    # cannot resolve, and produced three DYN-SV rows for one event, two of them
+    # sharing a row_id.
+    live = live[live["strategy"].isin(set(STRUCTURES))]
     live = live[~live["strategy"].isin(set(FORECAST_SIZED))]
     offsets = [
         step * sign
@@ -740,6 +748,8 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
                     int(record["quote_max_age_sessions"])
                     if record.get("quote_max_age_sessions") is not None else None
                 ),
+                # And the same ceiling on that bound, for the same reason.
+                chain_as_of=as_of,
             )
             try:
                 result = scorer.score(request)

@@ -15,6 +15,14 @@ row, because they catch different failures:
   fresh result at display precision. A bundle hand-edited after rendering
   keeps its digest — only the field diff catches the tamper.
 
+A **chooser** row (DYN-SV) is the exception, because the engine cannot score
+it: it names a structure per event instead of having legs. It is verified
+against the structure it says it chose — re-score ``chosen_strategy``, put the
+chooser's own name back, and require the digest to agree — so the row's claim
+("these are the winner's numbers, and this is who won") is what gets checked.
+Its ``detail`` is checked by shape instead of equality, since the chooser
+prepends a sentence to the winner's.
+
 Any mismatch means the bundle and the engine disagree, and the publish is
 refused. The report never raises on a mismatch; the caller decides.
 """
@@ -63,12 +71,15 @@ class SelfCheckReport:
         }
 
 
-def reconstruct_request(row: dict):
+def reconstruct_request(row: dict, *, board_as_of=None):
     """Board row → the exact ``ScoreRequest`` that produced it.
 
     ``score_calendar`` scores with ``as_of=None`` (the scorer defaults it to
     the entry date) and an optional fixed strike, so those are the only
-    ingredients needed to reproduce the call.
+    ingredients needed to reproduce the call — plus ``board_as_of``, which
+    ceilings the stale-quote fallback at the night the board was rendered for.
+    Without it a re-score run later can substitute a chain that did not exist
+    on that night, and the row reads as a mismatch when nothing changed.
     """
     from engine.fills import FillModel
     from engine.score import ScoreRequest
@@ -96,7 +107,29 @@ def reconstruct_request(row: dict):
             int(row["quote_max_age_sessions"])
             if row.get("quote_max_age_sessions") is not None else None
         ),
+        chain_as_of=(
+            pd.Timestamp(board_as_of).normalize() if board_as_of is not None else None
+        ),
     )
+
+
+def _chooser_detail_ok(row: dict, fresh_detail: Any) -> str | None:
+    """Is a chooser row's rewritten ``detail`` consistent with what it chose?
+
+    The chooser prepends its own sentence to the winner's detail, so the two
+    strings cannot be compared for equality the way every other field is.
+    Returns a reason on failure, ``None`` when consistent.
+    """
+    stored = row.get("detail") or ""
+    chosen = row.get("chosen_strategy")
+    if not chosen:
+        return "chooser row does not name a chosen_strategy"
+    if not stored.startswith(f"chose {chosen} of "):
+        return f"detail does not open by naming {chosen}"
+    tail = str(fresh_detail or "")
+    if tail and not stored.endswith(f"; {tail}"):
+        return "detail dropped the chosen structure's own detail"
+    return None
 
 
 def _sample_rows(rows: Sequence[dict], n: int, seed: int) -> list[dict]:
@@ -176,7 +209,8 @@ def selfcheck(
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     board_as_of = board.get("as_of") or meta.get("as_of")
 
-    from engine.score import UNSCORABLE, Scorer, unscorable_result
+    from engine.score import (DYNAMIC_STRATEGY, UNSCORABLE, Scorer,
+                              unscorable_result)
 
     if scorer is None:
         scorer = Scorer()
@@ -193,8 +227,22 @@ def selfcheck(
         if not digest:
             mismatches.append({"row_id": row.get("row_id"), "reason": "missing digest"})
             continue
+        # A chooser row carries the numbers of the structure it PICKED, under
+        # its own strategy name. The engine cannot score "DYN-SV" — it has no
+        # legs — so the honest re-score is of the structure named on the row,
+        # compared against the row with the chooser's own name put back. That
+        # verifies exactly what a chooser row claims: these are the winner's
+        # numbers, and this is who won.
+        chooser = str(row.get("strategy")) == DYNAMIC_STRATEGY
+        if chooser and not row.get("chosen_strategy"):
+            mismatches.append({"row_id": row.get("row_id"),
+                               "reason": "chooser row does not name a chosen_strategy"})
+            continue
         try:
-            request = reconstruct_request(row)
+            request = reconstruct_request(
+                row | {"strategy": row["chosen_strategy"]} if chooser else row,
+                board_as_of=board_as_of,
+            )
             result = scorer.score(request)
         except UNSCORABLE as exc:
             # The board carries NO_CHAIN placeholders for events whose chains
@@ -213,7 +261,16 @@ def selfcheck(
                 }
             )
             continue
-        fresh_digest = row_digest(result.as_dict())
+        fresh = result.as_dict()
+        if chooser:
+            detail_reason = _chooser_detail_ok(row, fresh.get("detail"))
+            if detail_reason:
+                mismatches.append({"row_id": row.get("row_id"),
+                                   "reason": detail_reason})
+                continue
+            fresh = fresh | {"strategy": DYNAMIC_STRATEGY,
+                             "detail": row.get("detail")}
+        fresh_digest = row_digest(fresh)
         if fresh_digest != digest:
             mismatches.append(
                 {
@@ -224,7 +281,7 @@ def selfcheck(
                 }
             )
             continue
-        field_diffs = _diff_fields(row, result.as_dict())
+        field_diffs = _diff_fields(row, fresh)
         if field_diffs:
             mismatches.append(
                 {

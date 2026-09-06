@@ -703,7 +703,17 @@ function payoffDiagram(r) {
     + "<text x='" + px(l.strike).toFixed(1) + "' y='" + (H - M + 15) + "' class='pf-lbl "
       + (l.side === "buy" ? "pf-buy" : "pf-sell") + "' text-anchor='middle'>"
       + (l.side === "buy" ? "+" : "\u2212") + fmt(l.qty, 0) + "</text>").join("");
-  return "<div class='layer payoff'><h4>Payoff at expiry</h4>"
+  // The chooser's row carries the winner's legs, so the diagram above IS the
+  // chosen structure. Say which one, from the served field rather than by
+  // parsing it back out of the detail prose.
+  const chose = r.chosen_strategy
+    ? "<div class='badge'>DYN-SV chose <b>" + esc(r.chosen_strategy) + "</b>"
+      + (r.menu_size ? " of " + fmt(r.menu_size, 0) : "")
+      + (r.chosen_margin === null || r.chosen_margin === undefined ? ""
+         : ", ahead of the next by " + signedPct(r.chosen_margin, 1))
+      + " — this is that structure's payoff.</div>"
+    : "";
+  return "<div class='layer payoff'><h4>Payoff at expiry</h4>" + chose
     + "<svg viewBox='0 0 " + W + " " + H + "' class='pf'>"
     + "<line x1='" + M + "' y1='" + (H - M) + "' x2='" + (W - M) + "' y2='" + (H - M)
       + "' class='pf-axis'/>"

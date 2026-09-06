@@ -29,6 +29,7 @@ Bundle layout::
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import json
 import re
@@ -102,6 +103,11 @@ _BOARD_FIELDS = (
     # What the gate decided on, for the strategies gated by simulated expected
     # return rather than by arithmetic.
     "exp_pnl_sim", "win_sim",
+    # The chooser's own columns. DYN-SV picks a structure per event, so the row
+    # has to NAME the winner rather than leave it buried in `detail` prose —
+    # and the self-check reads `chosen_strategy` to know which structure to
+    # re-score a chooser row against. Null on every other row.
+    "chosen_strategy", "chosen_margin", "menu_size",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",
     "implied_move", "implied_move_at_entry", "model_vs_market",
@@ -222,20 +228,43 @@ def _integral_floats(value: Any) -> Any:
     return value
 
 
+@functools.cache
+def _engine_fields() -> frozenset[str]:
+    """The keys :meth:`ScoreResult.as_dict` can produce, and only those.
+
+    The digest's domain. Derived from the dataclass rather than listed here so
+    a new engine field is covered the day it is added, and a field appended by
+    anything downstream of the engine is not.
+    """
+    from dataclasses import fields
+
+    from engine.score import ScoreResult
+
+    names = {f.name for f in fields(ScoreResult)}
+    return frozenset((names - {"fill_alpha"}) | {"fill"})
+
+
 def row_digest(record: Mapping[str, Any]) -> str:
     """The canonical digest of one scored row.
 
-    ``score_calendar`` appends ``strike_offset`` to ``ScoreResult.as_dict()``;
-    the digest is defined on the result alone, so the extra key is removed
-    before hashing. Both sides of the self-check hash through THIS function —
-    the stored row and the fresh :class:`~engine.score.ScoreResult` — so the
-    comparison asks whether the engine still produces this score, not whether
-    a value travelled through pandas on its way here.
+    Defined on the ENGINE's result: only keys :meth:`ScoreResult.as_dict`
+    itself can emit are hashed. Both sides of the self-check hash through THIS
+    function — the stored row and a fresh :class:`~engine.score.ScoreResult` —
+    so the comparison asks whether the engine still produces this score, not
+    whether a value travelled through pandas on its way here.
+
+    An allowlist, not a blocklist, because two separate bugs shipped as a
+    blocklist of one key (``strike_offset``). ``score_calendar`` now concats
+    the DYN-SV chooser's rows onto the frame, and pandas gives every OTHER row
+    the chooser's three columns as NaN — so all 19 sampled rows went red on a
+    field none of them had a value for. Anything appended downstream of the
+    engine is outside the domain by construction.
     """
     import hashlib
 
+    allowed = _engine_fields()
     core = {
-        str(k): _digest_safe(v) for k, v in record.items() if k != "strike_offset"
+        str(k): _digest_safe(v) for k, v in record.items() if k in allowed
     }
     return hashlib.sha256(
         json.dumps(core, sort_keys=True, default=str).encode()
@@ -277,7 +306,13 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
         if entry_cost is not None and spot
         else None
     )
-    record["payoff_curve"] = payoff_curve(record)
+    # NOT written back onto `record`. The digest below is defined on the
+    # ENGINE's result — a renderer-derived field inside it makes every board
+    # digest disagree with a fresh `ScoreResult.as_dict()`, which is exactly
+    # what the self-check compares. The first version assigned
+    # `record["payoff_curve"]` here and turned all 19 sampled rows red. Derived
+    # fields belong in `row`, the way the three below do.
+    curve = payoff_curve(record)
     # Derived HERE, not in the client. The board's rule is that the UI formats
     # and never computes, so the nightly self-check covers every number shown.
     # This ratio first shipped as arithmetic in app.js, which `ui_no_compute`
@@ -319,6 +354,7 @@ def compact_row(record: Mapping[str, Any], rank: int | None = None) -> dict:
 
     row = {
         "row_id": _row_identity(record),
+        "payoff_curve": curve,
         "cost_over_width": cost_over_width,
         "entry_cost_pct": entry_cost_pct,
         "model_fair_pct": fair_pct,

@@ -169,6 +169,50 @@ class TestCompactRow:
         assert "payoff" not in row and "analog_buckets" not in row
         assert row["digest"] and row["row_id"].startswith("AAA|STR-THRU|")
 
+    def test_the_digest_is_the_engines_row_not_the_renderers(self):
+        """The self-check re-scores and digests ``ScoreResult.as_dict()``.
+
+        So anything the RENDERER derives must stay out of the digest input.
+        A first version of the payoff diagram assigned
+        ``record["payoff_curve"]`` inside this function, and every sampled row
+        went red in phase 3 — the board's digest covered a field a fresh
+        engine call cannot produce.
+        """
+        from engine.dashboard.render import row_digest
+
+        record = _result().as_dict()
+        expected = row_digest(record)
+        assert compact_row(record)["digest"] == expected
+
+    def test_the_digest_ignores_columns_appended_after_scoring(self):
+        """``score_calendar`` concats the chooser's rows onto the frame.
+
+        pandas then gives EVERY other row the chooser's three columns as NaN.
+        With the digest defined as a blocklist of one key, that turned all 19
+        sampled rows red in phase 3 on fields none of them had a value for.
+        The domain is the engine's field set, so anything appended downstream
+        is outside it by construction.
+        """
+        from engine.dashboard.render import row_digest
+
+        record = _result().as_dict()
+        polluted = record | {
+            "chosen_strategy": "CND-PS", "chosen_margin": 0.09, "menu_size": 5,
+            "strike_offset": 0.025, "payoff_curve": None, "rank": 3,
+        }
+        assert row_digest(polluted) == row_digest(record)
+
+    def test_it_does_not_mutate_the_record_it_was_given(self):
+        """``records`` is shared with the per-ticker files and with ranking.
+
+        Writing a derived field back would give one row two identities
+        depending on which caller read it first.
+        """
+        record = _result().as_dict()
+        before = dict(record)
+        compact_row(record, rank=1)
+        assert record == before
+
 
 # --------------------------------------------------------------------------
 # the bundle
@@ -311,6 +355,64 @@ class TestSelfCheck:
             exc=KeyError("no chain for CCC"),
         )
         assert row_digest(placeholder.as_dict()) == row["digest"]
+
+    def test_a_chooser_row_verifies_against_the_structure_it_chose(self, tmp_path):
+        """DYN-SV has no legs, so re-scoring it as a structure is meaningless.
+
+        It carries the numbers of the structure it PICKED under its own name,
+        and that is what must be verified: re-score ``chosen_strategy``, put
+        the chooser's name back, and require the digest to agree.
+        """
+        from engine.dashboard.render import row_digest
+        from engine.score import DYNAMIC_STRATEGY
+
+        winner = _result(ticker="AAA", strategy="CND-PS", detail="gate 0.71")
+        row = winner.as_dict() | {
+            "strategy": DYNAMIC_STRATEGY, "chosen_strategy": "CND-PS",
+            "chosen_margin": 0.09, "menu_size": 5,
+            "detail": "chose CND-PS of 5 (exp P&L +31.0%); gate 0.71",
+            "strike_offset": None,
+        }
+        render_bundle(pd.DataFrame([row]), tmp_path / "b", as_of=AS_OF,
+                      meta={"as_of": str(AS_OF.date()), "snapshot_hash": "snap-test"})
+        report = selfcheck(tmp_path / "b", scorer=FakeScorer([winner]))
+        assert report.ok, report.mismatches
+        # And the row it is verified against is really the winner's.
+        board = json.loads((tmp_path / "b" / "data" / "board.json").read_text())
+        assert board["rows"][0]["digest"] == row_digest(
+            winner.as_dict() | {"strategy": DYNAMIC_STRATEGY,
+                                "detail": row["detail"]})
+
+    def test_a_chooser_row_that_names_the_wrong_winner_is_red(self, tmp_path):
+        """The detail sentence is the claim; it has to match the field."""
+        from engine.score import DYNAMIC_STRATEGY
+
+        winner = _result(ticker="AAA", strategy="CND-PS", detail="gate 0.71")
+        row = winner.as_dict() | {
+            "strategy": DYNAMIC_STRATEGY, "chosen_strategy": "CND-PS",
+            "chosen_margin": 0.09, "menu_size": 5,
+            "detail": "chose TWIN-P of 5 (exp P&L +31.0%); gate 0.71",
+            "strike_offset": None,
+        }
+        render_bundle(pd.DataFrame([row]), tmp_path / "b", as_of=AS_OF,
+                      meta={"as_of": str(AS_OF.date()), "snapshot_hash": "snap-test"})
+        report = selfcheck(tmp_path / "b", scorer=FakeScorer([winner]))
+        assert not report.ok
+        assert any("does not open by naming" in m["reason"]
+                   for m in report.mismatches), report.mismatches
+
+    def test_a_chooser_row_with_no_chosen_strategy_is_red(self, tmp_path):
+        """Silently skipping it would leave the one derived row unverified."""
+        from engine.score import DYNAMIC_STRATEGY
+
+        winner = _result(ticker="AAA", strategy="CND-PS")
+        row = winner.as_dict() | {"strategy": DYNAMIC_STRATEGY,
+                                  "strike_offset": None}
+        render_bundle(pd.DataFrame([row]), tmp_path / "b", as_of=AS_OF,
+                      meta={"as_of": str(AS_OF.date()), "snapshot_hash": "snap-test"})
+        report = selfcheck(tmp_path / "b", scorer=FakeScorer([winner]))
+        assert not report.ok
+        assert any("chosen_strategy" in m["reason"] for m in report.mismatches)
 
     def test_missing_board_is_red(self, tmp_path):
         report = selfcheck(tmp_path / "nothing")
@@ -463,6 +565,34 @@ class TestNightlyPieces:
         assert {t for t, _ in asked} == {"PASS"}
         assert sorted(round(s, 4) for _, s in asked) == [97.5, 102.5]
         assert [r["strike_offset"] for r in rows] == [-0.025, 0.025]
+
+    def test_strike_ladder_refuses_a_strategy_with_no_legs(self):
+        """DYN-SV picks a structure; it is not one, so it cannot be re-struck.
+
+        Laddering it asked the engine to resolve a name with no ``STRUCTURES``
+        entry and put three DYN-SV rows on one event, two of them sharing a
+        row_id. A ladder row means "the same structure at another strike", so
+        the strategy has to BE a structure.
+        """
+        from engine.dashboard import nightly
+        from engine.score import DYNAMIC_STRATEGY
+
+        board = pd.DataFrame([
+            _result(ticker="REAL", gate_pass=True).as_dict() | {"strike_offset": None},
+            _result(ticker="META", strategy=DYNAMIC_STRATEGY,
+                    gate_pass=True).as_dict() | {"strike_offset": None},
+        ])
+        asked: list[str] = []
+
+        class Recorder:
+            snapshot = "snap-test"
+
+            def score(self, request, chain_index=None):
+                asked.append(request.strategy)
+                return _result(ticker=request.ticker, strike=request.strike)
+
+        nightly.strike_ladder(board, scorer=Recorder(), alt_strikes=1, as_of=AS_OF)
+        assert DYNAMIC_STRATEGY not in asked and asked
 
     def test_strike_ladder_is_off_at_zero(self):
         from engine.dashboard import nightly

@@ -1169,6 +1169,95 @@ class TestStructureChampionOnTheBoard:
         assert "TWIN-P" in STRUCTURES
 
 
+class TestChainAsOfCeiling:
+    """The stale-quote fallback must not reach past the night being scored.
+
+    ``_fresh_quote_date`` anchors on the ENTRY date, which on a forward board
+    is in the future. Live that is harmless — no chain exists between today and
+    the entry. Replaying a past night against a store refreshed since, it
+    reaches forward: ``score_calendar`` pre-loads the fallback key anchored on
+    ``as_of`` while the scorer's own fallback anchors on the entry, so the
+    board reported NO_CHAIN for a key its index lacked and an on-demand
+    re-score priced the very same row. Eight of twenty rows in the phase-3
+    historical dry-run diverged that way, and none of them were the rows the
+    change under test had touched.
+    """
+
+    def test_the_ceiling_is_part_of_the_request_identity(self):
+        """Two different ceilings are two different questions.
+
+        They must not share a bootstrap seed, or the same key would stand for
+        a row that priced and a row that refused.
+        """
+        import pandas as pd
+
+        from engine.score import ScoreRequest
+
+        base = dict(ticker="AAA", strategy="TWIN-P", as_of=None,
+                    quote_max_age_sessions=5)
+        loose = ScoreRequest(**base)
+        tight = ScoreRequest(**base, chain_as_of=pd.Timestamp("2026-09-02"))
+        assert loose.key() != tight.key()
+        assert tight.key() == ScoreRequest(
+            **base, chain_as_of=pd.Timestamp("2026-09-02")).key()
+
+    def test_a_chain_after_the_ceiling_is_refused(self, monkeypatch):
+        """The whole point: a later chain is information the board lacked."""
+        import pandas as pd
+
+        from engine import score as score_mod
+
+        scorer = score_mod.Scorer.__new__(score_mod.Scorer)
+
+        class Cal:
+            def index_of(self, ts, side="prev"):
+                return int(pd.Timestamp(ts).normalize().value // 86_400_000_000_000)
+
+        scorer.calendar = Cal()
+        monkeypatch.setattr("engine.replay.latest_chain_date",
+                            lambda ticker, anchor: pd.Timestamp("2026-09-04"))
+
+        result = score_mod.ScoreResult(ticker="AAA", strategy="TWIN-P",
+                                       as_of=pd.Timestamp("2026-09-02"))
+        result.entry_date = pd.Timestamp("2026-09-09")
+
+        loose = score_mod.ScoreRequest(ticker="AAA", strategy="TWIN-P", as_of=None,
+                                       quote_max_age_sessions=5)
+        assert scorer._fresh_quote_date(loose, result, 5)[0] == pd.Timestamp("2026-09-04")
+
+        tight = score_mod.ScoreRequest(ticker="AAA", strategy="TWIN-P", as_of=None,
+                                       quote_max_age_sessions=5,
+                                       chain_as_of=pd.Timestamp("2026-09-02"))
+        assert scorer._fresh_quote_date(tight, result, 5) == (None, None)
+
+    def test_a_chain_on_the_ceiling_is_still_allowed(self):
+        """The bound is inclusive: a chain from that session was available."""
+        import pandas as pd
+
+        from engine import score as score_mod
+
+        scorer = score_mod.Scorer.__new__(score_mod.Scorer)
+
+        class Cal:
+            def index_of(self, ts, side="prev"):
+                return int(pd.Timestamp(ts).normalize().value // 86_400_000_000_000)
+
+        scorer.calendar = Cal()
+        import engine.replay as replay
+        original = replay.latest_chain_date
+        replay.latest_chain_date = lambda ticker, anchor: pd.Timestamp("2026-09-02")
+        try:
+            result = score_mod.ScoreResult(ticker="AAA", strategy="TWIN-P",
+                                           as_of=pd.Timestamp("2026-09-02"))
+            result.entry_date = pd.Timestamp("2026-09-04")
+            req = score_mod.ScoreRequest(ticker="AAA", strategy="TWIN-P", as_of=None,
+                                         quote_max_age_sessions=5,
+                                         chain_as_of=pd.Timestamp("2026-09-02"))
+            assert scorer._fresh_quote_date(req, result, 5)[0] == pd.Timestamp("2026-09-02")
+        finally:
+            replay.latest_chain_date = original
+
+
 class TestDynamicShortVol:
     """The chooser is a meta-strategy over scored rows, not a sixth structure.
 
@@ -1183,7 +1272,8 @@ class TestDynamicShortVol:
     def _rows(**over):
         import pandas as pd
 
-        base = dict(event_id="E1", ticker="AAA", strike_offset=None, detail="")
+        base = dict(ticker="AAA", event_date="2026-02-01",
+                    strike_offset=None, detail="")
         return pd.DataFrame([
             base | dict(strategy="TWIN-P", exp_pnl_sim=0.10),
             base | dict(strategy="CND-PS", exp_pnl_sim=0.31),
@@ -1216,8 +1306,9 @@ class TestDynamicShortVol:
         from engine.score import dynamic_short_vol
 
         frame = pd.concat([self._rows(), pd.DataFrame([dict(
-            event_id="E1", ticker="AAA", strike_offset=None, detail="",
-            strategy="STR-THRU", exp_pnl_sim=0.99)])], ignore_index=True)
+            ticker="AAA", event_date="2026-02-01", strike_offset=None,
+            detail="", strategy="STR-THRU", exp_pnl_sim=0.99)])],
+            ignore_index=True)
         assert dynamic_short_vol(frame).iloc[0]["chosen_strategy"] == "CND-PS"
 
     def test_an_event_nothing_simulated_yields_no_row(self):
@@ -1228,8 +1319,8 @@ class TestDynamicShortVol:
         from engine.score import dynamic_short_vol
 
         frame = pd.DataFrame([dict(
-            event_id="E2", ticker="BBB", strategy="TWIN-P5", strike_offset=None,
-            detail="", exp_pnl_sim=np.nan)])
+            ticker="BBB", event_date="2026-02-01", strategy="TWIN-P5",
+            strike_offset=None, detail="", exp_pnl_sim=np.nan)])
         assert dynamic_short_vol(frame).empty
 
     def test_ladder_rows_do_not_let_one_family_enter_five_times(self):
@@ -1239,8 +1330,9 @@ class TestDynamicShortVol:
         from engine.score import dynamic_short_vol
 
         frame = pd.concat([self._rows(), pd.DataFrame([dict(
-            event_id="E1", ticker="AAA", strategy="TWIN-P", detail="",
-            strike_offset=0.05, exp_pnl_sim=0.95)])], ignore_index=True)
+            ticker="AAA", event_date="2026-02-01", strategy="TWIN-P",
+            detail="", strike_offset=0.05, exp_pnl_sim=0.95)])],
+            ignore_index=True)
         out = dynamic_short_vol(frame)
         assert out.iloc[0]["chosen_strategy"] == "CND-PS"
         assert out.iloc[0]["menu_size"] == 3
@@ -1268,3 +1360,51 @@ class TestDynamicShortVol:
         frame["entry_rule"] = ["NO", "NO", "NO"]
         out = dynamic_short_vol(frame)
         assert out.iloc[0]["entry_rule"] == "NO"
+
+    def test_the_event_key_is_one_a_scored_row_actually_carries(self):
+        """The regression that made the whole class pass while the board broke.
+
+        This grouped on ``event_id`` — the Tier-2 ``earnings_events`` key —
+        and every test above passed, because the fixture supplied a column
+        ``score_board`` never produces. Three phase-3 checks failed with
+        ``KeyError: 'event_id'`` on real data. Assert the key against the
+        dataclass the real caller serializes, so a fixture cannot vouch for a
+        schema again.
+        """
+        import pandas as pd
+
+        from engine.score import _EVENT_KEY, ScoreResult
+
+        emitted = set(ScoreResult(
+            ticker="AAA", strategy="TWIN-P",
+            as_of=pd.Timestamp("2026-01-15")).as_dict())
+        assert set(_EVENT_KEY) <= emitted, (
+            f"{sorted(set(_EVENT_KEY) - emitted)} is not on a scored row")
+
+    def test_two_events_for_one_ticker_are_two_contests(self):
+        """Ticker alone is not an event — a name reports every quarter."""
+        import pandas as pd
+
+        from engine.score import dynamic_short_vol
+
+        q1 = self._rows()
+        q2 = self._rows()
+        q2["event_date"] = "2026-05-01"
+        out = dynamic_short_vol(pd.concat([q1, q2], ignore_index=True))
+        assert len(out) == 2
+        assert sorted(out["event_date"]) == ["2026-02-01", "2026-05-01"]
+
+    def test_a_frame_without_the_key_says_so_instead_of_declining(self):
+        """Declining is for an event nothing simulated, not a broken schema.
+
+        A silent empty return here is what let the wrong key ship: the caller
+        would have shown a board with no chooser row and no error.
+        """
+        import pandas as pd
+        import pytest
+
+        from engine.score import dynamic_short_vol
+
+        frame = self._rows().drop(columns=["event_date"])
+        with pytest.raises(KeyError, match="event_date"):
+            dynamic_short_vol(frame)

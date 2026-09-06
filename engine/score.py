@@ -246,6 +246,19 @@ class ScoreRequest:
     #: lets the board show a trade several days out. `None` keeps the strict
     #: behaviour: no chain for the entry date, no price.
     quote_max_age_sessions: int | None = None
+    #: Ceiling on the stale-quote fallback: never substitute a chain dated
+    #: after this. ``None`` means no ceiling.
+    #:
+    #: The fallback above anchors on the ENTRY date, which on a forward board
+    #: is in the future. Live that is harmless — no chain exists between today
+    #: and the entry — but replaying a past night against a store that has
+    #: since been refreshed, it reaches forward past the night being replayed.
+    #: :func:`score_calendar` pre-loads the fallback key anchored on ``as_of``
+    #: instead, so the two disagreed: the board reported NO_CHAIN for a key its
+    #: index lacked while a re-score fetched the same key on demand and priced
+    #: it. Eight of twenty rows in the historical dry-run diverged that way.
+    #: Setting this makes both paths refuse the same chains.
+    chain_as_of: pd.Timestamp | None = None
     #: Parameters handed to the structure factory, for a structure whose SHAPE
     #: varies per event rather than being fixed by its strategy code — a
     #: per-event tent width, a different back DTE, a shifted anchor. Without
@@ -271,6 +284,8 @@ class ScoreRequest:
             self.variant or "",
             "" if self.decision_offset is None else f"d{self.decision_offset:+d}",
             "" if self.quote_max_age_sessions is None else f"q{self.quote_max_age_sessions}",
+            "" if self.chain_as_of is None
+            else f"c{pd.Timestamp(self.chain_as_of).date()}",
             # Two events priced at different structure parameters are different
             # TRADES, so they must not share an identity or a bootstrap seed.
             # Sorted, so an equal dict always renders equal.
@@ -1027,6 +1042,13 @@ class Scorer:
         if newest is None:
             return None, None
         newest = pd.Timestamp(newest).normalize()
+        if request.chain_as_of is not None and newest > pd.Timestamp(
+            request.chain_as_of
+        ).normalize():
+            # Dated after the night being scored: information the board did not
+            # have. Refuse it here so the caller's pre-loaded index and an
+            # on-demand re-score reach the same verdict.
+            return None, None
         try:
             age = self.calendar.index_of(anchor, side="prev") - self.calendar.index_of(
                 newest, side="prev"
@@ -1961,6 +1983,7 @@ def score_calendar(
                     strike=strike,
                     fill=fill,
                     quote_max_age_sessions=quote_max_age_sessions,
+                    chain_as_of=as_of,
                 )
                 try:
                     result = engine.score(request, chain_index=index)
@@ -2002,6 +2025,15 @@ DYNAMIC_MENU: tuple[str, ...] = ("TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-
 #: What the chooser is called on the board.
 DYNAMIC_STRATEGY = "DYN-SV"
 
+#: What identifies one event among scored rows.
+#:
+#: NOT ``event_id``. That column is the Tier-2 ``earnings_events`` key and it
+#: does not survive into a board row: :meth:`ScoreResult.as_dict` carries
+#: ``ticker`` and ``event_date`` and nothing else that names the event. The
+#: first version of this grouped on ``event_id`` and passed its unit tests,
+#: because the fixture invented the column the real caller never supplies.
+_EVENT_KEY: tuple[str, ...] = ("ticker", "event_date")
+
 
 def dynamic_short_vol(frame: pd.DataFrame,
                       menu: tuple[str, ...] = DYNAMIC_MENU) -> pd.DataFrame:
@@ -2036,8 +2068,16 @@ def dynamic_short_vol(frame: pd.DataFrame,
     if live.empty:
         return frame.iloc[0:0]
 
+    missing = [c for c in _EVENT_KEY if c not in live.columns]
+    if missing:
+        raise KeyError(
+            f"dynamic_short_vol needs {_EVENT_KEY} to identify an event; "
+            f"missing {missing}. Board rows come from ScoreResult.as_dict(), "
+            "which carries no event_id — that column exists in Tier-2 tables, "
+            "not on the board.")
+
     picks = []
-    for event_id, block in live.groupby("event_id", sort=False):
+    for _, block in live.groupby(list(_EVENT_KEY), sort=False, dropna=False):
         ordered = block.sort_values("exp_pnl_sim", ascending=False)
         best = ordered.iloc[0].to_dict()
         runner = ordered.iloc[1] if len(ordered) > 1 else None
