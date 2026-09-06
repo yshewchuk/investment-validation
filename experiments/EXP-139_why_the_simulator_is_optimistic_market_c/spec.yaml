@@ -1,0 +1,169 @@
+id: EXP-139
+title: "Why the simulator is optimistic: market-cap conditioning and a per-family de-bias"
+kind: simulator-replacement
+strategy: TWIN-P5
+programme: tier4-feature-models
+prior: [EXP-129, EXP-131, EXP-133, EXP-134, EXP-137, EXP-138]
+type: confirmatory
+price_source: >
+  None new. EXP-137's priced candidates are read from disk and nothing is
+  repriced; the quotes are the ORATS chains that experiment used, and every
+  structure, width, anchor and filter is held at its configuration. Only how
+  the residual pool is drawn from, and what is subtracted from the resulting
+  expectation, change.
+
+hypothesis: >
+  The simulator over-predicts EVERY structure family, by 5.9pp to 12.3pp of
+  mean return, in the same direction. That pattern is the finding: a pricing
+  bug or a distribution-shape error would push families in opposite directions
+  depending on whether each is long or short the wings, and a uniform positive
+  bias is instead what a too-WIDE outcome distribution produces. Every
+  enumerated family has a bounded payoff with a zero floor, so fattening the
+  distribution raises all of their expected values, and raises them most where
+  the payoff is widest relative to the debit.
+
+  Two candidate causes are tested, one a cause and one a correction:
+
+  CAP    the residual pool is drawn from 87,121 events of which only 27.5%
+         clear the 10 billion dollar market cap floor the strategy trades. The
+         sub-2-billion bucket has a measurably fatter ratio distribution than
+         the over-200-billion one - skew +2.95 against +1.37, p99 4.27 against
+         3.70, and 7pp less mass in the 1-2x band where the twin peaks pay
+         most. Conditioning the draw on market cap as well as on the predicted
+         move decile should narrow the simulated distribution for the names
+         actually traded, and should therefore reduce the optimism.
+  DEBIAS a per-family correction subtracted from the expectation before the
+         argmax, estimated walk-forward on trailing events only. This does not
+         fix the cause; it removes the part of the bias that differs BETWEEN
+         families, which is what makes an argmax over them rank wrongly.
+
+  Registered primary: CAP.
+
+  FALSIFIED if market-cap conditioning does not reduce the mean
+  simulated-minus-realized gap on the traded universe, or reduces it without
+  raising the chooser's top-1 hit rate above EXP-137's 24.7%.
+
+known_before_registration:
+  two_explanations_have_already_been_eliminated: >
+    This spec exists because the obvious causes were tested and did not
+    survive, and neither may be re-proposed without new evidence.
+    The move distribution's SHAPE: EXP-138 replaced the additive clipped draw
+    with Weibull, Gamma and empirical-ratio resampling. Top-1 hit rate moved
+    24.7% -> 24.5%, 24.8%, 24.6%; the centre-peaked share moved 63.2% -> 65.2%,
+    the wrong way. The clip was real - 2.74% of pooled draws at exactly zero
+    against 0.56% realized - and immaterial.
+    BLACK-SCHOLES REPRICING: fed the REALIZED move and REALIZED crush, the
+    pricer reproduces the actually quoted exit to a median 1-2 cents, which is
+    0.4% to 1.2% of the debit across all eight families, spread under 0.8pp.
+    Against a 6-12pp miscalibration that is a tenth of the problem and it is
+    not differentially biased by family - the two twin-peaked families sit at
+    1.1% and 1.2%, mid-pack.
+  the_bias_is_not_a_centre_versus_twin_bias: >
+    Recorded because it was the working assumption and it is wrong. On 4,641
+    common-universe events the chooser predicts twin-peaked on 36.8% and
+    twin-peaked actually wins 36.7%. The marginal is calibrated. The 78%
+    centre-peaked figure from EXP-134 is a property of its GATED book, so the
+    trailing top-20% gate contributes roughly 15pp of centre skew on top of the
+    chooser - a separate mechanism, not tested here, and not to be conflated
+    with this one.
+  the_per_family_miscalibration_that_is_being_attacked: >
+    Mean predicted minus mean realized return, over the same 4,641 events:
+      wide butterfly five (-4,1,1)   +12.3pp   predicted/actual-best ratio 1.29
+      butterfly (-2,1)               +11.0pp   0.15
+      stepped-ramp seven             +10.9pp   0.30
+      centre five (-2,-1,2)          +10.8pp   0.73
+      notched seven (-2,1,-1,1)       +9.0pp   1.48
+      condor (0,-1,1)                 +8.9pp   1.63
+      TWIN-P5 (2,-2,1)                +8.8pp   1.22
+      TWIN-P (2,-1,-1,1)              +5.9pp   0.84
+    The three-strike butterfly is the extreme case in both directions: called
+    best 84 times against 559 actual, under-called by 6.7x, while having the
+    HIGHEST precision of any family at 42.9% when it is called. The signal is
+    present and the model almost never emits it.
+  what_conditioning_on_market_cap_cannot_fix: >
+    It narrows the distribution for large names. It does not make the point
+    forecast better, and it cannot address the third of events where the top
+    two families finish within 5pp of each other and no ranking is available to
+    any model. EXP-137 measured the oracle at +56.92% against a random family
+    at +7.90%, with the chooser at +16.24% capturing 17% of that spread; an
+    upper bound on what any recalibration can buy is the remaining 83%, and
+    nothing here should be read as approaching it.
+  the_cap_bucket_boundaries_are_registered_here: >
+    Under 2B, 2-10B, 10-50B, 50-200B, over 200B - the buckets the measurement
+    was made on, frozen before the run so they cannot be tuned to the answer. A
+    bucket thinner than the pool's 250-event floor falls back to the
+    predicted-move decile alone, which is the existing behaviour, so
+    conditioning can only refine and never leaves a sparse region unsimulated.
+  the_debias_must_be_causal_or_it_is_nothing: >
+    The per-family correction is estimated on events strictly earlier than the
+    one being simulated, on a trailing window, exactly as the gate's cutoff is.
+    A correction fitted on the full sample would be reading the answer, and its
+    hit rate would be meaningless.
+
+definition:
+  cap_conditioning: >
+    ResidualPool.draw currently conditions on the predicted-move decile alone.
+    The CAP arm conditions on the intersection of that decile and the event's
+    market-cap bucket, keeping every other property: the causality cutoff, the
+    pairing of the move and crush residuals, the SHA-256 seeding, and the
+    250-event floor below which it falls back.
+  debias: >
+    For each family, the mean of (simulated minus realized) over that family's
+    events in a trailing twelve-month window ending strictly before the event
+    being simulated, subtracted from its expectation before the argmax. Fewer
+    than 100 events in the window leaves the correction at zero rather than
+    estimating one from noise.
+  both: "CAP and DEBIAS together, to see whether the correction still buys anything once the cause is addressed."
+  unchanged: >
+    EXP-137's candidates, the eight families, the width rules, the anchors, the
+    no-arbitrage filter, the 25% spread filter, the market cap floor, the
+    conditional exit, the gate and the cash-secured margin. One book per family
+    so the mix is read rather than inferred.
+  the_risks_this_run_measures:
+    narrowing_the_distribution_helps_every_family_equally:
+      "If the fatness was uniform across families, removing it lowers every
+       expectation and changes no ranking. Then the hit rate is unmoved and the
+       answer is that the chooser's weakness is the point forecast, not the
+       distribution around it."
+    the_debias_is_a_symptom_treatment:
+      "It can raise the hit rate while leaving the simulator as wrong as it
+       was. Reported as such; it is registered as a secondary arm and is not
+       promotable in place of a cause."
+    a_narrower_pool_is_a_thinner_pool:
+      "Intersecting decile with cap bucket cuts the draw pool roughly tenfold.
+       The share of events falling back to decile-only is a required output; if
+       it is large the treatment was not applied to most of the universe."
+
+primary_spec:
+  universe: "EXP-137's common universe, 4,641 events, all eight families priced"
+  treatment: "residual pool conditioned on market-cap bucket as well as predicted-move decile"
+  measurement: "mean simulated minus realized per family, and the chooser's top-1 hit rate"
+  acceptance:
+    less_optimistic: "mean simulated-minus-realized gap below the uncorrected arm's, on every family"
+    better_chooser: "top-1 hit rate above EXP-137's 24.7%"
+    not_at_a_cost: "return on capital of the best-of-family book at or above the uncorrected arm's"
+    treatment_actually_applied: "fewer than half of events fall back to decile-only conditioning"
+
+grid:
+  arm: [cap, uncorrected, debias, both]
+
+required_outputs:
+  - "mean simulated minus realized per family, per arm, against the uncorrected baseline"
+  - "top-1 hit rate, top-3 and mean realized rank per arm, against the 12.5% chance floor"
+  - "share of events falling back to decile-only conditioning, and the median pool size drawn from"
+  - "predicted-best count against actually-best count per family, per arm"
+  - "return on capital per family, per arm"
+  - "the simulated move distribution under cap conditioning against the traded universe's realized one"
+  - "defined-risk falsification per arm"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-06T06:10:08+00:00"

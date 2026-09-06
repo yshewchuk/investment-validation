@@ -1,0 +1,177 @@
+id: EXP-138
+title: "A skewed move: Weibull-scaled simulation against the additive clip"
+kind: simulator-replacement
+strategy: TWIN-P5
+programme: tier4-feature-models
+prior: [EXP-115, EXP-129, EXP-131, EXP-133, EXP-134, EXP-137]
+type: confirmatory
+price_source: >
+  ORATS chains (bid/ask), priced through the same FillModel arithmetic
+  engine.structures.price_structure uses. Held positions settle at the Tier-2
+  daily_market close on the expiry date. No new prices; only the simulated
+  move's distribution changes.
+
+hypothesis: >
+  engine.pnl_sim draws the simulated earnings move additively and clips it:
+  move = max(pred_abs_move + err_move, 0). Measured over the 87,121-event
+  residual pool that is right in location and wrong in shape - mean 5.61%
+  against a realized 5.62%, median 3.72% against 3.70%, but 2.74% of draws at
+  exactly zero against 0.56% in reality, and skew +3.43 against +5.00.
+
+  The error has a direction. A spike at zero move is a spike at the CENTRE of
+  the payoff, where every centre-peaked family pays its maximum and both
+  twin-peaked families dip. The clip therefore flatters exactly the structures
+  that took 78% of EXP-134's book, and the family mix that result rests on may
+  be an artifact of the simulator rather than a property of the market.
+
+  Replacing the additive draw with a scale-family draw - the predicted move
+  times a Weibull-distributed ratio - removes the atom at zero, restores the
+  right skew, and cannot go negative. If the simulator was biased, the chooser
+  built on it should pick the realized-best structure MORE OFTEN, and the
+  centre-peaked share of its book should fall.
+
+  FALSIFIED if the Weibull arm does not raise the chooser's top-1 hit rate
+  above the additive arm's on the common universe, or if it raises it while
+  lowering return on capital.
+
+known_before_registration:
+  the_shape_is_a_scale_family_and_this_was_measured_first: >
+    Divide realized absolute move by predicted absolute move and the
+    distribution barely moves across the prediction range: over deciles
+    spanning a median predicted move of 1.96% to 10.89%, the ratio's median
+    stays 0.80-0.84, its p90 2.15-2.29, its p99 3.84-4.10 and its coefficient
+    of variation 0.84-0.93. One shape rescaled per event is therefore
+    sufficient, which is the premise the whole construction rests on and is why
+    it is stated before the fit.
+  the_predicted_sd_carries_no_information_and_is_deliberately_not_used: >
+    pred_abs_move_sd over pred_abs_move spans only 0.80-0.99 across events, and
+    the realized spread does not respond to it: across quintiles of that ratio
+    the realized ratio SD is 0.91, 0.90, 0.89, 0.91, 0.89 and its p90 is 2.16,
+    2.22, 2.24, 2.22, 2.20. Rescaling by both mean and SD would add a parameter
+    that does nothing and import that model's noise. The scale is the predicted
+    MEAN alone.
+    A corollary that belongs on the record: because sd over mean is about 0.9
+    for everyone, EXP-134's second width rule - no wider than pred plus 3 sd -
+    is functionally no wider than 3.7x the predicted move for every event. It
+    reads as an uncertainty-scaled bound and is a constant multiple.
+  the_fit_and_why_lognormal_was_rejected: >
+    Fitted on the ratio with loc fixed at 0 and judged on the probability mass
+    in the bands these structures pay over:
+      band        under 0.5x / 0.5-1x / 1-2x / 2-3.7x / over 3.7x   worst
+      empirical      32.6%   25.7%  28.7%   11.5%   1.5%                -
+      weibull        32.9%   26.3%  27.4%   11.7%   1.6%            1.3pp
+      gamma          33.5%   26.4%  26.6%   11.6%   2.0%            2.1pp
+      lognormal      39.6%   24.5%  19.7%   10.1%   6.2%            9.0pp
+    Lognormal is fitted in log space where the near-zero moves have enormous
+    leverage (minimum ratio 0, p1 = 0.02); that drags sigma to 1.111 and gives
+    a p99 of 8.88 against a realized 3.99. It strips 9pp from the 1-2x band
+    where the twin peaks pay most and quadruples the beyond-the-wings tail.
+    Rejected on measurement.
+  weibull_still_understates_the_extreme_tail: >
+    Fitted skew is +1.59 against a realized +2.18 in ratio space. This is an
+    improvement on the additive model (+3.43 against +5.00 in move space), not
+    a cure, and no arm here reproduces the far tail. The empirical ratio arm is
+    registered precisely because it needs no fit at all.
+  what_the_empirical_arm_is_for: >
+    The ratio arm resamples the pool's own realized-over-predicted ratios. No
+    distributional assumption, non-negative by construction, exact 0.56% mass
+    at zero, and the pairing preserved for free. A fitted curve that cannot
+    beat resampling has bought an assumption and nothing else, so ratio is the
+    benchmark and not a courtesy arm.
+  the_pairing_must_survive: >
+    EXP-129 established the move-and-crush draw must stay paired because the
+    dependence lives in higher moments a Pearson r of +0.028 cannot see. The
+    parametric arms therefore do not draw independently: the pool row is drawn
+    exactly as before - same decile conditioning, same causality cutoff, same
+    SHA-256 seed - its ratio's rank supplies the uniform, the fitted quantile
+    function is evaluated at that rank, and the crush comes from the SAME row.
+    Only the move's marginal is reshaped; the copula is untouched.
+
+definition:
+  the_move_models:
+    additive: "max(pred + err_move, 0) - engine.pnl_sim's rule, the reference arm"
+    ratio: "pred times the drawn row's realized-over-predicted ratio - empirical, no fit"
+    weibull: "pred times Weibull.ppf(rank of the drawn row's ratio), c=1.1666 scale=1.0978 loc=0"
+    gamma: "pred times Gamma.ppf(same rank), a=1.2669 scale=0.8252 loc=0"
+  fitted_parameters_are_frozen_here: >
+    The Weibull and Gamma parameters above are fitted on the WHOLE pool and
+    written into this spec before the run. They are not re-fitted per fold, and
+    that is a stated limitation rather than an oversight: the shape is a
+    property of the earnings-move distribution across 87,121 events, but
+    fitting it on all of them means every fold's simulation saw a shape derived
+    partly from its own period. The empirical ratio arm carries the same
+    caveat; only the pool's causality cutoff is walk-forward.
+  everything_else_is_exp_134s: >
+    The eight enumerated families, the width rules, anchors 0/1/2, the ladder
+    bound, the three no-arbitrage conditions on the entry curve, the 25% mean
+    leg spread filter, the 10 billion dollar market cap floor, the conditional
+    exit, the cash-secured margin at 50% of current equity from 100,000
+    dollars, and EXP-131's trailing six-month top-20% gate. One book per family
+    as in EXP-137, so the family mix can be read rather than inferred from an
+    argmax.
+  the_primary_measurement: >
+    The chooser's top-1 hit rate on the common universe - how often the
+    structure predicted best was the structure that realized best - measured
+    identically to EXP-137's diagnostic, which found 24.7% against a 12.5%
+    chance baseline under the additive model. This is a direct test of the
+    simulator and is not confounded by funding or gating.
+  the_risks_this_run_measures:
+    a_better_marginal_may_not_be_a_better_chooser:
+      "Fixing the shape of a distribution does not have to improve a ranking.
+       The hit rate may be unmoved, which would say the chooser's weakness is
+       elsewhere - in Black-Scholes repricing or in the forecast itself - and
+       that is a useful answer rather than a failure."
+    four_arms_on_one_universe:
+      "Four move models times eight families is thirty-two books. Every one is
+       recorded, none is promotable on this run, and the primary is fixed in
+       advance as weibull."
+    the_fit_saw_every_year:
+      "Stated in the definition and repeated here because it bounds what the
+       result can support: the shape parameters are fitted on the whole pool."
+
+primary_spec:
+  universe: "10B+ market cap, spread <= 25%, no-arbitrage-consistent entry strikes, 2018-2026"
+  move_model: "weibull, c=1.1666 scale=1.0978 loc=0, applied to the drawn row's ratio rank"
+  structure: "one book per enumerated family, width and anchor chosen per event"
+  gate: "EXP-131 trailing six-month top 20%, per arm, on its own history"
+  exit: "conditional - close if the post-print curve is arb-consistent, else hold to expiry"
+  margin: "cash-secured, 50% of current equity, 100,000 dollar start"
+  acceptance:
+    better_chooser: "top-1 hit rate on the common universe above the additive arm's"
+    not_at_a_cost: "return on capital of the best-of-family book at or above the additive arm's"
+    beats_the_empirical_benchmark: "top-1 hit rate at or above the ratio arm's, or the fit is reported as having bought nothing"
+    defined_risk_holds: "no trade loses more than its debit"
+
+grid:
+  move_model: [weibull, additive, ratio, gamma]
+  family:
+    - N3q-2_1
+    - N4q0_-1_1
+    - N5q-4_1_1
+    - N5q-2_-1_2
+    - N5q2_-2_1
+    - N7q-2_-1_1_1
+    - N7q-2_1_-1_1
+    - N7q2_-1_-1_1
+
+required_outputs:
+  - "simulated absolute-move distribution per model against realized: mean, median, p90, p99, skew, mass at zero"
+  - "top-1 hit rate, top-3 rate and mean realized rank per move model, against the 12.5% chance baseline"
+  - "centre-peaked share of the best-of-family book per move model - the bias this experiment exists to test"
+  - "per-family return on capital under each move model, ungated and gated"
+  - "how often each family was actually best, per move model"
+  - "simulated minus realized return per move model - is the better-shaped model better calibrated?"
+  - "defined-risk falsification per arm"
+  - "pricer equivalence receipt sampled across every year"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-06T02:42:40+00:00"

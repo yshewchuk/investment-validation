@@ -309,7 +309,7 @@ def _net(qty, idx, px_long, px_short):
 
 
 def _sim_means(strikes, spot, dte_exit, pred_move, pred_crush, pre_iv,
-               event_date, pool, key):
+               event_date, pool, key, move_model=None):
     """Mean simulated exit value of ONE put at each ladder strike, per draw half.
 
     Reproduces ``engine.pnl_sim.expected_pnl``'s draw sequence exactly — same
@@ -323,7 +323,18 @@ def _sim_means(strikes, spot, dte_exit, pred_move, pred_crush, pre_iv,
     err_move, err_crush = pool.draw(event_date, pred_move, DRAWS, rng)
     if err_move.size == 0:
         return None, None, 0
-    move = np.maximum(pred_move + err_move, 0.0)
+    # ``move_model`` reshapes the MOVE marginal and nothing else. Default None
+    # is engine.pnl_sim's own line, unchanged, so EXP-133/134/137 reproduce
+    # exactly. EXP-138 supplies an alternative because this one is additive and
+    # clipped at zero: measured over the 87,121-event pool it puts 2.74% of its
+    # mass at exactly a flat print against 0.56% in reality, and reaches skew
+    # +3.43 against a realized +5.00. A spike at zero move is a spike at the
+    # CENTRE of the payoff, which flatters every centre-peaked family and
+    # penalises the twin-peaked ones — a bias with a direction, not just noise.
+    if move_model is None:
+        move = np.maximum(pred_move + err_move, 0.0)
+    else:
+        move = move_model(pred_move, err_move, pool, event_date)
     crush = pred_crush + err_crush
     sign = rng.choice((-1.0, 1.0), size=move.size)
     spot_exit = spot * np.maximum(1.0 + sign * move / 100.0, pnl_sim.MIN_SPOT_FRACTION)
@@ -370,7 +381,8 @@ def _incumbent_candidate(strikes, spot, a0, quoted, pred_move):
             np.array([2.0, -2.0, -2.0, 1.0, 1.0, 0.0, 0.0]))
 
 
-def price_event(row, entry_rows, exit_rows, pool, *, rng_pick) -> dict | None:
+def price_event(row, entry_rows, exit_rows, pool, *, rng_pick,
+                move_model=None) -> dict | None:
     """Every candidate for one event: geometry, real P&L, simulated P&L, choices.
 
     Returns ``None`` with a reason recorded when the event yields no candidate
@@ -470,9 +482,15 @@ def price_event(row, entry_rows, exit_rows, pool, *, rng_pick) -> dict | None:
     tradeable = admissible & (rel_spread <= MAX_REL_SPREAD)
 
     # --- simulated expectation, linear in the contract vector ---------------
+    # A pool may want to condition on something only the EVENT knows — EXP-139
+    # conditions on market cap. Announced through an optional hook so the
+    # `draw` signature every prior experiment prices through stays fixed.
+    if hasattr(pool, "on_event"):
+        pool.on_event(row)
     m_sel, m_gate, pool_n = _sim_means(
         strikes, spot_entry, dte_exit, row["pred_abs_move"], row["pred_iv_crush_30"],
-        row["pre_iv30"], row["event_date"], pool, key=f"EXP-133|{row['ticker']}")
+        row["pre_iv30"], row["event_date"], pool, key=f"EXP-133|{row['ticker']}",
+        move_model=move_model)
     # A structure whose long and short legs offset can net to a debit at or
     # below zero. That is a real state, not an error — replay_one calls it
     # `zero_cost` — and every such candidate is already masked out by
