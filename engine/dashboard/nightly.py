@@ -92,6 +92,37 @@ class NightlyReport:
         }
 
 
+def _nights_to_backfill(last, as_of, *, calendar):
+    """Which missed nights are worth re-scoring, and which are free to skip.
+
+    Returns ``(nights, skipped_closed, next_unreached)``: the sessions to score,
+    the closed dates passed over, and the first date not reached because the cap
+    ran out (equal to ``as_of`` when the gap was fully covered).
+
+    **A non-session cannot produce a ledger row.** ``ledger.snapshot`` records
+    only rows whose ENTRY is that day, and an entry date is a trading day by
+    construction — so backfilling a Saturday scores the entire calendar and then
+    discards every row of it. Measured on 2026-09-06: the 09-05 pass cost a full
+    201-event, 8-structure re-score, about 45 minutes, for a guaranteed zero.
+    The loop walked calendar days while the thing it calls only ever writes on
+    sessions, and after a long weekend that is three such passes.
+
+    Skipping does not count against :data:`MAX_BACKFILL_DAYS`. That cap bounds
+    SCORING work, and a skipped day does none.
+    """
+    day = pd.Timestamp(last).normalize() + pd.Timedelta(days=1)
+    as_of = pd.Timestamp(as_of).normalize()
+    nights: list[pd.Timestamp] = []
+    skipped: list[str] = []
+    while day < as_of and len(nights) < MAX_BACKFILL_DAYS:
+        if calendar.is_trading_day(day):
+            nights.append(day)
+        else:
+            skipped.append(str(day.date()))
+        day += pd.Timedelta(days=1)
+    return nights, skipped, day
+
+
 def _default_target():
     """Where a night publishes when the caller did not say.
 
@@ -1117,14 +1148,24 @@ def run_nightly(
 
     # -- 4b. honest backfill of missed nights --------------------------------
     late_as_ofs: list[str] = []
+    skipped_closed: list[str] = []
     if backfill:
         last = state.get("last_successful_as_of")
         if last:
-            day = pd.Timestamp(last).normalize() + pd.Timedelta(days=1)
-            while day < as_of and len(late_as_ofs) < MAX_BACKFILL_DAYS:
-                result = ledger.snapshot(as_of=day, horizon_days=horizon_days)
-                late_as_ofs.append({"as_of": str(day.date()), "rows": result.get("rows", 0)})
-                day += pd.Timedelta(days=1)
+            nights, skipped_closed, day = _nights_to_backfill(
+                last, as_of, calendar=engine.calendar
+            )
+            for night in nights:
+                result = ledger.snapshot(as_of=night, horizon_days=horizon_days)
+                late_as_ofs.append(
+                    {"as_of": str(night.date()), "rows": result.get("rows", 0)}
+                )
+            if skipped_closed:
+                report.flags.append({
+                    "kind": "backfill_skipped_closed",
+                    "detail": "market closed — no row can enter on these dates",
+                    "dates": skipped_closed,
+                })
             if day < as_of:
                 report.flags.append({
                     "kind": "backfill_gap",
@@ -1136,7 +1177,9 @@ def run_nightly(
                     "detail": "rows written after their decision date (decision_ts is honest)",
                     "as_ofs": late_as_ofs,
                 })
-        report.steps["backfill"] = late_as_ofs
+        report.steps["backfill"] = {
+            "scored": late_as_ofs, "skipped_closed": skipped_closed,
+        }
 
     # -- flags that need scores ----------------------------------------------
     triggered = sorted(

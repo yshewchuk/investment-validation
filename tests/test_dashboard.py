@@ -1598,6 +1598,76 @@ class TestChainAnchorFollowsWhatIsPublished:
                                  default=pd.Timestamp("2026-09-03")) == pd.Timestamp("2026-09-03")
 
 
+class TestBackfillNights:
+    """A closed day cannot produce a ledger row, so re-scoring it is pure waste.
+
+    `ledger.snapshot` records only rows whose ENTRY is that day, and an entry
+    date is a trading day by construction. The loop walked calendar days
+    anyway: on 2026-09-06 it spent a full 201-event, 8-structure re-score —
+    about 45 minutes — on Saturday 09-05, and the entry-date filter discarded
+    every row of it. After a long weekend that is three such passes.
+    """
+
+    @staticmethod
+    def _calendar(closed=("2026-09-05", "2026-09-06")):
+        shut = {pd.Timestamp(d) for d in closed}
+
+        class Cal:
+            def is_trading_day(self, day):
+                return pd.Timestamp(day).normalize() not in shut
+
+        return Cal()
+
+    def test_a_weekend_gap_costs_nothing(self):
+        from engine.dashboard.nightly import _nights_to_backfill
+
+        nights, skipped, _ = _nights_to_backfill(
+            "2026-09-04", pd.Timestamp("2026-09-07"), calendar=self._calendar())
+        assert nights == []
+        assert skipped == ["2026-09-05", "2026-09-06"]
+
+    def test_sessions_in_the_gap_are_still_scored(self):
+        from engine.dashboard.nightly import _nights_to_backfill
+
+        nights, skipped, _ = _nights_to_backfill(
+            "2026-09-03", pd.Timestamp("2026-09-08"), calendar=self._calendar())
+        assert [str(n.date()) for n in nights] == ["2026-09-04", "2026-09-07"]
+        assert skipped == ["2026-09-05", "2026-09-06"]
+
+    def test_the_cap_bounds_scoring_not_skipping(self):
+        """A skipped day does no work, so it must not consume the budget.
+
+        Counting skips against the cap would let one long holiday weekend
+        exhaust it and silently leave real sessions unrecorded.
+        """
+        from engine.dashboard.nightly import MAX_BACKFILL_DAYS, _nights_to_backfill
+
+        # Every weekend closed across a five-week gap.
+        shut = [d for d in pd.date_range("2026-09-01", "2026-10-10")
+                if d.weekday() >= 5]
+        nights, skipped, nxt = _nights_to_backfill(
+            "2026-09-01", pd.Timestamp("2026-10-10"),
+            calendar=self._calendar(closed=shut))
+        assert len(nights) == MAX_BACKFILL_DAYS
+        assert skipped, "weekends in the gap were not skipped"
+        assert nxt < pd.Timestamp("2026-10-10"), "the cap should leave a remainder"
+
+    def test_a_fully_covered_gap_reports_no_remainder(self):
+        """`next_unreached == as_of` is what suppresses the backfill_gap flag."""
+        from engine.dashboard.nightly import _nights_to_backfill
+
+        _, _, nxt = _nights_to_backfill(
+            "2026-09-04", pd.Timestamp("2026-09-07"), calendar=self._calendar())
+        assert nxt == pd.Timestamp("2026-09-07")
+
+    def test_no_gap_at_all_is_empty(self):
+        from engine.dashboard.nightly import _nights_to_backfill
+
+        nights, skipped, nxt = _nights_to_backfill(
+            "2026-09-04", pd.Timestamp("2026-09-05"), calendar=self._calendar())
+        assert nights == [] and skipped == [] and nxt == pd.Timestamp("2026-09-05")
+
+
 class TestImpliedMoveConvention:
     """`model_vs_market` divides a predicted E|move| by a vendor number that is
     not in that convention. EXP-122 measured the gap against a model-free
