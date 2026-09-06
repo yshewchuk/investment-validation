@@ -1,0 +1,163 @@
+id: EXP-141
+title: "A smaller menu: choosing which structures the chooser may offer, out of sample"
+kind: structure-selection
+strategy: TWIN-P5
+programme: structure-validation
+prior: [EXP-133, EXP-134, EXP-137, EXP-138, EXP-139]
+type: confirmatory
+price_source: >
+  None new. EXP-137's priced candidates are read from disk and nothing is
+  repriced or re-simulated. Every structure, width, anchor, filter, exit and
+  gate is held at its configuration. The only thing that changes is WHICH
+  families the chooser is allowed to offer.
+
+hypothesis: >
+  The per-event chooser ranks eight enumerated families by simulated expected
+  P&L. Three of them it cannot distinguish at all: measured on 4,641
+  common-universe events, the notched seven, the centre-five and the
+  stepped-ramp seven are called best with a precision of 12.6%, 12.3% and
+  16.4% against a 12.5% chance baseline. They are coin flips inside an argmax,
+  and every coin flip is a chance to displace a family the model can actually
+  rank.
+
+  Removing them should therefore improve the chooser without improving the
+  model. Restricting the menu to the five families that win most often - TWIN-P,
+  TWIN-P5, the wide five-strike butterfly, the condor and the butterfly -
+  raises gated Sharpe by 0.25 to 0.30, return on capital by about 2.3pp, and
+  profit per dollar of posted collateral from 0.17% to 0.21%.
+
+  That measurement is POST HOC: the five were picked after seeing which won on
+  the same events they were then scored on. This experiment asks whether the
+  effect survives when the menu is chosen out of sample.
+
+  Registered primary: the menu is chosen on 2018-2022 alone, by how often each
+  family was the realized best in that period, and evaluated on 2023-2026,
+  which the choice never saw.
+
+  FALSIFIED if the out-of-sample menu does not beat the all-eight chooser on
+  BOTH per-trade Sharpe and profit per dollar of collateral, on the holdout.
+
+known_before_registration:
+  the_post_hoc_numbers_that_motivated_this_and_why_they_are_not_evidence: >
+    Measured on all 4,641 events with the menu chosen from those same events.
+    At the top-20% gate: all-eight Sharpe 2.87, on capital 23.0%, per
+    collateral 0.17%; top-five Sharpe 3.12, on capital 25.4%, per collateral
+    0.21%; always-condor Sharpe 3.26, on capital 22.2%, per collateral 0.20%.
+    At the top-30% gate the top-five chooser reaches Sharpe 3.64 against the
+    condor's 3.68 while beating it on mean, median, capital and collateral.
+    Every one of those numbers is contaminated by the selection and none may be
+    cited as a result of this experiment.
+  the_raw_hit_rate_will_rise_and_that_is_not_a_finding: >
+    Restricting the menu from eight to five raises the top-1 hit rate from
+    24.7% to 31.9% mechanically, because chance rises from 12.5% to 20.0%. The
+    LIFT over chance falls, 1.98x to 1.59x. The chooser does not become better
+    at ranking; it is offered fewer ways to be wrong, and the ones removed were
+    worth least. The report must present lift and returns, never the raw hit
+    rate, when comparing menus of different sizes.
+  the_gain_appears_only_once_the_gate_is_selecting: >
+    Ungated, the top-five restriction is a wash - return on capital 10.62%
+    against 10.13%, slightly worse. The whole effect appears at the top-20% and
+    top-30% gates. That is consistent with EXP-137's finding that the gate and
+    the chooser are substitutes rather than complements, and it means a result
+    here says nothing about an ungated book.
+  menu_size_is_itself_a_free_parameter: >
+    Five was chosen by looking. It is therefore swept - 3, 4, 5, 6 and 8 - so
+    the experiment measures the shape of the trade-off rather than confirming a
+    number that was already seen. A K that wins only at 5 and nowhere near it
+    is a fitted result, not a robust one.
+  what_the_menu_is_competing_against: >
+    Always trading the condor, which needs no chooser, no search, no
+    max-statistic exposure and half the collateral of any five- or
+    seven-strike family - 2 short puts against 4, $24,400 against $48,800 at a
+    median $122 underlying. A menu restriction that merely ties the condor has
+    bought complexity for nothing, so the condor is carried as a registered
+    benchmark in every cell.
+  three_prior_attempts_at_this_chooser_failed: >
+    EXP-138 reshaped the simulated move distribution: hit rate 24.7% to 24.5%.
+    A stage-0 check eliminated Black-Scholes: 1-2 cents against realized
+    inputs. EXP-139 conditioned the residual pool on market cap and subtracted
+    a causal per-family bias: 25.2% and 24.3%, and every adjustment captured
+    LESS of the random-to-oracle spread than doing nothing. Restricting the
+    menu is the first intervention that has moved a return measure, and that
+    asymmetry is the reason it is worth registering rather than assuming.
+
+definition:
+  the_menu_choice: >
+    On the training period alone, count how often each family was the realized
+    best of eight. Take the top K. That criterion is chosen because it measures
+    the thing the menu controls - how often a family can win at all - rather
+    than how well the model ranks it.
+  the_split: >
+    Train 2018-2022, evaluate 2023-2026. The same split EXP-131 used, chosen
+    for the same reason: it is the longest holdout the chain era allows while
+    leaving five years to choose from.
+  the_rolling_alternative: >
+    A grid arm in which the menu is re-chosen every year from all strictly
+    earlier events, so it adapts. More realistic and more prone to churn;
+    registered as a cell, not as the primary, because a menu that changes every
+    year is a different operational proposition from one fixed in advance.
+  unchanged: >
+    EXP-137's candidates, widths, anchors, the no-arbitrage filter, the 25%
+    mean leg spread filter, the market cap floor, the conditional exit, and
+    EXP-131's trailing six-month gate. Nothing is repriced.
+  the_measures: >
+    Per-trade Sharpe and profit per dollar of posted collateral are the two the
+    acceptance turns on. Return on capital is reported but is not decisive: it
+    divides by premium, and premium is not the binding resource under a
+    cash-secured constraint - collateral is. Return on capital of +22% over
+    eight years is about 4.6% a year on a $100,000 account at one contract per
+    trade, and the report must state the account translation rather than let
+    the percentage stand alone.
+  the_risks_this_run_measures:
+    a_five_year_training_period_may_not_rank_families_stably:
+      "If the top-K menu chosen on 2018-2022 differs materially from the one
+       the full sample would pick, the post-hoc gain will not reproduce and the
+       honest conclusion is that menu choice is unstable, not that it is
+       useless. The training-period menu is a required output."
+    the_holdout_is_four_years:
+      "2023-2026 is short and contains one regime. A gain of the size seen post
+       hoc, 0.25-0.30 of Sharpe, is not separable from noise on four years, and
+       no bootstrap in this design can make it so."
+    restricting_the_menu_cannot_fix_the_ranking:
+      "Lift over chance falls when the menu shrinks. If the whole gain is
+       economic rather than skill, extending the menu again later will lose it,
+       and nothing here licenses a claim that the chooser improved."
+
+primary_spec:
+  universe: "EXP-137's common universe, conditional exit, all filters unchanged"
+  menu: "top 5 families by realized-best count on 2018-2022, evaluated on 2023-2026"
+  gate: "EXP-131 trailing six-month top 20%, on the arm's own history"
+  acceptance:
+    beats_all_eight: "per-trade Sharpe AND profit per dollar of collateral above the all-eight chooser, on the holdout"
+    beats_the_condor: "the same two measures at or above always-condor, or the menu is reported as not worth its complexity"
+    stable_menu: "the menu chosen on 2018-2022 shares at least 4 of 5 families with the one the full sample would choose"
+    universe_floor: ">= 200 holdout trades, or reported as too thin to carry"
+
+grid:
+  menu_size: [3, 4, 5, 6, 8]
+  criterion: [realized_best_count, own_return_on_capital]
+  schedule: [fixed_2018_2022, rolling_annual]
+  gate: [0.20, 0.30]
+  benchmark: [always_condor, always_twin_p, chooser_all_eight]
+
+required_outputs:
+  - "the menu chosen on the training period, per K and per criterion, against the full-sample menu"
+  - "holdout Sharpe, win, mean, median, return on capital and profit per dollar of collateral, per cell"
+  - "lift over chance, never the raw hit rate, when comparing menus of different size"
+  - "the same table for always-condor and always-TWIN-P on identical holdout events"
+  - "training-period versus holdout performance per menu, so shrinkage is visible"
+  - "collateral posted per trade and realized concurrency per cell"
+  - "the account translation of every return-on-capital figure quoted"
+  - "defined-risk falsification per cell"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-06T15:08:05+00:00"
