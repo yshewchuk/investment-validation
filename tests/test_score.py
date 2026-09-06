@@ -1167,3 +1167,104 @@ class TestStructureChampionOnTheBoard:
         from engine.structures import STRUCTURES
 
         assert "TWIN-P" in STRUCTURES
+
+
+class TestDynamicShortVol:
+    """The chooser is a meta-strategy over scored rows, not a sixth structure.
+
+    A chooser has no leg list of its own, so it cannot be a ``STRUCTURES``
+    entry — expressing it as one would mean inventing legs it does not have.
+    These pin the behaviour that makes it readable on a board: it names what it
+    picked, it declines rather than guessing, and it never merges the choice
+    with the decision to trade.
+    """
+
+    @staticmethod
+    def _rows(**over):
+        import pandas as pd
+
+        base = dict(event_id="E1", ticker="AAA", strike_offset=None, detail="")
+        return pd.DataFrame([
+            base | dict(strategy="TWIN-P", exp_pnl_sim=0.10),
+            base | dict(strategy="CND-PS", exp_pnl_sim=0.31),
+            base | dict(strategy="BFLY-P", exp_pnl_sim=0.22),
+        ] + [base | over] if over else [
+            base | dict(strategy="TWIN-P", exp_pnl_sim=0.10),
+            base | dict(strategy="CND-PS", exp_pnl_sim=0.31),
+            base | dict(strategy="BFLY-P", exp_pnl_sim=0.22),
+        ])
+
+    def test_it_picks_the_highest_expected_pnl_and_says_which(self):
+        from engine.score import DYNAMIC_STRATEGY, dynamic_short_vol
+
+        out = dynamic_short_vol(self._rows())
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row["strategy"] == DYNAMIC_STRATEGY
+        assert row["chosen_strategy"] == "CND-PS"
+        assert row["chosen_margin"] == pytest.approx(0.31 - 0.22)
+        assert "chose CND-PS" in row["detail"] and "next BFLY-P" in row["detail"]
+
+    def test_off_menu_structures_cannot_win(self):
+        """STR-THRU is long the move and is not part of the short-vol menu.
+
+        Ranking every scored strategy would let an unrelated thesis win a
+        contest it was never entered in.
+        """
+        import pandas as pd
+
+        from engine.score import dynamic_short_vol
+
+        frame = pd.concat([self._rows(), pd.DataFrame([dict(
+            event_id="E1", ticker="AAA", strike_offset=None, detail="",
+            strategy="STR-THRU", exp_pnl_sim=0.99)])], ignore_index=True)
+        assert dynamic_short_vol(frame).iloc[0]["chosen_strategy"] == "CND-PS"
+
+    def test_an_event_nothing_simulated_yields_no_row(self):
+        """No opinion is a state, and it must not be spelled as a pick."""
+        import numpy as np
+        import pandas as pd
+
+        from engine.score import dynamic_short_vol
+
+        frame = pd.DataFrame([dict(
+            event_id="E2", ticker="BBB", strategy="TWIN-P5", strike_offset=None,
+            detail="", exp_pnl_sim=np.nan)])
+        assert dynamic_short_vol(frame).empty
+
+    def test_ladder_rows_do_not_let_one_family_enter_five_times(self):
+        """A ladder row is an alternative STRIKE, not a different structure."""
+        import pandas as pd
+
+        from engine.score import dynamic_short_vol
+
+        frame = pd.concat([self._rows(), pd.DataFrame([dict(
+            event_id="E1", ticker="AAA", strategy="TWIN-P", detail="",
+            strike_offset=0.05, exp_pnl_sim=0.95)])], ignore_index=True)
+        out = dynamic_short_vol(frame)
+        assert out.iloc[0]["chosen_strategy"] == "CND-PS"
+        assert out.iloc[0]["menu_size"] == 3
+
+    def test_the_menu_is_the_one_exp_141_chose_out_of_sample(self):
+        """Changing this list is a research decision, not a config tweak.
+
+        EXP-141 ranked families on 2018-2022 and evaluated on 2023-2026; the
+        training menu came back identical to the full-sample one. The excluded
+        three are coin flips — precision 12.6%, 12.3% and 16.4% against a 12.5%
+        chance baseline.
+        """
+        from engine.score import DYNAMIC_MENU
+
+        assert set(DYNAMIC_MENU) == {"TWIN-P", "TWIN-P5", "CND-PS",
+                                     "BFLY-P", "BFLY-P5"}
+
+    def test_it_carries_the_winners_own_gate_verdict(self):
+        """Choosing a structure and deciding to trade it are separate."""
+        import pandas as pd
+
+        from engine.score import dynamic_short_vol
+
+        frame = self._rows()
+        frame["entry_rule"] = ["NO", "NO", "NO"]
+        out = dynamic_short_vol(frame)
+        assert out.iloc[0]["entry_rule"] == "NO"

@@ -1977,7 +1977,85 @@ def score_calendar(
                 flush=True,
             )
     print(f"  [score] {len(rows):,} scores in {time.time()-started:.0f}s", flush=True)
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    return pd.concat([frame, dynamic_short_vol(frame)], ignore_index=True) \
+        if len(frame) else frame
+
+
+#: The families the dynamic chooser may offer, and why these five.
+#:
+#: EXP-141 chose them out of sample — ranked on 2018-2022 by how often each was
+#: the realized best, evaluated on 2023-2026 — and the training menu came back
+#: identical to the full-sample one. The three excluded families are coin flips
+#: inside an argmax: precision 12.6%, 12.3% and 16.4% against a 12.5% chance
+#: baseline, and dropping them was worth +0.37 of Sharpe and +35% of profit per
+#: dollar of collateral on the holdout, which is more than reshaping the move
+#: distribution (EXP-138) and recalibrating the expectation (EXP-139) produced
+#: combined.
+#:
+#: Read `guides/exp141_smaller_menu.md` before changing this list. The gain is
+#: economic, not skill — lift over chance FALLS as the menu shrinks, 1.98x to
+#: 1.59x — so adding a family back does not dilute an edge, it reintroduces a
+#: coin flip.
+DYNAMIC_MENU: tuple[str, ...] = ("TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5")
+
+#: What the chooser is called on the board.
+DYNAMIC_STRATEGY = "DYN-SV"
+
+
+def dynamic_short_vol(frame: pd.DataFrame,
+                      menu: tuple[str, ...] = DYNAMIC_MENU) -> pd.DataFrame:
+    """One row per event: the menu structure with the highest expected P&L.
+
+    A meta-strategy over rows that have already been scored, rather than a
+    sixth structure. That is not a shortcut — a chooser has no leg list of its
+    own, and expressing it as a ``STRUCTURES`` entry would mean inventing one.
+    What it emits is the winner's own row, relabelled, with ``chosen_strategy``
+    and the runner-up recorded so the board shows WHICH structure it picked and
+    by how much.
+
+    **It does not re-gate.** The winner keeps its own entry-rule verdict, so a
+    chooser row that says NO says it for the same reason the underlying
+    structure did. Picking a structure and deciding to trade it are separate
+    decisions and the board should not merge them.
+
+    Ties and missing simulations decline rather than default: an event where no
+    menu member produced an ``exp_pnl_sim`` yields no chooser row at all, which
+    reads as "no opinion" instead of an arbitrary pick.
+    """
+    if frame.empty or "exp_pnl_sim" not in frame.columns:
+        return frame.iloc[0:0]
+    live = frame[
+        frame["strategy"].isin(menu)
+        & frame["exp_pnl_sim"].notna()
+        # The ATM pass only: a ladder row is an alternative strike for a
+        # structure, not a different structure, and ranking across them would
+        # let one family enter the contest five times.
+        & (frame.get("strike_offset").isna() if "strike_offset" in frame else True)
+    ]
+    if live.empty:
+        return frame.iloc[0:0]
+
+    picks = []
+    for event_id, block in live.groupby("event_id", sort=False):
+        ordered = block.sort_values("exp_pnl_sim", ascending=False)
+        best = ordered.iloc[0].to_dict()
+        runner = ordered.iloc[1] if len(ordered) > 1 else None
+        best["chosen_strategy"] = best["strategy"]
+        best["strategy"] = DYNAMIC_STRATEGY
+        best["chosen_margin"] = (
+            None if runner is None
+            else float(best["exp_pnl_sim"]) - float(runner["exp_pnl_sim"]))
+        best["menu_size"] = int(len(ordered))
+        detail = (f"chose {best['chosen_strategy']} of {len(ordered)} "
+                  f"(exp P&L {100*float(best['exp_pnl_sim']):+.1f}%")
+        if runner is not None:
+            detail += (f", next {runner['strategy']} "
+                       f"{100*float(runner['exp_pnl_sim']):+.1f}%")
+        best["detail"] = f"{detail})" + (
+            f"; {best['detail']}" if best.get("detail") else "")
+        picks.append(best)
+    return pd.DataFrame(picks)
 
 
 # --------------------------------------------------------------------------
