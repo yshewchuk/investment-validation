@@ -1,0 +1,153 @@
+id: EXP-143
+title: "STR-RUNUP T14 missing implied quote gate"
+strategy: STR-RUNUP
+type: confirmatory_model_challenger
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades the identical structure at every stored fill alpha. Fills
+  are assumptions, not achieved executions.
+hypothesis: >
+  At the unchanged T-14 STR-RUNUP trade, preserving no-quote events with native
+  HGB missing-value handling, explicit quote-availability features and an
+  IV-derived event-move proxy produces a more profitable causal gate than the
+  registered complete-case incumbent. The effect should remain positive in the
+  quote-absent cohort rather than coming only from expanded eligibility.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; earnings is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: native_nan_availability_proxy
+  score: "predicted gross midpoint return"
+  threshold: 0.07394797616848554
+  threshold_rule: >
+    Apply the registered incumbents fixed predicted-return threshold to every
+    arm. All models predict the same return target on the same scale, so the
+    gate architecture is the only intended change. Annual matched-selectivity
+    results are secondary.
+  first_test_year: 2020
+  outer_split: "event year; train only on years strictly before the test year"
+
+incumbent:
+  id: gate_midfill_str_runup
+  arm: incumbent_complete_case
+  features: "current registered 42-feature contract"
+  missing_rule: "decline the event unless every feature is finite"
+  reproduction_required:
+    oos_rows: 2759
+    selected: 552
+    threshold: 0.07394797616848554
+
+model:
+  class: HistGradientBoostingRegressor
+  parameters:
+    max_iter: 250
+    learning_rate: 0.05
+    max_leaf_nodes: 15
+    min_samples_leaf: 60
+    l2_regularization: 2.0
+    early_stopping: true
+    n_iter_no_change: 20
+    random_state: 20260829
+  target: "gross midpoint return for the unchanged T-14 trade"
+
+derived_features:
+  availability:
+    - has_im
+    - has_im_d1
+    - has_im_d5
+    - has_im_d10
+  iv_implied_move_proxy: >
+    100 times sqrt(max(((iv30/100)^2 - (exern_iv30/100)^2) times 30/365, 0)).
+    This is an alternate model feature, not a claim that it equals ORATS impliedMove.
+  im_filled_proxy: "entry im when quoted, otherwise iv_implied_move_proxy"
+  im_minus_proxy: "entry im minus iv_implied_move_proxy when entry im is quoted"
+
+gate_variants:
+  - id: incumbent_complete_case
+    status: benchmark
+    features: "registered 42"
+    missing_rule: "all finite or decline"
+  - id: native_nan
+    status: secondary
+    features: "registered 42"
+    missing_rule: "HGB native NaN branches"
+  - id: native_nan_availability
+    status: secondary
+    features: "registered 42 plus four availability indicators"
+    missing_rule: "HGB native NaN branches"
+  - id: native_nan_availability_proxy
+    status: primary
+    features: >
+      registered 42 plus four availability indicators, iv_implied_move_proxy,
+      im_filled_proxy and im_minus_proxy
+    missing_rule: "HGB native NaN branches"
+  - id: split_quote_cohort
+    status: secondary
+    features: "same enriched primary feature set"
+    missing_rule: >
+      Fit separate models for rows with and without a finite entry im. If a
+      training cohort has fewer than 250 rows, fall back to the unified primary model.
+
+evaluation:
+  operational_universe: >
+    Every engine.replay STR-RUNUP event carrying exact variant
+    e-14_x+0_target_dte=30. A challenger may score an event the incumbent
+    declines; that restored coverage is part of the operational policy.
+  headline_window: "walk-forward OOS 2020-2026"
+  cohort_slices:
+    - "entry implied move quoted: finite im"
+    - "entry implied move absent: non-finite im"
+    - "all implied-move level and lag inputs complete"
+    - "at least one implied-move input absent"
+  matched_diagnostics:
+    - "primary ranked to incumbent selected count within each year"
+    - "all arms on the incumbents feature-complete event universe"
+  uncertainty: "10,000 earnings-week cluster bootstrap resamples, seed 143"
+  required_metrics:
+    - "mean and capital-weighted return"
+    - "trade Sharpe, cashflow CAGR, win rate and profit factor"
+    - "positive years and selected count by year"
+    - "full five-point fill sensitivity and breakeven alpha"
+    - "Monte Carlo probability of loss at 5 percent sizing"
+    - "score rank correlation and top-minus-bottom decile spread"
+    - "quote-present and quote-absent cohort performance"
+    - "weekly bootstrap of primary minus incumbent policy value"
+    - "probability calibration and stress battery"
+  primary_success:
+    - "primary CAGR exceeds incumbent CAGR"
+    - "primary trade Sharpe exceeds incumbent trade Sharpe"
+    - "primary positive-year share is no worse than incumbent"
+    - "primary Monte Carlo loss probability at 5 percent is no worse than incumbent"
+    - "90 percent weekly interval for policy-value difference excludes zero above"
+    - "primary selected quote-absent cohort has positive mean return"
+    - "primary Brier skill is at least -0.05"
+
+falsification: >
+  Native missing-value handling is not an improvement if the primary fails to
+  beat the incumbent on both CAGR and trade Sharpe, if restored no-quote events
+  have non-positive return, or if the policy-value interval includes zero.
+
+data:
+  trades: "Tier-2 engine.replay exact T-14 STR-RUNUP trades"
+  features: "EXP-142 cached current gate dataset, rebuilt from Tier-2 if absent"
+  source_experiments: [EXP-107, EXP-110, EXP-111, EXP-120, EXP-142]
+  quota_calls: 0
+  data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Scores are computed upstream by strict expanding annual folds. The generic
+    evaluator receives only 2020 onward and performs no additional model fit.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: gate_midfill_str_runup
+preregistered_at: "2026-09-06T21:55:11+00:00"
