@@ -116,3 +116,31 @@ The larger lever is still untouched and still needs its own registration: the
 gate admits the top 20% by construction, EXP-131 chose that for volume
 stability rather than returns, and with an account idle three quarters of the
 time that choice now costs capital efficiency it did not cost before.
+
+## 7. Two disclosures about this experiment's own record
+
+**The first RAN row in `LEDGER.csv` is wrong.** `run.py` originally wrote the
+sweep's numbers straight into the ledger, putting CAGR (4.24) in the
+`sharpe_trade` column and a percentage (27.26) in `oos_mean_mid`, where every
+other row in that file holds a decimal mean and a real Sharpe ratio. The cause
+was that the file never called `engine.evaluate.evaluate()` at all — a policy
+sweep is not a trade-level evaluation, so there were no natural headline
+numbers and I invented two. The fix was to run the primary cell's FUNDED book
+through the standard evaluation, which produces both a real `REPORT.md` and
+real headline numbers (mean 0.322, Sharpe 3.52). The ledger is append-only, so
+the bad row remains above the corrected one; **read the later row.**
+
+The same omission meant that for a period this experiment had a guide but no
+generated report — which by the program's own rule (`guides/README.md` §9)
+means it did not exist as a record. Fixed.
+
+**The report's accuracy checklist carries one FAIL: "Real prices only."** That
+is a wording defect in this spec, not a data defect. `price_source` opens with
+"None new. EXP-134's priced candidates are read from disk…", which the checker
+does not recognise as a sanctioned source. The underlying quotes are ORATS
+chains, unchanged from EXP-134, repriced by nothing. The spec is deliberately
+NOT edited to make the check pass — editing a registered spec after seeing its
+results is the thing the hash-continuity check exists to catch — so the report
+correctly refuses to be treated as promotable evidence, and a successor spec
+should name the inherited source explicitly instead of describing what it did
+not do.
