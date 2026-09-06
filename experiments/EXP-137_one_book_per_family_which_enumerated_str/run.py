@@ -40,6 +40,10 @@ E134 = ROOT / "experiments" / "EXP-134_priced_right_funded_and_held_structure_s"
 for p in (ROOT, E133, E134, HERE):
     sys.path.insert(0, str(p))
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
 from engine.evaluate import evaluate, trade_stats  # noqa: E402
 from experiments import common as ecommon, lib  # noqa: E402
 
@@ -110,6 +114,118 @@ def stats(mid: pd.DataFrame) -> dict:
     }
 
 
+def payoff_figure(fam: str, offsets, out: Path) -> None:
+    """Terminal payoff of one family, in units of the anchor spacing.
+
+    Drawn from the family's own contract vector rather than from a stored
+    picture, so the chart cannot drift away from what the code trades. The
+    x-axis is the move away from the anchor; the y-axis is what the structure
+    is worth at expiry, which for every enumerated family is non-negative and
+    zero outside the outermost strikes.
+    """
+    f = LABEL[fam]
+    K = np.array([0.0] + [d for d in offsets] + [-d for d in offsets])
+    q = np.array([f.q0] + list(f.tail) + list(f.tail), dtype=float)
+    keep = q != 0
+    K, q = K[keep], q[keep]
+    span = max(offsets) * 1.35
+    grid = np.linspace(-span, span, 2001)
+    pay = np.array([(q * np.maximum(K - x, 0.0)).sum() for x in grid])
+
+    fig, ax = plt.subplots(figsize=(7.2, 3.2))
+    ax.plot(grid, pay, lw=2.2, color="#1f77b4")
+    ax.axhline(0, lw=0.9, color="#444")
+    ax.fill_between(grid, 0, pay, alpha=0.12, color="#1f77b4")
+    for k, qty in zip(K, q):
+        ax.axvline(k, ls=":", lw=0.9, color="#999")
+        ax.annotate(f"{qty:+.0f}", (k, ax.get_ylim()[1]), ha="center",
+                    va="top", fontsize=9,
+                    color="#2ca02c" if qty > 0 else "#d62728")
+    ax.set_xlabel("move away from the anchor, in units of the spacing a")
+    ax.set_ylabel("payoff at expiry")
+    ax.set_title(f"{fam}  q=({f.q0},{','.join(str(x) for x in f.tail)})  "
+                 f"d={tuple(offsets)}  — {'twin-peaked' if f.twin_peaked else 'centre-peaked'}")
+    ax.margins(x=0)
+    fig.tight_layout()
+    fig.savefig(out, dpi=110)
+    plt.close(fig)
+
+
+def ascii_payoff(fam: str, offsets) -> list[str]:
+    """The same payoff as text, so the shape survives anywhere the PNG does not."""
+    f = LABEL[fam]
+    K = np.array([0.0] + [d for d in offsets] + [-d for d in offsets])
+    q = np.array([f.q0] + list(f.tail) + list(f.tail), dtype=float)
+    # A family with no contract at its own axis (the four-strike condor) has no
+    # leg there, and printing a "+0" row invents one.
+    keep = q != 0
+    K, q = K[keep], q[keep]
+    order = np.argsort(K)
+    K, q = K[order], q[order]
+    pts = np.array([(q * np.maximum(K - x, 0.0)).sum() for x in K])
+    hi = max(pts.max(), 1e-9)
+    rows = ["```", f"payoff at expiry — {fam}, spacing d={tuple(offsets)}", ""]
+    for level in range(10, -1, -1):
+        y = hi * level / 10
+        line = "".join("#" if v >= y - 1e-9 else " " for v in
+                       np.interp(np.linspace(K.min(), K.max(), 61), K, pts))
+        rows.append(f"{y:6.2f}a |{line}")
+    rows.append("       +" + "-" * 61)
+    rows.append("        " + f"{K.min():+.0f}a".ljust(30) + "0" + f"{K.max():+.0f}a".rjust(30))
+    rows.append("")
+    rows.append("strike offset : " + "  ".join(f"{k:+.0f}a" for k in K))
+    rows.append("contracts     : " + "  ".join(f"{v:+3.0f} " for v in q))
+    rows.append("payoff        : " + "  ".join(f"{v:4.1f}" for v in pts))
+    rows.append("```")
+    return rows
+
+
+def sample_trade(mid: pd.DataFrame, fam: str) -> tuple[list[str], dict | None]:
+    """One real trade from this family's own book, chosen as the MEDIAN result.
+
+    Deliberately not the best trade. A structure guide illustrated with its own
+    top decile teaches the reader the wrong thing about what the structure
+    normally does, so the row picked is the one whose return sits closest to
+    the family's median.
+    """
+    if mid.empty:
+        return ["*No traded example — this family funded nothing.*"], None
+    target = mid["ret"].median()
+    row = mid.iloc[(mid["ret"] - target).abs().argsort().iloc[0]]
+    doc = json.loads(row["legs"])
+    ex = {l["name"]: l for l in doc["exit"]}
+    lines = [
+        f"**{row['ticker']} — earnings {pd.Timestamp(row['event_date']).date()}**  ",
+        f"Spot {row['spot_entry']:.2f} at entry → {row['spot_exit']:.2f} the day after "
+        f"the print ({100*(row['spot_exit']/row['spot_entry'] - 1):+.1f}%). "
+        f"Predicted move {row['pred_abs_move']:.1f}% ± {row['pred_abs_move_sd']:.1f}. "
+        f"Anchor {row['anchor']:.2f}, half-width {row['half_width_pct_spot']:.1f}% of spot "
+        f"({row['width_over_forecast']:.2f}× the forecast).",
+        "",
+        "| leg | side | qty | strike | entry bid/ask | paid | exit bid/ask | received |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for l in sorted(doc["entry"], key=lambda l: -l["strike"]):
+        x = ex[l["name"]]
+        lines.append(
+            f"| {l['name']} | {l['side']} | {l['qty']:.0f} | {l['strike']:.2f} | "
+            f"{l['bid']:.2f} / {l['ask']:.2f} | {l['price']:.3f} | "
+            f"{x['bid']:.2f} / {x['ask']:.2f} | {x['price']:.3f} |")
+    held = bool(row.get("held_to_expiry", False))
+    lines += [
+        "",
+        f"Net debit **${row['entry_cost']:.2f}** per contract "
+        f"(× 100 = ${100*row['entry_cost']:.0f}). "
+        + (f"The post-print curve violated no-arbitrage, so this one was **held to "
+           f"expiry** and settled at its terminal payoff of ${row['exit_value']:.2f}."
+           if held else
+           f"The post-print curve was arithmetically consistent, so it was **closed** "
+           f"at ${row['exit_value']:.2f}."),
+        f"Result **{100*row['ret']:+.1f}%** on the debit — this family's median trade.",
+    ]
+    return lines, {"ticker": row["ticker"], "ret": float(row["ret"])}
+
+
 def main(record: bool = True) -> None:
     spec = lib.load_spec(HERE / "spec.yaml")
     built = e137build.build_all()
@@ -171,14 +287,32 @@ def main(record: bool = True) -> None:
             cell, full, gate=None, run_dir=run_dir, repricer=None,
             tail_shock=ecommon.abs_move_tail_shock, spy_daily=spy,
             input_files=[RESULTS / "candidates.parquet"],
-            extra_sections=lambda rr, k=fam: sections(results, events, built, k),
+            # The GATED mid rows, not the ungated ones: the sample trade must
+            # come from the book this report is about.
+            extra_sections=lambda rr, k=fam, m=full[np.isclose(
+                full["fill_alpha"].astype(float), MID)], d=run_dir: sections(
+                    results, events, built, k, m, d),
             write_report=True)
         if record and lib.spec_hash(cell) not in already:
             lib.record_evaluation(HERE, cell, result.results)
         print(f"[EXP-137] {fam}: report {result.report_path}", flush=True)
 
 
-def sections(results, events, built, cell):
+def _median_offsets(mid: pd.DataFrame, fam: str) -> tuple[int, ...]:
+    """This book's most common spacing RATIO, for drawing the shape.
+
+    Every trade picks its own width, so no single geometry describes the book.
+    The modal reduced ratio is the honest representative and the caption says
+    so rather than implying the width is fixed.
+    """
+    ratios = mid["shape_key"].dropna().str.split("@").str[-1]
+    if ratios.empty:
+        t = LABEL[fam].tiers
+        return (1, 2, 4)[:t] if t == 3 else ((1, 3) if t == 2 else (1,))
+    return tuple(int(x) for x in ratios.mode().iloc[0].split(":"))
+
+
+def sections(results, events, built, cell, mid=None, run_dir=None):
     """The four readings, grouped by payoff shape rather than ranked flat."""
     def rows_for(gated, cu):
         out = []
@@ -211,7 +345,43 @@ def sections(results, events, built, cell):
                 f"{100*events[f'offers_{fam}'].mean():.1f}%"]
                for fam in FAMILIES]
 
-    return [
+    # The structure this report is about, drawn and traded. Placed first
+    # because a reader who does not know what the shape IS cannot read any of
+    # the tables below it.
+    shape_sections = []
+    if mid is not None and run_dir is not None:
+        offs = _median_offsets(mid, cell)
+        png = Path(run_dir) / "figures" / "payoff.png"
+        png.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            payoff_figure(cell, offs, png)
+            img = [f"![payoff](figures/{png.name})", ""]
+        except Exception:                                        # noqa: BLE001
+            img = []
+        trade_lines, _ = sample_trade(mid, cell)
+        shape_sections = [
+            {
+                "title": f"The structure — {cell}",
+                "note": (f"{LABEL[cell].label}. "
+                         f"{'Twin-peaked' if LABEL[cell].twin_peaked else 'Centre-peaked'}: "
+                         + ("it pays most when the stock moves about one spacing "
+                            "either way, which is the modal earnings move."
+                            if LABEL[cell].twin_peaked else
+                            "it pays most when the stock does not move, so it is "
+                            "short the event.")
+                         + f" Drawn at d={tuple(offs)}, this book's median spacing ratio; "
+                         "the width itself is chosen per event."),
+                "columns": None, "rows": None,
+                "body": img + ascii_payoff(cell, offs),
+            },
+            {
+                "title": "A sample trade — the median result, not the best",
+                "columns": None, "rows": None,
+                "body": trade_lines,
+            },
+        ]
+
+    return shape_sections + [
         {
             "title": "Is this family alive? — every event it can carry, NO gate",
             "note": ("The unselected population. No gate and no chooser between "
