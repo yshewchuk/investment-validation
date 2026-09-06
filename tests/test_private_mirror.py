@@ -90,7 +90,26 @@ class TestCollection:
         # the ceiling was set when there were a third as many experiments. If
         # this fires again, inspect the breakdown before touching the number:
         # a single extension jumping is the signal it exists for.
-        assert rest < 20_000_000, f"non-growth payload is {rest:,} bytes — check the allowlist"
+        #
+        # Raised again to 80MB on 2026-09-06, after the same inspection. It
+        # fired at 60.8MB and the breakdown was: figures 27.63MB across 531
+        # PNGs, metrics json 15.94MB, code 13.25MB, markdown 2.45MB. No data
+        # glob — EXP-133/134/137/138/139/141 each evaluate MANY arms and every
+        # arm writes six figures and a metrics blob. EXP-134 alone is 15
+        # arm/convention combinations.
+        #
+        # Why raising costs almost nothing: the failure this catches is
+        # order-of-magnitude, not marginal. `data/curated` is 1.4GB and
+        # `data/raw` 2.7GB, so a glob creeping in lands at ~1,400MB, which 20MB
+        # and 80MB catch identically. Sensitivity is unchanged; only the
+        # nuisance rate falls.
+        #
+        # The real cost of growth is elsewhere and a lower ceiling does not fix
+        # it: PNGs are binary and do not delta-compress, so every re-run stores
+        # a full new blob in history forever. Syncing once per iteration rather
+        # than once per finished experiment is what grows `.git` (93MB at this
+        # writing) — see AGENTS.md, "Finishing an experiment".
+        assert rest < 80_000_000, f"non-growth payload is {rest:,} bytes — check the allowlist"
         # Raised from 30MB when EXP-121 landed. A transaction log carries every
         # leg's quotes at both ends, so its size scales with LEG COUNT, not just
         # trade count: STR-THRU's 17,666 two-leg trades are 4.1MB, TWIN-P's
@@ -98,11 +117,22 @@ class TestCollection:
         # measuring the wrong thing once multi-leg structures existed. The
         # allowlist guard above is the one that catches a data glob creeping in;
         # this one only asks whether the evidence has become unwieldy.
-        assert sum(p.stat().st_size for p in growth) < 60_000_000, (
+        # Raised from 60MB on 2026-09-06 alongside a prune, after inspecting
+        # the composition: 82 logs at 115.5MB, of which 46.6MB were GRID CELL
+        # arms — now excluded by EXCLUDE_GLOBS, leaving 68.8MB of primaries.
+        # The ceiling is set above that so a few more experiments do not trip
+        # it, and the prune is what keeps the number meaningful: an experiment
+        # that evaluates fifteen arms should not ship fifteen audit trails.
+        assert sum(p.stat().st_size for p in growth) < 100_000_000, (
             f"evidence files are {sum(p.stat().st_size for p in growth):,} bytes — "
             "expected, but prune or archive before the mirror gets unwieldy"
         )
-        assert total < 75_000_000, f"mirror is {total:,} bytes"
+        # The backstop, and it must stay ABOVE the sum of the two ceilings
+        # above or it silently becomes the only guard and they stop meaning
+        # anything. 80MB payload + 100MB evidence = 180MB, so this sits just
+        # clear of that. It caught nothing here — it fired at 130MB only
+        # because it had been left at the 20+60 era's arithmetic.
+        assert total < 200_000_000, f"mirror is {total:,} bytes"
 
     def test_no_market_data_files_are_collected(self):
         """No market data — but the irreplaceable non-code artifacts DO ship.

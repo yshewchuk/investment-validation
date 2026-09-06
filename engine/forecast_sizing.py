@@ -91,11 +91,43 @@ def twin_p5_params(pred_abs_move: float) -> dict | None:
     return {"width_moneyness": width}
 
 
+#: Where the payoff of each short-vol family is centred, in units of the
+#: spacing. Unlike the twin peaks these all peak at the ANCHOR, so the spacing
+#: is set by where the payoff should reach ZERO rather than where it peaks: the
+#: outer strike goes on the predicted move, which is EXP-133's registered width
+#: rule (span the forecast) at its binding edge. EXP-137 measured the chosen
+#: widths clustering at 1.3-1.7x the forecast, so this is the conservative end
+#: of what the search picked, not the middle of it.
+SHORT_VOL_OUTER = {"CND-PS": 2.0, "BFLY-P": 1.0, "BFLY-P5": 3.0}
+
+
+def short_vol_params(strategy: str):
+    """``width_moneyness`` so the OUTER strike lands on the predicted move."""
+    outer = SHORT_VOL_OUTER[strategy]
+
+    def rule(pred_abs_move: float) -> dict | None:
+        try:
+            forecast = float(pred_abs_move)
+        except (TypeError, ValueError):
+            return None
+        if not forecast > 0 or forecast != forecast:
+            return None
+        width = (forecast / 100.0) / outer
+        if not WIDTH_MIN <= width <= WIDTH_MAX:
+            return None
+        return {"width_moneyness": width}
+
+    return rule
+
+
 #: Strategies whose shape is set per event by a Tier-4 forecast, and the rule
 #: that turns the forecast into structure parameters.
 FORECAST_SIZED: dict[str, Callable[[float], dict | None]] = {
     "TWIN-P": twin_p_params,
     "TWIN-P5": twin_p5_params,
+    "CND-PS": short_vol_params("CND-PS"),
+    "BFLY-P": short_vol_params("BFLY-P"),
+    "BFLY-P5": short_vol_params("BFLY-P5"),
 }
 
 

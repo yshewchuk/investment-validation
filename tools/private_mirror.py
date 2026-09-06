@@ -108,9 +108,18 @@ EXCLUDE_PARTS = ("__pycache__", ".git", ".venv", "node_modules", ".pytest_cache"
 #: EXP-109's two counterfactual selector evaluations are 26 MB of figures and
 #: transaction logs for a system that does not exist, and they regenerate from
 #: `run_stage2.py`. The experiment's own REPORT.md, spec and results still ship.
+#: A GRID CELL's transaction log, on the same reasoning one step further. The
+#: log exists so a reported chart can be checked row by row, and that matters
+#: most for the result an experiment turns on. From EXP-133 on, an experiment
+#: routinely evaluates many arms — EXP-134 alone has 15 arm/convention
+#: combinations — and their logs came to 46.6 MB of the mirror's 115.5 MB
+#: against 68.8 MB for every primary combined. The grid cells keep their
+#: REPORT.md, figures and metrics json; only the per-trade rows behind a
+#: SECONDARY curve are dropped, and `run.py --force` regenerates them.
 EXCLUDE_GLOBS = (
     "experiments/*/eval_*/*",
     "experiments/*/eval_*/**/*",
+    "experiments/*/arms/**/transactions_*.csv",
 )
 
 EXCLUDE_DIRS = (
@@ -189,7 +198,8 @@ def scan_for_secrets(files: list[Path]) -> Report:
     return report
 
 
-def sync(target: Path, files: list[Path]) -> tuple[int, list[str]]:
+def sync(target: Path, files: list[Path],
+         *, prune_roots: set[str] | None = None) -> tuple[int, list[str]]:
     """Copy the collected files, and PRUNE anything the mirror should no longer hold.
 
     Copy-only was a real defect, not a missing nicety. A file that stops being
@@ -228,9 +238,15 @@ def sync(target: Path, files: list[Path]) -> tuple[int, list[str]]:
         rel = existing.relative_to(target)
         if rel.parts and rel.parts[0] == ".git":
             continue
-        if rel.parts[0] not in managed and rel.as_posix() not in {
-            f.relative_to(ROOT).as_posix() for f in files
-        }:
+        if prune_roots is None:
+            if rel.parts[0] not in managed and rel.as_posix() not in {
+                f.relative_to(ROOT).as_posix() for f in files
+            }:
+                continue
+        elif not any(
+            rel.as_posix() == root or rel.as_posix().startswith(root + "/")
+            for root in prune_roots
+        ):
             continue
         if rel.as_posix() in wanted:
             continue
@@ -247,9 +263,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", default=str(Path.home() / ".private_mirror" / "investing-plan"))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--push", action="store_true", help="commit and push the mirror clone")
+    ap.add_argument(
+        "--experiment",
+        help="sync only one experiment ID plus experiments/LEDGER.csv")
     args = ap.parse_args(argv)
 
     files, skipped = collect()
+    prune_roots = None
+    stage_paths = None
+    if args.experiment:
+        matches = sorted((ROOT / "experiments").glob(f"{args.experiment}_*"))
+        if len(matches) != 1 or not matches[0].is_dir():
+            print(
+                f"expected one experiment directory for {args.experiment}; "
+                f"found {len(matches)}", file=sys.stderr)
+            return 2
+        experiment_root = matches[0].relative_to(ROOT).as_posix()
+        ledger_path = "experiments/LEDGER.csv"
+        files = [
+            path for path in files
+            if path.relative_to(ROOT).as_posix() == ledger_path
+            or path.relative_to(ROOT).as_posix().startswith(experiment_root + "/")
+        ]
+        skipped = [
+            reason for reason in skipped
+            if reason.startswith(experiment_root + "/")
+        ]
+        prune_roots = {experiment_root}
+        stage_paths = [experiment_root, ledger_path]
+        print(f"  scope: {args.experiment} plus {ledger_path}")
     total = sum(p.stat().st_size for p in files)
     print(f"private mirror: {len(files)} file(s), {total:,} bytes")
     for reason in skipped[:10]:
@@ -283,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    copied, pruned = sync(target, files)
+    copied, pruned = sync(target, files, prune_roots=prune_roots)
     print(f"  synced {copied} changed file(s) → {target}")
     if pruned:
         # Named, not counted. A silent deletion from the record the program
@@ -296,11 +338,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.push:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        subprocess.run(["git", "add", "-A"], cwd=target, check=True)
+        add_cmd = ["git", "add", "-A"]
+        if stage_paths is not None:
+            add_cmd.extend(["--", *stage_paths])
+        subprocess.run(add_cmd, cwd=target, check=True)
         status = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=target, capture_output=True, text=True
+            ["git", "diff", "--cached", "--quiet"], cwd=target
         )
-        if not status.stdout.strip():
+        if status.returncode == 0:
             print("  nothing to commit")
             return 0
         subprocess.run(

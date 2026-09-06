@@ -234,10 +234,44 @@ TWIN_P5_RULE = EntryRule(
 )
 
 
+def _short_vol_rule(strategy: str) -> EntryRule:
+    """The EXP-131 gate plus the two liquidity guards, for a short-vol family.
+
+    Identical in form to TWIN-P5's, and deliberately so: EXP-133 through
+    EXP-141 priced every one of these families through exactly this rule, so
+    registering anything else would put a structure on the board under terms no
+    experiment measured.
+
+    **These are tracked, not promoted.** The evidence behind them is a
+    four-year holdout on 490 trades whose Sharpe difference sits inside noise,
+    and there are no forward prints at all. They are on the board so a live
+    record can accumulate on events no backtest selection has touched — which
+    the TWIN-P5 promotion note names as the missing evidence for the whole
+    programme. See ``guides/exp141_smaller_menu.md``.
+    """
+    return EntryRule(
+        strategy=strategy,
+        terms=(
+            Term("expected_pnl",
+                 "simulated expected return is below the trailing top-20% bar",
+                 _expected_pnl_clears_the_bar, needs=("exp_pnl_sim", "pnl_cutoff")),
+            Term("spread", f"mean relative spread exceeds {MAX_REL_SPREAD:.0%}",
+                 _spread_is_crossable, needs=("rel_spread",)),
+            Term("mcap", f"market cap below ${MCAP_FLOOR/1e9:.0f}B",
+                 _name_is_large_enough, needs=("mcap_usd",)),
+        ),
+        evidence=("EXP-137/141 forward tracking, NOT promoted: 2023-2026 holdout, "
+                  "gain inside noise, no forward prints"),
+    )
+
+
 #: Strategies gated by arithmetic rather than by a registered model.
 ENTRY_RULES: dict[str, EntryRule] = {
     "TWIN-P": TWIN_P_RULE,
     "TWIN-P5": TWIN_P5_RULE,
+    "CND-PS": _short_vol_rule("CND-PS"),
+    "BFLY-P": _short_vol_rule("BFLY-P"),
+    "BFLY-P5": _short_vol_rule("BFLY-P5"),
 }
 
 

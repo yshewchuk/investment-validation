@@ -51,8 +51,12 @@ __all__ = [
     "straddle_through",
     "straddle_runup",
     "put_condor",
+    "put_condor_strike",
+    "put_butterfly",
+    "put_butterfly_wide",
     "twin_peak",
     "twin_peak_5",
+    "REFERENCE_QTY",
     "STRUCTURES",
     "price_structure",
     "structure_return",
@@ -406,8 +410,17 @@ class LegSpec:
             raise ValueError(f"right must be {CALL!r} or {PUT!r}, got {self.right!r}")
         if self.side not in (BUY, SELL):
             raise ValueError(f"side must be {BUY!r} or {SELL!r}, got {self.side!r}")
-        if self.qty <= 0:
-            raise ValueError("qty must be positive; direction is carried by `side`")
+        if self.qty < 0:
+            raise ValueError("qty must not be negative; direction is carried by `side`")
+        # qty == 0 is a REFERENCE leg: it resolves a strike so other legs can be
+        # mirrored about it, and carries no position. A four-strike condor whose
+        # axis of symmetry sits ON a listed strike has no contract there, and
+        # every strike below the axis is placed by exact dollar mirror about it
+        # — which is what makes the deep-ITM tail cancel to exactly zero. Without
+        # this the structure cannot be expressed at all for a general
+        # inner/outer pair; it can only be expressed when outer == 3 * inner,
+        # which is the evenly spaced special case CND-P already covers.
+        # It prices to a zero cash flow and is excluded from contract counts.
 
 
 @dataclass(frozen=True)
@@ -1159,6 +1172,131 @@ def twin_peak_5(
     )
 
 
+#: Marker for a leg that exists only so others can mirror about its strike.
+REFERENCE_QTY = 0.0
+
+
+def _symmetric_put_ladder(name: str, description: str, anchor_qty: int,
+                          tail: tuple[tuple[int, int], ...], *,
+                          width_moneyness: float | None = None,
+                          steps: int = 1, anchor_offset: int = 0,
+                          entry_offset: int = 0, exit_offset: int = 1,
+                          decision_offset: int | None = None,
+                          peak_multiple: float = 1.0) -> Structure:
+    """The general symmetric all-put structure the EXP-133 enumeration found.
+
+    ``tail`` is ``((multiple, qty), ...)`` — each entry places ``qty`` contracts
+    at ``A + multiple*a`` AND at ``A - multiple*a``, where ``a`` is the spacing
+    and ``A`` the anchor. A negative qty is a short leg. ``anchor_qty`` does the
+    same at ``A`` itself, and may be zero for a family with no contract on its
+    own axis.
+
+    Every strike below the anchor is placed by exact dollar MIRROR of the one
+    above it and must be LISTED, which is what makes the deep-ITM tail cancel to
+    exactly zero rather than nearly. That, plus contracts summing to zero, is
+    the whole defined-risk claim — see ``guides/exp133_structure_search.md``.
+
+    This generalises :func:`twin_peak` and :func:`twin_peak_5` rather than
+    replacing them: both remain as they were, because EXP-123 through EXP-131
+    are replayed against them and a shared factory would silently re-price
+    those results.
+    """
+    if width_moneyness is not None and not width_moneyness > 0:
+        raise ValueError(f"width_moneyness must be positive, got {width_moneyness!r}")
+    if anchor_qty + 2 * sum(q for _, q in tail) != 0:
+        raise ValueError("contracts must sum to zero or the deep-ITM tail does not cancel")
+    expiry = ExpirySelector(kind="first_post_event")
+    atm = StrikeSelector("bracket", side="below", steps=int(anchor_offset) or None)
+    legs: list[LegSpec] = []
+    # The anchor leg is always resolved, because every mirrored strike is placed
+    # relative to it. Where the family carries no contract on its own axis it is
+    # a REFERENCE leg — zero quantity, zero cash flow, present so the mirrors
+    # are exact.
+    legs.append(LegSpec("atm", PUT, BUY if anchor_qty >= 0 else SELL, expiry, atm,
+                        qty=float(abs(anchor_qty)) if anchor_qty else REFERENCE_QTY))
+    for i, (mult, qty) in enumerate(tail, start=1):
+        side = BUY if qty > 0 else SELL
+        up = (StrikeSelector("offset_from", ref="atm",
+                             moneyness=float(width_moneyness) * mult)
+              if width_moneyness is not None
+              else StrikeSelector("grid_step", ref="atm", steps=int(steps) * mult))
+        legs.append(LegSpec(f"up{i}", PUT, side, expiry, up, qty=float(abs(qty))))
+        legs.append(LegSpec(f"dn{i}", PUT, side, expiry,
+                            StrikeSelector("mirror", ref=f"up{i}", about="atm"),
+                            qty=float(abs(qty))))
+    return Structure(
+        name=name, description=description, legs=tuple(legs),
+        entry_offset=entry_offset, exit_offset=exit_offset,
+        decision_offset=decision_offset,
+        params={"anchor_qty": anchor_qty, "tail": list(tail),
+                "width_moneyness": width_moneyness, "steps": int(steps),
+                "anchor_offset": int(anchor_offset),
+                "width_legs": ("atm", "up1"), "peak_multiple": peak_multiple},
+    )
+
+
+def put_condor_strike(width_moneyness: float | None = None, inner: int = 1,
+                      outer: int = 2, **kw) -> Structure:
+    """CND-PS — a put condor whose axis of symmetry sits ON a listed strike.
+
+    Long ``A +/- outer*a``, short ``A +/- inner*a``, nothing at ``A`` itself::
+
+        A - outer*a  BUY      A - inner*a  SELL
+        A + inner*a  SELL     A + outer*a  BUY
+
+    **This is not CND-P.** :func:`put_condor` centres its axis BETWEEN the two
+    shorts and spaces all three gaps equally; this centres on a strike and lets
+    the inner and outer offsets vary independently. EXP-137 measured the two as
+    different structures: CND-P returned -1.70% to -2.90% on capital across its
+    own width sweep, while this family returned +7.0% on the same universe, and
+    only 10.1% of the widths this one chooses are the equal spacing CND-P is
+    fixed at. See ``guides/exp141_smaller_menu.md``.
+
+    Two short puts rather than four, which is why it posts half the collateral
+    of any five- or seven-strike family under a cash-secured account: a median
+    $24,400 against $48,800.
+    """
+    return _symmetric_put_ladder(
+        "CND-PS", "Put condor centred on a listed strike; short +/-inner, long "
+        "+/-outer, all puts, one post-event expiry.",
+        0, ((inner, -1), (outer, 1)), width_moneyness=width_moneyness,
+        peak_multiple=float(outer - inner), **kw)
+
+
+def put_butterfly(width_moneyness: float | None = None, **kw) -> Structure:
+    """BFLY-P — the three-strike put butterfly: long the wings, short two at A.
+
+    ``A-a BUY 1, A SELL 2, A+a BUY 1``. Peak ``a`` at a dead-flat print, zero at
+    ``+/-a``, and the only enumerated family that needs three listed strikes, so
+    it fits ladders nothing else does — offered on 11,678 events against the
+    seven-strike families' 6,800.
+
+    Alive but marginal on its own: EXP-137 measured -0.3% on capital ungated and
+    +6.8% gated, and it is the single best structure on 12.0% of events while
+    being predicted best on only 1.8% of them.
+    """
+    return _symmetric_put_ladder(
+        "BFLY-P", "Put butterfly: short two at the anchor, long both wings, "
+        "all puts, one post-event expiry.",
+        -2, ((1, 1),), width_moneyness=width_moneyness, peak_multiple=1.0, **kw)
+
+
+def put_butterfly_wide(width_moneyness: float | None = None, inner: int = 1,
+                       outer: int = 3, **kw) -> Structure:
+    """BFLY-P5 — a five-strike butterfly: short four at A, long both pairs.
+
+    ``A SELL 4``, long one at each of ``A +/- inner*a`` and ``A +/- outer*a``.
+    Centre-peaked with two ramps rather than one, so it pays across a wider
+    quiet band than :func:`put_butterfly` at the cost of four short puts
+    instead of two.
+    """
+    return _symmetric_put_ladder(
+        "BFLY-P5", "Five-strike put butterfly: short four at the anchor, long "
+        "both strike pairs, all puts, one post-event expiry.",
+        -4, ((inner, 1), (outer, 1)), width_moneyness=width_moneyness,
+        peak_multiple=float(inner + outer), **kw)
+
+
 #: Factories keyed by strategy code, so specs can name a structure as a string.
 STRUCTURES = {
     "CAL-P": put_calendar,
@@ -1170,4 +1308,11 @@ STRUCTURES = {
     # twin-peak structure. The default wing is 3 — the arm that was measured —
     # so `STRUCTURES["TWIN-P5"]()` can never build the m=2 shape by omission.
     "TWIN-P5": twin_peak_5,
+    # Added 2026-09-06 for forward tracking off EXP-133/137/141. Each carries a
+    # registered entry rule (the EXP-131 gate plus the two liquidity guards) —
+    # they are NOT promoted, and the board shows them so a live track record can
+    # accumulate on prints no backtest selection has touched.
+    "CND-PS": put_condor_strike,
+    "BFLY-P": put_butterfly,
+    "BFLY-P5": put_butterfly_wide,
 }

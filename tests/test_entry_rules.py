@@ -161,7 +161,12 @@ class TestSizing:
         assert twin_p_params(WIDTH_MAX * PLATEAU_CENTRE * 100) is not None
 
     def test_only_declared_strategies_are_forecast_sized(self):
-        assert set(FORECAST_SIZED) == {"TWIN-P", "TWIN-P5"}
+        # The three short-vol families were added 2026-09-06 for forward
+        # tracking (EXP-133/137/141). They are sized like the twin peaks — the
+        # forecast sets the spacing — but their payoff peaks at the ANCHOR, so
+        # the outer strike goes on the predicted move rather than the peak.
+        assert set(FORECAST_SIZED) == {"TWIN-P", "TWIN-P5",
+                                       "CND-PS", "BFLY-P", "BFLY-P5"}
         assert forecast_params("STR-THRU", 7.5) is None
 
     def test_the_parameter_is_one_the_factory_accepts(self):
