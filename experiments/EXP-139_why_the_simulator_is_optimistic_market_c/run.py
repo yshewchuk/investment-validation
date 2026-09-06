@@ -112,6 +112,11 @@ def score(mid: pd.DataFrame, adj: pd.Series | None = None) -> dict:
     gaps = {f: float((m.loc[m["arm"] == f, "pred"] - m.loc[m["arm"] == f, "ret"]).mean())
             for f in FAMILIES}
     return {
+        # Kept so the report can trace WHICH events changed hands between arms
+        # and whether the change helped — a hit rate alone says an arm is
+        # different, not how.
+        "_chosen": chosen, "_truth": truth, "_real": real.values,
+        "_events": pred.index.to_numpy(),
         "events": int(len(pred)), "top1": float((chosen == truth).mean()),
         "top3": float((rank <= 3).mean()), "mean_rank": float(rank.mean()),
         "ret_chooser": float(picked.mean()),
@@ -140,11 +145,14 @@ def main(record: bool = True) -> None:
     unc_mid = unc_mid[unc_mid["event_id"].isin(shared)]
     print(f"[EXP-139] {len(shared):,} events priced by both arms", flush=True)
 
+    # Computed once and reused for both the comparison and the per-arm books;
+    # the trailing estimate is the expensive part of this file.
+    adj_unc, adj_cap = debias(unc_mid), debias(cap_mid)
     arms = {
         "uncorrected": score(unc_mid),
         "cap": score(cap_mid),
-        "debias": score(unc_mid, debias(unc_mid)),
-        "both": score(cap_mid, debias(cap_mid)),
+        "debias": score(unc_mid, adj_unc),
+        "both": score(cap_mid, adj_cap),
     }
     for k, s in arms.items():
         print(f"[EXP-139] {k:12s} top-1 {100*s['top1']:5.1f}%  top-3 {100*s['top3']:5.1f}%  "
@@ -163,8 +171,11 @@ def main(record: bool = True) -> None:
     }
     print(f"[EXP-139] acceptance: {acceptance}", flush=True)
     (RESULTS / "arm_comparison.json").write_text(
-        json.dumps({"arms": arms, "acceptance": acceptance,
-                    "meta": b139["meta"]}, indent=1, default=str))
+        json.dumps({"arms": {k: {kk: vv for kk, vv in v.items()
+                                 if not kk.startswith("_")}
+                             for k, v in arms.items()},
+                    "acceptance": acceptance, "meta": b139["meta"]},
+                   indent=1, default=str))
 
     print(f"\n{'family':>14} {'payoff':>7} " + "".join(f"{k:>14}" for k in arms))
     for f in FAMILIES:
@@ -178,21 +189,29 @@ def main(record: bool = True) -> None:
     # numbers rather than a comparison table alone.
     spy = ecommon.load_spy_daily()
     already = set(lib.ledger_read().query("stage == 'ran'")["spec_hash"])
-    for name, mid, adj in (("cap", cap_mid, None),
-                           ("uncorrected", unc_mid, None)):
+    # Each SOURCE is loaded once; `debias` and `both` reuse the same rows as
+    # `uncorrected` and `cap` respectively and differ only in which family the
+    # adjusted prediction picks.
+    sources = {}
+    for src, frame, tal in (("cap", e139.load_all(), b139["tallies"]),
+                            ("unc", pd.read_parquet(
+                                E137 / "results" / "candidates.parquet"),
+                             b137["tallies"])):
+        sources[src] = e134run.apply_exit(
+            e133run.attach(frame.drop(columns=["mcap_usd"], errors="ignore"), tal),
+            "conditional")
+    del frame
+
+    for name, mid, adj, src in (("cap", cap_mid, None, "cap"),
+                                ("uncorrected", unc_mid, None, "unc"),
+                                ("debias", unc_mid, adj_unc, "unc"),
+                                ("both", cap_mid, adj_cap, "cap")):
         m = mid.copy()
         m["pred"] = m["exp_pnl_sim_select"] - (adj if adj is not None else 0.0)
         pick = m.loc[m.groupby("event_id")["pred"].idxmax()]
-        allr = e134run.apply_exit(
-            e133run.attach(
-                (e139.load_all() if name == "cap"
-                 else pd.read_parquet(E137 / "results" / "candidates.parquet")
-                 ).drop(columns=["mcap_usd"], errors="ignore"),
-                b139["tallies"] if name == "cap" else b137["tallies"]),
-            "conditional")
+        allr = sources[src]
         keys = set(zip(pick["event_id"], pick["arm"]))
         book = allr[[(e, a) in keys for e, a in zip(allr["event_id"], allr["arm"])]]
-        del allr
         if book.empty:
             continue
         is_primary = name == "cap"
@@ -216,7 +235,47 @@ def main(record: bool = True) -> None:
 
 
 def sections(arms, built, cell):
-    order = ["uncorrected", "cap", "debias", "both"]
+    order = [k for k in ("uncorrected", "cap", "debias", "both") if k in arms]
+    base = arms["uncorrected"]
+    F = FAMILIES
+
+    def sel_table(arm):
+        """Predicted-best against actually-best, per family, for one arm."""
+        a = arms[arm]
+        ch, tr, real = a["_chosen"], a["_truth"], a["_real"]
+        out = []
+        for i, f in enumerate(F):
+            s_, t_ = ch == i, tr == i
+            prec = 100 * (s_ & t_).sum() / max(s_.sum(), 1)
+            rec = 100 * (s_ & t_).sum() / max(t_.sum(), 1)
+            out.append([
+                f, "twin" if LABEL[f].twin_peaked else "centre",
+                f"{s_.sum():,}", f"{t_.sum():,}",
+                f"{s_.sum() / max(t_.sum(), 1):.2f}",
+                f"{prec:.1f}%", f"{rec:.1f}%",
+                f"{100 * real[s_, i].mean():+.1f}%" if s_.sum() else "—",
+            ])
+        return out
+
+    def flips(arm):
+        """Against the uncorrected arm: which picks changed, and did it help?"""
+        a = arms[arm]
+        ch0, ch1, real = base["_chosen"], a["_chosen"], a["_real"]
+        moved = ch0 != ch1
+        if not moved.any():
+            return None
+        idx = np.arange(len(ch0))
+        r0 = real[idx, ch0]
+        r1 = real[idx, ch1]
+        better = (r1 > r0) & moved
+        worse = (r1 < r0) & moved
+        return {
+            "n": int(moved.sum()), "share": float(moved.mean()),
+            "better": int(better.sum()), "worse": int(worse.sum()),
+            "delta": float(r1[moved].mean() - r0[moved].mean()),
+            "was_right_before": int((base["_truth"] == ch0)[moved].sum()),
+            "right_after": int((a["_truth"] == ch1)[moved].sum()),
+        }
     rows = [[
         f"**{k}**" if k == cell else k,
         f"{100*arms[k]['top1']:.1f}%", f"{100*arms[k]['top3']:.1f}%",
@@ -228,6 +287,53 @@ def sections(arms, built, cell):
                 + [f"{100*arms[k]['gaps'][f]:+.1f}pp" for k in order]
                 for f in FAMILIES]
     m = built["meta"]
+    flip_rows = []
+    for k in order:
+        if k == "uncorrected":
+            continue
+        fl = flips(k)
+        if not fl:
+            continue
+        flip_rows.append([
+            k, f"{fl['n']:,}", f"{100*fl['share']:.1f}%",
+            f"{fl['better']:,}", f"{fl['worse']:,}",
+            f"{100*fl['delta']:+.2f}pp",
+            f"{fl['was_right_before']:,}", f"{fl['right_after']:,}",
+        ])
+
+    net_rows = []
+    for i, f in enumerate(F):
+        row = [f, "twin" if LABEL[f].twin_peaked else "centre",
+               f"{(base['_truth'] == i).sum():,}"]
+        for k in order:
+            row.append(f"{(arms[k]['_chosen'] == i).sum():,}")
+        net_rows.append(row)
+
+    outcome_rows = [[
+        f"**{k}**" if k == cell else k,
+        f"{100*arms[k]['ret_chooser']:+.2f}%",
+        f"{100*arms[k]['ret_oracle']:+.2f}%",
+        f"{100*arms[k]['ret_random']:+.2f}%",
+        f"{100*(arms[k]['ret_chooser'] - arms[k]['ret_random']) / (arms[k]['ret_oracle'] - arms[k]['ret_random']):.1f}%",
+    ] for k in order]
+
+    per_arm_selection = []
+    for k in order:
+        per_arm_selection.append({
+            "title": f"Selections under `{k}`" + (" — the registered primary"
+                                                 if k == "cap" else ""),
+            "note": ("`predicted` is how often this arm named the family best; "
+                     "`was best` is how often it realized best — the same in "
+                     "every arm, since only the prediction moves. `ratio` above "
+                     "1 means the arm over-calls the family. `precision` is how "
+                     "often a call was right; `recall` how much of that family's "
+                     "wins it caught."),
+            "columns": ["family", "payoff", "predicted", "was best", "ratio",
+                        "precision", "recall", "mean return when picked"],
+            "align": ["---", "---"] + ["---:"] * 6,
+            "rows": sel_table(k),
+        })
+
     return [
         {
             "title": "Four arms, one set of priced candidates",
@@ -256,7 +362,42 @@ def sections(arms, built, cell):
             "align": ["---", "---"] + ["---:"] * len(order),
             "rows": fam_rows,
         },
-    ]
+        {
+            "title": "Where the choice ended up, by arm",
+            "note": ("How many events each family was picked for, against how "
+                     "often it actually won. `was best` is fixed — only the "
+                     "predictions move — so this table is the whole story of "
+                     "what each adjustment did to the selection."),
+            "columns": ["family", "payoff", "was best"] + order,
+            "align": ["---", "---"] + ["---:"] * (len(order) + 1),
+            "rows": net_rows,
+        },
+        {
+            "title": "What the adjustments actually changed",
+            "note": ("Only the events whose pick MOVED against the uncorrected "
+                     "arm. `better`/`worse` compare the realized return of the "
+                     "new pick against the old one on the same event, so this "
+                     "is whether the change paid — not whether the arm is "
+                     "different."),
+            "columns": ["arm", "picks changed", "share", "better", "worse",
+                        "mean change", "right before", "right after"],
+            "align": ["---"] + ["---:"] * 7,
+            "rows": flip_rows,
+            "body": ["", "An adjustment that moves many picks with `better` and "
+                     "`worse` near parity has added variance and no skill, "
+                     "which is what a symptom treatment looks like from the "
+                     "inside."],
+        },
+        {
+            "title": "What the choice was worth, by arm",
+            "note": ("`oracle` takes the realized best, `random` the mean of all "
+                     "eight — the ceiling and the floor. `captured` is the share "
+                     "of that gap the arm's chooser actually collected."),
+            "columns": ["arm", "chooser", "oracle", "random", "captured"],
+            "align": ["---"] + ["---:"] * 4,
+            "rows": outcome_rows,
+        },
+    ] + per_arm_selection
 
 
 if __name__ == "__main__":
