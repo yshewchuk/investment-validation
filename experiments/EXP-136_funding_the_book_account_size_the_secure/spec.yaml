@@ -1,0 +1,157 @@
+id: EXP-136
+title: "Funding the book: account size, the secured cap, position sizing and fill order"
+kind: capital-allocation
+strategy: TWIN-P5
+programme: structure-validation
+prior: [EXP-131, EXP-133, EXP-134]
+type: exploratory
+price_source: >
+  None new. EXP-134's priced candidates are read from disk and nothing is
+  repriced. The strategy - the enumerated candidate set, the width rules, the
+  no-arbitrage filter, the objective, the gate and the exit convention - is
+  held FIXED at EXP-134's registered configuration. Only the funding policy
+  moves.
+
+hypothesis: >
+  EXP-134 funded 675 of 1,428 wanted trades under a $100,000 account securing
+  at most 50% of equity, sized at 5% of equity per trade, filled in
+  chronological order. It turned $100,000 into $182,842 over nine years, about
+  7.35% a year, while averaging 0.25 open positions - the account was idle
+  roughly three quarters of the time.
+
+  Four changes to the funding policy are proposed together:
+    - the account starts at $200,000 rather than $100,000;
+    - the secured cap rises from 50% to 66% of current marked equity;
+    - a position AIMS to consume a quarter of the current headroom instead of
+      5% of equity, as an aim and not a cap - a structure needing the whole
+      headroom for one contract still takes one;
+    - trades competing on the same entry date are filled most expensive first,
+      since expensive names can only ever be funded from an empty account.
+
+  Registered primary: all four together.
+
+  FALSIFIED if the primary does not beat EXP-134's registered policy on CAGR
+  over the identical book.
+
+  The four are separable and are ALSO run one at a time, because a bundle that
+  moves the outcome says nothing about which of its parts moved it.
+
+known_before_registration:
+  a_post_hoc_sweep_has_already_been_seen_and_this_is_why_the_type_is_exploratory: >
+    This cannot be labelled confirmatory and is not. A post-hoc sweep of these
+    same policies was run on EXP-134's book BEFORE this spec was written, at
+    the user's request, and its numbers are below. The experiment is registered
+    anyway - to put the comparison in the ledger, to run it across arms and
+    exit conventions rather than one cell, and because the user asked for the
+    policy to be adopted. Every number here was visible first, and no result
+    from this run may be read as independent confirmation of the policy choice.
+  what_that_sweep_measured_on_best_all_conditional: >
+    CAGR from the stated start, over the identical gated book of 1,428 wanted
+    trades:
+      registered EXP-134 ($100k, 50%, 5% of equity, chronological)   7.35%
+      + account $200k only                                            8.18%
+      + cap 66% only                                                  10.23%
+      + size at 1/4 of headroom only                                   3.17%
+      + most expensive first only                                      7.08%
+      $200k + 66%                                                     10.73%
+      $200k + 66% + expensive first                                    8.90%
+      $200k + 66% + expensive first + 1/2 headroom                     6.08%
+      ALL FOUR (the registered primary)                                4.24%
+    The primary is therefore expected to be WORSE than two of its own grid
+    cells, and it is registered as the primary regardless because it is the
+    policy that was asked for. Registering a hypothesis one expects to lose is
+    the point of registering it.
+  why_sizing_to_a_share_of_headroom_hurts: >
+    The intuition is to leave room for concurrency. The account averages 0.25
+    open positions and its median secured-at-entry is 0% of the cap, so the
+    concurrency being reserved for mostly does not arrive. Under-sizing trades
+    away size that is certain for trades that are not: the rule funds more
+    events (78.7% against 47.3%) at one contract instead of four, and the count
+    does not pay for the size. Measured, not assumed - and the sweep to 1/2
+    confirms the direction rather than rescuing it.
+  what_the_margin_refusals_are_actually_made_of: >
+    Of EXP-134's 753 refusals, 369 (49%) could not fund ONE contract even
+    against an empty account - median underlying $306 - and 384 (51%) would
+    have fit but for open positions, median underlying $92. Doubling the
+    account attacks the first group directly and nothing else does.
+  return_on_capital_is_not_fixed_across_these_cells: >
+    Stated because the first draft of the sweep claimed it was. Each trade's
+    return on its own debit is untouched by funding policy, but a different
+    policy funds a different SUBSET, so aggregate return on capital moves with
+    the mix - by up to 6pp across the sweep. CAGR and final equity are the
+    measures this experiment turns on; return on capital is reported so the
+    mix shift is visible rather than hidden.
+
+definition:
+  the_book_is_fixed: >
+    EXP-134's candidates, exit convention and gate, read from
+    experiments/EXP-134_.../results/candidates.parquet. No repricing, no
+    re-selection, no change to the gate. The set of trades the strategy WANTS
+    is identical in every cell; only which of them the account can place, and
+    at what size, differs.
+  the_policy_under_test: >
+    start_equity $200,000; secured cap 0.66 of current marked equity across all
+    open positions; sizing aims at 0.25 of current headroom, overridden upward
+    to one contract when one contract fits within the full headroom; same-date
+    ties filled by secured requirement descending.
+  unchanged_from_exp_134: >
+    Cash-secured in full at strike x 100 per short put with no spread offset.
+    Whole contracts only. Secured cash released at exit. A trade that cannot be
+    funded does not happen and is NOT re-selected to a cheaper structure.
+    Returns quoted on the debit.
+  the_risks_this_run_measures:
+    the_primary_is_expected_to_lose:
+      "Registered anyway. If it loses as the sweep says, the report states that
+       the requested policy is worse than its own components and names the two
+       cells that beat it, rather than quietly promoting a grid cell."
+    a_bigger_account_is_not_a_better_strategy:
+      "Doubling the account raises CAGR by funding trades that were refused. It
+       is a capacity result, not an edge result, and the report must not let a
+       larger final balance read as a better strategy. Return on capital and
+       trades-per-year are reported alongside."
+    all_of_this_is_one_book:
+      "Every cell reuses the same 1,428 wanted trades, so the cells are not
+       independent samples and their differences carry no error bar from this
+       design. Reported as a deterministic comparison, never with a p-value."
+
+primary_spec:
+  universe: "EXP-134's gated book, best_all arm, conditional exit"
+  policy: "$200,000 start, 66% secured cap, size at 1/4 of headroom, most expensive filled first"
+  acceptance:
+    beats_the_registered_policy: "CAGR above EXP-134's $100k / 50% / 5%-of-equity / chronological policy on the identical book"
+    funds_more: "funded trade count above EXP-134's 675"
+    no_new_defined_risk_failures: "zero trades losing more than their debit, unchanged from EXP-134"
+
+grid:
+  policy:
+    - registered_exp134          # $100k, 50%, 5% of equity, chronological
+    - account_200k_only
+    - cap_66_only
+    - quarter_headroom_only
+    - expensive_first_only
+    - account_200k_and_cap_66
+    - account_200k_cap_66_expensive_first
+    - account_200k_cap_66_expensive_first_half_headroom
+  arm: [best_all, best_twin_only, incumbent]
+  exit_convention: [conditional, close_x1, hold_expiry]
+
+required_outputs:
+  - "CAGR, final equity and funded count for every policy cell, with the registered primary marked"
+  - "which single change moves the outcome, one at a time"
+  - "median contracts bought and average open positions per cell — the size-versus-count trade"
+  - "margin refusals split into too-expensive-for-an-empty-account and blocked-by-open-positions"
+  - "return on capital per cell, so the funded-mix shift is visible"
+  - "the same sweep on the incumbent arm, so the policy is not tuned to one strategy"
+  - "explicit statement of whether the registered primary beat its own components"
+
+data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+api_calls_budget: 0
+preregistered_at: "2026-09-06T00:50:06+00:00"
