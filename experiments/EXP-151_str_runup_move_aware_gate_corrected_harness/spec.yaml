@@ -1,0 +1,134 @@
+id: EXP-151
+title: "STR-RUNUP move-aware forecast gate with corrected evaluation harness"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades the identical T-14 structure at every stored fill alpha.
+  The headline uses midpoint fills and zero commissions. Fills are assumptions,
+  not achieved executions.
+hypothesis: >
+  With EXP-148s min_train_years=0 evaluation setting restored, replacing only
+  its forecast-PnL columns with the move-aware EXP-150 distributions improves
+  the forecast-PnL-plus-analog gate over base_top20 on mean return, trade
+  Sharpe and CAGR, preserves positive-year share, and retains its advantage
+  after excluding entry relative spreads above 50 percent.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: model_plus_forecast_pnl_plus_analogs
+  gate_rule: >
+    Each annual fold uses the precomputed strictly causal score and training-only
+    top-20-percent threshold. min_train_years=0 is required because the gate fit
+    already occurred outside the generic evaluator.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+correction:
+  invalid_source_run: EXP-150
+  problem: >
+    EXP-150 omitted min_train_years=0. The generic evaluator therefore treated
+    2020 and 2021 as ungated even though annual precomputed decisions existed,
+    inflating base_top20 from 520 selected trades to 1089.
+  correction: >
+    Restore the exact EXP-148 evaluator setting and reuse the frozen EXP-150
+    move-aware signal file. No forecast values, gate scores, thresholds, arms,
+    trades, fills, or success rules are changed after observing EXP-150.
+
+controlled_rerun:
+  unchanged_from_exp148:
+    - "corrected-calendar T-14 trade and market-cap-at-least-one-billion universe"
+    - "seven gate arms and their feature columns"
+    - "causal analog matches"
+    - "annual gate fits and training-only top-20-percent thresholds"
+    - "fill sensitivity, sizing, bootstrap and success criteria"
+  changed_from_exp148: >
+    The five forecast_pnl columns use the absolute-move model, symmetric stock
+    direction draws and the implied-move-by-moneyness payoff surface.
+
+forecast_pnl_construction:
+  source: "Frozen EXP-150 dataset_with_move_aware_signals.parquet"
+  implied_model: "annual causal engine.models.training.implied_t1 fits"
+  stock_move_model: "annual causal engine.models.training.runup_move fits"
+  residuals: >
+    Joint ticker-group cross-fitted implied-move, absolute-move and payoff errors
+    sampled from strictly prior events and conditioned on market cap and entry
+    implied move where sample size permits.
+  direction: "independent symmetric signs, as supported by EXP-149"
+  payoff: "EXP-149 six-term T-1 implied-move and fixed-strike moneyness surface"
+
+gate_variants:
+  - id: incumbent_registered_threshold
+    status: operational_benchmark
+  - id: base_top20
+    status: matched_threshold_benchmark
+  - id: model_plus_raw_forecast
+    status: unchanged_control
+  - id: model_plus_forecast_pnl
+    status: move_aware_secondary
+  - id: model_plus_analogs
+    status: unchanged_control
+  - id: model_plus_raw_forecast_plus_analogs
+    status: unchanged_control
+  - id: model_plus_forecast_pnl_plus_analogs
+    status: primary
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on causally available feature-complete events; the evaluated live-domain
+    cohort requires market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years"
+    - "five-point fill sensitivity and breakeven alpha"
+    - "Monte Carlo probability of loss at five-percent sizing"
+    - "score Spearman and top-minus-bottom decile spread"
+    - "common-cohort exact annual top-20-percent diagnostic"
+    - "earnings-week bootstrap of primary minus base_top20 policy value"
+    - "market-cap and relative-spread slices for every arm"
+    - "performance with entry relative spread above 50 percent removed"
+    - "signal coverage and per-fold feature-completeness counts"
+  primary_success:
+    - "primary mean, CAGR and trade Sharpe exceed base_top20"
+    - "primary positive-year share is no worse than base_top20"
+    - "primary breakeven alpha is no worse than base_top20"
+    - "primary mean exceeds base_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for policy-value difference excludes zero above"
+  multiplicity: >
+    The forecast-PnL-plus-analog arm is the sole primary comparison. EXP-150 is
+    retained in the ledger as the implementation-failed predecessor. A passing
+    result still requires a separate confirmatory promotion experiment.
+
+falsification: >
+  The move-aware gate architecture is not supported if it fails to improve
+  both mean return and trade Sharpe over base_top20, if the bootstrap interval
+  includes zero, or if the advantage disappears after excluding spreads above
+  50 percent.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  base_signals: "EXP-148 dataset_with_signals.parquet"
+  move_aware_signals: "EXP-150 dataset_with_move_aware_signals.parquet"
+  source_experiments: [EXP-144, EXP-148, EXP-149, EXP-150]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Scores and thresholds were computed by the stricter annual procedure before
+    evaluation. The evaluator must apply those decisions in every OOS year.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-07T22:26:46+00:00"

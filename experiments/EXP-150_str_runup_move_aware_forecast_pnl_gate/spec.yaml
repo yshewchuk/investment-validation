@@ -1,0 +1,144 @@
+id: EXP-150
+title: "STR-RUNUP T14 gate with move-aware forecast PnL and analog evidence"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades the identical T-14 structure at every stored fill alpha.
+  The headline uses midpoint fills and zero commissions. Fills are assumptions,
+  not achieved executions.
+hypothesis: >
+  Re-running the EXP-148 gate comparison with the improved two-driver STR-RUNUP
+  forecast PnL from EXP-149 and the registered runup_move architecture improves
+  selection efficiency. At the unchanged annual training-only top-20-percent
+  threshold, the move-aware forecast-PnL-plus-analog gate beats base_top20 on
+  mean return, trade Sharpe and CAGR, does not reduce positive-year share, and
+  retains its advantage after excluding entry relative spreads above 50 percent.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: model_plus_forecast_pnl_plus_analogs
+  gate_model: "EXP-148 HistGradientBoostingRegressor and unchanged arm features"
+  gate_rule: >
+    Each annual fold fits only on earlier years and chooses the 80th percentile
+    of its own training predictions. The threshold is applied unchanged to the
+    test year.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+controlled_rerun:
+  source: EXP-148
+  unchanged:
+    - "corrected-calendar T-14 trade and live-domain universe"
+    - "seven gate arms and their feature columns"
+    - "causal analog matches"
+    - "annual walk-forward gate fits and top-20-percent threshold discipline"
+    - "fill-alpha sensitivity, sizing, bootstrap and success criteria"
+  changed: >
+    The five forecast_pnl columns are recomputed from joint T-1 implied-move
+    and absolute T-14-to-T-1 stock-move draws through the EXP-149 moneyness
+    payoff surface. Raw implied-forecast arms and analog-only arms remain the
+    original controls.
+
+forecast_pnl_construction:
+  implied_model: >
+    engine.models.training.implied_t1 refit inside each annual outer fold.
+  stock_move_model: >
+    engine.models.training.runup_move refit inside each annual outer fold to
+    predict 100 times absolute log(T-1 spot divided by T-14 spot).
+  residuals: >
+    Five-fold ticker-group cross-fitted errors are computed inside each outer
+    training set. Implied-move error, absolute-move error, and payoff-surface
+    error are drawn from the same strictly prior row, preserving dependence.
+  conditioning: >
+    Prefer market-cap tercile crossed with entry implied-move quintile with at
+    least 250 rows, then market-cap tercile, then the full prior pool.
+  direction: >
+    Independent 50/50 signs. EXP-149 found that absolute movement was useful
+    while the empirical positive-drift sign did not add reliable skill.
+  payoff_surface: >
+    Causal exit_value_over_spot surface over T-1 implied move and fixed-strike
+    exit moneyness, with the six terms validated in EXP-149. Every annual fit
+    uses only earlier-year trades.
+  output: >
+    Mean, win share, p10, p90 and standard deviation of 4000 simulated returns
+    against each events actual midpoint entry premium.
+
+gate_variants:
+  - id: incumbent_registered_threshold
+    status: operational_benchmark
+  - id: base_top20
+    status: matched_threshold_benchmark
+  - id: model_plus_raw_forecast
+    status: unchanged_control
+  - id: model_plus_forecast_pnl
+    status: move_aware_secondary
+  - id: model_plus_analogs
+    status: unchanged_control
+  - id: model_plus_raw_forecast_plus_analogs
+    status: unchanged_control
+  - id: model_plus_forecast_pnl_plus_analogs
+    status: primary
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on causally available feature-complete events; the evaluated live-domain
+    cohort requires market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years"
+    - "five-point fill sensitivity and breakeven alpha"
+    - "Monte Carlo probability of loss at five-percent sizing"
+    - "score Spearman and top-minus-bottom decile spread"
+    - "common-cohort exact annual top-20-percent diagnostic"
+    - "earnings-week bootstrap of primary minus base_top20 policy value"
+    - "market-cap and relative-spread slices for every arm"
+    - "performance with entry relative spread above 50 percent removed"
+    - "signal coverage and per-fold feature-completeness counts"
+  primary_success:
+    - "primary mean, CAGR and trade Sharpe exceed base_top20"
+    - "primary positive-year share is no worse than base_top20"
+    - "primary breakeven alpha is no worse than base_top20"
+    - "primary mean exceeds base_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for policy-value difference excludes zero above"
+  multiplicity: >
+    This is the requested EXP-148 rerun under one preregistered forecast change.
+    The forecast-PnL-plus-analog arm is the sole primary comparison. A passing
+    result still requires a separate confirmatory promotion experiment.
+
+falsification: >
+  The move-aware gate architecture is not supported if it fails to improve
+  both mean return and trade Sharpe over base_top20, if the bootstrap interval
+  includes zero, or if the advantage disappears after excluding spreads above
+  50 percent.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  source_signals: "EXP-148 dataset_with_signals.parquet"
+  corrected_features: "EXP-144 factor_dataset.parquet"
+  forecast_models:
+    - engine.models.training.implied_t1
+    - engine.models.training.runup_move
+  source_experiments: [EXP-144, EXP-148, EXP-149]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  note: >
+    Forecast models, residual distributions, payoff surfaces, gate models and
+    thresholds use years strictly before each test year. Stored Tier-4 rows are
+    not used because their monthly folds can postdate historical entry dates.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-07T22:14:05+00:00"
