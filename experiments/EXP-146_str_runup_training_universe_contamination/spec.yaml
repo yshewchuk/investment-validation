@@ -1,0 +1,118 @@
+id: EXP-146
+title: "STR-RUNUP training-universe contamination"
+strategy: STR-RUNUP
+type: confirmatory_model_challenger
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades identical corrected-calendar T-14 events at every stored
+  fill alpha. Fills are assumptions, not achieved executions.
+hypothesis: >
+  Adding sub-one-billion-dollar names to the pooled STR-RUNUP gate training
+  population reduced selection efficiency on the original liquid universe.
+  On one fixed corrected-calendar test cohort, training on names above one
+  billion dollars produces better causal policy value and ranking than
+  training on the full expanded universe. Legacy-cohort-only, market-cap
+  expert and spread expert models diagnose whether any remaining degradation
+  comes from broader population mixing.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; earnings is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: above_1b_pool
+  incumbent: full_pool
+  target: "gross midpoint return"
+  gate_rule: "score at or above the trailing six-month 80th percentile"
+  first_test_year: 2020
+  outer_split: "event year; train only on years strictly before the test year"
+
+fixed_test_cohort:
+  membership: >
+    Corrected-calendar T-14 events also present in the frozen EXP-107 gate
+    dataset, with market capitalization at least one billion dollars and a
+    complete registered 42-feature contract.
+  purpose: >
+    Every model scores the identical events. No arm can improve by removing
+    losing test trades or changing feature coverage.
+
+training_arms:
+  - id: full_pool
+    status: benchmark
+    train: "all corrected-calendar feature-complete T-14 events"
+  - id: above_1b_pool
+    status: primary
+    train: "all corrected-calendar feature-complete T-14 events with mcap at least $1B"
+  - id: legacy_pool
+    status: secondary
+    train: "fixed-test membership rule, using only years before the test year"
+  - id: mcap_experts
+    status: secondary
+    train: "separate full-pool models for $1B-$10B and at least $10B"
+    fallback: "above_1b_pool model if a bucket has fewer than 250 training rows"
+  - id: spread_experts
+    status: secondary
+    train: "separate above-$1B models for entry relative spread <=15%, 15%-50%, and >50%"
+    fallback: "above_1b_pool model if a bucket has fewer than 250 training rows"
+  - id: ungated
+    status: benchmark
+    train: "none"
+
+selection:
+  operational: >
+    At each month, use only the prior six months of out-of-sample scores on
+    the fixed test cohort to set each arms 80th-percentile cutoff. Require at
+    least 100 prior finite scores. The 2019 fold seeds the cutoff and is not
+    included in headline returns.
+  matched_diagnostic: >
+    Within each test year select exactly the top 20 percent for every model
+    arm on the identical fixed cohort. This uses the full years score
+    distribution and cannot trigger promotion.
+
+evaluation:
+  headline_window: "strict walk-forward OOS 2020-2026"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, Sharpe and positive years"
+    - "breakeven fill alpha and five-point fill sensitivity"
+    - "earnings-week bootstrap for above_1b_pool minus full_pool"
+    - "earnings-week bootstrap for legacy_pool minus full_pool"
+    - "Spearman rank correlation and top-minus-bottom decile spread"
+    - "annual exact top-20-percent matched results"
+    - "training counts by arm, fold and population"
+    - "performance by market-cap and spread cohort"
+  primary_success:
+    - "above_1b_pool mean, capital-weighted return and Sharpe exceed full_pool"
+    - "above_1b_pool positive-year share is no worse than full_pool"
+    - "above_1b_pool breakeven alpha is no worse than full_pool"
+    - "90 percent earnings-week interval for policy-value difference excludes zero above"
+    - "above_1b_pool rank correlation and top-minus-bottom decile spread exceed full_pool"
+
+data:
+  corrected_features: "EXP-144 factor_dataset.parquet"
+  legacy_membership: "EXP-107 gate_dataset_str_runup.parquet event IDs only"
+  calendar_reconciliation_commit: b0ee8da
+  source_experiments: [EXP-107, EXP-118, EXP-119, EXP-144]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+model:
+  class: HistGradientBoostingRegressor
+  feature_contract: "registered gate_midfill_str_runup 42 features"
+  parameters: "engine.models.training.gate.fit defaults, unchanged"
+  random_state: 20260829
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Scores are computed upstream by strict expanding annual folds. The generic
+    evaluator receives only 2020 onward and performs no additional model fit.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: gate_midfill_str_runup
+preregistered_at: "2026-09-07T13:28:22+00:00"
