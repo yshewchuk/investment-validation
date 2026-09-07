@@ -1,0 +1,149 @@
+id: EXP-149
+title: "STR-RUNUP T14 drift-aware forecast PnL"
+strategy: STR-RUNUP
+type: exploratory_forecast_calibration
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm uses the identical T-14 structure. Forecast accuracy is measured
+  against midpoint returns, and selected-book performance is reported across
+  every stored fill alpha with zero commissions. Fills are assumptions, not
+  achieved executions.
+hypothesis: >
+  The current STR-RUNUP forecast PnL conversion omits the predictable
+  distribution of underlying movement between T-14 and T-1. Adding a causal
+  absolute-move forecast and the fixed-strike exit moneyness it creates will
+  reduce out-of-sample return forecast error and improve return ranking on the
+  unchanged T-14 trade. Sampling the causally observed direction distribution
+  will test whether the positive pre-print drift adds information beyond a
+  symmetric movement distribution.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: drift_empirical_sign
+  decision_rule: "enter when mean forecast midpoint return is greater than zero"
+  draws_per_event: 4000
+  first_test_year: 2020
+  outer_split: "event year; every fit and residual pool uses years strictly before the test year"
+
+forecast_variants:
+  - id: current_payoff_map
+    status: benchmark
+    description: >
+      EXP-148 causal T-1 implied-move forecast passed through the current
+      one-variable linear exit-value map and its empirical residuals.
+  - id: surface_no_drift
+    status: ablation
+    description: >
+      The new empirical exit-value surface with spot held at its T-14 value.
+      This isolates the surface change from the movement distribution.
+  - id: drift_symmetric_sign
+    status: ablation
+    description: >
+      Joint implied-move and absolute-stock-move draws, with an independent
+      50/50 direction draw.
+  - id: drift_empirical_sign
+    status: primary
+    description: >
+      Joint implied-move and absolute-stock-move residual draws. Direction is
+      taken from the same strictly prior historical event as the movement
+      residual, preserving the causal positive-drift rate and dependence.
+
+models:
+  implied_t1:
+    class: "registered engine.models.training.implied_t1 HistGradientBoostingRegressor"
+    target: "ORATS impliedMove at the last pre-print close"
+  absolute_stock_move:
+    class: "registered STR-RUNUP gate HistGradientBoostingRegressor parameters"
+    target: "log1p of 100 times absolute log(T-1 spot / T-14 spot)"
+  residual_estimation: >
+    Within every outer training set, obtain five ticker-group cross-fitted
+    residual vectors. Draw implied-move error, transformed absolute-move error,
+    observed direction, and payoff-surface error from the same historical row.
+  conditioning: >
+    First use market-cap tercile crossed with entry implied-move quintile and
+    require 250 rows. Fall back to market-cap tercile, then the complete
+    strictly prior residual pool.
+
+payoff_surface:
+  target: "observed T-1 midpoint straddle value divided by T-14 spot"
+  fit: "ordinary least squares using years strictly before the forecast year"
+  terms:
+    - "intercept"
+    - "T-1 implied move"
+    - "absolute T-1 log moneyness of the fixed T-14 strike"
+    - "squared T-1 log moneyness"
+    - "signed T-1 log moneyness"
+    - "T-1 implied move times absolute T-1 log moneyness"
+  bounds: "simulated implied move, absolute move, and exit value are floored at zero"
+
+drift_distribution:
+  measurement: "100 times log(T-1 spot / T-14 spot)"
+  required_slices:
+    - "all corrected T-14 events"
+    - "2020-2026 market cap at least one billion dollars"
+    - "entry relative spread at most 50 percent"
+    - "entry relative spread at most 15 percent"
+    - "calendar year"
+  diagnostics:
+    - "mean, median, standard deviation, positive share and quantiles"
+    - "stock-move deciles against realized option return"
+    - "ticker-level persistence"
+    - "walk-forward event-level signed-direction predictability"
+
+evaluation:
+  universe: >
+    Corrected-calendar, feature-complete engine.replay T-14 STR-RUNUP events
+    with market cap of at least one billion dollars. All forecast arms use the
+    same scoreable event cohort.
+  headline_window: "strict walk-forward OOS 2020-2026"
+  primary_accuracy_metrics:
+    - "mean absolute error and root mean squared error versus midpoint return"
+    - "bias, Pearson correlation, and Spearman rank correlation"
+    - "predicted-return quintile calibration"
+    - "p10-p90 interval coverage and width"
+    - "year-by-year accuracy"
+    - "the same metrics after excluding entry spreads above 50 percent"
+  book_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years"
+    - "five-point fill sensitivity and breakeven alpha"
+    - "Monte Carlo probability of loss at five-percent sizing"
+  primary_success:
+    - "drift_empirical_sign MAE is below current_payoff_map MAE"
+    - "drift_empirical_sign RMSE is below current_payoff_map RMSE"
+    - "drift_empirical_sign absolute bias is below current_payoff_map absolute bias"
+    - "drift_empirical_sign Spearman correlation exceeds current_payoff_map"
+    - "all four improvements persist after excluding spreads above 50 percent"
+    - "the 90 percent earnings-week bootstrap interval for paired absolute-error improvement is below zero"
+  multiplicity: >
+    drift_empirical_sign versus current_payoff_map is the sole primary
+    comparison. The no-drift and symmetric-sign arms explain the mechanism and
+    cannot support promotion.
+
+falsification: >
+  The drift-aware conversion is not supported if it does not improve both MAE
+  and RMSE, if ranking correlation does not improve, or if the paired error
+  interval includes zero. A failure of empirical signs relative to symmetric
+  signs means the broad movement distribution matters but the positive drift
+  bias does not.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  corrected_features: "EXP-144 factor_dataset.parquet"
+  current_forecast: "EXP-148 dataset_with_signals.parquet"
+  market_state: "Tier-2 daily_market"
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  note: >
+    Forecast models, payoff surfaces, residual distributions and drift-sign
+    distributions are estimated only from events in years before each test
+    year. No stored event-month Tier-4 forecast is used.
+preregistered_at: "2026-09-07T16:04:25+00:00"
