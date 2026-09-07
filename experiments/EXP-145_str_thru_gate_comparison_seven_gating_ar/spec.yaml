@@ -1,0 +1,99 @@
+id: EXP-145
+title: "STR-THRU gate comparison: seven gating arms across model, forecast and analog evidence"
+hypothesis: "STR-THRU's current gate is a HistGradientBoostingRegressor trained only on event-history and pre-print volatility-state features. Two other evidence sources already exist in the engine and are unused by it: the size model's own per-event forecast (the predicted absolute move, engine.payoff.PAYOFF_DRIVER's driver for STR-THRU) and the empirical analog-trade distribution (engine.analogs.AnalogMatcher). This experiment compares seven top-20-percent walk-forward selection rules on the identical STR-THRU trade universe and identical selection rate, so differences are ranking quality, not selectivity: (1) the incumbent model gate unchanged, (2) a rule gate on forecast percentile/edge alone, (3) a rule gate on matched analog trade evidence alone, (4) a rule gate combining forecast and analog ranks, (5) the incumbent's feature set plus the forecast as an added GBM feature, (6) the incumbent's feature set plus analog statistics as added GBM features, (7) the incumbent's feature set plus both. Falsified as a program-level finding if no challenger arm improves both walk-forward CAGR and trade Sharpe over the incumbent while not worsening Monte Carlo P(loss) at 5pct sizing -- in which case the incumbent gate stands."
+type: exploratory_gate_comparison
+strategy: "STR-THRU"
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+primary_spec:
+  structure: "STR-THRU e+0 x+1 (last pre-print close in, first post-print close out)"
+  universe: "all engine.replay STR-THRU events, unselected (~19,161 events, 2018-2026)"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  selection_rate: "every arm selects its own top 20% by its own score, threshold chosen per walk-forward fold on TRAINING years only -- identical selectivity across arms so P&L differences reflect ranking quality, not how many trades were kept"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+
+incumbent:
+  gate: gate_midfill_str_thru
+  role: benchmark for arm 1 and the feature baseline for arms 5-7
+  threshold: 0.05679090768112426
+  top_fraction: 0.20
+  target: "gross mid-fill return (ret at alpha=0.5)"
+  features: "41 registry features -- EVENT_HISTORY_FEATURES + DAILY_STATE_COLUMNS + days_to_print, entry_cost_pct, dte_entry (engine/models/training/gate.py FEATURES)"
+
+new_signals:
+  forecast:
+    source: "engine.data.features.tier4.load_forecasts() -- the size model's pred_abs_move (PAYOFF_DRIVER['STR-THRU']='abs_move'), already a walk-forward-safe monthly-fold table on disk, joined on (ticker, event_date)"
+    fields_used: [pred_abs_move, pred_abs_move_p10, pred_abs_move_p90, pred_abs_move_sd]
+    derived: "forecast_edge = pred_abs_move - im (predicted absolute move minus the quoted implied move at entry, both % of spot) -- positive means the model expects a bigger move than the market is pricing, which is STR-THRU's stated thesis (mispriced expected move)"
+    coverage_caveat: "pred_abs_move is null on ~54% of STR-THRU rows (early-history events with insufficient training history at that fold) -- rows without a forecast cannot be scored by arms 2, 4, 5, 7 and are never selected by them, same discipline as a model gate's incomplete-feature rows"
+  analog:
+    source: "engine.analogs.AnalogMatcher over the full engine-replayed trade set (all strategies, so the matcher's own causal machinery is reused unmodified), matched per STR-THRU row on its own (mcap_bucket, dte_band, moneyness_band, implied_tercile) with as_of=that row's own entry_date"
+    fields_used: [analog_mean, analog_win_rate, analog_n, analog_widened, analog_thin]
+    causality: "AnalogMatcher.match(as_of=...) already restricts the matched pool to trades with exit_date < as_of and re-derives implied terciles on that causal pool -- computed ONCE outside the walk-forward loop and safe to reuse in every fold, because the per-row cutoff is the row's own decision date, not the fold boundary"
+    min_analogs: 30
+
+gate_variants:
+  - id: arm1_incumbent_model
+    status: benchmark
+    description: "Current registered gate_midfill_str_thru, refit per walk-forward fold, stored threshold applied unchanged. No forecast or analog input."
+  - id: arm2_forecast_percentile
+    status: challenger
+    description: "Rule gate, no ML fit. Score = zscore(forecast_edge) - zscore(pred_abs_move_sd) computed on each fold's training rows; top 20% of that score (threshold chosen on training rows) selected in the test year. Rows with no forecast are never selected."
+  - id: arm3_analog_evidence
+    status: challenger
+    description: "Rule gate, no ML fit. Score = analog_mean (already causal per-row); top 20% of training-fold analog_mean selected in the test year, thin matches (n<30) excluded. analog_win_rate doubles as this arm's predict_proba -- the only rule arm with a natural P(win) to calibrate."
+  - id: arm4_forecast_plus_analog_rule
+    status: challenger
+    description: "Rule gate, no ML fit. Score = 0.5*rank(forecast_edge) + 0.5*rank(analog_mean) within each fold's training rows; top 20% selected in the test year. Rows missing either signal are never selected."
+  - id: arm5_model_plus_forecast_feature
+    status: challenger
+    description: "Same GBM class/hyperparameters as the incumbent, refit per fold, with pred_abs_move, pred_abs_move_sd and forecast_edge appended to the 41 registered features. No stored threshold -- top 20% of each fold's training predictions."
+  - id: arm6_model_plus_analog_feature
+    status: challenger
+    description: "Same GBM class/hyperparameters as the incumbent, refit per fold, with analog_mean, analog_win_rate and analog_n appended to the 41 registered features. No stored threshold -- top 20% of each fold's training predictions."
+  - id: arm7_model_plus_forecast_plus_analog
+    status: challenger
+    description: "Same GBM class/hyperparameters as the incumbent, refit per fold, with all six forecast+analog columns appended to the 41 registered features. No stored threshold -- top 20% of each fold's training predictions."
+
+evaluation:
+  universe: "every engine.replay STR-THRU event; per-arm scoreable subset differs only where a signal is missing (no forecast, no chain features)"
+  headline_window: "walk-forward OOS -- 2018-2019 cold-start ungated (min_train_years=2) under every arm identically, gated selection from 2020"
+  required_metrics_per_arm:
+    - "backtest at the fill-alpha grid (worst/mid/best) with breakeven alpha"
+    - "walk-forward OOS mean/median/std/win_rate/profit_factor/Sharpe(trade)/Sharpe(equity)/Sortino/tail_ratio"
+    - "CAGR, max drawdown, years positive vs years evaluated, by-year table"
+    - "Monte Carlo (block=20, paths=1000, seed=0): P(loss), terminal equity percentiles, drawdown percentiles at sizing {2%,5%,10%,20%}"
+    - "stress battery: 2018Q4, 2020-02..04, 2022, 10 worst SPY earnings weeks, IV-regime split"
+    - "calibration block where the arm has a predict_proba (arms 1,3,5,6,7; N/A for arms 2,4)"
+    - "n_selected by year, ungated share, deployment (peak/worst cash/constrained entries)"
+    - "equity curve, by-year, MC fan, alpha-degradation, stress-grid and reliability figures"
+  comparison_report:
+    - "one table across all 7 arms: OOS mean, CAGR, trade Sharpe, max DD, breakeven alpha, MC P(loss)@5%, years positive/evaluated, n_selected, calibration availability"
+    - "which arms clear the falsification bar (beats incumbent CAGR AND trade Sharpe, does not worsen MC P(loss)@5%)"
+    - "trade-off discussion: selection overlap between arms (Jaccard of selected event_ids), where challengers agree/disagree with the incumbent, whether any lift is concentrated in a few years or names"
+  multiplicity: "7 specs (this comparison) plus the pre-existing STR-THRU gate lineage (EXP-049/050 origin, EXP-105 registered-gate re-validation) all land in experiments/LEDGER.csv under their own spec hashes -- the promotion decision, if any, cites the full count"
+  primary_success: "at least one challenger arm beats arm1 on BOTH walk-forward CAGR and trade Sharpe, without a worse MC P(loss) at 5% sizing"
+
+falsification: "No challenger arm clearing primary_success falsifies the hypothesis that unused forecast/analog evidence has ranking value beyond the incumbent's feature set -- the incumbent gate stands and this experiment is a negative result, reported as such rather than reframed."
+
+promotion_target: null
+promotion_note: "This experiment is comparative/exploratory, not a promotion vote by itself. A challenger clearing primary_success is a candidate for a dedicated confirmatory re-validation experiment (the EXP-105 pattern) before any registry promotion -- one exploratory win is not itself the promotion bar (see guides/pnl_gate_promotion.md)."
+
+data:
+  trades: "Tier-2 engine.replay STR-THRU trades (store.read_table('trades'))"
+  forecasts: "data/features/tier4_forecasts.parquet"
+  market_state: "Tier-2 daily_market"
+  events: "Tier-2 earnings_events"
+  source_experiments: [EXP-049, EXP-050, EXP-105, EXP-117]
+  quota_calls: 0
+
+data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+preregistered_at: "2026-09-07T12:59:24+00:00"

@@ -54,6 +54,12 @@ INCLUDE = (
     ("config/thesis", "**/*"),
     ("experiments", "LEDGER.csv"),
     ("experiments", "**/REPORT.md"),
+    # A multi-arm experiment that gives each arm its own subdirectory (and
+    # REPORT.md) writes the cross-arm trade-off discussion to a top-level
+    # COMPARISON.md instead of cramming it into one arm's report — EXP-145's
+    # convention. It is the findings document for the comparison itself and
+    # is not regenerable from code alone, same reasoning as REPORT.md.
+    ("experiments", "**/COMPARISON.md"),
     # EXP-117 introduced a stage-0 definition/audit document beside the report;
     # it is the experiment's evidence and is not regenerable from code alone.
     ("experiments", "**/DEFINITION.md"),
