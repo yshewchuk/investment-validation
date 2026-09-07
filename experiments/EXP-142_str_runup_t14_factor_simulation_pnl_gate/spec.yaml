@@ -1,0 +1,197 @@
+id: EXP-142
+title: "STR-RUNUP T14 factor simulation PnL gate"
+strategy: STR-RUNUP
+type: confirmatory_model_challenger
+price_source: >
+  Cached ORATS historical bid/ask chains normalized through engine.replay.
+  The simulator predicts midpoint value; realized performance is reported at
+  every stored fill alpha. Fills are assumptions, not achieved executions.
+hypothesis: >
+  At the unchanged incumbent STR-RUNUP trade definition, a causal simulator
+  built from the joint distribution of the pre-print spot path and exit
+  volatility state ranks zero-commission midpoint return better than the
+  registered direct-return gate. Its trailing top-20-percent book beats the
+  incumbent gate on CAGR and trade Sharpe, is positive in at least as large a
+  share of years, and does not worsen Monte Carlo loss probability at five
+  percent sizing.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: sim_joint
+  gate_rule: >
+    Score at or above the 80th percentile of simulator scores observed in the
+    strictly prior six calendar months, recomputed monthly. A window under 100
+    scoreable events is UNDETERMINED and admits nothing.
+  draws_per_event: 4000
+  simulator_score: "mean simulated return on entry capital"
+  first_test_year: 2020
+  outer_split: "event year; every fit and residual pool uses years strictly before the test year"
+
+incumbent:
+  gate: gate_midfill_str_runup
+  threshold: 0.07394797616848554
+  target: "gross midpoint return"
+  evaluation: >
+    Refit the registered HistGradientBoostingRegressor class inside every
+    annual fold and apply the stored threshold. Features and quotes are
+    observed at the same T-14 entry close as the challenger.
+
+factor_targets:
+  exit_exern_iv30:
+    transform: log
+    definition: "ORATS ex-earnings 30-day IV at the last pre-print close"
+  exit_event_variance:
+    transform: log1p
+    definition: >
+      max((iv30_decimal squared - exern_iv30_decimal squared) times 30/365, 0)
+      at the last pre-print close. This is used instead of ORATS impliedMove
+      because EXP-120 showed that impliedMove is inconsistent with the vendors
+      own published IV decomposition.
+  preprint_abs_spot_move:
+    transform: log1p
+    definition: "100 times absolute log(exit spot / entry spot)"
+  preprint_spot_sign:
+    model: "sampled from the same historical residual row as all factor errors"
+
+factor_models:
+  class: HistGradientBoostingRegressor
+  features: >
+    The registered entry-as-of STR-RUNUP feature set, including event history,
+    entry-day volatility state and changes, market cap, days to print,
+    entry premium as a share of spot, and entry DTE.
+  parameters:
+    max_iter: 250
+    learning_rate: 0.05
+    max_leaf_nodes: 15
+    min_samples_leaf: 60
+    l2_regularization: 2.0
+    early_stopping: true
+    n_iter_no_change: 20
+    random_state: 20260829
+  residual_estimation: >
+    Within each outer training set, obtain cross-fitted residual vectors with
+    five GroupKFold folds grouped by ticker. The outer test year is never used.
+
+simulation:
+  residual_vector:
+    - "exit_exern_iv30 transformed residual"
+    - "exit_event_variance transformed residual"
+    - "preprint_abs_spot_move transformed residual"
+    - "observed preprint spot sign"
+  pairing: >
+    Draw every component from the same historical event. The independent-draw
+    version is a diagnostic only.
+  conditioning: >
+    First try market-cap tercile crossed with entry implied-move quintile.
+    Require at least 250 residual rows; otherwise fall back to market-cap
+    tercile, then the complete strictly-prior residual pool.
+  state_to_price: >
+    Convert simulated ex-earnings IV and earnings variance into total variance
+    through the held contracts expiry. Multiply the reconstructed contract IV
+    by the event-specific entry IV basis, defined as observed entry contract IV
+    divided by entry-state reconstructed IV. Reprice the fixed call and put
+    with Black-Scholes at zero rates and dividends and their actual exit DTE.
+  bounds:
+    minimum_vol_decimal: 0.01
+    minimum_spot_fraction: 0.0001
+    entry_iv_basis: [0.5, 2.0]
+
+gate_variants:
+  - id: incumbent_direct_return
+    status: benchmark
+    description: "Current registered direct midpoint-return regressor and stored threshold."
+  - id: sim_surface_point
+    status: secondary_ablation
+    description: "Point forecasts of exit volatility factors, with spot held at entry."
+  - id: sim_surface_swarm
+    status: secondary_ablation
+    description: "Joint volatility-factor residual draws, with spot held at entry."
+  - id: sim_joint
+    status: primary
+    description: "Joint volatility-factor and learned pre-print spot-move swarm."
+  - id: sim_joint_independent
+    status: diagnostic
+    description: "Same marginals as sim_joint with factor residual pairing broken."
+
+repricing_guard:
+  definition: >
+    Before interpreting a simulated gate, feed realized exit spot,
+    ex-earnings IV and event variance through the same repricer and compare its
+    straddle value with the observed exit midpoint.
+  required:
+    median_absolute_value_error_fraction_lte: 0.10
+    absolute_mean_return_bias_lte: 0.02
+  failure_reading: >
+    The factor architecture remains testable, but this implementation cannot
+    support a promotion decision because its state-to-price map is too biased.
+
+evaluation:
+  universe: >
+    Every feature-complete engine.replay STR-RUNUP event carrying the exact
+    incumbent e-14 x+0 target_dte=30 trade. All gate arms share one scoreable
+    event universe inside each comparison.
+  headline_window: "walk-forward OOS 2020-2026, subject to residual-pool availability"
+  primary_metric: "cashflow CAGR at zero-commission modeled midpoint fills"
+  required_metrics:
+    - "mean and capital-weighted return"
+    - "trade Sharpe, cashflow CAGR, win rate and profit factor"
+    - "years positive and selected count by year"
+    - "worst, quarter, midpoint, three-quarter and best realized fill sensitivity"
+    - "breakeven fill alpha"
+    - "Monte Carlo probability of loss at 5 percent sizing"
+    - "score Spearman correlation and realized-return deciles"
+    - "top-minus-bottom score-decile spread"
+    - "weekly-block bootstrap of challenger minus incumbent policy value"
+    - "Brier skill for separately calibrated probability of profit"
+    - "stress battery and top-1-percent-winner sensitivity"
+  primary_success:
+    - "sim_joint CAGR exceeds incumbent CAGR"
+    - "sim_joint trade Sharpe exceeds incumbent trade Sharpe"
+    - "sim_joint positive-year share is no worse than incumbent"
+    - "sim_joint Monte Carlo probability of loss at 5 percent is no worse than incumbent"
+    - "90 percent earnings-week cluster interval for policy-value difference excludes zero above"
+    - "sim_joint Brier skill is at least -0.05"
+    - "repricing guard passes"
+  matched_selectivity: >
+    In addition to operational gates, rank each arm to the incumbents selected
+    count within each outer year. This is secondary and isolates ranking quality.
+  uncertainty: "10,000 earnings-week cluster bootstrap resamples, seed 142"
+  multiplicity: >
+    sim_joint versus incumbent is the sole confirmatory comparison. All other
+    gate variants and ablations are explanatory and cannot trigger promotion.
+
+falsification: >
+  The mechanism is falsified for this implementation if sim_joint does not
+  beat the incumbent on both CAGR and trade Sharpe, if the policy-value
+  interval includes zero, or if the oracle-state repricing guard fails. A
+  failure of the spot ablation alone means spot-path modeling adds no value;
+  it does not falsify volatility-state simulation.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP trades and cached EXP-107 transaction evidence"
+  market_state: "Tier-2 daily_market"
+  events: "Tier-2 earnings_events"
+  input_gate_dataset: "EXP-107 cached gate_dataset_str_runup.parquet when hashes agree"
+  source_experiments: [EXP-107, EXP-120, EXP-129, EXP-139]
+  quota_calls: 0
+  data_snapshot: 43e125d7234d0c9a44d0e33a87fdb148aac5162fc0b00cb99f7a73ad916c2aff
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Gate scores are precomputed by the stricter outer annual procedure above.
+    Zero here prevents the generic evaluator from admitting 2018-2019 as
+    ungated cold-start rows; the evaluation frame begins in 2020.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: gate_midfill_str_runup
+preregistered_at: "2026-09-06T20:35:23+00:00"

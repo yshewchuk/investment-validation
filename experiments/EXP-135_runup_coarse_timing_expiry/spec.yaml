@@ -1,0 +1,48 @@
+id: EXP-135
+title: "Pre-earnings run-up: coarse entry timing and expiry grid"
+strategy: STR-RUNUP
+type: exploratory
+price_source: "ORATS historical bid/ask chains, engine.replay pricing; fills are assumptions, not achieved trades."
+hypothesis: >
+  A coarse grid of 21, 14, 7 and 3 trading sessions before the last pre-print
+  close reveals a stable region of profitable pre-earnings long-straddle
+  exposure across adjacent entry dates and expiry rules. A single best
+  historical cell is not evidence of an optimum. No champion is promoted.
+primary_spec:
+  entry_sessions: [21, 14, 7, 3]
+  expiry_rules: [first_post_event, second_post_event, exit_plus_14_calendar_days]
+  exit: last pre-print close, session aware
+  universe: "Frozen 6,607 engine.replay STR-RUNUP events, 2018-2026, all gates ignored"
+  contracts: "Expiry menu selected from the T-21 chain only and held fixed across entry dates; ATM strike selected separately at each entry and pinned through exit."
+  fills: [0.0, 0.25, 0.5, 0.75, 1.0]
+  commission_per_contract_per_side_usd: 0.65
+  control: "Existing e-14_x+0_target_dte=30 replay on the same matched events"
+  objective: "Paired mean net-return differences, stability by year, and capital-days efficiency"
+evaluation:
+  matched_primary: "Events with all 12 grid cells priced at every fill alpha"
+  secondary: "Matched four-date cohorts within each expiry, and all available cells with coverage funnel"
+  discovery_years: [2018, 2019, 2020, 2021, 2022, 2023]
+  validation_years: [2024, 2025, 2026]
+  caveat: "Validation is reserved from selection in this experiment; these calendar years are not pristine program-wide holdouts."
+  uncertainty: "Seeded 2,000-resample bootstrap clustered by event week for paired neighboring-date differences"
+  plateau: "Report adjacent-date differences and intervals; overlapping uncertainty is inconclusive, not proof of equivalence."
+  sensitivity: "Worst/mid/best, fees, repaired-quote exclusion, tight entry-spread slices, top-1-percent winner exclusion"
+  selection: "No fitted gate; evaluate the base exposure. No outcome-based event selection."
+  unavailable: "No intraday timing claims or achieved-fill claims from EOD chains."
+  coverage_bias: "Existing replay cohort conditions on baseline data availability; not the entire earnings calendar or a survivorship-free universe."
+data_pull:
+  dte_range: "1,100"
+  batch: 10
+  budget_calls: 8500
+  reserve_calls: 3000
+  request_fields: "Slim chain prices plus IV, delta, and liquidity; both sides in one response."
+  integrity: "Diff requested and returned tickers; recursively split partial or 404 batches, cache absences, stop on authentication failure."
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+has_short_leg: false
+promotion_target: null
+data_snapshot: "Frozen input cohort and file hashes in results/input_manifest.json"
+preregistered_at: "2026-09-06T00:06:49+00:00"

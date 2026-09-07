@@ -1,0 +1,62 @@
+id: EXP-140
+title: "Current STR-RUNUP gate across entry timing and expiry"
+strategy: STR-RUNUP
+type: confirmatory_extension
+price_source: "Cached ORATS historical bid/ask chains from EXP-135; engine.replay-compatible pricing. No new API requests. Fills are assumptions, not achieved trades."
+hypothesis: >
+  Conditional on the result already observed in EXP-135, applying the current
+  registered STR-RUNUP gate causally at each candidate entry preserves the late
+  timing region. The pre-registered primary, T-3 with the first post-event
+  expiry, has positive 2020-2026 strict-gated mean return after commissions and
+  positive lift over its same-cell ungated base. T-3 and T-7 remain stronger
+  than T-14 and T-21 across expiry rules. No champion is promoted by this run.
+primary_spec:
+  entry_sessions: 3
+  expiry_rule: first_post_event
+  exit: "last pre-print close, session aware"
+  gate: gate_midfill_str_runup
+  gate_features: "current registry list of 43 features"
+  gate_threshold: 0.07394797616848554
+  gate_fit: "HistGradientBoostingRegressor refit for each annual fold on that cell only, using years strictly before the test year"
+  gate_asof: "each cells actual entry close; no later cells features may gate an earlier entry"
+  gate_target: "that cells gross mid-fill return, matching the registered gates target convention"
+  headline_window: "strict gated OOS 2020-2026; 2018-2019 cold-start rows are excluded from comparison headlines"
+  fills: [0.0, 0.25, 0.5, 0.75, 1.0]
+  commission_per_contract_per_side_usd: 0.65
+grid:
+  entry_sessions: [21, 14, 7, 3]
+  expiry_rules: [first_post_event, second_post_event, exit_plus_14_calendar_days]
+  note: "All 12 declared cells are evaluated. Only the primary above is a headline configuration."
+data:
+  source_experiment: EXP-135
+  source_grid: "experiments/EXP-135_runup_coarse_timing_expiry/results/grid_trades.parquet"
+  universe: "EXP-135 fully matched 12-cell cohort, 3,797 of 6,607 frozen STR-RUNUP events"
+  quota_calls: 0
+evaluation:
+  primary_metric: "mean net return at modeled mid fills, strict gated OOS 2020-2026"
+  base_comparison: "same cell and same 2020-2026 feature-complete universe before gate selection"
+  required:
+    - "worst, mid, and best modeled fills after commissions"
+    - "gate lift, win rate, capital-weighted return, breakeven fill alpha, and years positive"
+    - "selected and scoreable counts by year"
+    - "entry-date and expiry selection overlap"
+    - "paired differences on events admitted by both compared cells"
+    - "top-1-percent winner and tight-spread sensitivity"
+  interpretation: >
+    Independent cell means answer how each deployable gated configuration
+    performs. Paired common-admission differences isolate payoff timing but use
+    a smaller selected intersection. Differences in independent means combine
+    gate selection and payoff behavior and must not be read as pure timing.
+  uncertainty: "2,000-resample bootstrap clustered by earnings week"
+  multiplicity: "12 declared cells; no multiplicity adjustment, so grid rankings are directional"
+  unavailable: "EOD chains cannot prove achieved fills or immediately-before-close execution"
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+data_snapshot: "EXP-135 frozen input manifest plus hashes recorded in EXP-140 results/input_manifest.json"
+preregistered_at: "2026-09-06T12:14:55+00:00"
