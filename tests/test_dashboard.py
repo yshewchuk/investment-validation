@@ -164,6 +164,34 @@ class TestCompactRow:
         assert row["model_fair_pct"] is None
         assert row["premium_vs_fair"] is None
 
+    def test_runup_surface_sets_fair_premium_from_move_and_implied(self):
+        payoff = {
+            "kind": "runup_payoff_surface",
+            "coefficients": {
+                "intercept": 0.01,
+                "implied_move": 0.004,
+                "abs_moneyness": 0.003,
+                "moneyness_sq_div10": 0.0,
+                "signed_moneyness": 0.0,
+                "implied_x_abs_moneyness_div10": 0.0,
+            },
+        }
+        result = _result(
+            strategy="STR-RUNUP",
+            driver_name="im_t1",
+            driver_prediction=6.0,
+            runup_move_prediction=4.0,
+            runup_move_p10=1.0,
+            runup_move_p90=9.0,
+            runup_move_days=7.0,
+            runup_move_scale=0.5,
+            payoff=payoff,
+        )
+        row = compact_row(result.as_dict())
+        assert row["model_fair_pct"] == pytest.approx(4.6)
+        assert row["runup_move_prediction"] == 4.0
+        assert row["runup_move_scale"] == 0.5
+
     def test_carries_only_board_fields(self):
         row = compact_row(_result().as_dict())
         assert "payoff" not in row and "analog_buckets" not in row

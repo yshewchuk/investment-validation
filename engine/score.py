@@ -69,8 +69,23 @@ from engine.forecast_sizing import (
     forecast_params,
 )
 from engine.models.registry import Registry, RegistryError, load_registry
-from engine.payoff import PayoffError, PayoffMap, fit_payoff, simulate_returns
-from engine.replay import ChainIndex, legs_spot_dte, load_chain_index, plan_events
+from engine.payoff import (
+    PayoffError,
+    PayoffMap,
+    RunupPayoffSurface,
+    fit_payoff,
+    fit_runup_payoff,
+    scale_runup_move,
+    simulate_returns,
+    simulate_runup_returns,
+)
+from engine.replay import (
+    ChainIndex,
+    legs_exit_spot,
+    legs_spot_dte,
+    load_chain_index,
+    plan_events,
+)
 from engine.structures import (
     STRUCTURES,
     ExpirySelector,
@@ -449,6 +464,14 @@ class ScoreResult:
 
     driver_name: str | None = None
     driver_prediction: float | None = None
+    #: Predicted absolute stock movement over the actual STR-RUNUP holding
+    #: window. The registered model predicts fourteen sessions; other entry
+    #: timings scale that distribution linearly by days_before_print / 14.
+    runup_move_prediction: float | None = None
+    runup_move_p10: float | None = None
+    runup_move_p90: float | None = None
+    runup_move_days: float | None = None
+    runup_move_scale: float | None = None
     #: The interval around ``driver_prediction`` itself — the "± 2" on an
     #: expected move of 6 — as opposed to ``model_p10``/``model_p90``, which are
     #: percentiles of the resulting TRADE RETURN. Both are real and they answer
@@ -550,6 +573,9 @@ class Scorer:
 
         self._models: dict[tuple[str, str], object] = {}
         self._payoffs: dict[tuple[str, float, object], PayoffMap] = {}
+        self._runup_payoffs: dict[
+            tuple[float, object], RunupPayoffSurface | None
+        ] = {}
         self._recalibrations: dict[tuple[str, float, object], object] = {}
         self._recal_pairs = None
         self._quotes: dict[tuple[str, object], float | None] = {}
@@ -599,6 +625,7 @@ class Scorer:
         # Reconstructed from the stored legs rather than recomputed, so the
         # analog buckets describe the trade that was actually priced.
         out["spot_entry"], out["dte_entry"] = legs_spot_dte(out)
+        out["spot_exit"] = legs_exit_spot(out)
         out["im_t1"] = out["or_implied"]
 
         # The implied-move bucket has to be measured at the *entry* date on both
@@ -641,6 +668,21 @@ class Scorer:
             except (PayoffError, KeyError):
                 self._payoffs[key] = None
         return self._payoffs[key]
+
+    def runup_payoff(self, alpha: float, before) -> RunupPayoffSurface | None:
+        """Two-driver surface fitted only on STR-RUNUP trades closed earlier."""
+        stamp = pd.Timestamp(before).normalize() if before is not None else None
+        key = (round(float(alpha), 4), stamp)
+        if key not in self._runup_payoffs:
+            try:
+                self._runup_payoffs[key] = fit_runup_payoff(
+                    self.trades,
+                    alpha=alpha,
+                    before=stamp,
+                )
+            except (PayoffError, KeyError):
+                self._runup_payoffs[key] = None
+        return self._runup_payoffs[key]
 
     def recalibration(self, strategy: str, alpha: float, before):
         """Monotone win-rate recalibration fitted on pairs closed before ``before``.
@@ -1291,6 +1333,9 @@ class Scorer:
 
     def _score_model(self, request, result, features) -> None:
         strategy = request.strategy
+        if strategy == "STR-RUNUP":
+            self._score_runup_model(request, result, features)
+            return
         loaded_size = self.model("size")
         loaded_implied = self.model("implied_t1")
 
@@ -1410,6 +1455,142 @@ class Scorer:
         result.win_model = (
             float(np.ravel(recal.transform(raw_win))[0]) if recal is not None else raw_win
         )
+        result.model_p10 = float(np.quantile(returns, 0.10))
+        result.model_p90 = float(np.quantile(returns, 0.90))
+
+    def _score_runup_model(self, request, result, features) -> None:
+        """Forecast STR-RUNUP PnL from implied move and pre-print spot movement."""
+        loaded_implied = self.model("implied_t1")
+        loaded_move = self.model("runup_move")
+        if loaded_implied is None or loaded_move is None:
+            result.flag("NO_MODEL")
+            missing_roles = [
+                role
+                for role, loaded in (
+                    ("implied_t1", loaded_implied),
+                    ("runup_move", loaded_move),
+                )
+                if loaded is None
+            ]
+            result.detail = f"missing champion model roles {missing_roles}"
+            return
+
+        implied_entry, implied_artifact = loaded_implied
+        move_entry, move_artifact = loaded_move
+        result.model_versions["im_t1"] = implied_entry.id
+        result.model_versions["runup_move"] = move_entry.id
+        result.model_input_as_of = (
+            str(pd.Timestamp(result.entry_date).date())
+            if result.entry_date is not None
+            else None
+        )
+        all_features = tuple(
+            dict.fromkeys((*implied_artifact.features, *move_artifact.features))
+        )
+        result.model_inputs = {
+            name: (
+                float(features[name].iloc[0])
+                if name in features.columns and pd.notna(features[name].iloc[0])
+                else None
+            )
+            for name in all_features
+        }
+        missing = [name for name in all_features if name not in features.columns]
+        if missing:
+            result.flag("MISSING_FEATURES")
+            result.detail = f"runup models need {missing}"
+            return
+        absent = [
+            name
+            for name in all_features
+            if not np.isfinite(float(features[name].iloc[0]))
+        ]
+        if absent:
+            result.flag("MISSING_FEATURES")
+            result.detail = f"runup models have non-finite {absent}"
+            return
+
+        implied_x = features[list(implied_artifact.features)].to_numpy(float)
+        move_x = features[list(move_artifact.features)].to_numpy(float)
+        point_implied = float(implied_artifact.predict(implied_x)[0])
+        point_move_d14 = float(move_artifact.predict(move_x)[0])
+        days = float(features["days_before_print"].iloc[0])
+        if not np.isfinite(days) or days < 0:
+            result.flag("MISSING_FEATURES")
+            result.detail = f"invalid days_before_print {days}"
+            return
+        scale = days / 14.0
+
+        result.driver_name = "im_t1"
+        result.driver_prediction = point_implied
+        result.runup_move_days = days
+        result.runup_move_scale = scale
+        result.runup_move_prediction = float(
+            scale_runup_move(max(point_move_d14, 0.0), days)
+        )
+
+        rng = np.random.default_rng(
+            int.from_bytes(
+                hashlib.sha256(
+                    f"{self.snapshot}|{request.key()}".encode()
+                ).digest()[:8],
+                "big",
+            )
+        )
+        implied_draws = point_implied + implied_artifact.residual_draws(
+            MODEL_DRAWS,
+            rng,
+            prediction=point_implied,
+        )
+        implied_draws = np.maximum(implied_draws, 0.0)
+        move_draws_d14 = point_move_d14 + move_artifact.residual_draws(
+            MODEL_DRAWS,
+            rng,
+            prediction=point_move_d14,
+        )
+        move_draws = scale_runup_move(
+            np.maximum(move_draws_d14, 0.0),
+            days,
+        )
+        result.driver_p10 = float(np.quantile(implied_draws, 0.10))
+        result.driver_p90 = float(np.quantile(implied_draws, 0.90))
+        result.runup_move_p10 = float(np.quantile(move_draws, 0.10))
+        result.runup_move_p90 = float(np.quantile(move_draws, 0.90))
+
+        if (
+            result.entry_cost is None
+            or result.entry_cost <= 0
+            or result.spot is None
+            or result.strike is None
+        ):
+            if "COARSE_LADDER" not in result.flags:
+                result.flag("NO_CHAIN")
+            return
+        payoff = self.runup_payoff(request.fill.alpha, result.evidence_cutoff)
+        if payoff is None:
+            result.flag("NO_PAYOFF_MAP")
+            return
+        result.payoff = payoff.as_dict()
+
+        signed_moves = rng.choice((-1.0, 1.0), size=MODEL_DRAWS) * move_draws
+        noise = payoff.residual_draws(MODEL_DRAWS, rng)
+        returns = simulate_runup_returns(
+            implied_draws,
+            signed_moves,
+            payoff,
+            spot=result.spot,
+            strike=result.strike,
+            cost=result.entry_cost,
+            payoff_noise=noise,
+        )
+        result.exp_pnl_model = float(returns.mean())
+        raw_win = float((returns > 0).mean())
+        result.win_model_raw = raw_win
+        # Existing STR-RUNUP isotonic pairs were generated by the retired
+        # one-driver simulator. Reusing that map would calibrate a probability
+        # with observations from different forecast semantics. Keep the new
+        # Monte Carlo win frequency raw until its own causal pairs accumulate.
+        result.win_model = raw_win
         result.model_p10 = float(np.quantile(returns, 0.10))
         result.model_p90 = float(np.quantile(returns, 0.90))
 

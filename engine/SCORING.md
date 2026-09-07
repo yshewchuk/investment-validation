@@ -96,18 +96,19 @@ theoretically would require assuming how implied volatility behaves through a
 print — the thing fifty experiments established cannot be assumed — and would
 produce a number with no way to check it.
 
-Instead `engine/payoff.py` fits `exit_value/spot ≈ a + b · driver` on real
-replayed trades at the same fill alpha, and applies it to the **real entry cost
-from the real chain**. The fit uses only trades that had *closed* before the
-decision date, so a payoff map used to score January 2021 knows nothing about how
-2021 turned out.
+Instead `engine/payoff.py` calibrates exit value on real replayed trades at the
+same fill alpha, and applies it to the **real entry cost from the real chain**.
+Most structures use `exit_value/spot ≈ a + b · driver`. STR-RUNUP uses the
+EXP-149 surface over T-1 implied move and exit moneyness, because the stock can
+move away from the fixed entry strike before the position is sold. Every fit
+uses only trades that had *closed* before the decision date.
 
 The driver differs by structure, and the difference is the structure's thesis:
 
 | Strategy | Driver | Why |
 |---|---|---|
 | STR-THRU | `abs_move` | Held through the print — the realized move *is* the trade |
-| STR-RUNUP | `im_t1` | Sold before the print, so the realized move is irrelevant by construction; what it is worth at exit is the implied move being quoted then |
+| STR-RUNUP | `im_t1` + pre-print stock move | Sold before the print; implied move sets volatility value while the stock path sets exit moneyness against the fixed entry strike |
 | CAL-P | — | No payoff map, because there is no validated evidence to calibrate one against |
 
 ---
@@ -135,7 +136,13 @@ So the scorer supplies the market block **only when the entry is the decision
 close**. A model that needs it at an earlier entry reports `MISSING_FEATURES` and
 declines to score, which is correct: it is the wrong model for that date.
 STR-RUNUP is driven by `implied_t1`, whose features are as-of the entry by
-construction.
+construction. Its stock-path model predicts the absolute T-14-to-T-1 move.
+Other entry horizons linearly scale that distribution by
+`days_before_print / 14`, including extrapolation beyond fourteen sessions.
+The prior STR-RUNUP isotonic win-rate map belongs to the retired one-driver
+simulator, so it is not applied to this new two-driver forecast. The board shows
+the raw Monte Carlo win frequency until causal pairs from the new simulator are
+available.
 
 Two further causality rules, each enforced and tested:
 

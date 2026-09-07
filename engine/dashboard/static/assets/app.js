@@ -916,7 +916,7 @@ function renderRowDetail(r, detailEl) {
     + "<tr><td>win rate</td><td>" + pct(win, 1) + "</td></tr>"
     + "</tbody></table></div>";
 
-  const modelExtra =
+  let modelExtra =
     "<tr><td title='Percentiles of the TRADE RETURN, after the driver is pushed "
     + "through the payoff map.'>return p10 / p90</td><td>"
     + signedPct(r.model_p10) + " / " + signedPct(r.model_p90) + "</td></tr>"
@@ -943,6 +943,19 @@ function renderRowDetail(r, detailEl) {
     + (r.implied_move_at_entry === null || r.implied_move_at_entry === undefined
         ? "–" : fmt(r.implied_move_at_entry, 2) + "%")
     + "</td></tr>";
+  if (r.runup_move_prediction !== null && r.runup_move_prediction !== undefined) {
+    modelExtra +=
+      "<tr><td>stock move over holding window</td><td>"
+      + fmt(r.runup_move_prediction, 2) + "%"
+      + (r.runup_move_p10 === null || r.runup_move_p10 === undefined
+          ? ""
+          : " <span class=band>" + fmt(r.runup_move_p10, 2) + "–"
+            + fmt(r.runup_move_p90, 2) + "</span>")
+      + "</td></tr>"
+      + "<tr><td>move horizon scaling</td><td>"
+      + fmt(r.runup_move_days, 0) + " sessions / 14 = "
+      + fmt(r.runup_move_scale, 2) + "x</td></tr>";
+  }
   const analogExtra =
     "<tr><td>CI (bootstrap)</td><td>[" + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</td></tr>"
     + "<tr><td>matched on</td><td class='mono'>"

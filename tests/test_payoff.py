@@ -13,8 +13,13 @@ from engine.payoff import (
     PAYOFF_DRIVER,
     PayoffError,
     PayoffMap,
+    RunupPayoffSurface,
     driver_for,
     fit_payoff,
+    fit_runup_payoff,
+    runup_payoff_design,
+    scale_runup_move,
+    simulate_runup_returns,
 )
 
 
@@ -47,6 +52,30 @@ def linear_trades(
             "exit_date": pd.Timestamp(f"{year}-06-02"),
         }
     )
+
+
+def runup_surface_trades(n: int = 600, seed: int = 17) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    implied = rng.uniform(3.0, 12.0, n)
+    moneyness = rng.uniform(-10.0, 10.0, n)
+    spot = np.full(n, 100.0)
+    strike = np.full(n, 100.0)
+    spot_exit = strike * np.exp(moneyness / 100.0)
+    coefficients = np.array([0.01, 0.004, 0.002, 0.0002, 0.0003, 0.0001])
+    exit_value = runup_payoff_design(implied, moneyness) @ coefficients * spot
+    frame = pd.DataFrame(
+        {
+            "strategy": "STR-RUNUP",
+            "fill_alpha": 0.5,
+            "im_t1": implied,
+            "spot_entry": spot,
+            "spot_exit": spot_exit,
+            "strike": strike,
+            "exit_value": exit_value,
+            "exit_date": pd.Timestamp("2020-06-02"),
+        }
+    )
+    return frame, coefficients
 
 
 class TestDriver:
@@ -129,6 +158,52 @@ class TestCausality:
         assert fit_payoff(
             pool, "STR-THRU", alpha=0.5, before=pd.Timestamp("2020-06-03")
         ).n == 300
+
+
+class TestRunupSurface:
+    def test_t14_move_is_scaled_linearly_for_other_entry_days(self):
+        values = np.array([4.0, 8.0])
+        assert scale_runup_move(values, 7).tolist() == pytest.approx([2.0, 4.0])
+        assert scale_runup_move(values, 21).tolist() == pytest.approx([6.0, 12.0])
+        assert not scale_runup_move(values, 0).any()
+
+    def test_recovers_the_exp149_surface(self):
+        trades, expected = runup_surface_trades()
+        fitted = fit_runup_payoff(trades, alpha=0.5)
+        assert fitted.n == len(trades)
+        assert np.asarray(fitted.coefficients) == pytest.approx(expected, abs=1e-9)
+        assert fitted.r == pytest.approx(1.0, abs=1e-9)
+
+    def test_spot_move_changes_exit_value_through_moneyness(self):
+        payoff = RunupPayoffSurface(
+            alpha=0.5,
+            coefficients=(0.01, 0.004, 0.003, 0.0, 0.0, 0.0),
+            resid_sd=0.0,
+            n=500,
+            r=1.0,
+        )
+        flat = payoff.exit_value([6.0], [0.0], spot=100.0, strike=100.0)
+        moved = payoff.exit_value([6.0], [8.0], spot=100.0, strike=100.0)
+        assert moved[0] > flat[0]
+
+    def test_simulation_uses_real_cost_and_floors_value_after_noise(self):
+        payoff = RunupPayoffSurface(
+            alpha=0.5,
+            coefficients=(0.01, 0.0, 0.0, 0.0, 0.0, 0.0),
+            resid_sd=0.0,
+            n=500,
+            r=1.0,
+        )
+        returns = simulate_runup_returns(
+            [6.0, 6.0],
+            [0.0, 0.0],
+            payoff,
+            spot=100.0,
+            strike=100.0,
+            cost=2.0,
+            payoff_noise=[0.0, -0.05],
+        )
+        assert returns.tolist() == pytest.approx([-0.5, -1.0])
 
 
 class TestResiduals:

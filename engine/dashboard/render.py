@@ -61,7 +61,7 @@ __all__ = [
 
 #: Bumped when the bundle's on-disk shape changes, so a stale published bundle
 #: and a new client (or the reverse) are detectable from meta.json alone.
-RENDER_VERSION = 1
+RENDER_VERSION = 2
 
 #: The guide's mobile budget: board.json should stay under ~1 MB. Above this
 #: the renderer flags the bundle rather than failing — the board still works,
@@ -110,6 +110,8 @@ _BOARD_FIELDS = (
     "chosen_strategy", "chosen_margin", "menu_size",
     "extrapolated", "flags", "model_versions",
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",
+    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
+    "runup_move_days", "runup_move_scale",
     "implied_move", "implied_move_at_entry", "model_vs_market",
     "chain_last_obs", "chain_age_days",
     "scored", "rank", "fill", "detail", "digest",
@@ -285,6 +287,46 @@ def _model_fair_pct(record: Mapping[str, Any]) -> float | None:
     """
     payoff = record.get("payoff") or {}
     driver = record.get("driver_prediction")
+    if payoff.get("kind") == "runup_payoff_surface":
+        coefficients = payoff.get("coefficients") or {}
+        move = record.get("runup_move_prediction")
+        spot = record.get("spot")
+        strike = record.get("strike")
+        names = (
+            "intercept",
+            "implied_move",
+            "abs_moneyness",
+            "moneyness_sq_div10",
+            "signed_moneyness",
+            "implied_x_abs_moneyness_div10",
+        )
+        if (
+            driver is None
+            or move is None
+            or spot in (None, 0.0)
+            or strike in (None, 0.0)
+            or any(name not in coefficients for name in names)
+        ):
+            return None
+        values = []
+        for direction in (-1.0, 1.0):
+            exit_spot = float(spot) * np.exp(
+                direction * float(move) / 100.0
+            )
+            money = 100.0 * np.log(exit_spot / float(strike))
+            absolute = abs(money)
+            terms = (
+                1.0,
+                float(driver),
+                absolute,
+                money * money / 10.0,
+                money,
+                float(driver) * absolute / 10.0,
+            )
+            values.append(
+                sum(float(coefficients[name]) * term for name, term in zip(names, terms))
+            )
+        return max(0.0, float(np.mean(values)) * 100.0)
     intercept, slope = payoff.get("intercept"), payoff.get("slope")
     if driver is None or intercept is None or slope is None:
         return None
@@ -718,6 +760,11 @@ def build_strategies(registry=None) -> dict:
             "model": describe(champion("size" if driver == "abs_move" else "implied_t1", name))
             if driver
             else None,
+            "runup_model": (
+                describe(champion("runup_move", name))
+                if name == "STR-RUNUP"
+                else None
+            ),
             "gate": describe(champion("gate", name)),
             # A strategy gated by arithmetic has no registry entry to describe,
             # and rendering "gate: none" for an ENABLED strategy reads as a
@@ -742,11 +789,13 @@ def build_strategies(registry=None) -> dict:
             "layers": {
                 "model": (
                     "The champion predicts the driver from the features below. That "
-                    "prediction is pushed through the structure's payoff map — a line "
-                    "fitted on real replayed trades, exit_value/spot = intercept + "
-                    "slope x driver — and simulated against the premium actually "
-                    "quoted, twice-randomised: once for how wrong the driver "
-                    "prediction may be, once for how much the payoff line fails to "
+                    "prediction is pushed through the structure's calibrated payoff. "
+                    "The calibration is fitted on real replayed trades. STR-RUNUP "
+                    "uses a surface over "
+                    "implied move and stock-path moneyness; other strategies use a "
+                    "line over their driver. It is simulated against the premium "
+                    "actually quoted, twice-randomised: once for model error and "
+                    "once for how much the payoff calibration fails to "
                     "explain. Expected PnL is the mean of those draws; the win rate "
                     "is the share above zero."
                 ),

@@ -17,9 +17,10 @@ priced on real chains at real fills by :mod:`engine.replay`. So fit the map from
 the predicted quantity to the realized exit value, on those trades, and use the
 entry cost from the actual chain the trade would be entered on.
 
-This module does the second. The map is deliberately a straight line through one
-variable — with a few thousand trades and an admittedly lumpy edge, a flexible
-fit would model 2022 and 2024 rather than the mechanism.
+This module does the second. Most structures use a straight line through one
+driver. STR-RUNUP is the deliberate exception introduced by EXP-149: its fixed
+entry strike becomes off-centre when spot moves before exit, so its calibrated
+surface uses both the predicted T-1 implied move and exit moneyness.
 
 **The map is fitted causally.** ``fit_payoff(..., before=as_of)`` uses only
 trades that had already closed by the decision date, so a payoff map used to
@@ -37,10 +38,15 @@ import pandas as pd
 
 __all__ = [
     "PayoffMap",
+    "RunupPayoffSurface",
     "PAYOFF_DRIVER",
     "fit_payoff",
+    "fit_runup_payoff",
     "driver_for",
+    "runup_payoff_design",
+    "scale_runup_move",
     "simulate_returns",
+    "simulate_runup_returns",
 ]
 
 #: What each structure's exit value is a function of.
@@ -163,6 +169,114 @@ class PayoffMap:
         }
 
 
+RUNUP_TERMS = (
+    "intercept",
+    "implied_move",
+    "abs_moneyness",
+    "moneyness_sq_div10",
+    "signed_moneyness",
+    "implied_x_abs_moneyness_div10",
+)
+RUNUP_BASE_DAYS = 14.0
+
+
+def scale_runup_move(values, days_before_print: float) -> np.ndarray:
+    """Linearly interpolate or extrapolate a T-14 move distribution."""
+    scale = float(days_before_print) / RUNUP_BASE_DAYS
+    return np.asarray(values, dtype=float) * scale
+
+
+def runup_payoff_design(implied_move, moneyness) -> np.ndarray:
+    """EXP-149 surface terms for pre-print straddle exit value."""
+    implied = np.asarray(implied_move, dtype=float)
+    money = np.asarray(moneyness, dtype=float)
+    absolute = np.abs(money)
+    return np.column_stack(
+        [
+            np.ones(len(implied)),
+            implied,
+            absolute,
+            np.square(money) / 10.0,
+            money,
+            implied * absolute / 10.0,
+        ]
+    )
+
+
+@dataclass(frozen=True)
+class RunupPayoffSurface:
+    """STR-RUNUP exit value as a function of implied move and moneyness."""
+
+    alpha: float
+    coefficients: tuple[float, ...]
+    resid_sd: float
+    n: int
+    r: float | None
+    fitted_through: pd.Timestamp | None = None
+    residuals: np.ndarray = field(default_factory=lambda: np.array([]))
+
+    def residual_draws(self, n: int, rng: np.random.Generator) -> np.ndarray:
+        if self.residuals.size:
+            return rng.choice(self.residuals, size=n, replace=True)
+        if np.isfinite(self.resid_sd) and self.resid_sd > 0:
+            return rng.normal(0.0, self.resid_sd, n)
+        return np.zeros(n)
+
+    def exit_value(
+        self,
+        implied_move,
+        signed_move,
+        *,
+        spot: float,
+        strike: float,
+    ) -> np.ndarray:
+        value_per_spot = self.value_per_spot(
+            implied_move,
+            signed_move,
+            spot=spot,
+            strike=strike,
+        )
+        return np.maximum(value_per_spot, 0.0) * float(spot)
+
+    def value_per_spot(
+        self,
+        implied_move,
+        signed_move,
+        *,
+        spot: float,
+        strike: float,
+    ) -> np.ndarray:
+        implied = np.asarray(implied_move, dtype=float)
+        move = np.asarray(signed_move, dtype=float)
+        implied, move = np.broadcast_arrays(implied, move)
+        exit_spot = float(spot) * np.exp(move / 100.0)
+        moneyness = 100.0 * np.log(exit_spot / float(strike))
+        design = runup_payoff_design(implied.ravel(), moneyness.ravel())
+        value_per_spot = design @ np.asarray(self.coefficients, dtype=float)
+        return value_per_spot.reshape(implied.shape)
+
+    def as_dict(self) -> dict:
+        return {
+            "strategy": "STR-RUNUP",
+            "driver": "im_t1+runup_move",
+            "kind": "runup_payoff_surface",
+            "alpha": round(self.alpha, 4),
+            "coefficients": {
+                name: round(value, 8)
+                for name, value in zip(RUNUP_TERMS, self.coefficients)
+            },
+            "resid_sd": round(self.resid_sd, 8),
+            "n": self.n,
+            "r": round(self.r, 4) if self.r is not None else None,
+            "n_residuals": int(self.residuals.size),
+            "fitted_through": (
+                str(self.fitted_through.date())
+                if self.fitted_through is not None
+                else None
+            ),
+        }
+
+
 class PayoffError(RuntimeError):
     """Not enough closed trades to calibrate a payoff map."""
 
@@ -249,6 +363,85 @@ def fit_payoff(
     )
 
 
+def fit_runup_payoff(
+    trades: pd.DataFrame,
+    *,
+    alpha: float,
+    before=None,
+    min_trades: int = MIN_TRADES,
+) -> RunupPayoffSurface:
+    """Fit the causal EXP-149 STR-RUNUP exit-value surface."""
+    rows = trades[
+        (trades["strategy"] == "STR-RUNUP")
+        & np.isclose(trades["fill_alpha"].astype(float), float(alpha))
+    ]
+    if before is not None:
+        before = pd.Timestamp(before).normalize()
+        rows = rows[pd.to_datetime(rows["exit_date"]) < before]
+
+    needed = ["im_t1", "spot_entry", "spot_exit", "strike", "exit_value"]
+    missing = [column for column in needed if column not in rows.columns]
+    if missing:
+        raise PayoffError(f"STR-RUNUP: payoff surface needs columns {missing}")
+
+    implied = pd.to_numeric(rows["im_t1"], errors="coerce").to_numpy(float)
+    spot_entry = pd.to_numeric(rows["spot_entry"], errors="coerce").to_numpy(float)
+    spot_exit = pd.to_numeric(rows["spot_exit"], errors="coerce").to_numpy(float)
+    strike = pd.to_numeric(rows["strike"], errors="coerce").to_numpy(float)
+    exit_value = pd.to_numeric(rows["exit_value"], errors="coerce").to_numpy(float)
+    ok = (
+        np.isfinite(implied)
+        & np.isfinite(spot_entry)
+        & np.isfinite(spot_exit)
+        & np.isfinite(strike)
+        & np.isfinite(exit_value)
+        & (spot_entry > 0)
+        & (spot_exit > 0)
+        & (strike > 0)
+    )
+    implied = implied[ok]
+    spot_entry = spot_entry[ok]
+    spot_exit = spot_exit[ok]
+    strike = strike[ok]
+    exit_value = exit_value[ok]
+    if len(implied) < min_trades:
+        label = before.date() if before is not None else "the end"
+        raise PayoffError(
+            f"STR-RUNUP: {len(implied)} closed trades before {label} "
+            f"for payoff surface, need {min_trades}"
+        )
+
+    moneyness = 100.0 * np.log(spot_exit / strike)
+    design = runup_payoff_design(implied, moneyness)
+    target = exit_value / spot_entry
+    coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+    fitted = design @ coefficients
+    residuals = target - fitted
+    r = (
+        float(np.corrcoef(fitted, target)[0, 1])
+        if fitted.std() > 0 and target.std() > 0
+        else None
+    )
+    kept = residuals
+    if kept.size > MAX_RESIDUALS:
+        kept = np.random.default_rng(RESIDUAL_SEED).choice(
+            kept, size=MAX_RESIDUALS, replace=False
+        )
+    return RunupPayoffSurface(
+        alpha=float(alpha),
+        coefficients=tuple(float(value) for value in coefficients),
+        resid_sd=(
+            float(residuals.std(ddof=2))
+            if len(residuals) > 2
+            else float("nan")
+        ),
+        n=int(len(implied)),
+        r=r,
+        fitted_through=before,
+        residuals=np.sort(kept),
+    )
+
+
 def simulate_returns(
     driver_draws,
     payoff: PayoffMap,
@@ -271,3 +464,28 @@ def simulate_returns(
     if cost <= 0:
         return np.full(np.shape(pnl), np.nan)
     return pnl / cost
+
+
+def simulate_runup_returns(
+    implied_draws,
+    signed_move_draws,
+    payoff: RunupPayoffSurface,
+    *,
+    spot: float,
+    strike: float,
+    cost: float,
+    payoff_noise=None,
+) -> np.ndarray:
+    """Push implied-move and pre-print spot-path draws through the surface."""
+    value_per_spot = payoff.value_per_spot(
+        implied_draws,
+        signed_move_draws,
+        spot=spot,
+        strike=strike,
+    )
+    if payoff_noise is not None:
+        value_per_spot = value_per_spot + np.asarray(payoff_noise, dtype=float)
+    value = np.maximum(value_per_spot, 0.0) * float(spot)
+    if cost <= 0:
+        return np.full(np.shape(value), np.nan)
+    return (value - float(cost)) / float(cost)

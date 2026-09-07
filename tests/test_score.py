@@ -391,6 +391,116 @@ class TestModelLayer:
         assert result.exp_pnl_model is None
 
 
+class TestRunupModelLayer:
+    def test_uses_move_model_and_scales_t14_distribution(self, scorer, monkeypatch):
+        from types import SimpleNamespace
+
+        from engine.payoff import RunupPayoffSurface
+
+        implied = ModelArtifact(
+            model=Linear(6.0),
+            role="implied_t1",
+            features=("days_before_print",),
+            residuals=np.zeros(100),
+            target="im_t1",
+        )
+        move = ModelArtifact(
+            model=Linear(8.0),
+            role="runup_move",
+            features=("days_before_print",),
+            residuals=np.zeros(100),
+            target="runup_abs_move_d14",
+        )
+        models = {
+            "implied_t1": (SimpleNamespace(id="implied_test"), implied),
+            "runup_move": (SimpleNamespace(id="runup_test"), move),
+        }
+        payoff = RunupPayoffSurface(
+            alpha=0.5,
+            coefficients=(0.01, 0.004, 0.003, 0.0, 0.0, 0.0),
+            resid_sd=0.0,
+            n=500,
+            r=1.0,
+        )
+        monkeypatch.setattr(scorer, "model", lambda role, strategy="*": models.get(role))
+        monkeypatch.setattr(scorer, "runup_payoff", lambda alpha, before: payoff)
+        monkeypatch.setattr(
+            scorer,
+            "recalibration",
+            lambda *args, **kwargs: pytest.fail("old STR-RUNUP calibration was reused"),
+        )
+
+        def score_at(days):
+            result = ScoreResult(
+                ticker=TICKER,
+                strategy="STR-RUNUP",
+                as_of=EVENT,
+                event_date=EVENT,
+                session="AMC",
+                entry_date=EVENT,
+                evidence_cutoff=EVENT,
+                entry_cost=3.4,
+                spot=100.0,
+                strike=100.0,
+            )
+            scorer._score_runup_model(
+                request(strategy="STR-RUNUP"),
+                result,
+                pd.DataFrame({"days_before_print": [float(days)]}),
+            )
+            return result
+
+        t14 = score_at(14)
+        t7 = score_at(7)
+        assert t14.runup_move_prediction == pytest.approx(8.0)
+        assert t7.runup_move_prediction == pytest.approx(4.0)
+        assert t7.runup_move_p10 == pytest.approx(t14.runup_move_p10 / 2.0)
+        assert t7.runup_move_p90 == pytest.approx(t14.runup_move_p90 / 2.0)
+        assert t7.runup_move_scale == pytest.approx(0.5)
+        assert t14.model_versions == {
+            "im_t1": "implied_test",
+            "runup_move": "runup_test",
+        }
+        assert t14.payoff["kind"] == "runup_payoff_surface"
+        assert t14.exp_pnl_model != pytest.approx(t7.exp_pnl_model)
+
+    def test_missing_move_champion_refuses_the_old_forecast(self, scorer, monkeypatch):
+        from types import SimpleNamespace
+
+        implied = ModelArtifact(
+            model=Linear(6.0),
+            role="implied_t1",
+            features=("days_before_print",),
+            residuals=np.zeros(10),
+            target="im_t1",
+        )
+        monkeypatch.setattr(
+            scorer,
+            "model",
+            lambda role, strategy="*": (
+                (SimpleNamespace(id="implied_test"), implied)
+                if role == "implied_t1"
+                else None
+            ),
+        )
+        result = ScoreResult(
+            ticker=TICKER,
+            strategy="STR-RUNUP",
+            as_of=EVENT,
+            event_date=EVENT,
+            session="AMC",
+            entry_date=EVENT,
+        )
+        scorer._score_runup_model(
+            request(strategy="STR-RUNUP"),
+            result,
+            pd.DataFrame({"days_before_print": [14.0]}),
+        )
+        assert result.exp_pnl_model is None
+        assert "NO_MODEL" in result.flags
+        assert "runup_move" in result.detail
+
+
 class TestAnalogLayer:
     def test_reports_the_matched_population(self, scorer, chain_index):
         result = scorer.score(request(), chain_index=chain_index)

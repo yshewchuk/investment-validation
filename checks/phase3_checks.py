@@ -1024,8 +1024,10 @@ def check_registry_current() -> str:
 
     from engine.models.registry import artifact_sha256, load_registry
     from engine.models.training import gate as gate_mod
+    from engine.models.training import gate_forecast_analog as gate_fa_mod
     from engine.models.training import implied_t1 as implied_mod
     from engine.models.training import iv_crush as crush_mod
+    from engine.models.training import runup_move as runup_move_mod
     from engine.models.training import size_model as size_mod
 
     # One entry per ROLE in the registry. A role missing here is reported as
@@ -1035,8 +1037,12 @@ def check_registry_current() -> str:
     code = {
         "size": set(size_mod.FEATURES),
         "implied_t1": set(implied_mod.FEATURES),
+        "runup_move": set(runup_move_mod.FEATURES),
         "iv_crush": set(crush_mod.FEATURES),
         "gate": set(gate_mod.FEATURES),
+    }
+    entry_code = {
+        "gate_midfill_str_thru_forecast_analog": set(gate_fa_mod.FEATURES),
     }
     registry_path = ROOT / "engine" / "models" / "registry.json"
     champions = [
@@ -1049,7 +1055,7 @@ def check_registry_current() -> str:
     problems: list[str] = []
     for entry in champions:
         role, registered = entry["role"], set(entry["features"])
-        expected = code.get(role)
+        expected = entry_code.get(entry["id"], code.get(role))
         if expected is None:
             problems.append(f"{entry['id']}: role {role!r} has no training module")
             continue

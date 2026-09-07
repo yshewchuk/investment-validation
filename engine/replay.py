@@ -55,6 +55,8 @@ __all__ = [
     "replay_one",
     "replay",
     "ReplayResult",
+    "legs_spot_dte",
+    "legs_exit_spot",
     "to_trades_table",
 ]
 
@@ -740,6 +742,23 @@ def legs_spot_dte(trades: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
             dte = legs[0].get("dte") if legs else None
         dtes[i] = _as_float(dte)
     return pd.Series(spots, index=trades.index), pd.Series(dtes, index=trades.index)
+
+
+def legs_exit_spot(trades: pd.DataFrame) -> pd.Series:
+    """Recover the exit spot stored beside the pinned exit legs."""
+    spots = np.full(len(trades), np.nan)
+    if "legs" not in trades.columns:
+        return pd.Series(spots, index=trades.index)
+    for index, blob in enumerate(trades["legs"].to_numpy()):
+        if not isinstance(blob, str):
+            continue
+        try:
+            document = json.loads(blob)
+        except ValueError:
+            continue
+        if isinstance(document, dict):
+            spots[index] = _as_float(document.get("spot_exit"))
+    return pd.Series(spots, index=trades.index)
 
 
 def _as_float(value) -> float:
