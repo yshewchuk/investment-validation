@@ -1,0 +1,156 @@
+id: EXP-148
+title: "STR-RUNUP T14 gate with forecast PnL and analog evidence"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades the identical T-14 structure at every stored fill alpha.
+  The headline uses midpoint fills and zero commissions. Fills are assumptions,
+  not achieved executions.
+hypothesis: >
+  On the unchanged corrected-calendar T-14 STR-RUNUP trade, adding the causal
+  model-forecast PnL distribution and matched analog-trade statistics to the
+  registered direct-return gate features improves selection efficiency. At
+  equal training-only top-20-percent threshold discipline, the combined model
+  beats the base-feature control on mean return, trade Sharpe and CAGR, does
+  not reduce the positive-year share, and retains its improvement after trades
+  with entry relative spreads above 50 percent are removed.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: model_plus_forecast_pnl_plus_analogs
+  model: "registered HistGradientBoostingRegressor class and 42 base features"
+  extra_features:
+    forecast_pnl:
+      - forecast_pnl_mean
+      - forecast_pnl_win
+      - forecast_pnl_p10
+      - forecast_pnl_p90
+      - forecast_pnl_sd
+    analog:
+      - analog_mean
+      - analog_win_rate
+      - analog_n
+  gate_rule: >
+    Each annual fold fits only on earlier years and chooses the 80th percentile
+    of its own training predictions. The threshold is then applied unchanged
+    to that folds test year.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+forecast_pnl_construction:
+  driver: >
+    The registered implied_t1 model class refit inside each annual outer fold
+    to forecast the implied move at T-1 from the T-14 feature row.
+  point_forecast_causality: >
+    Each test year is predicted by a fit using years strictly before it. The
+    stored monthly Tier-4 table is not used because 2266 of 4219 covered T-14
+    events enter before their event-month model fold, which would be a
+    decision-time leak in this historical experiment. The live serving path
+    already resolves this by choosing the earlier decision fold.
+  driver_uncertainty: >
+    Five-fold ticker-group cross-fitted residuals computed inside each outer
+    training set, sampled from rows unavailable to their own fit.
+  payoff_map: >
+    Causal STR-RUNUP exit_value_over_spot = intercept + slope times im_t1 map,
+    fitted only on engine.replay trades closed before each events entry date.
+  payoff_uncertainty: "empirical residuals of that causal payoff map"
+  output: >
+    Mean, win share, p10, p90 and standard deviation of 4000 simulated returns
+    on the events actual midpoint entry premium.
+
+analog_construction:
+  source: "engine.analogs.AnalogMatcher over unselected engine.replay STR-RUNUP trades"
+  matching:
+    - "market-cap bucket"
+    - "entry implied move relative to the tickers own history"
+    - "entry DTE band"
+    - "absolute moneyness band"
+  causality: "only trades closed strictly before the candidate entry date"
+  widening: "below 30 matches, drop moneyness then DTE then implied tercile"
+
+gate_variants:
+  - id: incumbent_registered_threshold
+    status: operational_benchmark
+    features: "registered 42 features; stored registry threshold"
+  - id: base_top20
+    status: matched_threshold_benchmark
+    features: "registered 42 features; training-only top-20-percent threshold"
+  - id: model_plus_raw_forecast
+    status: secondary
+    features: "base plus T-1 forecast point, p10, p90, sd and predicted run-up"
+  - id: model_plus_forecast_pnl
+    status: secondary
+    features: "base plus forecast PnL mean, win, p10, p90 and sd"
+  - id: model_plus_analogs
+    status: secondary
+    features: "base plus analog mean, win rate and sample size"
+  - id: model_plus_raw_forecast_plus_analogs
+    status: secondary_exp147_analogue
+    features: "base plus raw T-1 forecast outputs and analog statistics"
+  - id: model_plus_forecast_pnl_plus_analogs
+    status: primary
+    features: "base plus forecast PnL distribution and analog statistics"
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Models train on all
+    causally available feature-complete events; the evaluated live-domain cohort
+    requires market cap of at least one billion dollars. Operational coverage
+    and a common scoreable-cohort diagnostic are both reported.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years"
+    - "five-point fill sensitivity and breakeven alpha"
+    - "Monte Carlo probability of loss at five-percent sizing"
+    - "score Spearman and top-minus-bottom decile spread"
+    - "common-cohort exact annual top-20-percent diagnostic"
+    - "earnings-week bootstrap of primary minus base_top20 policy value"
+    - "market-cap and relative-spread slices for every arm"
+    - "performance with entry relative spread above 50 percent removed"
+    - "signal coverage and per-fold feature-completeness counts"
+  primary_success:
+    - "primary mean, CAGR and trade Sharpe exceed base_top20"
+    - "primary positive-year share is no worse than base_top20"
+    - "primary breakeven alpha is no worse than base_top20"
+    - "primary mean exceeds base_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for policy-value difference excludes zero above"
+  multiplicity: >
+    The forecast-PnL-plus-analog arm is the sole primary comparison. The raw
+    forecast analogue and individual signal-group arms are explanatory. A win
+    here requires a separate confirmatory promotion experiment before registry
+    changes.
+
+falsification: >
+  The proposed feature architecture is not supported if it fails to improve
+  both return and trade Sharpe over the equal-threshold base control, if the
+  bootstrap interval includes zero, or if its advantage disappears when entry
+  relative spreads above 50 percent are excluded.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  base_features: "EXP-144 corrected-calendar factor_dataset.parquet"
+  forecast_model: "engine.models.training.implied_t1 refit strictly inside each outer fold"
+  analogs: "Tier-2 trades through engine.analogs"
+  source_experiments: [EXP-129, EXP-142, EXP-144, EXP-145, EXP-146, EXP-147]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Scores and decisions are computed by the stricter annual procedure above.
+    The generic evaluator receives only 2020 onward and performs no model fit.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-07T14:37:55+00:00"
