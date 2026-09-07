@@ -863,7 +863,7 @@ def build_meta(
         except Exception:
             registry = None
     if registry is not None:
-        for role in ("size", "implied_t1", "gate"):
+        for role in ("size", "implied_t1", "runup_move", "iv_crush", "gate"):
             try:
                 model_versions[role] = registry.champion(role).id
             except Exception:

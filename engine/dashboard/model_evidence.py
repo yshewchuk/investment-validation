@@ -246,6 +246,21 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades):
         if sampled is not None:
             data.attrs["sampled_events"] = sampled
         return data, implied_t1.TARGET, list(implied_t1.FEATURES)
+    if role == "runup_move":
+        from engine.models.training import runup_move
+        from engine.models.training.train_all import _events_with_session
+
+        events = _events_with_session()
+        sampled = None
+        if len(events) > MAX_EVENTS:
+            sampled = {"events": MAX_EVENTS, "of": int(len(events)), "seed": SAMPLE_SEED}
+            events = events.sample(MAX_EVENTS, random_state=SAMPLE_SEED)
+        years = sorted(pd.to_datetime(events["event_date"]).dt.year.unique().tolist())
+        daily = _daily_subset(events["ticker"].unique(), years=years)
+        data = runup_move.build_dataset(events, panel=panel, daily=daily)
+        if sampled is not None:
+            data.attrs["sampled_events"] = sampled
+        return data, runup_move.TARGET, list(runup_move.FEATURES)
     return None, None, []
 
 

@@ -57,11 +57,12 @@ __all__ = [
 #:
 #: ``size``        predicted |earnings move|, in percent of spot
 #: ``implied_t1``  predicted quoted implied move at the last pre-print close
+#: ``runup_move``  predicted absolute stock move from T-14 to T-1
 #: ``iv_crush``    predicted change in 30-day implied vol across the print, as a
 #:                 percent of the pre-print level — negative at 83% of prints,
 #:                 and the only role so far whose target is SIGNED
 #: ``gate``        predicted per-trade return at mid fills — the selection signal
-ROLES = ("size", "implied_t1", "iv_crush", "gate")
+ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate")
 
 #: Strategy scope. ``"*"`` means the model is strategy-agnostic (the size model
 #: predicts a property of the *event*, not of any structure traded around it).
@@ -84,6 +85,7 @@ MODEL_TIERS = ("feature", "decision")
 ROLE_TIER = {
     "size": "feature",
     "implied_t1": "feature",
+    "runup_move": "feature",
     "iv_crush": "feature",
     "gate": "decision",
 }
@@ -102,6 +104,10 @@ TIER4_COLUMNS = (
     "pred_im_t1_d14_p10",
     "pred_im_t1_d14_p90",
     "pred_im_t1_d14_sd",
+    "pred_runup_abs_move_d14",
+    "pred_runup_abs_move_d14_p10",
+    "pred_runup_abs_move_d14_p90",
+    "pred_runup_abs_move_d14_sd",
     "pred_iv_crush_30",
     "pred_iv_crush_30_p10",
     "pred_iv_crush_30_p90",

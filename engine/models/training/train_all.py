@@ -39,6 +39,7 @@ from engine.models.training import gate as gate_mod
 from engine.models.training import gate_forecast_analog as gate_fa_mod
 from engine.models.training import iv_crush as crush_mod
 from engine.models.training import implied_t1 as implied_mod
+from engine.models.training import runup_move as runup_move_mod
 from engine.models.training import size_model as size_mod
 from engine.models.training.common import SEED, log
 
@@ -47,6 +48,10 @@ from engine.models.training.common import SEED, log
 REFERENCE = {
     "size": {"oos_r": 0.459, "source": "EXP-040", "note": "OLS+NN blend on true implied"},
     "implied_t1": {"mae_pp": "3.3-4.0", "r": "0.60-0.72", "source": "EXP-043"},
+    "runup_move": {
+        "source": "EXP-149",
+        "note": "absolute T-14-to-T-1 spot movement used by drift-aware forecast PnL",
+    },
     "gate": {"lift_per_trade": 0.046, "source": "EXP-049", "note": "top-20% on S3 mid fills"},
 }
 
@@ -195,6 +200,66 @@ def train_implied_t1(*, seed: int = SEED, dry_run: bool = False) -> dict:
         seed=seed,
         notes=artifact.notes,
         produces="pred_im_t1_d14",
+    )
+    return _finalize(artifact, entry, result, dry_run)
+
+
+def train_runup_move(*, seed: int = SEED, dry_run: bool = False) -> dict:
+    log("=== runup_move: absolute T-14-to-T-1 stock move ===")
+    events = _events_with_session()
+    panel = load_panel()
+    dataset = runup_move_mod.build_dataset(events, panel=panel)
+    model, result = runup_move_mod.train(dataset, seed=seed)
+    buckets = bucket_residuals(
+        result.frame["pred"].to_numpy(dtype=float), result.residuals
+    )
+    notes = (
+        "Predicts 100 * abs(log(T-1 spot / T-14 spot)) in percentage points. "
+        "The estimator fits log1p(target) for tail stability and converts its "
+        "public prediction back to percentage points. Direction is deliberately "
+        "not modeled: EXP-149 found no causal signed-direction skill, while the "
+        "absolute movement distribution materially improved forecast-PnL accuracy."
+    )
+    artifact = ModelArtifact(
+        model=model,
+        role="runup_move",
+        features=runup_move_mod.FEATURES,
+        residuals=result.residuals,
+        residual_buckets=buckets,
+        target=runup_move_mod.TARGET,
+        train_years=tuple(result.years),
+        metrics=result.metrics,
+        params={
+            "horizon_trading_days": runup_move_mod.HORIZON,
+            "target_transform": "log1p",
+            "estimator": "HistGradientBoostingRegressor",
+        },
+        seed=seed,
+        notes=notes,
+    )
+    entry = RegistryEntry(
+        id="runup_move_d14_v1_gbm",
+        role="runup_move",
+        strategy=ANY_STRATEGY,
+        artifact=str(
+            (ARTIFACT_DIR / "runup_move_d14_v1_gbm.joblib").relative_to(paths.ROOT)
+        ),
+        artifact_sha256="",
+        features=list(runup_move_mod.FEATURES),
+        target=runup_move_mod.TARGET,
+        train_window=f"walk-forward, OOS {min(result.years)}-{max(result.years)}",
+        train_years=list(result.years),
+        eval={
+            **{k: v for k, v in result.metrics.items() if k != "by_year"},
+            "by_year": result.by_year.to_dict("records"),
+            "reference": REFERENCE["runup_move"],
+        },
+        champion=True,
+        promoted=date.today().isoformat(),
+        evidence="experiments/EXP-149_str_runup_drift_aware_forecast_pnl",
+        seed=seed,
+        notes=notes,
+        produces="pred_runup_abs_move_d14",
     )
     return _finalize(artifact, entry, result, dry_run)
 
@@ -438,7 +503,7 @@ def _finalize(artifact: ModelArtifact, entry: RegistryEntry, result, dry_run: bo
 #: ever fit it was EXP-128's own run, and ``train_all`` silently trained four
 #: of the five champions. A Tier-3 change then refreshed every model except
 #: that one, which is the failure this ordering exists to prevent.
-ROLE_ORDER = ("size", "implied_t1", "gate", "iv_crush")
+ROLE_ORDER = ("size", "implied_t1", "runup_move", "gate", "iv_crush")
 
 #: Roles selectable via ``--role`` but never part of the default sweep — a
 #: promoted-but-non-standard model an operator refreshes deliberately, not
@@ -482,6 +547,8 @@ def main(argv=None) -> int:
             report["models"].append(train_size(seed=args.seed, dry_run=args.dry_run))
         elif role == "implied_t1":
             report["models"].append(train_implied_t1(seed=args.seed, dry_run=args.dry_run))
+        elif role == "runup_move":
+            report["models"].append(train_runup_move(seed=args.seed, dry_run=args.dry_run))
         elif role == "gate":
             for strategy in gate_strategies:
                 report["models"].append(

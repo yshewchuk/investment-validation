@@ -83,6 +83,7 @@ __all__ = [
     "FeatureModel",
     "size_feature_model",
     "im_t1_feature_model",
+    "runup_move_feature_model",
     "iv_crush_feature_model",
     "feature_model",
     "fold_start_of",
@@ -161,6 +162,7 @@ def column_group(produces: str) -> tuple[str, ...]:
 PRODUCES = (
     "pred_abs_move",
     "pred_im_t1_d14",
+    "pred_runup_abs_move_d14",
     "pred_iv_crush_30",
 )
 
@@ -340,6 +342,63 @@ def im_t1_feature_model(registry=None) -> FeatureModel:
     )
 
 
+def runup_move_feature_model(registry=None) -> FeatureModel:
+    """The T-14-to-T-1 absolute stock-move champion as a Tier-4 producer.
+
+    Its decision-date features use the same session-aware T-14 frame as
+    :func:`im_t1_feature_model`. The target differs: it is the absolute log
+    return of spot between that decision close and the last pre-print close.
+    """
+    from engine.models.training import runup_move
+
+    reg = registry_mod.load_registry() if registry is None else registry
+    entry = reg.champion("runup_move")
+    if tuple(entry.features) != tuple(runup_move.FEATURES):
+        raise Tier4Error(
+            f"champion {entry.id} was registered on a different feature list than "
+            "engine.models.training.runup_move.FEATURES"
+        )
+    if entry.target != runup_move.TARGET:
+        raise Tier4Error(
+            f"champion {entry.id} targets {entry.target!r}, module targets "
+            f"{runup_move.TARGET!r}"
+        )
+
+    def prepare(panel: pd.DataFrame) -> pd.DataFrame:
+        from engine.features import DAILY_STATE_FIELDS
+
+        events = store.read_table(
+            "earnings_events",
+            years=IM_T1_YEARS,
+            columns=["event_id", "ticker", "event_date", "session"],
+        )
+        events = events[events["session"].notna()].reset_index(drop=True)
+        daily = store.read_table(
+            "daily_market",
+            years=range(min(IM_T1_YEARS) - 1, max(IM_T1_YEARS) + 1),
+            columns=["ticker", "date", "src_iv", *DAILY_STATE_FIELDS.keys()],
+        )
+        frame = runup_move.build_dataset(
+            events,
+            panel=panel,
+            daily=daily,
+            horizon=runup_move.HORIZON,
+        )
+        if frame.empty:
+            return frame
+        return frame.rename(columns={"event_date": "date"})
+
+    return FeatureModel(
+        model_id=entry.id,
+        produces=f"pred_runup_abs_move_d{runup_move.HORIZON}",
+        features=tuple(entry.features),
+        target=entry.target,
+        fit=runup_move.fit,
+        prepare=prepare,
+        seed=entry.seed or SEED,
+    )
+
+
 def iv_crush_feature_model(registry=None) -> FeatureModel:
     """The champion ``iv_crush`` model, as a Tier-4 producer.
 
@@ -388,6 +447,7 @@ def iv_crush_feature_model(registry=None) -> FeatureModel:
 FEATURE_MODELS: dict[str, Callable[..., FeatureModel]] = {
     "pred_abs_move": size_feature_model,
     "pred_im_t1_d14": im_t1_feature_model,
+    "pred_runup_abs_move_d14": runup_move_feature_model,
     "pred_iv_crush_30": iv_crush_feature_model,
 }
 
@@ -545,8 +605,8 @@ def interval_for(
     refine the estimate and never leave a sparse region with a pool too thin to
     be a distribution.
 
-    ``floor`` clips BOTH bounds. It defaults to zero because both producers so
-    far predict a MAGNITUDE — an absolute move, an implied move — where an
+    ``floor`` clips BOTH bounds. It defaults to zero because most producers
+    predict a MAGNITUDE — an absolute move or an implied move — where an
     interval reaching below zero reports an outcome that cannot occur, and on
     real data the lower bound would cross often: the size champion's MAE is
     ~3.9pp against a median forecast near 5pp.

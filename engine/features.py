@@ -280,8 +280,8 @@ def _panel_cached(path_str: str, mtime: float) -> pd.DataFrame:
 #: judging a wide interval needs to know whether it is wide because the model is
 #: uncertain or because the pool was thin.
 #:
-#: Derived from the table's own definition rather than restated. Two producers
-#: now contribute seven columns each; a hand-maintained copy of that list is one
+#: Derived from the table's own definition rather than restated. Every producer
+#: contributes seven columns; a hand-maintained copy of that list is one
 #: champion promotion away from silently dropping a column from every join.
 FORECAST_COLUMNS = tier4_table.COLUMNS[len(tier4_table.KEY_COLUMNS):]
 
@@ -1051,6 +1051,10 @@ FEATURE_NOTES: dict[str, str] = {
     "analog_mean": "Mean return of matched historical STR-THRU analogs (engine.analogs.AnalogMatcher), same buckets and causal cutoff the board's analog layer already uses.",
     "analog_win_rate": "Share of matched historical analogs that won — a real matched win rate, not a model-derived probability.",
     "analog_n": "Number of matched historical analogs behind analog_mean/analog_win_rate. Low n means a thin, low-confidence match.",
+    "pred_runup_abs_move_d14": "Predicted absolute stock move from T-14 to the session-aware last pre-print close, in %. EXP-149 uses this distribution to account for fixed-strike moneyness in STR-RUNUP forecast PnL.",
+    "pred_runup_abs_move_d14_p10": "10th percentile of the predicted T-14-to-T-1 absolute stock move, from the same fold residual pool.",
+    "pred_runup_abs_move_d14_p90": "90th percentile of the predicted T-14-to-T-1 absolute stock move, from the same fold residual pool.",
+    "pred_runup_abs_move_d14_sd": "Held-out residual standard deviation for the T-14-to-T-1 absolute stock-move forecast, in percentage points.",
 }
 
 #: Human labels for the two payoff drivers.

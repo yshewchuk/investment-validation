@@ -14,6 +14,7 @@ import pytest
 from engine.models.training import common
 from engine.models.training import gate as gate_mod
 from engine.models.training import implied_t1 as implied_mod
+from engine.models.training import runup_move as runup_mod
 from engine.models.training import size_model as size_mod
 
 
@@ -251,6 +252,52 @@ class TestImpliedT1:
 
     def test_days_before_print_is_a_feature_not_bookkeeping(self):
         assert "days_before_print" in implied_mod.FEATURES
+
+
+class TestRunupMove:
+    def test_uses_the_t14_decision_features(self):
+        assert runup_mod.HORIZON == 14
+        assert runup_mod.FEATURES == implied_mod.FEATURES
+        assert runup_mod.TARGET == "runup_abs_move_d14"
+
+    def test_fit_is_deterministic_and_nonnegative(self):
+        rng = np.random.default_rng(14)
+        X = rng.normal(size=(500, len(runup_mod.FEATURES)))
+        y = np.exp(1.2 + 0.25 * X[:, 0] + rng.normal(0, 0.15, len(X))) - 1.0
+        a = runup_mod.fit(X, y, seed=7).predict(X[:30])
+        b = runup_mod.fit(X, y, seed=7).predict(X[:30])
+        assert np.allclose(a, b)
+        assert (a >= 0).all()
+
+    def test_target_is_the_absolute_log_move(self, monkeypatch):
+        base = pd.DataFrame(
+            {
+                "ticker": ["A"],
+                "event_date": pd.to_datetime(["2024-05-15"]),
+                "last_pre_print": pd.to_datetime(["2024-05-14"]),
+                "spot": [100.0],
+            }
+        )
+        monkeypatch.setattr(
+            runup_mod.implied_t1,
+            "build_dataset",
+            lambda *args, **kwargs: base.copy(),
+        )
+
+        import engine.features as features
+
+        monkeypatch.setattr(
+            features,
+            "daily_state_frame",
+            lambda *args, **kwargs: pd.DataFrame({"spot": [90.0]}),
+        )
+        result = runup_mod.build_dataset(
+            pd.DataFrame({"event_date": pd.to_datetime(["2024-05-15"])}),
+            daily=pd.DataFrame(),
+        )
+        expected = 100.0 * np.log(0.9)
+        assert result["runup_signed_move_d14"].iloc[0] == pytest.approx(expected)
+        assert result[runup_mod.TARGET].iloc[0] == pytest.approx(abs(expected))
 
 
 class TestGate:

@@ -765,6 +765,7 @@ class TestIntervalMechanics:
         expected = {
             "pred_abs_move": 0.0,
             "pred_im_t1_d14": 0.0,
+            "pred_runup_abs_move_d14": 0.0,
             "pred_iv_crush_30": None,
         }
         for produces in tier4.PRODUCES:
