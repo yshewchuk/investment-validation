@@ -1105,6 +1105,12 @@ def run_nightly(
     scores = score_calendar(
         as_of, horizon_days=horizon_days, alt_strikes=0,
         scorer=engine, tickers=tickers,
+        # Finer than score_calendar's own default (50): the nightly board
+        # spans hundreds of events x every live strategy, and 50-event
+        # granularity gave too few checkpoints to tell "slow" from "stuck"
+        # over a run that can now take much longer than it used to as
+        # strategies were added.
+        progress_every=10,
     )
     board_scores = scores
 

@@ -557,6 +557,19 @@ class Scorer:
         #: most two folds, so this bounds an otherwise per-row cost.
         self._serving_models: dict[pd.Timestamp, object] = {}
         self._verify = verify_artifacts
+        #: live_features() results, keyed by (ticker, event_date, entry_date,
+        #: session) — every score() call recomputes _live_values from scratch
+        #: (its own docstring: "one call per score"), and score_calendar()
+        #: calls score() once per (event, strategy, offset). Most strategies
+        #: share the same decision date for one event (only STR-RUNUP enters
+        #: early), so without this a board with N strategies pays the full
+        #: live_features cost — panel history slice, regime/runup/orats
+        #: feature blocks, pre-print vol — up to N times per event instead of
+        #: once. Grew from a non-issue into the board's dominant cost as
+        #: strategies were added; found while diagnosing a nightly rebuild
+        #: that used to fit in the "five-minute budget" score_calendar's own
+        #: docstring quotes and now runs much longer.
+        self._live_features_cache: dict[tuple, dict[str, float]] = {}
 
     # -- setup -------------------------------------------------------------
 
@@ -1113,10 +1126,23 @@ class Scorer:
     def _live_values(self, request, result) -> dict[str, float]:
         """``live_features`` for an event the panel does not carry.
 
-        One call per score, shared by the market block and the event-history
-        block below — they are two slices of the same vector, and computing it
-        twice would double the cost of every forward row on the board.
+        Shared by the market block and the event-history block below — they
+        are two slices of the same vector, and computing it twice would
+        double the cost of every forward row on the board. Also cached ACROSS
+        different ``score()`` calls, keyed on (ticker, event_date, entry_date,
+        session): a board scores every strategy for one event, most of which
+        share the same decision date (only STR-RUNUP enters early), so without
+        this the same expensive recomputation ran once per strategy instead of
+        once per event.
         """
+        key = (
+            request.ticker,
+            pd.Timestamp(result.event_date).normalize() if result.event_date is not None else None,
+            pd.Timestamp(result.entry_date).normalize() if result.entry_date is not None else None,
+            result.session,
+        )
+        if key in self._live_features_cache:
+            return self._live_features_cache[key]
         try:
             vector = live_features(
                 request.ticker,
@@ -1125,12 +1151,16 @@ class Scorer:
                 session=result.session,
                 context=self.context,
             )
+            values = dict(vector.values)
         except (KeyError, ValueError, FileNotFoundError):
             # No prior events, or no price history to build the run-up block
             # from. The model layer will report MISSING_FEATURES, which is the
-            # honest answer for a name we know nothing about.
-            return {}
-        return dict(vector.values)
+            # honest answer for a name we know nothing about. Cached too — a
+            # ticker with no history stays without it for every strategy that
+            # asks, not just the first.
+            values = {}
+        self._live_features_cache[key] = values
+        return values
 
     def _market_block(self, request, result) -> dict[str, float]:
         """Market state at the last pre-print close, from whichever path has it.
@@ -2123,11 +2153,18 @@ def score_calendar(
                     atm_spot = result.spot
                 rows.append(result.as_dict() | {"strike_offset": offset})
         if progress_every and i and i % progress_every == 0:
+            elapsed = time.time() - started
+            rate = i / elapsed if elapsed > 0 else 0.0
+            remaining_events = len(events) - i
+            eta_s = remaining_events / rate if rate > 0 else float("nan")
             print(
-                f"  [score] {i:,}/{len(events):,} events, {time.time()-started:.0f}s",
+                f"  [score] {i:,}/{len(events):,} events, {elapsed:.0f}s elapsed, "
+                f"{rate:.2f} events/s, ETA {eta_s:.0f}s "
+                f"(live_features cache: {len(engine._live_features_cache):,} entries)",
                 flush=True,
             )
-    print(f"  [score] {len(rows):,} scores in {time.time()-started:.0f}s", flush=True)
+    print(f"  [score] {len(rows):,} scores in {time.time()-started:.0f}s "
+          f"(live_features cache: {len(engine._live_features_cache):,} entries)", flush=True)
     frame = pd.DataFrame(rows)
     return pd.concat([frame, dynamic_short_vol(frame)], ignore_index=True) \
         if len(frame) else frame
