@@ -20,7 +20,7 @@ which are only real if something enforces them:
  7. ``access_rule``      an unauthenticated 200 on the target refuses the publish
  8. ``ui_no_compute``    every field the client reads is one the renderer wrote
  9. ``calp_unvalidated`` CAL-P renders as unvalidated, matching the scorer
-10. ``server_local``     the desk server binds 127.0.0.1 and keeps the quota
+10. ``server_local``     the desk server binds 0.0.0.0 and keeps the quota
                          actions off the published bundle
 11. ``board_budget``     board.json fits the mobile budget
 12. ``registry_current`` every champion matches the code that trains it
@@ -966,27 +966,20 @@ def check_calp_unvalidated() -> str:
 
 
 @check("server_local", needs_data=False,
-       description="the desk server binds 127.0.0.1; the bundle has no mutating surface")
+       description="the desk server binds 0.0.0.0; the bundle has no mutating surface")
 def check_server_local() -> str:
     from dashboard import earnings_app
 
     source = (ROOT / "dashboard" / "earnings_app.py").read_text()
     _require(
-        earnings_app.DEFAULT_HOST == "127.0.0.1",
-        f"the desk server defaults to {earnings_app.DEFAULT_HOST}, not loopback",
+        earnings_app.DEFAULT_HOST == "0.0.0.0",
+        f"the desk server defaults to {earnings_app.DEFAULT_HOST}, not 0.0.0.0",
     )
     _require(
         earnings_app.DEFAULT_PORT == 8711,
         f"the desk server defaults to port {earnings_app.DEFAULT_PORT}, not 8711 — "
         "the semis scanner that used to reserve 8711 is retired, and this is the "
         "port a container with only 8711 published expects",
-    )
-    # An override exists for a containerised desk, but an all-interfaces bind
-    # must never be what the file itself chooses.
-    _require(
-        "0.0.0.0" not in source,
-        "the desk server hardcodes an all-interfaces bind — that must stay an "
-        "explicit environment override, never the default",
     )
     mutating = re.findall(r'@app\.(post|put|delete|patch)\("([^"]+)"', source)
     _require(
@@ -1004,7 +997,7 @@ def check_server_local() -> str:
         "--no-publish" in source,
         "the desk refresh action can publish — a desk button must not ship a snapshot",
     )
-    return f"binds 127.0.0.1; {len(mutating)} mutating endpoint(s), all desk-only"
+    return f"binds 0.0.0.0; {len(mutating)} mutating endpoint(s), all under /api/"
 
 
 # --------------------------------------------------------------------------

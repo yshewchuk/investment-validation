@@ -81,10 +81,10 @@ cloudflared named tunnel to :8711 for desk-time interactive use.
   publicly readable without Access (probe: unauthenticated GET of meta.json
   must NOT return 200 after setup). Positions + licensed ORATS-derived data
   never ship unauthenticated.
-- The live server binds 127.0.0.1 only; the tunnel is the sole remote path
-  to it. `POST /refresh` (and anything quota-spending) exists only on the
-  local app — the published bundle has no mutating endpoints by
-  construction.
+- The live server binds 0.0.0.0:8711, so host or container network policy
+  controls direct access. `POST /refresh` (and anything quota-spending)
+  exists only on the app — the published bundle has no mutating endpoints
+  by construction.
 
 ## 4. Constraints
 

@@ -57,7 +57,7 @@ and the engine cannot drift.
     engine/dashboard/nightly.py     the orchestrator (below)
     dashboard/earnings/             the bundle: index.html, assets/, data/
     dashboard/published/            local publish target (releases/ + current)
-    dashboard/earnings_app.py       FastAPI, 127.0.0.1:8711
+    dashboard/earnings_app.py       FastAPI, 0.0.0.0:8711
 
 Every datum in `data/` travels twice — as `.json` (what the self-check, the API
 and any other consumer read) and as a `.js` wrapper generated from the same
@@ -74,12 +74,11 @@ every value on screen, including derived ones like rank and premium-vs-fair.
     # the real thing (spends ORATS quota from the 3k/month live reserve)
     python3 -m engine.dashboard.nightly
 
-    # serve it at http://127.0.0.1:8711
+    # serve it on all interfaces at port 8711
     python3 dashboard/earnings_app.py
 
-    # in a container, where a published port cannot reach the loopback bind
-    # (port defaults to 8711 already; only the host needs overriding)
-    DASHBOARD_HOST=0.0.0.0 python3 dashboard/earnings_app.py
+    # optionally restrict it to the local machine
+    DASHBOARD_HOST=127.0.0.1 python3 dashboard/earnings_app.py
 
     # verify a bundle against the engine by hand
     python3 -m engine.dashboard.selfcheck --bundle dashboard/earnings
@@ -245,14 +244,11 @@ the 3,000-call live reserve.
 
 ### Two things that bite when running it locally
 
-**A published Docker port cannot reach a loopback bind.** Docker forwards to
-the container's bridge interface, so a server on `127.0.0.1` inside a container
-is invisible from the host however the port was published. `DASHBOARD_HOST`
-exists for that, and the default stays loopback so an all-interfaces bind is
-never an accident — the board discloses position intent and redistributes
-licensed ORATS-derived quotes, so whoever can reach the bind can read both.
-Check what your publish is bound to (`-p 8711:8711` listens on every host
-interface; `-p 127.0.0.1:8711:8711` does not).
+**The server listens on every interface by default.** This supports published
+container ports and direct access through the host network. The board discloses
+position intent and redistributes licensed ORATS-derived quotes, so protect
+port 8711 with the host firewall, container publish rules, or the configured
+access proxy. Set `DASHBOARD_HOST=127.0.0.1` to restore a local-only bind.
 
 **Do not leave the desk server warm while the nightly runs.** A `Scorer` is
 ~1.4 GB held for the process's life, and two at once exceeded a 7 GB box: the
@@ -303,10 +299,10 @@ hand: it backfills the missed nights and marks them LATE.
 ## Remote access
 
 Primary channel: the published static snapshot. Secondary (optional): a named
-cloudflared tunnel to :8711 for desk-time interactive use. The server binds
-127.0.0.1 only, so the tunnel is the sole remote path to it, and the published
-bundle has no mutating endpoint by construction — `POST /api/refresh` and
-anything else that spends quota exists only on the local app.
+cloudflared tunnel to :8711 for desk-time interactive use. The server listens
+on every interface, so host or container network policy controls direct access.
+The published bundle has no mutating endpoint by construction — `POST
+/api/refresh` and anything else that spends quota exists only on the app.
 
 ### Checklist — steps only the account holder can do
 

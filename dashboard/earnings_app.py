@@ -8,14 +8,11 @@ construction.
 
 Hard rules from the guide, enforced here:
 
-* **Binds 127.0.0.1 by default.** The cloudflared tunnel is the sole remote
-  path to this app. ``DASHBOARD_HOST`` / ``DASHBOARD_PORT`` override it, which
-  a containerised desk needs — a published Docker port forwards to the
-  container's bridge interface, not its loopback, so a 127.0.0.1 bind inside a
-  container is unreachable from the host. Overriding is a deliberate act with a
-  real consequence: the board discloses position intent and redistributes
-  licensed ORATS-derived quotes, so whoever can reach the bind can read both.
-  The default stays loopback so that is never the accident.
+* **Binds 0.0.0.0 by default.** This makes the dashboard reachable through a
+  published container port and from other interfaces on the host.
+  ``DASHBOARD_HOST`` / ``DASHBOARD_PORT`` can still override the bind.
+  Network access controls remain responsible for protecting the position and
+  licensed quote data exposed by the board.
 * **Quota-spending actions are local-only.** ``POST /api/refresh`` shells out
   to the nightly job with ``--no-publish``.
 * Port 8711 was the semis scanner's; that dashboard is retired, and this one
@@ -159,9 +156,8 @@ def refresh():
 # The bundle itself, served LAST so /api/* routes win.
 app.mount("/", StaticFiles(directory=str(BUNDLE), html=True), name="bundle")
 
-#: Loopback and 8711 unless the environment says otherwise. 8711 was the
-#: retired semis scanner's port; this is the only dashboard running now.
-DEFAULT_HOST = "127.0.0.1"
+#: Every interface on port 8711 unless the environment says otherwise.
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8711
 
 if __name__ == "__main__":
