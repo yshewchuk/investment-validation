@@ -23,7 +23,7 @@ engine/dashboard/
 dashboard/earnings/           # served + published bundle
   index.html  assets/app.js  assets/app.css
   data/board.json  data/tickers/{T}.json  data/meta.json  data/health.json
-dashboard/earnings_app.py     # FastAPI, port 8712 (leave the semis scanner on 8711 untouched)
+dashboard/earnings_app.py     # FastAPI, port 8711 (the semis scanner that used to hold this port is retired)
 ```
 
 - **Client:** vanilla JS + CSS, no npm, no CDN dependencies (must open from
@@ -69,7 +69,7 @@ missed night — it re-reads, re-renders, re-publishes).
 ## 3. Remote access
 
 Per the plan: primary = published static snapshot; secondary = optional
-cloudflared named tunnel to :8712 for desk-time interactive use.
+cloudflared named tunnel to :8711 for desk-time interactive use.
 
 - **User tasks (cannot be done by the agent; provide this checklist):**
   create the Cloudflare account/project, add the Pages/R2 target, configure

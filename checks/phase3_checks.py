@@ -976,9 +976,10 @@ def check_server_local() -> str:
         f"the desk server defaults to {earnings_app.DEFAULT_HOST}, not loopback",
     )
     _require(
-        earnings_app.DEFAULT_PORT == 8712,
-        f"the desk server defaults to port {earnings_app.DEFAULT_PORT}; 8711 is the "
-        "semis scanner's and the two must not share one",
+        earnings_app.DEFAULT_PORT == 8711,
+        f"the desk server defaults to port {earnings_app.DEFAULT_PORT}, not 8711 — "
+        "the semis scanner that used to reserve 8711 is retired, and this is the "
+        "port a container with only 8711 published expects",
     )
     # An override exists for a containerised desk, but an all-interfaces bind
     # must never be what the file itself chooses.

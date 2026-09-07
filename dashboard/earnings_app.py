@@ -1,4 +1,4 @@
-"""Earnings-vol monitoring board — FastAPI, port 8712.
+"""Earnings-vol monitoring board — FastAPI, port 8711.
 
 Renderer-first: this server is a convenience around the SAME bundle the
 nightly job renders and the publisher ships. It serves ``dashboard/earnings/``
@@ -18,7 +18,9 @@ Hard rules from the guide, enforced here:
   The default stays loopback so that is never the accident.
 * **Quota-spending actions are local-only.** ``POST /api/refresh`` shells out
   to the nightly job with ``--no-publish``.
-* The semis scanner on 8711 is untouched.
+* Port 8711 was the semis scanner's; that dashboard is retired, and this one
+  moved onto its port (2026-09-07) so a container with only 8711 published
+  reaches it without an env override.
 
 Run::
 
@@ -157,10 +159,10 @@ def refresh():
 # The bundle itself, served LAST so /api/* routes win.
 app.mount("/", StaticFiles(directory=str(BUNDLE), html=True), name="bundle")
 
-#: Loopback and 8712 unless the environment says otherwise. 8711 belongs to the
-#: semis scanner; the two dashboards do not share a port.
+#: Loopback and 8711 unless the environment says otherwise. 8711 was the
+#: retired semis scanner's port; this is the only dashboard running now.
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8712
+DEFAULT_PORT = 8711
 
 if __name__ == "__main__":
     import uvicorn

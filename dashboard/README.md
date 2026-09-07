@@ -1,5 +1,9 @@
 # Semi Index-Flow Scanner Dashboard
 
+**Retired 2026-09-07.** No longer in use; its port (8711) now belongs to the
+earnings-vol monitoring board below. This section is kept as a record of what
+`server.py`/`refresh.py` did, not as a running service.
+
 Web UI for the semiconductor index-flow dispersion strategy (see ../STRATEGY.md).
 
 ## Run
@@ -36,9 +40,9 @@ Web UI for the semiconductor index-flow dispersion strategy (see ../STRATEGY.md)
 
 # Earnings-vol monitoring board (Phase 3)
 
-The second dashboard in this directory, on **port 8712** — the semis scanner
-above keeps 8711 and is untouched by any of it. Different data, different
-engine, deliberately separate process.
+The second dashboard in this directory, on **port 8711** — the semis scanner
+above used to hold that port; it is retired, and this is now the only running
+dashboard here. Different data, different engine, its own process.
 
 ## Architecture: the bundle is the product
 
@@ -53,7 +57,7 @@ and the engine cannot drift.
     engine/dashboard/nightly.py     the orchestrator (below)
     dashboard/earnings/             the bundle: index.html, assets/, data/
     dashboard/published/            local publish target (releases/ + current)
-    dashboard/earnings_app.py       FastAPI, 127.0.0.1:8712
+    dashboard/earnings_app.py       FastAPI, 127.0.0.1:8711
 
 Every datum in `data/` travels twice — as `.json` (what the self-check, the API
 and any other consumer read) and as a `.js` wrapper generated from the same
@@ -70,11 +74,12 @@ every value on screen, including derived ones like rank and premium-vs-fair.
     # the real thing (spends ORATS quota from the 3k/month live reserve)
     python3 -m engine.dashboard.nightly
 
-    # serve it at http://127.0.0.1:8712
+    # serve it at http://127.0.0.1:8711
     python3 dashboard/earnings_app.py
 
     # in a container, where a published port cannot reach the loopback bind
-    DASHBOARD_HOST=0.0.0.0 DASHBOARD_PORT=8711 python3 dashboard/earnings_app.py
+    # (port defaults to 8711 already; only the host needs overriding)
+    DASHBOARD_HOST=0.0.0.0 python3 dashboard/earnings_app.py
 
     # verify a bundle against the engine by hand
     python3 -m engine.dashboard.selfcheck --bundle dashboard/earnings
@@ -298,7 +303,7 @@ hand: it backfills the missed nights and marks them LATE.
 ## Remote access
 
 Primary channel: the published static snapshot. Secondary (optional): a named
-cloudflared tunnel to :8712 for desk-time interactive use. The server binds
+cloudflared tunnel to :8711 for desk-time interactive use. The server binds
 127.0.0.1 only, so the tunnel is the sole remote path to it, and the published
 bundle has no mutating endpoint by construction — `POST /api/refresh` and
 anything else that spends quota exists only on the local app.
