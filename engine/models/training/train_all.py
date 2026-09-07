@@ -375,9 +375,12 @@ def train_gate_forecast_analog(
         threshold=float(threshold),
         # Declares the Tier-4 dependency this decision model now has — the
         # first gate to declare `consumes`, so a future size-model re-promotion
-        # shows up in `Registry.consumers("pred_abs_move")`.
-        consumes=["pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90",
-                  "pred_abs_move_sd"],
+        # shows up in `Registry.consumers("pred_abs_move")`. Only the canonical
+        # column: `pred_abs_move_p10/p90/sd` are byproducts of the SAME
+        # FeatureModel's output (tier4.column_group), not separately produced
+        # columns with their own champion — declaring them here made
+        # Registry.validate() report a missing producer that will never exist.
+        consumes=["pred_abs_move"],
         notes=artifact.notes,
     )
 
@@ -437,10 +440,25 @@ def _finalize(artifact: ModelArtifact, entry: RegistryEntry, result, dry_run: bo
 #: that one, which is the failure this ordering exists to prevent.
 ROLE_ORDER = ("size", "implied_t1", "gate", "iv_crush")
 
+#: Roles selectable via ``--role`` but never part of the default sweep — a
+#: promoted-but-non-standard model an operator refreshes deliberately, not
+#: something every restore should silently retrain. ``gate_forecast_analog``
+#: is STR-THRU's forecast+analog gate (2026-09-07 promotion,
+#: guides/str_thru_gate_forecast_analog_promotion.md) — data/models/*.joblib
+#: is never committed (RECOVERY.md), so without this CLI path a fresh restore
+#: would have a registry entry pointing at an artifact nothing could rebuild.
+#: Unlike train_gate_forecast_analog()'s own default (train + save, never
+#: register — the safe default for a NEW promotion candidate), invoking this
+#: role DOES register: choosing it is the operator's deliberate act of
+#: refreshing the model that is ALREADY the champion, the same as every other
+#: ``--role`` choice already does for its strategy.
+EXTRA_ROLES = ("gate_forecast_analog",)
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--role", action="append", choices=ROLE_ORDER, help="train only this role")
+    ap.add_argument("--role", action="append", choices=ROLE_ORDER + EXTRA_ROLES,
+                    help="train only this role")
     ap.add_argument(
         "--gate-strategy", action="append", default=None,
         help="strategies to fit a gate for (default: STR-THRU, STR-RUNUP)",
@@ -471,6 +489,15 @@ def main(argv=None) -> int:
                 )
         elif role == "iv_crush":
             report["models"].append(train_iv_crush(seed=args.seed, dry_run=args.dry_run))
+        elif role == "gate_forecast_analog":
+            summary = train_gate_forecast_analog(
+                evidence="guides/str_thru_gate_forecast_analog_promotion.md",
+                seed=args.seed, dry_run=args.dry_run,
+            )
+            if not args.dry_run and "entry" in summary:
+                register(RegistryEntry(**summary["entry"]))
+                log(f"registered {summary['id']} → refreshed on new data")
+            report["models"].append(summary)
 
     if not args.dry_run:
         problems = load_registry().validate()

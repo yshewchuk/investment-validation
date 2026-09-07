@@ -1043,6 +1043,14 @@ FEATURE_NOTES: dict[str, str] = {
     "days_before_print": "TRADING days from entry to the last pre-print close. 0 for STR-THRU, 14 for STR-RUNUP — calendar days here would be a silent training/serving skew.",
     "entry_cost_pct": "Premium paid for the structure, as % of spot. The gate's read on whether the trade is expensive.",
     "dte_entry": "Days to expiry of the traded contracts at entry.",
+    "pred_abs_move": "The size model's own predicted absolute move for this print, in %. Served leak-safe via the Tier-4 monthly-fold table (engine.data.features.tier4) — the same number STR-THRU is priced from (engine.payoff.PAYOFF_DRIVER), now also a gate feature.",
+    "pred_abs_move_p10": "10th percentile of the size model's predicted move, from the same fold's held-out residual pool.",
+    "pred_abs_move_p90": "90th percentile of the size model's predicted move, from the same fold's held-out residual pool.",
+    "pred_abs_move_sd": "Spread of the size model's held-out residuals for this fold — how confident the forecast is, not how big the move is predicted to be.",
+    "forecast_edge": "Predicted move minus the quoted implied move at entry, both % of spot. Positive means the model expects a bigger move than the market is pricing — STR-THRU's stated thesis (EXP-145).",
+    "analog_mean": "Mean return of matched historical STR-THRU analogs (engine.analogs.AnalogMatcher), same buckets and causal cutoff the board's analog layer already uses.",
+    "analog_win_rate": "Share of matched historical analogs that won — a real matched win rate, not a model-derived probability.",
+    "analog_n": "Number of matched historical analogs behind analog_mean/analog_win_rate. Low n means a thin, low-confidence match.",
 }
 
 #: Human labels for the two payoff drivers.
