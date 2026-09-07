@@ -36,6 +36,7 @@ from engine.models.registry import (
     register,
 )
 from engine.models.training import gate as gate_mod
+from engine.models.training import gate_forecast_analog as gate_fa_mod
 from engine.models.training import iv_crush as crush_mod
 from engine.models.training import implied_t1 as implied_mod
 from engine.models.training import size_model as size_mod
@@ -299,6 +300,104 @@ def train_gate(strategy: str, *, seed: int = SEED, dry_run: bool = False) -> dic
         notes=artifact.notes,
     )
     return _finalize(artifact, entry, result, dry_run)
+
+
+def train_gate_forecast_analog(
+    *, seed: int = SEED, evidence: str, dry_run: bool = False
+) -> dict:
+    """Train the STR-THRU forecast+analog gate (EXP-145 arm 7) as a PROMOTION
+    CANDIDATE, never as a direct champion write.
+
+    Unlike :func:`train_gate`, this never calls ``register()`` — it trains
+    the final model, saves the artifact (to get a real sha256), and returns
+    the candidate ``RegistryEntry`` as a dict for the caller to hand to
+    ``experiments/promote.py --apply-registry``, which is where the
+    champion/challenger decision actually gets made. Registering directly
+    here would bypass the one mechanical gate (``experiments.promote.decide``)
+    this candidate is supposed to have to clear.
+
+    ``evidence`` must name the confirmatory experiment this candidate is
+    being registered FROM — there is no default, unlike the Phase-1 bulk
+    registration this mirrors, because a promotion candidate without a named
+    experiment behind it is not evidence.
+    """
+    log(f"=== gate: STR-THRU forecast+analog (candidate, {gate_fa_mod.STRATEGY}) ===")
+    trades = _engine_trades(gate_fa_mod.STRATEGY)
+    if trades.empty:
+        log("no engine-replayed STR-THRU trades — skipping.")
+        return {"role": "gate", "strategy": gate_fa_mod.STRATEGY, "skipped": "no trades"}
+    dataset = gate_fa_mod.build_dataset(trades)
+    model, result, threshold = gate_fa_mod.train(dataset, seed=seed)
+    yearly = gate_fa_mod.by_year_gate_table(result, threshold)
+    log("gate by year:\n" + yearly.to_string(index=False))
+
+    artifact = ModelArtifact(
+        model=model,
+        role="gate",
+        features=gate_fa_mod.FEATURES,
+        residuals=result.residuals,
+        target=gate_fa_mod.TARGET,
+        train_years=tuple(result.years),
+        metrics=result.metrics,
+        params={"alpha": gate_fa_mod.GATE_ALPHA, "top_fraction": gate_fa_mod.TOP_FRACTION},
+        seed=seed,
+        notes=(
+            "Trained on engine.replay STR-THRU trades at alpha=0.5 over an "
+            "unselected event universe. Extends gate_midfill_str_thru's 41 "
+            "registered features with the size model's own forecast "
+            f"({', '.join(gate_fa_mod.FORECAST_COLS)}) and matched analog-trade "
+            f"statistics ({', '.join(gate_fa_mod.ANALOG_COLS)}) — EXP-145 arm 7."
+        ),
+    )
+    entry = RegistryEntry(
+        id="gate_midfill_str_thru_forecast_analog",
+        role="gate",
+        strategy=gate_fa_mod.STRATEGY,
+        artifact=str((ARTIFACT_DIR / "gate_midfill_str_thru_forecast_analog.joblib")
+                     .relative_to(paths.ROOT)),
+        artifact_sha256="",
+        features=list(gate_fa_mod.FEATURES),
+        target=gate_fa_mod.TARGET,
+        train_window=f"walk-forward, OOS {min(result.years)}-{max(result.years)}",
+        train_years=list(result.years),
+        eval={
+            **{k: v for k, v in result.metrics.items() if k != "by_year"},
+            "by_year": yearly.to_dict("records"),
+            "reference": {
+                "source": "EXP-145 arm 7 / EXP-147 confirmatory",
+                "note": "forecast + analog features added to the registered 41",
+            },
+        },
+        champion=True,
+        promoted=date.today().isoformat(),
+        evidence=evidence,
+        seed=seed,
+        threshold=float(threshold),
+        # Declares the Tier-4 dependency this decision model now has — the
+        # first gate to declare `consumes`, so a future size-model re-promotion
+        # shows up in `Registry.consumers("pred_abs_move")`.
+        consumes=["pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90",
+                  "pred_abs_move_sd"],
+        notes=artifact.notes,
+    )
+
+    summary = {
+        "id": entry.id, "role": entry.role, "strategy": entry.strategy,
+        "metrics": {k: (round(v, 6) if isinstance(v, float) else v)
+                    for k, v in result.metrics.items() if not isinstance(v, (list, dict))},
+        "n_residuals": int(artifact.residuals.size), "oos_years": list(result.years),
+    }
+    if dry_run:
+        log(f"--dry-run: not saving/writing {entry.id}")
+        return summary
+
+    path = ARTIFACT_DIR / Path(entry.artifact).name
+    digest = artifact.save(path)
+    entry.artifact_sha256 = digest
+    log(f"saved (not registered) {entry.id} → {path.name} ({digest[:12]}…)")
+    summary["artifact_sha256"] = digest
+    summary["entry"] = entry.as_dict()
+    return summary
 
 
 def _finalize(artifact: ModelArtifact, entry: RegistryEntry, result, dry_run: bool) -> dict:

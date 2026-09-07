@@ -30,6 +30,8 @@ display preference.
 """
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
@@ -147,17 +149,26 @@ def train(
     seed: int = SEED,
     first_test_year: int = 2020,
     top_fraction: float = TOP_FRACTION,
+    features: Sequence[str] = FEATURES,
 ):
     """Walk-forward the gate, then report what gating would have bought.
 
     The extra statistics are the point of a gate and are not visible in r or
     MAE: the mean return of the passed set against the ungated base, and the
     top-minus-bottom decile spread.
+
+    ``features`` defaults to this module's own 41-column list so every
+    existing caller (``train_all.train_gate``) is unaffected; a caller with a
+    different feature set — e.g. one that appends the size model's forecast
+    or analog-trade statistics as extra columns — passes its own tuple rather
+    than this module gaining a second, diverging copy of the walk-forward
+    logic.
     """
+    features = tuple(features)
     result = walk_forward(
-        dataset, FEATURES, TARGET, fit, first_test_year=first_test_year, seed=seed
+        dataset, features, TARGET, fit, first_test_year=first_test_year, seed=seed
     )
-    model = fit_final(dataset, FEATURES, TARGET, fit, seed=seed)
+    model = fit_final(dataset, features, TARGET, fit, seed=seed)
 
     scored = result.frame
     threshold = choose_threshold(scored["pred"], top_fraction)

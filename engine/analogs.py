@@ -44,6 +44,7 @@ __all__ = [
     "AnalogSet",
     "AnalogMatcher",
     "bucket_frame",
+    "match_frame",
 ]
 
 #: Below this, an empirical distribution is an anecdote. The guide's threshold.
@@ -442,6 +443,70 @@ class AnalogMatcher:
             years=years,
             unavailable=tuple(unavailable),
         )
+
+
+def match_frame(
+    trades: pd.DataFrame,
+    matcher: AnalogMatcher,
+    *,
+    strategy: str,
+    alpha: float = 0.5,
+    as_of_column: str = "entry_date",
+    min_analogs: int = MIN_ANALOGS,
+    progress_every: int = 0,
+) -> pd.DataFrame:
+    """Per-row matched analog statistics for a whole trade frame.
+
+    One :meth:`AnalogMatcher.match` call per row (``bootstrap=0`` — a batch
+    caller wants the point estimates, not a confidence interval, and skipping
+    the bootstrap is what keeps a full-universe pass fast), with ``as_of`` set
+    to that ROW's own decision date. ``match`` already restricts its pool to
+    trades closed strictly before that date, so the cutoff is per-row, not a
+    caller-supplied global one — which is what makes this safe to compute
+    ONCE, outside any walk-forward loop, and reuse in every fold: a fold
+    boundary drawn later can never un-close a trade that had already closed
+    before a given row's own decision date.
+
+    ``trades`` must already carry :func:`bucket_frame`'s columns
+    (``mcap_bucket``, ``dte_band``, ``moneyness_band``, ``implied_ratio``) —
+    callers that built ``matcher`` from an already-bucketed frame already have
+    them; call :func:`bucket_frame` on ``trades`` first otherwise.
+
+    Returns one row per unique ``event_id`` at the requested ``alpha``:
+    ``event_id``, ``analog_mean``, ``analog_win_rate``, ``analog_n``,
+    ``analog_widened``, ``analog_thin``.
+    """
+    mid = trades[np.isclose(pd.to_numeric(trades["fill_alpha"]), alpha)]
+    mid = mid.drop_duplicates("event_id")
+    records: list[dict] = []
+    n = len(mid)
+    for i, row in enumerate(mid.itertuples(index=False)):
+        buckets = {
+            "mcap_bucket": row.mcap_bucket,
+            "dte_band": row.dte_band,
+            "moneyness_band": row.moneyness_band,
+            "implied_tercile": row.implied_tercile,
+            "implied_ratio": row.implied_ratio,
+        }
+        aset = matcher.match(
+            strategy, buckets, alpha=alpha, as_of=getattr(row, as_of_column),
+            bootstrap=0, min_analogs=min_analogs, request_key=str(row.event_id),
+        )
+        records.append({
+            "event_id": row.event_id,
+            "analog_mean": aset.mean,
+            "analog_win_rate": aset.win_rate,
+            "analog_n": aset.n,
+            "analog_widened": aset.widened,
+            "analog_thin": aset.thin,
+        })
+        if progress_every and ((i + 1) % progress_every == 0 or i + 1 == n):
+            print(f"  [analogs] {i + 1:,}/{n:,} matched", flush=True)
+    return pd.DataFrame.from_records(
+        records,
+        columns=["event_id", "analog_mean", "analog_win_rate", "analog_n",
+                 "analog_widened", "analog_thin"],
+    )
 
 
 def _seed(snapshot: str, strategy: str, alpha: float, buckets: dict, request_key: str) -> int:

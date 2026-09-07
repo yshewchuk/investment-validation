@@ -1,0 +1,69 @@
+id: EXP-147
+title: "STR-THRU gate promotion: confirmatory validation of the forecast+analog gate"
+hypothesis: "EXP-145 arm 7 (the incumbent gate_midfill_str_thru's 41 registered features plus the size model's own forecast and matched analog-trade statistics as six extra GBM features, top-20 percent walk-forward selection) beats the current champion gate_midfill_str_thru on walk-forward CAGR and trade Sharpe, does not worsen Monte Carlo P(loss) at 5pct sizing, survives the stress battery with no new red regime cell, and clears the accuracy checklist and Brier-skill floor -- run independently through the same harness as a clean pre-registered confirmatory validation, not as part of the original 7-arm comparison. Falsified if any of these fails; the current champion stands and this candidate does not promote."
+type: confirmatory_promotion_candidate
+strategy: "STR-THRU"
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+primary_spec:
+  structure: "STR-THRU e+0 x+1 (last pre-print close in, first post-print close out)"
+  universe: "all engine.replay STR-THRU events, unselected (~19,161 events, 2018-2026)"
+  gate: engine.models.training.gate_forecast_analog (49 features -- gate_mod.FEATURES + FORECAST_COLS + ANALOG_COLS)
+  gate_kind: "no registered threshold yet; each walk-forward fold chooses its own top-20% quantile on that fold's training predictions (experiments.common.make_trained_gate discipline)"
+  top_fraction: 0.20
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+
+candidate:
+  gate_id: gate_midfill_str_thru_forecast_analog
+  base_features: "gate_midfill_str_thru's registered 41 (engine/models/training/gate.py FEATURES)"
+  extra_features:
+    forecast: [pred_abs_move, pred_abs_move_p10, pred_abs_move_p90, pred_abs_move_sd, forecast_edge]
+    analog: [analog_mean, analog_win_rate, analog_n]
+  forecast_source: "engine.data.features.tier4.load_forecasts() -- the size model's own pred_abs_move, walk-forward-safe monthly-fold table; forecast_edge = pred_abs_move - im"
+  analog_source: "engine.analogs.AnalogMatcher, matched per event on its own (mcap_bucket, dte_band, moneyness_band, implied_tercile) with as_of = that event's own entry date"
+  live_serving: "engine/score.py Scorer._forecast_for_gate / _gate_feature_frame, called from _score_gate only when a gate's own feature list names these columns -- verified byte-identical to the training-time values on a historical event before this experiment ran"
+
+champion_baseline:
+  gate_id: gate_midfill_str_thru
+  threshold: 0.05679090768112426
+  source: "experiments/EXP-145_str_thru_gate_comparison_seven_gating_ar/arms/arm1_incumbent_model/results/metrics_*.json -- a fresh, full evaluate() run of the CURRENT registry champion on the identical trade universe and harness, run 2026-09-07 (the EXP-105 confirmatory run predates the 2026-09-06 registry promotion and is stale for this comparison)"
+
+promotion_rule: "experiments/promote.py's mechanical decide(): (a) CAGR AND trade Sharpe both beat champion, years-positive share no worse; (b) MC P(loss)@5% no worse; (c) no new red stress regime cell; (d) pre-registration valid; (e) accuracy checklist clean; (f) Brier skill >= -0.05. All must pass; no partial promotion."
+
+evaluation:
+  universe: "every engine.replay STR-THRU event; scoreable subset is smaller than the champion's wherever a forecast or a non-thin analog match is missing (see EXP-145 COMPARISON.md's ungated_share/n_selected caveat)"
+  headline_window: "walk-forward OOS -- 2018-2019 cold-start ungated (min_train_years=2) identically to the champion baseline, gated selection from 2020"
+  required_metrics:
+    - "backtest at the fill-alpha grid (worst/mid/best) with breakeven alpha"
+    - "walk-forward OOS mean/median/std/win_rate/profit_factor/Sharpe(trade)/Sharpe(equity)/Sortino/tail_ratio"
+    - "CAGR, max drawdown, years positive vs years evaluated, by-year table"
+    - "Monte Carlo (block=20, paths=1000, seed=0): P(loss), terminal equity percentiles at sizing {2%,5%,10%,20%}"
+    - "stress battery: 2018Q4, 2020-02..04, 2022, 10 worst SPY earnings weeks, IV-regime split"
+    - "calibration block (isotonic predict_proba, same discipline as the champion)"
+    - "n_selected by year, ungated share, deployment (peak/worst cash/constrained entries)"
+  multiplicity: "this is EXP-145's arm 7 re-run as its own pre-registered spec, not a fresh discovery -- the ledger records both the exploratory EXP-145 row and this confirmatory one under separate spec hashes, and a promotion decision cites both"
+
+falsification: "Any of promote.py's rules failing falsifies the promotion; the current champion gate_midfill_str_thru stands and no registry write happens. A rule warning (not failing) does not block -- see experiments/promote.py's decide() for the exact PASS/WARN/FAIL semantics."
+
+promotion_target: gate_midfill_str_thru
+promotion_note: "If this clears every rule, the model actually shipped to the registry is a FINAL fit on all available data (engine.models.training.common.fit_final), not any single walk-forward fold's model -- the walk-forward result here is the EVIDENCE for the decision, not the artifact that gets served."
+
+data:
+  trades: "Tier-2 engine.replay STR-THRU trades (store.read_table('trades'))"
+  forecasts: "data/features/tier4_forecasts.parquet"
+  market_state: "Tier-2 daily_market"
+  events: "Tier-2 earnings_events"
+  source_experiments: [EXP-049, EXP-050, EXP-105, EXP-117, EXP-145]
+  quota_calls: 0
+
+data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+preregistered_at: "2026-09-07T14:05:42+00:00"

@@ -1809,6 +1809,90 @@ class Scorer:
                              if result.detail else f"expected-P&L unavailable: {exc}")
         return out
 
+    #: Columns a gate may name that are not part of the base ``_features()``
+    #: frame — computed on demand in :meth:`_gate_feature_frame` from
+    #: signals that already exist elsewhere on ``result`` or via Tier 4,
+    #: never re-derived a second way. Kept in one place so a gate's feature
+    #: list is the only thing that decides whether the extra computation
+    #: runs at all — an old gate whose features never name these pays
+    #: nothing for them.
+    _GATE_FORECAST_COLUMNS = (
+        "pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90",
+        "pred_abs_move_sd", "forecast_edge",
+    )
+    _GATE_ANALOG_COLUMNS = ("analog_mean", "analog_win_rate", "analog_n")
+
+    def _forecast_for_gate(self, request, result, features) -> dict[str, float]:
+        """``pred_abs_move`` (+p10/p90/sd), served leak-safe via Tier 4.
+
+        The SAME machinery :meth:`_size_from_forecast` uses for
+        forecast-sized structures — factored out here so a gate that merely
+        CONSUMES the forecast as a feature (never sizes its structure from
+        it, which is STR-THRU's case) reuses the identical leak-safe serving
+        path rather than a second implementation that could silently drift
+        from the stored Tier-4 table a gate was trained against.
+        """
+        out = {c: float("nan") for c in self._GATE_FORECAST_COLUMNS}
+        try:
+            served = self._serving(tier4.serving_fold(result.event_date, result.as_of))
+        except Exception:  # a board must not die on one unfit fold
+            return out
+        if any(f not in features.columns for f in served.features):
+            return out
+        try:
+            forecast = float(served.predict(features)[0])
+        except Exception:
+            return out
+        if forecast != forecast:  # NaN
+            return out
+        out["pred_abs_move"] = forecast
+        try:
+            p10, p90, sd, _ = served.interval([forecast])
+            if np.isfinite(sd[0]):
+                out["pred_abs_move_p10"] = float(p10[0])
+                out["pred_abs_move_p90"] = float(p90[0])
+                out["pred_abs_move_sd"] = float(sd[0])
+        except Exception:
+            pass
+        implied = _feature_value(features, "im")
+        if implied is not None:
+            out["forecast_edge"] = forecast - float(implied)
+        return out
+
+    def _gate_feature_frame(self, request, result, features, artifact_features):
+        """``features``, extended with forecast/analog columns a gate names.
+
+        A no-op copy for every gate that does not name these columns — old
+        gates (the STR-THRU/STR-RUNUP incumbents, any arithmetic-rule
+        strategy) are unaffected. ``analog_mean``/``analog_win_rate``/
+        ``analog_n`` are read straight off ``result`` rather than
+        recomputed: :meth:`_score_analogs` already ran earlier in
+        :meth:`score` and produced exactly this row's matched analog set, at
+        the SAME request fill alpha the gate's other features (e.g.
+        ``entry_cost_pct``) already carry — recomputing would be a second,
+        possibly-inconsistent answer to a question already answered.
+        """
+        wanted = set(artifact_features)
+        needed_forecast = [c for c in self._GATE_FORECAST_COLUMNS
+                          if c in wanted and c not in features.columns]
+        needed_analog = [c for c in self._GATE_ANALOG_COLUMNS
+                         if c in wanted and c not in features.columns]
+        if not needed_forecast and not needed_analog:
+            return features
+        out = features.copy()
+        if needed_forecast:
+            for column, value in self._forecast_for_gate(request, result, features).items():
+                out[column] = value
+        if needed_analog:
+            out["analog_mean"] = (
+                float(result.exp_pnl_analog) if result.exp_pnl_analog is not None else float("nan")
+            )
+            out["analog_win_rate"] = (
+                float(result.win_analog) if result.win_analog is not None else float("nan")
+            )
+            out["analog_n"] = float(result.n_analogs)
+        return out
+
     def _score_gate(self, request, result, features) -> None:
         loaded = self.model("gate", request.strategy)
         if loaded is None:
@@ -1819,6 +1903,7 @@ class Scorer:
         if not self._gate_in_domain(request, features):
             result.flag("OUT_OF_DOMAIN")
             return
+        features = self._gate_feature_frame(request, result, features, artifact.features)
         # A gate that declines says WHY. Both branches used to `return` in
         # silence, which put an unexplained `n/a` on the board — indistinguishable
         # from a name the gate had never been asked about. It matters more since
