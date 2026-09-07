@@ -1,0 +1,126 @@
+id: EXP-144
+title: "STR-RUNUP T14 corrected-calendar gate rebaseline"
+strategy: STR-RUNUP
+type: confirmatory_model_challenger
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades the identical structure at every stored fill alpha. Fills
+  are assumptions, not achieved executions.
+hypothesis: >
+  On the reconciled canonical earnings calendar and unchanged T-14 STR-RUNUP
+  trade, native missing-value handling restores a more stable and profitable
+  causal gate than the registered complete-case incumbent. The gain must be
+  visible after separating score coverage from ranking quality, and the joint
+  spot and IV simulation gate is a secondary challenger.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; earnings is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: native_nan
+  score: "predicted gross midpoint return"
+  gate_rule: "score at or above the trailing six-month 80th percentile"
+  first_test_year: 2020
+  draws_per_event: 4000
+  outer_split: "event year; train only on years strictly before the test year"
+
+incumbent:
+  id: gate_midfill_str_runup
+  arm: incumbent_complete_case
+  features: "registered 42-feature contract"
+  stored_threshold: 0.0725137593996064
+  expected_oos_rows: 2754
+  expected_selected_at_stored_threshold: 551
+  missing_rule: "decline the event unless every feature is finite"
+
+gate_variants:
+  - id: incumbent_complete_case
+    status: benchmark
+    model: "direct midpoint-return HistGradientBoostingRegressor"
+    missing_rule: "all features finite or decline"
+  - id: native_nan
+    status: primary
+    model: "same direct midpoint-return HistGradientBoostingRegressor"
+    missing_rule: "native HGB missing-value branches"
+  - id: native_nan_availability
+    status: secondary
+    model: "same direct midpoint-return HistGradientBoostingRegressor"
+    missing_rule: "native HGB branches plus explicit availability flags"
+  - id: sim_joint
+    status: secondary
+    model: "joint spot-path and exit-volatility residual swarm"
+    missing_rule: "decline when the option or factor state is incomplete"
+  - id: ungated
+    status: benchmark
+    model: "none"
+    missing_rule: "all priced events admitted"
+
+selection:
+  operational: >
+    At each month, use only the prior six months of out-of-sample scores to
+    set that arms 80th-percentile cutoff. Require at least 100 historical
+    finite scores. This is causal and allows score coverage to remain part of
+    the policy.
+  matched_diagnostic: >
+    Within each test year and on the intersection scoreable by all modeled
+    arms, select exactly the top 20 percent for each arm. This diagnostic uses
+    the full years score distribution and cannot trigger promotion.
+
+evaluation:
+  headline_window: "strict walk-forward OOS 2020-2026"
+  cold_start: "2019 scores seed trailing thresholds; no 2018-2019 trade enters the headline"
+  required_slices:
+    - "entry implied move present versus absent"
+    - "market-cap bucket"
+    - "relative-spread quintile"
+  required_metrics:
+    - "ungated, incumbent and challenger mean and capital-weighted return"
+    - "gate lift over the identical full priced universe"
+    - "positive years and selected count by year"
+    - "full five-point fill sensitivity and breakeven alpha"
+    - "earnings-week bootstrap of native_nan minus incumbent policy value"
+    - "Spearman rank correlation and top-minus-bottom decile spread"
+    - "causal trailing-cutoff and exact matched-selectivity results"
+    - "sample funnel and implied-move availability cohorts"
+  promotion_checks:
+    - "native_nan mean, capital-weighted return, CAGR and trade Sharpe exceed incumbent"
+    - "native_nan positive-year share is no worse than incumbent"
+    - "native_nan breakeven alpha is no worse than incumbent"
+    - "90 percent earnings-week interval for policy value excludes zero above"
+    - "native_nan rank correlation and top-minus-bottom decile spread exceed incumbent"
+    - "mandatory engine accuracy checks pass"
+
+factor_simulation:
+  targets:
+    - "exit ex-earnings IV"
+    - "exit event variance"
+    - "absolute pre-print spot move"
+  residuals: "ticker-group cross-fitted and sampled jointly by historical event"
+  draw_count: 4000
+  random_state: 20260829
+  role: "secondary challenger only"
+
+data:
+  trades: "Tier-2 engine.replay exact T-14 STR-RUNUP trades"
+  features: "corrected Tier-3 canonical event panel and daily market state"
+  calendar_reconciliation_commit: b0ee8da
+  source_experiments: [EXP-107, EXP-118, EXP-142, EXP-143]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Scores are computed upstream by strict expanding annual folds. The generic
+    evaluator receives only 2020 onward and performs no additional model fit.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: gate_midfill_str_runup
+preregistered_at: "2026-09-07T12:53:19+00:00"
