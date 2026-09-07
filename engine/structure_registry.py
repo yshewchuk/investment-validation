@@ -52,13 +52,15 @@ __all__ = [
 #: structure named in no family is unaffected by any of this and is live on its
 #: own terms.
 #:
-#: ``twin-peak`` — a doubled ATM long, shorts either side, wings that cancel the
-#: tails to exactly zero. TWIN-P spends seven listed strikes on it, TWIN-P5
-#: five. Same thesis (earnings moves are usually small but rarely zero), same
-#: forecast sizing the peak, same three-term arithmetic entry rule.
-FAMILIES: dict[str, tuple[str, ...]] = {
-    "twin-peak": ("TWIN-P", "TWIN-P5"),
-}
+#: ``twin-peak`` (TWIN-P, TWIN-P5) lived here from 2026-09-04 to 2026-09-06.
+#: EXP-126 promoted TWIN-P5 as the one live shape, on the premise the two were
+#: alternatives for one thesis. A further comparison on 2026-09-06 found that
+#: premise false — the shapes win on different events rather than one
+#: dominating — so the family was retired rather than re-arbitrated: both are
+#: live now (see ``engine.entry_rules.TWIN_P_RULE``), and the champion record
+#: moved to ``TWIN_P_LEGACY_RULE`` and this comment rather than to a manifest
+#: entry with no family left to name.
+FAMILIES: dict[str, tuple[str, ...]] = {}
 
 CHAMPIONS_PATH = paths.ENGINE / "models" / "structures.json"
 

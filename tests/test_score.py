@@ -947,17 +947,6 @@ class TestForecastSizedStructures:
     fourteen inputs are. These tests fix that ordering in place.
     """
 
-    @pytest.fixture(autouse=True)
-    def _twin_p_is_champion(self, monkeypatch):
-        """These tests are about MECHANICS, not about which shape is live.
-
-        TWIN-P was superseded by TWIN-P5 on 2026-09-04, so the scorer now
-        returns SUPERSEDED for it before pricing anything. Pinning the family
-        champion back keeps these covering the seven-strike geometry they were
-        written against; the supersede path has its own class below.
-        """
-        monkeypatch.setattr("engine.score.superseded_by", lambda strategy: None)
-
     def test_the_forecast_sets_the_width_before_pricing(
         self, scorer, dense_chain, forecast
     ):
@@ -1028,20 +1017,20 @@ class TestForecastSizedStructures:
 
 
 class TestArithmeticEntryRule:
-    """A strategy with no registered gate is decided by its rule, or not at all."""
+    """A strategy with no registered gate is decided by its rule, or not at all.
 
-    @pytest.fixture(autouse=True)
-    def _twin_p_is_champion(self, monkeypatch):
-        """These tests are about MECHANICS, not about which shape is live.
+    TWIN-P's live rule (since 2026-09-06) needs `exp_pnl_sim`/`pnl_cutoff` —
+    the same simulated top-20% gate TWIN-P5 uses (see
+    `engine.entry_rules.TWIN_P_RULE`). Building a real simulation is not what
+    these tests are about, so `Scorer._simulated_pnl` is stubbed to a fixed,
+    determinate value wherever a verdict needs one.
+    """
 
-        TWIN-P was superseded by TWIN-P5 on 2026-09-04, so the scorer now
-        returns SUPERSEDED for it before pricing anything. Pinning the family
-        champion back keeps these covering the seven-strike geometry they were
-        written against; the supersede path has its own class below.
-        """
-        monkeypatch.setattr("engine.score.superseded_by", lambda strategy: None)
-
-    def test_the_rule_decides_and_labels_itself(self, scorer, dense_chain, forecast):
+    def test_the_rule_decides_and_labels_itself(
+        self, scorer, dense_chain, forecast, monkeypatch
+    ):
+        monkeypatch.setattr(scorer, "_simulated_pnl",
+                            lambda *a, **k: {"exp_pnl_sim": 0.20, "pnl_cutoff": 0.05})
         result = scorer.score(twin(), chain_index=dense_chain)
         assert result.model_versions.get("gate") == "entry-rule:TWIN-P"
         # A rule has a verdict, not a score. Reporting a number here would
@@ -1051,9 +1040,14 @@ class TestArithmeticEntryRule:
         assert "TWIN-P entry rule" in (result.detail or "")
 
     def test_a_small_name_fails_the_rule_and_says_which_term(
-        self, scorer, dense_chain, forecast
+        self, scorer, dense_chain, forecast, monkeypatch
     ):
         # The fixture panel carries mcap 5e9, under the registered $10B floor.
+        # exp_pnl_sim is stubbed to clear its own bar so mcap is the only term
+        # that fails — otherwise a missing simulation would make the whole
+        # verdict undetermined rather than a decided failure.
+        monkeypatch.setattr(scorer, "_simulated_pnl",
+                            lambda *a, **k: {"exp_pnl_sim": 0.20, "pnl_cutoff": 0.05})
         result = scorer.score(twin(), chain_index=dense_chain)
         assert result.gate_pass is False
         assert "market cap" in result.detail
@@ -1089,17 +1083,6 @@ class TestArithmeticEntryRule:
 class TestTheForecastBandOnTheBoard:
     """A forecast without a width is half an answer; a fabricated one is worse."""
 
-    @pytest.fixture(autouse=True)
-    def _twin_p_is_champion(self, monkeypatch):
-        """These tests are about MECHANICS, not about which shape is live.
-
-        TWIN-P was superseded by TWIN-P5 on 2026-09-04, so the scorer now
-        returns SUPERSEDED for it before pricing anything. Pinning the family
-        champion back keeps these covering the seven-strike geometry they were
-        written against; the supersede path has its own class below.
-        """
-        monkeypatch.setattr("engine.score.superseded_by", lambda strategy: None)
-
     def test_the_band_travels_with_the_forecast(self, scorer, dense_chain, forecast):
         result = scorer.score(twin(), chain_index=dense_chain)
         assert result.forecast_abs_move == pytest.approx(6.0)
@@ -1131,41 +1114,43 @@ class TestTheForecastBandOnTheBoard:
 
 
 class TestStructureChampionOnTheBoard:
-    """A superseded shape says so, and says what beat it.
+    """The twin-peak family (TWIN-P vs TWIN-P5) was retired 2026-09-06.
 
-    The distinction this class defends is the one that made the first attempt
-    wrong: putting a beaten structure into `DISABLED_STRATEGIES` takes it off
-    the board but stamps `UNVALIDATED_STRUCTURE`, which for TWIN-P — three
-    completed experiments — reports the opposite of the truth. Superseded is a
-    deployment decision about which of two validated shapes is live; disabled
-    is a statement that nobody has shown a shape works at all.
+    EXP-126 promoted TWIN-P5 as the one live shape on 2026-09-04, on the
+    premise the two were alternatives for a single thesis. A further
+    comparison found that premise false — each wins on different events
+    rather than one dominating — so the family was retired rather than
+    re-arbitrated: both are live, neither is superseded. See
+    `engine/structure_registry.py` and `engine.entry_rules.TWIN_P_LEGACY_RULE`
+    for the retired champion record.
     """
 
-    def test_a_superseded_structure_is_not_scored_and_names_its_successor(
-        self, scorer, dense_chain, forecast
-    ):
+    def test_neither_twin_peak_shape_is_superseded(self):
         from engine.structure_registry import superseded_by
 
-        assert superseded_by("TWIN-P").strategy == "TWIN-P5"
-        result = scorer.score(twin(), chain_index=dense_chain)
-        assert result.flags == ["SUPERSEDED"]
-        assert not result.scored
-        assert "TWIN-P5" in result.detail
+        assert superseded_by("TWIN-P") is None
+        assert superseded_by("TWIN-P5") is None
 
-    def test_superseded_is_not_the_unvalidated_flag(self, scorer, dense_chain, forecast):
-        """The whole reason the flag exists. TWIN-P is the most-measured
-        structure in the program; reporting it as unvalidated would misstate
-        the evidence in order to state the decision."""
+    def test_twin_p_scores_instead_of_declining(
+        self, scorer, dense_chain, forecast, monkeypatch
+    ):
+        monkeypatch.setattr(scorer, "_simulated_pnl",
+                            lambda *a, **k: {"exp_pnl_sim": 0.20, "pnl_cutoff": 0.05})
+        result = scorer.score(twin(), chain_index=dense_chain)
+        assert "SUPERSEDED" not in result.flags
+        assert result.scored or result.gate_pass is not None
+
+    def test_neither_shape_carries_the_unvalidated_flag(
+        self, scorer, dense_chain, forecast
+    ):
+        """TWIN-P is the most-measured structure in the program; reporting it
+        as unvalidated would misstate the evidence regardless of which shape
+        happens to be live."""
         result = scorer.score(twin(), chain_index=dense_chain)
         assert "UNVALIDATED_STRUCTURE" not in result.flags
         from engine.score import DISABLED_STRATEGIES
 
         assert "TWIN-P" not in DISABLED_STRATEGIES
-
-    def test_the_champion_itself_is_scored_normally(self):
-        from engine.structure_registry import superseded_by
-
-        assert superseded_by("TWIN-P5") is None
 
     def test_a_structure_in_no_family_is_untouched(self):
         from engine.structure_registry import family_of, superseded_by
@@ -1173,24 +1158,23 @@ class TestStructureChampionOnTheBoard:
         assert family_of("STR-THRU") is None
         assert superseded_by("STR-THRU") is None
 
-    def test_the_default_board_universe_drops_superseded_members(self):
-        """`score_calendar` defaults to every registered structure. Without
-        this filter the board would price both shapes of one idea on the same
-        events — twice the position for one thesis."""
+    def test_the_default_board_universe_carries_both_twin_peak_shapes(self):
+        """`score_calendar` defaults to every registered structure, filtered
+        through `live_strategies`. Before the retirement this dropped TWIN-P
+        to avoid pricing both shapes of one idea on the same events; now
+        neither is filtered, because they are no longer one idea."""
         from engine.structure_registry import live_strategies
         from engine.structures import STRUCTURES
 
         live = live_strategies(sorted(STRUCTURES))
         assert "TWIN-P5" in live
-        assert "TWIN-P" not in live
+        assert "TWIN-P" in live
 
-    def test_the_beaten_shape_stays_in_the_registry(self):
-        """Superseded, not deleted: EXP-123/124/125 replay against TWIN-P, and
-        a promotion that cannot be rolled back is not a decision, it is a
-        one-way door."""
+    def test_both_shapes_stay_in_the_registry(self):
         from engine.structures import STRUCTURES
 
         assert "TWIN-P" in STRUCTURES
+        assert "TWIN-P5" in STRUCTURES
 
 
 class TestChainAsOfCeiling:

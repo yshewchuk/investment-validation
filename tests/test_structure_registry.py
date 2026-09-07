@@ -45,13 +45,31 @@ class TestFamilies:
             assert len(members) >= 2, f"{name} declares only {members}"
 
 
+#: The real ``twin-peak`` family (TWIN-P vs TWIN-P5) was retired 2026-09-06:
+#: a further comparison found the two shapes are not mutually exclusive — each
+#: wins on different events — so both are live instead of one superseding the
+#: other (see ``engine/structure_registry.py`` and
+#: ``engine.entry_rules.TWIN_P_LEGACY_RULE``). The promotion/champion
+#: MECHANISM this file exercises still needs an example family to operate on,
+#: so the classes below inject a synthetic one rather than reuse production
+#: state that no longer exists.
+def _inject_synthetic_family(monkeypatch):
+    monkeypatch.setattr(
+        "engine.structure_registry.FAMILIES",
+        {"twin-peak": ("TWIN-P", "TWIN-P5")},
+    )
+
+
 class TestTheManifest:
+    @pytest.fixture(autouse=True)
+    def _synthetic_family(self, monkeypatch):
+        _inject_synthetic_family(monkeypatch)
+
     def test_a_missing_manifest_keeps_the_incumbent_rather_than_emptying_the_board(
         self, tmp_path
     ):
         champions = load_champions(tmp_path / "absent.json")
-        for name, members in FAMILIES.items():
-            assert champions[name].strategy == members[0]
+        assert champions["twin-peak"].strategy == "TWIN-P"
 
     def test_promotion_writes_the_receipt(self, tmp_path):
         path = tmp_path / "structures.json"
@@ -99,6 +117,10 @@ class TestTheManifest:
 
 
 class TestSupersede:
+    @pytest.fixture(autouse=True)
+    def _synthetic_family(self, monkeypatch):
+        _inject_synthetic_family(monkeypatch)
+
     def test_the_champion_is_not_superseded(self, tmp_path):
         path = tmp_path / "s.json"
         promote_structure("twin-peak", "TWIN-P5", evidence="EXP-126", path=path)
@@ -128,19 +150,26 @@ class TestSupersede:
 
 
 class TestTheShippedManifest:
-    def test_the_repo_manifest_is_loadable_and_consistent(self):
-        champions = load_champions()
-        for name, entry in champions.items():
-            assert entry.strategy in FAMILIES[name]
+    """The real repo state: no family left, both twin-peak shapes live.
 
-    def test_twin_p5_is_the_live_twin_peak(self):
-        entry = champion_for("twin-peak")
-        assert entry.strategy == "TWIN-P5"
-        assert "EXP-126" in entry.evidence
+    Distinct from ``TestTheManifest``/``TestSupersede`` above, which exercise
+    the generic mechanism against an injected family — these read the actual
+    ``FAMILIES`` dict and ``engine/models/structures.json`` unpatched, to pin
+    the 2026-09-06 retirement itself.
+    """
 
-    def test_the_promotion_records_where_it_is_worse(self):
-        """A receipt that only lists the wins is advertising. TWIN-P5 loses on
-        drawdown and on breakeven alpha, and the note has to say so."""
-        entry = champion_for("twin-peak")
-        assert "drawdown" in entry.notes
-        assert "breakeven alpha" in entry.notes
+    def test_no_family_is_declared(self):
+        assert FAMILIES == {}
+
+    def test_the_shipped_manifest_has_no_champions(self):
+        assert load_champions() == {}
+
+    def test_neither_twin_peak_shape_is_superseded(self):
+        assert family_of("TWIN-P") is None
+        assert family_of("TWIN-P5") is None
+        assert superseded_by("TWIN-P") is None
+        assert superseded_by("TWIN-P5") is None
+
+    def test_both_twin_peak_shapes_are_live(self):
+        assert live_strategies(["TWIN-P", "TWIN-P5", "CAL-P"]) == [
+            "TWIN-P", "TWIN-P5", "CAL-P"]

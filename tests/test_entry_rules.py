@@ -21,6 +21,7 @@ from engine.entry_rules import (
     MAX_REL_SPREAD,
     MCAP_FLOOR,
     TWIN_P5_RULE,
+    TWIN_P_LEGACY_RULE,
     TWIN_P_RULE,
     EntryRule,
     Term,
@@ -52,14 +53,20 @@ def facts(**over):
     return base
 
 
+#: These two classes pin the THREE-OUTCOMES mechanism and the original
+#: EXP-123 geometry against `TWIN_P_LEGACY_RULE` — the rule TWIN-P traded on
+#: from registration until 2026-09-06, still live under its own name (see
+#: `engine.entry_rules.TWIN_P_LEGACY_RULE`) rather than deleted. `TWIN_P_RULE`
+#: itself now points at the same simulated gate as TWIN-P5's; see
+#: `TestTwinPNowSharesTwinP5sGate` below.
 class TestTheThreeOutcomes:
     def test_all_terms_holding_passes(self):
-        verdict = TWIN_P_RULE.evaluate(facts())
+        verdict = TWIN_P_LEGACY_RULE.evaluate(facts())
         assert verdict.passed is True
         assert set(verdict.terms.values()) == {True}
 
     def test_a_failing_term_says_which(self):
-        verdict = TWIN_P_RULE.evaluate(facts(cost=3.0))
+        verdict = TWIN_P_LEGACY_RULE.evaluate(facts(cost=3.0))
         assert verdict.passed is False
         assert verdict.terms["reward"] is False
         assert verdict.terms["spread"] is True
@@ -67,32 +74,32 @@ class TestTheThreeOutcomes:
 
     def test_every_failing_term_is_named_not_just_the_first(self):
         # The rule is reported term by term so each one's cost stays countable.
-        verdict = TWIN_P_RULE.evaluate(facts(cost=3.0, rel_spread=0.9, mcap_usd=1e9))
+        verdict = TWIN_P_LEGACY_RULE.evaluate(facts(cost=3.0, rel_spread=0.9, mcap_usd=1e9))
         assert verdict.passed is False
         assert verdict.detail.count(";") == 2
 
     @pytest.mark.parametrize("absent", ["cost", "peak", "rel_spread", "mcap_usd"])
     def test_a_missing_fact_is_undetermined_not_a_rejection(self, absent):
-        verdict = TWIN_P_RULE.evaluate(facts(**{absent: None}))
+        verdict = TWIN_P_LEGACY_RULE.evaluate(facts(**{absent: None}))
         assert verdict.passed is None
         assert absent in verdict.missing
 
     def test_a_nan_is_missing_not_a_number(self):
         # A NaN that compares False against every threshold would silently
         # reject, and the row would show a decision nobody made.
-        verdict = TWIN_P_RULE.evaluate(facts(mcap_usd=float("nan")))
+        verdict = TWIN_P_LEGACY_RULE.evaluate(facts(mcap_usd=float("nan")))
         assert verdict.passed is None
         assert "mcap_usd" in verdict.missing
 
     def test_an_infinite_fact_is_missing_too(self):
-        verdict = TWIN_P_RULE.evaluate(facts(rel_spread=float("inf")))
+        verdict = TWIN_P_LEGACY_RULE.evaluate(facts(rel_spread=float("inf")))
         assert verdict.passed is None
 
 
 class TestTheTwinPTerms:
     def test_reward_is_strict(self):
-        assert TWIN_P_RULE.evaluate(facts(cost=2.0, w=2.0)).passed is False
-        assert TWIN_P_RULE.evaluate(facts(cost=1.999, w=2.0)).passed is True
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(cost=2.0, w=2.0)).passed is False
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(cost=1.999, w=2.0)).passed is True
 
     def test_the_reward_term_reads_the_peak_not_the_width(self):
         """The same cost and spacing, two shapes, two answers.
@@ -103,23 +110,23 @@ class TestTheTwinPTerms:
         as `cost < w` cannot tell them apart and would admit the second at
         twice the risk it priced.
         """
-        assert TWIN_P_RULE.evaluate(facts(cost=1.5, w=2.0, peak=4.0)).passed is True
-        assert TWIN_P_RULE.evaluate(facts(cost=1.5, w=2.0, peak=2.0)).passed is False
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(cost=1.5, w=2.0, peak=4.0)).passed is True
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(cost=1.5, w=2.0, peak=2.0)).passed is False
 
     def test_a_zero_width_is_undetermined_not_a_free_pass(self):
         # cost < 0 is impossible, so `cost < w` with w = 0 would always reject —
         # but a zero width means the legs collapsed, which is a broken structure
         # and not a judgement about the trade.
-        assert TWIN_P_RULE.evaluate(facts(w=0.0)).passed is None
-        assert TWIN_P_RULE.evaluate(facts(peak=0.0)).passed is None
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(w=0.0)).passed is None
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(peak=0.0)).passed is None
 
     def test_the_spread_threshold_is_inclusive(self):
-        assert TWIN_P_RULE.evaluate(facts(rel_spread=MAX_REL_SPREAD)).passed is True
-        assert TWIN_P_RULE.evaluate(facts(rel_spread=MAX_REL_SPREAD + 1e-9)).passed is False
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(rel_spread=MAX_REL_SPREAD)).passed is True
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(rel_spread=MAX_REL_SPREAD + 1e-9)).passed is False
 
     def test_the_mcap_floor_is_inclusive(self):
-        assert TWIN_P_RULE.evaluate(facts(mcap_usd=MCAP_FLOOR)).passed is True
-        assert TWIN_P_RULE.evaluate(facts(mcap_usd=MCAP_FLOOR - 1)).passed is False
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(mcap_usd=MCAP_FLOOR)).passed is True
+        assert TWIN_P_LEGACY_RULE.evaluate(facts(mcap_usd=MCAP_FLOOR - 1)).passed is False
 
     def test_the_thresholds_match_the_preregistered_experiment(self):
         # EXP-123's spec.yaml registered these before it ran. A later edit here
@@ -136,6 +143,7 @@ class TestTheRegistry:
 
     def test_a_rule_reports_the_evidence_that_registered_it(self):
         assert "EXP-123" in TWIN_P_RULE.evidence
+        assert "EXP-123" in TWIN_P_LEGACY_RULE.evidence
 
 
 class TestSizing:
@@ -241,9 +249,41 @@ class TestTheTwinP5PnLGate:
         assert TWIN_P5_RULE.evaluate({**clears, "rel_spread": 0.90, "mcap_usd": 5e10}).passed is False
         assert TWIN_P5_RULE.evaluate({**clears, "rel_spread": 0.10, "mcap_usd": 1e8}).passed is False
 
-    def test_twin_p_still_gates_on_arithmetic(self):
-        """The promotion is TWIN-P5's alone. TWIN-P keeps a rule that cannot be
-        wrong about an event, which is the thing being given up here."""
-        assert [t.name for t in TWIN_P_RULE.terms] == ["reward", "spread", "mcap"]
-        assert TWIN_P_RULE.evaluate(
+    def test_the_original_arithmetic_rule_survives_under_its_own_name(self):
+        """TWIN-P no longer trades on this rule (see the class below), but the
+        rule itself is not deleted — a rollback is
+        ``ENTRY_RULES["TWIN-P"] = TWIN_P_LEGACY_RULE``, same as the structure
+        registry keeps a beaten shape in ``STRUCTURES``."""
+        assert [t.name for t in TWIN_P_LEGACY_RULE.terms] == ["reward", "spread", "mcap"]
+        assert TWIN_P_LEGACY_RULE.evaluate(
             {"cost": 0.4, "peak": 1.0, "rel_spread": 0.1, "mcap_usd": 5e10}).passed
+
+
+class TestTwinPNowSharesTwinP5sGate:
+    """2026-09-06: a further comparison found TWIN-P and TWIN-P5 are not
+    mutually exclusive — each wins on different events — so the twin-peak
+    family (engine/structure_registry.py) was retired and both are live. TWIN-P
+    was switched onto TWIN-P5's own simulated gate rather than left on
+    ``TWIN_P_LEGACY_RULE``, so the two are judged on the same terms and DYN-SV
+    (whose ``DYNAMIC_MENU`` already names both) can compare them by
+    ``exp_pnl_sim`` at all — the legacy rule never populates that field.
+    """
+
+    def test_twin_p_now_gates_like_twin_p5(self):
+        assert [t.name for t in TWIN_P_RULE.terms] == ["expected_pnl", "spread", "mcap"]
+        clears = {"exp_pnl_sim": 0.20, "pnl_cutoff": 0.06,
+                  "rel_spread": 0.10, "mcap_usd": 5e10}
+        assert TWIN_P_RULE.evaluate(clears).passed is True
+        assert TWIN_P_RULE.evaluate({**clears, "exp_pnl_sim": 0.01}).passed is False
+
+    def test_it_is_not_the_same_object_as_twin_p5s_rule(self):
+        # Same shape of rule, but each strategy needs its own EntryRule so
+        # verdict detail and model_versions name the right one.
+        assert TWIN_P_RULE is not TWIN_P5_RULE
+        assert TWIN_P_RULE.strategy == "TWIN-P"
+
+    def test_the_evidence_says_this_is_an_operator_decision_not_a_rerun_exp126(self):
+        # The seven-strike shape has never itself been backtested against this
+        # bar — labelling this as re-validated would misstate the evidence.
+        assert "operator decision" in TWIN_P_RULE.evidence
+        assert "not independently re-validated" in TWIN_P_RULE.evidence

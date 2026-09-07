@@ -1,9 +1,9 @@
 """Arithmetic entry rules — the gates that are not models.
 
 Every strategy on the board so far is gated by a fitted model with a threshold,
-looked up from the registry. Some are not. TWIN-P's rule is arithmetic on the
-entry close — reward greater than risk, a spread tight enough to cross sixteen
-times, a name large enough to have one — and nothing in it is learned.
+looked up from the registry. Some are not. ``TWIN_P_LEGACY_RULE`` is arithmetic
+on the entry close — reward greater than risk, a spread tight enough to cross
+sixteen times, a name large enough to have one — and nothing in it is learned.
 
 **Expressing such a rule as a `Gate` was tried and was wrong.** EXP-123 wrapped
 it in `engine.evaluate.Gate` with a no-op ``fit`` so it would travel through the
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 __all__ = ["Term", "Verdict", "EntryRule", "ENTRY_RULES", "TWIN_P_RULE",
-           "TWIN_P5_RULE", "rule_for"]
+           "TWIN_P_LEGACY_RULE", "TWIN_P5_RULE", "rule_for"]
 
 
 def _number(facts: Mapping, key: str) -> float | None:
@@ -156,7 +156,13 @@ def _name_is_large_enough(facts: Mapping) -> bool | None:
     return None if mcap is None else mcap >= MCAP_FLOOR
 
 
-TWIN_P_RULE = EntryRule(
+#: The original EXP-123 rule, kept live under its own name rather than deleted.
+#: TWIN-P no longer trades on it (see ``TWIN_P_RULE`` below), but a structure's
+#: promotion history is not disposable: ``engine/structure_registry.py`` keeps
+#: a beaten SHAPE in ``STRUCTURES`` for the identical reason, and a rule is no
+#: less a decision than a shape is. Reinstating the old rule is
+#: ``ENTRY_RULES["TWIN-P"] = TWIN_P_LEGACY_RULE``.
+TWIN_P_LEGACY_RULE = EntryRule(
     strategy="TWIN-P",
     terms=(
         Term("reward", "cost is not below half the peak payoff", _reward_beats_risk,
@@ -231,6 +237,37 @@ TWIN_P5_RULE = EntryRule(
              _name_is_large_enough, needs=("mcap_usd",)),
     ),
     evidence="EXP-129 + EXP-131 held out on 2023-2026; promoted 2026-09-05",
+)
+
+
+#: TWIN-P was superseded by TWIN-P5 on 2026-09-04 (EXP-126: one champion per
+#: family) and stayed off the board until 2026-09-06, when a further
+#: comparison found the two are not mutually exclusive after all — each wins
+#: on different events rather than one dominating the other. The board now
+#: carries both, live, so that choice can be made per event rather than
+#: baked into a single champion.
+#:
+#: TWIN-P is given TWIN-P5's own gate rather than kept on ``TWIN_P_LEGACY_RULE``
+#: so the two are judged on the same terms and so DYN-SV (``DYNAMIC_MENU``
+#: already names both) can compare them by ``exp_pnl_sim`` at all — the legacy
+#: arithmetic rule never populates that field. This is an operator decision
+#: made 2026-09-06, not an independently re-run EXP-126: the seven-strike
+#: shape has never itself been backtested against this bar.
+TWIN_P_RULE = EntryRule(
+    strategy="TWIN-P",
+    terms=(
+        Term("expected_pnl",
+             "simulated expected return is below the trailing top-20% bar",
+             _expected_pnl_clears_the_bar, needs=("exp_pnl_sim", "pnl_cutoff")),
+        Term("spread", f"mean relative spread exceeds {MAX_REL_SPREAD:.0%}",
+             _spread_is_crossable, needs=("rel_spread",)),
+        Term("mcap", f"market cap below ${MCAP_FLOOR/1e9:.0f}B",
+             _name_is_large_enough, needs=("mcap_usd",)),
+    ),
+    evidence=("shape: EXP-123 spec.yaml, pre-registered; gate: TWIN-P5's "
+              "EXP-129/131 bar, applied by operator decision 2026-09-06 "
+              "so both twin-peak shapes are comparable side by side — not "
+              "independently re-validated for seven strikes"),
 )
 
 
