@@ -106,7 +106,9 @@ def _attach_forecast(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _attach_analogs(frame: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
+def _attach_analogs(
+    frame: pd.DataFrame, trades: pd.DataFrame, context=None
+) -> pd.DataFrame:
     """Join per-event matched analog statistics, computed causally.
 
     Reuses :class:`engine.score.Scorer` for the same enrichment (mcap,
@@ -115,10 +117,18 @@ def _attach_analogs(frame: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     ``engine.score`` does not import this module and importing it eagerly
     would pull the whole scoring stack (registry, replay, structures) into
     every training-module import.
+
+    ``context`` bounds what the Scorer loads. Its default
+    (``FeatureContext.load()``) reads the ENTIRE ``daily_market`` table —
+    ~8.9M rows, ~6.9 GB peak — which is fine standalone on an idle box and
+    fatal when the caller already holds a panel and a per-year daily subset,
+    as the dashboard's model-evidence rebuild does (OOM-killed twice at
+    exactly this line before the parameter existed). Callers that already
+    know the tickers and years involved should pass a filtered context.
     """
     from engine.score import Scorer
 
-    scorer = Scorer(trades=trades)
+    scorer = Scorer(trades=trades, context=context)
     bucketed = bucket_frame(scorer.trades)
     matched = match_frame(
         bucketed, scorer.matcher, strategy=STRATEGY, alpha=GATE_ALPHA,
@@ -136,14 +146,16 @@ def build_dataset(
     panel: pd.DataFrame | None = None,
     daily: pd.DataFrame | None = None,
     alpha: float = GATE_ALPHA,
+    context=None,
 ) -> pd.DataFrame:
     """The incumbent's feature frame (:func:`gate.build_dataset`) plus forecast
-    and analog columns joined on."""
+    and analog columns joined on. ``context`` is passed through to
+    :func:`_attach_analogs` to bound what its Scorer loads."""
     base = gate_mod.build_dataset(trades, panel=panel, daily=daily, alpha=alpha)
     if base.empty:
         return base
     base = _attach_forecast(base)
-    base = _attach_analogs(base, trades)
+    base = _attach_analogs(base, trades, context=context)
     return base
 
 

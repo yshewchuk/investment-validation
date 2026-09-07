@@ -196,13 +196,23 @@ def _daily_subset(tickers, years=None) -> pd.DataFrame:
     return pd.concat(kept, ignore_index=True)
 
 
-def _dataset_for(role: str, strategy: str, *, panel, daily, trades):
+def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=()):
     """Rebuild the rows a champion was trained on, and name its target.
 
     Each model learns from a different table, at a different scale, which is
     itself part of the answer to "why not one model": the size model sees every
     earnings event in the panel, while a gate only sees events whose chains
     exist to price a trade from — an order of magnitude fewer rows.
+
+    ``features`` is the champion's REGISTERED feature list, and a gate needs
+    it to pick its training module: the STR-THRU champion may be the
+    forecast_analog variant, whose set extends the incumbent's with the
+    Tier-4 forecast and analog columns. Rebuilding that champion through the
+    incumbent's ``gate.build_dataset`` produces a frame missing every extended
+    input, and the evidence table then reports each of them as "not present in
+    the rebuilt training set" — the dashboard silently loses the new
+    champion's parameters. Dispatch on the registered set, the same way
+    ``engine.score`` serves whatever ``artifact.features`` names.
     """
     if role == "size":
         from engine.models.training import size_model
@@ -211,13 +221,31 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades):
     if role == "gate":
         from engine.models.training import gate
 
+        module = gate
+        if features and set(features) != set(gate.FEATURES):
+            from engine.models.training import gate_forecast_analog as gate_fa
+
+            if set(features) == set(gate_fa.FEATURES):
+                module = gate_fa
         rows = trades[trades["strategy"] == strategy]
         if rows.empty:
             return None, None, []
         years = sorted(pd.to_datetime(rows["entry_date"]).dt.year.unique().tolist())
         daily = _daily_subset(rows["ticker"].unique(), years=years)
-        data = gate.build_dataset(rows, panel=panel, daily=daily)
-        return data, gate.TARGET, list(gate.FEATURES)
+        if module is not gate:
+            # The forecast_analog rebuild constructs a Scorer for its analog
+            # join, and a Scorer's default context reads the ENTIRE
+            # daily_market (~8.9M rows, ~6.9 GB peak) on top of everything
+            # this builder already holds — two rebuilds were OOM-killed at
+            # exactly that point. Bound the context to what the trades can
+            # actually look up: their own tickers, their own years.
+            from engine.features import FeatureContext
+
+            context = FeatureContext.load(rows["ticker"].unique(), years=years)
+            data = module.build_dataset(rows, panel=panel, daily=daily, context=context)
+        else:
+            data = module.build_dataset(rows, panel=panel, daily=daily)
+        return data, module.TARGET, list(module.FEATURES)
     if role == "iv_crush":
         from engine.models.training import iv_crush
 
@@ -297,7 +325,8 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
     for entry in champions:
         try:
             data, target, features = _dataset_for(
-                entry.role, entry.strategy, panel=panel, daily=daily, trades=trades
+                entry.role, entry.strategy, panel=panel, daily=daily, trades=trades,
+                features=entry.features,
             )
         except Exception as exc:  # one model's dataset must not lose the others
             models[entry.id] = {

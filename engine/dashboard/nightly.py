@@ -1208,6 +1208,35 @@ def run_nightly(
     if calib_flag:
         report.flags.append(calib_flag)
 
+    # -- 4c. model evidence — rebuilt only when a champion changed -----------
+    # render copies data/features/model_evidence.json into the bundle verbatim,
+    # and the file is keyed by the champions' artifact fingerprint. Nothing
+    # else in the pipeline rebuilt it: after the 2026-09-06 gate promotion the
+    # dashboard kept serving the Sep-5 table — the new champion was absent and
+    # the STR-THRU gate showed the incumbent's inputs instead of the registered
+    # set. The fingerprint check makes this free on nights nothing changed; a
+    # failed rebuild degrades to the cached table and raises a flag rather than
+    # taking the board down.
+    try:
+        from engine.dashboard.model_evidence import build_model_evidence
+
+        evidence = build_model_evidence(registry=engine.registry)
+        report.steps["model_evidence"] = {
+            "generated_at": evidence.get("generated_at"),
+            "models": sorted((evidence.get("models") or {}).keys()),
+            "elapsed_s": evidence.get("elapsed_s"),
+        }
+    except Exception as exc:  # noqa: BLE001 — stale evidence beats a dark board
+        report.steps["model_evidence"] = {
+            "degraded": True, "error": f"{type(exc).__name__}: {exc}"[:300],
+        }
+        report.flags.append({
+            "kind": "model_evidence_stale",
+            "detail": ("evidence rebuild failed; the bundle carries the cached "
+                       f"table, which may predate the current champions — "
+                       f"{type(exc).__name__}: {exc}")[:300],
+        })
+
     # -- 5. render -------------------------------------------------------------
     meta = build_meta(
         scores,
