@@ -16,7 +16,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from engine.data.normalize.n_trades import LEGACY_SPECS, normalize_legacy_set
+from engine.data.normalize.n_trades import (
+    LEGACY_SPECS,
+    filter_to_canonical_events,
+    normalize_legacy_set,
+)
 
 
 def write_trades(path, rows, columns=None):
@@ -126,6 +130,25 @@ class TestRobustness:
         rows = [base_row(), base_row(ticker="BBB", date="not-a-date")]
         out, _ = normalize_legacy_set("S1_calendar", spec_factory(rows))
         assert len(out) == 1
+
+
+class TestCanonicalEventFilter:
+    def test_removes_only_simulated_rows_on_discarded_event_claims(self):
+        trades = pd.DataFrame(
+            {
+                "event_id": ["AAA_2024-05-08", "AAA_2024-05-09", "AAA_2024-05-09"],
+                "kind": ["sim", "sim", "live"],
+            }
+        )
+        events = pd.DataFrame({"event_id": ["AAA_2024-05-08"]})
+        out, report = filter_to_canonical_events(trades, events)
+        assert out["kind"].tolist() == ["sim", "live"]
+        assert report == {
+            "rows_in": 3,
+            "rows_out": 2,
+            "rows_removed": 1,
+            "event_ids_removed": 1,
+        }
 
 
 class TestSpecRegistry:

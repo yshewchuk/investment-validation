@@ -23,12 +23,19 @@ def normalize(tickers: Iterable[str] | None = None) -> tuple[pd.DataFrame, dict]
         return cal, {"rows": 0}
 
     out = cal.copy()
+    if "event_cluster_id" not in out:
+        out["event_cluster_id"] = out["event_id"]
+    if "claim_count" not in out:
+        out["claim_count"] = 1
+    if "reconciliation" not in out:
+        out["reconciliation"] = "unreconciled"
     out["year"] = pd.to_datetime(out["event_date"]).dt.year
     for col in ("annc_tod", "updated_at", "session", "session_src"):
         out[col] = out[col].astype("string")
 
     today = pd.Timestamp.today().normalize()
     forward = out[pd.to_datetime(out["event_date"]) >= today]
+    audit = out.attrs.get("reconciliation_audit", pd.DataFrame())
     report = {
         "rows": int(len(out)),
         "tickers": int(out["ticker"].nunique()),
@@ -37,6 +44,20 @@ def normalize(tickers: Iterable[str] | None = None) -> tuple[pd.DataFrame, dict]
         "orats_only": int((out["src_orats"] & ~out["src_oquants"]).sum()),
         "oquants_only": int((~out["src_orats"] & out["src_oquants"]).sum()),
         "session_known": int(out["session"].notna().sum()),
+        "reconciliation": {
+            str(k): int(v) for k, v in out["reconciliation"].value_counts().items()
+        },
+        "reconciliation_audit": {
+            "claims_in_multi_date_clusters": int(len(audit)),
+            "status": (
+                {str(k): int(v) for k, v in audit["status"].value_counts().items()}
+                if not audit.empty else {}
+            ),
+            "ambiguous_clusters": (
+                int(audit.loc[audit["status"] == "quarantined", "event_cluster_id"].nunique())
+                if not audit.empty else 0
+            ),
+        },
         "session_by_source": {
             str(k): int(v) for k, v in out["session_src"].value_counts().items()
         },

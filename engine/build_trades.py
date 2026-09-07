@@ -33,6 +33,7 @@ import pandas as pd
 
 from engine import replay
 from engine.data import manifest, store
+from engine.data.normalize.n_trades import filter_to_canonical_events
 from engine.data.schemas import coerce
 from engine.structures import STRUCTURES
 
@@ -96,6 +97,7 @@ def build(strategies, years=None, dry_run: bool = False) -> dict:
     n_other_engine = int(len(kept) - n_legacy)
     combined = pd.concat([coerce(kept, "trades"), coerce(engine_rows, "trades")],
                          ignore_index=True)
+    combined, canonical_report = filter_to_canonical_events(combined, events)
     store.write_table(combined, "trades")
 
     stats = store.table_stats("trades")
@@ -113,6 +115,7 @@ def build(strategies, years=None, dry_run: bool = False) -> dict:
     report["kept_engine_rows"] = n_other_engine
     report["rebuilt_strategies"] = sorted(rebuilt)
     report["engine_rows"] = int(len(engine_rows))
+    report["canonical_event_filter"] = canonical_report
     report["snapshot"] = snapshot
     report["elapsed_s"] = round(time.time() - started, 1)
     print(f"snapshot {snapshot}", flush=True)

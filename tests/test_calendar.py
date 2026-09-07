@@ -13,6 +13,7 @@ from engine.calendar import (
     PrintWindow,
     TradingCalendar,
     build_calendar,
+    reconcile_historical_events,
     detect_date_changes,
     projected_trading_days,
     session_from_annc_tod,
@@ -227,6 +228,10 @@ class TestDecisionOffsets:
 
 
 class TestBuildCalendar:
+    @pytest.fixture
+    def tc(self):
+        return TradingCalendar(pd.date_range("2023-01-02", "2025-12-31", freq="B"))
+
     def test_agreement_flag_marks_doubly_confirmed_events(self):
         orats = pd.DataFrame(
             {
@@ -267,6 +272,77 @@ class TestBuildCalendar:
         )
         out = build_calendar(orats=orats, oquants=pd.DataFrame(columns=["ticker", "event_date"]))
         assert out.iloc[0]["event_id"] == "AAA_2024-01-15"
+
+    def test_one_confirmed_date_wins_over_nearby_unconfirmed_claims(self, tc):
+        events = pd.DataFrame(
+            {
+                "event_id": ["AAA_2024-01-15", "AAA_2024-01-22"],
+                "ticker": ["AAA", "AAA"],
+                "event_date": pd.to_datetime(["2024-01-15", "2024-01-22"]),
+                "session": [AMC, AMC],
+                "src_orats": [True, True],
+                "src_oquants": [True, False],
+                "src_nasdaq": [False, False],
+                "src_yfinance": [False, False],
+            }
+        )
+        out, audit = reconcile_historical_events(events, calendar=tc, as_of="2025-01-01")
+        assert out["event_id"].tolist() == ["AAA_2024-01-15"]
+        assert out.iloc[0]["claim_count"] == 2
+        assert set(audit["status"]) == {"canonical", "superseded"}
+
+    def test_ambiguous_historical_cluster_is_quarantined_in_full(self, tc):
+        events = pd.DataFrame(
+            {
+                "event_id": ["AAA_2024-01-15", "AAA_2024-01-29"],
+                "ticker": ["AAA", "AAA"],
+                "event_date": pd.to_datetime(["2024-01-15", "2024-01-29"]),
+                "session": [AMC, AMC],
+                "src_orats": [True, True],
+                "src_oquants": [False, False],
+                "src_nasdaq": [False, False],
+                "src_yfinance": [False, False],
+            }
+        )
+        out, audit = reconcile_historical_events(events, calendar=tc, as_of="2025-01-01")
+        assert out.empty
+        assert set(audit["status"]) == {"quarantined"}
+
+    def test_equivalent_reaction_windows_collapse(self, tc):
+        events = pd.DataFrame(
+            {
+                "event_id": ["AAA_2024-05-08", "AAA_2024-05-09"],
+                "ticker": ["AAA", "AAA"],
+                "event_date": pd.to_datetime(["2024-05-08", "2024-05-09"]),
+                "session": [AMC, BMO],
+                "src_orats": [True, True],
+                "src_oquants": [False, False],
+                "src_nasdaq": [False, False],
+                "src_yfinance": [False, False],
+            }
+        )
+        out, audit = reconcile_historical_events(events, calendar=tc, as_of="2025-01-01")
+        assert len(out) == 1
+        assert out.iloc[0]["reconciliation"] == "reaction_window_equivalent"
+        assert set(audit["status"]) == {"canonical", "superseded"}
+
+    def test_cluster_span_is_capped_instead_of_chained(self, tc):
+        events = pd.DataFrame(
+            {
+                "event_id": ["AAA_2024-01-02", "AAA_2024-01-25", "AAA_2024-02-15"],
+                "ticker": ["AAA"] * 3,
+                "event_date": pd.to_datetime(["2024-01-02", "2024-01-25", "2024-02-15"]),
+                "session": [AMC] * 3,
+                "src_orats": [True] * 3,
+                "src_oquants": [False] * 3,
+                "src_nasdaq": [False] * 3,
+                "src_yfinance": [False] * 3,
+            }
+        )
+        out, audit = reconcile_historical_events(events, calendar=tc, as_of="2025-01-01")
+        assert out["event_id"].tolist() == ["AAA_2024-02-15"]
+        assert audit["event_cluster_id"].nunique() == 1
+        assert audit["event_cluster_id"].iloc[0] == "AAA|2024-01-02|2024-01-25"
 
 
 class TestDateChangeDetection:

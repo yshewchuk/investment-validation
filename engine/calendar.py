@@ -56,6 +56,7 @@ __all__ = [
     "load_yfinance_earnings",
     "SESSION_PRIORITY",
     "CONFLICT_WINDOW_DAYS",
+    "reconcile_historical_events",
     "build_calendar",
     "detect_date_changes",
     "DateChange",
@@ -579,6 +580,191 @@ def load_yfinance_earnings(tickers: Iterable[str] | None = None) -> pd.DataFrame
 #: puts the entry on the wrong day.
 CONFLICT_WINDOW_DAYS = 30
 
+RECONCILIATION_COLUMNS = (
+    "event_cluster_id",
+    "claim_count",
+    "reconciliation",
+)
+
+RECONCILIATION_AUDIT_COLUMNS = (
+    "event_cluster_id",
+    "ticker",
+    "claim_event_id",
+    "claim_event_date",
+    "canonical_event_ids",
+    "status",
+    "resolution",
+    "reaction_pre",
+    "reaction_post",
+    "src_orats",
+    "src_oquants",
+    "src_nasdaq",
+    "src_yfinance",
+)
+
+
+def _reaction_window(row: pd.Series, calendar: TradingCalendar) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """Return the two closes used to measure this claim, when they are known."""
+    session = row.get("session")
+    if pd.isna(session) or session not in (BMO, AMC):
+        return None
+    try:
+        return (
+            calendar.last_pre_print(row["event_date"], session),
+            calendar.first_post_print(row["event_date"], session),
+        )
+    except (KeyError, ValueError):
+        return None
+
+
+def reconcile_historical_events(
+    events: pd.DataFrame,
+    *,
+    calendar: TradingCalendar | None = None,
+    as_of=None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Resolve nearby historical date claims without using realized returns.
+
+    Raw source claims remain immutable in Tier 1. This function defines the
+    canonical Tier-2 event set and returns a claim-level audit beside it.
+
+    An exact date carried by at least two independent sources is definitive.
+    One confirmed row wins over nearby unconfirmed revisions. Several confirmed
+    rows are retained as separate prints. Claims with different dates but the
+    same session-aware pre/post close window collapse to one representative.
+    Every other multi-row historical cluster is quarantined in full.
+
+    Clusters are capped at CONFLICT_WINDOW_DAYS from their first claim, avoiding
+    single-link chaining across a long series of dates.
+    """
+    if events.empty:
+        out = events.copy()
+        for col in RECONCILIATION_COLUMNS:
+            if col not in out:
+                out[col] = pd.Series(dtype="object")
+        return out, pd.DataFrame()
+
+    cal = calendar or trading_calendar()
+    cutoff = (
+        pd.Timestamp(as_of).normalize()
+        if as_of is not None
+        else pd.Timestamp.today().normalize()
+    )
+    work = events.copy()
+    work["event_date"] = pd.to_datetime(work["event_date"]).dt.normalize()
+    source_cols = [
+        c for c in ("src_orats", "src_oquants", "src_nasdaq", "src_yfinance")
+        if c in work.columns
+    ]
+    work["_source_count"] = work[source_cols].fillna(False).astype(bool).sum(axis=1)
+
+    kept: list[int] = []
+    audit_rows: list[dict] = []
+    metadata: dict[int, tuple[str, int, str]] = {}
+
+    def record_cluster(indices: list[int], cluster_id: str, resolution: str,
+                       selected: list[int]) -> None:
+        selected_set = set(selected)
+        canonical_ids = [str(work.loc[i, "event_id"]) for i in selected]
+        for i in selected:
+            kept.append(i)
+            metadata[i] = (cluster_id, len(indices), resolution)
+        if len(indices) == 1:
+            return
+        for i in indices:
+            row = work.loc[i]
+            window = _reaction_window(row, cal)
+            if i in selected_set:
+                status = "canonical"
+            elif selected:
+                status = "superseded"
+            else:
+                status = "quarantined"
+            audit_rows.append({
+                "event_cluster_id": cluster_id,
+                "ticker": str(row["ticker"]),
+                "claim_event_id": str(row["event_id"]),
+                "claim_event_date": row["event_date"],
+                "canonical_event_ids": ",".join(canonical_ids) if canonical_ids else None,
+                "status": status,
+                "resolution": resolution,
+                "reaction_pre": window[0] if window else pd.NaT,
+                "reaction_post": window[1] if window else pd.NaT,
+                **{c: bool(row.get(c, False)) for c in source_cols},
+            })
+
+    for ticker, ticker_rows in work.groupby("ticker", sort=False):
+        historical_source = pd.Series(False, index=ticker_rows.index)
+        for col in ("src_orats", "src_oquants"):
+            if col in ticker_rows:
+                historical_source |= ticker_rows[col].fillna(False).astype(bool)
+        historical = historical_source & (ticker_rows["event_date"] < cutoff)
+        hist = ticker_rows[historical].sort_values("event_date")
+        forward = ticker_rows[~historical].sort_values("event_date")
+
+        for idx in forward.index:
+            day = work.loc[idx, "event_date"].strftime("%Y-%m-%d")
+            cluster_id = f"{ticker}|{day}|{day}"
+            record_cluster([idx], cluster_id, "forward_claim", [idx])
+
+        cluster: list[int] = []
+        cluster_start: pd.Timestamp | None = None
+        clusters: list[list[int]] = []
+        for idx, row in hist.iterrows():
+            day = row["event_date"]
+            if cluster_start is None or (day - cluster_start).days > CONFLICT_WINDOW_DAYS:
+                if cluster:
+                    clusters.append(cluster)
+                cluster = [idx]
+                cluster_start = day
+            else:
+                cluster.append(idx)
+        if cluster:
+            clusters.append(cluster)
+
+        for indices in clusters:
+            first = work.loc[indices[0], "event_date"].strftime("%Y-%m-%d")
+            last = work.loc[indices[-1], "event_date"].strftime("%Y-%m-%d")
+            cluster_id = f"{ticker}|{first}|{last}"
+            if len(indices) == 1:
+                record_cluster(indices, cluster_id, "singleton", indices)
+                continue
+
+            confirmed = [i for i in indices if int(work.loc[i, "_source_count"]) >= 2]
+            if len(confirmed) == 1:
+                record_cluster(indices, cluster_id, "exact_source_confirmation", confirmed)
+                continue
+            if len(confirmed) > 1:
+                record_cluster(indices, cluster_id, "multiple_confirmed_events", confirmed)
+                continue
+
+            windows = {i: _reaction_window(work.loc[i], cal) for i in indices}
+            known = [w for w in windows.values() if w is not None]
+            if len(known) == len(indices) and len(set(known)) == 1:
+                selected = sorted(
+                    indices,
+                    key=lambda i: (
+                        -int(work.loc[i, "_source_count"]),
+                        -int(bool(work.loc[i].get("src_orats", False))),
+                        work.loc[i, "event_date"],
+                    ),
+                )[:1]
+                record_cluster(indices, cluster_id, "reaction_window_equivalent", selected)
+                continue
+
+            record_cluster(indices, cluster_id, "ambiguous_cluster", [])
+
+    ordered_kept = sorted(kept)
+    out = work.loc[ordered_kept].drop(columns=["_source_count"]).copy()
+    out["event_cluster_id"] = [metadata[i][0] for i in ordered_kept]
+    out["claim_count"] = [metadata[i][1] for i in ordered_kept]
+    out["reconciliation"] = [metadata[i][2] for i in ordered_kept]
+    out = out.sort_values(["ticker", "event_date"]).reset_index(drop=True)
+    audit = pd.DataFrame(audit_rows, columns=RECONCILIATION_AUDIT_COLUMNS).sort_values(
+        ["ticker", "claim_event_date", "claim_event_id"]
+    ).reset_index(drop=True)
+    return out, audit
+
 
 def _flag_date_conflicts(merged: pd.DataFrame) -> pd.Series:
     """Mark forward rows whose ticker has a rival date from another source.
@@ -737,6 +923,7 @@ def build_calendar(
     merged["event_id"] = (
         merged["ticker"].astype(str) + "_" + merged["event_date"].dt.strftime("%Y-%m-%d")
     )
+    merged, reconciliation_audit = reconcile_historical_events(merged)
     cols = [
         "event_id",
         "ticker",
@@ -751,13 +938,16 @@ def build_calendar(
         "date_agree",
         "date_conflict",
         "updated_at",
+        "event_cluster_id",
+        "claim_count",
+        "reconciliation",
     ]
     for col in cols:
         if col not in merged:
             merged[col] = pd.NA
-    return (
-        merged[cols].sort_values(["ticker", "event_date"]).reset_index(drop=True)
-    )
+    result = merged[cols].sort_values(["ticker", "event_date"]).reset_index(drop=True)
+    result.attrs["reconciliation_audit"] = reconciliation_audit
+    return result
 
 
 # --------------------------------------------------------------------------

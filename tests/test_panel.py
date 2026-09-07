@@ -113,6 +113,19 @@ class TestBuildEvents:
         with pytest.raises(FileNotFoundError):
             build_events(tmp_path / "absent")
 
+    def test_canonical_calendar_removes_claim_before_history_is_built(self, moves_dir):
+        canonical = pd.DataFrame(
+            {
+                "ticker": ["AAA"] * 9,
+                "event_date": pd.to_datetime(
+                    [f"20{y:02d}-01-15" for y in range(10, 20) if y != 12]
+                ),
+            }
+        )
+        panel = build_events(moves_dir, canonical_events=canonical)
+        assert pd.Timestamp("2012-01-15") not in set(panel["date"])
+        assert panel["n_prior"].min() == MIN_HISTORY
+
 
 class TestRegimeFeatures:
     @pytest.fixture

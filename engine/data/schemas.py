@@ -196,6 +196,12 @@ EARNINGS_EVENTS = TableSchema(
         ("date_conflict", "bool", False,
          "Forward sources disagree about this print's date (both rows kept)"),
         ("updated_at", "string", True, "Last-update stamp from the contributing source"),
+        ("event_cluster_id", "string", True,
+         "Ticker and bounded date range of the reconciled claim cluster"),
+        ("claim_count", "int64", True,
+         "Number of source-date claims considered in the cluster"),
+        ("reconciliation", "string", True,
+         "Rule that admitted this canonical event"),
     ),
 )
 

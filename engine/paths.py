@@ -125,6 +125,7 @@ TIER4 = FEATURES / "tier4_forecasts.parquet"
 MANIFEST = DATA / "MANIFEST.md"
 
 REPORTS = ROOT / "reports"
+EVENT_RECONCILIATION_REPORT = REPORTS / "earnings_event_reconciliation.parquet"
 LEDGER = ROOT / "ledger"
 
 #: Directories engine code creates on demand.

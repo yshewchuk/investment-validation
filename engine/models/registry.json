@@ -7,7 +7,7 @@
    "role": "gate",
    "strategy": "STR-RUNUP",
    "artifact": "data/models/gate_midfill_str_runup.joblib",
-   "artifact_sha256": "db3d41b39e95b1814fd1805da67a50f6051a512352d80077942bb2d04112c762",
+   "artifact_sha256": "c6893f4b0d47ad0f2c1d39464f94e8a05fd03b48f86af6eb35726643b0649257",
    "features": [
     "n_prior",
     "mean_prior_move",
@@ -64,77 +64,77 @@
     2026
    ],
    "eval": {
-    "n": 2759,
-    "r": 0.012175632943377344,
-    "mae": 0.24455781565436988,
-    "rmse": 0.33276380304739867,
-    "bias": 0.02886011117920574,
-    "decile_spread": 0.008459773132997206,
+    "n": 2754,
+    "r": 0.03890492850196781,
+    "mae": 0.2417290988819212,
+    "rmse": 0.3295222362863905,
+    "bias": 0.02504405899354701,
+    "decile_spread": 0.06149930345990548,
     "oos_years": 7,
-    "threshold": 0.07394797616848554,
+    "threshold": 0.0725137593996064,
     "top_fraction": 0.2,
-    "base_mean_ret": -0.0046962199591673096,
-    "gated_mean_ret": 0.005801648662787959,
-    "gate_lift": 0.010497868621955269,
-    "base_win_rate": 0.3533889090250091,
-    "gated_win_rate": 0.4003623188405797,
-    "n_passed": 552,
+    "base_mean_ret": -0.005637716623841816,
+    "gated_mean_ret": 0.023654148989234212,
+    "gate_lift": 0.029291865613076028,
+    "base_win_rate": 0.35294117647058826,
+    "gated_win_rate": 0.397459165154265,
+    "n_passed": 551,
     "by_year": [
      {
       "year": 2020,
       "n": 238,
       "base_mean": 0.01801555669369408,
-      "n_passed": 53,
-      "gated_mean": 0.016060966726682946,
-      "gated_win": 0.39622641509433965
+      "n_passed": 61,
+      "gated_mean": 0.043165072893647786,
+      "gated_win": 0.45901639344262296
      },
      {
       "year": 2021,
-      "n": 441,
-      "base_mean": -0.028257957889286908,
-      "n_passed": 118,
-      "gated_mean": -0.0071133173262131165,
-      "gated_win": 0.3559322033898305
+      "n": 439,
+      "base_mean": -0.031758401952866784,
+      "n_passed": 106,
+      "gated_mean": 0.02913001795176934,
+      "gated_win": 0.37735849056603776
      },
      {
       "year": 2022,
-      "n": 405,
-      "base_mean": 0.036673886143273375,
-      "n_passed": 48,
-      "gated_mean": 0.09092296551542005,
-      "gated_win": 0.5416666666666666
+      "n": 403,
+      "base_mean": 0.03436394422258657,
+      "n_passed": 80,
+      "gated_mean": 0.07718683729386248,
+      "gated_win": 0.5
      },
      {
       "year": 2023,
-      "n": 471,
-      "base_mean": -0.04230632408394938,
-      "n_passed": 67,
-      "gated_mean": 0.0009393571235721276,
-      "gated_win": 0.3582089552238806
+      "n": 470,
+      "base_mean": -0.04257711907191829,
+      "n_passed": 61,
+      "gated_mean": -0.01040895629853201,
+      "gated_win": 0.29508196721311475
      },
      {
       "year": 2024,
       "n": 366,
       "base_mean": 0.07878968900092564,
-      "n_passed": 72,
-      "gated_mean": 0.04922639898254469,
-      "gated_win": 0.4722222222222222
+      "n_passed": 70,
+      "gated_mean": 0.1261402937600631,
+      "gated_win": 0.5142857142857142
      },
      {
       "year": 2025,
       "n": 550,
       "base_mean": -0.053867137295894235,
-      "n_passed": 167,
-      "gated_mean": -0.045645144900385015,
-      "gated_win": 0.3532934131736527
+      "n_passed": 146,
+      "gated_mean": -0.06998735151849471,
+      "gated_win": 0.2945205479452055
      },
      {
       "year": 2026,
       "n": 288,
       "base_mean": 0.0037515283425389365,
       "n_passed": 27,
-      "gated_mean": 0.10525368405331452,
-      "gated_win": 0.5555555555555556
+      "gated_mean": 0.11707099455056481,
+      "gated_win": 0.5185185185185185
      }
     ],
     "reference": {
@@ -144,11 +144,11 @@
     }
    },
    "champion": true,
-   "promoted": "2026-09-05",
+   "promoted": "2026-09-06",
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "Trained on engine.replay STR-RUNUP trades at alpha=0.5 over an unselected event universe.",
-   "threshold": 0.07394797616848554,
+   "threshold": 0.0725137593996064,
    "tier": "decision",
    "produces": null,
    "consumes": []
@@ -158,7 +158,7 @@
    "role": "gate",
    "strategy": "STR-THRU",
    "artifact": "data/models/gate_midfill_str_thru.joblib",
-   "artifact_sha256": "e049062bff31c13183ee9393eb890ea351260d9c3ca9d2b3783b675b0197cb99",
+   "artifact_sha256": "35236cf9df2f98846002a98456854293060844a8897c16c5b92cee5f77b00182",
    "features": [
     "n_prior",
     "mean_prior_move",
@@ -215,77 +215,77 @@
     2026
    ],
    "eval": {
-    "n": 9928,
-    "r": 0.03738888582587249,
-    "mae": 0.35616248276211804,
-    "rmse": 0.5282490905198827,
-    "bias": -0.015293282429383074,
-    "decile_spread": 0.07383753314153087,
+    "n": 9890,
+    "r": 0.031950715253345204,
+    "mae": 0.3570285972551478,
+    "rmse": 0.5292811110037741,
+    "bias": -0.013526173738644015,
+    "decile_spread": 0.0816388368935266,
     "oos_years": 7,
-    "threshold": 0.052401487664469615,
+    "threshold": 0.056790907681124256,
     "top_fraction": 0.2,
-    "base_mean_ret": 0.028550059278411775,
-    "gated_mean_ret": 0.04758102265701264,
-    "gate_lift": 0.019030963378600864,
-    "base_win_rate": 0.3854754230459307,
-    "gated_win_rate": 0.3997985901309164,
-    "n_passed": 1986,
+    "base_mean_ret": 0.028729054127606735,
+    "gated_mean_ret": 0.05105292774036559,
+    "gate_lift": 0.02232387361275886,
+    "base_win_rate": 0.3857431749241658,
+    "gated_win_rate": 0.4019211324570273,
+    "n_passed": 1978,
     "by_year": [
      {
       "year": 2020,
-      "n": 1075,
-      "base_mean": -0.020815077052357907,
-      "n_passed": 342,
-      "gated_mean": -0.04438408571244736,
-      "gated_win": 0.3333333333333333
+      "n": 1070,
+      "base_mean": -0.023146270340195754,
+      "n_passed": 337,
+      "gated_mean": -0.003464991533967956,
+      "gated_win": 0.35311572700296734
      },
      {
       "year": 2021,
-      "n": 1513,
-      "base_mean": -0.012407357969663677,
-      "n_passed": 301,
-      "gated_mean": 0.04211092396017938,
-      "gated_win": 0.39867109634551495
+      "n": 1504,
+      "base_mean": -0.012607857119047538,
+      "n_passed": 232,
+      "gated_mean": -0.009189519562406576,
+      "gated_win": 0.3577586206896552
      },
      {
       "year": 2022,
-      "n": 1460,
-      "base_mean": 0.03335978799361326,
-      "n_passed": 209,
-      "gated_mean": 0.06362665773410331,
-      "gated_win": 0.37799043062200954
+      "n": 1451,
+      "base_mean": 0.03400772967527453,
+      "n_passed": 158,
+      "gated_mean": -0.009683881477686099,
+      "gated_win": 0.35443037974683544
      },
      {
       "year": 2023,
-      "n": 1528,
-      "base_mean": 0.054061498404992143,
-      "n_passed": 214,
-      "gated_mean": 0.12355258385508021,
-      "gated_win": 0.4485981308411215
+      "n": 1526,
+      "base_mean": 0.05402051046259703,
+      "n_passed": 191,
+      "gated_mean": 0.14947833000909863,
+      "gated_win": 0.45549738219895286
      },
      {
       "year": 2024,
-      "n": 1445,
-      "base_mean": 0.052358062029708614,
-      "n_passed": 237,
-      "gated_mean": 0.1137422586207504,
-      "gated_win": 0.4936708860759494
+      "n": 1440,
+      "base_mean": 0.05292722508016723,
+      "n_passed": 330,
+      "gated_mean": 0.11061541643022833,
+      "gated_win": 0.5060606060606061
      },
      {
       "year": 2025,
-      "n": 1720,
-      "base_mean": 0.04536980614829158,
-      "n_passed": 399,
-      "gated_mean": 0.04633613718869741,
-      "gated_win": 0.42105263157894735
+      "n": 1715,
+      "base_mean": 0.04625973482921523,
+      "n_passed": 443,
+      "gated_mean": 0.05407868568149365,
+      "gated_win": 0.38826185101580135
      },
      {
       "year": 2026,
-      "n": 1187,
-      "base_mean": 0.033351982067366656,
-      "n_passed": 284,
-      "gated_mean": 0.041607823083264904,
-      "gated_win": 0.352112676056338
+      "n": 1184,
+      "base_mean": 0.03422965170675357,
+      "n_passed": 287,
+      "gated_mean": 0.0585439331663003,
+      "gated_win": 0.3867595818815331
      }
     ],
     "reference": {
@@ -295,11 +295,11 @@
     }
    },
    "champion": true,
-   "promoted": "2026-09-05",
+   "promoted": "2026-09-06",
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "Trained on engine.replay STR-THRU trades at alpha=0.5 over an unselected event universe.",
-   "threshold": 0.052401487664469615,
+   "threshold": 0.056790907681124256,
    "tier": "decision",
    "produces": null,
    "consumes": []
@@ -309,7 +309,7 @@
    "role": "iv_crush",
    "strategy": "*",
    "artifact": "data/models/iv_crush_v1_gbm.joblib",
-   "artifact_sha256": "fd295801edd496b2c1b6a27b33c4cb9aecc5f6f780e74831efed86b4f5d93547",
+   "artifact_sha256": "ffdb58b26c32dc1fb447359b54ed64213cac7d5a52214543bfb234fc45ffab69",
    "features": [
     "n_prior",
     "mean_prior_move",
@@ -372,16 +372,16 @@
     2026
    ],
    "eval": {
-    "n": 87165,
-    "r": 0.46975072308054533,
-    "mae": 10.297986183516302,
-    "rmse": 20.635690192940334,
-    "bias": -0.7423300431059986,
-    "decile_spread": 37.88311548169217,
+    "n": 85268,
+    "r": 0.46867634274372466,
+    "mae": 10.190835534731749,
+    "rmse": 20.494761115104456,
+    "bias": -0.9046573982905882,
+    "decile_spread": 37.387996753243414,
     "oos_years": 14
    },
    "champion": true,
-   "promoted": "2026-09-05",
+   "promoted": "2026-09-06",
    "evidence": "experiments/EXP-128_what_survives_the_print_a_walk_forward_m",
    "seed": 20260829,
    "notes": "Target is SIGNED \u2014 iv30 falls at 83.2% of prints \u2014 so the Tier-4 producer declares interval_floor=None; a magnitude model's zero floor would clip most bands to [0, 0] without inverting one. EXP-128 cleared MAE, RMSE, year-consistency, decile spread and interval calibration and FAILED its registered coverage floor (71,864 scored rows against 80,000) because the arm consumed every numeric panel column; a curated feature list is the next iteration. Materialised on the user's explicit call with that shortfall on the record.",
@@ -395,7 +395,7 @@
    "role": "implied_t1",
    "strategy": "*",
    "artifact": "data/models/opf_implied_t1_gbm.joblib",
-   "artifact_sha256": "f50bd00bb3f2f37d42d3e7908555343ec32dc81d877737169990cb4471244cba",
+   "artifact_sha256": "7437910ff418792422b9f1bc8eac1b27c1b25b06e36ea22408ae2d84515515be",
    "features": [
     "n_prior",
     "mean_prior_move",
@@ -453,16 +453,16 @@
     2026
    ],
    "eval": {
-    "n": 376732,
-    "r": 0.7637363928586902,
-    "mae": 2.0341520623046674,
-    "rmse": 3.61945244514255,
-    "bias": -0.053881503848894695,
-    "decile_spread": 14.627986749354424,
+    "n": 372063,
+    "r": 0.7676368054811146,
+    "mae": 2.013250792274006,
+    "rmse": 3.5873594192336373,
+    "bias": -0.0543059507635323,
+    "decile_spread": 14.680121809267643,
     "oos_years": 9,
-    "runup_r": 0.66244646462833,
-    "runup_mae": 2.0341520623046674,
-    "runup_decile_spread": 10.805615308666457,
+    "runup_r": 0.6648075949495041,
+    "runup_mae": 2.013250792274006,
+    "runup_decile_spread": 10.755596182212962,
     "reference": {
      "mae_pp": "3.3-4.0",
      "r": "0.60-0.72",
@@ -470,7 +470,7 @@
     }
    },
    "champion": true,
-   "promoted": "2026-09-05",
+   "promoted": "2026-09-06",
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "Decision days pooled with days_before_print as a feature. Features are as-of the decision date only \u2014 the panel's market-state block is read at the close being predicted and would leak.",
@@ -565,7 +565,7 @@
    "role": "size",
    "strategy": "*",
    "artifact": "data/models/size_v1_4.joblib",
-   "artifact_sha256": "1c6c3cfa31155a9a9513ef0b86525b7a858497734dedf1cf37401f1a9644c8da",
+   "artifact_sha256": "51e1d5ac1cfdb165aa5d6c9b6abfc65961b5314aadbe1ed53b1946b048e377a9",
    "features": [
     "has_implied_quote",
     "mean_prior_abs_move",
@@ -601,21 +601,21 @@
     2026
    ],
    "eval": {
-    "n": 93518,
-    "r": 0.46336094335982286,
-    "mae": 3.72606540696065,
-    "rmse": 5.679151424262742,
-    "bias": -0.2050310837122559,
-    "decile_spread": 10.06700076833646,
+    "n": 91550,
+    "r": 0.46424698280537524,
+    "mae": 3.735666854965028,
+    "rmse": 5.694976558769913,
+    "bias": -0.22042005653747357,
+    "decile_spread": 10.127349625859196,
     "oos_years": 14,
     "feature_set_comparison": {
      "servable": {
-      "n": 93518,
-      "r": 0.46336094335982286,
-      "mae": 3.72606540696065,
-      "rmse": 5.679151424262742,
-      "bias": -0.2050310837122559,
-      "decile_spread": 10.06700076833646,
+      "n": 91550,
+      "r": 0.46424698280537524,
+      "mae": 3.735666854965028,
+      "rmse": 5.694976558769913,
+      "bias": -0.22042005653747357,
+      "decile_spread": 10.127349625859196,
       "oos_years": 14
      },
      "legacy": null,
@@ -631,7 +631,7 @@
     }
    },
    "champion": true,
-   "promoted": "2026-09-05",
+   "promoted": "2026-09-06",
    "evidence": "reports/phase1_models.md",
    "seed": 20260829,
    "notes": "v1.4 architecture. `or_implied` replaces the legacy `implied_move`, which cannot be sourced for an unrealized event. v1.4 adds the absolute-valued inputs promoted by EXP-109: mean_prior_abs_move, abs_dist_ema, abs_dist_high \u2014 the magnitudes behind V-shaped signed features that the blend's linear half cannot represent.",

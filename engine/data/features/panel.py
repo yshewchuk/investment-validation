@@ -202,7 +202,8 @@ def history_features(
 
 
 def build_events(moves_dir: Path | None = None,
-                 extra_moves_dirs: Sequence[Path] = ()) -> pd.DataFrame:
+                 extra_moves_dirs: Sequence[Path] = (),
+                 canonical_events: pd.DataFrame | None = None) -> pd.DataFrame:
     """The base causal panel: one row per admitted (ticker, event).
 
     ``extra_moves_dirs`` hold synthesized oquants-format files — originally the
@@ -289,6 +290,21 @@ def build_events(moves_dir: Path | None = None,
                 rec["src"] = origin
 
     # PASS 2 — history from the merged series, in date order.
+    if canonical_events is not None:
+        allowed: dict[str, set[str]] = {}
+        canonical = canonical_events[["ticker", "event_date"]].copy()
+        canonical["event_date"] = pd.to_datetime(canonical["event_date"]).dt.strftime("%Y-%m-%d")
+        for ticker, dates in canonical.groupby("ticker")["event_date"]:
+            allowed[str(ticker)] = set(dates)
+        removed = 0
+        for ticker in list(merged):
+            keep = allowed.get(str(ticker), set())
+            book = merged[ticker]
+            before = len(book)
+            merged[ticker] = {day: rec for day, rec in book.items() if day in keep}
+            removed += before - len(merged[ticker])
+        _log(f"events: canonical calendar excluded {removed:,} raw move claim(s)")
+
     rows: list[dict] = []
     recomputed = 0
     for ticker, book in merged.items():
@@ -860,7 +876,13 @@ def add_implied_history(df: pd.DataFrame) -> pd.DataFrame:
 def build_panel(daily: pd.DataFrame | None = None) -> pd.DataFrame:
     """Full Tier-3 causal panel, built from Tier 1 (moves/prices) and Tier 2."""
     _log("block 1/4 — causal events from oquants moves")
-    panel = build_events(extra_moves_dirs=(paths.COMPUTED_MOVES,))
+    canonical_events = store.read_table(
+        "earnings_events", columns=["ticker", "event_date"]
+    )
+    panel = build_events(
+        extra_moves_dirs=(paths.COMPUTED_MOVES,),
+        canonical_events=canonical_events,
+    )
     _log("block 2/4 — market regime")
     panel = add_regime_features(panel)
     _log("block 3/4 — run-up and distance features")

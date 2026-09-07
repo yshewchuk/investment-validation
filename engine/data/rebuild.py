@@ -111,9 +111,16 @@ def _banner(text: str) -> None:
 def build_events_table(sample: int | None = None) -> dict:
     _banner("earnings_events")
     frame, report = n_events.normalize()
+    audit = frame.attrs.get("reconciliation_audit")
+    frame.attrs.clear()
     if sample:
         frame = frame.head(sample)
     store.write_table(frame, "earnings_events")
+    if audit is not None:
+        audit_path = paths.assert_writable(paths.EVENT_RECONCILIATION_REPORT)
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit.to_parquet(audit_path, engine="pyarrow", index=False, compression="snappy")
+        report["reconciliation_audit"]["path"] = str(audit_path)
     stats = store.table_stats("earnings_events")
     print(f"  wrote {stats.rows:,} rows / {len(stats.years)} partitions", flush=True)
     report["sessions"] = n_events.session_coverage(frame)

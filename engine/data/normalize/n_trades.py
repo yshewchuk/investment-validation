@@ -26,7 +26,12 @@ import pandas as pd
 
 from engine import paths
 
-__all__ = ["LEGACY_SPECS", "normalize_legacy_set", "normalize_all"]
+__all__ = [
+    "LEGACY_SPECS",
+    "normalize_legacy_set",
+    "normalize_all",
+    "filter_to_canonical_events",
+]
 
 #: ``strategy -> (path, entry_column, exit_column, legacy_label)``.
 #:
@@ -156,3 +161,43 @@ def normalize_all() -> tuple[pd.DataFrame, list[dict]]:
     if not frames:
         return pd.DataFrame(), reports
     return pd.concat(frames, ignore_index=True), reports
+
+
+def filter_to_canonical_events(
+    trades: pd.DataFrame, events: pd.DataFrame
+) -> tuple[pd.DataFrame, dict]:
+    """Remove simulated trades whose event claim was not canonicalized.
+
+    Reconciliation only removes event claims, so every retained priced trade is
+    still valid and does not need an expensive replay. Live and paper records
+    are preserved even if a later calendar correction changes their event key;
+    they are ledger facts rather than reproducible simulations.
+    """
+    if events.empty:
+        return trades.copy().reset_index(drop=True), {
+            "rows_in": int(len(trades)),
+            "rows_out": int(len(trades)),
+            "rows_removed": 0,
+            "event_ids_removed": 0,
+            "reason": "empty canonical event universe; refusing destructive filter",
+        }
+
+    valid = set(events["event_id"].dropna().astype(str))
+    event_ids = trades["event_id"].astype("string")
+    if "kind" in trades:
+        simulated = trades["kind"].astype(str).eq("sim")
+    else:
+        provenance = trades.get(
+            "provenance", pd.Series("", index=trades.index)
+        ).astype(str)
+        simulated = provenance.str.startswith(("engine.replay", "legacy:"))
+    simulated &= event_ids.notna()
+    invalid = simulated & ~event_ids.astype(str).isin(valid)
+    out = trades.loc[~invalid].copy().reset_index(drop=True)
+    report = {
+        "rows_in": int(len(trades)),
+        "rows_out": int(len(out)),
+        "rows_removed": int(invalid.sum()),
+        "event_ids_removed": int(event_ids[invalid].nunique()),
+    }
+    return out, report
