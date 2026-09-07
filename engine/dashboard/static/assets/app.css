@@ -10,7 +10,16 @@ body {
 h1 { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
 h3 { font-size: 14px; margin: 0 0 8px; }
 .sub { color: var(--dim); font-size: 12px; margin: 4px 0 12px; }
-.hidden { display: none; }
+/* !important is load-bearing here, not decoration: `.tabs { display: flex }`
+   below is the same specificity (one class) and comes LATER in this file, so
+   on an element carrying both classes (`#subtabs-models` starts as
+   `class="tabs hidden"`) the cascade picked `.tabs`'s `flex` over this rule's
+   `none` — the models sub-tab strip rendered visible on every load, and
+   `switchArea`'s later `classList.toggle("hidden", ...)` on the trades strip
+   had the identical fight and lost the same way, so BOTH sub-tab strips
+   showed regardless of which area was active. A utility class meant to always
+   win has to actually always win. */
+.hidden { display: none !important; }
 
 /* Title and snapshot line share a row: two stacked blocks of small grey text
    above the nav was three rows of chrome before any content. */

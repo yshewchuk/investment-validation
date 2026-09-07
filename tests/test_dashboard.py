@@ -1305,6 +1305,16 @@ class TestBoardOrderAndDomainFilter:
         # turns off.
         assert 'id="f-ood" type="checkbox" checked' not in html
 
+    def test_the_disabled_structures_switch_defaults_to_off(self):
+        """CAL-P/CND-P carry no gate, forecast or evidence — UNVALIDATED_STRUCTURE,
+        not a decision — so they stay behind a switch like out-of-domain rows do."""
+        app = self.APP.read_text()
+        assert "disabled: false," in app
+        assert "isDisabledStructure" in app
+        html = Path("engine/dashboard/static/index.html").read_text()
+        assert 'id="f-disabled" type="checkbox"' in html
+        assert 'id="f-disabled" type="checkbox" checked' not in html
+
     # -- the real sort, when node is around ---------------------------------
 
     @staticmethod
@@ -1410,6 +1420,105 @@ class TestBoardOrderAndDomainFilter:
         ]
         got = self._run(rows, tmp_path=tmp_path)
         assert got["order"] == ["AAA/STR-THRU"]
+
+
+class TestHiddenAlwaysWins:
+    """`.hidden` has to beat every other display rule, including ones added
+    later in the stylesheet.
+
+    `#subtabs-models` ships as `class="tabs hidden"`. `.hidden { display:
+    none }` and `.tabs { display: flex }` are both single-class selectors —
+    equal specificity — so the LATER one in source order wins a tie,
+    regardless of which class the HTML lists first. `.tabs` used to come after
+    `.hidden`, so it won: the Models sub-tab strip rendered visible on every
+    load, and the Trades strip (given `.hidden` by `switchArea` on entering
+    Models) had the identical fight and lost the same way — both sub-tab
+    strips showed regardless of which area was selected.
+    """
+
+    CSS = Path("engine/dashboard/static/assets/app.css")
+
+    def test_hidden_is_marked_important(self):
+        css = self.CSS.read_text()
+        assert ".hidden { display: none !important; }" in css
+
+    def test_a_tabs_element_can_still_carry_hidden(self):
+        """The markup this bug actually broke — pin it stays valid HTML."""
+        html = Path("engine/dashboard/static/index.html").read_text()
+        assert 'class="tabs hidden" id="subtabs-models"' in html
+
+
+class TestNavigationRouting:
+    """The hash is the state, so the back/forward buttons and a bookmarked
+    link all replay the same screen a click would have produced.
+
+    Before this, every area/tab switch and every explorer/model/derivation
+    selection was a live DOM mutation with no address — refreshing, sharing a
+    link, or pressing back always landed back on Trades → Upcoming prints.
+    """
+
+    APP = Path("engine/dashboard/static/assets/app.js")
+
+    @classmethod
+    def _run(cls, script):
+        """`parseRoute`/`navigate`/`areaOfTab` touch only `location`, never
+        `document` — so, unlike `TestBoardOrderAndDomainFilter._run`, no DOM
+        stub is needed. `window` still is: `const BOARD = window.BOARD || ...`
+        and friends read it unconditionally at the top of the file, before
+        any function here is even defined."""
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not available")
+        src = cls.APP.read_text()
+        body = src[: src.index("function init()")]
+        proc = subprocess.run(
+            [node, "-e", "globalThis.window = {};\n" + body + "\n" + script],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+
+    def test_no_hash_is_the_trades_board(self):
+        out = self._run(
+            "globalThis.location = { hash: '' };"
+            "console.log(JSON.stringify(parseRoute()));"
+        )
+        assert json.loads(out) == {"area": "trades", "tab": "board", "param": None}
+
+    def test_a_route_with_a_param_round_trips_through_encoding(self):
+        out = self._run(
+            "globalThis.location = { hash: '#/models/modelx/opf%20size%20gbm' };"
+            "console.log(JSON.stringify(parseRoute()));"
+        )
+        assert json.loads(out) == {
+            "area": "models", "tab": "modelx", "param": "opf size gbm"}
+
+    def test_an_unknown_tab_falls_back_to_the_areas_first(self):
+        out = self._run(
+            "globalThis.location = { hash: '#/models/nonsense' };"
+            "console.log(JSON.stringify(parseRoute()));"
+        )
+        assert json.loads(out)["tab"] == "modelx"
+
+    def test_navigate_writes_a_hash_the_same_parser_reads_back(self):
+        out = self._run(
+            "globalThis.location = { hash: '' };"
+            "navigate('trades', 'explorer', 'AA PL');"
+            "console.log(JSON.stringify({hash: location.hash, route: parseRoute()}));"
+        )
+        got = json.loads(out)
+        assert got["hash"] == "#/trades/explorer/AA%20PL"
+        assert got["route"] == {"area": "trades", "tab": "explorer", "param": "AA PL"}
+
+    def test_area_of_tab_is_the_inverse_of_area_views(self):
+        out = self._run(
+            "console.log(JSON.stringify(["
+            "areaOfTab('board'), areaOfTab('modelx'), areaOfTab('health')]));"
+        )
+        assert json.loads(out) == ["trades", "models", "models"]
 
 
 class TestLadderRowsRoundTrip:

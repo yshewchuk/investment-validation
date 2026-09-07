@@ -24,6 +24,7 @@ const TICKER_DATA = window.TICKER_DATA || {};
    other filters are set. Kept beside the count badge so a shrunken board says
    why it shrank rather than looking like a thin night. */
 let boardHidden = 0;
+let disabledHidden = 0;
 
 const state = {
   sortKey: "event_date",
@@ -35,6 +36,10 @@ const state = {
      gate was never trained on has no verdict to read. Those rows belong behind
      a switch rather than in the middle of the ones that do carry a call. */
   outOfDomain: false,
+  /* Off by default for the same reason: CAL-P/CND-P are never scored at all
+     (no gate, no forecast, no evidence — see UNVALIDATED_STRUCTURE), so they
+     read as noise next to rows that carry a real verdict. */
+  disabled: false,
   tickerSelected: null,
 };
 
@@ -75,6 +80,14 @@ function cellColor(x) {
 const AREA_VIEWS = { trades: ["board", "explorer", "book"], models: ["modelx", "derivation", "health"] };
 const ALL_VIEWS = ["board", "explorer", "book", "modelx", "derivation", "health"];
 
+function areaOfTab(tab) {
+  return Object.keys(AREA_VIEWS).find((a) => AREA_VIEWS[a].indexOf(tab) !== -1) || "trades";
+}
+
+/* These two only ever move the DOM to match a state that already exists —
+   they never decide what that state IS. `navigate()` below is what decides;
+   these are called from `applyRoute()` (and from each other) so a hash change
+   and a page load produce the identical screen a click would have. */
 function switchTab(name) {
   document.querySelectorAll(".tab[data-tab]").forEach(
     (t) => t.classList.toggle("active", t.dataset.tab === name)
@@ -85,14 +98,72 @@ function switchTab(name) {
 }
 
 function switchArea(area) {
-  if (area === "models") initModelExplorer();
   document.querySelectorAll(".tab.area").forEach(
     (t) => t.classList.toggle("active", t.dataset.area === area)
   );
   Object.keys(AREA_VIEWS).forEach((a) =>
     document.getElementById("subtabs-" + a).classList.toggle("hidden", a !== area)
   );
-  switchTab(AREA_VIEWS[area][0]);
+}
+
+/* ------------------------------------------------------------- routing */
+
+/* The hash IS the state — not a mirror of it. Every click below calls
+   `navigate()` rather than `switchArea`/`switchTab` directly, so there is
+   exactly one place a screen change happens (`applyRoute`, on `hashchange`)
+   and the back button replays this program's own history instead of leaving
+   the page the way every click before it always had.
+   Shape: #/<area>/<tab>[/<param>] — param is the selected ticker (explorer),
+   model id (modelx) or strategy (derivation); board/book/health carry none. */
+function parseRoute() {
+  const parts = (location.hash || "").replace(/^#\/?/, "").split("/")
+    .filter(Boolean).map((p) => decodeURIComponent(p));
+  const area = parts[0] === "models" ? "models" : "trades";
+  const tabs = AREA_VIEWS[area];
+  const tab = tabs.indexOf(parts[1]) !== -1 ? parts[1] : tabs[0];
+  return { area, tab, param: parts[2] || null };
+}
+
+function navigate(area, tab, param) {
+  const hash = "#/" + [area, tab].concat(param ? [encodeURIComponent(param)] : []).join("/");
+  if (location.hash === hash) applyRoute();  /* re-clicking the active tab still fires */
+  else location.hash = hash;
+}
+
+/* Loads the ~2MB model-evidence payload once, on first visit to Model
+   explorer specifically — not on every visit to the Models area, since
+   derivation and health need none of it. */
+let modelExplorerReady = false;
+function ensureModelExplorer(onReady) {
+  if (modelExplorerReady) { onReady(); return; }
+  initModelExplorer(() => { modelExplorerReady = true; onReady(); });
+}
+
+function applyRoute() {
+  const { area, tab, param } = parseRoute();
+  switchArea(area);
+  switchTab(tab);
+  if (tab === "explorer") {
+    const sel = document.getElementById("x-ticker");
+    const ticker = param && Array.from(sel.options).some((o) => o.value === param)
+      ? param : sel.value;
+    if (ticker) { sel.value = ticker; renderExplorer(ticker); }
+  } else if (tab === "modelx") {
+    ensureModelExplorer(() => {
+      if (!param) return;
+      const sel = document.getElementById("m-model");
+      if (Array.from(sel.options).some((o) => o.value === param)) {
+        sel.value = param;
+        renderModelExplorer(param);
+      }
+    });
+  } else if (tab === "derivation" && param) {
+    const sel = document.getElementById("d-strategy");
+    if (Array.from(sel.options).some((o) => o.value === param)) {
+      sel.value = param;
+      renderDerivation(param);
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- flags */
@@ -314,7 +385,7 @@ function flagBadges(row) {
 function driverCell(r) {
   if (r.driver_prediction === null || r.driver_prediction === undefined) return "–";
   const label = r.driver_name === "abs_move" ? "|move|"
-    : r.driver_name === "implied_t1" ? "T–1 implied" : (r.driver_name || "");
+    : r.driver_name === "im_t1" ? "T–1 implied" : (r.driver_name || "");
   /* The point estimate alone reads as more certain than it is. The band is the
      10th-90th percentile of the model's own draws. Since EXP-115 those draws
      come from the residual bucket matching this row's prediction rather than
@@ -373,7 +444,7 @@ function printRow(members) {
   const move = byDriver("abs_move");
   const sized = members.find((m) => m.forecast_abs_move !== null
                                  && m.forecast_abs_move !== undefined) || {};
-  const t1 = byDriver("implied_t1");
+  const t1 = byDriver("im_t1");
   const passes = members.filter((m) => m.gate_pass === true).length;
   /* PROJECTED_CALENDAR is a statement about the DATE, so it is said next to
      the date: a print no forward source has confirmed is an estimate, and the
@@ -404,7 +475,31 @@ function printRow(members) {
    Cell order mirrors the grouped header: trade (strategy, dates), signal
    (blank — event-level), cost, decision (gate, rank), forecast (model PnL,
    win), evidence (analog PnL, n), flags. */
+/* Structures gated by `_expected_pnl_clears_the_bar` (engine/entry_rules.py)
+   have no payoff map (engine/payoff.py PAYOFF_DRIVER), so `exp_pnl_model` is
+   always null for them — but the entry rule itself is a simulated expected
+   return, computed and stored as `exp_pnl_sim`/`win_sim` for exactly the
+   trades that need a top-20% cutoff to gate on. Falling back to it here is
+   not a UI computation — it is choosing which of two engine-computed numbers
+   to show, the same pattern `printRow` already uses for `sized` vs `move`.
+   TWIN-P's rule is pure arithmetic (`cost < peak / 2`) and simulates nothing,
+   so it still shows "–" here, correctly. */
+function pnlCell(r) {
+  if (r.exp_pnl_model !== null && r.exp_pnl_model !== undefined) {
+    return { value: r.exp_pnl_model, sim: false };
+  }
+  if (r.exp_pnl_sim !== null && r.exp_pnl_sim !== undefined) {
+    return { value: r.exp_pnl_sim, sim: true };
+  }
+  return { value: null, sim: false };
+}
+
 function strategyRow(r, disabled, winCell, premium) {
+  const pnl = pnlCell(r);
+  const simBadge = ' <span class="badge" title="No payoff map exists for this '
+    + "structure's twin-peaked payoff, so this is the entry rule's own "
+    + "simulated expected return — the number it gates on, top-20% of the "
+    + 'trailing six months — not a payoff-map forecast.">sim</span>';
   return '<tr class="subrow clickable' + (disabled ? " disabled" : "") + '" data-ticker="'
     + esc(r.ticker) + '">'
     + "<td></td><td></td>"
@@ -415,7 +510,7 @@ function strategyRow(r, disabled, winCell, premium) {
     + "<td>" + premium + (premium && geometryCell(r) ? "<br>" : "") + geometryCell(r) + "</td>"
     + "<td>" + gatePill(r) + splitBadge(r) + "</td>"
     + "<td>" + (r.rank || "–") + "</td>"
-    + '<td class="' + cls(r.exp_pnl_model) + '">' + signedPct(r.exp_pnl_model, 2) + "</td>"
+    + '<td class="' + cls(pnl.value) + '">' + signedPct(pnl.value, 2) + (pnl.sim ? simBadge : "") + "</td>"
     + "<td>" + winCell + "</td>"
     + '<td class="' + cls(r.exp_pnl_analog) + '">' + signedPct(r.exp_pnl_analog, 2) + "</td>"
     + "<td>" + (r.n_analogs === null || r.n_analogs === undefined ? "–" : r.n_analogs) + "</td>"
@@ -453,6 +548,16 @@ function isOutOfDomain(row) {
   return (row.flags || []).indexOf("OUT_OF_DOMAIN") !== -1;
 }
 
+/* CAL-P and CND-P: registered in STRUCTURES so engine.replay/build_trades can
+   price them, but `score()` returns UNVALIDATED_STRUCTURE for both before
+   pricing anything — no backtest exists for CAL-P's exact spec, and CND-P has
+   mechanics but no gate. Reading the flag rather than hard-coding a strategy
+   name is what CND-P was missing before this filter existed: the dimming in
+   `strategyRow` used to check only `strategy === "CAL-P"`. */
+function isDisabledStructure(row) {
+  return (row.flags || []).indexOf("UNVALIDATED_STRUCTURE") !== -1;
+}
+
 /* The default order: when the decision is due, then what the decision is.
    `dir` flips the schedule only — passers stay at the top of their session
    either way, because reversing the date is a request to read the calendar
@@ -482,6 +587,13 @@ function boardRows() {
     const before = rows.length;
     rows = rows.filter((r) => !isOutOfDomain(r));
     boardHidden = before - rows.length;
+  }
+  if (state.disabled) {
+    disabledHidden = 0;
+  } else {
+    const before = rows.length;
+    rows = rows.filter((r) => !isDisabledStructure(r));
+    disabledHidden = before - rows.length;
   }
 
   /* A print is placed by the strongest verdict any of its structures carries,
@@ -517,7 +629,8 @@ function renderBoard() {
   const rows = boardRows();
   document.getElementById("board-count").textContent =
     rows.length + " / " + BOARD.rows.length + " rows"
-    + (boardHidden ? " · " + boardHidden + " out-of-domain hidden" : "");
+    + (boardHidden ? " · " + boardHidden + " out-of-domain hidden" : "")
+    + (disabledHidden ? " · " + disabledHidden + " disabled hidden" : "");
 
   const tb = document.querySelector("#tbl-board tbody");
 
@@ -535,10 +648,12 @@ function renderBoard() {
 
   tb.innerHTML = Array.from(groups.values()).map((members) => {
     return printRow(members) + members.map((r) => {
-      const disabled = r.strategy === "CAL-P";
-      const winCell = r.win_model === null || r.win_model === undefined
-        ? "–"
-        : pct(r.win_model, 0) + ' <span class="badge">[' + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</span>";
+      const disabled = isDisabledStructure(r);
+      const winCell = r.win_model !== null && r.win_model !== undefined
+        ? pct(r.win_model, 0) + ' <span class="badge">[' + signedPct(r.ci_low) + ", " + signedPct(r.ci_high) + "]</span>"
+        : r.win_sim !== null && r.win_sim !== undefined
+        ? pct(r.win_sim, 0) + ' <span class="badge" title="From the entry rule\'s own simulation, not the analog bootstrap — no CI is computed for it.">sim</span>'
+        : "–";
       const premium = r.entry_cost_pct === null || r.entry_cost_pct === undefined
         ? "–"
         : fmt(r.entry_cost_pct, 1) + "%" + (r.model_fair_pct !== null && r.model_fair_pct !== undefined
@@ -572,6 +687,9 @@ function initBoardControls() {
   const ood = document.getElementById("f-ood");
   ood.checked = state.outOfDomain;
   ood.onchange = (e) => { state.outOfDomain = e.target.checked; renderBoard(); };
+  const dis = document.getElementById("f-disabled");
+  dis.checked = state.disabled;
+  dis.onchange = (e) => { state.disabled = e.target.checked; renderBoard(); };
   document.getElementById("f-ticker").oninput = (e) => {
     state.ticker = e.target.value.trim().toLowerCase(); renderBoard();
   };
@@ -597,11 +715,7 @@ function loadTickerData(ticker, then) {
 }
 
 function openExplorer(ticker) {
-  switchArea("trades");
-  switchTab("explorer");
-  const sel = document.getElementById("x-ticker");
-  sel.value = ticker;
-  renderExplorer(ticker);
+  navigate("trades", "explorer", ticker);
 }
 
 function renderExplorer(ticker) {
@@ -933,7 +1047,7 @@ function initExplorerControls() {
     opt.value = t; opt.textContent = t;
     sel.appendChild(opt);
   });
-  sel.onchange = () => renderExplorer(sel.value);
+  sel.onchange = () => navigate("trades", "explorer", sel.value);
 }
 
 /* --------------------------------------------------------- model explorer */
@@ -1141,11 +1255,12 @@ function loadModels(then) {
   document.head.appendChild(script);
 }
 
-function initModelExplorer() {
+function initModelExplorer(onReady) {
   loadModels(() => {
     MODELS_META = window.MODELS || {};
     MODELS = MODELS_META.models || {};
     buildModelExplorer();
+    if (onReady) onReady();
   });
 }
 
@@ -1165,7 +1280,7 @@ function buildModelExplorer() {
     o.value = id; o.textContent = id + "  (" + (MODELS[id].role || "") + ")";
     sel.appendChild(o);
   });
-  sel.onchange = () => renderModelExplorer(sel.value);
+  sel.onchange = () => navigate("models", "modelx", sel.value);
   renderModelExplorer(ids[0]);
 }
 
@@ -1305,7 +1420,7 @@ function initDerivation() {
     o.value = n; o.textContent = n;
     sel.appendChild(o);
   });
-  sel.onchange = () => renderDerivation(sel.value);
+  sel.onchange = () => navigate("models", "derivation", sel.value);
   if (names.length) renderDerivation(names[0]);
 }
 
@@ -1519,10 +1634,10 @@ function renderHealth() {
 
 function init() {
   document.querySelectorAll(".tab[data-tab]").forEach((t) => {
-    t.onclick = () => switchTab(t.dataset.tab);
+    t.onclick = () => navigate(areaOfTab(t.dataset.tab), t.dataset.tab);
   });
   document.querySelectorAll(".tab.area").forEach((t) => {
-    t.onclick = () => switchArea(t.dataset.area);
+    t.onclick = () => navigate(t.dataset.area, AREA_VIEWS[t.dataset.area][0]);
   });
 
   const metaBits = [];
@@ -1544,6 +1659,16 @@ function init() {
   renderHealth();
   initBookControls();
   renderBook();
+
+  /* The hash decides the visible screen from here on — a bookmarked or
+     shared link, and the back/forward buttons, all replay through this same
+     path rather than always landing on Trades → Upcoming prints. Wired here,
+     not at module scope: the `TestBoardOrderAndDomainFilter` node harness
+     evals everything before this function with a `window` stub that has no
+     `addEventListener`, and this line only needs to exist once the real page
+     has loaded anyway. */
+  window.addEventListener("hashchange", applyRoute);
+  applyRoute();
 }
 
 init();
