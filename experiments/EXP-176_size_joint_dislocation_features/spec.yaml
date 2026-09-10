@@ -1,0 +1,67 @@
+id: EXP-176
+title: "Joint raw and volatility-scaled dislocation features"
+strategy: "STR-THRU"
+type: exploratory_model_comparison
+price_source: "Cached ORATS historical bid and ask chains normalized through engine.replay; realized moves are from the causal Tier-3 panel."
+hypothesis: >
+  The 5-, 10-, and 20-session dislocations are related views of a common
+  pre-event state. Testing them one at a time may hide complementary horizon
+  information. A model that receives the raw trio, the volatility-scaled trio,
+  or all six together may learn the relationship more effectively than any
+  single added feature.
+primary_spec:
+  baseline: size_v1_4
+  challenger: size_v1_4_plus_all_joint_dislocation_features
+  target: "abs_move, absolute earnings move in percent of spot"
+  architecture: "unchanged equal-weight OLS plus MLP(64,32) blend"
+  primary_added_features:
+    - abs_ret5
+    - abs_ret10
+    - abs_ret20
+    - abs_ret5_over_rvol30
+    - abs_ret10_over_rvol30
+    - abs_ret20_over_rvol30
+  selection_book: "STR-THRU forecast-edge top-20 control, economic companion only"
+  modeled_fill_alpha: 0.5
+arms:
+  - name: raw_trio
+    features: [abs_ret5, abs_ret10, abs_ret20]
+  - name: scaled_trio
+    features: [abs_ret5_over_rvol30, abs_ret10_over_rvol30, abs_ret20_over_rvol30]
+  - name: all_six
+    features: [abs_ret5, abs_ret10, abs_ret20, abs_ret5_over_rvol30, abs_ret10_over_rvol30, abs_ret20_over_rvol30]
+definitions:
+  raw_trio: "Absolute prior 5-, 10-, and 20-session stock returns."
+  scaled_trio: "Each absolute return divided by positive pre-event ORATS rVol30."
+  all_six: "The union of the raw and rVol30-scaled horizon features."
+causal_anchor: "All returns and rVol30 values are known before the earnings event; no event-day information is used."
+data:
+  panel: data/features/panel.parquet
+  trades: Tier-2 engine.replay STR-THRU trades
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  accuracy_window: "Expanding annual walk-forward OOS 2013-2026"
+  same_rows: "Baseline and all grouped arms use identical complete-case rows on the union of six added features and incumbent features."
+evaluation:
+  primary_metrics:
+    - overall OOS MAE
+    - overall OOS RMSE and Pearson r
+    - per-year MAE differences
+    - top-minus-bottom forecast-decile realized-move spread
+  robustness:
+    - five fixed MLP seeds
+    - paired annual MAE Wilcoxon for the all-six primary arm
+    - no coverage loss from the complete-case rule
+primary_success:
+  - all-six arm improves MAE in at least 8 of 14 annual folds
+  - all-six arm median MAE delta is below zero across five seeds
+  - all-six paired Wilcoxon p-value is below 0.10
+  - no secondary arm is promoted post hoc; promotion requires a new confirmatory registration
+falsification: >
+  Reject the joint dislocation block if the all-six arm fails its consistency
+  criteria, if any gain depends on changed rows, or if only a secondary grouped
+  arm wins after seeing the results.
+promotion_target: null
+preregistered_at: "2026-09-09T00:00:00+00:00"
