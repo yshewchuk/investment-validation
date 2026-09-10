@@ -857,7 +857,7 @@ class Scorer:
         # signal some earlier layer already produced, and a second derivation
         # would be a second answer to the same question.
         if request.strategy in DYNAMIC_MENU:
-            self._score_chooser(request, result, features, chain_index)
+            self._score_chooser(request, result, features)
         return result
 
     # -- pieces ------------------------------------------------------------
@@ -1043,6 +1043,13 @@ class Scorer:
             result.flag("NO_CHAIN")
             self._note_chain_age(request, result)
             return
+        # Working state for this scoring pass, like `_priced_legs` below:
+        # the entry rows the structure was actually priced on, at the quote
+        # date `_price_entry` resolved (including the stale-quote fallback).
+        # The chooser's `n_admissible` proxy reads THESE rows rather than any
+        # caller-supplied chain index, so a board row and its selfcheck
+        # re-score — which passes no index — agree by construction.
+        result._entry_rows = clean
         snapshot = ChainSnapshot(
             ticker=request.ticker,
             obs_date=result.quote_date,
@@ -2231,7 +2238,7 @@ class Scorer:
         (176.0, 5674.0),
     )
 
-    def _score_chooser(self, request, result, features, chain_index) -> None:
+    def _score_chooser(self, request, result, features) -> None:
         """Score one menu candidate with the registered DYN-SV champion.
 
         Decline — ``chooser_score`` stays None — when no champion is
@@ -2246,7 +2253,7 @@ class Scorer:
         entry, artifact = loaded
         try:
             frame = self._chooser_frame(request, result, features,
-                                        artifact.features, chain_index)
+                                        artifact.features)
         except Exception as exc:  # a board must not die on one row
             result.detail = (f"{result.detail}; chooser unavailable: {exc}"
                              if result.detail
@@ -2265,8 +2272,8 @@ class Scorer:
             artifact.model.predict(np.asarray([vector], dtype=float))[0]
         )
 
-    def _chooser_frame(self, request, result, features, wanted, chain_index
-                       ) -> dict[str, float]:
+    def _chooser_frame(self, request, result, features, wanted
+                      ) -> dict[str, float]:
         """The champion's 67 features for one candidate row, by name.
 
         Every value is read from a signal the scoring pass already produced —
@@ -2351,7 +2358,7 @@ class Scorer:
             else nan)
         out["anchor_over_spot"] = anchor / spot if np.isfinite(anchor) and spot else nan
         out["n_legs"] = float(len(legs))
-        depth = self._live_chain_depth(request, result, chain_index, m, s)
+        depth = self._live_chain_depth(request, result, m, s)
         out["n_admissible"] = self._n_admissible_for(depth)
         out["dte_entry"] = (nan if result.dte_entry is None
                             else float(result.dte_entry))
@@ -2430,7 +2437,7 @@ class Scorer:
         except Exception:
             return float("nan")
 
-    def _live_chain_depth(self, request, result, chain_index, m, s) -> float:
+    def _live_chain_depth(self, request, result, m, s) -> float:
         """Quoted put strikes at the entry expiry inside the width window.
 
         The raw material `n_admissible` counted patterns from: a pattern was
@@ -2438,13 +2445,20 @@ class Scorer:
         rules allow — ``[spot.(1-(m+3s)/100), spot.(1+(m+3s)/100)]`` — and
         its legs carried crossable quotes. NaN when there is no chain or no
         finite forecast, which maps to the training median.
+
+        Reads the rows stashed by :meth:`_price_entry` — the chain the
+        structure was actually PRICED on, at the quote date pricing resolved
+        — rather than any caller-supplied chain index, so the board row, a
+        bare ``score()`` call and the nightly's selfcheck re-score all see
+        the same rows and produce the same depth. That determinism is why
+        the index parameter is gone: the selfcheck re-scores without one,
+        and the first version returned the training median there while the
+        board used the real depth — one chooser score apart, and a
+        selfcheck stop.
         """
-        if (chain_index is None or result.entry_date is None
-                or result.expiry is None or not np.isfinite(m)
-                or not np.isfinite(s) or not result.spot):
-            return float("nan")
-        rows = chain_index.get(request.ticker, result.entry_date)
-        if rows is None or rows.empty:
+        rows = getattr(result, "_entry_rows", None)
+        if (rows is None or rows.empty or result.expiry is None
+                or not np.isfinite(m) or not np.isfinite(s) or not result.spot):
             return float("nan")
         try:
             return _chain_depth(
