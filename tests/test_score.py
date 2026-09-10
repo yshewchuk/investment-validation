@@ -629,6 +629,96 @@ class TestTradesWithoutTheLegsBlob:
                    context=context, snapshot="snap-test", analog_daily=daily)
 
 
+class TestChooserAnalogsMatchTraining:
+    """The chooser's five analog columns are the kNN it was FITTED on, not the
+    board's bucket layer.
+
+    Serving read `result.exp_pnl_analog` and friends — a different
+    neighbourhood in different units under the same five names (agreement
+    0.021; the served values carry no signal on this population, the trained
+    ones do). These lock the serving shape to the training one.
+    """
+
+    DIMS = ("exp_pnl_sim", "width_over_forecast", "n_legs",
+            "anchor_over_spot", "rel_spread")
+
+    def _scorer(self, tmp_path, rows):
+        import types
+
+        from engine.score import CHOOSER_ANALOG_POOL, Scorer, _UNSET
+
+        pd.DataFrame(rows).to_parquet(tmp_path / CHOOSER_ANALOG_POOL, index=False)
+        engine = Scorer.__new__(Scorer)
+        engine._chooser_pool = _UNSET
+        engine.__dict__["_pool_dir"] = tmp_path
+        return engine
+
+    def _pool(self, n, *, pnl, exit_date="2024-01-01"):
+        return [{"strategy": "TWIN-P", "entry_date": "2023-12-01",
+                 "exit_date": exit_date, "pnl": pnl(i),
+                 "exp_pnl_sim": 0.1 + i * 0.001, "width_over_forecast": 1.0,
+                 "n_legs": 7.0, "anchor_over_spot": 1.0, "rel_spread": 0.1}
+                for i in range(n)]
+
+    def test_values_come_from_the_pool_not_the_board_analog_layer(self, tmp_path, monkeypatch):
+        import types
+
+        from engine import paths
+        from engine.score import Scorer, _UNSET
+
+        monkeypatch.setattr(paths, "FEATURES", tmp_path)
+        from engine.score import CHOOSER_ANALOG_POOL
+
+        pd.DataFrame(self._pool(60, pnl=lambda i: 2.0)).to_parquet(
+            tmp_path / CHOOSER_ANALOG_POOL, index=False)
+        engine = Scorer.__new__(Scorer)
+        engine._chooser_pool = _UNSET
+
+        result = types.SimpleNamespace(strategy="TWIN-P",
+                                       entry_date=pd.Timestamp("2024-06-01"))
+        frame = {d: v for d, v in zip(self.DIMS, (0.1, 1.0, 7.0, 1.0, 0.1))}
+        out = engine._chooser_analogs(result, frame)
+
+        # Dollars from the pool, not a return from the analog layer.
+        assert out["analog_mean"] == pytest.approx(2.0)
+        assert out["analog_win_rate"] == pytest.approx(1.0)
+        # A CONSTANT in training — every row took exactly K neighbours.
+        assert out["analog_n"] == float(Scorer._CHOOSER_ANALOG_K)
+
+    def test_a_candidate_that_had_not_closed_yet_is_not_an_analog(self, tmp_path, monkeypatch):
+        import types
+
+        from engine import paths
+        from engine.score import CHOOSER_ANALOG_POOL, Scorer, _UNSET
+
+        monkeypatch.setattr(paths, "FEATURES", tmp_path)
+        # Every pool row closes AFTER the query's entry — nothing is eligible,
+        # so the row must decline rather than borrow the future.
+        pd.DataFrame(self._pool(60, pnl=lambda i: 2.0, exit_date="2026-01-01")
+                     ).to_parquet(tmp_path / CHOOSER_ANALOG_POOL, index=False)
+        engine = Scorer.__new__(Scorer)
+        engine._chooser_pool = _UNSET
+        result = types.SimpleNamespace(strategy="TWIN-P",
+                                       entry_date=pd.Timestamp("2024-06-01"))
+        frame = {d: v for d, v in zip(self.DIMS, (0.1, 1.0, 7.0, 1.0, 0.1))}
+        out = engine._chooser_analogs(result, frame)
+        assert all(not np.isfinite(v) for v in out.values())
+
+    def test_no_pool_declines_rather_than_inventing_a_neighbourhood(self, tmp_path, monkeypatch):
+        import types
+
+        from engine import paths
+        from engine.score import Scorer, _UNSET
+
+        monkeypatch.setattr(paths, "FEATURES", tmp_path)  # empty dir
+        engine = Scorer.__new__(Scorer)
+        engine._chooser_pool = _UNSET
+        result = types.SimpleNamespace(strategy="TWIN-P",
+                                       entry_date=pd.Timestamp("2024-06-01"))
+        out = engine._chooser_analogs(result, dict(zip(self.DIMS, (0.1,) * 5)))
+        assert all(not np.isfinite(v) for v in out.values())
+
+
 class TestFlags:
     def test_atm_is_not_extrapolated(self, scorer, chain_index):
         result = scorer.score(request(), chain_index=chain_index)

@@ -542,6 +542,10 @@ class ScoreResult:
 # --------------------------------------------------------------------------
 
 
+#: The prior menu candidates the DYN-SV chooser's analog neighbourhood is
+#: drawn from, under `paths.FEATURES`. Built by `tools/build_chooser_pool.py`.
+CHOOSER_ANALOG_POOL = "chooser_analog_pool.parquet"
+
 #: Distinguishes "not looked up yet" from "looked up, and the answer is None".
 _UNSET = object()
 
@@ -640,6 +644,8 @@ class Scorer:
         self._crush = _UNSET
         self._crush_frame = _UNSET
         self._latest_iv = _UNSET
+        #: The chooser analog pool, loaded on first use.
+        self._chooser_pool = _UNSET
 
         self.registry = registry if registry is not None else load_registry()
         self.snapshot = snapshot if snapshot is not None else _snapshot_hash()
@@ -2480,14 +2486,8 @@ class Scorer:
         out["exp_pnl_sim"] = nan if sim is None else float(sim)
         out["exp_pnl_sim_select"] = out["exp_pnl_sim"]
         out["entry_cost_pct"] = feat("entry_cost_pct")
-        out["analog_mean"] = (nan if result.exp_pnl_analog is None
-                              else float(result.exp_pnl_analog))
-        out["analog_win_rate"] = (nan if result.win_analog is None
-                                  else float(result.win_analog))
-        buckets = result.analog_buckets or {}
-        out["analog_p10"] = float(buckets.get("p10", nan))
-        out["analog_p90"] = float(buckets.get("p90", nan))
-        out["analog_n"] = float(result.n_analogs)
+        # The analog block is filled AFTER the geometry below, because it is
+        # keyed on those same five columns. See `_chooser_analogs`.
         for member in DYNAMIC_MENU:
             out[f"is_{member.lower().replace('-', '_')}"] = (
                 1.0 if member == strategy else 0.0)
@@ -2555,6 +2555,9 @@ class Scorer:
         # seen, not an approximation of it.
         out["quote_repaired"] = 0.0
         out["wide_market"] = 1.0 if "WIDE_MARKET" in result.flags else 0.0
+
+        # -- the analog block, keyed on the five columns just written ---------
+        out.update(self._chooser_analogs(result, out))
 
         # -- payoff schematics (EXP-165) --------------------------------------
         out.update(self._chooser_schematics(result, m, s))
@@ -2648,6 +2651,115 @@ class Scorer:
             if depth < floor:
                 return value
         return self._N_ADMISSIBLE_BY_DEPTH[-1][1]
+
+    #: The chooser's analog neighbourhood, ported from EXP-161's
+    #: `add_causal_analogs` — the function that produced these five columns for
+    #: every training row.
+    _CHOOSER_ANALOG_DIMS = ("exp_pnl_sim", "width_over_forecast", "n_legs",
+                            "anchor_over_spot", "rel_spread")
+    _CHOOSER_ANALOG_K = 25
+    _CHOOSER_ANALOG_COLUMNS = ("analog_mean", "analog_win_rate", "analog_p10",
+                               "analog_p90", "analog_n")
+
+    def _chooser_analogs(self, result, frame) -> dict[str, float]:
+        """The champion's five analog columns, computed the way it was TRAINED.
+
+        These are NOT the board's analog layer. That layer buckets on the
+        event and the contract (mcap, DTE band, moneyness, implied tercile) and
+        averages a RETURN; this one takes the 25 nearest prior candidates in the
+        space of the structure's own geometry and simulated payoff and averages
+        a DOLLAR P&L. Serving read the first while the champion had been fitted
+        on the second — five of its sixty-seven inputs, under identical names,
+        in different units, from a differently-shaped neighbourhood. Measured
+        agreement between the two: Spearman 0.021, and the served values carry
+        no signal on this population (-0.0005 over 47,017 menu trades, sign
+        flipping across all five structures) while the trained ones do (+0.082,
+        positive in 9/9 years).
+
+        The collision was in the NAMES, not the arithmetic: the STR-THRU gate
+        writes three of these same names 150 lines above, correctly, because it
+        really was trained on the bucket layer.
+
+        Causality is the pool filter, not the row order: a candidate is
+        eligible when it CLOSED strictly before this row's entry. Training
+        walked a frame sorted by entry date and masked on the same condition,
+        which is the same set — anything later cannot have closed earlier.
+        """
+        nan = float("nan")
+        blank = {c: nan for c in self._CHOOSER_ANALOG_COLUMNS}
+        pool = self._chooser_analog_pool()
+        if not pool or result.entry_date is None:
+            return blank
+        rows = pool.get(str(result.strategy))
+        if rows is None:
+            return blank
+        vals = np.array([frame.get(d, nan) for d in self._CHOOSER_ANALOG_DIMS],
+                        dtype=float)
+        if not np.isfinite(vals).all():
+            return blank
+
+        X, y, closed = rows
+        eligible = closed < np.datetime64(pd.Timestamp(result.entry_date))
+        if eligible.sum() < self._CHOOSER_ANALOG_K:
+            return blank
+        X, y = X[eligible], y[eligible]
+        # Rescaled on the ELIGIBLE pool, per row, exactly as training did — the
+        # spread of each dimension changes as the pool grows, and freezing one
+        # global scale would make an early event's neighbourhood differ from
+        # the one it was trained with.
+        scale = X.std(0, ddof=1)
+        scale[~np.isfinite(scale) | (scale < 1e-8)] = 1.0
+        distance = (((X - vals) / scale) ** 2).mean(1)
+        take = np.argpartition(distance, self._CHOOSER_ANALOG_K - 1)[
+            :self._CHOOSER_ANALOG_K]
+        near = y[take]
+        return {
+            "analog_mean": float(near.mean()),
+            "analog_win_rate": float((near > 0).mean()),
+            "analog_p10": float(np.quantile(near, 0.10)),
+            "analog_p90": float(np.quantile(near, 0.90)),
+            # A CONSTANT in training — every row took exactly K neighbours, so
+            # the fit learned nothing from it. Serving used to put the bucket
+            # match's size here instead, which ranged 41 to 2,786: an input
+            # some hundreds of training standard deviations out of
+            # distribution, on a feature whose scaler sd is the 1.0 sklearn
+            # substitutes for zero variance.
+            "analog_n": float(self._CHOOSER_ANALOG_K),
+        }
+
+    def _chooser_analog_pool(self):
+        """Prior menu candidates with their realized P&L, by strategy.
+
+        Lazily loaded and cached per instance. The pool is the population the
+        champion's neighbourhood was drawn from; without it the five columns
+        stay NaN and `_score_chooser` declines the row through its existing
+        incomplete-vector path rather than inventing a neighbourhood.
+        """
+        if self._chooser_pool is not _UNSET:
+            return self._chooser_pool
+        self._chooser_pool = None
+        try:
+            frame = pd.read_parquet(paths.FEATURES / CHOOSER_ANALOG_POOL)
+        except Exception:
+            return self._chooser_pool
+        needed = {"strategy", "entry_date", "exit_date", "pnl",
+                  *self._CHOOSER_ANALOG_DIMS}
+        if not needed.issubset(frame.columns):
+            return self._chooser_pool
+        frame = frame.dropna(subset=["exit_date", "pnl"])
+        built: dict[str, tuple] = {}
+        for strategy, group in frame.groupby("strategy", sort=False):
+            X = group[list(self._CHOOSER_ANALOG_DIMS)].to_numpy(float)
+            ok = np.isfinite(X).all(1)
+            if not ok.any():
+                continue
+            built[str(strategy)] = (
+                X[ok],
+                group["pnl"].to_numpy(float)[ok],
+                pd.to_datetime(group["exit_date"]).to_numpy()[ok],
+            )
+        self._chooser_pool = built or None
+        return self._chooser_pool
 
     def _chooser_schematics(self, result, m, s) -> dict[str, float]:
         """The 12 payoff-schematic features (EXP-165), ported verbatim.
