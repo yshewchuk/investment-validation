@@ -62,7 +62,10 @@ __all__ = [
 #:                 percent of the pre-print level — negative at 83% of prints,
 #:                 and the only role so far whose target is SIGNED
 #: ``gate``        predicted per-trade return at mid fills — the selection signal
-ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate")
+#: ``chooser``     predicted event-demeaned PnL per offered structure — the
+#:                 structure-selection signal; the champion picks the argmax
+#:                 among the structures actually offered on the event
+ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate", "chooser")
 
 #: Strategy scope. ``"*"`` means the model is strategy-agnostic (the size model
 #: predicts a property of the *event*, not of any structure traded around it).
@@ -88,6 +91,7 @@ ROLE_TIER = {
     "runup_move": "feature",
     "iv_crush": "feature",
     "gate": "decision",
+    "chooser": "decision",
 }
 
 #: The Tier-4 vocabulary: the columns a feature model may declare it produces

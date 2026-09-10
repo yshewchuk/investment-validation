@@ -1,0 +1,65 @@
+id: EXP-170
+title: "Menu7-prime at the ten-billion floor: promotion candidate with tail injection"
+strategy: DYN-SV
+type: confirmatory
+price_source: >
+  None new. The selector's out-of-fold choices are the EXP-169 cached
+  predictions, loaded from results parquets and unchanged; no model is
+  retrained, repriced, or re-simulated. ORATS historical bid and ask chains
+  cached by EXP-137 carry the prices; conditional exits use a valid
+  quote-derived close only when nonnegative and no-arbitrage, otherwise the
+  stored expiry payoff. No oquants model marks are used. quota_calls: 0.
+hypothesis: >
+  EXP-169's menu7p_mcap10 arm (the five incumbent structures plus RAMP7 and
+  CTR5, NOTCH7 dropped, partial-inclusive universe, cut0 hygiene at the
+  ten-billion floor, expected-PnL-per-secured-dollar ordering) reached
+  301,049 dollars on 2,263 funded trades with a clean worst-earnings-weeks
+  stress cell (+0.021 on n=41) where the one-billion arm's cell was red
+  (-0.044). The promotion machinery requires the candidate to be a PRIMARY
+  spec evaluated through the full harness including the mandatory
+  short-leg tail injection, which the EXP-169 arms lack (the grid-cell path
+  skipped it). This experiment re-runs that exact book as a primary with the
+  doubled-move tail stage present, so it can be promoted honestly: the
+  challenger is the ten-billion configuration, the champion is the incumbent
+  resolver baseline, and the promotion question is settled under the full
+  rule battery rather than a grid-cell exception.
+primary_spec:
+  menu: "TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7 (N7q-2_-1_1_1), CTR5 (N5q-2_-1_2); NOTCH7 dropped"
+  selector: "EXP-169 cached out-of-fold deviation-head choices (quantile-target, event-demeaned, full features plus menu one-hots plus thirteen payoff-schematic features plus Tier-4 forecast columns), unchanged"
+  universe_rule: "EXP-169 partial-inclusive universe: events offering at least two menu structures with valid midpoints"
+  gate_rule: "cut0 hygiene on the chosen candidate: rel_spread <= 0.25, mcap_usd >= 1e10"
+  funding_order: "expected PnL (exp_pnl_sim of the chosen candidate) per secured dollar, descending, per entry date"
+  tail_injection: "common.abs_move_tail_shock — double the largest one percent of realized absolute moves and re-price the exit through the stored leg quotes; mandatory for this short-leg book"
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "expected PnL per secured dollar descending"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Partial-inclusive annual-OOS events 2020-2026; funding after selection at midpoint"
+  required_metrics:
+    - "headline mean, sharpe_trade, CAGR, years positive, max drawdown"
+    - "MC by sizing fraction including P(loss) at 5 percent"
+    - "stress regimes including worst-earnings-weeks and the doubled-move tail injection"
+    - "five-point fill sensitivity report"
+  primary_success:
+    - "the ten-billion book beats the incumbent resolver champion on CAGR and trade Sharpe with no smaller a positive-year share"
+    - "no new red stress regime cell versus the champion"
+    - "the doubled-move tail injection is present and reported"
+    - "zero defined-risk failures"
+  multiplicity: "One preregistered promotion candidate; the registry update follows only through experiments/promote.py."
+data:
+  candidates: "EXP-137 candidate panel, read from cache"
+  selector_cache: "EXP-169 results dev_scores.parquet and choices.parquet (out-of-fold, unchanged)"
+  tier4: "data/features/tier4_forecasts.parquet, already embedded in the cached choices"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: "dyn_sv_chooser role in the model registry via experiments/promote.py"
+preregistered_at: "2026-09-09T11:41:21+00:00"

@@ -1,0 +1,68 @@
+id: EXP-169
+title: "Menu7-prime: only the structures the chooser ranks, at the ten-billion and one-billion floors"
+strategy: DYN-SV
+type: confirmatory
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137, all families read
+  from cache. Conditional exits use a valid quote-derived close only when
+  nonnegative and no-arbitrage, otherwise the stored expiry payoff. No oquants
+  model marks are used. Nothing is re-priced or re-simulated; quota_calls: 0.
+hypothesis: >
+  EXP-167's per-structure diagnostics split the three families EXP-141
+  dropped: RAMP7 is now well ranked (31.2 percent pick precision versus 16.4
+  under the old chooser, +0.638 mean realized when funded) while NOTCH7
+  remains unrankable (11.2 percent) and realizes below the menu mean. The
+  confirmatory menu is therefore the five incumbents plus RAMP7 plus CTR5
+  (menu7-prime, seven structures), dropping NOTCH7. CTR5 enters on the
+  strength of the account: menu8 beat menu7 by 8.9k dollars with CTR5 the
+  only addition. This is run at the unchanged ten-billion market-cap floor
+  (isolating the menu change against EXP-167's menu7 at 292,400 and menu8 at
+  301,278) and at the one-billion floor, which EXP-119 (small-name slice) and EXP-168 (short-vol
+  market-cap floor, ten-billion versus one-billion, run in parallel by
+  another session) have already established; the one-billion arm is a transfer
+  check, not a discovery claim.
+primary_spec:
+  menu: "TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7 (N7q-2_-1_1_1), CTR5 (N5q-2_-1_2); NOTCH7 dropped"
+  universe_rule: "Events offering at least two of the menu's structures with valid midpoint rows; complete and partial menus both included; no market-cap floor at training time"
+  target: "realized PnL demeaned by the mean over the structures actually offered on the same event"
+  train_protocol: "EXP-165/167 protocol unchanged: quantile-normal target, MLP(64,32) early stop patience 50, five-seed average, expanding annual folds 2020 onward, full registered features plus menu one-hots plus thirteen payoff-schematic features plus Tier-4 forecast columns"
+  gate_rule: "cut0 hygiene on the chosen candidate: rel_spread <= 0.25, mcap floor 1e10 (mcap10 arm) or 1e9 (mcap1 arm)"
+  funding_order: "expected PnL (exp_pnl_sim of the chosen candidate) per secured dollar, descending, per entry date"
+  arms:
+    menu7p_mcap10: "menu7-prime, ten-billion floor (isolates the menu change against EXP-167)"
+    menu7p_mcap1: "menu7-prime, one-billion floor (the operating point; transfer check per EXP-119)"
+  primary: menu7p_mcap1
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "expected PnL per secured dollar descending"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Partial-inclusive annual-OOS events; funding after selection at midpoint"
+  required_metrics:
+    - "per-arm wanted, funded, unfunded and its mean realized, final equity, CAGR, peak concurrency"
+    - "per-structure diagnostics on menu7-prime: offered, picks, funded, mean realized when funded, pick precision versus offered-menu oracle"
+    - "market-cap buckets (1-2B, 2-5B, 5-10B, 10B+) for the mcap1 arm: funded count, mean realized, mean secured"
+    - "menu-size buckets for oracle hit"
+    - "five-point fill sensitivity report for each arm"
+  primary_success:
+    - "menu7p_mcap10 final equity exceeds EXP-167 menu7 (292,400 dollars) - the menu swap helps at the unchanged floor"
+    - "menu7p_mcap1 final equity exceeds menu7p_mcap10 - the one-billion transfer holds on this menu"
+    - "menu7p_mcap1 final equity exceeds EXP-167 menu8 (301,278 dollars) - the program best is beaten"
+    - "RAMP7 and CTR5, when funded, each realize at least the menu-wide funded mean"
+    - "zero defined-risk failures in every arm"
+  multiplicity: "Two preregistered arms; confirmatory close of the menu arc; no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel, read from cache"
+  tier4: "data/features/tier4_forecasts.parquet joined on ticker and event date"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T05:12:32+00:00"

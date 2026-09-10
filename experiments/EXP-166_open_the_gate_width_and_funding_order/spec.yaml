@@ -1,0 +1,76 @@
+id: EXP-166
+title: "Open the gate: gate width crossed with funding order on the schematic selector"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137. Conditional exits use
+  a valid quote-derived close only when nonnegative and no-arbitrage, otherwise
+  the stored expiry payoff. No oquants model marks are used. Selector choices
+  are the EXP-165 cached out-of-fold predictions; no model is retrained here.
+hypothesis: >
+  EXP-165 measured the ungated pool at +0.348 mean realized PnL on the
+  incumbent pick and +0.272 on the qt_schem pick - positive in every year,
+  62.8 percent of events positive. The incumbent gate therefore separates
+  good events from less-good ones, not good from bad, and the account already
+  cannot fund all 710 gated events (the 134 starved events average +0.792).
+  Widening the gate can only pay if the funding queue stops ordering
+  same-day candidates by secured requirement (largest first, adversarial)
+  and orders by expected PnL per secured dollar instead. This experiment
+  crosses gate width (incumbent cutoff, half cutoff, no expected-PnL
+  condition; spread and market-cap hygiene unchanged) with funding order
+  (expensive-first versus expected-per-secured-dollar) on the fixed
+  qt_schem selector, and additionally reports whether widening without
+  ordering or ordering without widening is sufficient.
+primary_spec:
+  selector: "EXP-165 qt_schem out-of-fold choices (quantile-target deviation head with payoff-schematic features), loaded from cache, unchanged"
+  gate_rule: >
+    Event-level expected-PnL condition on the incumbent-pick simulated PnL:
+    cut100 trades when exp_pnl_sim >= arithmetic_cutoff (the incumbent gate);
+    cut50 when exp_pnl_sim >= 0.5 x arithmetic_cutoff; cut0 drops the
+    expected-PnL condition entirely. Every arm keeps the hygiene filters
+    applied to its own chosen candidate (rel_spread <= 0.25, mcap_usd >= 1e10).
+  funding_order: >
+    expensive-first (largest secured requirement first, the EXP-162/163/164/165
+    policy) versus priority ordering by exp_pnl_sim of the chosen candidate
+    times 100 divided by its secured requirement, descending, per entry date.
+  arms:
+    incumbent_resolver: "cut100 gate, incumbent argmax-exp_pnl_sim selector, expensive-first (the program baseline)"
+    cut100_expensive: "cut100 gate, qt_schem selector, expensive-first (EXP-165 qt_schem replication, gate recomputed arm-level)"
+    cut100_order: "cut100 gate, qt_schem selector, priority order"
+    cut50_expensive: "cut50 gate, qt_schem selector, expensive-first"
+    cut50_order: "cut50 gate, qt_schem selector, priority order"
+    cut0_expensive: "cut0 gate (hygiene only), qt_schem selector, expensive-first"
+    cut0_order: "cut0 gate (hygiene only), qt_schem selector, priority order"
+  primary: cut50_order
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "arm-specific: largest secured requirement first, or expected PnL per secured dollar descending"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Complete five-menu events, annual-OOS 2020-2026; funding after selection at midpoint"
+  required_metrics:
+    - "per-arm wanted, funded, unfunded wanted and its mean realized PnL (opportunity cost)"
+    - "per-arm final equity, CAGR, peak concurrency, mean secured utilization, funded-trade mean realized PnL"
+    - "per-arm five-point fill sensitivity report"
+    - "consistency check: incumbent_resolver and cut100_expensive against their EXP-162/165 counterparts"
+  primary_success:
+    - "cut50_order final equity exceeds the incumbent_resolver baseline"
+    - "cut50_order final equity exceeds cut100_order (widening pays under ordering)"
+    - "at least one ordering arm beats its expensive-first twin (cut50_order over cut50_expensive or cut0_order over cut0_expensive)"
+    - "zero defined-risk failures in every arm"
+  multiplicity: "Seven preregistered arms of one gate-width-by-order grid plus the baseline; exploratory only, no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel; five mapped DYN-SV structures"
+  selector_cache: "EXP-165 results/dev_scores.parquet and choices.parquet (out-of-fold, unchanged)"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T03:53:21+00:00"

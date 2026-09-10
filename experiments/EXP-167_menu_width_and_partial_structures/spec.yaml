@@ -1,0 +1,72 @@
+id: EXP-167
+title: "Menu width and partial menus: the dropped structures return to a better chooser"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137, which carries all
+  eight enumerated pattern families. Conditional exits use a valid quote-derived
+  close only when nonnegative and no-arbitrage, otherwise the stored expiry
+  payoff. No oquants model marks are used. Nothing is re-priced or re-simulated;
+  quota_calls: 0.
+hypothesis: >
+  EXP-141 cut the menu from eight families to five because the THEN chooser
+  (argmax simulated expected PnL) could not distinguish the other three at
+  all: notched-seven 12.6 percent, centre-five 12.3 percent, stepped-ramp
+  seven 16.4 percent precision against a 12.5 percent chance baseline. That
+  was a property of the old resolver, not of the structures. The EXP-163/165
+  deviation head ranks structures materially better (oracle hit 27.5-28.0
+  percent versus the incumbent resolver's 26.8 on the five-menu), so the
+  dropped structures may now be selectable rather than noise. Separately,
+  the universe has been complete-five-menu events only, discarding 2,633
+  partial-menu OOS events where the ladder could not fit all five; allowing
+  the chooser to order whatever is tradeable adds 52 percent more events.
+  EXP-166 showed the open gate plus per-secured-dollar ordering converts
+  breadth into equity (300.5k versus 242.1k baseline).
+primary_spec:
+  menus:
+    menu5: "TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5 (the incumbent menu)"
+    menu7: "menu5 plus NOTCH7 (N7q-2_1_-1_1, notched seven) and RAMP7 (N7q-2_-1_1_1, stepped-ramp seven) - the two best old-chooser-precision dropped families"
+    menu8: "menu7 plus CTR5 (N5q-2_-1_2, centre-peaked five, doubled wings)"
+  universe_rule: "Events offering at least two of the menu's structures with valid midpoint rows; complete and partial menus both included"
+  target: "realized PnL demeaned by the mean over the structures actually offered on the same event"
+  train_protocol: "EXP-165 qt_schem protocol per menu: quantile-normal target, MLP(64,32) early stop patience 50, five-seed average, expanding annual folds 2020 onward, full registered features plus the menu's structure one-hots plus the thirteen payoff-schematic features and the Tier-4 forecast columns"
+  gate_rule: "cut0 (hygiene only) on the chosen candidate: rel_spread <= 0.25, mcap_usd >= 1e10; no expected-PnL condition"
+  funding_order: "expected PnL (exp_pnl_sim of the chosen candidate) per secured dollar, descending, per entry date"
+  arms:
+    incumbent_resolver: "menu5 partial universe, incumbent trailing cutoff gate, argmax exp_pnl_sim selector, expensive-first (the program baseline)"
+    menu5: "menu5, cut0 gate, deviation head, priority order"
+    menu7: "menu7, cut0 gate, deviation head, priority order"
+    menu8: "menu8, cut0 gate, deviation head, priority order"
+  primary: menu7
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "expected PnL per secured dollar descending (expensive-first for the incumbent baseline arm)"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Partial-inclusive annual-OOS events per menu; funding after selection at midpoint"
+  required_metrics:
+    - "per-menu wanted, funded, unfunded and its mean realized, final equity, CAGR, peak concurrency"
+    - "per-structure diagnostics across menu7 and menu8: offered share, pick rate, mean realized PnL when picked, share of picks that were the offered-menu oracle, versus each menu's overall mean"
+    - "menu-size buckets (structures offered per event) for oracle hit and funded mean"
+    - "five-point fill sensitivity report for each arm"
+  primary_success:
+    - "menu7 final equity exceeds menu5 under the shared gate and funding"
+    - "in menu7 the restored structures, when picked, realize at least the menu-wide funded mean"
+    - "menu7 final equity exceeds the incumbent_resolver baseline"
+    - "zero defined-risk failures in every arm"
+  multiplicity: "Four preregistered arms; exploratory only, no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel, all eight pattern families read from cache"
+  tier4: "data/features/tier4_forecasts.parquet joined on ticker and event date"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T04:29:13+00:00"

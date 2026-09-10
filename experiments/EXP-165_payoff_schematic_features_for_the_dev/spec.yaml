@@ -1,0 +1,79 @@
+id: EXP-165
+title: "Payoff-schematic features for the deviation head"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137. Conditional exits use
+  a valid quote-derived close only when nonnegative and no-arbitrage, otherwise
+  the stored expiry payoff. No oquants model marks are used.
+hypothesis: >
+  The deviation head currently sees the structure only through the
+  exp_pnl_sim scalar, entry_cost_pct, and static geometry. The incumbent
+  resolver's entire edge is ranking on the integrated scalar, which cannot
+  express where along the move axis a structure earns or loses. Decomposing
+  the same information into payoff schematics - credit-adjusted breakeven
+  rooms normalized by the forecast move, maximum profit ratios, and PnL
+  sampled at forecast-plus-residual move grid points - gives the head
+  per-candidate shape features that interact with history and market state,
+  on exactly the axis that survives the within-event argmax. EXP-164 showed
+  richer inputs help once the target is event-demeaned and quantile-stabilized;
+  these are the most structure-specific inputs yet untested.
+primary_spec:
+  target: "realized PnL demeaned by the mean of the five offered structures on the same event (EXP-163/164 protocol, unchanged)"
+  train_protocol: "EXP-164 qt protocol: QuantileTransformer(output_distribution=normal) on the training-fold target, MLP(64,32) max_iter=800, early stop patience=50, five-seed average, expanding annual folds 2020 onward"
+  schematic_features: >
+    Computed analytically at entry from the stored legs JSON, strike ladder,
+    entry prices, and the panel forecast (pred_abs_move, pred_abs_move_sd) -
+    no simulation, leak-safe by construction, exact piecewise-linear expiry
+    payoff algebra:
+    breakeven rooms (5): down and up breakeven move distances divided by the
+    forecast move; max profit as percent of spot; max profit over entry cost;
+    max profit over secured capital. Shape grid (8): expiry PnL at move
+    levels (down and up sides) of forecast minus residual sd, forecast,
+    forecast plus sd, forecast plus two sd, each as percent of spot.
+  tier4_features: >
+    The qt_schem_tier4 cell additionally joins the out-of-fold Tier-4 size
+    forecasts on ticker and event date: pred_abs_move_p10/p90/sd/resid_n,
+    the pred_im_t1_d14 family, the pred_runup_abs_move_d14 family, and
+    forecast_edge (Tier-4 predicted move minus the quoted implied move).
+  cells:
+    qt_full: "EXP-164 winning cell, unchanged control"
+    qt_breakeven: "full plus the five breakeven and max-profit features"
+    qt_shape: "full plus the eight PnL-at-move-grid features"
+    qt_schem: "full plus all thirteen schematic features"
+    qt_schem_tier4: "full plus all thirteen schematic plus the Tier-4 forecast columns"
+  primary: qt_schem
+  gate_rule: "fixed incumbent trailing expected-PnL cutoff plus spread and market-cap hygiene; nothing varies but the head"
+  funding_order: "largest secured requirement first (unchanged)"
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "largest secured requirement first"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Complete five-menu events; annual-OOS prediction; funding after selection at midpoint"
+  required_metrics:
+    - "per-cell within-event Spearman per fold and overall, mean epochs, seed rank agreement, loss SD"
+    - "per-cell oracle hit, incumbent agreement, eligible, wanted, funded, final equity, CAGR, peak concurrency"
+    - "replication check: qt_full against EXP-164 qt_full"
+    - "five-point fill sensitivity report for each cell"
+  primary_success:
+    - "qt_schem final equity exceeds the qt_full control under the shared funding policy"
+    - "qt_schem final equity exceeds the incumbent"
+    - "at least one schematic sub-cell (qt_breakeven or qt_shape) exceeds the qt_full control"
+    - "zero defined-risk failures in every cell"
+  multiplicity: "Five preregistered cells plus the incumbent baseline; exploratory only, no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel; five mapped DYN-SV structures"
+  tier4: "data/features/tier4_forecasts.parquet joined on ticker and event date (out-of-fold by construction)"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T02:50:08+00:00"

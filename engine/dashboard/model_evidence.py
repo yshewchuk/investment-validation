@@ -218,6 +218,11 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=())
         from engine.models.training import size_model
 
         return size_model.prepare(panel), size_model.TARGET, list(size_model.FEATURES)
+    if role == "chooser":
+        from engine.models.training import chooser
+
+        data, target, feats = chooser.build_dataset()
+        return data, target, feats
     if role == "gate":
         from engine.models.training import gate
 

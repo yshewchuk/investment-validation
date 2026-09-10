@@ -1,0 +1,82 @@
+id: EXP-163
+title: "Two-headed DYN-SV: learned event level and within-event deviation"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137. Conditional exits use
+  a valid quote-derived close only when nonnegative and no-arbitrage, otherwise
+  the stored expiry payoff. No oquants model marks are used.
+hypothesis: >
+  EXP-162 showed the raw-target selector spends its fit on the cross-event
+  axis that cancels at argmax time (within-event Spearman +0.03, cross-event
+  +0.01). Splitting the compound decision into two heads each trained on the
+  axis it is graded on should recover the missing selection signal: a LEVEL
+  head (one row per event, target = mean realized PnL of the five offered
+  structures) drives the trade/no-trade gate and the funding queue, and a
+  DEVIATION head (one row per candidate, target = realized PnL minus its event
+  mean) drives the structure argmax. The composed prediction
+  level + deviation replaces the incumbent trailing-cutoff gate and the
+  argmax-exp_pnl_sim resolver, and an expected-PnL-per-secured-dollar ordering
+  replaces expensive-first within the funding walk.
+primary_spec:
+  deviation_head:
+    target: "realized PnL demeaned by the mean of the five offered structures on the same event"
+    feature_set: "EXP-161 nn_all_categories (identity, exp_pnl_sim, analogs, geometry, history, market, execution) - identical to the incumbent-comparison information set"
+    model: "MLP(64,32) max_iter=800, validation early stop patience=50, five-seed average; architecture fixed per EXP-162 (architecture was not the constraint)"
+  level_head:
+    target: "event-mean realized PnL of the five offered structures"
+    feature_set: "event-constant registered inputs (pred_abs_move, pred_abs_move_sd, dte_entry, n_admissible, mcap_log, history, market) plus menu aggregates (mean and max exp_pnl_sim, mean rel_spread, mean entry_cost_pct, mean analog_mean, mean width_over_forecast)"
+    model: "MLP(64,32) max_iter=800, validation early stop patience=50, five-seed average"
+  gate_rule: >
+    Level arms trade an event when predicted level >= fold threshold and the
+    chosen candidate passes the incumbent hygiene filters (rel_spread <= 0.25,
+    mcap_usd >= 10e9). The threshold is the train-fit predicted-level quantile
+    that matches the incumbent gate's traded share on the same training folds
+    (rate matching, not performance tuning). Incumbent-gate arms keep the
+    trailing expected-PnL cutoff unchanged.
+  selector_rule: "deviation arms take argmax predicted deviation among offered structures; incumbent-selector arms keep argmax exp_pnl_sim"
+  funding_order: >
+    Same cash-secured walk as EXP-162 for every arm except two_head_order,
+    which orders same-day candidates by (level + deviation) per secured
+    dollar, descending, instead of largest secured requirement first.
+  arms:
+    incumbent: "incumbent gate, incumbent resolver, expensive-first"
+    dev_only: "incumbent gate, deviation head, expensive-first"
+    level_gate: "level head gate, incumbent resolver, expensive-first"
+    two_head: "level head gate, deviation head, expensive-first"
+    two_head_order: "level head gate, deviation head, expected-per-secured-dollar order"
+  primary: two_head_order
+  neural_train_rule: "Expanding annual fit on exit-complete events before each test year, 2020 onward"
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "largest secured requirement first; two_head_order orders by expected PnL per secured dollar"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Complete five-menu events; annual-OOS prediction; funding after selection at midpoint"
+  required_metrics:
+    - "level-head OOS Spearman against realized event-mean PnL per fold and overall"
+    - "deviation-head within-event Spearman against realized PnL per fold and overall"
+    - "per-arm oracle structure hit rate, incumbent agreement, eligible, wanted, funded, final equity, CAGR, peak concurrency"
+    - "unfunded-but-wanted event count and mean realized PnL by arm (capital-exhaustion opportunity cost)"
+    - "five-point fill sensitivity report for each arm"
+  primary_success:
+    - "two_head_order final equity exceeds incumbent under the shared cash-secured funding constraints"
+    - "two_head_order funded count at least 90 percent of the incumbent funded count"
+    - "at least one ablation arm (dev_only or level_gate) strictly improves on incumbent final equity"
+    - "zero defined-risk failures in every arm"
+  multiplicity: "Five arms of one preregistered decomposition; exploratory only, no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel; five mapped DYN-SV structures"
+  panel: "Tier-3 prior-event and market-state feature panel"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T00:43:25+00:00"

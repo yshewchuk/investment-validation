@@ -1,0 +1,55 @@
+id: EXP-162
+title: "Dynamic short-vol neural architecture and size sweep"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137. Conditional exits use
+  a valid quote-derived close only when nonnegative and no-arbitrage, otherwise
+  the stored expiry payoff. No oquants model marks are used.
+hypothesis: >
+  With the exact five-structure DYN-SV menu, causal same-structure analogs,
+  and the full registered feature set fixed, a larger or deeper neural network
+  may select higher-realized-PnL structures than the incumbent simulated-PnL
+  resolver and the prior 64x32 MLP. Architecture, not eligibility, is varied.
+primary_spec:
+  candidate_menu: [TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5]
+  target: "Conditional-exit realized PnL in option points per one-lot"
+  feature_set: "EXP-161 full PnL, same-structure analog, identity, geometry, history, market, execution inputs"
+  eligibility: "Fixed incumbent trailing expected-PnL, spread, and market-cap gate"
+  neural_train_rule: "Expanding annual fit on earlier exit-complete candidates; five independently initialized seed average"
+  primary: deep_128_64_32
+  architectures:
+    small_16: "MLP(16), max_iter=800, validation early stop patience=50"
+    prior_64_32: "MLP(64,32), max_iter=800, validation early stop patience=50"
+    wide_128_64: "MLP(128,64), max_iter=800, validation early stop patience=50"
+    deep_128_64_32: "MLP(128,64,32), max_iter=1200, validation early stop patience=80"
+  funding_policy:
+    start_equity_usd: 200000
+    secured_cap_of_current_equity: 0.66
+    target_share_of_headroom: 0.25
+    same_day_order: "largest secured requirement first"
+    short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Complete five-menu events; annual-OOS prediction; funding after selection at midpoint"
+  required_metrics:
+    - "per-seed loss and validation trajectories, best-validation iteration, cap-hit flags, and OOS seed-agreement by annual fold"
+    - "candidate OOS PnL rank correlation and event-level oracle structure hit rate"
+    - "identical-gate $200k cash-secured account final equity, CAGR, funded count, and peak concurrency"
+    - "five-point fill sensitivity report for each architecture"
+  primary_success:
+    - "deep primary oracle-hit rate exceeds incumbent resolver"
+    - "deep primary final equity exceeds prior_64_32 and incumbent under the identical funding policy"
+  multiplicity: "Four architectures plus incumbent; exploratory only, no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel; five mapped DYN-SV structures"
+  panel: "Tier-3 prior-event and market-state feature panel"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-08T23:32:58+00:00"

@@ -1,0 +1,73 @@
+id: EXP-164
+title: "Deviation head: robust targets, lean features, restart averaging"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137. Conditional exits use
+  a valid quote-derived close only when nonnegative and no-arbitrage, otherwise
+  the stored expiry payoff. No oquants model marks are used.
+hypothesis: >
+  EXP-163's deviation head (full feature set, MSE) early-stops at ~55 epochs
+  because fat-tailed noise dominates the validation MSE: the within-event
+  realized SD is ~2.9 points against a ~0.2 selection edge. EXP-161 separately
+  showed the lean feature set (exp_pnl_sim plus analogs plus identity) beat the
+  full set by ~4k dollars of final equity. The two levers have never been
+  crossed. A quantile (rank-Gaussian) target transform removes the fat-tail
+  gradient poisoning; snapshot-averaged restarts jostle the fit off premature
+  validation stalls; smaller batches add gradient noise as regularization.
+  Crossing the most promising techniques with the two feature sets should
+  identify which lever (or combination) recovers ranking signal.
+primary_spec:
+  target: "realized PnL demeaned by the mean of the five offered structures on the same event (EXP-163 deviation target, unchanged)"
+  feature_sets:
+    lean: "EXP-161 BASE: exp_pnl_sim, exp_pnl_sim_select, entry_cost_pct, five analog columns, five structure identity one-hots (13 inputs)"
+    full: "EXP-161 nn_all_categories (all registered inputs)"
+  techniques:
+    mse: "control: MLP(64,32) max_iter=800, early stop patience=50, batch 200 (EXP-163 protocol)"
+    qt: "QuantileTransformer(output_distribution=normal, n_quantiles=min(1000,n)) fit on the training-fold target; predictions are in transformed space and the argmax uses them directly; L1 loss was probed and is unavailable in sklearn 1.9.0 MLPRegressor (squared_error or poisson only), so the quantile target carries the robustness role"
+    swa: "manual partial_fit loop: LR 1e-3 with a 4e-3 restart burst on epochs 100-159, validation MSE on a fixed 15 percent split evaluated every 10 epochs with 5-eval smoothing, stop after 60 stale epochs once past epoch 160, hard cap 300 epochs, snapshot every 20 epochs from epoch 120 plus the final state, predictions averaged over snapshots"
+    batch32: "batch_size=32, otherwise the mse protocol"
+  cells:
+    mse_lean: "lean features, MSE control"
+    qt_lean: "lean features, quantile target"
+    swa_lean: "lean features, restart averaging"
+    batch32_lean: "lean features, batch 32"
+    mse_full: "full features, MSE control (replicates EXP-163 dev_only)"
+    qt_full: "full features, quantile target"
+  primary: qt_lean
+  gate_rule: "every cell uses the fixed incumbent trailing expected-PnL cutoff plus spread and market-cap hygiene; nothing varies but the head"
+  funding_order: "largest secured requirement first (EXP-162/163 policy); the per-secured-dollar ordering is deliberately NOT varied here"
+  neural_train_rule: "Expanding annual fit before each test year, 2020 onward, five-seed average per cell"
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "largest secured requirement first"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Complete five-menu events; annual-OOS prediction; funding after selection at midpoint"
+  required_metrics:
+    - "per-cell mean epochs or n_iter actually run (the did-it-train-longer readout), final loss, and seed rank agreement on test candidates"
+    - "per-cell within-event Spearman per fold and overall, oracle hit, incumbent agreement"
+    - "per-cell eligible, wanted, funded, final equity, CAGR, peak concurrency under the fixed gate and funding"
+    - "replication check: mse_full against EXP-163 dev_only"
+    - "five-point fill sensitivity report for each cell"
+  primary_success:
+    - "qt_lean final equity exceeds the incumbent under the shared funding policy"
+    - "qt_lean final equity exceeds mse_full (the EXP-163 configuration)"
+    - "at least one technique beats its same-feature mse control (qt_lean vs mse_lean, qt_full vs mse_full, swa_lean vs mse_lean, or batch32_lean vs mse_lean)"
+    - "zero defined-risk failures in every cell"
+  multiplicity: "Six preregistered cells plus the incumbent baseline; exploratory only, no registry or live resolver changes."
+data:
+  candidates: "EXP-137 candidate panel; five mapped DYN-SV structures"
+  panel: "Tier-3 prior-event and market-state feature panel"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T01:43:49+00:00"

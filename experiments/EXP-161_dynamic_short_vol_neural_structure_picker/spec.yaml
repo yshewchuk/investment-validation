@@ -1,0 +1,99 @@
+id: EXP-161
+title: "Dynamic short-vol neural structure picker under cash-secured funding"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains, previously cached and normalized by
+  EXP-137. Each candidate uses a conditional exit: use close-derived proceeds
+  only when the post-print quote curve is nonnegative and no-arbitrage;
+  otherwise use its stored expiry payoff. No oquants model marks are used.
+hypothesis: >
+  The current DYN-SV resolver chooses the offered structure with the highest
+  simulated PnL. A causal neural regressor trained on realized conditional PnL,
+  each structure's own causal analogs, and registered feature categories can
+  choose a higher-realized-PnL member of the exact five-structure DYN-SV menu.
+  The trade/no-trade gate is held fixed to the incumbent arithmetic resolver.
+
+primary_spec:
+  candidate_menu:
+    TWIN-P: "historical seven-strike twin-peak equivalent"
+    TWIN-P5: "historical five-strike twin-peak equivalent"
+    CND-PS: "historical put-condor-on-strike equivalent"
+    BFLY-P: "historical three-strike put-butterfly equivalent"
+    BFLY-P5: "historical five-strike put-butterfly equivalent"
+  decision: >
+    One candidate per offered structure is supplied by the dynamic resolver.
+    The incumbent selects maximum simulated PnL; the neural chooser selects
+    maximum annual-OOS predicted realized PnL. Both retain the incumbent
+    trailing expected-PnL, spread, and market-cap eligibility decision.
+  target: "Realized conditional-exit PnL in option points per one-lot"
+  architecture: "StandardScaler plus 3-seed MLPRegressor(64,32), early stopping"
+  neural_train_rule: >
+    Expanding annual training only on earlier exit-complete candidates. Analogs
+    are same-structure nearest neighbors whose exits predate the candidate entry.
+  first_test_year: 2020
+  operational_benchmark: "Current dynamic resolver: maximum simulated PnL"
+  primary: nn_all_categories
+  matched_neural_control: nn_pnl_structure_analogs
+  funding_policy:
+    start_equity_usd: 200000
+    secured_cap_of_current_equity: 0.66
+    target_share_of_headroom: 0.25
+    same_day_order: "largest secured requirement first"
+    short_put_rule: "fully cash secure every short put at strike x 100"
+
+base_features:
+  pnl: [exp_pnl_sim, exp_pnl_sim_select, entry_cost_pct]
+  same_structure_analogs: [analog_mean, analog_win_rate, analog_p10, analog_p90, analog_n]
+  structure_identity: [is_twin_p, is_twin_p5, is_cnd_ps, is_bfly_p, is_bfly_p5]
+feature_categories:
+  geometry_forecast:
+    [pred_abs_move, pred_abs_move_sd, width_over_forecast, half_width_pct_spot,
+     anchor_over_spot, n_legs, n_admissible, dte_entry]
+  event_history:
+    [mean_prior_abs_move, ema12r_abs, signed_streak, mean_prior_or_implied,
+     mcap_log, or_implied, or_rvol30]
+  market_state:
+    [spy_ret21, spy_ret63, spy_ret252, spy_dd252, spy_vol5, spy_vol20,
+     spy_vol60, spy_vol252, spy_vol20_rel252]
+  execution_quality:
+    [rel_spread, quote_repaired, wide_market]
+arms:
+  - incumbent_simulated_pnl
+  - nn_pnl_structure_analogs
+  - nn_plus_geometry
+  - nn_plus_history
+  - nn_plus_market
+  - nn_plus_execution
+  - nn_all_categories
+evaluation:
+  universe: >
+    Complete five-structure historical DYN-SV-menu events with valid midpoint
+    conditional exits and complete features for an arm. Funding is simulated
+    only after annual-OOS selection and uses midpoint information.
+  required_metrics:
+    - "candidate-level annual-OOS rank correlation to realized PnL"
+    - "event-level realized-PnL structure-hit rate versus conditional-exit oracle"
+    - "incumbent versus each NN chooser on identical incumbent gate events"
+    - "cash-secured $200k account final equity, CAGR, funded count, and concurrency"
+    - "five-point real-price fill sensitivity on the funded book"
+  primary_success:
+    - "primary chooser exceeds the PnL-plus-structure-analogs control in realized selected PnL"
+    - "primary chooser exceeds the incumbent in conditional-exit oracle hit rate"
+    - "primary $200k cash-secured account final equity exceeds the control"
+  multiplicity: >
+    Six neural feature sets plus the incumbent are exploratory arms. This run
+    changes neither a registry entry nor a live resolver.
+data:
+  candidates: "EXP-137 results/candidates.parquet; five mapped historical DYN-SV families"
+  panel: "Tier-3 prior-event and market-state feature panel"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-08T23:15:00+00:00"
