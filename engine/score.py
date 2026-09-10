@@ -153,6 +153,12 @@ FLAGS = (
     # given a shape, and pricing a default-width one instead would put a number
     # on the board for a trade nobody chose.
     "NO_FORECAST",
+    # The DYN-SV chooser champion declined this menu candidate — its 67-feature
+    # vector is incomplete, the same rows the training folds dropped from
+    # scoring. Deliberately NOT MISSING_FEATURES: that flag means the row's own
+    # numbers are withheld, while here the row is fully scored and priced; only
+    # the champion ranking is absent, and the event falls back to the resolver.
+    "CHOOSER_MISSING_FEATURES",
     # Two legs resolved onto one contract, so the structure was refused. Kept
     # apart from NO_CHAIN deliberately: the chain is present and correct, and a
     # reader who sees NO_CHAIN goes and re-pulls quotes that are already fine.
@@ -2179,6 +2185,17 @@ class Scorer:
         if entry.threshold is not None:
             result.gate_pass = bool(result.gate_score >= entry.threshold)
 
+    def _compare_layers(self, result) -> None:
+        model, analog = result.exp_pnl_model, result.exp_pnl_analog
+        if model is None or analog is None:
+            return
+        if np.sign(model) != np.sign(analog):
+            result.flag("LAYER_DISAGREE")
+            return
+        if result.ci_low is not None and not (result.ci_low <= model <= result.ci_high):
+            result.flag("LAYER_DISAGREE")
+
+
     # -- the DYN-SV chooser champion --------------------------------------
 
     #: The regime columns the chooser consumes that the gates' market block
@@ -2519,17 +2536,6 @@ class Scorer:
         except Exception:
             pass
         return out
-
-    def _compare_layers(self, result) -> None:
-        model, analog = result.exp_pnl_model, result.exp_pnl_analog
-        if model is None or analog is None:
-            return
-        if np.sign(model) != np.sign(analog):
-            result.flag("LAYER_DISAGREE")
-            return
-        if result.ci_low is not None and not (result.ci_low <= model <= result.ci_high):
-            result.flag("LAYER_DISAGREE")
-
 
 # --------------------------------------------------------------------------
 # module-level convenience
