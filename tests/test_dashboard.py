@@ -9,6 +9,8 @@ that the real engine agrees with it) are the acceptance layer's job, in
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -534,6 +536,84 @@ class TestPublish:
 # --------------------------------------------------------------------------
 # nightly parts that need no store
 # --------------------------------------------------------------------------
+
+
+class TestSingleRunLock:
+    """Two nightlies at once is an OOM, not a queue — so the second declines."""
+
+    def test_a_second_run_is_refused_while_the_first_holds_it(self, tmp_path):
+        from engine.dashboard.nightly import NightlyStop, single_run_lock
+
+        lock = tmp_path / "nightly.lock"
+        with single_run_lock(lock):
+            with pytest.raises(NightlyStop) as caught:
+                with single_run_lock(lock):
+                    pass
+        # It has to name the holder: "already running" with no pid sends the
+        # operator hunting for a process that may have died an hour ago.
+        assert "already running" in str(caught.value)
+        assert f"pid {os.getpid()}" in str(caught.value)
+
+    def test_the_lock_is_free_again_once_the_run_finishes(self, tmp_path):
+        from engine.dashboard.nightly import single_run_lock
+
+        lock = tmp_path / "nightly.lock"
+        with single_run_lock(lock):
+            pass
+        with single_run_lock(lock):  # must not raise
+            pass
+
+    def test_a_crashed_run_does_not_wedge_the_next_one(self, tmp_path):
+        """The OS drops the flock with the descriptor, so a kill releases it.
+
+        This is the case that matters: the failure mode being guarded against
+        is a memory kill, and a lock that survived its holder's death would
+        turn one lost night into every following night.
+        """
+        from engine.dashboard.nightly import single_run_lock
+
+        lock = tmp_path / "nightly.lock"
+        with pytest.raises(RuntimeError):
+            with single_run_lock(lock):
+                raise RuntimeError("OOM-killed, say")
+        with single_run_lock(lock):  # must not raise
+            pass
+
+
+class TestRunTimeline:
+    def test_each_step_records_what_it_actually_cost(self):
+        from engine.dashboard.nightly import NightlyReport
+
+        report = NightlyReport(as_of="2026-09-10")
+        started = time.time() - 10.0
+        report.start(started)
+        report.mark("score", started=started)
+        report.mark("render", started=started)
+
+        assert [row["step"] for row in report.timeline] == ["score", "render"]
+        # `at_s` is cumulative, `elapsed_s` is not: the first step absorbs the
+        # 10s since `started`, the second only its own sliver.
+        assert report.timeline[0]["elapsed_s"] >= 10.0
+        assert report.timeline[1]["elapsed_s"] < 1.0
+        assert report.timeline[1]["at_s"] >= report.timeline[0]["at_s"]
+        assert "timeline" in report.as_dict()
+
+    def test_no_step_can_outlast_the_run_that_contains_it(self):
+        """The defect this replaces: `model_evidence` reported 1,636s inside a
+        721s run, because it published the elapsed_s stored in its own cached
+        artifact — a previous run's number — rather than tonight's."""
+        from engine.dashboard.nightly import NightlyReport
+
+        report = NightlyReport(as_of="2026-09-10")
+        started = time.time()
+        report.start(started)
+        for step in ("tiers", "score", "model_evidence", "render"):
+            report.mark(step, started=started)
+        report.elapsed_s = time.time() - started
+
+        assert report.timeline, "a run with no timeline cannot be diagnosed"
+        for row in report.timeline:
+            assert row["elapsed_s"] <= report.elapsed_s + 1e-6, row
 
 
 class TestNightlyPieces:

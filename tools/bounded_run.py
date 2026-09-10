@@ -19,9 +19,20 @@ MEMORY
   that kills a neighbor's job with no traceback anywhere — into a clean,
   explained, resumable abort of exactly one job.
 
-The nightly is idempotent and resumable, so an abort at the cap costs the
-phases since the last checkpoint, not the run. The watchdog heartbeat also
-satisfies the house rule that a long job logs at least once a minute.
+What an aborted nightly actually costs, since this said "resumable" and there
+are no checkpoints to resume from: the FETCHED work survives, because the store
+is written as it goes and a re-run skips chain pairs it already holds, the Tier
+3/4 tables are rebuilt in place, and `ledger.snapshot` filters on
+`existing_row_ids()` so re-recording a night writes nothing twice. The COMPUTED
+work does not — scoring, the ladder, rendering and the self-check are held in
+memory until the publish, so a kill during them loses all of it, and because
+the state file is only written at step 7 the next run re-covers that night via
+the backfill. Scoring is the longest phase, so an abort is most likely to land
+exactly where the loss is largest.
+
+So: an abort costs the night's compute, not its downloads or its ledger. The
+watchdog heartbeat also satisfies the house rule that a long job logs at least
+once a minute.
 
 Usage:
     python3 tools/bounded_run.py [--cores N] [--max-rss-gb G] \\

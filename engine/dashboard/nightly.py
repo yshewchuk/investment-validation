@@ -29,6 +29,8 @@ the ledger refuses duplicate ``row_id`` writes.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import subprocess
@@ -48,6 +50,7 @@ from engine.score import LADDER_STEP
 
 __all__ = [
     "NightlyStop", "NightlyReport", "run_nightly", "refresh_calendar_data",
+    "single_run_lock",
     "strike_ladder", "validate_refresh",
 ]
 
@@ -81,15 +84,88 @@ class NightlyReport:
     flags: list = field(default_factory=list)
     stopped: str | None = None
     elapsed_s: float = 0.0
+    #: Wall-clock cost of each step, in the order they ran. Separate from
+    #: ``steps`` because that dict holds what a step PRODUCED, and the two
+    #: were being conflated: ``model_evidence`` reported the ``elapsed_s``
+    #: stored in its own cached artifact, so a night that skipped the rebuild
+    #: entirely still claimed 1,636s — inside a run whose total was 721s.
+    #: Timing that can exceed the run containing it is not timing.
+    timeline: list = field(default_factory=list)
+    _marked_at: float = 0.0
+
+    def start(self, started: float) -> None:
+        self._marked_at = started
+
+    def mark(self, step: str, *, started: float) -> float:
+        """Record what the step just finished actually cost, and return it.
+
+        Called after each step rather than derived from `steps`, because a
+        step that degrades or skips still costs time and still has to appear:
+        the run grew from 117s to 3,636s with only four of fourteen steps
+        reporting any duration at all, which is why nobody could say where it
+        went.
+        """
+        now = time.time()
+        elapsed = now - (self._marked_at or started)
+        self._marked_at = now
+        self.timeline.append({
+            "step": step,
+            "elapsed_s": round(elapsed, 1),
+            "at_s": round(now - started, 1),
+        })
+        return elapsed
 
     def as_dict(self) -> dict:
         return {
             "as_of": self.as_of,
             "steps": self.steps,
+            "timeline": self.timeline,
             "flags": self.flags,
             "stopped": self.stopped,
             "elapsed_s": round(self.elapsed_s, 1),
         }
+
+
+@contextlib.contextmanager
+def single_run_lock(path: Path | None = None):
+    """Hold an exclusive lock for the duration of one nightly, or refuse.
+
+    Two of these overlapping is the box's worst case, not a merely untidy one:
+    each holds a ``Scorer`` (measured 5.4GB peak on this 7GB machine), so the
+    second one does not queue — it OOMs whichever is unluckier, and a kernel
+    OOM kill leaves no traceback anywhere, which is precisely the failure that
+    reads as "the nightly silently did nothing". The run takes up to an hour,
+    the cron fires nightly and the guide documents running it by hand, so the
+    overlap needs no unusual bad luck.
+
+    Non-blocking on purpose. A second run that WAITS an hour and then starts
+    scoring against a store the first one has already refreshed is not a
+    recovery; the honest answer is to decline and say who holds it. The lock
+    is released by the OS if the holder dies, so a killed run does not wedge
+    the next one.
+    """
+    path = Path(path) if path is not None else paths.REPORTS / ".nightly.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.seek(0)
+            holder = handle.read().strip() or "an unrecorded process"
+            raise NightlyStop(
+                "lock", f"another nightly is already running ({holder}); "
+                        "not starting a second one"
+            ) from None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"pid {os.getpid()} started {datetime.now(timezone.utc).isoformat()}")
+        handle.flush()
+        yield path
+    finally:
+        # flock is released with the descriptor; the file is left in place so
+        # its contents name the last holder.
+        handle.close()
 
 
 def _nights_to_backfill(last, as_of, *, calendar):
@@ -970,6 +1046,7 @@ def run_nightly(
     probe_url = os.environ.get("DASHBOARD_PROBE_URL") or None
 
     report = NightlyReport(as_of=str(as_of.date()))
+    report.start(started)
     state = _read_state(bundle_dir)
 
     # -- the universe: confirmed events in the horizon ----------------------
@@ -1011,6 +1088,7 @@ def run_nightly(
                              "detail": f"nothing confirmed in {as_of.date()} → {horizon.date()} "
                                        "(the calendar may need a refresh)"})
 
+    report.mark("universe", started=started)
     # -- 1. refresh -----------------------------------------------------------
     if refresh and calendar_tickers:
         from engine.data.fetch import CredentialRotated, FetchError
@@ -1043,6 +1121,7 @@ def run_nightly(
     else:
         report.steps["refresh"] = {"skipped": not refresh or not calendar_tickers}
 
+    report.mark("refresh", started=started)
     # -- 2. validation battery — red stops the pipeline ----------------------
     # Validate what will actually be scored (falling back to the frontier set
     # when nothing is upcoming yet, so a blind store still gets checked).
@@ -1059,6 +1138,7 @@ def run_nightly(
         _write_flag_report(as_of, report.flags, report.steps)
         raise NightlyStop("validate", detail)
 
+    report.mark("validate", started=started)
     # -- 2b. Tier 3 and Tier 4 ------------------------------------------------
     # The panel is a deterministic function of Tier 2 and Tier 4 is a
     # deterministic function of the panel, so a refresh that moves Tier 2 and
@@ -1098,6 +1178,7 @@ def run_nightly(
         if change_flag:
             report.flags.append(change_flag)
 
+    report.mark("tiers", started=started)
     # -- 3. score -------------------------------------------------------------
     # The board is scored ATM-only; the strike ladder comes after, for the rows
     # the gate passed (see :func:`strike_ladder`).
@@ -1145,12 +1226,14 @@ def run_nightly(
     )
     board_scores = scores
 
+    report.mark("score", started=started)
     # -- 4. ledger, BEFORE rendering — the frozen record is the point --------
     # The ledger records the ATM board only: the ladder rows are EXTRAPOLATED
     # views of the same decision, and freezing them would inflate the
     # calibration sample with rows nobody would trade.
     report.steps["ledger"] = ledger.snapshot(as_of=as_of, scores=board_scores)
 
+    report.mark("ledger", started=started)
     # -- 4a. SETTLE what has already happened --------------------------------
     # The nightly wrote predictions for six nights and settled none of them,
     # because nothing ever called this. A frozen prediction with no outcome is
@@ -1171,6 +1254,7 @@ def run_nightly(
             "detail": f"outcomes not scored tonight — {type(exc).__name__}: {exc}",
         })
 
+    report.mark("settle", started=started)
     # -- 3b. the strike ladder, for the explorer -------------------------------
     ladder = strike_ladder(
         board_scores, scorer=engine, alt_strikes=alt_strikes, as_of=as_of
@@ -1190,6 +1274,7 @@ def run_nightly(
         "analog_entry_coverage": engine.analog_entry_coverage,
     }
 
+    report.mark("ladder", started=started)
     # -- 4b. honest backfill of missed nights --------------------------------
     late_as_ofs: list[str] = []
     skipped_closed: list[str] = []
@@ -1258,6 +1343,7 @@ def run_nightly(
     if calib_flag:
         report.flags.append(calib_flag)
 
+    report.mark("backfill", started=started)
     # -- 4c. model evidence — rebuilt only when a champion changed -----------
     # render copies data/features/model_evidence.json into the bundle verbatim,
     # and the file is keyed by the champions' artifact fingerprint. Nothing
@@ -1274,7 +1360,12 @@ def run_nightly(
         report.steps["model_evidence"] = {
             "generated_at": evidence.get("generated_at"),
             "models": sorted((evidence.get("models") or {}).keys()),
-            "elapsed_s": evidence.get("elapsed_s"),
+            # The artifact's OWN elapsed_s, which is how long whichever run
+            # last rebuilt it took — NOT this run. On a night the fingerprint
+            # matches, nothing is rebuilt and this number is someone else's:
+            # it read 1,636s in a 721s run on 2026-09-09. Named for what it is;
+            # tonight's cost is in `timeline`.
+            "cached_build_elapsed_s": evidence.get("elapsed_s"),
         }
     except Exception as exc:  # noqa: BLE001 — stale evidence beats a dark board
         report.steps["model_evidence"] = {
@@ -1287,6 +1378,7 @@ def run_nightly(
                        f"{type(exc).__name__}: {exc}")[:300],
         })
 
+    report.mark("model_evidence", started=started)
     # -- 5. render -------------------------------------------------------------
     meta = build_meta(
         scores,
@@ -1328,6 +1420,7 @@ def run_nightly(
     )
     report.steps["render"] = render_summary
 
+    report.mark("render", started=started)
     # -- 5b. selfcheck — any mismatch stops the publish -----------------------
     check = selfcheck(bundle_dir, scorer=engine)
     report.steps["selfcheck"] = check.as_dict()
@@ -1338,6 +1431,7 @@ def run_nightly(
         _write_flag_report(as_of, report.flags, report.steps)
         raise NightlyStop("selfcheck", check.detail)
 
+    report.mark("selfcheck", started=started)
     # -- 6. publish atomically -------------------------------------------------
     if publish:
         try:
@@ -1349,6 +1443,7 @@ def run_nightly(
     else:
         report.steps["publish"] = {"skipped": True}
 
+    report.mark("publish", started=started)
     # -- 7. persist flags + state ----------------------------------------------
     flag_path = _write_flag_report(as_of, report.flags, report.steps)
     report.steps["flags"] = {"path": str(flag_path), "count": len(report.flags)}
@@ -1359,12 +1454,14 @@ def run_nightly(
         "last_selfcheck": check.as_dict(),
     })
 
+    report.mark("flags", started=started)
     # -- 8. backup sync — failures flag, never block ----------------------------
     if backup:
         report.steps["backup"] = _backup_sync(report.flags)
     else:
         report.steps["backup"] = {"skipped": True}
 
+    report.mark("backup", started=started)
     report.elapsed_s = time.time() - started
     return report
 
@@ -1439,21 +1536,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     tickers = [t.strip().upper() for t in args.tickers.split(",")] if args.tickers else None
     try:
-        report = run_nightly(
-            args.as_of,
-            horizon_days=args.horizon,
-            alt_strikes=args.alt_strikes,
-            tickers=tickers,
-            bundle_dir=args.bundle,
-            target=args.target,
-            refresh=not args.no_refresh,
-            tiers=not args.no_tiers,
-            publish=not args.no_publish,
-            backup=args.backup,
-            backfill=not args.no_backfill,
-            chain_sessions=args.chain_sessions,
-            max_staleness_days=args.max_staleness,
-        )
+        # Around the CLI, not around `run_nightly`: this is where the two
+        # overlapping callers actually are — the cron and a hand-run, plus the
+        # desk app's `POST /api/refresh`, which shells out to exactly this
+        # entry point. Tests and other in-process callers use `run_nightly`
+        # directly and are deliberately unaffected.
+        with single_run_lock():
+            report = run_nightly(
+                args.as_of,
+                horizon_days=args.horizon,
+                alt_strikes=args.alt_strikes,
+                tickers=tickers,
+                bundle_dir=args.bundle,
+                target=args.target,
+                refresh=not args.no_refresh,
+                tiers=not args.no_tiers,
+                publish=not args.no_publish,
+                backup=args.backup,
+                backfill=not args.no_backfill,
+                chain_sessions=args.chain_sessions,
+                max_staleness_days=args.max_staleness,
+            )
     except NightlyStop as exc:
         print(f"NIGHTLY STOPPED — {exc}", file=sys.stderr)
         return 1
