@@ -1,0 +1,53 @@
+id: EXP-174
+title: "Full-feature residual correction for the size model"
+strategy: "STR-THRU"
+type: exploratory_model_comparison
+price_source: "Cached ORATS historical bid and ask chains normalized through engine.replay; realized moves are from the causal Tier-3 panel."
+hypothesis: >
+  EXP-173 only gave the residual head the base prediction and normalized
+  surface ratios. A stronger residual model that also sees every original
+  size-model feature may learn interactions the direct model leaves behind.
+  The residual head must remain causal and fall back to the direct prediction
+  when surface inputs are unavailable.
+primary_spec:
+  baseline: size_v1_4
+  challenger: size_v1_4_plus_full_feature_residual_head
+  target: "abs_move, absolute earnings move in percent of spot"
+  architecture: "equal-weight OLS plus MLP(64,32) direct model, followed by a shallow HistGradientBoosting residual head"
+  residual_features: "all incumbent size features + base prediction + six normalized surface ratios"
+  selection_book: "STR-THRU forecast-edge top-20 control, economic companion only"
+  modeled_fill_alpha: 0.5
+definitions:
+  residual: "abs_move minus the causal direct-model prediction"
+  surface_ratios: "Log ratios of pre-event IV, ex-earnings IV, realized volatility, ORATS implied move, and causal trailing move history."
+causal_anchor: "For year Y, the direct model and residual head use only rows dated before Y; all features are pre-event."
+data:
+  panel: data/features/panel.parquet
+  trades: Tier-2 engine.replay STR-THRU trades
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  accuracy_window: "Expanding annual walk-forward OOS 2013-2026"
+  same_rows: "Direct and residual-corrected predictions use identical incumbent-complete rows; incomplete surface rows use the direct prediction."
+evaluation:
+  primary_metrics:
+    - overall OOS MAE
+    - overall OOS RMSE and Pearson r
+    - per-year paired MAE differences
+    - top-minus-bottom forecast-decile realized-move spread
+  robustness:
+    - five fixed MLP and residual-head seeds
+    - paired annual MAE Wilcoxon
+    - explicit surface coverage and residual-head fallback rate
+primary_success:
+  - challenger improves MAE in at least 8 of 14 annual folds
+  - challenger median MAE delta is below zero across five seeds
+  - no accuracy claim uses rows unavailable to the direct baseline
+  - any promotion requires a new confirmatory registration
+falsification: >
+  Reject the full-feature residual head if it does not improve consistently
+  across years and seeds, or if gains require applying it without complete
+  live surface inputs.
+promotion_target: null
+preregistered_at: "2026-09-09T00:00:00+00:00"
