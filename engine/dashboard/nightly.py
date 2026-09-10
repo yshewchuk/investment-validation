@@ -1185,10 +1185,16 @@ def run_nightly(
     if scorer is None:
         # "Scorer()" defaults to a full daily_market load. That is roughly
         # 9m rows, while the board needs live state only for its current
-        # calendar names. The historical analog table can fall back to its
-        # event-level implied move when an old entry-date daily row is outside
-        # this live scoring slice. Keeping this context narrow makes the
+        # calendar names, so keeping this context narrow is what makes the
         # nightly scorer fit alongside the Tier-3 and Tier-4 rebuild outputs.
+        #
+        # This used to say the analog table "can fall back to its event-level
+        # implied move" for entry dates outside the slice. It no longer can:
+        # that fallback was reached by 98.48% of analog trades and silently
+        # made the board's analog block a function of how wide this context
+        # happened to be. `Scorer` now reads those quotes from the trades'
+        # own span, so narrowing here costs live state only — which is the
+        # only thing it was ever supposed to bound.
         from engine.features import FeatureContext
 
         context_tickers = set(scoring_tickers or calendar_tickers)
