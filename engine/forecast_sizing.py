@@ -98,7 +98,9 @@ def twin_p5_params(pred_abs_move: float) -> dict | None:
 #: rule (span the forecast) at its binding edge. EXP-137 measured the chosen
 #: widths clustering at 1.3-1.7x the forecast, so this is the conservative end
 #: of what the search picked, not the middle of it.
-SHORT_VOL_OUTER = {"CND-PS": 2.0, "BFLY-P": 1.0, "BFLY-P5": 3.0}
+SHORT_VOL_OUTER = {"CND-PS": 2.0, "BFLY-P": 1.0, "BFLY-P5": 3.0,
+                   #: RAMP7 reaches zero at +/-3a, CTR5 at +/-2a.
+                   "RAMP7": 3.0, "CTR5": 2.0}
 
 
 def short_vol_params(strategy: str):
@@ -128,6 +130,10 @@ FORECAST_SIZED: dict[str, Callable[[float], dict | None]] = {
     "CND-PS": short_vol_params("CND-PS"),
     "BFLY-P": short_vol_params("BFLY-P"),
     "BFLY-P5": short_vol_params("BFLY-P5"),
+    # Menu7-prime additions (2026-09-09), sized by the same registered width
+    # rule as the rest of the menu: outer strike on the predicted move.
+    "RAMP7": short_vol_params("RAMP7"),
+    "CTR5": short_vol_params("CTR5"),
 }
 
 

@@ -309,6 +309,11 @@ ENTRY_RULES: dict[str, EntryRule] = {
     "CND-PS": _short_vol_rule("CND-PS"),
     "BFLY-P": _short_vol_rule("BFLY-P"),
     "BFLY-P5": _short_vol_rule("BFLY-P5"),
+    # Menu7-prime additions (2026-09-09), gated on the same terms as the rest
+    # of the menu: EXP-167/169 priced every menu family through exactly this
+    # rule, so the chooser compares seven candidates judged identically.
+    "RAMP7": _short_vol_rule("RAMP7"),
+    "CTR5": _short_vol_rule("CTR5"),
 }
 
 

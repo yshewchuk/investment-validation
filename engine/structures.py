@@ -1351,6 +1351,60 @@ def put_butterfly_wide(width_moneyness: float | None = None, inner: int = 1,
         peak_multiple=float(inner + outer), **kw)
 
 
+def ramp7(**kw) -> Structure:
+    """RAMP7 — centre-peaked seven-strike put ladder, stepped ramps.
+
+    ``A SELL 2``, ``A +/- a SELL 1`` each, ``A +/- 2a BUY 1`` and
+    ``A +/- 3a BUY 1`` each: the EXP-133 family ``N7q-2_-1_1_1``, a
+    centre-peaked shape whose payoff steps up from the anchor to a flat
+    ``4a`` plateau at ``+/-a`` before falling to zero outside ``+/-3a``.
+
+    Sizing follows the menu convention (:func:`engine.forecast_sizing.
+    short_vol_params`): the outer strike lands on the predicted move, so
+    ``a = forecast / (3 . 100)`` of spot, EXP-133's registered width rule at
+    its binding edge. The training candidates for every family are per-event
+    best-of-family patterns; the live menu has always served one
+    forecast-sized shape per family instead, and RAMP7 is served no
+    differently than TWIN-P is.
+
+    On the menu since EXP-167 recovered it: precision 31.2% against the old
+    chooser's 16.4%-at-EXP-141 exclusion verdict, +0.644 realized when
+    funded, the best per-pick PnL in the menu (EXP-169: menu7-prime, 5/5
+    checks at the $10B floor). NOTCH7 — the other seven-strike family
+    EXP-141 dropped — stays excluded: 11.2% precision, unrankable.
+    """
+    return _symmetric_put_ladder(
+        "RAMP7", "Centre-peaked seven-strike put ladder: short two at the "
+        "anchor, short the first pair, long the outer two pairs, all puts, "
+        "one post-event expiry.",
+        -2, ((1, -1), (2, 1), (3, 1)), peak_multiple=4.0, **kw)
+
+
+def ctr5(**kw) -> Structure:
+    """CTR5 — the centre-five: doubled wings on a five-strike put ladder.
+
+    ``A SELL 2``, ``A +/- a SELL 1`` each, ``A +/- 2a BUY 2`` each: the
+    EXP-133 family ``N5q-2_-1_2``, peak ``3a`` at the anchor, zero outside
+    ``+/-2a``.
+
+    Sizing follows the menu convention (:func:`engine.forecast_sizing.
+    short_vol_params`): the outer strike lands on the predicted move, so
+    ``a = forecast / (2 . 100)`` of spot — the same registered width rule the
+    rest of the menu is served under.
+
+    On the menu since EXP-167: the most-picked structure when offered (30% of
+    chooser picks, 32.5% precision against a 12.5% chance baseline) and the
+    most frequently admissible family in the panel — offered on 77% of events.
+    EXP-141 had dropped it at 12.3% precision under the old argmax resolver;
+    the quantile-target head (EXP-164) is what made it rankable.
+    """
+    return _symmetric_put_ladder(
+        "CTR5", "Five-strike centre-peaked put ladder: short two at the "
+        "anchor, short the inner pair, doubled long the outer pair, all "
+        "puts, one post-event expiry.",
+        -2, ((1, -1), (2, 2)), peak_multiple=3.0, **kw)
+
+
 #: Factories keyed by strategy code, so specs can name a structure as a string.
 STRUCTURES = {
     "CAL-P": put_calendar,
@@ -1369,4 +1423,10 @@ STRUCTURES = {
     "CND-PS": put_condor_strike,
     "BFLY-P": put_butterfly,
     "BFLY-P5": put_butterfly_wide,
+    # Added 2026-09-09 for the menu7-prime chooser (dyn_sv_chooser_v1_1,
+    # EXP-167/169/170). Tracked under the same _short_vol_rule as the rest of
+    # the menu — the same terms every experiment in the arc priced these
+    # families through — so the chooser compares them with the incumbents.
+    "RAMP7": ramp7,
+    "CTR5": ctr5,
 }

@@ -173,8 +173,12 @@ class TestSizing:
         # tracking (EXP-133/137/141). They are sized like the twin peaks — the
         # forecast sets the spacing — but their payoff peaks at the ANCHOR, so
         # the outer strike goes on the predicted move rather than the peak.
+        # RAMP7 and CTR5 joined 2026-09-09 with the menu7-prime chooser
+        # (EXP-167/169/170) under the same registered width rule: RAMP7
+        # reaches zero at +/-3a, CTR5 at +/-2a.
         assert set(FORECAST_SIZED) == {"TWIN-P", "TWIN-P5",
-                                       "CND-PS", "BFLY-P", "BFLY-P5"}
+                                       "CND-PS", "BFLY-P", "BFLY-P5",
+                                       "RAMP7", "CTR5"}
         assert forecast_params("STR-THRU", 7.5) is None
 
     def test_the_parameter_is_one_the_factory_accepts(self):

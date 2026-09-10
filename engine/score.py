@@ -364,6 +364,12 @@ class ScoreResult:
     gate_score: float | None = None
     gate_threshold: float | None = None
     gate_pass: bool | None = None
+    #: The DYN-SV chooser champion's score for this menu candidate, or None
+    #: when the champion is not registered, or the row's feature vector is
+    #: incomplete — the same decline the training folds applied to rows with
+    #: missing features. Ranking among an event's candidates happens in
+    #: :func:`dynamic_short_vol`, never here.
+    chooser_score: float | None = None
 
     # structure geometry, read off the priced legs
     #: Mean relative spread across the entry legs. One leg's spread says little;
@@ -642,6 +648,11 @@ class Scorer:
             as_of_column="entry_date",
         )
         out["implied_at_entry"] = state["im"].to_numpy()
+        # A bounded live-scoring context intentionally holds daily rows only
+        # for the current calendar. Older analogs outside that slice retain
+        # the event-level implied move, the documented fallback used whenever
+        # an entry-date observation is unavailable.
+        out["implied_at_entry"] = out["implied_at_entry"].fillna(out["or_implied"])
         return bucket_frame(out)
 
     def model(self, role: str, strategy: str = "*"):
@@ -835,6 +846,12 @@ class Scorer:
         self._score_analogs(request, result, features)
         self._score_gate(request, result, features)
         self._compare_layers(result)
+        # The chooser score sits AFTER the gate so exp_pnl_sim, the analog
+        # stats and the flags are all populated — every input it reads is a
+        # signal some earlier layer already produced, and a second derivation
+        # would be a second answer to the same question.
+        if request.strategy in DYNAMIC_MENU:
+            self._score_chooser(request, result, features, chain_index)
         return result
 
     # -- pieces ------------------------------------------------------------
@@ -1830,7 +1847,28 @@ class Scorer:
             from engine.models.training import iv_crush
 
             try:
-                self._crush_frame = iv_crush.crush_frame()
+                # For a bounded live context, scope realized-crush history to
+                # the loaded tickers. Reloading all daily_market rows here
+                # would defeat the nightly memory bound.
+                daily = self.context.daily
+                if daily is None:
+                    self._crush_frame = iv_crush.crush_frame()
+                else:
+                    columns = [
+                        "ticker", "date", "iv10", "iv30",
+                        "exern_iv10", "exern_iv30",
+                    ]
+                    events = store.read_table(
+                        "earnings_events",
+                        columns=["ticker", "event_date", "session"],
+                    )
+                    events = events[
+                        events["ticker"].isin(set(daily["ticker"].unique()))
+                    ]
+                    self._crush_frame = iv_crush.crush_frame(
+                        events=events,
+                        daily=daily[columns],
+                    )
             except Exception:
                 self._crush_frame = pd.DataFrame(
                     columns=["ticker", "event_date", "pre_iv30", "crush_pct_iv30"])
@@ -2141,6 +2179,347 @@ class Scorer:
         if entry.threshold is not None:
             result.gate_pass = bool(result.gate_score >= entry.threshold)
 
+    # -- the DYN-SV chooser champion --------------------------------------
+
+    #: The regime columns the chooser consumes that the gates' market block
+    #: does not already carry. Read from the same two sources `_market_block`
+    #: reads (panel row for historical events, `live_features` for upcoming
+    #: ones) so training and serving agree by construction — the same
+    #: assertion `checks/phase1_replay.py` makes for the shared block.
+    _CHOOSER_REGIME_EXTRA = ("spy_vol5", "spy_vol60", "spy_vol252",
+                             "spy_vol20_rel252")
+
+    #: `n_admissible` in the training panel counts how many of EXP-133's
+    #: 12,600 enumerated patterns resolved, spanned the forecast, passed the
+    #: zero-floor, priceable and spread checks at that event. Two reasons it
+    #: cannot be served exactly: the count is over the pattern GRID, which
+    #: the live scorer must not carry, and — found while wiring this — the
+    #: build's `quoted` mask reads the EXIT-day chain, so the training value
+    #: partially encodes exit-day quote availability: mild future information
+    #: a decision-time feature cannot and should not reproduce.
+    #:
+    #: Served instead as the conditional median of the training distribution
+    #: given the live chain depth (:func:`_chain_depth` — two-sided-quoted
+    #: put strikes inside the admissible width window), calibrated on all
+    #: 2,853 menu events of 2025-2026 through the exact live function.
+    #: Spearman(depth, n_admissible) = +0.892. Measured 2026-09-09 on
+    #: 2,388 scoreable events: median imputation moves 9.0% of champion picks
+    #: from the true-feature picks, the depth map 5.1% — and part of that
+    #: 5.1% is the irreducible exit-quote component above.
+    _N_ADMISSIBLE_BY_DEPTH: tuple[tuple[float, float], ...] = (
+        (6.0, 5.0), (7.0, 11.0), (8.0, 16.0), (9.0, 26.0), (10.0, 31.5),
+        (11.0, 54.0), (12.0, 59.5), (13.0, 78.0), (15.0, 127.0),
+        (17.0, 159.5), (19.0, 299.0), (23.0, 485.0), (26.0, 718.0),
+        (33.0, 1572.5), (42.0, 3158.0), (49.0, 5635.0), (62.0, 6742.0),
+        (176.0, 5674.0),
+    )
+
+    def _score_chooser(self, request, result, features, chain_index) -> None:
+        """Score one menu candidate with the registered DYN-SV champion.
+
+        Decline — ``chooser_score`` stays None — when no champion is
+        registered (the resolver stays the ranking key for the whole board),
+        or when the row's 67-feature vector is incomplete. The training folds
+        dropped exactly such rows (``np.isfinite(...).all(1)`` in EXP-169's
+        ``generate``), so a live decline is the same filter, not a new one.
+        """
+        loaded = self.model("chooser", DYNAMIC_STRATEGY)
+        if loaded is None:
+            return
+        entry, artifact = loaded
+        try:
+            frame = self._chooser_frame(request, result, features,
+                                        artifact.features, chain_index)
+        except Exception as exc:  # a board must not die on one row
+            result.detail = (f"{result.detail}; chooser unavailable: {exc}"
+                             if result.detail
+                             else f"chooser unavailable: {exc}")
+            return
+        vector = [frame.get(name, float("nan")) for name in artifact.features]
+        if not all(np.isfinite(v) for v in vector):
+            absent = [name for name, v in zip(artifact.features, vector)
+                      if not np.isfinite(v)]
+            result.flag("CHOOSER_MISSING_FEATURES")
+            note = f"chooser {entry.id}: non-finite {absent}"
+            result.detail = f"{result.detail}; {note}" if result.detail else note
+            return
+        result.model_versions["chooser"] = entry.id
+        result.chooser_score = float(
+            artifact.model.predict(np.asarray([vector], dtype=float))[0]
+        )
+
+    def _chooser_frame(self, request, result, features, wanted, chain_index
+                       ) -> dict[str, float]:
+        """The champion's 67 features for one candidate row, by name.
+
+        Every value is read from a signal the scoring pass already produced —
+        the priced legs, the sizing forecast and its Tier-4 interval, the
+        analog set, the market block, the panel's event-history recursions —
+        or computed from them by the same formulas EXP-169 trained on
+        (:meth:`_chooser_schematics`, :func:`_chain_depth`). Nothing is
+        re-derived a second way.
+        """
+        nan = float("nan")
+        out: dict[str, float] = {}
+        strategy = request.strategy
+        values = features.iloc[0] if len(features) else None
+
+        def feat(name):
+            if values is None or name not in features.columns:
+                return nan
+            v = values[name]
+            return float(v) if pd.notna(v) else nan
+
+        # -- per-candidate: simulation, cost, analogs ------------------------
+        # The live `exp_pnl_sim` is the FULL-draw mean of one pool; the
+        # training panel split that pool into selection and gate halves so
+        # in-backtest selection could not contaminate its own evaluation.
+        # That split is anti-selection machinery, not a distinct signal, and
+        # the live board selects nothing on the simulation — the chooser
+        # ranks on its own score — so both columns are served the full-draw
+        # mean. Measured 2026-09-09: 1.0% of OOS argmaxes move under the
+        # duplicated value, against the true split, on 2,388 events.
+        sim = result.exp_pnl_sim
+        out["exp_pnl_sim"] = nan if sim is None else float(sim)
+        out["exp_pnl_sim_select"] = out["exp_pnl_sim"]
+        out["entry_cost_pct"] = feat("entry_cost_pct")
+        out["analog_mean"] = (nan if result.exp_pnl_analog is None
+                              else float(result.exp_pnl_analog))
+        out["analog_win_rate"] = (nan if result.win_analog is None
+                                  else float(result.win_analog))
+        buckets = result.analog_buckets or {}
+        out["analog_p10"] = float(buckets.get("p10", nan))
+        out["analog_p90"] = float(buckets.get("p90", nan))
+        out["analog_n"] = float(result.n_analogs)
+        for member in DYNAMIC_MENU:
+            out[f"is_{member.lower().replace('-', '_')}"] = (
+                1.0 if member == strategy else 0.0)
+
+        # -- geometry --------------------------------------------------------
+        # The forecast that sized the structure IS the training
+        # `pred_abs_move`, served through the same leak-safe Tier-4 fold.
+        m = (nan if result.forecast_abs_move is None
+             else float(result.forecast_abs_move))
+        s = nan
+        p10 = p90 = resid_n = nan
+        if np.isfinite(m):
+            try:
+                served = self._serving(
+                    tier4.serving_fold(result.event_date, result.as_of))
+                band = served.interval([m])
+                if np.isfinite(band[0][0]):
+                    p10, p90, s, resid_n = (float(band[0][0]),
+                                            float(band[1][0]),
+                                            float(band[2][0]),
+                                            float(band[3][0]))
+            except Exception:
+                pass
+        out["pred_abs_move"] = m
+        out["pred_abs_move_sd"] = s
+        out["pred_abs_move_p10"] = p10
+        out["pred_abs_move_p90"] = p90
+        out["pred_abs_move_resid_n"] = resid_n
+        legs = result.legs
+        anchor = float(result.strike) if legs and result.strike else nan
+        if legs:
+            strikes = [float(leg["strike"]) for leg in legs]
+            half = max(strikes) - anchor if np.isfinite(anchor) else nan
+        else:
+            half = nan
+        spot = float(result.spot) if result.spot is not None else nan
+        half_pct = 100.0 * half / spot if np.isfinite(half) and spot else nan
+        out["half_width_pct_spot"] = half_pct
+        out["width_over_forecast"] = (
+            half_pct / m if np.isfinite(half_pct) and np.isfinite(m) and m > 0
+            else nan)
+        out["anchor_over_spot"] = anchor / spot if np.isfinite(anchor) and spot else nan
+        out["n_legs"] = float(len(legs))
+        depth = self._live_chain_depth(request, result, chain_index, m, s)
+        out["n_admissible"] = self._n_admissible_for(depth)
+        out["dte_entry"] = (nan if result.dte_entry is None
+                            else float(result.dte_entry))
+
+        # -- event history and market state -----------------------------------
+        for name in ("mean_prior_abs_move", "ema12r_abs", "signed_streak",
+                     "mean_prior_or_implied", "mcap_log", "or_implied",
+                     "or_rvol30", "spy_ret21", "spy_ret63", "spy_ret252",
+                     "spy_dd252", "spy_vol20"):
+            out[name] = feat(name)
+        for name in self._CHOOSER_REGIME_EXTRA:
+            out[name] = feat(name)
+            if not np.isfinite(out[name]):
+                out[name] = self._regime_extra(request, result, name)
+
+        # -- execution --------------------------------------------------------
+        out["rel_spread"] = (nan if result.rel_spread is None
+                             else float(result.rel_spread))
+        # The training panel hard-codes False for every candidate row
+        # (EXP-133's `_emit`), so 0.0 is the only value the head has ever
+        # seen, not an approximation of it.
+        out["quote_repaired"] = 0.0
+        out["wide_market"] = 1.0 if "WIDE_MARKET" in result.flags else 0.0
+
+        # -- payoff schematics (EXP-165) --------------------------------------
+        out.update(self._chooser_schematics(result, m, s))
+
+        # -- the other Tier-4 producers ---------------------------------------
+        for produces, columns in (
+            ("pred_im_t1_d14",
+             ("pred_im_t1_d14", "pred_im_t1_d14_p10", "pred_im_t1_d14_p90")),
+            ("pred_runup_abs_move_d14",
+             ("pred_runup_abs_move_d14", "pred_runup_abs_move_d14_p10",
+              "pred_runup_abs_move_d14_p90", "pred_runup_abs_move_d14_sd")),
+        ):
+            for name in columns:
+                out[name] = nan
+            try:
+                served = self._serving(
+                    tier4.serving_fold(result.event_date, result.as_of),
+                    produces=produces)
+                if any(f not in features.columns for f in served.features):
+                    continue
+                pred = served.predict(features)
+                if len(pred) and np.isfinite(pred[0]):
+                    band = served.interval(pred)
+                    out[columns[0]] = float(pred[0])
+                    out[columns[1]] = float(band[0][0])
+                    out[columns[2]] = float(band[1][0])
+                    if len(columns) > 3:
+                        out[columns[3]] = float(band[2][0])
+            except Exception:
+                pass
+        # The training `tier4_pred_abs_move_sd` is the Tier-4 table's own
+        # `pred_abs_move_sd` column renamed — the same interval the sizing
+        # served above, one name, one value.
+        out["tier4_pred_abs_move_sd"] = s
+        out["tier4_forecast_edge"] = (
+            m - out["or_implied"]
+            if np.isfinite(m) and np.isfinite(out["or_implied"])
+            else nan)
+        return out
+
+    def _regime_extra(self, request, result, name) -> float:
+        """One regime column the gates' block does not carry, from the same
+        two sources `_market_block` reads it from."""
+        try:
+            row = self._panel_row(request, result)
+            if row is not None:
+                if name in row.index:
+                    v = row[name]
+                    return float(v) if pd.notna(v) else float("nan")
+                return float("nan")
+            live = self._live_values(request, result)
+            return float(live[name]) if name in live else float("nan")
+        except Exception:
+            return float("nan")
+
+    def _live_chain_depth(self, request, result, chain_index, m, s) -> float:
+        """Quoted put strikes at the entry expiry inside the width window.
+
+        The raw material `n_admissible` counted patterns from: a pattern was
+        admissible when its strikes listed inside the window the two width
+        rules allow — ``[spot.(1-(m+3s)/100), spot.(1+(m+3s)/100)]`` — and
+        its legs carried crossable quotes. NaN when there is no chain or no
+        finite forecast, which maps to the training median.
+        """
+        if (chain_index is None or result.entry_date is None
+                or result.expiry is None or not np.isfinite(m)
+                or not np.isfinite(s) or not result.spot):
+            return float("nan")
+        rows = chain_index.get(request.ticker, result.entry_date)
+        if rows is None or rows.empty:
+            return float("nan")
+        try:
+            return _chain_depth(
+                rows, pd.Timestamp(result.expiry), float(result.spot),
+                float(m), float(s))
+        except Exception:
+            return float("nan")
+
+    def _n_admissible_for(self, depth: float) -> float:
+        """The depth-conditional median of the training `n_admissible`."""
+        if not np.isfinite(depth):
+            return _N_ADMISSIBLE_MEDIAN
+        for floor, value in self._N_ADMISSIBLE_BY_DEPTH:
+            if depth < floor:
+                return value
+        return self._N_ADMISSIBLE_BY_DEPTH[-1][1]
+
+    def _chooser_schematics(self, result, m, s) -> dict[str, float]:
+        """The 12 payoff-schematic features (EXP-165), ported verbatim.
+
+        Breakeven rooms against the forecast move, max-profit ratios, and the
+        P&L at four down/four up move grid points — the same `_row_schematics`
+        EXP-169 trained on, computed from the priced entry legs.
+        """
+        nan = float("nan")
+        out = {name: nan for name in (*_CHOOSER_BREAKEVEN, *_CHOOSER_SHAPE)}
+        legs = result.legs
+        spot = float(result.spot) if result.spot is not None else nan
+        cost = (float(result.entry_cost)
+                if result.entry_cost is not None else nan)
+        if not legs or not np.isfinite(spot) or not np.isfinite(cost):
+            return out
+        entry = [(leg["right"], leg["side"], float(leg["qty"]),
+                  float(leg["strike"])) for leg in legs]
+        secured = float(sum(
+            qty * strike * 100.0
+            for _right, side, qty, strike in entry if side == "sell"))
+
+        def exit_cash(S):
+            total = 0.0
+            for right, side, qty, strike in entry:
+                sign = -1.0 if side == "sell" else 1.0
+                intr = (max(strike - S, 0.0) if right == "P"
+                        else max(S - strike, 0.0))
+                total += sign * qty * intr
+            return total
+
+        try:
+            strikes = sorted({strike for _r, _s, _q, strike in entry})
+            knots = np.unique(np.concatenate([np.array([0.0, spot]),
+                                             np.array(strikes)]))
+            pnl = np.array([exit_cash(k) for k in knots]) - cost
+            pnl_inf = -cost
+            vals = np.concatenate([pnl, [pnl_inf]])
+            pts = np.concatenate([knots, [np.inf]])
+            crossings = []
+            for i in range(len(vals) - 1):
+                if (vals[i] <= 0.0 < vals[i + 1]) or (vals[i + 1] <= 0.0 < vals[i]):
+                    if np.isfinite(pts[i + 1]) or np.isfinite(pts[i]):
+                        if vals[i + 1] != vals[i]:
+                            t = -vals[i] / (vals[i + 1] - vals[i])
+                            crossings.append(pts[i] + t * (pts[i + 1] - pts[i]))
+            max_profit = float(max(vals.max(), pnl_inf))
+            down_room = up_room = nan
+            if np.isfinite(m) and m > 0:
+                move = spot * float(m) / 100.0
+                below = [c for c in crossings if c < spot]
+                above = [c for c in crossings if c > spot]
+                if below:
+                    down_room = (spot - max(below)) / move
+                if above:
+                    up_room = (min(above) - spot) / move
+            sd = float(s) if np.isfinite(s) and s > 0 else 0.1 * (m or 0.0)
+            p = float(m) if np.isfinite(m) else 0.0
+            grid = [max(p - sd, 0.0), p, p + sd, p + 2 * sd]
+            out["breakeven_down_room_forecast"] = down_room
+            out["breakeven_up_room_forecast"] = up_room
+            out["max_profit_pct_spot"] = 100.0 * max_profit / spot
+            out["max_profit_over_cost"] = (
+                max_profit / cost if cost and cost > 0.05 else nan)
+            out["max_profit_over_secured"] = (
+                100.0 * max_profit / secured if secured > 0 else nan)
+            for side_name, sgn in (("down", -1.0), ("up", 1.0)):
+                for i, move_pct in enumerate(grid, start=1):
+                    frac = min(move_pct / 100.0, 0.9)
+                    S = spot * (1.0 + sgn * frac)
+                    out[f"shape_pnl_{side_name}_m{i}"] = (
+                        100.0 * (exit_cash(S) - cost) / spot)
+        except Exception:
+            pass
+        return out
+
     def _compare_layers(self, result) -> None:
         model, analog = result.exp_pnl_model, result.exp_pnl_analog
         if model is None or analog is None:
@@ -2351,25 +2730,72 @@ def score_calendar(
         if len(frame) else frame
 
 
-#: The families the dynamic chooser may offer, and why these five.
+#: The families the dynamic chooser may offer, and why these seven.
 #:
-#: EXP-141 chose them out of sample — ranked on 2018-2022 by how often each was
-#: the realized best, evaluated on 2023-2026 — and the training menu came back
-#: identical to the full-sample one. The three excluded families are coin flips
-#: inside an argmax: precision 12.6%, 12.3% and 16.4% against a 12.5% chance
-#: baseline, and dropping them was worth +0.37 of Sharpe and +35% of profit per
-#: dollar of collateral on the holdout, which is more than reshaping the move
-#: distribution (EXP-138) and recalibrating the expectation (EXP-139) produced
-#: combined.
+#: EXP-141 chose five out of sample — ranked on 2018-2022 by how often each was
+#: the realized best, evaluated on 2023-2026 — and dropped three families as
+#: coin flips inside an argmax: precision 12.6% (NOTCH7), 12.3% (CTR5) and
+#: 16.4% (RAMP7) against a 12.5% chance baseline.
 #:
-#: Read `guides/exp141_smaller_menu.md` before changing this list. The gain is
-#: economic, not skill — lift over chance FALLS as the menu shrinks, 1.98x to
-#: 1.59x — so adding a family back does not dilute an edge, it reintroduces a
-#: coin flip.
-DYNAMIC_MENU: tuple[str, ...] = ("TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5")
+#: EXP-167 revisited the two recoverable ones under the quantile-target head
+#: (EXP-164) and both came back rankable: RAMP7 at 31.2% precision with +0.644
+#: realized when funded — the best per-pick PnL in the menu — and CTR5 at
+#: 32.5%, the most-picked structure when offered and admissible on 77% of
+#: events. EXP-169 confirmed menu7-prime (5 incumbents + RAMP7 + CTR5) with
+#: 5/5 checks green at both market-cap floors, and EXP-170 promoted the
+#: chooser champion `dyn_sv_chooser_v1_1` on that menu. NOTCH7 stays
+#: excluded: 11.2% precision, still unrankable.
+#:
+#: The gain is economic, not skill — lift over chance FALLS as the menu
+#: shrinks — so what EXP-141 measured was which families an ARGMAX could not
+#: rank, not which families carry no information. The head that replaced the
+#: argmax (EXP-163/164: within-event-demeaned, quantile-normal target) reads
+#: the payoff schematic (EXP-165) and ranks what the argmax could not.
+DYNAMIC_MENU: tuple[str, ...] = (
+    "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5",
+)
 
 #: What the chooser is called on the board.
 DYNAMIC_STRATEGY = "DYN-SV"
+
+#: The chooser's payoff-schematic feature names (EXP-165), and the training
+#: median of the one grid-derived input that has no live counterpart.
+_CHOOSER_BREAKEVEN = (
+    "breakeven_down_room_forecast", "breakeven_up_room_forecast",
+    "max_profit_pct_spot", "max_profit_over_cost", "max_profit_over_secured",
+)
+_CHOOSER_SHAPE = tuple(
+    f"shape_pnl_{side}_m{i}" for side in ("down", "up") for i in (1, 2, 3, 4))
+_N_ADMISSIBLE_MEDIAN = 125.0
+
+
+def _chain_depth(rows: pd.DataFrame, expiry: pd.Timestamp, spot: float,
+                 m: float, s: float) -> float:
+    """Two-sided-quoted put strikes at ``expiry`` inside the width window.
+
+    The live counterpart of what the training ``n_admissible`` counted
+    patterns from: EXP-133 admitted a pattern whose strikes listed inside the
+    window the two width rules allow — ``[spot.(1-(m+3s)/100),
+    spot.(1+(m+3s)/100)]`` — and whose legs carried crossable quotes. The
+    pattern count itself needs the ~50,000-shape enumeration grid and cannot
+    honestly be recomputed from a priced chain, so the chooser serves the
+    depth-conditional median of the training distribution instead (see
+    :meth:`Scorer._n_admissible_for`); this count is the conditioning
+    observable, and it is computed by ONE function so the live value and the
+    calibration sample agree by construction.
+    """
+    puts = rows[(rows["right"] == "P") & (rows["expiry"] == expiry)]
+    if puts.empty:
+        return float("nan")
+    puts = puts.sort_values("strike")
+    puts = puts[~puts["strike"].duplicated()]
+    bid = pd.to_numeric(puts["bid"], errors="coerce").fillna(0.0).to_numpy()
+    ask = pd.to_numeric(puts["ask"], errors="coerce").fillna(0.0).to_numpy()
+    strikes = pd.to_numeric(puts["strike"], errors="coerce").to_numpy()
+    quoted = (bid > 0) & (ask > 0) & np.isfinite(strikes)
+    reach = (m + 3.0 * s) / 100.0
+    lo, hi = spot * (1.0 - reach), spot * (1.0 + reach)
+    return float(((strikes >= lo) & (strikes <= hi) & quoted).sum())
 
 #: What identifies one event among scored rows.
 #:
@@ -2383,23 +2809,35 @@ _EVENT_KEY: tuple[str, ...] = ("ticker", "event_date")
 
 def dynamic_short_vol(frame: pd.DataFrame,
                       menu: tuple[str, ...] = DYNAMIC_MENU) -> pd.DataFrame:
-    """One row per event: the menu structure with the highest expected P&L.
+    """One row per event: the menu structure the DYN-SV champion ranked best.
 
-    A meta-strategy over rows that have already been scored, rather than a
-    sixth structure. That is not a shortcut — a chooser has no leg list of its
+    A meta-strategy over rows that have already been scored, rather than an
+    eighth structure. That is not a shortcut — a chooser has no leg list of its
     own, and expressing it as a ``STRUCTURES`` entry would mean inventing one.
     What it emits is the winner's own row, relabelled, with ``chosen_strategy``
     and the runner-up recorded so the board shows WHICH structure it picked and
     by how much.
+
+    **The ranking key is the registered champion, not ``exp_pnl_sim``.** The
+    head promoted off EXP-170 (:data:`DYNAMIC_STRATEGY` role ``chooser``)
+    scores every candidate on the 67-feature frame the training folds used;
+    within an event, the highest ``chooser_score`` wins and the margin is the
+    score gap. An event where NO candidate carries a chooser score falls back
+    to the pre-champion resolver — rank by ``exp_pnl_sim`` — so the board
+    degrades to its old behaviour on exactly the rows the champion had no
+    opinion on, instead of going dark. A MIXED event (some candidates scored,
+    some not) is ranked on the scores that exist: the unscored candidates
+    could not compete in the champion's ordering anyway, and the training
+    folds dropped the same rows via their ``np.isfinite`` mask.
 
     **It does not re-gate.** The winner keeps its own entry-rule verdict, so a
     chooser row that says NO says it for the same reason the underlying
     structure did. Picking a structure and deciding to trade it are separate
     decisions and the board should not merge them.
 
-    Ties and missing simulations decline rather than default: an event where no
-    menu member produced an ``exp_pnl_sim`` yields no chooser row at all, which
-    reads as "no opinion" instead of an arbitrary pick.
+    Ties and missing simulations decline rather than default: an event where
+    no menu member produced either ranking key yields no chooser row at all,
+    which reads as "no opinion" instead of an arbitrary pick.
     """
     if frame.empty or "exp_pnl_sim" not in frame.columns:
         return frame.iloc[0:0]
@@ -2422,22 +2860,36 @@ def dynamic_short_vol(frame: pd.DataFrame,
             "which carries no event_id — that column exists in Tier-2 tables, "
             "not on the board.")
 
+    has_chooser = "chooser_score" in live.columns
     picks = []
     for _, block in live.groupby(list(_EVENT_KEY), sort=False, dropna=False):
-        ordered = block.sort_values("exp_pnl_sim", ascending=False)
-        best = ordered.iloc[0].to_dict()
-        runner = ordered.iloc[1] if len(ordered) > 1 else None
+        if has_chooser and block["chooser_score"].notna().any():
+            ordered = block.sort_values(
+                "chooser_score", ascending=False, kind="stable",
+                na_position="last")
+            key = "chooser_score"
+        else:
+            ordered = block.sort_values("exp_pnl_sim", ascending=False)
+            key = "exp_pnl_sim"
+        ranked = ordered[ordered[key].notna()]
+        if ranked.empty:
+            continue
+        best = ranked.iloc[0].to_dict()
+        runner = ranked.iloc[1] if len(ranked) > 1 else None
         best["chosen_strategy"] = best["strategy"]
         best["strategy"] = DYNAMIC_STRATEGY
         best["chosen_margin"] = (
             None if runner is None
-            else float(best["exp_pnl_sim"]) - float(runner["exp_pnl_sim"]))
-        best["menu_size"] = int(len(ordered))
-        detail = (f"chose {best['chosen_strategy']} of {len(ordered)} "
-                  f"(exp P&L {100*float(best['exp_pnl_sim']):+.1f}%")
+            else float(best[key]) - float(runner[key]))
+        best["menu_size"] = int(len(ranked))
+        detail = (f"chose {best['chosen_strategy']} of {len(ranked)} "
+                  f"on {key} ({float(best[key]):+.3f}")
         if runner is not None:
             detail += (f", next {runner['strategy']} "
-                       f"{100*float(runner['exp_pnl_sim']):+.1f}%")
+                       f"{float(runner[key]):+.3f}")
+        sim = best.get("exp_pnl_sim")
+        if sim is not None and np.isfinite(float(sim)):
+            detail += f", exp P&L {100*float(sim):+.1f}%"
         best["detail"] = f"{detail})" + (
             f"; {best['detail']}" if best.get("detail") else "")
         picks.append(best)

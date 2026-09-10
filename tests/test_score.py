@@ -1455,18 +1455,24 @@ class TestDynamicShortVol:
         assert out.iloc[0]["chosen_strategy"] == "CND-PS"
         assert out.iloc[0]["menu_size"] == 3
 
-    def test_the_menu_is_the_one_exp_141_chose_out_of_sample(self):
+    def test_the_menu_is_the_one_the_chooser_champion_was_trained_on(self):
         """Changing this list is a research decision, not a config tweak.
 
-        EXP-141 ranked families on 2018-2022 and evaluated on 2023-2026; the
-        training menu came back identical to the full-sample one. The excluded
-        three are coin flips — precision 12.6%, 12.3% and 16.4% against a 12.5%
-        chance baseline.
+        EXP-141 ranked families on 2018-2022, evaluated on 2023-2026, and
+        kept five: the excluded three were coin flips under an argmax —
+        precision 12.6% (NOTCH7), 12.3% (CTR5), 16.4% (RAMP7) against a
+        12.5% chance baseline. EXP-167 revisited the two recoverable ones
+        under the quantile-target head (EXP-164) and both came back rankable
+        — RAMP7 31.2% precision, +0.644 realized when funded; CTR5 32.5%,
+        the most-picked structure offered. EXP-169 confirmed menu7-prime
+        (5/5 checks at both mcap floors) and EXP-170 promoted the chooser
+        champion dyn_sv_chooser_v1_1 on exactly this menu. NOTCH7 stays
+        excluded: 11.2% precision, still unrankable.
         """
         from engine.score import DYNAMIC_MENU
 
         assert set(DYNAMIC_MENU) == {"TWIN-P", "TWIN-P5", "CND-PS",
-                                     "BFLY-P", "BFLY-P5"}
+                                     "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"}
 
     def test_it_carries_the_winners_own_gate_verdict(self):
         """Choosing a structure and deciding to trade it are separate."""
