@@ -251,11 +251,43 @@ port 8711 with the host firewall, container publish rules, or the configured
 access proxy. Set `DASHBOARD_HOST=127.0.0.1` to restore a local-only bind.
 
 **Do not leave the desk server warm while the nightly runs.** A `Scorer` is
-~1.4 GB held for the process's life, and two at once exceeded a 7 GB box: the
-nightly was OOM-killed with an empty log and exit 137, which looks exactly like
-nothing happening. Serving the board needs no scorer at all — the bundle is
-already on disk — so the warm-up is off unless `DASHBOARD_WARM=1`, and the
-first `/api/score` pays the two minutes instead.
+held for the process's life, and two at once exceeded a 7 GB box: the nightly
+was OOM-killed with an empty log and exit 137, which looks exactly like nothing
+happening. Serving the board needs no scorer at all — the bundle is already on
+disk — so the warm-up is off unless `DASHBOARD_WARM=1`, and the first
+`/api/score` pays the two minutes instead.
+
+**Running other work alongside the nightly.** Measured 2026-09-10 on the
+197-name board, building the scorer the nightly builds:
+
+| | before | after |
+|---|---|---|
+| `Scorer` build, peak RSS | 5.42 GB | **2.38 GB** |
+| held for the run | 3.62 GB | **1.31 GB** |
+
+What changed: the trades table's `legs` column is 853 MB of JSON read for three
+values (entry spot, entry DTE, exit spot), and it used to exist twice at once —
+the read, then the `provenance` filter's copy. It is now parsed a partition at
+a time and discarded, so it never forms a column, and the freed pages are
+returned to the OS rather than left in glibc's arenas (`malloc_trim`, worth
+0.54 GB here — RSS is what the OOM killer counts, so a free list that never
+shrinks is still charged to you).
+
+That leaves roughly 4 GB of headroom on this box during the build. The scoring
+phase then loads the board's option chains, which is the remaining large
+allocation and is amortised across every row — a bare `score()` with no
+`chain_index` pays ~0.9 GB per call instead, which is why the self-check's 20
+re-scores are spiky.
+
+Two nightlies still cannot run at once, and no longer try: the CLI takes an
+exclusive `single_run_lock` and a second invocation exits 1 naming the holder.
+For anything genuinely heavy running beside it, cap the job rather than hope:
+
+    python3 tools/bounded_run.py --max-rss-gb 5.5 -- \
+        python3 -m engine.dashboard.nightly
+
+An abort at the cap costs the night's compute, not its downloads or its ledger
+— see that file's header for exactly what survives.
 
 ## The nightly job
 

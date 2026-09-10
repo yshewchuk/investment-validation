@@ -575,6 +575,60 @@ class TestAnalogLayer:
         )
 
 
+class TestTradesWithoutTheLegsBlob:
+    """`legs` is 853MB of JSON — 76% of the trades table — read for exactly
+    three values. It is now parsed away at load, so it never forms a full
+    column: Scorer build peak fell 5.42GB to 2.38GB on the real store. What
+    must not change is the answer."""
+
+    def _derived(self, trades):
+        from engine.replay import legs_exit_spot, legs_spot_dte
+
+        out = trades.drop(columns=["legs"]).copy()
+        spot_entry, dte_entry = legs_spot_dte(trades)
+        out["spot_entry"], out["dte_entry"] = spot_entry, dte_entry
+        out["spot_exit"] = legs_exit_spot(trades)
+        return out
+
+    def test_pre_derived_trades_enrich_identically(
+        self, registry, trades, panel, daily, calendar
+    ):
+        """The loader's shape and the blob's shape must reach the same frame."""
+        context = FeatureContext(panel=panel, daily=daily, calendar=calendar)
+        kw = dict(registry=registry, context=context, snapshot="snap-test",
+                  analog_daily=daily)
+
+        with_blob = Scorer(trades=trades, **kw).trades
+        without = Scorer(trades=self._derived(trades), **kw).trades
+
+        assert "legs" not in with_blob.columns, "the blob must not survive enrich"
+        assert set(with_blob.columns) == set(without.columns)
+        pd.testing.assert_frame_equal(
+            with_blob, without[with_blob.columns], check_like=True
+        )
+
+    def test_scores_are_unchanged_by_the_loader_shape(
+        self, registry, trades, panel, daily, calendar, chain_index
+    ):
+        context = FeatureContext(panel=panel, daily=daily, calendar=calendar)
+        kw = dict(registry=registry, context=context, snapshot="snap-test",
+                  analog_daily=daily)
+        a = Scorer(trades=trades, **kw).score(request(), chain_index=chain_index)
+        b = Scorer(trades=self._derived(trades), **kw).score(
+            request(), chain_index=chain_index)
+        assert a.digest() == b.digest()
+
+    def test_trades_with_neither_blob_nor_derived_columns_are_refused(
+        self, registry, trades, panel, daily, calendar
+    ):
+        """Filling NaN here would silently unbucket every analog — the moneyness
+        band and the payoff fit both key off `spot_entry` — so it has to stop."""
+        context = FeatureContext(panel=panel, daily=daily, calendar=calendar)
+        with pytest.raises(ValueError, match="neither `legs` nor"):
+            Scorer(registry=registry, trades=trades.drop(columns=["legs"]),
+                   context=context, snapshot="snap-test", analog_daily=daily)
+
+
 class TestFlags:
     def test_atm_is_not_extrapolated(self, scorer, chain_index):
         result = scorer.score(request(), chain_index=chain_index)

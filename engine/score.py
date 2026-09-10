@@ -34,6 +34,7 @@ Three hard rules the guide sets, enforced here rather than documented:
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import time
@@ -545,6 +546,62 @@ class ScoreResult:
 _UNSET = object()
 
 
+def _release_free_pages() -> None:
+    """Hand memory Python has finished with back to the OS.
+
+    glibc keeps freed heap in its own arenas rather than returning it, so a
+    build that allocates a gigabyte and drops it stays a gigabyte of RSS —
+    and RSS is what the OOM killer counts, so the pages stay charged against
+    this process even though nothing is using them. Measured here: 0.54GB
+    returned by one call after a Scorer build. Best-effort by design; a
+    platform without ``malloc_trim`` is slightly fatter, not broken.
+    """
+    import ctypes
+
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _load_trades_without_legs() -> pd.DataFrame:
+    """The trades table, with the legs blob already reduced to what it answers.
+
+    ``legs`` is 853MB of JSON text — three quarters of this table — and it is
+    read for exactly three values: entry spot, entry DTE and exit spot. Loading
+    it as a column meant it existed twice at once (the read, then the
+    ``provenance`` filter's copy), which is most of the difference between a
+    Scorer that leaves room on this box and one that does not.
+
+    So the blob is streamed a partition at a time and discarded as it is
+    parsed, leaving three float columns. Partition order and row order are the
+    same as :func:`store.read_table` — that function is a concat of these same
+    partitions — so the frame is identical to the old one but for the missing
+    column and the three added ones.
+    """
+    slim = [c for c in store.empty_frame("trades").columns if c != "legs"]
+    frames = []
+    for _, part in store.iter_table("trades", columns=[*slim, "legs"]):
+        spot_entry, dte_entry = legs_spot_dte(part)
+        spot_exit = legs_exit_spot(part)
+        block = part.drop(columns=["legs"])
+        block["spot_entry"], block["dte_entry"] = spot_entry, dte_entry
+        block["spot_exit"] = spot_exit
+        frames.append(block)
+        del part, spot_entry, dte_entry, spot_exit
+    if not frames:
+        return store.empty_frame("trades").drop(columns=["legs"])
+    out = pd.concat(frames, ignore_index=True)
+    del frames
+    _release_free_pages()
+    # `read_table` coerces after its concat; do the same so dtypes do not
+    # depend on which loader ran. `allow_extra` because the three derived
+    # columns are not in the trades schema — without it `coerce` drops exactly
+    # the values this function exists to produce.
+    return store.coerce(out, "trades", only=slim, allow_extra=True)
+
+
 class Scorer:
     """Holds the loaded models, trades, and data context for a scoring run.
 
@@ -590,9 +647,11 @@ class Scorer:
         self.calendar = self.context.calendar or trading_calendar()
 
         if trades is None:
-            trades = store.read_table("trades")
+            trades = _load_trades_without_legs()
         engine_rows = trades[trades["provenance"].astype(str) == "engine.replay"]
         self.trades = self._enrich(engine_rows)
+        del trades, engine_rows
+        _release_free_pages()
         self.matcher = AnalogMatcher(self.trades, snapshot=self.snapshot)
 
         self._models: dict[tuple[str, str], object] = {}
@@ -633,8 +692,37 @@ class Scorer:
         """
         if trades.empty:
             return trades
-        out = trades.copy()
+        # Reconstructed from the stored legs rather than recomputed, so the
+        # analog buckets describe the trade that was actually priced.
+        #
+        # Read BEFORE the panel merge, and the blob dropped as soon as it has
+        # answered, because `legs` is 853MB of JSON text — 76% of this frame —
+        # and every copy below used to carry it: the `.copy()`, the merge, and
+        # `bucket_frame`'s own copy, which is most of the ~1.8GB spike a Scorer
+        # build put on a 7GB box. Nothing downstream reads it (the payoff fit,
+        # the matcher, `bucket_frame` and the renderer all take the derived
+        # columns), so holding it for the process's life bought nothing.
+        #
+        # The merge preserves row count — `(ticker, event_date)` is unique in
+        # the panel — so deriving before it rather than after is the same
+        # answer on the same rows.
+        out = trades.drop(columns=["legs"], errors="ignore")
         out["event_date"] = pd.to_datetime(out["event_date"])
+        if "legs" in trades.columns:
+            # An injected frame (tests, `gate_forecast_analog`) still carries
+            # the blob. Read it here and let it go with `out`.
+            out["spot_entry"], out["dte_entry"] = legs_spot_dte(trades)
+            out["spot_exit"] = legs_exit_spot(trades)
+        elif "spot_entry" not in out.columns:
+            # No blob and nothing derived from one. Parsing is the ONLY way to
+            # these three, so filling NaN here would silently unbucket every
+            # analog rather than fail; say so instead.
+            raise ValueError(
+                "trades carry neither `legs` nor the columns derived from it "
+                "(spot_entry, dte_entry, spot_exit) — load them with "
+                "`_load_trades_without_legs` or pass a frame that has `legs`"
+            )
+
         panel = self.context.panel
         columns = [
             "ticker", "date", "mcap_usd", "or_implied", "mean_prior_or_implied",
@@ -646,10 +734,6 @@ class Scorer:
             on=["ticker", "event_date"],
             how="left",
         )
-        # Reconstructed from the stored legs rather than recomputed, so the
-        # analog buckets describe the trade that was actually priced.
-        out["spot_entry"], out["dte_entry"] = legs_spot_dte(out)
-        out["spot_exit"] = legs_exit_spot(out)
         out["im_t1"] = out["or_implied"]
 
         # The implied-move bucket has to be measured at the *entry* date on both
