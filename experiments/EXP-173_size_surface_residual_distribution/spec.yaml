@@ -1,0 +1,73 @@
+id: EXP-173
+title: "Surface-conditioned residual mean and uncertainty parameters"
+strategy: "STR-THRU"
+type: exploratory_model_comparison
+price_source: "Cached ORATS historical bid and ask chains normalized through engine.replay; realized moves are from the causal Tier-3 panel."
+hypothesis: >
+  The incumbent size model predicts the conditional mean of the absolute
+  earnings move but its uncertainty layer is a residual pool split only by
+  point-prediction decile. Normalized option-surface dislocations may explain
+  both signed forecast error and residual scale. A causal residual mean head,
+  a causal surface-conditioned scale head, or their combination should improve
+  out-of-sample point accuracy and/or interval calibration without losing
+  live coverage.
+primary_spec:
+  baseline: size_v1_4_with_prediction_decile_residual_intervals
+  challenger: size_v1_4_surface_mean_plus_surface_scale
+  target: "abs_move, absolute earnings move in percent of spot"
+  architecture: "unchanged equal-weight OLS plus MLP(64,32) base; shallow HistGradientBoosting residual heads"
+  surface_features:
+    - surf_pre_iv10_over_iv30
+    - surf_pre_exern10_over_exern30
+    - surf_exern30_over_iv30
+    - surf_iv30_over_rvol30
+    - surf_implied_over_history
+    - surf_pre_iv10_over_exern10
+  selection_book: "STR-THRU forecast-edge top-20 control, economic companion only"
+  modeled_fill_alpha: 0.5
+arms:
+  - name: surface_mean
+    point: "base point plus surface-conditioned residual mean"
+    interval: "incumbent prediction-decile residual interval"
+  - name: surface_scale
+    point: "incumbent base point"
+    interval: "surface-conditioned residual scale with causal standardized residual quantiles"
+  - name: surface_mean_plus_scale
+    point: "surface-conditioned residual mean"
+    interval: "surface-conditioned residual scale with causal standardized residual quantiles"
+definitions:
+  surface_ratios: "Log ratios of pre-event IV levels, ex-earnings IV, realized volatility, ORATS implied move, and the causal trailing historical absolute move."
+  surface_mean: "HistGradientBoostingRegressor fit only on prior-year OOS residuals; missing surface rows fall back to the incumbent point forecast."
+  surface_scale: "HistGradientBoostingRegressor fit only on prior-year OOS log absolute residuals; interval quantiles are estimated from prior OOS standardized residuals."
+causal_anchor: "Every base prediction, residual head, scale estimate, and interval quantile for year Y uses only rows dated before Y; surface inputs are pre-event fields."
+data:
+  panel: data/features/panel.parquet
+  trades: Tier-2 engine.replay STR-THRU trades
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  accuracy_window: "Expanding annual walk-forward OOS 2013-2026"
+  same_rows: "Base and all surface arms use the same rows with complete incumbent features; surface heads fall back to the base for incomplete surface rows."
+evaluation:
+  primary_metrics:
+    - overall OOS MAE and RMSE
+    - annual paired MAE differences
+    - 80% interval coverage and width
+    - standardized residual calibration
+    - top-minus-bottom forecast-decile realized-move spread
+  robustness:
+    - five fixed MLP and residual-head seeds
+    - paired annual MAE Wilcoxon
+    - explicit surface coverage and fallback rate
+primary_success:
+  - combined arm improves point MAE in at least 8 of 14 annual folds or improves 80% interval coverage toward 0.80 without widening by more than 10%
+  - combined arm median MAE delta is below zero across five seeds or interval calibration improves on the incumbent
+  - no accuracy claim uses rows unavailable to the incumbent baseline
+  - any promotion requires a new confirmatory registration
+falsification: >
+  Reject the surface block for promotion if gains depend on changed rows,
+  disappear across seeds, worsen both point accuracy and interval calibration,
+  or require applying a surface head to missing live inputs.
+promotion_target: null
+preregistered_at: "2026-09-09T00:00:00+00:00"

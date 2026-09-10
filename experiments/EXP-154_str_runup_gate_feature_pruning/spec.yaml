@@ -1,0 +1,141 @@
+id: EXP-154
+title: "STR-RUNUP gate feature pruning noise ablation"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay,
+  inherited unchanged from the frozen EXP-150 signal dataset and the Tier-2
+  replayed STR-RUNUP trades. Every arm trades the identical T-14 structure at
+  every stored fill alpha. The headline uses midpoint fills and zero
+  commissions. Fills are assumptions, not achieved executions.
+hypothesis: >
+  The registered 42-feature STR-RUNUP gate carries features that cannot hold
+  event-level signal or that duplicate other columns: the six signed-direction
+  history terms (mean_prior_move, the four emaN_prior_move, signed_streak —
+  direction is unpredictable at the event level by the program's own
+  measurement) and the twelve lag-difference copies of daily-state levels
+  (im, iv10, iv30, exern_iv30 at d1/d5/d10, whose information the levels
+  already carry). Pruning both groups improves out-of-sample ranking accuracy
+  (score Spearman) and top-20-percent gated mean return and trade Sharpe over
+  the unchanged full-feature gate; per-fold permutation-importance arms test
+  whether further data-driven trimming helps or hurts.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: nosigned_nolags_top20
+  score_family: nosigned_nolags
+  top_fraction: 0.20
+  gate_rule: >
+    In each annual fold, fit the arm's gate only on earlier years, choose the
+    stated top-percent quantile from that folds training predictions, then
+    apply it unchanged to the held-out year. The full-42-feature gate at the
+    same fractions is the matched control; the registered incumbent threshold
+    is the operational benchmark.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+family_definitions:
+  full42: >
+    The registered 42-feature gate unchanged: 14 event-history features, 13
+    daily-state levels, 12 lag differences, days_to_print, entry_cost_pct,
+    dte_entry. Control family.
+  nosigned: >
+    Full 42 minus the six signed-direction history terms (mean_prior_move,
+    ema2_prior_move, ema4_prior_move, ema8_prior_move, ema12_prior_move,
+    signed_streak), leaving 36. The absolute-move history block (which carries
+    the magnitude information) is untouched.
+  nolags: >
+    Full 42 minus the twelve lag-difference columns (im_d1, im_d5, im_d10,
+    iv10_d1, iv10_d5, iv10_d10, iv30_d1, iv30_d5, iv30_d10, exern_iv30_d1,
+    exern_iv30_d5, exern_iv30_d10), leaving 30. The daily-state levels are
+    untouched.
+  nosigned_nolags: >
+    Both removals at once, leaving 24 features. The pre-registered primary
+    family.
+  perm_drop10: >
+    Per fold, drop the ten features with the lowest within-training permutation
+    importance (ticker-group holdout inside the training years only, mean
+    absolute error scoring, five repeats), leaving 32. The pruned set may
+    differ each fold and is recorded in the fold diagnostics.
+  perm_top15: >
+    Per fold, keep only the fifteen highest within-training permutation
+    importance features under the same procedure. The kept set may differ each
+    fold and is recorded in the fold diagnostics.
+
+selection_grid:
+  score_families: [full42, nosigned, nolags, nosigned_nolags, perm_drop10, perm_top15]
+  annual_training_only_top_fractions: [0.10, 0.20]
+  operational_benchmark: incumbent_registered_threshold
+  duplicate_exclusion: >
+    The operational incumbent shares the full42 score, so it is retained only
+    at its registered fixed threshold while the full42 family is swept at both
+    fractions.
+
+controlled_rerun:
+  unchanged_from_exp153:
+    - "corrected-calendar T-14 trade and market-cap-at-least-one-billion universe"
+    - "frozen EXP-150 signal dataset and the base 42-feature gate fit settings"
+    - "annual outer folds, five-point fill sensitivity, sizing and stress battery"
+    - "midpoint headline and zero commissions"
+  changed_from_exp153: >
+    The evidence families are replaced by six feature-subset families, each
+    swept at two annual training-only selection fractions.
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on causally available feature-complete events; evaluated events require
+    market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years for every cell"
+    - "out-of-sample score Spearman and top-minus-bottom decile spread per family (the accuracy metric)"
+    - "five-point fill sensitivity and breakeven alpha for every cell"
+    - "Monte Carlo and stress battery for every cell"
+    - "selected count and return after excluding entry relative spreads above 50 percent"
+    - "same-fraction earnings-week bootstrap of the primary family versus full42"
+    - "per-fold training rows, scoreable candidates, cutoffs and perm-selected features"
+  primary_success:
+    - "primary out-of-sample score Spearman exceeds full42_top20 (accuracy)"
+    - "primary mean, CAGR and trade Sharpe exceed full42_top20"
+    - "primary positive-year share is no worse than full42_top20"
+    - "primary breakeven alpha is no worse than full42_top20"
+    - "primary mean exceeds full42_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for the primary minus full42_top20 policy difference excludes zero above"
+  multiplicity: >
+    This is a twelve-cell exploratory grid plus a fixed operational benchmark.
+    The predeclared primary is nosigned_nolags at top-20 percent. No grid
+    result may change registry state; a separately pre-registered confirmation
+    is required.
+
+falsification: >
+  Feature pruning does not help this gate if nosigned_nolags_top20 fails to
+  beat full42_top20 on ranking accuracy and on gated mean and Sharpe, if the
+  bootstrap interval includes zero, or if no pruned cell shows a stable
+  execution-plausible advantage over its matched full42 cell worth confirming.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  move_aware_signals: "EXP-150 dataset_with_move_aware_signals.parquet"
+  source_experiments: [EXP-144, EXP-148, EXP-150, EXP-151, EXP-152, EXP-153]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Annual score fits and thresholds are computed before generic evaluation.
+    The evaluator receives precomputed decisions in every OOS year.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-08T01:57:50+00:00"

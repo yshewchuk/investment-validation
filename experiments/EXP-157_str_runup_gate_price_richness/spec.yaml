@@ -1,0 +1,139 @@
+id: EXP-157
+title: "STR-RUNUP gate price richness augmentation"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay,
+  inherited unchanged from the frozen EXP-150 signal dataset and the Tier-2
+  replayed STR-RUNUP trades. Market state is computed from the cached SPY
+  daily series as-of each trades entry date; price-richness measures are
+  derived from columns already on the frozen dataset (iv30, rvol30, im,
+  exern_iv30, dte_entry_leg, entry_cost_pct). Every arm trades the identical
+  T-14 structure at every stored fill alpha. The headline uses midpoint fills
+  and zero commissions. Fills are assumptions, not achieved executions.
+hypothesis: >
+  The gate's only price input is the entry premium level (entry_cost_pct).
+  Two relative price measures carry signal the level cannot express: the
+  variance risk premium (iv30 divided by rvol30), whose exploratory Spearman
+  with realized return is the strongest univariate in the price family, and
+  the surface richness residual (entry premium minus the premium implied by
+  the name's own implied move, DTE and ex-earnings IV). Adding both to the
+  market-state gate of EXP-155 improves top-20-percent gated mean return and
+  trade Sharpe over the unchanged market5 control, with the cheap half of the
+  control's own selections historically outperforming the rich half by 5.6
+  percentage points per trade.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: market5_both_top20
+  score_family: market5_both
+  top_fraction: 0.20
+  gate_rule: >
+    In each annual fold, fit the arm's gate only on earlier years, choose the
+    stated top-percent quantile from that folds training predictions, then
+    apply it unchanged to the held-out year. The market5 gate of EXP-155 at
+    the same fractions is the matched control; the registered incumbent
+    threshold is the operational benchmark.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+feature_definitions:
+  vrp: >
+    iv30 divided by rvol30, both read as-of the entry (decision) close and
+    already present as gate inputs in level form. The ratio is new: trees
+    cannot divide, and the ratio separates names whose implied vol runs rich
+    to realized from names where realized already caught up.
+  rich_resid: >
+    Entry premium (percent of spot) minus the premium implied by the name's
+    own surface, fitted per fold by ordinary least squares on earlier years
+    only: intercept + w1*im + w2*sqrt(dte_entry_leg)*exern_iv30. The
+    residual is positive when the straddle costs more than its own surface
+    implies, negative when it is cheap. Test-year residuals use only the
+    folds training coefficients; no test-year information enters the fit.
+  families:
+    market5: >
+      The EXP-155 market-augmented gate unchanged (42 + 5 market-state
+      columns). Control family.
+    market5_vrp: "market5 plus vrp (48 features)."
+    market5_rich: "market5 plus rich_resid (48 features)."
+    market5_both: "market5 plus vrp and rich_resid (49 features). Primary family."
+
+selection_grid:
+  score_families: [market5, market5_vrp, market5_rich, market5_both]
+  annual_training_only_top_fractions: [0.10, 0.20]
+  operational_benchmark: incumbent_registered_threshold
+  duplicate_exclusion: >
+    The operational incumbent shares the full42 score that market5 embeds,
+    so it is retained only at its registered fixed threshold while the
+    market5 family is swept at both fractions.
+
+controlled_rerun:
+  unchanged_from_exp155:
+    - "corrected-calendar T-14 trade and market-cap-at-least-one-billion universe"
+    - "frozen EXP-150 signal dataset and the base 42-feature gate fit settings"
+    - "market-state columns computed identically from the cached SPY series"
+    - "annual outer folds, five-point fill sensitivity, sizing and stress battery"
+    - "midpoint headline and zero commissions"
+  changed_from_exp155: >
+    Two price-richness features are added to the score families; the primary
+    comparison is against the market5 control at matched fractions.
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on causally available feature-complete events; evaluated events require
+    market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years for every cell"
+    - "out-of-sample score Spearman and top-minus-bottom decile spread per family"
+    - "five-point fill sensitivity and breakeven alpha for every cell"
+    - "Monte Carlo and stress battery for every cell"
+    - "selected count and return after excluding entry relative spreads above 50 percent"
+    - "same-fraction earnings-week bootstrap of the primary family versus market5"
+    - "per-fold training rows, scoreable candidates, cutoffs and surface coefficients"
+    - "selected-trade mean by entry-premium half (cheap versus rich) per family"
+  primary_success:
+    - "primary mean, CAGR and trade Sharpe exceed market5_top20"
+    - "primary positive-year share is no worse than market5_top20"
+    - "primary breakeven alpha is no worse than market5_top20"
+    - "primary mean exceeds market5_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for the primary minus market5_top20 policy difference excludes zero above"
+  multiplicity: >
+    This is an eight-cell exploratory grid plus a fixed operational benchmark.
+    The predeclared primary is market5_both at top-20 percent. No grid result
+    may change registry state; a separately pre-registered confirmation is
+    required.
+
+falsification: >
+  Price richness does not improve this gate if market5_both_top20 fails to
+  beat market5_top20 on gated mean and Sharpe, if the bootstrap interval
+  includes zero, or if no price-augmented cell shows a stable
+  execution-plausible advantage over its matched control worth confirming.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  move_aware_signals: "EXP-150 dataset_with_move_aware_signals.parquet"
+  market_state: "cached SPY daily closes (engine GSPC series)"
+  source_experiments: [EXP-144, EXP-148, EXP-150, EXP-151, EXP-152, EXP-153, EXP-154, EXP-155]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Annual score fits and thresholds are computed before generic evaluation.
+    The evaluator receives precomputed decisions in every OOS year.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-08T21:51:16+00:00"

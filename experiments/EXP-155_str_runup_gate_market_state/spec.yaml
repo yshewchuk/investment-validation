@@ -1,0 +1,129 @@
+id: EXP-155
+title: "STR-RUNUP gate market-state overlay"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay,
+  inherited unchanged from the frozen EXP-150 signal dataset and the Tier-2
+  replayed STR-RUNUP trades. Market state is computed from the cached SPY
+  daily series as-of each trades entry date. Every arm trades the identical
+  T-14 structure at every stored fill alpha. The headline uses midpoint fills
+  and zero commissions. Fills are assumptions, not achieved executions.
+hypothesis: >
+  The registered 42-feature STR-RUNUP gate contains no market-level state:
+  the per-name event-history and daily-surface features cannot express the
+  regime the book is exposed to. Adding five SPY state features as-of the
+  entry date (trailing 21, 63 and 252-day returns, 20-day realized
+  volatility, and the 252-day drawdown) lets the gate concentrate selection
+  in calm pre-expansion regimes, where the exploratory regime slice showed
+  the gated book earns most. The market-augmented gate at top-20 percent
+  beats the unchanged full-feature gate on gated mean return and trade
+  Sharpe, and a market-only control separates regime timing from selection.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: market5_top20
+  score_family: market5
+  top_fraction: 0.20
+  gate_rule: >
+    In each annual fold, fit the arm's gate only on earlier years, choose the
+    stated top-percent quantile from that folds training predictions, then
+    apply it unchanged to the held-out year. The full-42-feature gate at the
+    same fractions is the matched control; the registered incumbent threshold
+    is the operational benchmark.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+feature_definitions:
+  market_state: >
+    Five columns computed from the cached SPY daily close series, read
+    on-or-before each trades entry date (the same as-of convention as the
+    incumbent gates daily state): spy_ret21, spy_ret63, spy_ret252 are
+    trailing returns over 21, 63 and 252 trading days; spy_vol20 is the
+    annualized 20-day realized volatility of SPY daily returns; spy_dd252 is
+    the fractional drawdown of SPY close from its trailing 252-day maximum.
+    No per-event or post-entry information enters these columns.
+  families:
+    full42: "The registered 42-feature gate unchanged. Control."
+    market5: "Full 42 plus all five market-state columns (47 features). Primary family."
+    market2: "Full 42 plus spy_ret21 and spy_vol20 only (44 features)."
+    market_only: "The five market-state columns alone (5 features). Regime-timing control."
+
+selection_grid:
+  score_families: [full42, market5, market2, market_only]
+  annual_training_only_top_fractions: [0.10, 0.20]
+  operational_benchmark: incumbent_registered_threshold
+  duplicate_exclusion: >
+    The operational incumbent shares the full42 score, so it is retained only
+    at its registered fixed threshold while the full42 family is swept at both
+    fractions.
+
+controlled_rerun:
+  unchanged_from_exp154:
+    - "corrected-calendar T-14 trade and market-cap-at-least-one-billion universe"
+    - "frozen EXP-150 signal dataset and the base 42-feature gate fit settings"
+    - "annual outer folds, five-point fill sensitivity, sizing and stress battery"
+    - "midpoint headline and zero commissions"
+  changed_from_exp154: >
+    The feature-subset families are replaced by market-state augmentation
+    families, each swept at two annual training-only selection fractions.
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on causally available feature-complete events; evaluated events require
+    market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years for every cell"
+    - "out-of-sample score Spearman and top-minus-bottom decile spread per family"
+    - "five-point fill sensitivity and breakeven alpha for every cell"
+    - "Monte Carlo and stress battery for every cell"
+    - "selected count and return after excluding entry relative spreads above 50 percent"
+    - "same-fraction earnings-week bootstrap of the primary family versus full42"
+    - "per-fold training rows, scoreable candidates and cutoffs"
+    - "selected-trade density and per-trade mean by trailing SPY-vol quartile per family"
+  primary_success:
+    - "primary mean, CAGR and trade Sharpe exceed full42_top20"
+    - "primary positive-year share is no worse than full42_top20"
+    - "primary breakeven alpha is no worse than full42_top20"
+    - "primary mean exceeds full42_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for the primary minus full42_top20 policy difference excludes zero above"
+  multiplicity: >
+    This is an eight-cell exploratory grid plus a fixed operational benchmark.
+    The predeclared primary is market5 at top-20 percent. No grid result may
+    change registry state; a separately pre-registered confirmation is
+    required.
+
+falsification: >
+  Market state does not improve this gate if market5_top20 fails to beat
+  full42_top20 on gated mean and Sharpe, if the bootstrap interval includes
+  zero, or if no market-augmented cell shows a stable execution-plausible
+  advantage over its matched control worth confirming.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  move_aware_signals: "EXP-150 dataset_with_move_aware_signals.parquet"
+  market_state: "cached SPY daily closes (engine GSPC series)"
+  source_experiments: [EXP-144, EXP-148, EXP-150, EXP-151, EXP-152, EXP-153, EXP-154]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Annual score fits and thresholds are computed before generic evaluation.
+    The evaluator receives precomputed decisions in every OOS year.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-08T02:53:07+00:00"

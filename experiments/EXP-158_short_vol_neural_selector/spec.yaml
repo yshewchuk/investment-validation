@@ -1,0 +1,95 @@
+id: EXP-158
+title: "Short-vol neural selector with PnL, analogs, and feature categories"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  Frozen real-quote candidate grid from EXP-133. Candidate entry and exit values
+  are replayed from cached ORATS bid and ask chains at the five stored fill
+  alphas; no new vendor calls are made. The headline is midpoint fills.
+hypothesis: >
+  A scaled MLP selector can improve short-vol trade selection when its core
+  inputs are the causal simulated expected PnL and causal realized-trade analog
+  statistics. Candidate geometry, prior earnings history, broad SPY regime,
+  and quote quality may each add conditional information that an arithmetic PnL
+  cutoff misses. The primary full-feature network must outperform the matched
+  PnL-plus-analogs network, not merely the arithmetic rule.
+
+primary_spec:
+  candidate_structure: "EXP-133 best_all candidate, held fixed per event"
+  decision: "Entry close of each candidate; candidate expires after the print"
+  target: "Realized midpoint candidate return"
+  architecture: "StandardScaler plus MLPRegressor(64,32), early stopping"
+  train_rule: >
+    Expanding annual walk-forward fit on all earlier years; top-20-percent
+    cutoff is computed from the same fold training predictions only.
+  first_test_year: 2020
+  top_fraction: 0.20
+  primary: nn_all_categories_top20
+  matched_control: nn_pnl_analogs_top20
+
+base_features:
+  pnl: [exp_pnl_sim, exp_pnl_sim_select]
+  analogs: [analog_mean, analog_win_rate, analog_p10, analog_p90, analog_n]
+  analog_construction: >
+    For every event, nearest historical candidate outcomes are drawn only from
+    rows whose exit was before that entry. Distance uses known expected PnL,
+    candidate width, leg count, anchor, and relative spread after standardizing
+    on that historical pool. The nearest 25 form mean, win, p10, p90 and n.
+
+feature_categories:
+  geometry_forecast:
+    [pred_abs_move, pred_abs_move_sd, width_over_forecast, half_width_pct_spot,
+     anchor_over_spot, n_legs, n_admissible, dte_entry]
+  event_history:
+    [mean_prior_abs_move, ema12r_abs, signed_streak, mean_prior_or_implied,
+     mcap_log, or_implied, or_rvol30]
+  market_state:
+    [spy_ret21, spy_ret63, spy_ret252, spy_dd252, spy_vol5, spy_vol20,
+     spy_vol60, spy_vol252, spy_vol20_rel252]
+  execution_quality:
+    [rel_spread, entry_cost_pct, quote_repaired, wide_market]
+
+arms:
+  - nn_pnl_analogs_top20
+  - nn_plus_geometry_top20
+  - nn_plus_history_top20
+  - nn_plus_market_top20
+  - nn_plus_execution_top20
+  - nn_all_categories_top20
+
+evaluation:
+  universe: >
+    Feature-complete midpoint best_all candidates with at least two prior
+    years of real-quote history. Each selected event is re-evaluated over the
+    complete stored five-point fill-alpha grid.
+  required_metrics:
+    - "OOS score Spearman and top-minus-bottom decile spread"
+    - "midpoint mean, CAGR, trade Sharpe, and positive years for every arm"
+    - "five-point fill sensitivity and breakeven alpha"
+    - "same-event earnings-week bootstrap versus the PnL-plus-analogs control"
+    - "annual fold rows, scoreable candidates, and cutoffs"
+  primary_success:
+    - "primary midpoint mean and trade Sharpe exceed matched control"
+    - "primary positive-year share is no lower than matched control"
+    - "primary breakeven alpha is no worse than matched control"
+    - "90 percent earnings-week bootstrap interval for primary minus control excludes zero above"
+  multiplicity: >
+    Six predeclared neural arms are exploratory. The full-category arm is the
+    sole primary; no outcome changes registry or live rules without a separate
+    confirmation.
+
+data:
+  candidates: "EXP-133 results/candidates.parquet, arm=best_all"
+  panel: "Tier-3 panel, prior-event and market-state columns only"
+  data_snapshot: "6f58c834777b6dae6878e317f6eb3a58bc81fca14f9a5647228ebb5c2be1f9e7"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: "The neural runner performs the expanding prior-year fits upstream; evaluate receives only its precomputed OOS decisions."
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-08T22:12:26+00:00"

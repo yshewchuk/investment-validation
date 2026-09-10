@@ -1,0 +1,59 @@
+id: EXP-168
+title: "Short-vol market-cap floor: $10B versus $1B"
+strategy: DYN-SV
+type: policy_sensitivity
+price_source: >
+  ORATS historical bid and ask chains cached by EXP-137. Conditional exits use
+  a valid quote-derived close only when nonnegative and no-arbitrage, otherwise
+  the stored expiry payoff. No oquants model marks are used. The experiment
+  reads cached candidates only and makes zero API calls.
+hypothesis: >
+  The live short-vol arithmetic rule rejects otherwise high-simulated-PnL
+  candidates below $10B even when their quoted spread is within 25%. Lowering
+  only the market-cap floor to $1B may add executable, defined-risk short-vol
+  trades without degrading the real-price, five-fill book. The current
+  simulated-PnL cutoff, structure chooser, spread ceiling, exit repair, and
+  cash-secured funding policy remain fixed.
+primary_spec:
+  menu: "TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5"
+  chooser: "Current DYN-SV arithmetic chooser: maximum simulated expected PnL per complete-menu event"
+  gate_rule: >
+    Chosen candidate must clear its causal trailing expected-PnL cutoff and
+    have relative spread at or below 25%. The only varied term is market cap:
+    >=$10B versus >=$1B.
+  arms:
+    baseline_10b: "Current rule: mcap_usd >= $10B"
+    expanded_1b: "Candidate policy: mcap_usd >= $1B"
+    incremental_1b_10b: "Diagnostic subset added by the policy: $1B <= mcap_usd < $10B"
+  primary: expanded_1b
+funding_policy:
+  start_equity_usd: 200000
+  secured_cap_of_current_equity: 0.66
+  target_share_of_headroom: 0.25
+  same_day_order: "largest secured requirement first, matching the current DYN-SV baseline"
+  short_put_rule: "fully cash secure every short put at strike x 100"
+evaluation:
+  universe: "Complete five-menu annual-OOS events, 2020-2026"
+  required_metrics:
+    - "eligible, wanted, funded, and unfunded counts by arm"
+    - "realized return and five-point fill sweep for every arm"
+    - "cash-secured final equity, CAGR, and peak concurrency"
+    - "incremental $1B-$10B cohort diagnostics"
+  primary_success:
+    - "expanded_1b has positive midpoint mean return"
+    - "expanded_1b midpoint mean is no worse than baseline_10b"
+    - "incremental_1b_10b has positive midpoint mean return"
+    - "zero defined-risk failures in all arms"
+  multiplicity: "Three preregistered policy arms. Exploratory only; no live entry-rule or registry change."
+data:
+  candidates: "EXP-137 cached candidate panel, read through EXP-161 loader"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-09T00:00:00-04:00"

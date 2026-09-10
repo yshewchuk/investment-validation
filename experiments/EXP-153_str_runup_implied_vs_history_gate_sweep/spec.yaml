@@ -1,0 +1,136 @@
+id: EXP-153
+title: "STR-RUNUP implied-vs-history four-feature gate sweep"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay,
+  inherited unchanged from the frozen EXP-150 signal dataset and the Tier-2
+  replayed STR-RUNUP trades. Prior-event quotes come from the Tier-3 engine
+  panel at the same data snapshot as the frozen signals. Every arm trades the
+  identical T-14 structure at every stored fill alpha. The headline uses
+  midpoint fills and zero commissions. Fills are assumptions, not achieved
+  executions.
+hypothesis: >
+  A STR-RUNUP gate restricted to four implied-move-versus-history features —
+  the current implied move divided by the last implied move, the current
+  implied move minus the last realized move, the implied move divided by the
+  average past implied move, and the implied move minus the average past
+  realized move — selects T-14 trades that beat the matched-fraction base gate
+  on mean return and trade Sharpe at the pre-registered top-20-percent cell,
+  and the comparison stays informative across the annual top-10, top-30 and
+  top-40-percent selection rates.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: im_gap_top20
+  score_family: im_gap
+  top_fraction: 0.20
+  gate_rule: >
+    In each annual fold, fit the four-feature gate only on earlier years,
+    choose the top-20-percent quantile of that folds training predictions,
+    then apply it unchanged to the held-out year. The matched base control uses
+    the registered 42-feature gate score at the same annual fractions.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+feature_definitions:
+  im_ratio_last_implied: >
+    Entry implied move (im, the ORATS quote the frozen T-14 dataset carries at
+    the decision date) divided by the or_implied quote of the same tickers most
+    recent prior panel event dated strictly before the entry date.
+  im_gap_last_realized: >
+    Entry implied move minus the absolute realized move (abs_move) of that most
+    recent prior panel event.
+  im_ratio_mean_prior_implied: >
+    Entry implied move divided by mean_prior_or_implied, the panels running
+    mean of past pre-print implied quotes.
+  im_gap_mean_prior_realized: >
+    Entry implied move minus mean_prior_abs_move, the panels running mean of
+    past absolute realized moves.
+  quote_floor: >
+    Implied quotes below 1.0 percent are treated as invalid in any feature
+    that uses them, matching the EXP-148 MIN_VALID_QUOTE convention. Realized
+    moves are never floored. An event is scoreable by the family only when all
+    four features are finite.
+  causality: >
+    The prior-event merge is backward as-of with exact matches disallowed, so
+    the features see only events completed before the entry date. No feature
+    reads the current print or any post-entry information.
+
+selection_grid:
+  score_families: [im_gap, base]
+  annual_training_only_top_fractions: [0.10, 0.20, 0.30, 0.40]
+  operational_benchmark: incumbent_registered_threshold
+  duplicate_exclusion: >
+    The operational incumbent shares the base score, so it is retained only at
+    its registered fixed threshold while the base family is swept at all four
+    fractions.
+
+controlled_rerun:
+  unchanged_from_exp152:
+    - "corrected-calendar T-14 trade and market-cap-at-least-one-billion universe"
+    - "frozen EXP-150 signal dataset and the base 42-feature gate score fits"
+    - "annual outer folds, five-point fill sensitivity, sizing and stress battery"
+    - "midpoint headline and zero commissions"
+  changed_from_exp152: >
+    The six evidence families are replaced by one four-feature family plus the
+    base control, each swept at four annual training-only selection fractions.
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on causally available feature-complete events; evaluated events require
+    market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years for every cell"
+    - "five-point fill sensitivity and breakeven alpha for every cell"
+    - "Monte Carlo and stress battery for every cell"
+    - "selected count and return after excluding entry relative spreads above 50 percent"
+    - "score Spearman and top-minus-bottom decile spread per score family"
+    - "same-fraction earnings-week bootstrap of im_gap versus base"
+    - "per-fold training rows, scoreable candidates and cutoffs"
+  primary_success:
+    - "im_gap_top20 mean, CAGR and trade Sharpe exceed base_top20"
+    - "im_gap_top20 positive-year share is no worse than base_top20"
+    - "im_gap_top20 breakeven alpha is no worse than base_top20"
+    - "im_gap_top20 mean exceeds base_top20 after excluding spreads above 50 percent"
+    - "90 percent earnings-week interval for the im_gap_top20 minus base_top20 policy difference excludes zero above"
+  multiplicity: >
+    This is an eight-cell exploratory selection-rate grid plus a fixed
+    operational benchmark. The predeclared primary is the four-feature family
+    at top-20 percent. No grid result may change registry state; a separately
+    pre-registered confirmation is required.
+
+falsification: >
+  The four-feature architecture is not supported if im_gap_top20 fails to beat
+  base_top20 on mean return and trade Sharpe, if the bootstrap interval
+  includes zero, or if no swept im_gap cell shows a stable execution-plausible
+  advantage over its matched base cell worth confirming.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  move_aware_signals: "EXP-150 dataset_with_move_aware_signals.parquet"
+  prior_event_quotes: "Tier-3 engine panel at the frozen data snapshot"
+  source_experiments: [EXP-144, EXP-148, EXP-150, EXP-151, EXP-152]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Annual score fits and thresholds are computed before generic evaluation.
+    The evaluator receives precomputed decisions in every OOS year.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-08T00:02:22+00:00"

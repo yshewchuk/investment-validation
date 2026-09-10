@@ -1,0 +1,84 @@
+id: EXP-160
+title: "Short-vol neural selector corrected exits with verified ORATS provenance"
+strategy: DYN-SV
+type: exploratory_model_comparison
+price_source: >
+  ORATS historical bid and ask chains, cached and normalized by EXP-134.
+  Each candidate uses a conditional exit: close only with a no-arbitrage,
+  nonnegative quote-derived proceed; otherwise use the stored expiry payoff.
+  No model-fitted oquants marks or new vendor calls are used.
+hypothesis: >
+  This is the provenance-corrected record of EXP-159. On the identical
+  validated conditional-exit real-price candidates, the PnL-plus-analogs MLP
+  and four feature categories are compared with the live arithmetic DYN-SV
+  gate. The full-category MLP must beat the matched PnL-plus-analogs MLP;
+  the arithmetic gate remains a required operational benchmark.
+
+primary_spec:
+  candidate_structure: "EXP-134 conditional-exit best_all candidate, held fixed per event"
+  decision: "Entry close; current DYN-SV arithmetic rule or annual neural rule"
+  target: "Validated conditional-exit midpoint return"
+  architecture: "StandardScaler plus 3-seed MLPRegressor(64,32), early stopping"
+  neural_train_rule: "Expanding annual fit on earlier years; annual top-20-percent cutoff from training predictions only."
+  arithmetic_rule: >
+    Current DYN-SV rule: expected PnL at or above the top-20-percent trailing
+    six-month monthly bar with at least 100 prior candidates, relative spread
+    at or below 25 percent, and market cap at or above 10 billion USD.
+  first_test_year: 2020
+  top_fraction: 0.20
+  primary: nn_all_categories_top20
+  matched_neural_control: nn_pnl_analogs_top20
+  operational_benchmark: arithmetic_pnl_gate
+
+base_features:
+  pnl: [exp_pnl_sim, exp_pnl_sim_select]
+  analogs: [analog_mean, analog_win_rate, analog_p10, analog_p90, analog_n]
+feature_categories:
+  geometry_forecast:
+    [pred_abs_move, pred_abs_move_sd, width_over_forecast, half_width_pct_spot,
+     anchor_over_spot, n_legs, n_admissible, dte_entry]
+  event_history:
+    [mean_prior_abs_move, ema12r_abs, signed_streak, mean_prior_or_implied,
+     mcap_log, or_implied, or_rvol30]
+  market_state:
+    [spy_ret21, spy_ret63, spy_ret252, spy_dd252, spy_vol5, spy_vol20,
+     spy_vol60, spy_vol252, spy_vol20_rel252]
+  execution_quality:
+    [rel_spread, entry_cost_pct, quote_repaired, wide_market]
+arms:
+  - arithmetic_pnl_gate
+  - nn_pnl_analogs_top20
+  - nn_plus_geometry_top20
+  - nn_plus_history_top20
+  - nn_plus_market_top20
+  - nn_plus_execution_top20
+  - nn_all_categories_top20
+evaluation:
+  universe: "EXP-134 best_all candidates with nonmissing conditional exit values and complete arm features."
+  required_metrics:
+    - "real-price midpoint mean, CAGR, trade Sharpe and positive years for every arm"
+    - "five-point fill sensitivity and breakeven alpha"
+    - "OOS rank Spearman and decile spread"
+    - "arithmetic gate versus PnL-plus-analogs neural control head to head"
+    - "earnings-week bootstrap for full neural versus matched neural control"
+  primary_success:
+    - "primary midpoint mean and trade Sharpe exceed matched neural control"
+    - "primary positive-year share is no lower than matched neural control"
+    - "primary breakeven alpha is no worse than matched neural control"
+    - "primary-minus-control 90 percent earnings-week interval excludes zero above"
+  multiplicity: "Seven exploratory arms; no result changes registry or live rules without confirmation."
+data:
+  candidates: "EXP-134 results/candidates.parquet, arm=best_all, ORATS conditional exits"
+  panel: "Tier-3 prior-event and market-state feature panel"
+  data_snapshot: "6f58c834777b6dae6878e317f6eb3a58bc81fca14f9a5647228ebb5c2be1f9e7"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: "Precomputed decisions come from upstream expanding annual fits."
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-09-08T22:40:26+00:00"

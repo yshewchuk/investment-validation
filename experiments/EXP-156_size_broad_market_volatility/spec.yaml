@@ -1,0 +1,81 @@
+id: EXP-156
+title: "Size-model broad market volatility augmentation"
+strategy: STR-THRU
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Accuracy is measured against realized earnings moves in the Tier-3 panel;
+  the companion book uses only real engine.replay option prices at the five
+  standard fill assumptions. Oquants fitted marks are not used for P&L.
+hypothesis: >
+  The current size model already sees 20-day SPY realized volatility and
+  252-day SPY drawdown. Adding causal five-, 60-, and 252-session SPY realized
+  volatility plus the 20-day versus 252-day volatility ratio improves
+  out-of-sample absolute-earnings-move accuracy by separating an acute market
+  volatility shock from the market long-run volatility level.
+primary_spec:
+  baseline: size_v1_4
+  challenger: size_v1_4_plus_broad_market_vol
+  target: "abs_move, absolute earnings move in percent of spot"
+  architecture: "unchanged equal-weight OLS plus MLP(64,32) blend"
+  selection_book: >
+    STR-THRU entries whose predicted move minus ORATS pre-print implied move
+    ranks in the top 20 percent of the annual-fold training score distribution.
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+feature_definitions:
+  existing_control:
+    - spy_vol20
+    - spy_dd252
+  added:
+    spy_vol5: "Annualized standard deviation of the five prior SPY daily returns."
+    spy_vol60: "Annualized standard deviation of the 60 prior SPY daily returns."
+    spy_vol252: "Annualized standard deviation of the 252 prior SPY daily returns."
+    spy_vol20_rel252: "spy_vol20 divided by spy_vol252, minus one."
+  causal_anchor: >
+    Every measure is calculated from the cached S&P daily-close series ending
+    before the earnings event date, matching the incumbent panel convention.
+    No contemporaneous event close, post-print return, cross-sectional fit, or
+    future volatility observation enters a feature.
+evaluation:
+  accuracy_window: "Expanding annual walk-forward OOS 2013-2026."
+  same_rows: >
+    Baseline and challenger use the identical complete-case rows on the union
+    of all baseline and added features. This prevents a coverage difference
+    from being reported as predictive improvement.
+  primary_metrics:
+    - "overall OOS MAE"
+    - "overall OOS Pearson r"
+    - "per-year MAE and paired annual MAE difference"
+    - "top-minus-bottom forecast-decile realized-move spread"
+  robustness:
+    - "five fixed MLP seeds"
+    - "two-sided paired Wilcoxon test across annual MAE differences"
+    - "same rows and same architecture in every comparison"
+  book_window: "STR-THRU real-price engine.replay trades, annual OOS selection 2018-2026."
+  book_metrics:
+    - "worst, midpoint, and best fill results"
+    - "walk-forward P&L, fill sensitivity, Monte Carlo, and stress report"
+primary_success:
+  - "challenger OOS MAE is lower than baseline on the matched rows"
+  - "challenger lowers MAE in at least 8 of the 14 annual folds"
+  - "median challenger minus baseline MAE is below zero across the five fixed seeds"
+  - "the primary seed paired Wilcoxon p-value is below 0.10"
+falsification: >
+  The broad-volatility block is not adopted if its matched-sample MAE does not
+  improve consistently across years and seeds. The real-price book is a
+  companion economic check, not permission to promote a less accurate model.
+data:
+  panel: "data/features/panel.parquet"
+  market_state: "earnings_predictions/data/raw/polygon/gspc_daily.csv"
+  trades: "Tier-2 engine.replay STR-THRU trades"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-08T21:41:08+00:00"

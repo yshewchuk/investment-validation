@@ -1,0 +1,107 @@
+id: EXP-152
+title: "STR-RUNUP move-aware gate annual percentile sweep"
+strategy: STR-RUNUP
+type: exploratory_model_comparison
+price_source: >
+  Cached ORATS historical bid and ask chains normalized through engine.replay.
+  Every arm trades the identical T-14 structure at every stored fill alpha.
+  The headline uses midpoint fills and zero commissions. Fills are assumptions,
+  not achieved executions.
+hypothesis: >
+  The move-aware STR-RUNUP gate ranking may contain a selection-rate plateau
+  that is obscured by the prior fixed top-20-percent evaluation. Holding the
+  T-14 trade, score fits, causal inputs, feature families and fill treatment
+  fixed, annual training-only top-10, top-20, top-30 and top-40-percent
+  selections will identify whether the combined forecast-PnL-plus-analog gate
+  or another evidence family has a consistently stronger viable rate.
+
+primary_spec:
+  structure: "STR-RUNUP e-14 x+0 target_dte=30"
+  entry: "14 trading sessions before the session-aware last pre-print close"
+  exit: "session-aware last pre-print close; the earnings event is never held"
+  expiry: "first expiration with at least 30 calendar DTE at entry"
+  strike: "entry ATM call and same-strike put, held unchanged"
+  commissions_usd: 0.0
+  modeled_fill_alpha: 0.5
+  challenger: model_plus_forecast_pnl_plus_analogs_top20
+  score_family: model_plus_forecast_pnl_plus_analogs
+  top_fraction: 0.20
+  gate_rule: >
+    In each annual fold, fit the unchanged gate only on earlier years. Choose
+    the stated quantile from that folds training predictions, then apply it
+    unchanged to the held-out year. The primary is the pre-specified combined
+    evidence family at top-20 percent; all other cells are exploratory grid
+    evidence and cannot promote a model.
+  first_test_year: 2020
+  draws_per_event: 4000
+
+selection_grid:
+  score_families:
+    - base
+    - model_plus_raw_forecast
+    - model_plus_forecast_pnl
+    - model_plus_analogs
+    - model_plus_raw_forecast_plus_analogs
+    - model_plus_forecast_pnl_plus_analogs
+  annual_training_only_top_fractions: [0.10, 0.20, 0.30, 0.40]
+  operational_benchmark: incumbent_registered_threshold
+  duplicate_exclusion: >
+    The operational incumbent and base family share a score, so percentile
+    versions of the operational incumbent would duplicate base results. Retain
+    the incumbent only at its registered fixed threshold and sweep each of the
+    six distinct score families.
+
+controlled_rerun:
+  unchanged_from_exp151:
+    - "corrected-calendar T-14 trade and market-cap-at-least-one-billion universe"
+    - "frozen EXP-150 move-aware forecast PnL distributions"
+    - "causal analog matches, feature families and HistGradientBoosting gate fits"
+    - "annual outer folds, five-point fill sensitivity, sizing and stress battery"
+    - "midpoint headline and zero commissions"
+  changed_from_exp151: >
+    Every distinct score family receives four predeclared annual
+    training-only selection fractions instead of only top-20 percent.
+
+evaluation:
+  universe: >
+    Corrected-calendar engine.replay T-14 STR-RUNUP events. Gate models train
+    on all causally available feature-complete events; evaluated events require
+    market cap of at least one billion dollars.
+  headline_window: "strict walk-forward OOS 2020-2026; 2018-2019 train only"
+  required_metrics:
+    - "mean, capital-weighted return, CAGR, trade Sharpe and positive years"
+    - "five-point fill sensitivity and breakeven alpha for every grid cell"
+    - "Monte Carlo and stress battery for every grid cell"
+    - "selected count and return after excluding entry relative spreads above 50 percent"
+    - "same-fraction earnings-week bootstrap for each combined evidence cell versus base"
+  multiplicity: >
+    This is a 24-cell exploratory selection-rate grid plus a fixed operational
+    incumbent benchmark. The predeclared primary remains combined evidence at
+    top-20 percent. No grid result may change registry state; a separately
+    pre-registered confirmation is required.
+
+falsification: >
+  There is no useful selection-rate plateau for this architecture if the
+  combined-evidence family has no rate with a positive, execution-plausible
+  improvement over the matching base family and no other score family has a
+  stable positive slice worth confirming.
+
+data:
+  trades: "Tier-2 engine.replay STR-RUNUP e-14_x+0_target_dte=30 trades"
+  move_aware_signals: "EXP-150 dataset_with_move_aware_signals.parquet"
+  source_experiments: [EXP-148, EXP-150, EXP-151]
+  quota_calls: 0
+  data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+
+walk_forward:
+  unit: year
+  min_train_years: 0
+  note: >
+    Annual score fits and thresholds are computed before generic evaluation.
+    The evaluator receives precomputed decisions in every OOS year.
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+promotion_target: null
+preregistered_at: "2026-09-07T22:48:35+00:00"
