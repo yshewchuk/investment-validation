@@ -1181,6 +1181,13 @@ def run_nightly(
         "board_rows": int(len(board_scores)),
         "ladder_rows": len(ladder),
         "alt_strikes": alt_strikes,
+        # Share of the analog population bucketed on a real entry-date implied
+        # move rather than the event-level fallback. Recorded because its
+        # collapse — to 1.5%, when the scoring context was narrowed — moved
+        # published analog numbers for weeks with every guard still green.
+        # A run well below ~0.95 means the trades' surface rows went missing,
+        # not that the board changed.
+        "analog_entry_coverage": engine.analog_entry_coverage,
     }
 
     # -- 4b. honest backfill of missed nights --------------------------------

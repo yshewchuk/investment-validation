@@ -203,8 +203,11 @@ def registry(tmp_path):
 @pytest.fixture
 def scorer(registry, trades, panel, daily, calendar):
     context = FeatureContext(panel=panel, daily=daily, calendar=calendar)
+    # `analog_daily` explicitly: the enrich path reads the store for the trades'
+    # own span when handed nothing, and these tickers are synthetic.
     return Scorer(
-        registry=registry, trades=trades, context=context, snapshot="snap-test"
+        registry=registry, trades=trades, context=context, snapshot="snap-test",
+        analog_daily=daily,
     )
 
 
@@ -384,7 +387,8 @@ class TestModelLayer:
     def test_no_champion_is_flagged_not_faked(self, trades, panel, daily, calendar, chain_index):
         context = FeatureContext(panel=panel, daily=daily, calendar=calendar)
         engine = Scorer(
-            registry=Registry(entries=[]), trades=trades, context=context, snapshot="s"
+            registry=Registry(entries=[]), trades=trades, context=context, snapshot="s",
+            analog_daily=daily,
         )
         result = engine.score(request(), chain_index=chain_index)
         assert "NO_MODEL" in result.flags
@@ -522,6 +526,53 @@ class TestAnalogLayer:
         )
         assert result.n_analogs == 0
         assert "THIN_ANALOGS" in result.flags
+
+    def test_narrowing_the_live_context_does_not_move_the_analogs(
+        self, registry, trades, panel, daily, calendar, chain_index
+    ):
+        """The analog population is historical; the live context is not.
+
+        The board's analog block used to be bucketed on `context.daily`, so
+        narrowing that context for MEMORY silently re-bucketed the matched
+        population: the nightly's 197-ticker, 2-year context covered 1.52% of
+        the analog trades and the other 98.48% fell back to the event-level
+        `or_implied` — against a request side still reading its true
+        entry-date quote. It moved published numbers and flipped a sign, and
+        neither the nightly's self-check (it shares the same scorer) nor
+        Phase 3 (it builds its own board with the scorer it checks) could see
+        it. So: same trades, deliberately different live contexts, identical
+        analog numbers.
+        """
+        wide = FeatureContext(panel=panel, daily=daily, calendar=calendar)
+        # Narrowed the way the nightly narrows: the name being scored is kept
+        # (so the REQUEST side is untouched — its own quote is a live-context
+        # question and is allowed to depend on one), and the peer names the
+        # analog population is drawn from are dropped.
+        narrow_daily = daily[daily["ticker"] == TICKER]
+        narrow = FeatureContext(panel=panel, daily=narrow_daily, calendar=calendar)
+        assert 0 < len(narrow_daily) < len(daily), "the contexts must actually differ"
+
+        def score_with(context):
+            engine = Scorer(
+                registry=registry, trades=trades, context=context,
+                snapshot="snap-test", analog_daily=daily,
+            )
+            return engine, engine.score(request(), chain_index=chain_index)
+
+        wide_engine, wide_result = score_with(wide)
+        narrow_engine, narrow_result = score_with(narrow)
+
+        assert wide_result.n_analogs > 0
+        for field in ("n_analogs", "exp_pnl_analog", "win_analog",
+                      "ci_low", "ci_high"):
+            assert getattr(narrow_result, field) == getattr(wide_result, field), (
+                f"{field} moved when only the live context was narrowed"
+            )
+        # And the coverage that collapsed silently is now a number someone can
+        # look at, on both.
+        assert wide_engine.analog_entry_coverage == pytest.approx(
+            narrow_engine.analog_entry_coverage
+        )
 
 
 class TestFlags:

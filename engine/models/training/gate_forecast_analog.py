@@ -126,9 +126,17 @@ def _attach_analogs(
     exactly this line before the parameter existed). Callers that already
     know the tickers and years involved should pass a filtered context.
     """
+    from engine.features import FeatureContext
     from engine.score import Scorer
 
-    scorer = Scorer(trades=trades, context=context)
+    # This is a BATCH enrichment, not a live board: the context the caller
+    # chose is the analog population's own context, so it is also what the
+    # entry-date implied move is read from. Passed explicitly because
+    # `Scorer` otherwise loads the trades' full daily span for that column —
+    # correct for the board, but here it would both duplicate an unbounded
+    # `context` and undo the bounding `model_evidence` passes to stay alive.
+    resolved = context or FeatureContext.load()
+    scorer = Scorer(trades=trades, context=resolved, analog_daily=resolved.daily)
     bucketed = bucket_frame(scorer.trades)
     matched = match_frame(
         bucketed, scorer.matcher, strategy=STRATEGY, alpha=GATE_ALPHA,

@@ -53,6 +53,7 @@ from engine.entry_rules import rule_for
 from engine.structure_registry import live_strategies, superseded_by
 from engine.features import (
     DAILY_STATE_COLUMNS,
+    DAILY_STATE_FIELDS,
     EVENT_HISTORY_FEATURES,
     FeatureContext,
     add_absolute_features,
@@ -561,7 +562,18 @@ class Scorer:
         context: FeatureContext | None = None,
         snapshot: str | None = None,
         verify_artifacts: bool = True,
+        analog_daily: pd.DataFrame | None = None,
     ):
+        #: The daily rows the ANALOG population is bucketed against — a
+        #: different question from `context.daily`, which is the live scoring
+        #: state. Left None in production so :meth:`_enrich` loads the span the
+        #: trades themselves need; injected only by tests, which have no store
+        #: to read and whose synthetic tickers are not in one.
+        self._analog_daily = analog_daily
+        #: Share of analog trades that got a real entry-date implied move
+        #: rather than the `or_implied` fallback. Set by :meth:`_enrich`.
+        self.analog_entry_coverage: float | None = None
+
         # Lazily-built inputs for the expected-P&L gate, per INSTANCE so a
         # differently-configured environment cannot inherit them. _UNSET rather
         # than None because None is a real, cacheable answer here: "the pool
@@ -648,18 +660,95 @@ class Scorer:
         # the trades and an entry-date reading for the request would compare two
         # different quantities and call them the same bucket.
         out["entry_date"] = pd.to_datetime(out["entry_date"])
-        state = daily_state_frame(
-            out[["ticker", "entry_date"]].copy(),
-            daily=self.context.daily,
-            as_of_column="entry_date",
+        # Read from the span the TRADES need, never from `self.context.daily`.
+        # The analog population is a fixed historical set (~506k trades, ~2,700
+        # tickers, 2017-2026) while the live context is sized for whatever is on
+        # tomorrow's board, and bucketing the first against the second makes a
+        # published number a function of how wide the caller happened to build
+        # the scorer. It did: the nightly's context — 197 board tickers x 2
+        # years — covered 1.52% of the analog trades, so 98.48% fell through the
+        # fallback below while the REQUEST side kept its true entry-date
+        # reading. That is exactly the two-different-quantities comparison the
+        # paragraph above says must not happen, and it moved published numbers:
+        # `exp_pnl_analog` -0.0026 -> +0.0051 on MTN TWIN-P 2026-09-28, a sign
+        # flip, which is what `_compare_layers` turns into LAYER_DISAGREE.
+        #
+        at_entry = pd.Series(
+            self._entry_implied_move(out[["ticker", "entry_date"]].copy()),
+            index=out.index,
         )
-        out["implied_at_entry"] = state["im"].to_numpy()
-        # A bounded live-scoring context intentionally holds daily rows only
-        # for the current calendar. Older analogs outside that slice retain
-        # the event-level implied move, the documented fallback used whenever
-        # an entry-date observation is unavailable.
+        # Recorded rather than only absorbed. The fallback is legitimate for a
+        # trade whose entry date genuinely carries no surface row, but a
+        # COLLAPSE in this rate is the signature of the defect above — and
+        # nothing reported it: every guard stayed green at 1.5% coverage.
+        self.analog_entry_coverage = (
+            float(at_entry.notna().mean()) if len(at_entry) else None
+        )
+        out["implied_at_entry"] = at_entry.to_numpy()
+        # The documented fallback, for a trade with no entry-date observation.
         out["implied_at_entry"] = out["implied_at_entry"].fillna(out["or_implied"])
         return bucket_frame(out)
+
+    #: Tickers per pass in :meth:`_entry_implied_move`. Sized so one pass holds
+    #: a few hundred MB of surface rows rather than the ~915MB the whole analog
+    #: population needs at once — the nightly builds its Scorer while already
+    #: holding the Tier-3/Tier-4 rebuild outputs, and this line has OOM-killed
+    #: it before.
+    _ANALOG_TICKER_CHUNK = 600
+
+    def _entry_implied_move(self, requests: pd.DataFrame) -> np.ndarray:
+        """``im`` at each trade's own entry date, in ``requests`` order.
+
+        Reads the span the TRADES need. An injected ``analog_daily`` (tests,
+        and the batch enrichment in ``models.training.gate_forecast_analog``,
+        both of which have their own reason to bound it) is used as-is.
+
+        Otherwise the load is chunked BY TICKER, which is exact rather than
+        approximate: :func:`daily_state_frame` groups by ticker and answers
+        each name from its own series, so a ticker's value cannot depend on
+        which other tickers shared the frame. Chunking by YEAR would NOT be
+        safe the same way — a trade whose last surface row fell before its
+        chunk would silently take the fallback, which is the very failure this
+        method exists to remove.
+        """
+        if self._analog_daily is not None:
+            state = daily_state_frame(
+                requests, daily=self._analog_daily, as_of_column="entry_date"
+            )
+            return pd.to_numeric(state["im"], errors="coerce").to_numpy()
+
+        columns = ["ticker", "date", "src_iv", *DAILY_STATE_FIELDS.keys()]
+        years = pd.to_datetime(requests["entry_date"]).dt.year
+        # One year of lookback, matching `daily_state_frame`'s own self-serve
+        # read: the last row on or before an early-January entry is in the
+        # prior year.
+        span = range(int(years.min()) - 1, int(years.max()) + 1)
+        tickers = sorted(requests["ticker"].dropna().astype(str).unique())
+
+        out = np.full(len(requests), np.nan)
+        for start in range(0, len(tickers), self._ANALOG_TICKER_CHUNK):
+            chunk = set(tickers[start:start + self._ANALOG_TICKER_CHUNK])
+            mask = requests["ticker"].astype(str).isin(chunk).to_numpy()
+            if not mask.any():
+                continue
+            # Year at a time, so the peak is one year's surface rows plus this
+            # chunk's slice rather than every year at once.
+            slices = []
+            for year in span:
+                part = store.read_table(
+                    "daily_market", years=[year], columns=columns
+                )
+                if not part.empty:
+                    slices.append(part[part["ticker"].isin(chunk)])
+            if not slices:
+                continue
+            state = daily_state_frame(
+                requests.loc[mask, ["ticker", "entry_date"]].copy(),
+                daily=pd.concat(slices, ignore_index=True),
+                as_of_column="entry_date",
+            )
+            out[mask] = pd.to_numeric(state["im"], errors="coerce").to_numpy()
+        return out
 
     def model(self, role: str, strategy: str = "*"):
         key = (strategy, role)
