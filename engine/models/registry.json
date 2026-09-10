@@ -113,16 +113,9 @@
    "tier": "decision",
    "produces": null,
    "consumes": [
-    "pred_abs_move_p10",
-    "pred_abs_move_p90",
-    "pred_abs_move_sd",
+    "pred_abs_move",
     "pred_im_t1_d14",
-    "pred_im_t1_d14_p10",
-    "pred_im_t1_d14_p90",
-    "pred_runup_abs_move_d14",
-    "pred_runup_abs_move_d14_p10",
-    "pred_runup_abs_move_d14_p90",
-    "pred_runup_abs_move_d14_sd"
+    "pred_runup_abs_move_d14"
    ]
   },
   {
