@@ -1101,7 +1101,38 @@ def run_nightly(
     # -- 3. score -------------------------------------------------------------
     # The board is scored ATM-only; the strike ladder comes after, for the rows
     # the gate passed (see :func:`strike_ladder`).
-    engine = scorer or Scorer()
+    if scorer is None:
+        # "Scorer()" defaults to a full daily_market load. That is roughly
+        # 9m rows, while the board needs live state only for its current
+        # calendar names. The historical analog table can fall back to its
+        # event-level implied move when an old entry-date daily row is outside
+        # this live scoring slice. Keeping this context narrow makes the
+        # nightly scorer fit alongside the Tier-3 and Tier-4 rebuild outputs.
+        from engine.features import FeatureContext
+
+        context_tickers = set(scoring_tickers or calendar_tickers)
+        # Backfill is a historical re-score, not a reason to construct a
+        # second default Scorer. Include its possible events in this one
+        # bounded daily slice so the existing engine can score those nights.
+        # The old loop called ledger.snapshot without scores and loaded the
+        # complete daily_market table while the current board was still held.
+        if backfill and state.get("last_successful_as_of"):
+            backfill_start = pd.Timestamp(state["last_successful_as_of"]).normalize()
+            backfill_events = events[
+                (events["event_date"] >= backfill_start)
+                & (events["event_date"] <= horizon)
+                & events["session"].notna()
+            ]
+            if tickers is not None:
+                backfill_events = backfill_events[
+                    backfill_events["ticker"].isin(set(tickers))
+                ]
+            context_tickers.update(backfill_events["ticker"].dropna().astype(str))
+        context_years = range(as_of.year - 1, horizon.year + 1)
+        context = FeatureContext.load(sorted(context_tickers), years=context_years)
+        engine = Scorer(context=context)
+    else:
+        engine = scorer
     scores = score_calendar(
         as_of, horizon_days=horizon_days, alt_strikes=0,
         scorer=engine, tickers=tickers,
@@ -1162,7 +1193,19 @@ def run_nightly(
                 last, as_of, calendar=engine.calendar
             )
             for night in nights:
-                result = ledger.snapshot(as_of=night, horizon_days=horizon_days)
+                backfill_scores = score_calendar(
+                    night,
+                    horizon_days=horizon_days,
+                    alt_strikes=0,
+                    scorer=engine,
+                    tickers=tickers,
+                    progress_every=10,
+                )
+                result = ledger.snapshot(
+                    as_of=night,
+                    horizon_days=horizon_days,
+                    scores=backfill_scores,
+                )
                 late_as_ofs.append(
                     {"as_of": str(night.date()), "rows": result.get("rows", 0)}
                 )

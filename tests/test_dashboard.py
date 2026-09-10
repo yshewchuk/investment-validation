@@ -1804,6 +1804,17 @@ class TestBackfillNights:
             "2026-09-04", pd.Timestamp("2026-09-05"), calendar=self._calendar())
         assert nights == [] and skipped == [] and nxt == pd.Timestamp("2026-09-05")
 
+    def test_backfill_reuses_the_bounded_nightly_scorer(self):
+        """A second default scorer reloads all daily market history and OOMs."""
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1] / "engine" / "dashboard"
+               / "nightly.py").read_text()
+        block = src[src.index("# -- 4b. honest backfill"):]
+        block = block[:block.index("# -- flags that need scores")]
+        assert "scorer=engine" in block
+        assert "scores=backfill_scores" in block
+
 
 class TestImpliedMoveConvention:
     """`model_vs_market` divides a predicted E|move| by a vendor number that is
