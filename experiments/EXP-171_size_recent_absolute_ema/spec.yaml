@@ -1,0 +1,58 @@
+id: EXP-171
+title: "Recent absolute-move EMAs for the size model"
+strategy: "STR-THRU"
+type: exploratory_model_comparison
+price_source: "Cached ORATS historical bid and ask chains normalized through engine.replay; realized moves are from the causal Tier-3 panel."
+hypothesis: >
+  The incumbent size model has the mean prior absolute move and a 12-event
+  fast-to-slow absolute-move ratio, but not the recent absolute-move level.
+  Adding the causal 2-event and 4-event absolute-move EMAs should improve
+  out-of-sample absolute earnings-move accuracy by distinguishing a currently
+  hot or quiet name from a name whose long-run average is similar.
+primary_spec:
+  baseline: size_v1_4
+  challenger: size_v1_4_plus_recent_abs_ema
+  target: "abs_move, absolute earnings move in percent of spot"
+  architecture: "unchanged equal-weight OLS plus MLP(64,32) blend"
+  added_features:
+    - ema2_prior_abs_move
+    - ema4_prior_abs_move
+  selection_book: "STR-THRU forecast-edge top-20 control, only as an economic companion check"
+  modeled_fill_alpha: 0.5
+grid:
+  secondary_feature_sets:
+    - "ema2_prior_abs_move"
+    - "ema4_prior_abs_move"
+    - "ema2_prior_abs_move,ema4_prior_abs_move"
+    - "ema4_prior_abs_move/mean_prior_abs_move"
+data:
+  panel: data/features/panel.parquet
+  trades: Tier-2 engine.replay STR-THRU trades
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  accuracy_window: "Expanding annual walk-forward OOS 2013-2026"
+  same_rows: "Baseline and challenger use the identical complete-case rows on the union of their features."
+evaluation:
+  primary_metrics:
+    - overall OOS MAE
+    - overall OOS RMSE
+    - overall OOS Pearson r
+    - per-year MAE and paired annual MAE difference
+    - top-minus-bottom forecast-decile realized-move spread
+  robustness:
+    - five fixed MLP seeds
+    - two-sided paired Wilcoxon test across annual MAE differences
+    - no coverage loss in the primary arm
+primary_success:
+  - challenger OOS MAE is lower than baseline on matched rows
+  - challenger improves MAE in at least 8 of 14 annual folds
+  - median challenger-minus-baseline MAE is below zero across five seeds
+  - primary paired Wilcoxon p-value is below 0.10
+falsification: >
+  The recent-EMA block is rejected if the matched OOS improvement is not
+  consistent across years and seeds, if the primary loses coverage, or if it
+  improves ordinary MAE only by degrading RMSE or the forecast-decile spread.
+promotion_target: null
+preregistered_at: "2026-09-09T00:00:00+00:00"

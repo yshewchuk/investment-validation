@@ -1,0 +1,59 @@
+id: EXP-172
+title: "Normalized recent absolute-move variants"
+strategy: "STR-THRU"
+type: exploratory_model_comparison
+price_source: "Cached ORATS historical bid and ask chains normalized through engine.replay; realized moves are from the causal Tier-3 panel."
+hypothesis: >
+  The raw recent absolute-move level tested in EXP-171 was not consistently
+  better than the incumbent. Normalizing recent absolute moves against a
+  name's own long-run earnings-move level may isolate acceleration or shock
+  state and improve out-of-sample absolute-move accuracy without reducing
+  coverage.
+primary_spec:
+  baseline: size_v1_4
+  challenger: size_v1_4_plus_ema4_relative_to_history
+  target: "abs_move, absolute earnings move in percent of spot"
+  architecture: "unchanged equal-weight OLS plus MLP(64,32) blend"
+  primary_added_feature: ema4_abs_over_mean_abs
+  selection_book: "STR-THRU forecast-edge top-20 control, economic companion only"
+  modeled_fill_alpha: 0.5
+arms:
+  - name: raw_ema2
+    features: [ema2_prior_abs_move]
+  - name: raw_ema4
+    features: [ema4_prior_abs_move]
+  - name: centered_ema4
+    features: [ema4_abs_minus_mean_abs]
+  - name: ema4_relative_to_history
+    features: [ema4_abs_over_mean_abs]
+  - name: ema2_relative_to_ema4
+    features: [ema2_abs_over_ema4_abs]
+definitions:
+  ema4_abs_minus_mean_abs: "ema4_prior_abs_move minus mean_prior_abs_move; recent acceleration in percentage points."
+  ema4_abs_over_mean_abs: "ema4_prior_abs_move divided by mean_prior_abs_move; recent acceleration as a scale-free ratio."
+  ema2_abs_over_ema4_abs: "ema2_prior_abs_move divided by ema4_prior_abs_move; very recent shock relative to the short baseline."
+causal_anchor: "All added quantities use prior earnings events only and are computed before the event being scored."
+data:
+  panel: data/features/panel.parquet
+  trades: Tier-2 engine.replay STR-THRU trades
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 0
+  accuracy_window: "Expanding annual walk-forward OOS 2013-2026"
+  same_rows: "All arms and baseline use the identical complete-case rows on the union of all arm features."
+evaluation:
+  primary_metrics: [overall OOS MAE, overall OOS RMSE, overall OOS Pearson r, per-year MAE, top-bottom decile spread]
+  robustness: [five fixed MLP seeds, paired annual MAE Wilcoxon, identical rows, no coverage loss]
+primary_success:
+  - primary arm improves MAE in at least 8 of 14 annual folds
+  - primary arm median MAE delta is below zero across five seeds
+  - primary arm paired Wilcoxon p-value is below 0.10
+  - no arm is promoted solely from a post-hoc winner; any promotion requires a new confirmatory registration
+falsification: >
+  The normalized-feature block is rejected for promotion if the primary arm
+  fails its consistency criteria, if any accuracy gain depends on changed rows,
+  or if a secondary arm is selected after seeing results without a new
+  pre-registration.
+promotion_target: null
+preregistered_at: "2026-09-10T00:00:00+00:00"
