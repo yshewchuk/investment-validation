@@ -98,7 +98,8 @@ PANEL_COLUMNS = (
     + [f"ema{s}_prior_move" for s in SPANS]
     + [f"ema{s}_prior_abs_move" for s in SPANS]
     + ["mean_prior_or_implied", "year",
-       "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
+       "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
+       "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
        "signed_streak", "ema12r_abs", "dist_high", "dist_ema", "ret5", "ret10", "ret20"]
     + list(ORATS_FEATURES.values())
     + ["or_exern_z252", "mcap_log", "mcap_usd", "mcap_asof"]
@@ -399,7 +400,8 @@ def add_regime_features(
     out = df.copy()
     n = len(out)
     cols = {c: np.full(n, np.nan) for c in
-            ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20")}
+            ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
+             "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252")}
 
     anchor = np.full(n, np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
     idx = _anchor_index(
@@ -420,8 +422,13 @@ def add_regime_features(
             cols["spy_ret252"][i] = (spot / closes[j - 252] - 1.0) * 100
             # 252 observations ending at j (j-251 .. j inclusive).
             cols["spy_dd252"][i] = (spot / closes[j - 251 : j + 1].max() - 1.0) * 100
-        if j >= 20:
-            cols["spy_vol20"][i] = simple_ret[j - 20 : j].std(ddof=1) * np.sqrt(252) * 100
+        vols = {}
+        for window in (5, 20, 60, 252):
+            if j >= window:
+                vols[window] = simple_ret[j - window : j].std(ddof=1) * np.sqrt(252) * 100
+                cols[f"spy_vol{window}"][i] = vols[window]
+        if 20 in vols and 252 in vols and vols[252] > 0:
+            cols["spy_vol20_rel252"][i] = vols[20] / vols[252] - 1.0
     for name, values in cols.items():
         out[name] = values
     out["regime_asof"] = anchor

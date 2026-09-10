@@ -442,7 +442,10 @@ class FeatureContext:
 #: ``orats_asof`` than its ``runup_asof``, and collapsing the two to one date
 #: would stamp the staler block later than it was actually observed. Which is
 #: exactly the direction that hides a leak.
-_REGIME_BLOCK = ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20")
+_REGIME_BLOCK = (
+    "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
+    "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
+)
 
 _RUNUP_BLOCK = (
     "dist_high",
@@ -1038,6 +1041,10 @@ FEATURE_NOTES: dict[str, str] = {
     "abs_dist_high": "How FAR from the 52-week high, ignoring direction (EXP-109).",
     "abs_dist_ema": "How FAR from the trailing EMA, ignoring direction (EXP-109).",
     "spy_vol20": "20-day realized volatility of the S&P — the market regime the trade sits in.",
+    "spy_vol5": "5-day annualized realized volatility of the S&P, measured before the event.",
+    "spy_vol60": "60-day annualized realized volatility of the S&P, measured before the event.",
+    "spy_vol252": "252-day annualized realized volatility of the S&P, measured before the event.",
+    "spy_vol20_rel252": "20-day S&P realized volatility divided by its 252-day counterpart, minus one — a causal short-volatility shock/regime measure.",
     "spy_dd252": "S&P drawdown from its 252-day high, in %.",
     "days_to_print": "Calendar days from the decision to the announcement.",
     "days_before_print": "TRADING days from entry to the last pre-print close. 0 for STR-THRU, 14 for STR-RUNUP — calendar days here would be a silent training/serving skew.",
