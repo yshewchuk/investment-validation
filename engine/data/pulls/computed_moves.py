@@ -53,7 +53,7 @@ MIN_SCOREABLE = 12
 MAX_GAP_CALENDAR_DAYS = 5
 
 
-def target_tickers(*, all_scoreable: bool = False) -> tuple[list[str], dict]:
+def target_tickers(*, all_scoreable: bool = False, since=None) -> tuple[list[str], dict]:
     """Scoreable on the ORATS calendar, with daily rows.
 
     The daily-market requirement is load-bearing: the champion size model
@@ -96,8 +96,20 @@ def target_tickers(*, all_scoreable: bool = False) -> tuple[list[str], dict]:
         "scoreable_on_orats_calendar": len(scoreable),
         "also_in_oquants": len(scoreable & oq_tickers),
         "no_daily_market_rows": len(pool - dm_tickers),
-        "targets": len(targets),
     }
+    if since is not None:
+        # Ongoing mode: only names that have PRINTED since the watermark need
+        # their moves recomputed. Every other ticker's realized history is
+        # unchanged by definition, so rebuilding it is 2,800 needless network
+        # fetches — the difference between a nightly step and an afternoon.
+        since = pd.Timestamp(since).normalize()
+        recent = ev[ev["src_orats"] & ev["session"].notna()
+                    & (pd.to_datetime(ev["event_date"]) >= since)]
+        printed = set(recent["ticker"].astype(str))
+        targets = [t for t in targets if t in printed]
+        report["since"] = str(since.date())
+        report["printed_since"] = len(printed)
+    report["targets"] = len(targets)
     return targets, report
 
 
@@ -219,6 +231,41 @@ def build_ticker(ticker: str, events: pd.DataFrame, sd, sc,
 #: ``moves_*.json`` glob the panel and EXP-119 read this directory with.
 CHECKPOINT_NAME = ".checkpoint.jsonl"
 
+#: How far the realized moves have been built. The nightly reads it to decide
+#: which names printed since, and advances it when the pull succeeds.
+STATE_NAME = ".state.json"
+
+#: Sessions of deliberate overlap when advancing the watermark. An AMC print on
+#: the last final session is not measurable until the NEXT close exists, so a
+#: watermark that ran to the edge would step over those events and never revisit
+#: them. Re-examining a few names costs seconds; a permanently skipped event is
+#: a hole in the panel that nothing later repairs.
+WATERMARK_OVERLAP_SESSIONS = 3
+
+
+def read_state(out_dir: Path | None = None) -> dict:
+    path = (out_dir or paths.COMPUTED_MOVES) / STATE_NAME
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(through, out_dir: Path | None = None) -> Path:
+    """Record how far the moves are built. tmp+replace so a kill cannot leave a
+    truncated watermark, which would read as 'never built' and trigger a full
+    rebuild, or worse parse as a date far in the future and skip everything."""
+    directory = out_dir or paths.COMPUTED_MOVES
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / STATE_NAME
+    tmp = directory / f".{STATE_NAME}.tmp"
+    tmp.write_text(json.dumps({
+        "moves_through": str(pd.Timestamp(through).date()),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }, indent=1))
+    tmp.replace(path)
+    return path
+
 
 def _build_fingerprint(all_scoreable: bool, events: pd.DataFrame) -> str:
     """Identity of one build, so a checkpoint is only resumed into its own.
@@ -293,12 +340,22 @@ def main(argv=None) -> int:
                          "the realized-move SOURCE mode")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore any existing checkpoint and rebuild every target")
+    ap.add_argument("--since", default=None,
+                    help="only names that printed on or after this date — the "
+                         "ongoing mode; pass 'state' to use the recorded watermark")
+    ap.add_argument("--advance-watermark", default=None,
+                    help="on success, record the moves as built through this date")
     args = ap.parse_args(argv)
     if not args.dry_run and not args.confirm:
         print("pass --dry-run or --confirm", file=sys.stderr)
         return 2
 
-    targets, selection = target_tickers(all_scoreable=args.all_scoreable)
+    since = args.since
+    if since == "state":
+        since = read_state().get("moves_through")
+        if since is None:
+            print("no watermark recorded yet; building the full universe", flush=True)
+    targets, selection = target_tickers(all_scoreable=args.all_scoreable, since=since)
     if args.tickers:
         keep = {t.strip().upper() for t in args.tickers.split(",")}
         targets = [t for t in targets if t in keep]
@@ -378,6 +435,10 @@ def main(argv=None) -> int:
               f"({doc['skipped_events']} skipped), {time.time()-started:.0f}s", flush=True)
     print(f"FINISHED written={written} no_history={no_history} too_few={too_few} "
           f"-> {out_dir}", flush=True)
+    if args.advance_watermark:
+        path = write_state(args.advance_watermark, out_dir)
+        print(f"watermark: moves built through {args.advance_watermark} -> {path}",
+              flush=True)
     return 0
 
 

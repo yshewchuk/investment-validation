@@ -100,3 +100,52 @@ class TestRerunActuallyRebuilds:
         done = cm._load_checkpoint(tmp_path / cm.CHECKPOINT_NAME, "abc123")
 
         assert "A" not in done, "a stale file must not count as finished work"
+
+
+class TestOngoingMode:
+    def test_since_narrows_to_names_that_printed(self, monkeypatch):
+        """The whole point of the ongoing mode: a ticker whose last print
+        predates the watermark has an unchanged realized history, so
+        refetching it is a network call that cannot change an answer."""
+        ev = pd.DataFrame({
+            "ticker": ["OLD", "NEW"],
+            "event_date": pd.to_datetime(["2026-01-15", "2026-09-08"]),
+            "session": ["AMC", "AMC"],
+            "src_orats": [True, True],
+        })
+
+        def read(table, **kw):
+            if table == "earnings_events":
+                return ev.copy()
+            return pd.DataFrame({"ticker": ["OLD", "NEW"]})
+
+        monkeypatch.setattr(cm.store, "read_table", read)
+        monkeypatch.setattr(cm, "MIN_SCOREABLE", 1)
+        monkeypatch.setattr(cm.paths, "RAW_OQUANTS_MOVES", __import__("pathlib").Path("/nonexistent"))
+
+        everything, _ = cm.target_tickers(all_scoreable=True)
+        recent, report = cm.target_tickers(all_scoreable=True, since="2026-09-01")
+
+        assert set(everything) == {"OLD", "NEW"}
+        assert recent == ["NEW"]
+        assert report["since"] == "2026-09-01"
+
+
+class TestWatermark:
+    def test_round_trips(self, tmp_path):
+        cm.write_state("2026-09-08", tmp_path)
+        assert cm.read_state(tmp_path)["moves_through"] == "2026-09-08"
+
+    def test_missing_state_reads_as_never_built(self, tmp_path):
+        assert cm.read_state(tmp_path) == {}
+
+    def test_corrupt_state_reads_as_never_built(self, tmp_path):
+        """A truncated watermark must mean 'rebuild everything', never a date
+        that silently skips work."""
+        (tmp_path / cm.STATE_NAME).write_text("{not json")
+        assert cm.read_state(tmp_path) == {}
+
+    def test_overlap_is_deliberate(self):
+        """An AMC print on the last session is not measurable until the next
+        close exists, so the watermark must stay behind the edge."""
+        assert cm.WATERMARK_OVERLAP_SESSIONS >= 1

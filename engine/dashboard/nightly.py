@@ -709,6 +709,80 @@ def _recently_printed(as_of, tickers: Sequence[str]) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+#: Sessions the Tier-3 panel may trail the board's own date before it is
+#: called out. Realized moves need the post-print close, so one or two
+#: sessions of lag is structural; beyond that the derivation has stopped
+#: advancing and someone needs to know.
+MAX_PANEL_LAG_SESSIONS = 3
+
+
+def _panel_staleness_flags(as_of) -> list[dict]:
+    """Flag a Tier-3/Tier-4 panel that has stopped tracking the calendar.
+
+    This is the check whose absence let the panel sit at 2026-09-03 from
+    2026-09-05 to 09-11. Every step involved reported success the whole time:
+    the moves pull "resumed" (it was skipping everything), the rebuild
+    "completed" (from unchanged inputs), and no cell anywhere compared the
+    result against the prints it was supposed to cover.
+
+    Reported as flags rather than a red stop, matching the tiers rebuild
+    immediately above: a lagging panel scores an older universe, which is
+    wrong but visible, while refusing to render leaves the board dark, which
+    is worse and less visible.
+    """
+    from engine.calendar import trading_calendar
+    from engine.data import store
+    from engine.features import load_panel
+
+    as_of = pd.Timestamp(as_of).normalize()
+    flags: list[dict] = []
+    try:
+        panel = load_panel()
+        panel_max = pd.to_datetime(panel["date"]).max().normalize()
+        events = store.read_table("earnings_events", columns=["event_date", "src_orats"])
+        printed = pd.to_datetime(events.loc[events["src_orats"].fillna(False), "event_date"])
+        printed_max = printed[printed <= as_of].max()
+    except Exception as exc:  # a check must not be the thing that breaks the run
+        return [{"kind": "panel_coverage_unknown",
+                 "detail": f"could not measure panel coverage: {type(exc).__name__}: {exc}"[:200]}]
+
+    calendar = trading_calendar()
+    try:
+        sessions_behind = 0
+        cursor = as_of
+        # Counted in SESSIONS, not calendar days: a Monday board is not three
+        # days behind a Friday panel, it is one session behind, and a
+        # day-based limit would cry wolf every weekend and every holiday.
+        while cursor > panel_max and sessions_behind <= 60:
+            cursor = calendar.shift(cursor, -1)
+            sessions_behind += 1
+    except Exception:
+        sessions_behind = None
+
+    if sessions_behind is not None and sessions_behind > MAX_PANEL_LAG_SESSIONS:
+        flags.append({
+            "kind": "panel_stale",
+            "detail": (
+                f"Tier 3 panel ends {panel_max.date()}, {sessions_behind} sessions "
+                f"behind the board's {as_of.date()} (limit {MAX_PANEL_LAG_SESSIONS}). "
+                "Tier 4 inherits this, so forward rows score against forecasts that "
+                "never saw the recent prints. Check the realized-moves watermark."
+            ),
+        })
+    if pd.notna(printed_max) and panel_max < pd.Timestamp(printed_max).normalize():
+        missing = int((printed > panel_max).sum() - (printed > as_of).sum())
+        if missing > 0:
+            flags.append({
+                "kind": "panel_missing_prints",
+                "detail": (
+                    f"{missing} confirmed print(s) between {panel_max.date()} and "
+                    f"{pd.Timestamp(printed_max).date()} are in Tier 2 but not in the "
+                    "panel — the realized-move layer has not caught up with them."
+                ),
+            })
+    return flags
+
+
 def validate_refresh(
     tickers: Sequence[str],
     as_of,
@@ -1205,10 +1279,63 @@ def run_nightly(
     if refresh and tiers:
         from engine.data.rebuild import rebuild as rebuild_tables
 
+        # -- 2b(i). realized moves, the layer BOTH tiers are derived from ----
+        # Rebuilding Tier 3/4 without this cannot advance coverage by a day:
+        # the panel's event universe is bounded by the moves, so a rebuild
+        # re-derives the same cutoff from the same inputs. That is exactly
+        # what happened through 2026-09-05..09-11 — the moves pull had been a
+        # silent no-op, the panel sat at 09-03, and every nightly spent ~25
+        # minutes faithfully reproducing it.
+        #
+        # Only names that PRINTED since the watermark are recomputed (117 of
+        # 2,853 for a ten-day gap), and the pull is resumable, so this is a
+        # step rather than an afternoon. Degrades like the rebuild below: it
+        # is network-bound, and a missing move is a stale board, not a wrong
+        # one.
+        moves_since = None
         try:
-            tier_result = rebuild_tables(("panel", "tier4"))
+            # Imported here rather than relying on the finality block's import:
+            # that block is conditional, and a name bound only inside a branch
+            # that did not run is a NameError, not a fallback.
+            from engine.calendar import trading_calendar
+            from engine.data.pulls import computed_moves
+
+            moves_since = computed_moves.read_state().get("moves_through")
+            targets, selection = computed_moves.target_tickers(
+                all_scoreable=True, since=moves_since)
+            if targets:
+                code = computed_moves.main([
+                    "--all-scoreable", "--confirm",
+                    *(["--since", str(moves_since)] if moves_since else []),
+                    "--advance-watermark", str(
+                        trading_calendar().shift(
+                            as_of, -computed_moves.WATERMARK_OVERLAP_SESSIONS)
+                        .date()),
+                ])
+                report.steps["moves"] = {"targets": len(targets),
+                                         "since": moves_since, "exit": int(code)}
+            else:
+                report.steps["moves"] = {"targets": 0, "since": moves_since,
+                                         "note": "nothing printed since the watermark"}
+        except Exception as exc:
+            report.steps["moves"] = {"degraded": True,
+                                     "error": f"{type(exc).__name__}: {exc}"[:300]}
+            report.flags.append({
+                "kind": "moves_degraded",
+                "detail": ("realized moves not refreshed — Tier 3/4 cannot cover prints "
+                           f"since {moves_since}. {type(exc).__name__}: {exc}")[:300],
+            })
+
+        try:
+            # Tier 4 only has to redo the tail Tier 3 actually moved. Its own
+            # contract: "Tier 3 changing at date D makes every forecast from D
+            # onward stale ... so a partial Tier-3 rebuild must be followed by
+            # --since D". The nightly passed nothing and rebuilt ~100 monthly
+            # folds x 4 producers from 2018 every night to absorb one day.
+            tier_result = rebuild_tables(("panel", "tier4"), tier4_since=moves_since)
             report.steps["tiers"] = {
                 "rebuilt": ["panel", "tier4"],
+                "tier4_since": moves_since,
                 "elapsed_s": getattr(tier_result, "elapsed_s", None),
             }
         except Exception as exc:
@@ -1219,6 +1346,13 @@ def run_nightly(
                 "detail": ("Tier 3/Tier 4 not rebuilt — scoring from the stored panel and "
                            f"forecasts, which may not cover recent prints. {type(exc).__name__}: {exc}")[:300],
             })
+
+        # -- 2b(ii). did any of that actually advance? ----------------------
+        # The failure this exists for was silent: the pull wrote nothing, the
+        # rebuild "succeeded", and the panel stayed six days behind for a week
+        # without a single red cell. Success of the steps is not evidence that
+        # coverage moved, so measure the coverage itself.
+        report.flags.extend(_panel_staleness_flags(as_of))
 
     # -- earnings-date changes (needs the refreshed calendar) ----------------
     # Only against a PREVIOUS run's calendar: with no prior state every event

@@ -2010,7 +2010,16 @@ class TestTheNightlyRebuildsTheTiers:
         block = block[:block.index("# -- earnings-date changes")]
         assert "tiers_degraded" in block, "a skipped rebuild has to raise a flag"
         assert "NightlyStop" not in block, "a tier failure must not stop the night"
-        assert 'rebuild_tables(("panel", "tier4"))' in block, "panel before tier4 — tier4 reads it"
+        # Order, not call text: tier4 reads the panel, so panel must be rebuilt
+        # first. Asserting the exact call string broke the moment the call
+        # gained `tier4_since=` — a brittleness worth not re-introducing, since
+        # what actually matters is the argument ORDER inside the tuple.
+        assert 'rebuild_tables(("panel", "tier4")' in block, "panel before tier4 — tier4 reads it"
+        # The moves refresh is the layer BOTH tiers derive from; rebuilding
+        # them without it cannot advance coverage by a single day.
+        assert block.index("computed_moves") < block.index("rebuild_tables(("), \
+            "realized moves must be refreshed before the tiers that read them"
+        assert "moves_degraded" in block, "a failed moves refresh has to raise a flag"
 
 
 class TestAssetCacheBusting:
@@ -2047,3 +2056,63 @@ class TestAssetCacheBusting:
         _copy_static(b)
         grab = lambda p: re.findall(r'assets/app\.js\?v=([0-9a-f]+)', (p / "index.html").read_text())
         assert grab(a) == grab(b), "two renders of identical assets must agree"
+
+
+class TestPanelStalenessGuard:
+    """The check whose absence let Tier 3 sit six days behind for a week.
+
+    Every step reported success the whole time — the moves pull "resumed"
+    while skipping everything, the rebuild "completed" from unchanged inputs —
+    so the only way to catch it is to measure the coverage rather than trust
+    the steps.
+    """
+
+    def _install(self, monkeypatch, panel_max, printed_dates):
+        import pandas as pd
+        from engine.dashboard import nightly as n
+
+        panel = pd.DataFrame({"date": pd.to_datetime([panel_max])})
+        events = pd.DataFrame({
+            "event_date": pd.to_datetime(printed_dates),
+            "src_orats": [True] * len(printed_dates),
+        })
+        monkeypatch.setattr("engine.features.load_panel", lambda: panel.copy())
+        monkeypatch.setattr("engine.data.store.read_table",
+                            lambda *a, **k: events.copy())
+
+    def test_a_current_panel_raises_nothing(self, monkeypatch):
+        from engine.dashboard import nightly as n
+        self._install(monkeypatch, "2026-09-09", ["2026-09-09"])
+        assert n._panel_staleness_flags("2026-09-10") == []
+
+    def test_a_panel_far_behind_the_board_is_flagged(self, monkeypatch):
+        from engine.dashboard import nightly as n
+        self._install(monkeypatch, "2026-09-03", ["2026-09-03"])
+        kinds = {f["kind"] for f in n._panel_staleness_flags("2026-09-10")}
+        assert "panel_stale" in kinds
+
+    def test_confirmed_prints_missing_from_the_panel_are_flagged(self, monkeypatch):
+        """Tier 2 knows these printed; Tier 3 does not carry them."""
+        from engine.dashboard import nightly as n
+        self._install(monkeypatch, "2026-09-03",
+                      ["2026-09-03", "2026-09-04", "2026-09-08", "2026-09-09"])
+        flags = n._panel_staleness_flags("2026-09-10")
+        assert "panel_missing_prints" in {f["kind"] for f in flags}
+
+    def test_a_weekend_is_not_staleness(self, monkeypatch):
+        """Counted in sessions, not calendar days — otherwise every Monday
+        board would cry wolf about a Friday panel."""
+        from engine.dashboard import nightly as n
+        self._install(monkeypatch, "2026-09-04", ["2026-09-04"])   # Friday
+        kinds = {f["kind"] for f in n._panel_staleness_flags("2026-09-08")}  # Tuesday
+        assert "panel_stale" not in kinds
+
+    def test_the_check_never_breaks_the_run(self, monkeypatch):
+        from engine.dashboard import nightly as n
+
+        def boom():
+            raise RuntimeError("panel unreadable")
+
+        monkeypatch.setattr("engine.features.load_panel", boom)
+        flags = n._panel_staleness_flags("2026-09-10")
+        assert [f["kind"] for f in flags] == ["panel_coverage_unknown"]
