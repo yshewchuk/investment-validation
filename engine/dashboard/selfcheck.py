@@ -31,13 +31,14 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
 
-from engine.dashboard.render import row_digest
+from engine.dashboard.render import _engine_fields, row_digest
 
 __all__ = ["SelfCheckReport", "selfcheck", "reconstruct_request"]
 
@@ -148,7 +149,9 @@ def _sample_rows(rows: Sequence[dict], n: int, seed: int) -> list[dict]:
 #: ScoreResult fields the board displays. The digest proves the REQUEST and the
 #: engine state match; comparing these values proves the NUMBERS ON SHOW match
 #: too — a bundle hand-edited after rendering keeps its digest and still fails.
-_COMPARED_FIELDS = (
+#:
+#: These LEAD a diff rather than bound it: see :func:`_compared_fields`.
+_DISPLAY_FIELDS = (
     "ticker", "strategy", "event_date", "session", "entry_date", "exit_date",
     "strike", "expiry", "dte_entry", "spot", "entry_cost", "extrapolated",
     "flags", "exp_pnl_model", "win_model", "model_p10", "model_p90",
@@ -165,6 +168,30 @@ _COMPARED_FIELDS = (
     "forecast_p10", "forecast_p90", "forecast_sd",
     "exp_pnl_sim", "win_sim", "rel_spread",
 )
+
+
+@lru_cache(maxsize=1)
+def _compared_fields() -> tuple[str, ...]:
+    """Every field the digest hashes, display fields first.
+
+    The digest covers the whole ``ScoreResult``; this list used to cover a
+    hand-maintained subset — 41 of its 70 fields — so a divergence in any of
+    the other 29 reported two hashes and "outside _COMPARED_FIELDS": a
+    mismatch the tool could see and could not name.
+
+    That drift has now gone silent twice. Once on the forecast block (above),
+    and again on 2026-09-11, on three CTR5 rows whose moved field was one of
+    ``chooser_score``, ``structure_params``, ``structure_spec`` or
+    ``variant`` — every one of them a field this list did not carry. Both
+    times the answer was to widen the list by hand after a run had already
+    been spent discovering the gap.
+
+    Deriving the domain from the digest's own is what stops a third. A field
+    that can move the digest can now always be named. Display fields stay in
+    front so they survive the diff's truncation.
+    """
+    extra = sorted(_engine_fields() - set(_DISPLAY_FIELDS))
+    return _DISPLAY_FIELDS + tuple(extra)
 
 
 def _norm(value: Any) -> Any:
@@ -204,7 +231,7 @@ def _diff_fields(stored: dict, fresh: dict) -> list[dict]:
     hours, for a fault the tool already had in hand. Carry the values.
     """
     diffs: list[dict] = []
-    for field in _COMPARED_FIELDS:
+    for field in _compared_fields():
         if field not in stored or field not in fresh:
             continue
         a, b = _norm(stored[field]), _norm(fresh[field])
@@ -316,12 +343,13 @@ def selfcheck(
                 "fields": field_diffs[:12],
             }
             if not field_diffs:
-                # Diagnostic in its own right: the digest covers the whole
-                # ScoreResult, the comparison list covers a subset, so this
-                # says the divergence is in a field nobody is watching. Widen
-                # `_COMPARED_FIELDS` rather than shrug at it.
-                entry["note"] = ("digest differs but every compared field agrees — "
-                                 "the moved field is outside _COMPARED_FIELDS")
+                # The comparison now spans the digest's own domain, so an
+                # unnamed field is no longer the explanation. What is left is
+                # normalization: `_norm` rounds to the board's six places, so
+                # a difference below that survives the hash and dies here.
+                entry["note"] = ("digest differs but every hashed field agrees under "
+                                 "_norm — the divergence is finer than the board's "
+                                 "six-place rounding")
             mismatches.append(entry)
             continue
         if field_diffs:

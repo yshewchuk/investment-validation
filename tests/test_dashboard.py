@@ -324,6 +324,20 @@ class TestRenderBundle:
 
 
 class TestSelfCheck:
+    def test_every_field_the_digest_hashes_can_be_named(self):
+        """A digest mismatch must always be explainable.
+
+        Twice the explainer's field list was a hand-maintained subset of the
+        digest's domain, and twice a run ended with two hashes and no name —
+        the forecast block, then three CTR5 rows on 2026-09-11. The domains
+        are equal by construction now; this is what keeps them that way when
+        a field is added to ScoreResult.
+        """
+        from engine.dashboard.render import _engine_fields
+        from engine.dashboard.selfcheck import _compared_fields
+
+        assert set(_compared_fields()) == _engine_fields()
+
     def test_green_when_the_bundle_matches_the_engine(self, tmp_path, scores):
         render_bundle(scores, tmp_path / "b", as_of=AS_OF,
                       meta={"as_of": str(AS_OF.date()), "snapshot_hash": "snap-test"})
