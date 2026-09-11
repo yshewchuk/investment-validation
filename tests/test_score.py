@@ -967,11 +967,18 @@ class TestMarketBlock:
         assert scorer._market_block(request(ticker="UNKNOWN"), result) == {}
 
     def test_an_early_entry_gets_no_market_block(self, scorer, panel, daily, calendar):
-        """STR-RUNUP enters 14 trading days out; the block would be hindsight."""
+        """STR-RUNUP decides 14 trading days out; the block would be hindsight.
+
+        The withhold rule reads `result.as_of` — the decision date — not
+        `entry_date`, since the finality work (bceb00e) re-keyed the market
+        block on the close being decided, not the close a structure enters
+        at. A fixture that leaves `as_of` at the event date no longer
+        exercises "early" from the code's own point of view.
+        """
+        early = calendar.shift(EVENT, -14)
         result = ScoreResult(
-            ticker=TICKER, strategy="STR-RUNUP", as_of=EVENT,
-            event_date=EVENT, session="AMC",
-            entry_date=calendar.shift(EVENT, -14),
+            ticker=TICKER, strategy="STR-RUNUP", as_of=early,
+            event_date=EVENT, session="AMC", entry_date=early,
         )
         features = scorer._features(request(strategy="STR-RUNUP"), result)
         assert "or_implied" not in features.columns
