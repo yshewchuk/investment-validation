@@ -67,8 +67,6 @@ CONTRACT_MULTIPLIER = 100
 #: Calendar days a print gets to settle before "cannot price this" becomes a
 #: real verdict rather than "the exit chain has not been published yet".
 #: Three covers a Friday print whose exit chain lands Monday night.
-SETTLE_LAG_DAYS = 3
-
 #: Target dollars per position. One contract each is not equal sizing: premiums
 #: in a single week ran from $2.40 (AEO) to $69.00 (CASY), so a one-contract
 #: book puts 29x more capital behind CASY and lets a few expensive names decide
@@ -88,7 +86,7 @@ CAPITAL_PER_TRADE = 10_000.0
 #: :func:`build_book`.
 OUTCOME_MERGE_COLUMNS = (
     "row_id", "status", "realized_pnl", "realized_entry_cost",
-    "realized_exit_value", "reason",
+    "realized_exit_value", "reason", "exit_finality",
 )
 
 
@@ -105,7 +103,8 @@ OUTCOME_MERGE_COLUMNS = (
 #: supplies); these are the ones this module constructs and consumers may rely
 #: on. ``tests/test_portfolio.py`` holds the declaration against reality.
 BOOK_COLUMNS = (
-    "row_id", "ticker", "strategy", "event_date", "as_of", "entry_cost",
+    "row_id", "ticker", "strategy", "event_date", "as_of", "decision_date",
+    "entry_date", "exit_date", "quote_date", "entry_cost",
     "gate_pass", "exp_pnl_model", "win_model", "recommended",
     "status", "realized_pnl", "realized_entry_cost", "realized_exit_value",
     "reason", "state", "contracts", "sizing", "capital", "pnl",
@@ -152,6 +151,17 @@ def build_book(contracts: int | None = None,
     prices = preds["intended_prices"].apply(lambda p: p or {})
     preds["entry_cost"] = pd.to_numeric(prices.apply(lambda p: p.get("entry_cost")),
                                         errors="coerce")
+    preds["quote_date"] = pd.to_datetime(prices.apply(lambda p: p.get("quote_date")),
+                                         errors="coerce")
+    structure = (
+        preds["structure"].apply(lambda s: s or {})
+        if "structure" in preds.columns
+        else pd.Series([{} for _ in range(len(preds))], index=preds.index)
+    )
+    preds["decision_date"] = pd.to_datetime(
+        structure.apply(lambda s: s.get("decision_date"))).fillna(pd.to_datetime(preds["as_of"]))
+    preds["entry_date"] = pd.to_datetime(structure.apply(lambda s: s.get("entry_date")))
+    preds["exit_date"] = pd.to_datetime(structure.apply(lambda s: s.get("exit_date")))
     preds["as_of"] = pd.to_datetime(preds["as_of"])
     preds["event_date"] = pd.to_datetime(preds["event_date"])
 
@@ -184,18 +194,26 @@ def build_book(contracts: int | None = None,
         for c in OUTCOME_MERGE_COLUMNS[1:]:
             book[c] = None
 
-    # A print settles on the FIRST session after it, and that session's chains
-    # are published later still. Anything inside that window has not had its
-    # chance to settle yet, and must not be counted as a failure.
+    # New rows carry an explicit entry and exit. They are not positions before
+    # their entry close, and an exit is only unresolvable after its own close
+    # has positive finality evidence. Legacy rows retain their historical
+    # calendar-lag classification because they predate the finality receipt.
     today = pd.Timestamp.today().normalize()
-    settle_window = today - pd.Timedelta(days=SETTLE_LAG_DAYS)
-    book["state"] = np.where(
-        book["status"] == "resolved", "settled",
-        np.where(
-            book["event_date"] >= today, "open",
-            np.where(book["event_date"] >= settle_window, "awaiting_exit", "unresolvable"),
-        ),
-    )
+    def lifecycle(row):
+        if row.get("status") == "resolved":
+            return "settled"
+        if int(row.get("schema_version") or 0) >= 3 and pd.notna(row.get("entry_date")):
+            if today < pd.Timestamp(row["entry_date"]).normalize():
+                return "awaiting_entry"
+            if pd.isna(row.get("exit_date")) or today <= pd.Timestamp(row["exit_date"]).normalize():
+                return "open"
+            receipt = row.get("exit_finality") or {}
+            return "unresolvable" if receipt.get("is_final") else "awaiting_exit"
+        settle_window = today - pd.Timedelta(days=3)
+        if pd.Timestamp(row["event_date"]).normalize() >= today:
+            return "open"
+        return "awaiting_exit" if pd.Timestamp(row["event_date"]).normalize() >= settle_window else "unresolvable"
+    book["state"] = book.apply(lifecycle, axis=1)
     # Capital is the quoted premium at the decision, which is what you would
     # have committed. `realized_entry_cost` is what the replay actually paid;
     # the two differ by the quote/fill drift and both are reported.
@@ -217,7 +235,7 @@ def build_book(contracts: int | None = None,
         * pd.to_numeric(book["realized_entry_cost"], errors="coerce")
         * CONTRACT_MULTIPLIER * book["contracts"]
     )
-    return book.sort_values(["event_date", "ticker"]).reset_index(drop=True)
+    return book.sort_values(["entry_date", "event_date", "ticker"]).reset_index(drop=True)
 
 
 def _summarize_settled(settled: pd.DataFrame) -> dict[str, Any]:
@@ -313,11 +331,13 @@ def render(book: pd.DataFrame, summary: dict) -> str:
                          f"mean {block['mean_trade_return']:+.2%}  "
                          f"win {block['win_rate']:.1%}")
         L.append("")
-    cols = ["as_of", "ticker", "strategy", "event_date", "state",
+    cols = ["as_of", "ticker", "strategy", "event_date", "entry_date", "exit_date", "state",
             "entry_cost", "realized_pnl", "pnl"]
     view = book[cols].copy()
     view["as_of"] = view["as_of"].dt.date
     view["event_date"] = view["event_date"].dt.date
+    view["entry_date"] = view["entry_date"].dt.date
+    view["exit_date"] = view["exit_date"].dt.date
     L += ["  the book:", "    " + view.to_string(index=False).replace("\n", "\n    "), ""]
     n_wait = int((book["state"] == "awaiting_exit").sum())
     if n_wait:

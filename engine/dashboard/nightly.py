@@ -80,6 +80,9 @@ class NightlyStop(RuntimeError):
 @dataclass
 class NightlyReport:
     as_of: str
+    requested_as_of: str | None = None
+    resolved_as_of: str | None = None
+    finality: dict | None = None
     steps: dict = field(default_factory=dict)
     flags: list = field(default_factory=list)
     stopped: str | None = None
@@ -118,6 +121,9 @@ class NightlyReport:
     def as_dict(self) -> dict:
         return {
             "as_of": self.as_of,
+            "requested_as_of": self.requested_as_of,
+            "resolved_as_of": self.resolved_as_of,
+            "finality": self.finality,
             "steps": self.steps,
             "timeline": self.timeline,
             "flags": self.flags,
@@ -1023,6 +1029,7 @@ def run_nightly(
     fetcher=None,
     scorer=None,
     max_staleness_days: int = MAX_STALENESS_DAYS,
+    require_as_of: bool = False,
 ) -> NightlyReport:
     """One nightly pass. Raises :class:`NightlyStop` when a gating step fails."""
     from engine import ledger
@@ -1041,11 +1048,15 @@ def run_nightly(
 
     started = time.time()
     as_of = pd.Timestamp(as_of).normalize() if as_of is not None else pd.Timestamp.today().normalize()
+    requested_as_of = as_of
     bundle_dir = Path(bundle_dir) if bundle_dir is not None else paths.ROOT / "dashboard" / "earnings"
     target = target if target is not None else _default_target()
     probe_url = os.environ.get("DASHBOARD_PROBE_URL") or None
 
-    report = NightlyReport(as_of=str(as_of.date()))
+    report = NightlyReport(
+        as_of=str(as_of.date()),
+        requested_as_of=str(as_of.date()),
+    )
     report.start(started)
     state = _read_state(bundle_dir)
 
@@ -1122,6 +1133,41 @@ def run_nightly(
         report.steps["refresh"] = {"skipped": not refresh or not calendar_tickers}
 
     report.mark("refresh", started=started)
+    # -- 1b. resolve the board clock from positive close-finality evidence ---
+    # Refresh may intentionally walk back while ORATS is still publishing the
+    # current market-wide file. Do not leave the board stamped with the
+    # requested wall-clock date in that case: a stamp is a claim about data.
+    if calendar_tickers:
+        from engine.calendar import trading_calendar
+        from engine.data.finality import resolve_final_session
+
+        try:
+            finality = resolve_final_session(
+                requested_as_of, calendar_tickers, calendar=trading_calendar()
+            )
+        except RuntimeError as exc:
+            report.stopped = "finality"
+            report.flags.append({"kind": "session_not_final", "detail": str(exc)})
+            _write_flag_report(requested_as_of, report.flags, report.steps)
+            raise NightlyStop("finality", str(exc)) from exc
+        as_of = pd.Timestamp(finality.date).normalize()
+        report.as_of = str(as_of.date())
+        report.resolved_as_of = str(as_of.date())
+        report.finality = finality.as_dict()
+        report.steps["finality"] = report.finality
+        if as_of != requested_as_of:
+            detail = (
+                f"requested {requested_as_of.date()} resolved to final "
+                f"{as_of.date()}: {finality.detail}"
+            )
+            report.flags.append({"kind": "as_of_resolved", "detail": detail})
+            if require_as_of:
+                report.stopped = "finality"
+                _write_flag_report(as_of, report.flags, report.steps)
+                raise NightlyStop("finality", detail)
+    else:
+        report.resolved_as_of = str(as_of.date())
+
     # -- 2. validation battery — red stops the pipeline ----------------------
     # Validate what will actually be scored (falling back to the frontier set
     # when nothing is upcoming yet, so a blind store still gets checked).
@@ -1237,7 +1283,9 @@ def run_nightly(
     # The ledger records the ATM board only: the ladder rows are EXTRAPOLATED
     # views of the same decision, and freezing them would inflate the
     # calibration sample with rows nobody would trade.
-    report.steps["ledger"] = ledger.snapshot(as_of=as_of, scores=board_scores)
+    report.steps["ledger"] = ledger.snapshot(
+        as_of=as_of, scores=board_scores, finality=report.finality
+    )
 
     report.mark("ledger", started=started)
     # -- 4a. SETTLE what has already happened --------------------------------
@@ -1397,6 +1445,11 @@ def run_nightly(
         late_as_ofs=[x["as_of"] for x in late_as_ofs],
         registry=engine.registry,
     )
+    meta["execution_clock"] = {
+        "requested_as_of": str(requested_as_of.date()),
+        "resolved_as_of": str(as_of.date()),
+        "finality": report.finality,
+    }
     meta["cron"] = {
         "entry": f"30 21 * * 1-5  cd {paths.ROOT.name} && python3 -m engine.dashboard.nightly "
                  ">> dashboard/nightly.log 2>&1",
@@ -1514,6 +1567,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--as-of", default=None)
+    parser.add_argument("--require-as-of", action="store_true",
+                        help="fail instead of resolving --as-of back to the newest final session")
     parser.add_argument("--horizon", type=int, default=HORIZON_DAYS,
                         help="calendar days of prints to score; the default is "
                              "set by STR-RUNUP's 14-trading-day entry")
@@ -1562,6 +1617,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backfill=not args.no_backfill,
                 chain_sessions=args.chain_sessions,
                 max_staleness_days=args.max_staleness,
+                require_as_of=args.require_as_of,
             )
     except NightlyStop as exc:
         print(f"NIGHTLY STOPPED — {exc}", file=sys.stderr)

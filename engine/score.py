@@ -1380,7 +1380,7 @@ class Scorer:
         Shared by the market block and the event-history block below — they
         are two slices of the same vector, and computing it twice would
         double the cost of every forward row on the board. Also cached ACROSS
-        different ``score()`` calls, keyed on (ticker, event_date, entry_date,
+        different ``score()`` calls, keyed on (ticker, event_date, decision_date,
         session): a board scores every strategy for one event, most of which
         share the same decision date (only STR-RUNUP enters early), so without
         this the same expensive recomputation ran once per strategy instead of
@@ -1389,7 +1389,7 @@ class Scorer:
         key = (
             request.ticker,
             pd.Timestamp(result.event_date).normalize() if result.event_date is not None else None,
-            pd.Timestamp(result.entry_date).normalize() if result.entry_date is not None else None,
+            pd.Timestamp(result.as_of).normalize() if result.as_of is not None else None,
             result.session,
         )
         if key in self._live_features_cache:
@@ -1398,7 +1398,7 @@ class Scorer:
             vector = live_features(
                 request.ticker,
                 result.event_date,
-                as_of=result.entry_date,
+                as_of=result.as_of,
                 session=result.session,
                 context=self.context,
             )
@@ -1430,10 +1430,22 @@ class Scorer:
         """
         row = self._panel_row(request, result)
         if row is not None:
+            # A panel row has one market block baked at its event-date anchor.
+            # Reuse panel_features rather than duplicating its withhold rule:
+            # a decision before that anchor must receive NaN, never hindsight.
+            from engine.features import panel_features
+
+            vector = panel_features(
+                request.ticker,
+                result.event_date,
+                as_of=result.as_of,
+                session=result.session,
+                context=self.context,
+            )
             return {
-                column: (float(row[column]) if pd.notna(row[column]) else np.nan)
+                column: (float(vector.values[column]) if pd.notna(vector.values[column]) else np.nan)
                 for column in _PANEL_MARKET_BLOCK
-                if column in row.index
+                if column in vector.values
             }
         live = self._live_values(request, result)
         return {c: live[c] for c in _PANEL_MARKET_BLOCK if c in live}
@@ -1445,6 +1457,7 @@ class Scorer:
                 {
                     "ticker": request.ticker,
                     "event_date": result.event_date,
+                    "decision_date": result.as_of,
                     "entry_date": result.entry_date,
                     "entry_cost": result.entry_cost,
                     "spot_entry": result.spot,
@@ -1454,7 +1467,7 @@ class Scorer:
         )
         built = entry_feature_frame(
             frame, panel=self.context.panel, daily=self.context.daily,
-            as_of_column="entry_date",
+            as_of_column="decision_date",
         )
         built["entry_cost_pct"] = (
             pd.to_numeric(built["entry_cost"], errors="coerce")
@@ -1484,7 +1497,7 @@ class Scorer:
         window = self.calendar.resolve_offsets(
             result.event_date, result.session, 0, 1
         )
-        if result.entry_date is not None and result.entry_date >= window.last_pre_print:
+        if result.as_of is not None and result.as_of >= window.last_pre_print:
             block = self._market_block(request, result)
             for column, value in block.items():
                 built[column] = value
@@ -1522,13 +1535,13 @@ class Scorer:
 
         # The audit that the guide requires on EVERY call, not just in tests.
         stamped = {
-            c: result.entry_date
+            c: result.as_of
             for c in built.columns
             if c in set(EVENT_HISTORY_FEATURES) | set(DAILY_STATE_COLUMNS)
         }
         vector = FeatureVector(
             ticker=request.ticker,
-            as_of=result.entry_date,
+            as_of=result.as_of,
             values={
                 c: (float(built[c].iloc[0]) if pd.notna(built[c].iloc[0]) else float("nan"))
                 for c in stamped
@@ -1564,8 +1577,8 @@ class Scorer:
         # Record the inputs BEFORE any early return: a row that declined to
         # score is exactly the one where someone needs to see what went in.
         result.model_input_as_of = (
-            str(pd.Timestamp(result.entry_date).date())
-            if result.entry_date is not None
+            str(pd.Timestamp(result.as_of).date())
+            if result.as_of is not None
             else None
         )
         result.model_inputs = {
@@ -1689,8 +1702,8 @@ class Scorer:
         result.model_versions["im_t1"] = implied_entry.id
         result.model_versions["runup_move"] = move_entry.id
         result.model_input_as_of = (
-            str(pd.Timestamp(result.entry_date).date())
-            if result.entry_date is not None
+            str(pd.Timestamp(result.as_of).date())
+            if result.as_of is not None
             else None
         )
         all_features = tuple(

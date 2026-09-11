@@ -47,7 +47,7 @@ from engine.ledger_settlement import POLICY, comparison, recorded_structure, sel
 
 #: Bumped when a prediction row's shape changes. Rows carry it so a reader
 #: five schema versions later can still tell what it is holding.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Newly scored outcomes that trigger a calibration recompute (plan §P4.2).
 CALIBRATION_TRIGGER = 50
@@ -311,6 +311,7 @@ def _event_ids(events_wanted: pd.DataFrame) -> pd.DataFrame:
 
 def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
                           audit_receipts: Mapping[str, Any] | None = None,
+                          finality: Mapping[str, Any] | None = None,
                           entry_dated_only: bool = True) -> list[dict]:
     """Turn a scored board into ledger rows.
 
@@ -340,10 +341,14 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
     rows: list[dict] = []
     for record in scores.to_dict(orient="records"):
         if entry_dated_only:
-            entry_date = record.get("entry_date")
-            if entry_date is None or pd.isna(entry_date):
+            decision_date = (
+                record.get("as_of")
+                or record.get("decision_date")
+                or record.get("entry_date")
+            )
+            if decision_date is None or pd.isna(decision_date):
                 continue
-            if pd.Timestamp(entry_date).normalize() != as_of:
+            if pd.Timestamp(decision_date).normalize() != as_of:
                 continue
         event_date = pd.to_datetime(record.get("event_date"))
         rid = row_id(as_of, record.get("ticker"), record.get("strategy"),
@@ -374,13 +379,20 @@ def build_prediction_rows(scores: pd.DataFrame, *, as_of, decision_ts=None,
             "settlement": settlement,
             "structure": {"strike": record.get("strike"), "expiry": record.get("expiry"),
                           "legs": record.get("legs"),
+                          "decision_date": (
+                              record.get("as_of")
+                              or record.get("decision_date")
+                              or record.get("entry_date")
+                          ),
                           "entry_date": record.get("entry_date"),
                           "exit_date": record.get("exit_date"),
                           "dte_entry": record.get("dte_entry")},
             "intended_prices": {"alpha": alpha,
                                 "quote_date": record.get("quote_date"),
+                                "quoted_cost": record.get("entry_cost"),
                                 "entry_cost": record.get("entry_cost"),
                                 "spot": record.get("spot")},
+            "finality": dict(finality or {}),
             "score": record,
             "model_versions": record.get("model_versions") or {},
             "snapshot_hash": record.get("snapshot_hash") or "",
@@ -395,6 +407,7 @@ def snapshot(as_of=None, *, horizon_days: int = 21,
              strategies: Sequence[str] | None = None,
              tickers: Iterable[str] | None = None,
              scores: pd.DataFrame | None = None,
+             finality: Mapping[str, Any] | None = None,
              entry_dated_only: bool = True) -> dict:
     """Score the upcoming calendar and freeze the rows that ENTER today.
 
@@ -417,7 +430,16 @@ def snapshot(as_of=None, *, horizon_days: int = 21,
         return {"as_of": str(as_of.date()), "rows": 0, "path": None,
                 "note": "no confirmed events in the horizon"}
 
-    rows = build_prediction_rows(scores, as_of=as_of,
+    if finality is None:
+        from engine.data.finality import session_finality
+
+        finality = session_finality(as_of, scores["ticker"].dropna().astype(str).unique()).as_dict()
+    if not bool(finality.get("is_final")):
+        return {"as_of": str(as_of.date()), "rows": 0, "path": None,
+                "deferred": True, "finality": dict(finality),
+                "note": "session is not final; no append-only decision recorded"}
+
+    rows = build_prediction_rows(scores, as_of=as_of, finality=finality,
                                  entry_dated_only=entry_dated_only)
     if not rows:
         return {"as_of": str(as_of.date()), "rows": 0, "path": None,
@@ -431,6 +453,7 @@ def snapshot(as_of=None, *, horizon_days: int = 21,
     skipped = len(rows) - len(fresh)
     path = write_predictions(fresh, as_of=as_of) if fresh else None
     return {"as_of": str(as_of.date()), "rows": len(fresh), "skipped_existing": skipped,
+            "finality": dict(finality),
             "path": str(path) if path else None,
             "elapsed_s": round(time.time() - started, 1)}
 
@@ -496,7 +519,7 @@ def _settlement_calendar() -> pd.DataFrame:
                             columns=["event_id", "ticker", "event_date", "session"])
 
 
-def score_outcomes(through=None, *, resolved_at=None) -> dict:
+def score_outcomes(through=None, *, resolved_at=None, finality_fn=None) -> dict:
     """Settle recorded selection rules with simulated ORATS quote fills.
 
     The rule, including fixed strikes/expiries, comes from the prediction.
@@ -510,7 +533,33 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
     resolved_at = pd.Timestamp(resolved_at or datetime.now(tz=timezone.utc))
     pending = _unresolved(through)
     if not pending:
-        return {"resolved": 0, "unresolvable": 0, "path": None}
+        return {"resolved": 0, "unresolvable": 0, "deferred": 0, "path": None}
+
+    # New ledger rows may settle only once the recorded exit session is final.
+    # Legacy rows predate this proof and keep their historical retry behavior.
+    if finality_fn is None:
+        from engine.data.finality import session_finality
+
+        finality_fn = session_finality
+    finality_cache = {}
+    eligible = []
+    deferred = 0
+    for row in pending:
+        frozen = row.get("structure") or {}
+        exit_date = frozen.get("exit_date") or (row.get("score") or {}).get("exit_date")
+        if int(row.get("schema_version") or 0) < SCHEMA_VERSION or not exit_date:
+            eligible.append(row)
+            continue
+        key = (str(pd.Timestamp(exit_date).date()), str(row.get("ticker")))
+        if key not in finality_cache:
+            finality_cache[key] = finality_fn(exit_date, [row.get("ticker")]).as_dict()
+        if finality_cache[key].get("is_final"):
+            eligible.append(row)
+        else:
+            deferred += 1
+    pending = eligible
+    if not pending:
+        return {"resolved": 0, "unresolvable": 0, "deferred": deferred, "path": None}
 
     calendar = _settlement_calendar()
     groups, errors, checks = {}, {}, {}
@@ -611,6 +660,11 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
             "strategy": row["strategy"], "event_date": row["event_date"],
             "settlement": row.get("settlement"),
             "settlement_source": "orats_quote_simulation",
+            "exit_finality": finality_cache.get((
+                str(pd.Timestamp((row.get("structure") or {}).get("exit_date")
+                    or (row.get("score") or {}).get("exit_date")).date()),
+                str(row.get("ticker")),
+            )),
             "predicted_win": (row.get("score") or {}).get("win_model"),
             "predicted_pnl": (row.get("score") or {}).get("exp_pnl_model"),
             "predicted_win_analog": (row.get("score") or {}).get("win_analog"),
@@ -637,6 +691,7 @@ def score_outcomes(through=None, *, resolved_at=None) -> dict:
     path = _write_outcomes(rows)
     resolved = sum(1 for r in rows if r["status"] == "resolved")
     return {"resolved": resolved, "unresolvable": len(rows) - resolved,
+            "deferred": deferred,
             "path": str(path) if path else None}
 
 

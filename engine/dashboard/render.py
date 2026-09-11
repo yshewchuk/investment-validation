@@ -71,7 +71,7 @@ BOARD_MAX_BYTES = 1_200_000
 #: Fields a board row carries. Everything else stays in the per-ticker file,
 #: which loads lazily — the board is the only file every visit pays for.
 _BOARD_FIELDS = (
-    "row_id", "ticker", "strategy", "event_date", "session",
+    "row_id", "ticker", "strategy", "as_of", "event_date", "session",
     "entry_date", "exit_date", "strike", "strike_offset", "expiry",
     # `quote_date` / `quote_age_sessions`: which close the premium came from,
     # and how many sessions before the entry that was. A row several days out is
@@ -112,7 +112,7 @@ _BOARD_FIELDS = (
     "driver_name", "driver_prediction", "driver_p10", "driver_p90",
     "runup_move_prediction", "runup_move_p10", "runup_move_p90",
     "runup_move_days", "runup_move_scale",
-    "implied_move", "implied_move_at_entry", "model_vs_market",
+    "implied_move", "implied_move_at_entry", "model_vs_market", "model_input_as_of",
     "chain_last_obs", "chain_age_days",
     "scored", "rank", "fill", "detail", "digest",
 )
