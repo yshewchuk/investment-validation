@@ -576,3 +576,61 @@ class TestPanelFeaturesStaleMarketBlock:
             session="BMO", context=context,
         )
         assert vector.values["mean_prior_move"] == 1.0
+
+
+class TestLiveFeaturesBoundedByTheDecision:
+    """Prior history stops at the DECISION, not only at the event.
+
+    `prior < event_date` is right only when decision and event coincide. A
+    structure that decides early — STR-RUNUP enters fourteen trading days out —
+    can otherwise recur its history block over an event that had not happened
+    when the call was made.
+
+    Found 2026-09-11, the first night Tier 3 was not a week stale: CSBR carried
+    a confirmed 2026-09-10 print and an unconfirmed 09-14 one, and scoring the
+    latter decided at 2026-08-24 while reading the 09-10 result. The panel row
+    had not existed before that day's rebuild, so the leak was unreachable
+    until the data caught up.
+    """
+
+    @pytest.fixture
+    def context(self):
+        from engine.calendar import trading_calendar
+
+        rows = []
+        for i, date in enumerate(pd.to_datetime(
+                ["2026-03-12", "2026-07-27", "2026-09-10"])):
+            row = {name: 1.0 for name in features.PANEL_FEATURE_COLUMNS}
+            row.update({"ticker": "CSBR", "k": i, "date": date, "quarter": "Q1",
+                        "move": 2.0, "abs_move": 2.0, "year": date.year,
+                        "mcap_asof": date})
+            rows.append(row)
+        return features.FeatureContext(
+            panel=pd.DataFrame(rows), daily=None, calendar=trading_calendar()
+        )
+
+    def test_an_event_after_the_decision_is_not_recurred_into_history(self, context):
+        """The 09-10 print sits between the 08-24 decision and the 09-14 event.
+
+        Asserted on the history STAMP, which is the quantity `assert_causal`
+        compares against the decision and the one the LeakError named. Before
+        the fix this stamped 2026-09-10 against a 2026-08-24 decision and the
+        nightly died on it.
+        """
+        vector = features.live_features(
+            "CSBR", "2026-09-14", as_of=pd.Timestamp("2026-08-24"),
+            session="AMC", context=context,
+        )
+        stamp = vector.feature_as_of["n_prior"]
+        assert stamp == pd.Timestamp("2026-07-27"), stamp
+        assert stamp <= vector.as_of, "history observed after its own decision"
+
+    def test_a_same_day_decision_still_sees_its_most_recent_event(self, context):
+        """The bound is `<=`, not `<`. For an AMC print the decision close IS
+        the event date, so a strict bound would silently drop the latest prior
+        event from every same-day decision on the board."""
+        vector = features.live_features(
+            "CSBR", "2026-09-14", as_of=pd.Timestamp("2026-09-10"),
+            session="AMC", context=context,
+        )
+        assert vector.feature_as_of["n_prior"] == pd.Timestamp("2026-09-10")

@@ -706,7 +706,23 @@ def live_features(
     assert_decision_causal(as_of, event_date, session, calendar=cal)
 
     prior = ctx.ticker_panel(ticker)
-    prior = prior[prior["date"] < event_date].sort_values("date")
+    # Bounded by the DECISION as well as by the event. `< event_date` alone is
+    # right only when the two coincide; a structure that decides early —
+    # STR-RUNUP enters fourteen trading days out — can otherwise pick up an
+    # event that falls BETWEEN its decision and its own print, and recur the
+    # history block over a result nobody had yet.
+    #
+    # Found 2026-09-11 the moment Tier 3 stopped being a week stale. CSBR
+    # carries a confirmed 09-10 print and an unconfirmed 09-14 one; scoring
+    # the latter decides at 2026-08-24, and the 09-10 row — absent from the
+    # panel until that day's rebuild — walked straight into `n_prior`, the
+    # prior-move means and every EMA. `assert_causal` caught it and stopped
+    # the night, which is the audit working; the filter is what stops it
+    # arising. `<=` not `<`: for an AMC print the decision close IS the event
+    # date, so a strict bound would silently drop the most recent prior event
+    # from every same-day decision on the board.
+    prior = prior[(prior["date"] < event_date) & (prior["date"] <= as_of)]
+    prior = prior.sort_values("date")
     if prior.empty:
         raise KeyError(
             f"{ticker}: no prior panel events before {event_date.date()} — the "
