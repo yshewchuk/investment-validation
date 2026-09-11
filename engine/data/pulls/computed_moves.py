@@ -1,14 +1,31 @@
 #!/usr/bin/env python3
-"""Synthesize oquants-format moves files for tickers oquants does not carry.
+"""The program's source of record for REALIZED MOVES, in oquants file format.
 
+    python3 -m engine.data.pulls.computed_moves --confirm              # all names
+    python3 -m engine.data.pulls.computed_moves --since state --confirm  # ongoing
     python3 -m engine.data.pulls.computed_moves --dry-run
-    python3 -m engine.data.pulls.computed_moves --confirm
 
-The panel's event universe is bounded by the oquants moves cache (2,936
-tickers). EXP-117 Stage 3 measured 34 further tickers reaching the >=12-print
-scoreability bar on the ORATS calendar alone; this pull gives those names the
-event-history block the panel and the live scorer need, so they stop rendering
-as MISSING_FEATURES rows.
+This began as a universe EXTENSION — EXP-117 Stage 3 measured 34 tickers that
+reached the >=12-print scoreability bar on the ORATS calendar but were absent
+from the oquants moves cache, and this pull gave them the event-history block
+the panel and live scorer need. It is now the source of record for every
+ticker, not only those 34: the computed move wins the panel's per-field merge
+wherever it exists (see ``build_events``), and oquants is a fallback that
+supplies ``implied_move``.
+
+Two things forced that. The oquants cache has no fetcher in this repository,
+so it lags whenever nobody refreshes it out of band, and the panel's event
+universe is bounded by whatever the moves carry. And the computed move is the
+better measurement anyway — EXP-117 validated it at 99.5% within 0.5pp against
+Polygon truth.
+
+Because the whole panel and Tier 4 are derived from this, a pull that silently
+does nothing is indistinguishable from a healthy one until someone reads a
+date. That happened: between 2026-09-05 and 09-11 the pull skipped every
+ticker (see ``CHECKPOINT_NAME``), the panel sat at 09-03 while Tier 2 held
+prints through 09-10, and every nightly rebuilt Tier 3/4 faithfully from
+unchanged inputs. The checkpoint, the watermark and the nightly's own panel
+coverage flags all exist because of that week.
 
 Provenance is the point. The target values here are COMPUTED, not
 vendor-supplied:
@@ -53,23 +70,27 @@ MIN_SCOREABLE = 12
 MAX_GAP_CALENDAR_DAYS = 5
 
 
-def target_tickers(*, all_scoreable: bool = False, since=None) -> tuple[list[str], dict]:
+def target_tickers(*, all_scoreable: bool = True, since=None) -> tuple[list[str], dict]:
     """Scoreable on the ORATS calendar, with daily rows.
 
     The daily-market requirement is load-bearing: the champion size model
     needs or_implied / or_rvol30 / mcap_log, and a ticker with no
     daily_market rows would stay MISSING_FEATURES even with history rows.
 
-    ``all_scoreable`` drops the "absent from oquants" condition, which is what
-    turns this from a universe EXTENSION into a realized-move SOURCE. The panel
-    merges per field (see ``build_events``): the computed realized move wins
-    wherever it exists, oquants keeps ``implied_move``, and an event only this
-    pull has is added outright.
+    ``all_scoreable`` is the DEFAULT and the formalized position: the computed
+    move is this program's source of record for realized moves, for every
+    ticker, not only the ones oquants happens to lack. ``all_scoreable=False``
+    narrows back to the original universe EXTENSION and exists only for
+    reproducing pre-2026-09 behaviour.
 
-    Two reasons the wider mode is the right default going forward. The oquants
-    cache has no fetcher in this repository and lags — on 2026-09-05 it ended
-    2026-08-31 while Tier 2 held prints through 09-04, so 103 events could not
-    reach the panel at all. And the realized move computed here is the better
+    The panel merges per field (see ``build_events``): the computed realized
+    move wins wherever it exists, oquants supplies ``implied_move`` and nothing
+    else that matters, and an event only this pull has is added outright.
+
+    Two reasons this is the source of record rather than a supplement. The
+    oquants cache has no fetcher in this repository and lags — on 2026-09-05 it
+    ended 2026-08-31 while Tier 2 held prints through 09-04, so 103 events
+    could not reach the panel at all. And the computed move is the better
     measurement: EXP-117 validated it at 99.5% within 0.5pp against Polygon,
     and the 2026-09-05 arbitration found it matching oquants to the cent on
     92.5% of the events where oquants and ORATS spot disagreed.
@@ -336,8 +357,12 @@ def main(argv=None) -> int:
     ap.add_argument("--confirm", action="store_true")
     ap.add_argument("--tickers", default=None, help="comma-separated override")
     ap.add_argument("--all-scoreable", action="store_true",
-                    help="every scoreable ticker, not only those oquants lacks — "
-                         "the realized-move SOURCE mode")
+                    help="accepted and now the default; kept so existing "
+                         "invocations and scripts keep working")
+    ap.add_argument("--extension-only", action="store_true",
+                    help="narrow back to only the tickers oquants lacks — the "
+                         "pre-2026-09 universe-extension behaviour, for "
+                         "reproducing old builds")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore any existing checkpoint and rebuild every target")
     ap.add_argument("--since", default=None,
@@ -355,7 +380,8 @@ def main(argv=None) -> int:
         since = read_state().get("moves_through")
         if since is None:
             print("no watermark recorded yet; building the full universe", flush=True)
-    targets, selection = target_tickers(all_scoreable=args.all_scoreable, since=since)
+    targets, selection = target_tickers(
+        all_scoreable=not args.extension_only, since=since)
     if args.tickers:
         keep = {t.strip().upper() for t in args.tickers.split(",")}
         targets = [t for t in targets if t in keep]

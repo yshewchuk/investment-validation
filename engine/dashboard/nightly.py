@@ -710,10 +710,12 @@ def _recently_printed(as_of, tickers: Sequence[str]) -> list[str]:
 
 
 #: Sessions the Tier-3 panel may trail the board's own date before it is
-#: called out. Realized moves need the post-print close, so one or two
-#: sessions of lag is structural; beyond that the derivation has stopped
-#: advancing and someone needs to know.
-MAX_PANEL_LAG_SESSIONS = 3
+#: called out. Realized moves need the post-print close, so ONE session of lag
+#: is structural and unavoidable; two is the deliberate limit, leaving a single
+#: session of margin. That is tight on purpose — the failure this guards
+#: against ran silently for six days, and a flag that occasionally fires a day
+#: early costs a glance, while one that waits for certainty costs a week.
+MAX_PANEL_LAG_SESSIONS = 2
 
 
 def _panel_staleness_flags(as_of) -> list[dict]:
