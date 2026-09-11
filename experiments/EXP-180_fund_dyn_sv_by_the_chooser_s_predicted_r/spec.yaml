@@ -1,0 +1,85 @@
+id: EXP-180
+title: "Fund DYN-SV by the chooser's predicted return per margin, not simulated PnL"
+strategy: "DYN-SV"
+type: single-variable funding-order comparison
+price_source: >
+  ORATS historical bid/ask chains cached by EXP-137, all candidates read from
+  cache (via EXP-169's load_data_menu). Nothing is re-priced or re-fetched;
+  quota_calls: 0.
+hypothesis: >
+  Funding priority for the DYN-SV book currently orders same-day competitors
+  by exp_pnl_sim per secured dollar of the CHOSEN structure (margin163.py,
+  inherited from EXP-134/163) -- a model-free arithmetic estimate that never
+  sees the chooser's analogs, forecast edge, market state, or payoff
+  schematics. EXP-178 measured that a chooser retrained to rank realized PnL
+  more accurately (better within-event Spearman in 6/7 years) still produced
+  a very slightly WORSE funded book, and localized the loss to two structures
+  (CND-PS, BFLY-P5) where the funded SUBSET realized worse even though the
+  wanted-mean was unchanged or better -- i.e. capital was going to worse
+  members of a structure's own population, a funding-order effect, not a
+  picking effect. This experiment holds the CHOOSER'S PICKS fixed at the
+  deployed champion's choices (dyn_sv_chooser_v1_1 / EXP-169's OOS choices,
+  unchanged) and asks only whether a MODEL trained to predict each
+  candidate's own realized RETURN, on the chooser's own registered feature
+  set, orders funding better than exp_pnl_sim does. This isolates the
+  funding metric as the only variable: same picks, same expanding-annual-fold
+  discipline, same capital-allocation walk (margin163.simulate, unchanged),
+  only the priority column differs.
+primary_spec:
+  fixed_picks: "dyn_sv_chooser_v1_1's own OOS choices (experiments/EXP-169_menu7prime_confirmation/results/choices.parquet), completely unchanged -- this experiment does not retrain or re-pick anything"
+  auxiliary_model: >
+    A SEPARATE model from the chooser, predicting `ret` (pnl / entry_cost)
+    directly -- not the chooser's event-demeaned, quantile-transformed
+    ranking target, which is not a portable magnitude across events and
+    cannot be compared to exp_pnl_sim's units. Same feature list as the
+    chooser (EXP-161's ARMS["nn_all_categories"] via menu_features(MENU)),
+    same expanding-annual-fold walk, first_test_year=2020, same MLP(64,32) x
+    5 seeds (20260908-20260912) as every other head in this lineage, trained
+    on the FULL candidate population (not chosen-only) so every offered
+    candidate in every OOS event gets an out-of-fold predicted return --
+    avoiding the coverage gap a chosen-only training set would have for the
+    walk's earliest fold. StandardScaler only, no QuantileTransformer: the
+    raw ret scale is what a dollar-equivalent funding-priority score needs.
+  funding_priority: >
+    predicted_priority = predicted_ret * entry_cost * 100 / secured_per_contract
+    -- same shape as the incumbent's exp_pnl_sim * 100 / secured_per_contract,
+    substituting the auxiliary model's own prediction for the arithmetic
+    estimate, so the two are unit-comparable.
+  arms:
+    menu7p_mcap10: "ten-billion floor, the deployed champion's own arm (EXP-170)"
+    menu7p_mcap1: "one-billion floor, the transfer check (EXP-119/EXP-169)"
+  what_does_not_change: "the picks (head_structure per event), the hygiene gate (rel_spread <= 0.25, mcap floor), margin163.simulate's own walk algorithm (cap=0.66, target_share=0.25), the funding policy ($200,000 start)"
+evaluation:
+  required_metrics:
+    - "per-arm account comparison: incumbent funding order (exp_pnl_sim) vs candidate funding order (predicted_ret), both on the SAME fixed picks"
+    - "auxiliary-model accuracy table: per-year Spearman(predicted_ret, realized ret) on the full candidate population, AND on the chosen-only subset that actually competes for funding"
+    - "per-structure wanted-vs-funded and aggregate funded-PnL contribution (funded count x mean realized), incumbent vs candidate order, per arm -- the EXP-178 report format, so results are directly comparable"
+    - "rank agreement between the two priority columns (incumbent vs candidate), pooled and per year -- if they mostly agree, a small account delta is expected; if they diverge, the delta should track the divergence"
+  primary_success:
+    - "menu7p_mcap10 final_equity(candidate order) > final_equity(incumbent order) -- $301,048.89 is the reference, since the picks and everything else are unchanged from EXP-169's champion book"
+    - "menu7p_mcap1 final_equity(candidate order) > final_equity(incumbent order) -- $392,726.85 reference"
+    - "zero defined-risk failures in both arms under the candidate order"
+  multiplicity: "One preregistered comparison per arm (2 arms), no grid search over model architecture or feature set -- both are fixed to match the chooser's own, by design, so a win or loss is attributable to the funding metric alone."
+  promotion: "This experiment does NOT promote or change the live nightly's funding behaviour (engine/portfolio.py currently applies no funding order at all -- see the report's note). A pass is evidence for a follow-up change to the experiment lineage's evaluation harness, not an automatic deployment."
+data:
+  candidates: "EXP-137 candidate panel, read from cache"
+  fixed_choices: "experiments/EXP-169_menu7prime_confirmation/results/choices.parquet, unmodified"
+  tier4: "data/features/tier4_forecasts.parquet joined on ticker and event date"
+  quota_calls: 0
+walk_forward:
+  unit: year
+  min_train_years: 2
+  first_test_year: 2020
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+resource_notes: >
+  Run under tools/bounded_run.py per house convention. The auxiliary model's
+  training cost is comparable to the chooser's own fold training (~15-20
+  minutes measured for that architecture on this population) since it uses
+  the same architecture, feature count and row count -- see
+  EXP-169/EXP-178 for the measured baseline.
+data_snapshot: c11dd818bfc10d92e63f14484ecb0cec6d0421dc2957c60e79e532601267e7e7
+preregistered_at: "2026-09-11T03:55:13+00:00"
