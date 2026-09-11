@@ -71,3 +71,77 @@ def test_ledger_records_the_decision_session_not_the_later_entry(monkeypatch):
     assert rows[0]["structure"]["decision_date"] == "2026-09-09"
     assert rows[0]["structure"]["entry_date"] == "2026-09-10"
     assert rows[0]["finality"] == receipt
+
+
+def test_a_ticker_the_store_never_carries_cannot_veto_a_session(monkeypatch):
+    """The regression this gate shipped with.
+
+    The nightly asks about its whole calendar, which includes illiquid names
+    no data source carries. Counting those against a same-session check asks
+    whether data arrived that was never going to arrive — measured 2026-09-11,
+    81 of 213 requested names had no row on any date, so the gate read 62%
+    against an 80% floor and refused every session it was shown.
+    """
+    day = "2026-09-10"
+    daily = pd.DataFrame({"ticker": ["A", "B"], "date": [day, day]})
+    chains = pd.DataFrame({"ticker": ["A", "B"], "obs_date": [day, day]})
+    _install(monkeypatch, daily, chains, [
+        _Entry("hist/summaries", day), _Entry("hist/cores", day),
+    ])
+
+    # Five names the store has never seen, alongside the two it has.
+    result = finality.session_finality(
+        day, ["A", "B", "AENT", "ALAR", "BTTC", "CMMB", "EONR"])
+
+    assert result.is_final, result.detail
+    assert result.daily_share == 1.0
+    assert result.chain_share == 1.0
+    assert result.tickers == 7        # asked about
+    assert result.covered == 2        # actually carried — the real denominator
+
+
+def test_a_store_carrying_none_of_the_universe_is_not_vacuously_final(monkeypatch):
+    """Excluding uncovered names must not become 'divide by nothing, pass'.
+
+    A store that lost the universe has an empty denominator, and 0/0 is
+    exactly the shape that would report perfect freshness on no data at all.
+    """
+    day = "2026-09-10"
+    daily = pd.DataFrame({"ticker": ["X", "Y"], "date": [day, day]})
+    chains = pd.DataFrame({"ticker": ["X", "Y"], "obs_date": [day, day]})
+    _install(monkeypatch, daily, chains, [
+        _Entry("hist/summaries", day), _Entry("hist/cores", day),
+    ])
+
+    result = finality.session_finality(day, ["A", "B"])
+
+    assert not result.is_final
+    assert result.covered == 0
+    assert "carried" in result.detail
+
+
+def test_a_covered_name_missing_todays_close_still_fails(monkeypatch):
+    """The exclusion is about names with NO rows, never about a missing close.
+
+    A carried name that simply did not get today's pull must still count
+    against the session — that is the whole point of the gate.
+    """
+    day = "2026-09-10"
+    daily = pd.DataFrame({
+        "ticker": ["A", "B", "C", "D", "E"],
+        "date": [day, day, day, day, "2026-09-09"],
+    })
+    chains = pd.DataFrame({
+        "ticker": ["A", "B", "C", "D", "E"],
+        "obs_date": [day, day, day, day, day],
+    })
+    _install(monkeypatch, daily, chains, [
+        _Entry("hist/summaries", day), _Entry("hist/cores", day),
+    ])
+
+    result = finality.session_finality(day, ["A", "B", "C", "D", "E", "GHOST"])
+
+    assert result.covered == 5           # GHOST excluded, E is not
+    assert result.daily_share == 0.8     # E's close is genuinely missing
+    assert result.chain_share == 1.0
+    assert result.is_final               # 80% is the floor, inclusive
