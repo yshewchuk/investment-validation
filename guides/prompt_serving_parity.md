@@ -88,15 +88,53 @@ sitting in the code waiting for the first one to.
 
 ---
 
+### 1.4 The forecast-suppression defect — a THIRD parity class
+
+Found 2026-09-11, and it belongs here because it is a kind of parity this
+prompt did not originally name.
+
+`reconstruct_request` gained `structure_params=row.get("structure_params")`
+(commit `83f228d`), so a re-scored row replays the contract the board actually
+priced. Correct in intent. But the forecast was gated on those params being
+ABSENT:
+
+```python
+if request.strategy in FORECAST_SIZED and not request.structure_params:
+    request, structure = self._size_from_forecast(request, result, structure)
+```
+
+Replaying the params skipped the call entirely, so the whole forecast block
+came back empty — `forecast_model`, `forecast_abs_move`, the band — taking
+`exp_pnl_sim`, `win_sim`, `gate_pass` and the chooser with it. Measured on one
+row:
+
+| | board | re-score |
+|---|---|---|
+| forecast_model | size_v1_4 | **None** |
+| forecast_abs_move | 10.679723 | **None** |
+| exp_pnl_sim | -0.290524 | **None** |
+
+Drop the replayed params and the re-score reproduces the board exactly
+(10.679723). Fixed by decoupling: always RECORD the forecast, only SIZE when
+the caller left the shape open.
+
+**Why it belongs in this document.** It is neither training-vs-serving (§1.1,
+§1.2) nor a decision-date cutoff (§1.3). It is **serving-vs-serving**: same
+engine, same data, two request shapes, two different answers. A check built
+only around "does serving match training" is blind to it by construction.
+
 ## 2. Why nothing in the pipeline can catch these
 
-- **The self-check compares serving to serving.**
-  `engine/dashboard/selfcheck.py` re-scores sampled board rows through
-  `engine.score.score` and compares digests and displayed values. That proves
-  the bundle matches the engine. It cannot, even in principle, prove the engine
-  matches the training frame. Both defects in §1.1 and §1.2 were invisible to
-  it, and §1.1 actually *did* make it print mismatches for weeks without anyone
-  being able to say what they meant.
+- **The self-check compares serving to serving — which is a real check, not
+  a gap.** `engine/dashboard/selfcheck.py` re-scores sampled board rows through
+  `engine.score.score` and compares digests and displayed values. It cannot, even
+  in principle, prove the engine matches the TRAINING frame, which is why §1.1
+  and §1.2 walked straight past it — and why §1.1 printed mismatches for weeks
+  without anyone being able to say what they meant. But it is precisely the
+  right instrument for §1.4, and it worked: 10 mismatches in 20 rows, publish
+  refused, within hours of the commit landing. **Do not build P1 as a
+  replacement for it.** They answer different questions and the program needs
+  both. What failed on §1.4 was not detection but DIAGNOSIS — see §3.7.
 - **The registry pins names, not construction.** A registry entry carries
   `features: [...]` and `artifact_sha256`. It says which columns go in and in
   what order, and nothing at all about how any of them is computed. Two
@@ -238,6 +276,51 @@ which construction it was.
 
 ---
 
+### 3.7 P6 — make the self-check say WHAT diverged, and prove the round trip
+
+§1.4 was detected in hours and diagnosed in hours more, and the gap between
+those two numbers is entirely fixable. Three changes, smallest first.
+
+**The digest check short-circuits the field diff.**
+
+```python
+if fresh_digest != digest:
+    mismatches.append({... "reason": "digest mismatch", "stored": …, "fresh": …})
+    continue                      # <- the field diff never runs
+field_diffs = _diff_fields(row, fresh)
+```
+
+The digest says THAT something diverged; `_diff_fields` says WHAT. When the
+digest matches, the diff runs as a tamper check. When it differs — exactly when
+the explanation is needed — it is skipped. Every §1.4 mismatch therefore read
+`digest mismatch, stored 81feeeac, fresh 6e638dc5`, and the field-level cause
+was recovered three separate times by hand with throwaway scripts. Run the diff
+on mismatch too, and report the field names.
+
+**`_COMPARED_FIELDS` omits the block that broke.** Absent from it:
+
+```
+forecast_abs_move, forecast_model, forecast_fold, forecast_p10/p90/sd,
+exp_pnl_sim, win_sim
+```
+
+So even with the diff running it could not have named the fault. The digest
+hashes the whole `ScoreResult` and is the sensitive detector; the compared list
+is the explainer, and the explainer has a hole exactly where the forecast and
+simulation live. Extend it.
+
+**Add a round-trip test, which is the real fix.** The invariant §1.4 broke is
+cheap to state and cheap to check without a board:
+
+> score a row → render it → `reconstruct_request` from the rendered row →
+> re-score → the two results agree.
+
+That is the same property `selfcheck` verifies, at commit time in seconds
+rather than after a ~90-minute nightly. It would have failed `83f228d` in CI
+immediately. Put it in `tests/test_selfcheck.py` (or `tests/test_score.py`) over
+a small fixture board covering at least one FORECAST_SIZED strategy — the class
+of row where the request shape and the recorded contract interact.
+
 ## 4. Acceptance criteria
 
 - [ ] The parity check runs in the phase battery **and** as a nightly step
@@ -251,6 +334,11 @@ which construction it was.
       Demonstrate this, one at a time, and record which features it named. A
       check that has never failed on a known defect is not evidence.
 - [ ] The bounded-vs-full-context digest test covers every scored strategy.
+- [ ] A self-check mismatch names the DIVERGING FIELDS, not just two digests,
+      and `_COMPARED_FIELDS` covers the forecast and simulation block.
+- [ ] A round-trip test (score → render → reconstruct → re-score) runs in the
+      unit suite and fails when a replayed request changes what is computed.
+      Demonstrate it by reverting the §1.4 fix and watching it go red.
 - [ ] No engine module imports from `experiments/` — or a list of the remaining
       ones exists, with an owner and a date.
 

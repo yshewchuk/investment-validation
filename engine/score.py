@@ -994,8 +994,13 @@ class Scorer:
         # Before pricing, which is the whole point: the strikes cannot be
         # chosen until the width is known, and the width comes from a model
         # whose features are entirely pricing-free. See engine/forecast_sizing.
-        if request.strategy in FORECAST_SIZED and not request.structure_params:
-            request, structure = self._size_from_forecast(request, result, structure)
+        if request.strategy in FORECAST_SIZED:
+            # Always RECORD the forecast; only SIZE when the caller left the
+            # shape open. Gating the whole call on `not structure_params` made
+            # a replayed request — the self-check's, and any caller pinning a
+            # contract — silently forecast-less.
+            request, structure = self._size_from_forecast(
+                request, result, structure, size=not request.structure_params)
             if structure is None:
                 return result
 
@@ -1964,14 +1969,31 @@ class Scorer:
             )
         return self._serving_models[key]
 
-    def _size_from_forecast(self, request, result, structure):
-        """Set the structure's shape from the feature model's forecast.
+    def _size_from_forecast(self, request, result, structure, *, size: bool = True):
+        """Record the feature model's forecast, and optionally shape the trade.
 
         Returns ``(request, structure)``, with ``structure`` ``None`` when the
         event cannot be sized. Declining is the correct outcome and not a
         degraded one: pricing the factory's DEFAULT width instead would put a
         real number on the board for a trade nobody chose, and the row would
         claim to be forecast-sized while being nothing of the kind.
+
+        ``size=False`` records the forecast and leaves the contract alone, for
+        a caller that already pinned ``structure_params``. Recording and sizing
+        are separate jobs and were previously one: the call was skipped
+        wholesale whenever params were supplied, so a re-score of a row the
+        board had sized came back with the ENTIRE forecast block empty —
+        forecast_model, forecast_abs_move, the band — and exp_pnl_sim, win_sim,
+        gate_pass and the chooser all collapsed behind it.
+
+        That is not hypothetical: it took the 2026-09-11 nightly's self-check
+        to 10 mismatches in 20 rows and refused the publish, because
+        `reconstruct_request` replays a row's recorded params — correctly, it
+        is how you reproduce the contract that was actually priced — and
+        thereby suppressed the forecast that explains the row. The guard's job
+        is to avoid OVERRIDING a pinned contract, never to blank the forecast,
+        and the digest is entitled to assume these fields mean the same thing
+        on every path that produces them.
 
         The request is replaced rather than mutated so that everything
         downstream — the bootstrap seed, the recorded parameters, the structure
@@ -2010,6 +2032,11 @@ class Scorer:
                 result.forecast_p10 = float(p10[0])
                 result.forecast_p90 = float(p90[0])
                 result.forecast_sd = float(sd[0])
+        if not size:
+            # The forecast is recorded; the contract is the caller's. Returning
+            # the structure unchanged is what keeps a replayed request priced on
+            # the same legs it was priced on the first time.
+            return request, structure
         if params is None:
             result.flag("NO_FORECAST")
             result.detail = describe_sizing(request.strategy, None)

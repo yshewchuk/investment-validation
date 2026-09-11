@@ -156,6 +156,14 @@ _COMPARED_FIELDS = (
     "analog_widened", "gate_score", "gate_threshold", "gate_pass",
     "model_versions", "driver_name", "driver_prediction", "detail",
     "chain_last_obs", "chain_age_days",
+    # The forecast and simulation block. Absent until 2026-09-11, which is why
+    # the night this list could have named the fault it stayed silent: a
+    # replayed request returned forecast_model=None, forecast_abs_move=None and
+    # exp_pnl_sim=None, the digest caught it, and the explainer had no opinion
+    # because it was not looking at any of them.
+    "forecast_model", "forecast_fold", "forecast_abs_move",
+    "forecast_p10", "forecast_p90", "forecast_sd",
+    "exp_pnl_sim", "win_sim", "rel_spread",
 )
 
 
@@ -177,13 +185,31 @@ def _norm(value: Any) -> Any:
     return value
 
 
-def _diff_fields(stored: dict, fresh: dict) -> list[str]:
-    diffs = []
+def _short(value: Any, width: int = 60) -> Any:
+    """A value small enough to sit in a log line without losing its identity."""
+    if isinstance(value, float):
+        return round(value, 6) if np.isfinite(value) else None
+    if isinstance(value, (int, bool)) or value is None:
+        return value
+    text = str(value)
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _diff_fields(stored: dict, fresh: dict) -> list[dict]:
+    """Every compared field that differs, WITH both values.
+
+    Names alone are not a diagnosis. A mismatch reported as two 16-character
+    hashes sends the reader to write a throwaway script to learn which field
+    moved — on 2026-09-11 that happened three separate times over several
+    hours, for a fault the tool already had in hand. Carry the values.
+    """
+    diffs: list[dict] = []
     for field in _COMPARED_FIELDS:
         if field not in stored or field not in fresh:
             continue
-        if _norm(stored[field]) != _norm(fresh[field]):
-            diffs.append(field)
+        a, b = _norm(stored[field]), _norm(fresh[field])
+        if a != b:
+            diffs.append({"field": field, "board": _short(a), "fresh": _short(b)})
     return diffs
 
 
@@ -276,17 +302,28 @@ def selfcheck(
             fresh = fresh | {"strategy": DYNAMIC_STRATEGY,
                              "detail": row.get("detail")}
         fresh_digest = row_digest(fresh)
-        if fresh_digest != digest:
-            mismatches.append(
-                {
-                    "row_id": row.get("row_id"),
-                    "reason": "digest mismatch",
-                    "stored": digest[:16],
-                    "fresh": fresh_digest[:16],
-                }
-            )
-            continue
         field_diffs = _diff_fields(row, fresh)
+        if fresh_digest != digest:
+            # The diff runs HERE too, which it did not until 2026-09-11. The
+            # digest says THAT the row moved; only the diff says WHAT moved,
+            # and skipping it on mismatch withheld the explanation in exactly
+            # the case that needed one.
+            entry = {
+                "row_id": row.get("row_id"),
+                "reason": "digest mismatch",
+                "stored": digest[:16],
+                "fresh": fresh_digest[:16],
+                "fields": field_diffs[:12],
+            }
+            if not field_diffs:
+                # Diagnostic in its own right: the digest covers the whole
+                # ScoreResult, the comparison list covers a subset, so this
+                # says the divergence is in a field nobody is watching. Widen
+                # `_COMPARED_FIELDS` rather than shrug at it.
+                entry["note"] = ("digest differs but every compared field agrees — "
+                                 "the moved field is outside _COMPARED_FIELDS")
+            mismatches.append(entry)
+            continue
         if field_diffs:
             mismatches.append(
                 {

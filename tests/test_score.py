@@ -1339,7 +1339,33 @@ class TestForecastSizedStructures:
         result = scorer.score(
             twin(structure_params={"width_moneyness": 0.08}), chain_index=dense_chain
         )
-        assert result.forecast_abs_move is None
+        assert result.structure_width == pytest.approx(8.0)
+
+    def test_the_forecast_is_still_recorded_under_a_supplied_shape(
+        self, scorer, dense_chain, forecast
+    ):
+        """Recording the forecast and SIZING with it are separate jobs.
+
+        This assertion used to read `forecast_abs_move is None`, which pinned
+        how the override was implemented — the whole call was skipped — rather
+        than what it means. The cost showed up on 2026-09-11: the self-check
+        replays a row's recorded `structure_params` (correctly; it is how you
+        reproduce the contract that was priced), which tripped that skip and
+        returned the entire forecast block empty, taking exp_pnl_sim, win_sim,
+        gate_pass and the chooser with it. Ten mismatches in twenty rows, and
+        the publish refused.
+
+        The override still wins the WIDTH — asserted directly above. What it
+        must not do is erase the forecast that explains the row, because the
+        digest is entitled to assume these fields mean the same thing on every
+        path that produces them.
+        """
+        result = scorer.score(
+            twin(structure_params={"width_moneyness": 0.08}), chain_index=dense_chain
+        )
+        assert result.forecast_abs_move is not None
+        assert result.forecast_model is not None
+        # and the caller's shape is still the one that got priced
         assert result.structure_width == pytest.approx(8.0)
 
 

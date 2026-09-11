@@ -1630,6 +1630,18 @@ def run_nightly(
         report.stopped = "selfcheck"
         report.flags.append({"kind": "selfcheck_red", "detail": check.detail,
                              "mismatches": check.mismatches[:5]})
+        # Printed, not merely recorded. A stopped run never writes its JSON
+        # report, so on 2026-09-11 the only trace of ten mismatches was the
+        # one-line "10 mismatch(es) in 20 re-scored rows" — and the fields that
+        # moved had to be recovered by hand afterwards. The log is what a
+        # person actually reads at 3am; put the diagnosis in it.
+        for bad in check.mismatches[:5]:
+            print(f"  [selfcheck] {bad.get('row_id')}: {bad.get('reason')}", flush=True)
+            if bad.get("note"):
+                print(f"      {bad['note']}", flush=True)
+            for diff in bad.get("fields") or []:
+                print(f"      {diff['field']:24s} board={diff['board']!r:<34} "
+                      f"fresh={diff['fresh']!r}", flush=True)
         _write_flag_report(as_of, report.flags, report.steps)
         raise NightlyStop("selfcheck", check.detail)
 
