@@ -135,7 +135,22 @@ def target_tickers(*, all_scoreable: bool = True, since=None) -> tuple[list[str]
 
 
 def fetch_history(f: Fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | None:
-    """yfinance Close series (split-adjusted, not dividend-adjusted)."""
+    """yfinance Close series (split-adjusted, not dividend-adjusted).
+
+    ``live=True`` is load-bearing, not a tuning choice. Without it the cache
+    key is ``(source, endpoint, params)`` and ``period="max"`` never varies, so
+    the FIRST response ever cached for a ticker is returned forever — and this
+    pull exists to notice new closes. Measured 2026-09-11: 2,828 of 2,856
+    cached series were fetched on 09-05 and end at 2026-09-04, so every
+    rebuild after that recomputed the same moves from the same stale prices
+    and the panel could not advance past 09-03 no matter how often it ran.
+
+    ``live`` puts ``date.today()`` in the key, which is once-a-day freshness —
+    exactly the cadence a daily close series needs, and the same treatment the
+    nightly already gives the ORATS market-wide files. It costs a real fetch
+    per ticker per day, which is why the ongoing path asks only for the names
+    that printed rather than the whole universe.
+    """
     # The Fetcher RAISES on a non-200 rather than returning one, so the status
     # guard below never fired and a single delisted ticker took the whole run
     # down — BF_B, at 352 of 2,857, after 351 successful fetches. A universe
@@ -145,7 +160,7 @@ def fetch_history(f: Fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | No
 
     try:
         rec = f.fetch("yfinance", "history", {"ticker": ticker, "period": "max"},
-                      note="computed-moves")
+                      live=True, note="computed-moves")
     except (FetchError, OSError, ValueError):
         return None
     if rec is None or rec.status != 200:

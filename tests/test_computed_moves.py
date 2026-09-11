@@ -149,3 +149,32 @@ class TestWatermark:
         """An AMC print on the last session is not measurable until the next
         close exists, so the watermark must stay behind the edge."""
         assert cm.WATERMARK_OVERLAP_SESSIONS >= 1
+
+
+class TestPriceFreshness:
+    def test_history_is_fetched_live_so_new_closes_are_seen(self, monkeypatch):
+        """The second layer of the 09-05..09-11 staleness.
+
+        `period="max"` never varies, so without `live` the cache key is
+        constant and the first response ever cached for a ticker is returned
+        forever. Measured 2026-09-11: 2,828 of 2,856 cached series were
+        fetched on 09-05 and ended at 09-04 — so even after the pull stopped
+        skipping tickers, it recomputed the same moves from the same stale
+        prices. `live` puts today's date in the key, which is the once-a-day
+        freshness a daily close series needs.
+        """
+        seen = {}
+
+        class _Rec:
+            status = 200
+            body = b"Date,Close\n2026-09-10,1.0\n"
+
+        class _F:
+            def fetch(self, source, endpoint, params, *, live=False, note=""):
+                seen.update(source=source, endpoint=endpoint, live=live)
+                return _Rec()
+
+        cm.fetch_history(_F(), "AAPL")
+
+        assert seen["live"] is True, "a stale price series cannot produce a new move"
+        assert seen["source"] == "yfinance"
