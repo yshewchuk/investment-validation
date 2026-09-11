@@ -805,7 +805,7 @@ class TestGateDomain:
             features=["mcap_log"], target="ret",
             train_window="test", champion=True, threshold=0.05,
         )
-        scorer._models[("STR-THRU", "gate")] = (entry, artifact)
+        scorer._models[("STR-THRU", "gate", None)] = (entry, artifact)
 
     def _result(self):
         return ScoreResult(ticker=TICKER, strategy="STR-THRU", as_of=EVENT)
@@ -820,6 +820,21 @@ class TestGateDomain:
         assert "OUT_OF_DOMAIN" not in result.flags
         assert result.gate_score == pytest.approx(0.10)
         assert result.gate_pass is True
+
+    def test_d1_never_serves_the_d0_gate(self, scorer):
+        from engine.score import GATE_MCAP_FLOOR
+
+        self._stub_gate(scorer)
+        result = self._result()
+        result.structure_spec = {
+            "entry_offset": 0,
+            "decision_offset": -1,
+        }
+        features = pd.DataFrame({"mcap_log": [np.log(2 * GATE_MCAP_FLOOR)]})
+        scorer._score_gate(request(decision_offset=-1), result, features)
+        assert "GATE_UNTRAINED_DECISION_OFFSET" in result.flags
+        assert result.gate_score is None
+        assert result.gate_pass is None
 
     def test_a_sub_1b_name_gets_no_decision(self, scorer):
         from engine.score import GATE_MCAP_FLOOR

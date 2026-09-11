@@ -851,6 +851,11 @@ def strike_ladder(board: pd.DataFrame, *, scorer, alt_strikes: int, as_of) -> li
                 # re-scores it under a different seed. See `ladder_strike`.
                 strike=ladder_strike(spot, offset),
                 fill=FillModel(float(record.get("fill", 0.5))),
+                variant=record.get("variant"),
+                decision_offset=(
+                    (record.get("structure_spec") or {}).get("decision_offset")
+                ),
+                structure_params=record.get("structure_params"),
                 # Same quote bound as the board row this ladder steps off. A
                 # ladder priced under a stricter rule than its own ATM anchor is
                 # not a view of the same decision, and the selfcheck cannot

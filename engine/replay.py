@@ -40,6 +40,7 @@ from engine.structures import (
     ChainSnapshot,
     Structure,
     StructureError,
+    execution_variant_label,
     price_structure,
     structure_return,
 )
@@ -684,14 +685,7 @@ def _variant_label(structure: Structure) -> str:
     T−1 book are different trade sets, and `e+0x+1` cannot be allowed to name
     both of them in the `trades` table.
     """
-    parts = [f"e{structure.entry_offset:+d}", f"x{structure.exit_offset:+d}"]
-    if structure.decided_early:
-        parts.append(f"d{structure.decided_at:+d}")
-    for key in sorted(structure.params):
-        value = structure.params[key]
-        if value is not None:
-            parts.append(f"{key}={value}")
-    return "_".join(parts)
+    return execution_variant_label(structure)
 
 
 def _empty_trades() -> pd.DataFrame:

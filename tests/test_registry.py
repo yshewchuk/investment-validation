@@ -116,6 +116,16 @@ class TestRegistryInvariants:
         )
         assert registry.champion("gate", "STR-THRU").id == "g1"
 
+    def test_allows_d0_and_d1_champions_for_one_strategy_role(self):
+        registry = reg.Registry(
+            entries=[
+                entry(id="d0", role="gate", strategy="STR-THRU", champion=True),
+                entry(id="d1", role="gate", strategy="STR-THRU", decision_offset=-1, champion=True),
+            ]
+        )
+        assert registry.champion("gate", "STR-THRU").id == "d0"
+        assert registry.champion("gate", "STR-THRU", decision_offset=-1).id == "d1"
+
     def test_rejects_an_empty_feature_list(self):
         with pytest.raises(reg.RegistryError, match="empty feature list"):
             entry(features=[])
@@ -146,6 +156,12 @@ class TestChampionLookup:
     def test_a_non_champion_entry_is_not_returned(self):
         registry = reg.Registry(entries=[entry(champion=False)])
         assert registry.has_champion("size") is False
+
+    def test_d1_lookup_never_falls_back_to_a_d0_champion(self):
+        registry = reg.Registry(
+            entries=[entry(role="gate", strategy="STR-THRU", champion=True)]
+        )
+        assert registry.has_champion("gate", "STR-THRU", decision_offset=-1) is False
 
 
 class TestIntegrityChecks:

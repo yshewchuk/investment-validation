@@ -15,6 +15,9 @@ from engine.structures import (
     StructureError,
     StructurePrice,
     STRUCTURES,
+    D1_DECISION_OFFSETS,
+    D1_STRATEGIES,
+    execution_variant_label,
     price_structure,
     put_calendar,
     put_condor,
@@ -23,6 +26,7 @@ from engine.structures import (
     structure_return,
     twin_peak,
     twin_peak_5,
+    with_decision_offset,
 )
 
 
@@ -208,6 +212,17 @@ class TestStructureSpecs:
     def test_every_structure_can_take_one(self):
         assert put_calendar(decision_offset=-1).decided_at == -1
         assert straddle_runup(decision_offset=-16).decided_at == -16
+
+    def test_d1_catalog_moves_every_strategy_except_runup(self):
+        assert set(D1_STRATEGIES) == set(STRUCTURES) - {"STR-RUNUP"}
+        assert D1_DECISION_OFFSETS == {name: -1 for name in D1_STRATEGIES}
+        for name in D1_STRATEGIES:
+            d0 = STRUCTURES[name]()
+            d1 = with_decision_offset(d0, D1_DECISION_OFFSETS[name])
+            assert d1.entry_offset == d0.entry_offset
+            assert d1.exit_offset == d0.exit_offset
+            assert d1.decided_early
+            assert execution_variant_label(d1) != execution_variant_label(d0)
 
     def test_spec_round_trips_to_a_dict(self):
         spec = put_calendar(back_dte=30)

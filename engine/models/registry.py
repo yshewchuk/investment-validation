@@ -8,7 +8,7 @@ justified promoting it.
 Four integrity rules are enforced at load, each of them a failure that has
 happened to somebody:
 
-1. **Exactly one champion per (strategy, role).** Two champions is not a
+1. **Exactly one champion per (strategy, role, decision offset).** Two champions is not a
    tie-break to resolve at call time; it is an unresolved promotion.
 2. **The artifact hash matches.** A model retrained in place while the manifest
    still quotes its old metrics is the most expensive kind of stale: every
@@ -337,6 +337,10 @@ class RegistryEntry:
     #: Tier-4 columns this model reads, for decision models. This is the half of
     #: the graph that says which forecasts a promotion would disturb.
     consumes: list[str] = field(default_factory=list)
+    #: The close offset the decision model was fit to serve. None is the
+    #: legacy D0 namespace. An early-decision artifact must never be selected
+    #: for a D0 score, or the converse.
+    decision_offset: int | None = None
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
@@ -372,8 +376,8 @@ class RegistryEntry:
                 )
 
     @property
-    def key(self) -> tuple[str, str]:
-        return (self.strategy, self.role)
+    def key(self) -> tuple[str, str, int | None]:
+        return (self.strategy, self.role, self.decision_offset)
 
     @property
     def path(self) -> Path:
@@ -403,14 +407,16 @@ class Registry:
         if dupes:
             raise RegistryError(f"duplicate registry id(s): {dupes}")
 
-        champions: dict[tuple[str, str], list[str]] = {}
+        champions: dict[tuple[str, str, int | None], list[str]] = {}
         for entry in self.entries:
             if entry.champion:
                 champions.setdefault(entry.key, []).append(entry.id)
         contested = {k: v for k, v in champions.items() if len(v) > 1}
         if contested:
             detail = "; ".join(f"{k}: {v}" for k, v in sorted(contested.items()))
-            raise RegistryError(f"more than one champion for a (strategy, role) — {detail}")
+            raise RegistryError(
+                f"more than one champion for a (strategy, role, decision_offset) — {detail}"
+            )
 
     # -- lookup ------------------------------------------------------------
 
@@ -452,7 +458,13 @@ class Registry:
             for column in TIER4_COLUMNS
         }
 
-    def champion(self, role: str, strategy: str = ANY_STRATEGY) -> RegistryEntry:
+    def champion(
+        self,
+        role: str,
+        strategy: str = ANY_STRATEGY,
+        *,
+        decision_offset: int | None = None,
+    ) -> RegistryEntry:
         """The champion for a role, preferring a strategy-specific entry.
 
         A strategy-specific champion beats the wildcard, so a per-strategy gate
@@ -460,20 +472,33 @@ class Registry:
         """
         if role not in ROLES:
             raise RegistryError(f"unknown role {role!r}; known: {ROLES}")
-        specific = [e for e in self.entries if e.champion and e.key == (strategy, role)]
+        specific = [
+            e for e in self.entries
+            if e.champion and e.key == (strategy, role, decision_offset)
+        ]
         if specific:
             return specific[0]
-        wildcard = [e for e in self.entries if e.champion and e.key == (ANY_STRATEGY, role)]
+        wildcard = [
+            e for e in self.entries
+            if e.champion and e.key == (ANY_STRATEGY, role, decision_offset)
+        ]
         if wildcard:
             return wildcard[0]
         raise RegistryError(
-            f"no champion for role {role!r} (strategy {strategy!r}) — "
+            f"no champion for role {role!r} (strategy {strategy!r}, "
+            f"decision_offset {decision_offset!r}) — "
             f"train one with `python3 -m engine.models.training.train_all`"
         )
 
-    def has_champion(self, role: str, strategy: str = ANY_STRATEGY) -> bool:
+    def has_champion(
+        self,
+        role: str,
+        strategy: str = ANY_STRATEGY,
+        *,
+        decision_offset: int | None = None,
+    ) -> bool:
         try:
-            self.champion(role, strategy)
+            self.champion(role, strategy, decision_offset=decision_offset)
             return True
         except RegistryError:
             return False
@@ -514,9 +539,14 @@ class Registry:
         return artifact
 
     def load_champion(
-        self, role: str, strategy: str = ANY_STRATEGY, *, verify: bool = True
+        self,
+        role: str,
+        strategy: str = ANY_STRATEGY,
+        *,
+        decision_offset: int | None = None,
+        verify: bool = True,
     ) -> tuple[RegistryEntry, ModelArtifact]:
-        entry = self.champion(role, strategy)
+        entry = self.champion(role, strategy, decision_offset=decision_offset)
         return entry, self.load(entry, verify=verify)
 
     # -- validation --------------------------------------------------------
@@ -606,9 +636,16 @@ def load_registry(path: Path | None = None, *, missing_ok: bool = True) -> Regis
     return Registry(entries=entries, path=path)
 
 
-def champion(role: str, strategy: str = ANY_STRATEGY) -> tuple[RegistryEntry, ModelArtifact]:
+def champion(
+    role: str,
+    strategy: str = ANY_STRATEGY,
+    *,
+    decision_offset: int | None = None,
+) -> tuple[RegistryEntry, ModelArtifact]:
     """Convenience: load the current champion for a role."""
-    return load_registry().load_champion(role, strategy)
+    return load_registry().load_champion(
+        role, strategy, decision_offset=decision_offset
+    )
 
 
 def register(

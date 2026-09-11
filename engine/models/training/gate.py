@@ -108,6 +108,18 @@ def build_dataset(
     if "spot_entry" not in rows.columns or "dte_entry" not in rows.columns:
         rows["spot_entry"], rows["dte_entry"] = legs_spot_dte(rows)
 
+    if decided_early and {"dte_decision", "dte_entry"}.issubset(rows.columns):
+        decision_dte = pd.to_numeric(rows["dte_decision"], errors="coerce")
+        entry_dte = pd.to_numeric(rows["dte_entry"], errors="coerce")
+        comparable = decision_dte.notna() & entry_dte.notna()
+        if comparable.any() and not np.allclose(
+            decision_dte[comparable].to_numpy(),
+            entry_dte[comparable].to_numpy() + 1.0,
+        ):
+            raise ValueError(
+                "early-decision gate dataset requires dte_decision == dte_entry + 1"
+            )
+
     as_of_column = "decision_date" if decided_early else "entry_date"
     frame = entry_feature_frame(rows, panel=panel, daily=daily, as_of_column=as_of_column)
 

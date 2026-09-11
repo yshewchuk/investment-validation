@@ -63,12 +63,19 @@ def _events_with_session(years=range(2017, 2027)) -> pd.DataFrame:
     return events[events["session"].notna()].reset_index(drop=True)
 
 
-def _engine_trades(strategy: str) -> pd.DataFrame:
+def _engine_trades(strategy: str, *, decision_offset: int | None = None) -> pd.DataFrame:
     trades = store.read_table("trades")
     rows = trades[
         (trades["strategy"] == strategy)
         & (trades["provenance"].astype(str) == "engine.replay")
     ]
+    if decision_offset is not None:
+        label = f"d{int(decision_offset):+d}"
+        rows = rows[rows["variant"].astype(str).str.contains(label, regex=False)]
+    elif "decision_date" in rows.columns:
+        decision = pd.to_datetime(rows["decision_date"], errors="coerce")
+        entry = pd.to_datetime(rows["entry_date"], errors="coerce")
+        rows = rows[~(decision < entry)]
     return rows.reset_index(drop=True)
 
 
@@ -314,12 +321,19 @@ def train_iv_crush(*, seed: int = SEED, dry_run: bool = False) -> dict:
     return _finalize(artifact, entry, result, dry_run)
 
 
-def train_gate(strategy: str, *, seed: int = SEED, dry_run: bool = False) -> dict:
-    log(f"=== gate: {strategy} mid-fill return ===")
-    trades = _engine_trades(strategy)
+def train_gate(
+    strategy: str,
+    *,
+    decision_offset: int | None = None,
+    seed: int = SEED,
+    dry_run: bool = False,
+) -> dict:
+    clock = "D0" if decision_offset is None else f"D{decision_offset:+d}"
+    log(f"=== gate: {strategy} {clock} mid-fill return ===")
+    trades = _engine_trades(strategy, decision_offset=decision_offset)
     if trades.empty:
         log(f"no engine-replayed trades for {strategy} — skipping. Run engine.build_trades first.")
-        return {"role": "gate", "strategy": strategy, "skipped": "no trades"}
+        return {"role": "gate", "strategy": strategy, "decision_offset": decision_offset, "skipped": "no trades"}
     panel = load_panel()
     dataset = gate_mod.build_dataset(trades, panel=panel)
     model, result, threshold = gate_mod.train(dataset, seed=seed)
@@ -327,6 +341,7 @@ def train_gate(strategy: str, *, seed: int = SEED, dry_run: bool = False) -> dic
     log("gate by year:\n" + yearly.to_string(index=False))
 
     slug = strategy.lower().replace("-", "_")
+    suffix = "" if decision_offset is None else f"_d{abs(int(decision_offset))}"
     artifact = ModelArtifact(
         model=model,
         role="gate",
@@ -338,15 +353,15 @@ def train_gate(strategy: str, *, seed: int = SEED, dry_run: bool = False) -> dic
         params={"alpha": gate_mod.GATE_ALPHA, "top_fraction": gate_mod.TOP_FRACTION},
         seed=seed,
         notes=(
-            f"Trained on engine.replay {strategy} trades at alpha=0.5 over an "
+            f"Trained on engine.replay {strategy} {clock} trades at alpha=0.5 over an "
             "unselected event universe."
         ),
     )
     entry = RegistryEntry(
-        id=f"gate_midfill_{slug}",
+        id=f"gate_midfill_{slug}{suffix}",
         role="gate",
         strategy=strategy,
-        artifact=str((ARTIFACT_DIR / f"gate_midfill_{slug}.joblib").relative_to(paths.ROOT)),
+        artifact=str((ARTIFACT_DIR / f"gate_midfill_{slug}{suffix}.joblib").relative_to(paths.ROOT)),
         artifact_sha256="",
         features=list(gate_mod.FEATURES),
         target=gate_mod.TARGET,
@@ -363,6 +378,7 @@ def train_gate(strategy: str, *, seed: int = SEED, dry_run: bool = False) -> dic
         seed=seed,
         threshold=float(threshold),
         notes=artifact.notes,
+        decision_offset=decision_offset,
     )
     return _finalize(artifact, entry, result, dry_run)
 
@@ -528,6 +544,10 @@ def main(argv=None) -> int:
         "--gate-strategy", action="append", default=None,
         help="strategies to fit a gate for (default: STR-THRU, STR-RUNUP)",
     )
+    ap.add_argument(
+        "--gate-decision-offset", type=int, default=None,
+        help="fit the separately replayed execution-clock gate at this offset",
+    )
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--dry-run", action="store_true", help="train and evaluate, register nothing")
     ap.add_argument("--json", default=None)
@@ -553,6 +573,13 @@ def main(argv=None) -> int:
             for strategy in gate_strategies:
                 report["models"].append(
                     train_gate(strategy, seed=args.seed, dry_run=args.dry_run)
+                    if args.gate_decision_offset is None
+                    else train_gate(
+                        strategy,
+                        decision_offset=args.gate_decision_offset,
+                        seed=args.seed,
+                        dry_run=args.dry_run,
+                    )
                 )
         elif role == "iv_crush":
             report["models"].append(train_iv_crush(seed=args.seed, dry_run=args.dry_run))

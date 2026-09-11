@@ -1,0 +1,42 @@
+id: EXP-179
+title: "Execution-clock parity: D0 versus D-1 variants"
+type: paired_execution_validation
+strategy: "ALL_EXCEPT_STR-RUNUP"
+price_source: "Tier-2 ORATS historical option-chain bid/ask, priced by engine.replay; no new API calls"
+hypothesis: "For every currently defined strategy except STR-RUNUP, deciding and naming the trade at D-1, then entering the named contracts at the unchanged D0 close and exiting at the unchanged close, has approximately equivalent realized base-exposure performance to the D0 variant on the same chain-covered events. Any material difference is execution-clock evidence, not a gate result."
+primary_spec:
+  strategies: ["CAL-P", "STR-THRU", "CND-P", "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"]
+  excluded_strategy: "STR-RUNUP, because its existing T-14 entry already provides actionable lead time"
+  arms: ["D0", "D-1"]
+  D0: "Decide, name, and enter at the original entry close"
+  D-1: "Decide and name at the prior trading close, hold that named contract, enter at the original entry close"
+  entry_exit: "Unchanged across arms"
+  comparison_population: "Intersection of event IDs that price at every alpha in both arms, separately for each strategy"
+  fills: "Full alpha grid 0.00, 0.25, 0.50, 0.75, 1.00; mid-fill headline"
+  gate: "None in either arm. This is an exposure and executable-contract parity test, not a gate comparison."
+  calendar: "Known BMO and AMC session calendar from engine.replay"
+grid: {}
+evaluation:
+  required_per_arm:
+    - "Generated REPORT.md from engine.evaluate.evaluate"
+    - "Full fill-alpha sweep and breakeven alpha"
+    - "Walk-forward-equivalent unselected book, by-year table, equity curve, and Monte Carlo"
+    - "Paired event count and paired D-1 minus D0 mid-return summary"
+    - "D-1 quoted-versus-D0-filled premium drift summary"
+  parity_reading: "Compare matched-event mid return, win rate, alpha sweep, by-year means, and D-1 minus D0 paired return distribution. This experiment does not promote a strategy or a model."
+  no_model_substitution: "No D0 gate or chooser may be applied to a D-1 row. Separate D-1 gate and chooser experiments follow only after this execution result is reviewed."
+data:
+  event_universe: "engine.build_trades.event_universe, 2017 through 2026, known sessions only"
+  chain_coverage: "Tier-2 option_chains as rebuilt after the D-1 session pull"
+  quota_calls: 0
+data_snapshot: "c11dd818bfc10d92e63f14484ecb0cec6d0421dc2957c60e79e532601267e7e7"
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+falsification: "If a strategy has materially worse matched-event D-1 performance or materially lower chain coverage, the claim of execution-clock parity for that strategy is rejected and its D-1 model retraining/cutover pauses pending root-cause analysis. Approximately equivalent or better D-1 exposure only clears the execution prerequisite; it is not a promotion."
+preregistered_at: "2026-09-11T03:15:00+00:00"

@@ -100,6 +100,11 @@ def reconstruct_request(row: dict, *, board_as_of=None):
             else (float(row["strike"]) if offset is not None and row.get("strike") is not None else None)
         ),
         fill=FillModel(float(row.get("fill", 0.5))),
+        variant=row.get("variant"),
+        decision_offset=(
+            (row.get("structure_spec") or {}).get("decision_offset")
+        ),
+        structure_params=row.get("structure_params"),
         # Part of the request, so part of what has to be reproduced. A row
         # priced off an older chain re-scores to NO_CHAIN without it, and the
         # digest would flag every forward row as a mismatch.

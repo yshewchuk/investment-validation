@@ -416,7 +416,12 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
 def _model_kind(entry, registry) -> dict:
     """What the thing actually is — a blend, a tree ensemble, a linear fit."""
     try:
-        _, artifact = registry.load_champion(entry.role, entry.strategy, verify=False)
+        _, artifact = registry.load_champion(
+            entry.role,
+            entry.strategy,
+            decision_offset=entry.decision_offset,
+            verify=False,
+        )
     except Exception:
         return {"type": "unknown"}
     model = artifact.model

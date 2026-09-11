@@ -60,6 +60,11 @@ __all__ = [
     "twin_peak_5",
     "REFERENCE_QTY",
     "STRUCTURES",
+    "D1_DECISION_OFFSET",
+    "D1_STRATEGIES",
+    "D1_DECISION_OFFSETS",
+    "with_decision_offset",
+    "execution_variant_label",
     "price_structure",
     "structure_return",
 ]
@@ -1430,3 +1435,47 @@ STRUCTURES = {
     "RAMP7": ramp7,
     "CTR5": ctr5,
 }
+
+#: The actionable book decides at the prior completed close and enters at the
+#: original close. STR-RUNUP already has a fourteen-session decision lead, so
+#: it is intentionally absent until its distinct execution problem is handled.
+D1_DECISION_OFFSET = -1
+D1_STRATEGIES: tuple[str, ...] = tuple(
+    strategy for strategy in STRUCTURES if strategy != "STR-RUNUP"
+)
+
+#: Explicit D−1 selection for a replay, training job, or future live cutover.
+#: D0 remains the current board default until separate D−1 gates and chooser
+#: are trained and a deliberate cutover chooses this map.
+D1_DECISION_OFFSETS: dict[str, int] = {
+    strategy: D1_DECISION_OFFSET for strategy in D1_STRATEGIES
+}
+
+
+def with_decision_offset(structure: Structure, decision_offset: int | None) -> Structure:
+    """Return structure with a separately declared decision close.\n\n+    Keeping this as an immutable copy prevents a scoring request from mutating
+    a shared factory result. It also makes D0 and D−1 variants differ only in
+    their execution clock, never in their legs or entry/exit dates.
+    """
+    return Structure(
+        name=structure.name,
+        legs=structure.legs,
+        entry_offset=structure.entry_offset,
+        exit_offset=structure.exit_offset,
+        decision_offset=decision_offset,
+        description=structure.description,
+        params=dict(structure.params),
+    )
+
+
+def execution_variant_label(structure: Structure) -> str:
+    """Stable variant label that distinguishes an early decision book."""
+    parts = [f"e{structure.entry_offset:+d}", f"x{structure.exit_offset:+d}"]
+    if structure.decided_early:
+        parts.append(f"d{structure.decided_at:+d}")
+    for key in sorted(structure.params):
+        value = structure.params[key]
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return "_".join(parts)

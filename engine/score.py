@@ -96,6 +96,8 @@ from engine.structures import (
     Structure,
     LadderTooCoarse,
     StructureError,
+    execution_variant_label,
+    with_decision_offset,
 )
 
 __all__ = [
@@ -161,6 +163,11 @@ FLAGS = (
     # numbers are withheld, while here the row is fully scored and priced; only
     # the champion ranking is absent, and the event falls back to the resolver.
     "CHOOSER_MISSING_FEATURES",
+    # D−1 models are a distinct training problem. These flags make the
+    # intentionally ungated / unranked state visible until their champions
+    # are promoted instead of silently substituting D0 artifacts.
+    "GATE_UNTRAINED_DECISION_OFFSET",
+    "CHOOSER_UNTRAINED_DECISION_OFFSET",
     # Two legs resolved onto one contract, so the structure was refused. Kept
     # apart from NO_CHAIN deliberately: the chain is present and correct, and a
     # reader who sees NO_CHAIN goes and re-pulls quotes that are already fine.
@@ -840,12 +847,18 @@ class Scorer:
             out[mask] = pd.to_numeric(state["im"], errors="coerce").to_numpy()
         return out
 
-    def model(self, role: str, strategy: str = "*"):
-        key = (strategy, role)
+    def model(
+        self,
+        role: str,
+        strategy: str = "*",
+        *,
+        decision_offset: int | None = None,
+    ):
+        key = (strategy, role, decision_offset)
         if key not in self._models:
             try:
                 entry, artifact = self.registry.load_champion(
-                    role, strategy, verify=self._verify
+                    role, strategy, decision_offset=decision_offset, verify=self._verify
                 )
                 self._models[key] = (entry, artifact)
             except RegistryError:
@@ -2348,8 +2361,19 @@ class Scorer:
         return out
 
     def _score_gate(self, request, result, features) -> None:
-        loaded = self.model("gate", request.strategy)
+        decision_offset = _model_decision_offset(result)
+        loaded = self.model(
+            "gate", request.strategy, decision_offset=decision_offset
+        )
         if loaded is None:
+            if decision_offset is not None:
+                result.flag("GATE_UNTRAINED_DECISION_OFFSET")
+                note = (
+                    f"no D{decision_offset:+d} gate champion; row is ungated "
+                    "until the separately trained execution variant is promoted"
+                )
+                result.detail = f"{result.detail}; {note}" if result.detail else note
+                return
             self._apply_entry_rule(request, result, features)
             return
         entry, artifact = loaded
@@ -2439,8 +2463,18 @@ class Scorer:
         dropped exactly such rows (``np.isfinite(...).all(1)`` in EXP-169's
         ``generate``), so a live decline is the same filter, not a new one.
         """
-        loaded = self.model("chooser", DYNAMIC_STRATEGY)
+        decision_offset = _model_decision_offset(result)
+        loaded = self.model(
+            "chooser", DYNAMIC_STRATEGY, decision_offset=decision_offset
+        )
         if loaded is None:
+            if decision_offset is not None:
+                result.flag("CHOOSER_UNTRAINED_DECISION_OFFSET")
+                note = (
+                    f"no D{decision_offset:+d} chooser champion; resolver fallback "
+                    "is used until the separately trained execution variant is promoted"
+                )
+                result.detail = f"{result.detail}; {note}" if result.detail else note
             return
         entry, artifact = loaded
         try:
@@ -2935,6 +2969,7 @@ def score_calendar(
     progress_every: int = 50,
     alt_strikes: int = 0,
     quote_max_age_sessions: int | None = 5,
+    decision_offsets: Mapping[str, int | None] | None = None,
 ) -> pd.DataFrame:
     """Score every confirmed event in the next ``horizon_days`` × every strategy.
 
@@ -2955,6 +2990,7 @@ def score_calendar(
     as_of = pd.Timestamp(as_of).normalize() if as_of is not None else pd.Timestamp.today().normalize()
     horizon = as_of + pd.Timedelta(days=horizon_days)
     strategies = list(strategies) if strategies is not None else live_strategies(sorted(STRUCTURES))
+    offsets_by_strategy = dict(decision_offsets or {})
 
     events = store.read_table(
         "earnings_events", columns=["event_id", "ticker", "event_date", "session"]
@@ -2974,7 +3010,10 @@ def score_calendar(
     for strategy in strategies:
         if strategy in DISABLED_STRATEGIES:
             continue
-        plan = plan_events(STRUCTURES[strategy](), events, calendar=engine.calendar)
+        structure = with_decision_offset(
+            STRUCTURES[strategy](), offsets_by_strategy.get(strategy)
+        )
+        plan = plan_events(structure, events, calendar=engine.calendar)
         keys |= plan.chain_keys
     if quote_max_age_sessions is not None:
         # Every row whose entry has not happened is priced off the newest chain
@@ -3002,6 +3041,14 @@ def score_calendar(
     started = time.time()
     for i, event in enumerate(events.itertuples(index=False)):
         for strategy in strategies:
+            decision_offset = offsets_by_strategy.get(strategy)
+            structure = with_decision_offset(
+                STRUCTURES[strategy](), decision_offset
+            )
+            variant = (
+                execution_variant_label(structure)
+                if structure.decided_early else None
+            )
             atm_spot: float | None = None
             for offset in offsets:
                 strike = (
@@ -3018,6 +3065,8 @@ def score_calendar(
                     session=str(event.session),
                     strike=strike,
                     fill=fill,
+                    variant=variant,
+                    decision_offset=decision_offset,
                     quote_max_age_sessions=quote_max_age_sessions,
                     chain_as_of=as_of,
                 )
@@ -3217,6 +3266,24 @@ def dynamic_short_vol(frame: pd.DataFrame,
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+
+def _model_decision_offset(result: ScoreResult) -> int | None:
+    """Registry namespace for the execution clock that produced a row.\n+
+    None remains the legacy D0 namespace, including an explicit decision
+    equal to entry. Only a strictly earlier decision is a different model
+    problem and therefore requires a separately trained artifact.
+    """
+    spec = result.structure_spec or {}
+    decision = spec.get("decision_offset")
+    entry = spec.get("entry_offset")
+    if decision is None or entry is None:
+        return None
+    try:
+        decision, entry = int(decision), int(entry)
+    except (TypeError, ValueError):
+        return None
+    return decision if decision < entry else None
 
 
 def _trading_days_before(calendar, entry_date, event_date, session) -> float:
