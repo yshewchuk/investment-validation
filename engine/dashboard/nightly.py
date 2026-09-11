@@ -1315,9 +1315,11 @@ def run_nightly(
                         .date()),
                 ])
                 report.steps["moves"] = {"targets": len(targets),
-                                         "since": moves_since, "exit": int(code)}
+                                         "since": moves_since, "exit": int(code),
+                                         "selection": selection}
             else:
                 report.steps["moves"] = {"targets": 0, "since": moves_since,
+                                         "selection": selection,
                                          "note": "nothing printed since the watermark"}
         except Exception as exc:
             report.steps["moves"] = {"degraded": True,
