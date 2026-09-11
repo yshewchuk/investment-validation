@@ -31,6 +31,7 @@ five calendar days (halt/delisting), are excluded and counted, never guessed
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import sys
@@ -213,6 +214,75 @@ def build_ticker(ticker: str, events: pd.DataFrame, sd, sc,
     }
 
 
+#: Append-only log of tickers finished in the CURRENT build, so an interrupted
+#: pull resumes instead of restarting. Dot-prefixed so it cannot match the
+#: ``moves_*.json`` glob the panel and EXP-119 read this directory with.
+CHECKPOINT_NAME = ".checkpoint.jsonl"
+
+
+def _build_fingerprint(all_scoreable: bool, events: pd.DataFrame) -> str:
+    """Identity of one build, so a checkpoint is only resumed into its own.
+
+    Mode plus the event table's own extent: a pull asked for a wider universe,
+    or run after new prints landed, is a DIFFERENT build and must not inherit
+    the previous one's completed set — which is precisely the mistake the
+    ``.exists()`` check below used to make.
+    """
+    payload = json.dumps(
+        {
+            "mode": "all_scoreable" if all_scoreable else "extension_only",
+            "n_events": int(len(events)),
+            "max_event_date": str(pd.to_datetime(events["event_date"]).max().date()),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _load_checkpoint(path: Path, fingerprint: str) -> dict[str, str]:
+    """``{ticker: outcome}`` already finished under ``fingerprint``.
+
+    A checkpoint from a different build, or one that cannot be parsed, is
+    ignored rather than trusted — a corrupt resume that silently skips work is
+    worse than repeating it.
+    """
+    if not path.exists():
+        return {}
+    done: dict[str, str] = {}
+    try:
+        with path.open() as fh:
+            for n, line in enumerate(fh):
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                if n == 0:
+                    if record.get("fingerprint") != fingerprint:
+                        return {}
+                    continue
+                done[str(record["ticker"])] = str(record.get("outcome", "written"))
+    except (OSError, ValueError, KeyError):
+        return {}
+    return done
+
+
+def _start_checkpoint(path: Path, fingerprint: str, total: int) -> None:
+    path.write_text(json.dumps({
+        "fingerprint": fingerprint,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "targets": int(total),
+    }) + "\n")
+
+
+def _record(path: Path, ticker: str, outcome: str) -> None:
+    """Append one finished ticker. Every TERMINAL outcome is recorded, not just
+    a successful write: a name with no history is settled business, and a
+    resume that retried it would pay the same network call again for the same
+    answer."""
+    with path.open("a") as fh:
+        fh.write(json.dumps({"ticker": ticker, "outcome": outcome}) + "\n")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dry-run", action="store_true")
@@ -221,6 +291,8 @@ def main(argv=None) -> int:
     ap.add_argument("--all-scoreable", action="store_true",
                     help="every scoreable ticker, not only those oquants lacks — "
                          "the realized-move SOURCE mode")
+    ap.add_argument("--fresh", action="store_true",
+                    help="ignore any existing checkpoint and rebuild every target")
     args = ap.parse_args(argv)
     if not args.dry_run and not args.confirm:
         print("pass --dry-run or --confirm", file=sys.stderr)
@@ -247,24 +319,43 @@ def main(argv=None) -> int:
 
     out_dir = paths.COMPUTED_MOVES
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume against THIS build, not against whatever files happen to be on
+    # disk. The previous rule skipped any ticker with an existing
+    # `moves_<TK>.json`, which reads as resume-safety but means the second run
+    # of this pull writes nothing at all: the directory already holds a file
+    # per ticker from the last build, so every target is skipped and the
+    # realized moves stay frozen at the date they were last built. That is how
+    # the panel sat at 2026-09-03 while Tier 2 held prints through 09-10.
+    checkpoint = out_dir / CHECKPOINT_NAME
+    fingerprint = _build_fingerprint(args.all_scoreable, ev)
+    done = {} if args.fresh else _load_checkpoint(checkpoint, fingerprint)
+    if done:
+        print(f"resuming build {fingerprint}: {len(done):,} of {len(targets):,} "
+              f"already finished", flush=True)
+    else:
+        _start_checkpoint(checkpoint, fingerprint, len(targets))
+        print(f"starting build {fingerprint} over {len(targets):,} tickers", flush=True)
+
     f = Fetcher()
     started = time.time()
-    written = no_history = too_few = 0
+    written = sum(1 for v in done.values() if v == "written")
+    no_history = sum(1 for v in done.values() if v == "no_history")
+    too_few = sum(1 for v in done.values() if v == "too_few")
     for i, tk in enumerate(targets):
-        # A ticker already written this run is skipped, so an interrupted pull
-        # resumes instead of refetching 2,857 names from the top.
-        if (out_dir / f"moves_{tk}.json").exists():
-            written += 1
+        if tk in done:
             continue
         try:
             series = fetch_history(f, tk)
         except Exception as exc:  # nothing about one name may stop the universe
             print(f"  [{i+1}/{len(targets)}] {tk}: FAILED {type(exc).__name__}", flush=True)
             no_history += 1
+            _record(checkpoint, tk, "no_history")
             continue
         if series is None:
             no_history += 1
             print(f"  [{i+1}/{len(targets)}] {tk}: no yfinance history", flush=True)
+            _record(checkpoint, tk, "no_history")
             continue
         sd, sc = series
         tk_events = ev[(ev["ticker"] == tk) & (ev["event_date"] >= pd.Timestamp(sd[0]))]
@@ -273,9 +364,16 @@ def main(argv=None) -> int:
         if doc is None:
             too_few += 1
             print(f"  [{i+1}/{len(targets)}] {tk}: too few computable events", flush=True)
+            _record(checkpoint, tk, "too_few")
             continue
-        (out_dir / f"moves_{tk}.json").write_text(json.dumps(doc))
+        # tmp+replace: a kill between truncate and write would otherwise leave
+        # a half-written moves file that the panel would read as this ticker's
+        # whole history.
+        tmp = out_dir / f".moves_{tk}.json.tmp"
+        tmp.write_text(json.dumps(doc))
+        tmp.replace(out_dir / f"moves_{tk}.json")
         written += 1
+        _record(checkpoint, tk, "written")
         print(f"  [{i+1}/{len(targets)}] {tk}: {doc['n_events']} events "
               f"({doc['skipped_events']} skipped), {time.time()-started:.0f}s", flush=True)
     print(f"FINISHED written={written} no_history={no_history} too_few={too_few} "
