@@ -118,6 +118,55 @@ So the joint pool is assembled by calling `_pool_before` twice — once for
 `pred_abs_move`, once for `pred_iv_crush_30` — and inner-joining the two on
 `(ticker, event_date)`.
 
+### 3.0 What the pool must be — the contract
+
+Before changing how it is built, be clear what it is. `ResidualPool` keeps four
+ROW-ALIGNED arrays (`pnl_sim.py:114-126`):
+
+| array | why it exists |
+|---|---|
+| `_dates` | the causal cut; `before(cutoff)` is a `searchsorted`, so the table must be date-sorted |
+| `_pred` | the BUCKETING KEY — which decile of `pred_abs_move` this historical event sat in |
+| `_move` | `err_move` |
+| `_crush` | `err_crush` |
+
+`draw()` returns `self._move[chosen], self._crush[chosen]` — **the same
+`chosen`**. Downstream, `expected_pnl` does:
+
+```python
+move  = np.maximum(pred_abs_move + err_move, 0.0)
+crush = pred_iv_crush + err_crush
+spot_exit = spot * (1.0 + sign * move / 100.0)
+vol_exit  = (pre_iv30 / 100.0) * (1.0 + crush / 100.0)
+```
+
+So draw *i* is **one coherent world**: this print moved this much AND vol
+crushed this much, both repricing the same exit legs. A large move with a
+shallow crush is not as likely as a large move with a deep crush, and the pool
+carries that dependence empirically — by taking both errors off the SAME
+historical event — rather than anyone fitting a copula.
+
+Three rules follow, and breaking any of them breaks the estimator silently:
+
+1. **Row identity is the mechanism.** The join in 3.1 is on
+   `(ticker, event_date)` because that is the only way the size model's error
+   and the crush model's error land on the same row. A join that loses row
+   identity — or any reshaping that sorts the two error columns independently —
+   keeps both marginals intact and destroys the thing being estimated.
+2. **Summary statistics cannot substitute.** Per-decile moments give the
+   marginals and throw away the dependence. This is the real reason not to
+   store a precomputed pool artifact, stronger than the duplication argument in
+   3.3.
+3. **There is no ticker column, and there must not be one.** Ticker was never a
+   matching key — `_pred` is. That is exactly why scoping the pool by ticker was
+   always outside the design, and why the defect in section 1 was invisible:
+   nothing in `ResidualPool` asks about tickers, so nothing objected when the
+   set of them changed underneath it.
+
+Unrelated to the pool but worth not mistaking for a defect: `sign` is drawn from
+`rng` rather than taken from history. That is exact, not an approximation — the
+symmetric structures depend on `|move|` only.
+
 ### 3.1 Rewrite `_residual_pool` as a join of two served pools
 
 - `_pool_before(fold, size_model, panel)`     -> `(pred_abs_move, err_move)`
