@@ -1,0 +1,115 @@
+id: EXP-178
+title: "DYN-SV chooser analog construction: K, target and recency"
+strategy: "DYN-SV"
+type: exploratory-then-confirmatory
+price_source: >
+  ORATS historical bid/ask chains cached by EXP-137, all candidates read from
+  cache (EXP-137's candidates.parquet, via EXP-169's load_data_menu). Nothing
+  is re-priced or re-fetched; quota_calls: 0.
+hypothesis: >
+  The chooser's five causal same-structure analog columns (analog_mean,
+  analog_win_rate, analog_p10, analog_p90, analog_n — engine/score.py's
+  _chooser_analogs, reproducing experiments/EXP-161's add_causal_analogs) use
+  K=25 nearest neighbors, average dollar PnL, over the entire all-time pool
+  back to 2018-01-04, and none of those three choices has ever been measured
+  against an alternative — they were carried forward unchanged from EXP-158
+  through EXP-161/163/169 to the deployed champion (dyn_sv_chooser_v1_1).
+  A K different from 25, a scale-free return target instead of a dollar
+  target, or a recency-windowed pool instead of an all-time one, may carry
+  more predictive signal for the trade's own realized return — either because
+  25 nearest neighbors is not the informativeness-maximizing count, because
+  dollar PnL confounds trade size with edge across a menu of different
+  premiums, or because the market's short-vol regime (2018 through 2026 spans
+  2020's vol shock, 2021-2023's rate-hiking regime, and 2024-2026 quiet
+  markets) makes a stationary all-time analog worse than a windowed one — or,
+  conversely, that an all-time pool is BETTER because a windowed pool starves
+  a lower-frequency structure like RAMP7 or CTR5 of enough neighbors during
+  its early history. Both directions are live hypotheses; this experiment
+  measures which, if either, wins, with the null result (K=25, dollar PnL,
+  all-time is already best) pre-declared as a fully valid, complete outcome
+  triggering no retrain.
+primary_spec:
+  # Stage 1 (exploratory, no retrain): a fixed diagnostic grid over the
+  # analog's own three construction axes, scored by predictive power for
+  # ONLY same-structure candidates' own realized return (`ret`) — the
+  # quantity the chooser cares about, not the model itself. No model is
+  # trained in Stage 1; every cell is closed-form nearest-neighbor averaging,
+  # identical population, identical evaluation, differing only in K/target/
+  # lookback. Stage 2 (confirmatory retrain) runs ONLY if Stage 1's winner
+  # beats the incumbent cell under the rule below — see `selection_rule`.
+  grid_axes:
+    k: [15, 25, 50]
+    target: ["pnl", "ret"]
+    lookback_days: [null, 365, 1095]
+  incumbent_cell: {k: 25, target: "pnl", lookback_days: null}
+  evaluation_population: "menu7-prime candidates (TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5), same-structure analog matching only, years 2020-2026 inclusive (the champion's OOS window)"
+  evaluation_metric: "Spearman rank correlation of analog_mean against the candidate's own realized `ret`, pooled across all 7 structures within each year, and pooled across all years"
+  coverage_floor: 0.90
+  selection_rule: >
+    A cell qualifies for selection only if its coverage (share of
+    causally-DIMS-finite rows in 2020-2026 that receive a non-NaN analog,
+    denominator identical across cells) is >= coverage_floor. This exists
+    because a short lookback window or a large K can silently shrink the
+    scored population rather than change its quality, and a thin-coverage
+    cell can look spuriously good by only ever scoring the easy, densely-
+    populated tail of the pool. Among qualifying cells, rank by (1) count of
+    years with positive pooled Spearman (2020-2026, 7 years, more is
+    better), (2) mean per-year Spearman (higher is better), (3) all-years-
+    pooled Spearman (higher is better). The incumbent_cell is included in the
+    grid and wins every tie at every stage — this is an anti-post-hoc-
+    selection mechanism, not a convenience default. If the incumbent wins,
+    Stage 2 does NOT run and the experiment concludes with a null result.
+  retrain_protocol_if_triggered: >
+    If a non-incumbent cell wins, retrain the champion architecture exactly
+    as EXP-169/170 did (same menu7-prime dataset via
+    EXP-169's load_data_menu(MENU); same 12 payoff-schematic features
+    (EXP-165) and Tier-4 forecast columns; same feature list
+    (EXP-161's ARMS["nn_all_categories"], which is what the deployed
+    dyn_sv_chooser_v1_1.features matches) with only the five analog columns
+    swapped for the winning (k, target, lookback_days) construction; same
+    quantile-normal event-demeaned target; same MLP(64,32) x 5 seeds
+    (20260908-20260912), expanding annual folds, first_test_year=2020; same
+    cut0 hygiene gate (rel_spread <= 0.25, mcap floor) and expected-PnL-per-
+    secured-dollar funding order; same two arms (menu7p_mcap10 primary,
+    menu7p_mcap1 transfer check), same $200,000/66%/25% funding policy.
+    Nothing else changes — this isolates the analog construction as the only
+    variable versus the deployed champion.
+grid:
+  # The Stage-1 sweep cells ARE the grid; see grid_axes above. Stage 2, if
+  # triggered, is the ONE retrain named as primary below — not a grid search
+  # over the retrain itself.
+  {}
+success_criteria_if_retrained:
+  # Consistency checks against the CURRENT deployed champion
+  # (dyn_sv_chooser_v1_1, promoted 2026-09-09 from EXP-170's re-run of
+  # EXP-169's menu7p_mcap10 book). Read directly from
+  # experiments/EXP-169_menu7prime_confirmation/results/comparison.json and
+  # experiments/EXP-170_menu7prime_10b_promotion_candidate/results/comparison.json,
+  # not retyped from memory.
+  primary_arm: menu7p_mcap10
+  checks:
+    - "menu7p_mcap10 final_equity >= $301,048.89 (does not regress the deployed book)"
+    - "zero defined-risk failures in both arms"
+    - "menu7p_mcap1 final_equity > menu7p_mcap10 final_equity (the one-billion transfer still holds, per EXP-119/EXP-169)"
+    - "RAMP7 mean_realized_when_picked_funded >= the new menu-wide funded mean (matches EXP-169's own bar; EXP-169 baseline was 0.644, well above the 0.35-0.44 menu-wide range)"
+    - "CTR5 mean_realized_when_picked_funded >= the new menu-wide funded mean (EXP-169 baseline 0.439)"
+    - "within-event Spearman per annual fold does not degrade materially from EXP-169's recorded (2020:+0.043, 2021:+0.085, 2022:+0.072, 2023:+0.034, 2024:+0.047, 2025:+0.083, 2026:+0.084)"
+  promotion: "This experiment does NOT promote. A pass writes a confirmatory REPORT.md and stops; promotion, if warranted, is a separate deliberate step (experiments/promote.py) after review."
+data_snapshot: c11dd818bfc10d92e63f14484ecb0cec6d0421dc2957c60e79e532601267e7e7
+walk_forward:
+  unit: year
+  min_train_years: 2
+  first_test_year: 2020
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+resource_notes: >
+  Run under tools/bounded_run.py (taskset + nice -n 19 + RSS watchdog) because
+  this box runs other jobs concurrently (the nightly, ad-hoc rebuilds,
+  the live dashboard). Stage 1 is closed-form nearest-neighbor arithmetic,
+  no training; Stage 2 (if triggered) is one retrain, matching EXP-169's
+  measured cost (~18 minutes single-shot on this box). See run.py's module
+  docstring for the exact invocation and the cache/resume behavior.
+preregistered_at: "2026-09-11T02:31:47+00:00"
