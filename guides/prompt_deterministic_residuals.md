@@ -79,73 +79,84 @@ per row, and already does it per monthly fold under strict walk-forward. It is
 the same decile machinery `ResidualPool` reimplements — both descend from
 EXP-115.
 
-**So this is not a request to invent an artifact. It is a request to stop
-maintaining a second, worse copy of one.**
+Precisely: Tier 4 does not *persist* the pool arrays. It persists `p10`, `p90`,
+`sd` and `n` per row, and `_pool_before(fold, model, panel)` (`tier4.py:1228`)
+reconstructs the `(prediction, residual)` arrays by reading the STORED forecast
+table back and filtering to earlier folds. Its docstring says why that is also
+the correct choice and not merely the cheap one. The result is a function of
+`(fold, model, panel)` and of nothing else.
 
-The one thing Tier 4's pools do not carry is the *pairing*. Tier 4 stores
-marginal residuals per producer; the simulation needs `(err_move, err_crush)`
-from the **same event**, because that pairing is what carries their dependence
-without anyone estimating a copula. That is the gap to close, and it is the
-only gap.
+### The scorer is already using it — for one of the two estimates
 
----
+| | forecast band (`forecast_p10/p90/sd`) | PnL sim (`exp_pnl_sim`, `win_sim`, `ci_*`) |
+|---|---|---|
+| call | `served.interval()` -> `interval_for(pool_pred, pool_res)` | `pnl_sim.expected_pnl(pool=self._residual_pool())` |
+| pool from | `_pool_before(fold, model, panel)`, stored table | `_crush_table()` -> `crush_frame()` over `context.daily` |
+| context-dependent | **no** | **yes** |
+| deterministic | **yes** | **no** |
+
+So the defect is not that the machinery is missing. It is that the simulation
+path does not use the machinery sitting next to it.
+
+The reason it does not is legitimate and is the whole gap: `_pool_before`
+returns **one producer's marginal residuals**, while `expected_pnl` needs
+`err_move` and `err_crush` **paired on the same event**. That is a join across
+two producers, and the join is where `_crush_table` — and its memory-motivated
+filter — entered.
 
 ## 3. Design
 
-Two artifacts at two grains. Keeping them distinct is the part to get right.
+**The join does not need `crush_frame()`.** This is what makes the fix small.
 
-### 3.1 Per-event errors become Tier-4 columns
+The realized crush is `iv_crush.TARGET` = `crush_pct_iv30`, and
+`iv_crush.prepare(panel)` already joins it from Tier 2 — the build path,
+context-free by construction, and the same values `_pool_before` already
+differences to make that producer's residuals. Nothing here needs a 9M-row
+`daily_market` read at score time.
 
-Grain is `ticker x event_date` — already `tier4.KEY_COLUMNS`.
+So the joint pool is assembled by calling `_pool_before` twice — once for
+`pred_abs_move`, once for `pred_iv_crush_30` — and inner-joining the two on
+`(ticker, event_date)`.
 
-- `err_move  = abs_move        - pred_abs_move`      (panel join)
-- `err_crush = crush_pct_iv30  - pred_iv_crush_30`   (crush-frame join)
+### 3.1 Rewrite `_residual_pool` as a join of two served pools
 
-Both predictions are already Tier-4 columns. Both realizations are joins Tier 4
-can do at build time. `err_move` joins the `pred_abs_move` column group,
-`err_crush` the `pred_iv_crush_30` group.
+- `_pool_before(fold, size_model, panel)`     -> `(pred_abs_move, err_move)`
+- `_pool_before(fold, crush_model, panel)`    -> `(pred_iv_crush_30, err_crush)`
+- inner join on the event key; feed to `pnl_sim.ResidualPool`
 
-Rows written before a print have no realization yet; they are filled when the
-event resolves. **Do not build new machinery for this** — `_seed_residuals`
-(`tier4.py:776`) already carries realized outcomes onto an existing prefix, and
-that is the path to extend.
+`_pool_before` currently returns bare arrays, so it needs to also return the
+event keys for the join. That is the only signature change.
 
-Consequence worth having on its own: the 9M-row `daily_market` read that
-`_crush_table` performs per `Scorer` moves to Tier-4 build time, once a night.
-Scoring measured 68 min with live forecasts; some of that comes back.
+### 3.2 Delete `_crush_table` from the scoring path
 
-### 3.2 The monthly pool becomes a Tier-4 sibling table
+`Scorer._crush_table` exists for two callers: `_residual_pool` and
+`_pre_print_iv`. Once 3.1 lands, check whether `_pre_print_iv` can read
+`pre_iv30` from the panel — `iv_crush.prepare`'s docstring says the four
+pre-print vol terms became Tier-3 panel columns on 2026-09-05 precisely so they
+would be servable. If so, `_crush_table` goes away entirely and the scorer stops
+touching `daily_market` for this at all.
 
-Grain is `fold_start x decile` — *not* Tier-4's key, so it is its own table, not
-more columns. Key it on `fold_start` so a row's pool is by construction the pool
-of the fold that produced its prediction. That is the train/serve parity
-property this program has been chasing all session, obtained for free.
+### 3.3 What is NOT needed
 
-Store the **paired rows**, not summary statistics. A moments-only version
-discards exactly the dependence the pool exists to carry.
+Earlier drafts of this plan proposed new `err_move`/`err_crush` Tier-4 columns
+and a monthly fold-pool sibling table. **Both are unnecessary.** The stored
+forecast table plus `_pool_before` already provide a deterministic,
+fold-keyed, walk-forward-safe pool; the only thing missing was the join, and
+the join is three lines. Adding an artifact would mean maintaining a third copy
+of a thing that already exists twice.
 
-| variant | contents | size | stable across Tier-4 rebuilds |
-|---|---|---|---|
-| edges only | `fold_start, decile, edge_lo, edge_hi, n` | ~50KB | no |
-| **full snapshot** | + the paired `(err_move, err_crush)` rows | **~110MB** | **yes** |
-| capped snapshot | 2,000 pairs per decile per fold | ~40MB | yes, coarser tails |
+Do record the resolved decile and its `n` next to `exp_pnl_sim` on the board.
+That is cheap and makes the estimate auditable rather than merely reproducible.
 
-Recommend the full snapshot. 165 months x ~43k average prefix at float32.
-Edges-only is cheap but not stable: refitting a fold changes `pred_abs_move`,
-which changes `err_move`, which silently changes every historical PnL estimate
-ever recorded. Stability across rebuilds is the entire point.
+### 3.4 What to measure before writing the code
 
-### 3.3 `ResidualPool` reads the table instead of building one
-
-`Scorer._residual_pool` and `Scorer._crush_table` both disappear from the
-scoring path. `ResidualPool` is constructed from the stored fold pool for the
-request's `fold_start`. It stops taking a context, so it stops having one.
-
-Record the resolved `decile` and its `n` next to `exp_pnl_sim` on the board, so
-a row can say which pool produced its number. Cheap, and it makes the estimate
-auditable rather than merely reproducible.
-
----
+- **Join loss.** The two producers may not cover the same events; the old
+  `crush_frame` merge cost 7% (91,616 -> 85,277). Measure the fold-joined loss
+  and confirm per-decile counts still clear `MIN_POOL=250`.
+- **Cost of `_pool_before` at score time.** It calls `load_forecasts()` and
+  `training_frames(panel, model)`, and the latter runs `prepare`. Cache per
+  `Scorer` the way `_crush_frame` is cached today, and measure against the
+  68-minute scoring baseline.
 
 ## 4. The recency question
 
@@ -247,10 +258,13 @@ conditioning key — rather than as a side effect of a memory bound.
 
 ## 6. Rollout and risks
 
-1. Tier-4 columns (3.1) with `_seed_residuals` extended; test the fill-on-resolve path.
-2. Fold-pool table (3.2); assert it reproduces the current pool at `scope=cohort` so the migration is provably behaviour-preserving before anything changes.
-3. Experiment (section 5).
-4. Only then, switch `Scorer` to the table (3.3).
+1. Extend `_pool_before` to return event keys alongside its arrays.
+2. Rewrite `_residual_pool` as the two-producer join (3.1). Assert it reproduces
+   the current pool when restricted to the context tickers, so the migration is
+   provably behaviour-preserving before anything changes.
+3. Experiment (section 5) over the recency arms.
+4. Retire `_crush_table` from the scoring path (3.2), once `_pre_print_iv` is
+   confirmed servable from the panel.
 
 **Risks**
 
@@ -263,8 +277,9 @@ conditioning key — rather than as a side effect of a memory bound.
   a bar from a different distribution.
 - **Monthly freeze lags regime shifts** by up to a month. Minor against a
   6-month-plus window, and it errs causal — never forward-looking.
-- **Tier-4 rebuild cost rises**, since the crush frame joins at build time.
-  Offset against per-`Scorer` savings; measure both.
+- **`_pool_before` cost at score time** is unmeasured. It reads the stored
+  forecast table and runs the model's `prepare`. Cache it per `Scorer` as
+  `_crush_frame` is cached today, and measure against the 68-minute baseline.
 
 ---
 
