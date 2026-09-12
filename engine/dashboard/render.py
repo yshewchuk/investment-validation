@@ -132,6 +132,23 @@ MAX_ANALOG_TRADES = 50
 #: still small enough to keep board.json inside the mobile budget.
 BUNDLE_PRECISION = 6
 
+#: Fields the self-check reads back to REBUILD the request, not to display it.
+#: These are written at full precision: `reconstruct_request` prices from them,
+#: so rounding one changes what the re-score computes rather than only how it
+#: reads. On 2026-09-11 three CTR5 rows failed the nightly this way — a menu
+#: structure carries a computed `width_moneyness` like 0.026114337940089646,
+#: the bundle stored 0.026114, and the re-score priced the row from THAT. Every
+#: output then moved in the 7th place: `_norm` rounds to six and saw nothing,
+#: while the digest hashes raw values and went red with nothing to name.
+#:
+#: The same distinction `jsonio.json_safe` already documents — the dashboard
+#: rounds because a board shows six figures, the ledger does not because a
+#: frozen prediction is evidence. A request input is evidence in that sense.
+REPLAY_INPUT_FIELDS = frozenset({
+    "structure_params", "requested_strike", "strike", "strike_offset",
+    "fill", "quote_max_age_sessions", "structure_spec",
+})
+
 #: What ORATS `impliedMove` has to be multiplied by to become an EXPECTED
 #: ABSOLUTE MOVE, the quantity the numerator of `model_vs_market` predicts.
 #:
@@ -164,6 +181,19 @@ def _clean(value: Any) -> Any:
     numbers travel as ``null``.
     """
     return json_safe(value, round_to=BUNDLE_PRECISION)
+
+
+def _clean_row(record: Mapping[str, Any]) -> dict:
+    """`_clean` a scored row, keeping the replay inputs at full precision.
+
+    See :data:`REPLAY_INPUT_FIELDS`. Everything else still rounds to
+    :data:`BUNDLE_PRECISION`, so the bundle stays small and the board still
+    shows six figures.
+    """
+    return {
+        k: (json_safe(v) if k in REPLAY_INPUT_FIELDS else _clean(v))
+        for k, v in record.items()
+    }
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -1322,7 +1352,7 @@ def render_bundle(
         else pd.Timestamp.today().normalize()
     )
 
-    records = [_clean(dict(r)) | {"digest": row_digest(r)} for r in scores.to_dict(orient="records")]
+    records = [_clean_row(dict(r)) | {"digest": row_digest(r)} for r in scores.to_dict(orient="records")]
     ranks = _rank_rows(
         [r | {"row_id": _row_identity(r)} for r in records]
     )

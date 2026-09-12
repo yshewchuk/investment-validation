@@ -323,6 +323,30 @@ class TestRenderBundle:
 # --------------------------------------------------------------------------
 
 
+class TestReplayInputPrecision:
+    def test_structure_params_survive_the_bundle_at_full_precision(self):
+        """A replay input must come back as it went in.
+
+        `reconstruct_request` PRICES from `structure_params`, so rounding one
+        changes what the re-score computes, not just how it reads. A menu
+        structure carries a computed width like 0.026114337940089646; stored
+        at six places it becomes 0.026114, and every output then moves in the
+        7th place — invisible to `_norm`, fatal to the digest.
+        """
+        from engine.dashboard.render import _clean_row
+
+        width = 0.026114337940089646
+        row = _clean_row({
+            "structure_params": {"width_moneyness": width, "steps": 1},
+            "requested_strike": 35.123456789,
+            "exp_pnl_sim": 0.123456789,
+        })
+        assert row["structure_params"]["width_moneyness"] == width
+        assert row["requested_strike"] == 35.123456789
+        # display values still round, so the bundle stays small
+        assert row["exp_pnl_sim"] == pytest.approx(0.123457)
+
+
 class TestSelfCheck:
     def test_every_field_the_digest_hashes_can_be_named(self):
         """A digest mismatch must always be explainable.
