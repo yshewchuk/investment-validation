@@ -59,6 +59,18 @@ BLOCKED_PREFIXES = (
     "data/",
     "ledger/",
     "reports/",
+    # The phase-0 baseline package and the tier-0 fixture corpus. The fixtures
+    # are captured `(request, record)` pairs carrying real ORATS quotes — the
+    # licensed content convention 10 keeps off a public remote — and the
+    # baseline package is the frozen compatibility contract they are measured
+    # against. Blocked here BEFORE the first capture rather than after it:
+    # `guides/rearchitecture_phase0_baseline.md` §7.2 names doing it the other
+    # way round as the failure mode, because a fixture only has to reach a
+    # public remote once.
+    #
+    # Both go to the private mirror instead (tools/private_mirror.py).
+    "fixtures/",
+    "baseline/",
     "polygon_cache/",
     "earnings_predictions/",
     "bt/",

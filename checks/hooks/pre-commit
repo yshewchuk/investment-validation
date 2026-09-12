@@ -1,0 +1,33 @@
+#!/bin/sh
+# Versioned pre-commit gate. Installed by `python3 checks/install_hooks.py`.
+#
+# `.git/hooks` is not versioned, so a fresh clone has none of this and
+# `--no-verify` bypasses the one that exists. The hook is a convenience; the
+# nightly is the control, and it re-runs every check below over HEAD and
+# reports whether this file is installed at all (system_rearchitecture.md
+# §4.6). A control that cannot detect its own absence is not a control.
+#
+# Every check here reads STAGED BLOBS, not the working tree: checking the
+# working tree passes or fails on content that is not what would be committed.
+# All four are stdlib-only and parse with `ast` rather than importing, because
+# importing `engine.score` loads a panel and a two-minute hook gets deleted.
+#
+# Order is cheapest-and-most-catastrophic first: a leaked credential is
+# permanent, a layer violation is not.
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+# 1. Secrets, data payloads and forbidden paths. Never skip this one.
+python3 "$ROOT/checks/repo_hygiene.py" --quiet
+
+# 2. §4.2 import direction, the adapter ledger, and the v2 skeleton.
+python3 "$ROOT/checks/import_layers.py" --quiet
+
+# 3. §4.3 code budgets over engine/v2/** only. Legacy is exempt wholesale.
+python3 "$ROOT/checks/code_budgets.py" --quiet
+
+# 4. §4.5 package READMEs, with consumers checked against the import graph.
+python3 "$ROOT/checks/package_readmes.py" --quiet
+
+echo "pre-commit: hygiene, layers, budgets and READMEs all green"
