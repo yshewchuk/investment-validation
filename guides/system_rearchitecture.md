@@ -533,11 +533,51 @@ costs 2.9 seconds across 567 files and 7,493 functions, and the pre-commit
 scope is narrower than that: `engine/`, `checks/` and `tools/`, skipping
 `experiments/`, whose finalized research trees are immutable by convention 8.
 
-See the [logical data model](rearchitecture_data_model.md) for three linked
-entity-relationship views: market inputs; templates, positions and scenarios;
-and registered scores, models, publication and the actual-position ledger.
-The diagrams distinguish a generated position from a trade that was actually
-opened, and a template from the strategy that selects its placement.
+### 4.7 A budget failure refuses publication
+
+The nightly must fail on a budget violation, the failure must refuse
+publication, and it must be visible. Three things follow.
+
+**Refusing publication is not aborting the run.** §8.3 already keeps separate
+watermarks for ingestion, scoring, prediction commit, settlement, publication
+and backup, and already requires that a failed board not prevent resolving an
+existing position. A budget failure uses that split: ingestion, scoring,
+settlement and backup all complete and record their own watermarks, and only
+the publish step is refused. Predictions still commit — they are correct, and a
+frozen prediction is evidence regardless of the complexity of the function that
+produced it. What does not happen is a new release becoming current.
+
+| Watermark | On a budget failure |
+|---|---|
+| Ingestion, scoring, prediction commit, settlement, backup | Advance normally |
+| Publication | Refused; last good release stays current |
+
+**The banner has to carry a number, not a colour.** A permanent red state
+becomes wallpaper, and that is the actual mechanism by which a failure goes
+unnoticed for a long time. `health.json` gains a `code_budgets` class beside
+the existing `last_selfcheck` and `calibration_drift`, carrying `ok`,
+`first_failed_on`, `consecutive_nights`, the per-metric counts and the release
+being withheld. The banner reads as a streak — "publication withheld 3 nights,
+since 2026-09-14: 2 functions over complexity" — and appears on every view, not
+only Operations, which is the page nobody opens when nothing is wrong. Board
+readers can see that what they are looking at is not tonight's data and why.
+
+**The override is a committed line, not a runtime flag.** Refusing publication
+during an earnings season is a real cost, and a control with no escape gets
+deleted at eleven at night rather than argued with — which is the worst
+outcome, because a deleted check's absence looks like a pass. So publication
+can be overridden by a dated entry with a reason and an expiry in the same
+ledger the §4.6 exemptions use. It is visible in a diff, it is reviewable
+afterwards, and it expires on its own. `--no-verify` and an environment
+variable are not overrides; they are the failure mode this replaces.
+
+An override does not clear the streak. `first_failed_on` keeps counting, so
+the number on the banner is the age of the problem rather than the age of the
+last override.
+
+The nightly also reports whether the pre-commit hook is installed, and a
+missing hook is a budget failure on the same footing. A control that cannot
+detect its own absence is not a control.
 
 ## 5. Data storage: contracts and incremental ingestion
 
@@ -1041,6 +1081,10 @@ candidates remain private diagnostics; they do not become validated
 recommendations. Existing immutable bad records require a reasoned superseding
 entry, never deletion or rewriting.
 
+A code-budget failure refuses publication under §4.7 while ingestion, scoring,
+prediction commit, settlement and backup advance normally. The last good
+release stays current and the operations banner carries the streak.
+
 Commit validated predictions, release metadata and a publication outbox
 transactionally. Deliver the remote release idempotently afterward. Publication
 failure retains the frozen predictions and retries delivery; track validated,
@@ -1093,7 +1137,7 @@ drawer instead of placing every diagnostic in a permanent column.
 | Portfolio | Hypothetical/contrarian books, predictions, entries/exits, unresolved items, funding and comparable summaries |
 | Models | Active/historical releases, input/decile evidence, dependencies, OOS metrics and calibration |
 | Research | Experiments, generated reports, primary/secondary arms, sample funnels and fill sensitivity |
-| Operations | Job progress, failures, source coverage/finality, quota, publication and backup age |
+| Operations | Job progress, failures, source coverage/finality, quota, publication and backup age, code-budget streak and hook-install state |
 
 Retain existing filters, sorting, deep links, disabled/out-of-domain visibility,
 model health and offline downloads. Preserve evidence status: a tracked
@@ -1223,7 +1267,7 @@ properties it must have — stage localization and complete independent findings
 
 | Check | Required proof | Tier | Trigger |
 |---|---|---|---|
-| Code budgets | No module imports a higher layer; `engine/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; touched functions not worsened; exemption ledger at or below its committed count; every package README present with consumers matching the import graph | 0 | Every edit; pre-commit on staged blobs; nightly re-verification over HEAD |
+| Code budgets | No module imports a higher layer; `engine/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; touched functions not worsened; exemption ledger at or below its committed count; every package README present with consumers matching the import graph | 0 | Every edit; pre-commit on staged blobs; nightly re-verification over HEAD, refusing publication on failure |
 | Coverage ratchet | Per-package coverage not below its committed baseline; every strategy and refusal code has a tier-0 fixture pair; each comparator has a negative control | 2 | Nightly |
 | Strategy compatibility | Same contracts, timing, nulls, forecasts, thresholds, flags and choices | 0 | Every edit; every migration step |
 | Training/serving parity | Dataset rows and production context produce the same registered inputs | 1 | Model release; sampled nightly |
