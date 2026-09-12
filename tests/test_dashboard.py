@@ -346,6 +346,59 @@ class TestReplayInputPrecision:
         # display values still round, so the bundle stays small
         assert row["exp_pnl_sim"] == pytest.approx(0.123457)
 
+    def test_a_replay_input_survives_the_whole_write_path(self, tmp_path):
+        """Row-level exemption is not enough — the WRITER must honour it too.
+
+        The test above passed while the bundle was still wrong: `_clean_row`
+        exempted `structure_params`, and then `_write_pair` re-cleaned the
+        finished payload and rounded it straight back down. The digest is taken
+        on the RAW row before either step, so board.json shipped a hash of
+        numbers it did not contain, and every row with a computed width failed
+        the nightly self-check.
+
+        So assert against the FILE, not against the helper.
+        """
+        import json
+
+        from engine.dashboard.render import _clean_row, _write_pair
+
+        width = 0.026114337940089646
+        row = _clean_row({
+            "structure_params": {"width_moneyness": width},
+            "requested_strike": 35.123456789,
+            "exp_pnl_sim": 0.123456789,
+        })
+        path = _write_pair(tmp_path, "board", {"as_of": "2026-09-10", "rows": [row]})
+        written = json.loads(path.read_text())["rows"][0]
+
+        assert written["structure_params"]["width_moneyness"] == width
+        assert written["requested_strike"] == 35.123456789
+        assert written["exp_pnl_sim"] == pytest.approx(0.123457)
+
+    def test_the_writer_still_sanitizes_what_it_no_longer_rounds(self, tmp_path):
+        """Exempting a field from ROUNDING must not exempt it from JSON safety.
+
+        `NaN` is valid JavaScript and invalid JSON; a strict parser on the far
+        end of a published bundle is entitled to reject the file. The exemption
+        drops `round_to`, not `json_safe`.
+        """
+        import json
+
+        from engine.dashboard.render import _write_pair
+
+        path = _write_pair(tmp_path, "board", {
+            "rows": [{
+                "structure_params": {"width_moneyness": float("nan")},
+                "payoff_curve": {"max": float("inf")},
+                "exp_pnl_sim": float("nan"),
+            }],
+        })
+        text = path.read_text()
+        assert "NaN" not in text and "Infinity" not in text
+        written = json.loads(text)["rows"][0]
+        assert written["structure_params"]["width_moneyness"] is None
+        assert written["payoff_curve"]["max"] is None
+
 
 class TestSelfCheck:
     def test_every_field_the_digest_hashes_can_be_named(self):

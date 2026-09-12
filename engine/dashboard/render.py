@@ -183,6 +183,36 @@ def _clean(value: Any) -> Any:
     return json_safe(value, round_to=BUNDLE_PRECISION)
 
 
+def _clean_deep(value: Any) -> Any:
+    """:func:`_clean` a whole payload, keeping the replay inputs exact.
+
+    The exemption has to live HERE, in the recursive walk, rather than only at
+    the row level. It was written first as :func:`_clean_row` at the one call
+    site that builds board records — and then :func:`_write_pair` re-cleaned the
+    finished payload on the way to disk and rounded the exempted fields straight
+    back down, because a blanket ``_clean`` knows nothing about
+    :data:`REPLAY_INPUT_FIELDS`.
+
+    That shipped a bundle which disagreed with itself: the digest is computed on
+    the RAW row before either step, so ``board.json`` carried a hash of numbers
+    the file no longer contained. Every row with a computed ``width_moneyness``
+    then failed the nightly self-check — 10 of 20 sampled on 2026-09-11 — while
+    every row whose ``structure_params`` was ``None`` or ``{}`` passed, because
+    there was nothing to round.
+
+    Two layers of cleaning, where the second silently overrode the first. One
+    key-aware walk cannot have that failure mode.
+    """
+    if isinstance(value, Mapping):
+        return {
+            str(k): (json_safe(v) if k in REPLAY_INPUT_FIELDS else _clean_deep(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_clean_deep(v) for v in value]
+    return _clean(value)
+
+
 def _clean_row(record: Mapping[str, Any]) -> dict:
     """`_clean` a scored row, keeping the replay inputs at full precision.
 
@@ -190,10 +220,7 @@ def _clean_row(record: Mapping[str, Any]) -> dict:
     :data:`BUNDLE_PRECISION`, so the bundle stays small and the board still
     shows six figures.
     """
-    return {
-        k: (json_safe(v) if k in REPLAY_INPUT_FIELDS else _clean(v))
-        for k, v in record.items()
-    }
+    return _clean_deep(record)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -216,7 +243,10 @@ def _write_pair(directory: Path, stem: str, payload: Any, *, js_expr: str | None
     API and any future consumer read. Generating both from one payload is the
     only way they cannot disagree.
     """
-    payload = _clean(payload)
+    # `_clean_deep`, not `_clean`: the rows arriving here have already been
+    # cleaned with the replay inputs exempted, and a blanket re-clean undoes
+    # exactly that exemption. See :func:`_clean_deep`.
+    payload = _clean_deep(payload)
     text = json.dumps(payload, sort_keys=True, default=str)
     directory.mkdir(parents=True, exist_ok=True)
     json_path = directory / f"{stem}.json"
