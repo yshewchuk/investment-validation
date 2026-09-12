@@ -204,8 +204,11 @@ That is cheap and makes the estimate auditable rather than merely reproducible.
   and confirm per-decile counts still clear `MIN_POOL=250`.
 - **Cost of `_pool_before` at score time.** It calls `load_forecasts()` and
   `training_frames(panel, model)`, and the latter runs `prepare`. Cache per
-  `Scorer` the way `_crush_frame` is cached today, and measure against the
-  68-minute scoring baseline.
+  `Scorer` the way `_crush_frame` is cached today. **Measure against ~20
+  minutes, not 68.** The 68-minute figure was taken on 2026-09-11 while
+  EXP-179 held the same cores; an uncontended run of identical work (221
+  events, 2,431 scores) took 1,188s. Any benchmark on this box has to record
+  what else was running.
 
 ## 4. The recency question
 
@@ -328,7 +331,8 @@ conditioning key — rather than as a side effect of a memory bound.
   6-month-plus window, and it errs causal — never forward-looking.
 - **`_pool_before` cost at score time** is unmeasured. It reads the stored
   forecast table and runs the model's `prepare`. Cache it per `Scorer` as
-  `_crush_frame` is cached today, and measure against the 68-minute baseline.
+  `_crush_frame` is cached today, and measure against the ~20-minute
+  uncontended baseline (see 3.4).
 
 ---
 
