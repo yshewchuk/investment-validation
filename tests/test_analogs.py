@@ -317,6 +317,34 @@ class TestBootstrap:
         )
         assert (first.ci_low, first.ci_high) == (second.ci_low, second.ci_high)
 
+    def test_the_interval_does_not_depend_on_the_pool_row_order(self):
+        """The same analogs shuffled must give the same interval.
+
+        `rng.choice` samples by INDEX, so a fixed seed picks the same
+        positions and a reordered pool resamples different values from an
+        identical population. Every other statistic here is order-invariant,
+        which is how this stayed hidden: on 2026-09-11 a board and its own
+        re-score agreed on n_analogs, exp_pnl_analog and win_analog and
+        disagreed on ci_low/ci_high for the same set.
+
+        The existing determinism test passes the SAME frame twice, so it
+        could never have caught it.
+        """
+        pool = self.pool()
+        shuffled = pool.sample(frac=1.0, random_state=99).reset_index(drop=True)
+        buckets = dict(
+            mcap_bucket="1-10B", dte_band="4-10", moneyness_band="ATM", implied_tercile="mid"
+        )
+        first = AnalogMatcher(pool, snapshot="snap-a").match(
+            "STR-THRU", buckets, alpha=0.5, request_key="k"
+        )
+        second = AnalogMatcher(shuffled, snapshot="snap-a").match(
+            "STR-THRU", buckets, alpha=0.5, request_key="k"
+        )
+        assert first.n == second.n
+        assert first.mean == pytest.approx(second.mean)
+        assert (first.ci_low, first.ci_high) == (second.ci_low, second.ci_high)
+
     def test_a_different_snapshot_is_a_different_draw(self):
         pool = self.pool()
         buckets = dict(

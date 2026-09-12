@@ -406,6 +406,19 @@ class AnalogMatcher:
     ) -> AnalogSet:
         returns = pd.to_numeric(matched.get("ret"), errors="coerce").to_numpy(dtype=float)
         returns = returns[np.isfinite(returns)]
+        # SORTED, because the bootstrap below samples by INDEX. `rng.choice`
+        # with a fixed seed picks the same positions every time, so the same
+        # analogs arriving in a different row order produce a different
+        # resample — and `matched`'s order is not guaranteed, it falls out of
+        # how the trades were gathered and merged.
+        #
+        # Every other statistic here is order-invariant (mean, median, win
+        # rate, quantiles), which is exactly why this hid: on 2026-09-11 the
+        # board and its own re-score agreed on n_analogs, exp_pnl_analog and
+        # win_analog and disagreed on ci_low/ci_high, for the same analog set.
+        # Sorting makes the interval a function of the multiset, which is what
+        # it was always supposed to be.
+        returns = np.sort(returns)
         if returns.size == 0:
             return _empty(strategy, alpha, buckets, widened, dropped,
                           unavailable=unavailable)
