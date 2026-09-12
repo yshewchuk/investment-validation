@@ -130,6 +130,31 @@ venv/
 # structure nobody chose while reporting success.
 !/engine/models/structures.json
 
+# `**/models/` above blocks the grandfathered research model trees. The v2
+# model packages are not one of those: they are the empty skeleton of
+# system_rearchitecture.md §4.4's layer-3 inference package and its layer-6
+# training package, code and READMEs only. Same reason /engine/models/ is
+# re-included above; a separate rule because git matched the block, not the
+# allow, for every path under it.
+!/engine/v2/models/
+!/engine/v2/models/**/
+
+# The migration's progress meter (system_rearchitecture.md §4.6): every
+# engine/v2 -> legacy dependency, with a reason and a date, plus the committed
+# count that may only shrink. Config, not data — and a clone without it cannot
+# run `checks/import_layers.py` at all, which is the check that keeps the two
+# trees apart.
+!/checks/legacy_adapters.json
+
+# The versioned pre-commit hook. Extensionless, so the default-deny above
+# catches it; and the whole point of checks/hooks/ is that .git/hooks is NOT
+# versioned, so a clone with no copy of this file has no gate at all.
+!/checks/hooks/pre-commit
+
+# The environment lock. Code-adjacent config, and the thing that lets a clean
+# checkout reproduce the baseline the tier-0 corpus was captured in.
+!/requirements.txt
+
 # Claude Code state, entirely. `settings.local.json` alone was not enough: the
 # default-deny above re-allows directories (`!*/`) and then every `.py`, so a
 # git WORKTREE checked out under .claude/ — which is where Claude Code puts

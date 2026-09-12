@@ -50,6 +50,15 @@ from engine import paths  # noqa: E402
 #: the public ``.gitignore``: nothing ships unless it is named here.
 INCLUDE = (
     ("ledger", "**/*"),
+    # The phase-0 compatibility package and the tier-0 corpus. Irreplaceable in
+    # the precise sense this mirror exists for: the corpus is the oracle every
+    # later migration phase states its exit gate against, and re-capturing it
+    # would produce a corpus of whatever the engine does THEN, which is the one
+    # thing a baseline may not be. Blocked from the public repo by
+    # checks/repo_hygiene.py — they carry real quotes.
+    ("baseline", "**/*.json"),
+    ("baseline", "**/*.txt"),
+    ("fixtures", "**/*.json"),
     ("reports", "**/*.md"),
     ("config/thesis", "**/*"),
     ("experiments", "LEDGER.csv"),

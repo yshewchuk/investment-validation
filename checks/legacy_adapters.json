@@ -1,0 +1,6 @@
+{
+  "count": 0,
+  "adapters": [],
+  "note": "Every engine/v2/** -> engine/* dependency is an entry here: package, adapter module, legacy symbol, reason, declared_on. The count may only shrink (system_rearchitecture.md §4.6) and phase 8 begins when it reaches zero.",
+  "committed_ceiling": 0
+}
