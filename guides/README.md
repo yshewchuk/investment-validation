@@ -43,6 +43,13 @@ ledger's `health.json`, all of which now exist.**
   exhaustive placement contracts, historical/synthetic scenarios, reusable
   valuation and accounting, time/IV what-ifs and compatibility tests.
 
+Implementation plans, one per migration phase of
+[system rearchitecture](system_rearchitecture.md) §12:
+
+- [Phase 0 — Baseline](rearchitecture_phase0_baseline.md): the tier-0 corpus,
+  the ComparisonReceipt, the enforced layer map and the empty `engine/v2/`
+  skeleton. Writes no production logic and changes no board number.
+
 These are design proposals. They describe explicit future changes to the
 runtime choices in convention 7 below, while retaining the research and safety
 requirements. They do not change current strategy definitions or deployments.

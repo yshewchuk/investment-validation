@@ -238,28 +238,49 @@ stay warm during the decision window only when its memory is reserved.
 Keep entry points such as `engine.score.score`, `score_calendar`, and existing
 CLI commands as compatibility adapters while their implementations move.
 
-### 4.1 Physical layout
+### 4.1 Physical layout: two trees
 
 The table above is a logical boundary. A logical boundary that is not also a
 physical one constrains nothing: nothing currently stops `render.py` importing
 the scorer, and nothing did. Each owner therefore gets a package, and the
 package is the unit a person or an agent loads to work on that owner.
 
+§12 builds the replacement alongside the legacy store rather than moving code
+in place, because parity is the safety mechanism and two implementations cannot
+be compared once one is gone. That requires a second tree: the §4 owner names
+collide with existing directories (`engine/data`, `engine/models`,
+`engine/dashboard` all exist today), so the new packages cannot simply appear
+beside the old ones.
+
+The new tree is **`engine/v2/`**. It is written fresh against the layering
+below, never by moving a legacy file into it. Legacy `engine/` continues to run
+the board unchanged for the whole migration and is deleted at phase 8, at which
+point `engine/v2/` is renamed to `engine/`. That rename is a mechanical
+rewrite of import prefixes, and it is safe to do late precisely because the
+tier-0 corpus and the layer check are in place to prove it changed nothing.
+
+Two consequences worth stating rather than discovering. Because v2 is new code,
+it starts at **zero exemptions** on every budget in §4.3 — the 17 upward
+imports and 118 budget violations measured in the legacy tree are not a backlog
+to work through, they are properties of code with a deletion date. And because
+legacy is frozen rather than refactored, effort spent lowering its complexity
+is effort spent on a tree that will not exist.
+
 | Layer | Package | Owner from the table above | May import |
 |---|---|---|---|
-| 0 | `engine/contracts/` | — schemas and types only, no logic, no I/O | nothing |
-| 0 | `engine/foundation/` | paths, env, canonical JSON, session/calendar arithmetic, causality primitives | contracts |
-| 1 | `engine/data/` | Ingestion — sources, normalize, store, catalog | 0 |
-| 2 | `engine/features/` | Feature engine | 0-1 |
-| 3 | `engine/models/` | Model inference — registry and inference only | 0-2 |
-| 4a | `engine/domain/generation/`, `engine/domain/scenarios/`, `engine/domain/valuation/` | Structure generator, scenario builder, position valuator — three peers, none importing another | 0-3 |
-| 4b | `engine/domain/simulation/` | PnL simulator and accounting | 0-4a |
-| 5 | `engine/scoring/` | Scoring application | 0-4b |
-| 6 | `engine/evaluation/`, `engine/ledger/` | Evaluation/portfolio | 0-5 |
-| 6 | `engine/models/training/` | Model training | 0-5 |
-| 7 | `engine/serving/`, `engine/ops/` | API/projection, Supervisor/catalog | 0-6 |
-| 8 | `engine/dashboard/`, `ui/` | UI | 7 only |
-| — | `engine/diagnosis/` | Validation/diagnosis | 0-7; nothing imports it |
+| 0 | `engine/v2/contracts/` | — schemas and types only, no logic, no I/O | nothing |
+| 0 | `engine/v2/foundation/` | paths, env, canonical JSON, session/calendar arithmetic, causality primitives | contracts |
+| 1 | `engine/v2/data/` | Ingestion — sources, normalize, store, catalog | 0 |
+| 2 | `engine/v2/features/` | Feature engine | 0-1 |
+| 3 | `engine/v2/models/` | Model inference — registry and inference only | 0-2 |
+| 4a | `engine/v2/domain/generation/`, `.../scenarios/`, `.../valuation/` | Structure generator, scenario builder, position valuator — three peers, none importing another | 0-3 |
+| 4b | `engine/v2/domain/simulation/` | PnL simulator and accounting | 0-4a |
+| 5 | `engine/v2/scoring/` | Scoring application | 0-4b |
+| 6 | `engine/v2/evaluation/`, `engine/v2/ledger/` | Evaluation/portfolio | 0-5 |
+| 6 | `engine/v2/models/training/` | Model training | 0-5 |
+| 7 | `engine/v2/serving/`, `engine/v2/ops/` | API/projection, Supervisor/catalog | 0-6 |
+| 8 | `engine/v2/dashboard/`, `ui/` | UI | 7 only |
+| — | `engine/v2/diagnosis/` | Validation/diagnosis | 0-7; nothing imports it |
 
 Two placements in that table are doing real work and are not arbitrary.
 
@@ -270,13 +291,13 @@ contract rule that inference never fits, and it dissolves by construction the
 current situation where `models/training/gate.py` imports `engine.replay` and
 `models/training/gate_forecast_analog.py` imports `engine.score`.
 
-**Features may import inference but never training.** `data/features/tier4.py`
-currently imports `engine.models.training` in five places, which is the
+**Features may import inference but never training.** legacy `data/features/tier4.py`
+imports `engine.models.training` in five places, which is the
 feature-model cycle the Tier-4 design deliberately creates. Splitting the model
 package at the inference boundary resolves it: a feature depends on a frozen
 artifact it can load and call, never on the code that fits one.
 
-`engine/diagnosis/` is deliberately a sink. It may read every layer's artifacts,
+`engine/v2/diagnosis/` is deliberately a sink. It may read every layer's artifacts,
 and no layer may import it, so a comparator can never become a dependency of
 the thing it compares.
 
@@ -302,29 +323,43 @@ attached to a single Model engine owner, and a single package cannot enforce it;
 two packages on layers 3 and 6 can, because a scorer at layer 5 has no path to
 the training code at all.
 
-### 4.2 Enforced import direction, and the measured distance to it
+### 4.2 Enforced import direction
 
-Declaring layers is worthless without a check, because the direction is invisible
-at the point of writing an import. One `checks/import_layers.py`, in the plain
-assert style of convention 6, holds the layer map and fails on any upward edge.
-It runs at tier 0.
+Declaring layers is worthless without a check, because the direction is
+invisible at the point of writing an import. One `checks/import_layers.py`, in
+the plain assert style of convention 6, holds the layer map and fails on any
+violation. It runs at tier 0 and enforces three rules:
 
-The distance to that state is smaller than the coupling pain suggests. Parsing
-the current `engine/` import graph against the layering above yields **17
-upward edges**, in five groups:
+1. **Inside v2, imports point down only.** A layer-2 package may not import
+   layer 3. `engine/v2/diagnosis/` is imported by nothing.
+2. **v2 reaches legacy only through declared adapters.** Every dependency from
+   `engine/v2/**` on legacy `engine/*` is a named entry in
+   `checks/legacy_adapters.json`, confined to a single adapter module per
+   package. An undeclared legacy import fails the check.
+3. **Legacy never imports v2.** The legacy tree runs the board unchanged and
+   must not acquire a dependency on code that is still being proved.
 
-| Upward edge | Count | What it means |
+Because v2 is new code, rules 1 and 3 start satisfied and stay that way — there
+is no backlog and no exemption list. What ratchets is rule 2, and §4.6 explains
+why that is the useful thing to count.
+
+The legacy tree is measured once, for the record, and then left alone. Parsing
+`engine/` against this layering yields 17 upward edges, in five groups:
+
+| Upward edge | Count | What it is |
 |---|---|---|
-| `models/training/*` -> `score`, `replay`, `analogs` | 3 | Real. Gate training builds its dataset by calling the scorer; it needs the registered dataset recipe. Resolved by placing training at layer 6. |
-| `data/features/tier4` -> `models.training` | 6 | Real. Resolved by the inference/training split above. |
-| `calendar` -> `data.fetch`, `data.sources.nasdaq` | 4 | `calendar` is two things: session arithmetic (layer 0) and a calendar source (layer 1). Split the module, not the layering. |
-| `features`, `score` -> `audit` | 2 | `audit` is a causality primitive, not an evaluation output. It belongs in `foundation`. |
-| `data/rebuild` -> `data.features` | 2 | `rebuild` is an orchestrator above features, not a peer of the store. Reclassify. |
+| `models/training/*` -> `score`, `replay`, `analogs` | 3 | Gate training builds its dataset by calling the scorer |
+| `data/features/tier4` -> `models.training` | 6 | The feature-model cycle Tier 4 deliberately creates |
+| `calendar` -> `data.fetch`, `data.sources.nasdaq` | 4 | `calendar` is session arithmetic and a calendar source in one module |
+| `features`, `score` -> `audit` | 2 | `audit` is a causality primitive misfiled as an evaluation output |
+| `data/rebuild` -> `data.features` | 2 | `rebuild` is an orchestrator, not a peer of the store |
 
-Six of the seventeen are misclassification in the layer map rather than defects
-in the code. Nine are real, and they are two known problems already named
-elsewhere in this guide. The import graph is close to layered; what is missing
-is any declaration of the layering and any signal when something crosses it.
+These are not a work queue. They are the evidence that the layering is
+necessary and the specification of what v2 must not reproduce: the first two
+groups are dissolved by construction in §4.1 — training above scoring, features
+importing inference and never training — and the last three are resolved by
+splitting the module rather than the layering. The legacy tree keeps all
+seventeen until it is deleted.
 
 ### 4.3 Mechanical code budgets
 
@@ -344,21 +379,27 @@ length.
 
 Three further budgets run in the same check, at tier 0, for the same reason:
 they are the properties that decide whether a change can be reasoned about
-without loading its neighbours. All are measured from the current tree rather
-than chosen, so each is a tail to close rather than a rewrite to fund.
+without loading its neighbours. **They bind `engine/v2/**` and nothing else.**
+The legacy tree is exempt wholesale: it is frozen apart from bug fixes and
+deleted at phase 8, so lowering its complexity is effort spent on a tree that
+will not exist. The values are measured from that legacy tree rather than
+chosen, which is what makes them known to be achievable in this codebase.
 
-| Budget | Value | Current tree |
+| Budget | Value in v2 | Measured in the legacy tree |
 |---|---|---|
 | Cyclomatic complexity per function | 15 | 942 functions, median 3, p90 12, p95 18; 57 exceed |
 | Lines per function | 80 | median 14, p90 67, p95 89; 61 exceed |
 | Lines per module | 600 (warning) | 8 exceed |
 | Fan-out, non-orchestrator | 8 | see §4.2 |
 
-Roughly six per cent of functions exceed the first two. The worst is
-`run_nightly` at complexity 64 over 585 lines, which is the orchestrator: §4.1
-exempts orchestrators from fan-out and deliberately does not exempt them from
-length or complexity, because an orchestrator is exactly where a failure needs
-to be localizable to a stage.
+Roughly six per cent of legacy functions exceed the first two, so the budgets
+are neither generous nor unreachable for code written deliberately. In v2 the
+tolerance is zero: a function over budget cannot be committed, which is only
+reasonable because there is no inherited backlog to grandfather. The worst
+legacy case is `run_nightly` at complexity 64 over 585 lines, which is the
+orchestrator: §4.1 exempts orchestrators from fan-out and deliberately does not
+exempt them from length or complexity, because an orchestrator is exactly where
+a failure needs to be localizable to a stage.
 
 Complexity is a diagnosis budget, not an aesthetic one. A comparator can only
 name the first differing stage if stages are separable in the code; a function
@@ -390,32 +431,34 @@ Require instead:
 The ratchet stops erosion; the fixtures are what actually establish that a
 change did not move a number. Do not trade the second for a higher first.
 
-### 4.4 Where the current modules land
+### 4.4 Which legacy module each v2 package replaces
 
-The layering is only actionable with the mapping. Every current `engine/`
-module has a destination; the ones that appear more than once are the modules
-doing more than one job, and those splits are the point of the exercise.
+The layering is only actionable with the mapping. Every legacy `engine/` module
+has a successor; the ones appearing more than once are the modules doing more
+than one job, and those splits are the point of the exercise. Nothing is moved:
+each v2 package is written against the contracts and proved equal to the legacy
+behaviour on the tier-0 corpus before anything depends on it.
 
-| Layer | Package | Current source |
+| Layer | v2 package | Legacy module it replaces |
 |---|---|---|
-| 0 | `engine/contracts/` | new — the dataclasses currently declared inside `score.py` |
-| 0 | `engine/foundation/` | `paths.py`, `env.py`, `jsonio.py`, `audit.py`, session arithmetic from `calendar.py` |
-| 1 | `engine/data/` | `data/sources/`, `data/normalize/`, `data/pulls/`, `store.py`, `fetch.py`, `throttle.py`, `finality.py`, `rebuild.py`, calendar sourcing from `calendar.py` |
-| 2 | `engine/features/` | `features.py`, `data/features/panel.py`, `data/features/tier4.py` |
-| 3 | `engine/models/` | `models/registry.py`, artifact loading and inference adapters |
-| 3 | `engine/registry/` | `structure_registry.py`, plus the StrategySpec/DeploymentSpec store |
-| 4a | `engine/domain/generation/` | `structures.py`, `forecast_sizing.py`, `fills.py` |
-| 4a | `engine/domain/scenarios/` | `analogs.py`, `ResidualPool` from `pnl_sim.py` |
-| 4a | `engine/domain/valuation/` | `payoff.py`, `black_scholes_put` from `pnl_sim.py` |
-| 4b | `engine/domain/simulation/` | `expected_pnl` from `pnl_sim.py` |
-| 5 | `engine/scoring/` | `score.py` split by the stages in §6.3, `entry_rules.py`, `replay.py`, `trailing_cutoff` from `pnl_sim.py` |
-| 6 | `engine/evaluation/` | `evaluate.py`, `report.py`, `build_trades.py`, `calibrate.py`, `recalibrate.py` |
-| 6 | `engine/ledger/` | `ledger.py`, `ledger_settlement.py`, `portfolio.py` |
-| 6 | `engine/models/training/` | `models/training/` unchanged in content, moved above scoring |
-| 7 | `engine/serving/` | the data half of `dashboard/render.py`, `dashboard/earnings_app.py` |
-| 7 | `engine/ops/` | new supervisor and catalog; `dashboard/nightly.py` becomes a job graph; `tools/bounded_run.py` becomes an executor adapter |
-| 8 | `engine/dashboard/`, `ui/` | the formatting half of `dashboard/render.py`, `dashboard/static/` |
-| — | `engine/diagnosis/` | `dashboard/selfcheck.py`, plus the parity comparators |
+| 0 | `engine/v2/contracts/` | new — the dataclasses currently declared inside `score.py` |
+| 0 | `engine/v2/foundation/` | `paths.py`, `env.py`, `jsonio.py`, `audit.py`, session arithmetic from `calendar.py` |
+| 1 | `engine/v2/data/` | `data/sources/`, `data/normalize/`, `data/pulls/`, `store.py`, `fetch.py`, `throttle.py`, `finality.py`, `rebuild.py`, calendar sourcing from `calendar.py` |
+| 2 | `engine/v2/features/` | `features.py`, `data/features/panel.py`, `data/features/tier4.py` |
+| 3 | `engine/v2/models/` | `models/registry.py`, artifact loading and inference adapters |
+| 3 | `engine/v2/registry/` | `structure_registry.py`, plus the StrategySpec/DeploymentSpec store |
+| 4a | `engine/v2/domain/generation/` | `structures.py`, `forecast_sizing.py`, `fills.py` |
+| 4a | `engine/v2/domain/scenarios/` | `analogs.py`, `ResidualPool` from `pnl_sim.py` |
+| 4a | `engine/v2/domain/valuation/` | `payoff.py`, `black_scholes_put` from `pnl_sim.py` |
+| 4b | `engine/v2/domain/simulation/` | `expected_pnl` from `pnl_sim.py` |
+| 5 | `engine/v2/scoring/` | `score.py` split by the stages in §6.3, `entry_rules.py`, `replay.py`, `trailing_cutoff` from `pnl_sim.py` |
+| 6 | `engine/v2/evaluation/` | `evaluate.py`, `report.py`, `build_trades.py`, `calibrate.py`, `recalibrate.py` |
+| 6 | `engine/v2/ledger/` | `ledger.py`, `ledger_settlement.py`, `portfolio.py` |
+| 6 | `engine/v2/models/training/` | `models/training/`, rewritten above scoring rather than moved |
+| 7 | `engine/v2/serving/` | the data half of `dashboard/render.py`, `dashboard/earnings_app.py` |
+| 7 | `engine/v2/ops/` | new supervisor and catalog; `dashboard/nightly.py` becomes a job graph; `tools/bounded_run.py` becomes an executor adapter |
+| 8 | `engine/v2/dashboard/`, `ui/` | the formatting half of `dashboard/render.py`, `dashboard/static/` |
+| — | `engine/v2/diagnosis/` | `dashboard/selfcheck.py`, plus the parity comparators |
 
 `pnl_sim.py` is the clearest case for why this is worth doing. It is 260 lines
 that carry four separable jobs on three different layers: a residual pool
@@ -431,10 +474,11 @@ that execution order is written as a sequence rather than prose. `render.py`
 splits at the line §6.4 already draws: the values move to `serving/`, the
 formatting stays in the UI package.
 
-Two rules keep the mapping honest during the move. A module that appears twice
-in this table is split before either half moves, never copied. And every moved
-module keeps a compatibility shim at its old import path until phase 8, so the
-move is never the thing that breaks a caller.
+Two rules keep the mapping honest. A legacy module appearing twice is
+replaced by two v2 packages, never by one that quietly does both jobs — the
+split is the deliverable, not a side effect. And no legacy module is edited to
+point at v2: the legacy tree keeps running unchanged until it is deleted whole,
+so the migration can never be the thing that breaks the board.
 
 ### 4.5 Every package carries a README
 
@@ -466,72 +510,65 @@ rests on, and §4.1 showed that several of them could not be made structural.
 Writing each one into the package that must honour it, naming the package that
 owns it instead, is what makes an unenforceable rule at least a visible one.
 
-### 4.6 How the budgets ratchet
+### 4.6 What ratchets, and what does not
 
-The tail in §4.3 has to shrink without a stop-the-world refactor and without
-resting on intent. "Every commit must improve the metrics" is the obvious rule
-and it is the wrong one, for two reasons worth recording so it is not
-readopted later.
+Two trees make this simpler than one would. Because v2 starts clean and legacy
+is frozen, there is no complexity backlog to burn down and no exemption ledger
+for it. "Every commit must improve the metrics" is therefore not needed, and it
+is worth recording why it was rejected so it is not readopted.
 
 It cannot apply to every commit. A documentation change, a one-line fix, or a
-genuinely necessary new function will not lower a global count, and a rule that
-blocks them produces one of two outcomes: unrelated cleanup bundled into every
-fix, which makes diffs harder to review and works directly against the
-localizability this architecture is for; or `--no-verify`, which disables the
-secret scan in the same stroke and is the worse failure by a wide margin.
+necessary new function will not lower a global count, and a rule that blocks
+them produces either unrelated cleanup bundled into every diff — working
+directly against the localizability this architecture is for — or
+`--no-verify`, which disables the secret scan in the same stroke. And a
+coverage figure that must rise each commit is gameable in precisely the way
+that has already cost this program a night: the determinism test that missed
+the analog ordering bug had complete line coverage and an empty assertion.
 
-And a coverage figure that must rise every commit is gameable in precisely the
-way that has already cost this program a night: a test that executes a line
-without asserting on it raises the number. The determinism test that missed the
-analog ordering bug had complete line coverage and an empty assertion.
+What holds instead:
 
-So three mechanisms, none of which is "improve globally".
+**In v2, the budgets are absolute.** Zero tolerance, no exemption file, no
+grandfathering. A function over complexity 15 or 80 lines does not get
+committed. This is only a reasonable rule because there is nothing inherited to
+forgive, which is the main practical argument for the second tree.
 
-**1. The touched-function rule, enforced pre-commit.** Every function appearing
-in the staged diff must satisfy the §4.3 budgets. A function already over
-budget must come out strictly lower than it went in — not necessarily at
-budget, because a one-line fix inside a 585-line orchestrator cannot reasonably
-demand its full decomposition, but never unchanged. This is local, it never
-blocks work in an unrelated package, and it makes the tail shrink as a
-by-product of ordinary work rather than as a project.
+**In legacy, the budgets do not apply at all.** Bug fixes land there for the
+whole migration and must not be taxed with refactoring obligations on code
+scheduled for deletion. The only rule is rule 3 of §4.2: legacy must not import
+v2.
 
-**2. An exemption ledger that can only shrink.** The 57 complexity and 61
-length violations are listed in `checks/budget_exemptions.json`, each with its
-metric, value, reason and date. The file also carries the committed count. The
-check fails when today's count exceeds the committed one, and rewrites the
-committed count downward when it is lower. The cap therefore ratchets to the
-observed minimum automatically and can never rise: no schedule to maintain, no
-calendar entry to forget, and no way to quietly re-add. Adding an exemption
-remains possible and is deliberately not silent — it is a line in a tracked
-file with a reason, visible in the diff.
+**The adapter ledger is what ratchets.** `checks/legacy_adapters.json` lists
+every dependency v2 still has on legacy, with the package, the legacy symbol, a
+reason and a date, and carries a committed count. The check fails when the
+count rises and rewrites it downward when it falls. That count is the migration
+made numeric: it starts high, it can only shrink, and it reaches zero exactly
+when legacy is deletable. It is a far better progress measure than a phase
+number, because it cannot be satisfied by writing code that nothing uses.
 
-If the natural rate proves too slow, a scheduled decrement can be added on top
-of the ratchet later. Start without one: mechanism 1 already applies pressure
-proportional to how much a file is actually worked in, which is the right
-distribution of effort.
-
-**3. The nightly re-verifies what the hook checked.** A pre-commit hook lives
-in `.git/hooks`, which is not versioned, so a fresh clone has none and
-`--no-verify` bypasses the one that exists. The hook is therefore a
-convenience, not the control. Version the script under `checks/hooks/`, install
-it explicitly, and have the nightly run the identical check over `HEAD` and
-report drift — including whether the hook is installed at all. Without that, a
-bypass is permanent and invisible. This repository has no CI, so the nightly is
-the only backstop available and the checks must be cheap enough to sit in it.
+Adding an adapter stays possible and is deliberately not silent — a tracked
+line with a reason, visible in a diff. Removing the last one is the phase-8
+entry condition.
 
 **Coverage does not belong in the hook.** It requires the test suite, pytest is
 not currently installable in this environment, and a hook that takes minutes
-gets bypassed and then removed. The coverage ratchet of §4.3 runs in the
-nightly at tier 2 against a committed per-package baseline. Only the properties
-computable from the staged blobs by `ast` — complexity, function and module
-length, fan-out, import direction, README consistency — run pre-commit.
+gets bypassed and then deleted. The coverage ratchet of §4.3 runs in the
+nightly at tier 2 against a committed per-package baseline for v2 packages.
+Only the properties computable from staged blobs by `ast` — complexity,
+function and module length, fan-out, import direction, adapter declarations,
+README consistency — run pre-commit.
+
+**The nightly re-verifies what the hook checked.** A pre-commit hook lives in
+`.git/hooks`, which is not versioned, so a fresh clone has none and
+`--no-verify` bypasses the one that exists. The hook is a convenience; the
+nightly is the control, and it also reports whether the hook is installed at
+all. This repository has no CI, so the nightly is the only backstop available.
 
 The hook reads staged blobs rather than the working tree, the way
 `checks/repo_hygiene.py` already does; checking the working tree passes or
 fails on content that is not what would be committed. A full-repository parse
 costs 2.9 seconds across 567 files and 7,493 functions, and the pre-commit
-scope is narrower than that: `engine/`, `checks/` and `tools/`, skipping
-`experiments/`, whose finalized research trees are immutable by convention 8.
+scope is narrower: `engine/v2/`, `checks/` and `tools/`.
 
 ### 4.7 A budget failure refuses publication
 
@@ -1267,7 +1304,7 @@ properties it must have — stage localization and complete independent findings
 
 | Check | Required proof | Tier | Trigger |
 |---|---|---|---|
-| Code budgets | No module imports a higher layer; `engine/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; touched functions not worsened; exemption ledger at or below its committed count; every package README present with consumers matching the import graph | 0 | Every edit; pre-commit on staged blobs; nightly re-verification over HEAD, refusing publication on failure |
+| Code budgets | Inside v2 imports point down only; `engine/v2/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; v2 at zero budget exemptions; legacy-adapter ledger at or below its committed count; legacy never importing v2; every package README present with consumers matching the import graph | 0 | Every edit; pre-commit on staged blobs; nightly re-verification over HEAD, refusing publication on failure |
 | Coverage ratchet | Per-package coverage not below its committed baseline; every strategy and refusal code has a tier-0 fixture pair; each comparator has a negative control | 2 | Nightly |
 | Strategy compatibility | Same contracts, timing, nulls, forecasts, thresholds, flags and choices | 0 | Every edit; every migration step |
 | Training/serving parity | Dataset rows and production context produce the same registered inputs | 1 | Model release; sampled nightly |
@@ -1324,15 +1361,15 @@ this host so a parity check does not need two multi-gigabyte scorers alive.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green with its nine known exemptions listed and dated |
-| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; **`checks/code_budgets.py`, pinned linter, coverage ratchet and a README per package**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only; budgets green with the exemption ledger at or below its committed count, a touched function never leaving a commit worse than it entered, the nightly reporting hook-install and drift, every package README present and its consumers matching the import graph |
+| 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green over the v2 skeleton with an empty adapter ledger |
+| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; **`checks/code_budgets.py`, pinned linter, coverage ratchet and a README per package**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only; v2 budgets green at zero exemptions, the legacy-adapter ledger at or below its committed count, the nightly reporting hook-install and drift, every package README present and its consumers matching the import graph |
 | 2. Data access | Snapshot repository, immutable manifests, bounded reads, legacy adapters | Existing scores match; failed rebuild leaves active snapshot intact |
 | 3. Incremental data | Coverage watermarks, changed-key merges, dependency invalidation, correction path | No-op rewrites zero data; append/correction matches clean rebuild |
 | 4. Scoring | Registered extracted recipes, canonical score contract, engine-owned chooser data, financial logic moved from renderer | All strategies match; production imports no experiment runner |
 | 5. Models | Persisted fold artifacts, transforms/residuals, dataset recipes and evidence; atomic promotions | Zero fitting on scoring requests; exact promotion/rollback |
 | 6. UI | Read API then one screen at a time; old UI/export adapters retained | Feature inventory, lazy-load checks, phone/offline access pass |
 | 7. Live shadow | Entitlement/schema proof, snapshots, causal live features, clock-specific experiments | Live guide gates pass; no contamination; timely publication |
-| 8. Cutover | Switch consumers; remove duplicate implementations; update recovery/operations docs | Ten consecutive completed-session runs without manual resource placement; restore and compatibility evidence pass; the layer check has no remaining exemptions |
+| 8. Cutover | Switch consumers; delete legacy `engine/` whole; rename `engine/v2/` to `engine/`; update recovery/operations docs | Ten consecutive completed-session runs without manual resource placement; restore and compatibility evidence pass; the legacy-adapter ledger reaches zero; the rename is proved inert on the tier-0 corpus |
 
 The UI can start against frozen projections after phase 2. Shadow collection
 can begin before model readiness once its contract/quota are defined. Cutover
@@ -1357,7 +1394,10 @@ creates useful UI/operations boundaries without simultaneously rewriting
 storage, scoring and models.
 
 Keep old research trees, specs/results, imports, predictions and reports intact.
-Build new catalog/data state alongside the legacy store. During shadowing only
+Build new catalog/data state alongside the legacy store, in the second tree
+`engine/v2/` of §4.1: legacy `engine/` runs the board unchanged throughout,
+never edited to point at v2, and is deleted whole at phase 8 rather than
+hollowed out module by module. During shadowing only
 one path commits official predictions, registry changes and testing ledgers.
 Rollback restores a prior deployment/release; it does not erase historical
 facts. Necessary economic changes get separate experiments or explicit defect
