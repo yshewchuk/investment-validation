@@ -466,6 +466,73 @@ rests on, and §4.1 showed that several of them could not be made structural.
 Writing each one into the package that must honour it, naming the package that
 owns it instead, is what makes an unenforceable rule at least a visible one.
 
+### 4.6 How the budgets ratchet
+
+The tail in §4.3 has to shrink without a stop-the-world refactor and without
+resting on intent. "Every commit must improve the metrics" is the obvious rule
+and it is the wrong one, for two reasons worth recording so it is not
+readopted later.
+
+It cannot apply to every commit. A documentation change, a one-line fix, or a
+genuinely necessary new function will not lower a global count, and a rule that
+blocks them produces one of two outcomes: unrelated cleanup bundled into every
+fix, which makes diffs harder to review and works directly against the
+localizability this architecture is for; or `--no-verify`, which disables the
+secret scan in the same stroke and is the worse failure by a wide margin.
+
+And a coverage figure that must rise every commit is gameable in precisely the
+way that has already cost this program a night: a test that executes a line
+without asserting on it raises the number. The determinism test that missed the
+analog ordering bug had complete line coverage and an empty assertion.
+
+So three mechanisms, none of which is "improve globally".
+
+**1. The touched-function rule, enforced pre-commit.** Every function appearing
+in the staged diff must satisfy the §4.3 budgets. A function already over
+budget must come out strictly lower than it went in — not necessarily at
+budget, because a one-line fix inside a 585-line orchestrator cannot reasonably
+demand its full decomposition, but never unchanged. This is local, it never
+blocks work in an unrelated package, and it makes the tail shrink as a
+by-product of ordinary work rather than as a project.
+
+**2. An exemption ledger that can only shrink.** The 57 complexity and 61
+length violations are listed in `checks/budget_exemptions.json`, each with its
+metric, value, reason and date. The file also carries the committed count. The
+check fails when today's count exceeds the committed one, and rewrites the
+committed count downward when it is lower. The cap therefore ratchets to the
+observed minimum automatically and can never rise: no schedule to maintain, no
+calendar entry to forget, and no way to quietly re-add. Adding an exemption
+remains possible and is deliberately not silent — it is a line in a tracked
+file with a reason, visible in the diff.
+
+If the natural rate proves too slow, a scheduled decrement can be added on top
+of the ratchet later. Start without one: mechanism 1 already applies pressure
+proportional to how much a file is actually worked in, which is the right
+distribution of effort.
+
+**3. The nightly re-verifies what the hook checked.** A pre-commit hook lives
+in `.git/hooks`, which is not versioned, so a fresh clone has none and
+`--no-verify` bypasses the one that exists. The hook is therefore a
+convenience, not the control. Version the script under `checks/hooks/`, install
+it explicitly, and have the nightly run the identical check over `HEAD` and
+report drift — including whether the hook is installed at all. Without that, a
+bypass is permanent and invisible. This repository has no CI, so the nightly is
+the only backstop available and the checks must be cheap enough to sit in it.
+
+**Coverage does not belong in the hook.** It requires the test suite, pytest is
+not currently installable in this environment, and a hook that takes minutes
+gets bypassed and then removed. The coverage ratchet of §4.3 runs in the
+nightly at tier 2 against a committed per-package baseline. Only the properties
+computable from the staged blobs by `ast` — complexity, function and module
+length, fan-out, import direction, README consistency — run pre-commit.
+
+The hook reads staged blobs rather than the working tree, the way
+`checks/repo_hygiene.py` already does; checking the working tree passes or
+fails on content that is not what would be committed. A full-repository parse
+costs 2.9 seconds across 567 files and 7,493 functions, and the pre-commit
+scope is narrower than that: `engine/`, `checks/` and `tools/`, skipping
+`experiments/`, whose finalized research trees are immutable by convention 8.
+
 See the [logical data model](rearchitecture_data_model.md) for three linked
 entity-relationship views: market inputs; templates, positions and scenarios;
 and registered scores, models, publication and the actual-position ledger.
@@ -1156,7 +1223,8 @@ properties it must have — stage localization and complete independent findings
 
 | Check | Required proof | Tier | Trigger |
 |---|---|---|---|
-| Code budgets | No module imports a higher layer; `engine/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; coverage ratchet not decreased; every package README present with consumers matching the import graph | 0 | Every edit |
+| Code budgets | No module imports a higher layer; `engine/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; touched functions not worsened; exemption ledger at or below its committed count; every package README present with consumers matching the import graph | 0 | Every edit; pre-commit on staged blobs; nightly re-verification over HEAD |
+| Coverage ratchet | Per-package coverage not below its committed baseline; every strategy and refusal code has a tier-0 fixture pair; each comparator has a negative control | 2 | Nightly |
 | Strategy compatibility | Same contracts, timing, nulls, forecasts, thresholds, flags and choices | 0 | Every edit; every migration step |
 | Training/serving parity | Dataset rows and production context produce the same registered inputs | 1 | Model release; sampled nightly |
 | Serving/replay parity | Single/batch, cache/fresh, pinned geometry, reordered inputs, API/export agree | 1 | Every commit; full matrix nightly |
@@ -1213,7 +1281,7 @@ this host so a parity check does not need two multi-gigabyte scorers alive.
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green with its nine known exemptions listed and dated |
-| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; **`checks/code_budgets.py`, pinned linter, coverage ratchet and a README per package**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only; budgets green with their dated exemption lists, every package README present and its consumers matching the import graph |
+| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; **`checks/code_budgets.py`, pinned linter, coverage ratchet and a README per package**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only; budgets green with the exemption ledger at or below its committed count, a touched function never leaving a commit worse than it entered, the nightly reporting hook-install and drift, every package README present and its consumers matching the import graph |
 | 2. Data access | Snapshot repository, immutable manifests, bounded reads, legacy adapters | Existing scores match; failed rebuild leaves active snapshot intact |
 | 3. Incremental data | Coverage watermarks, changed-key merges, dependency invalidation, correction path | No-op rewrites zero data; append/correction matches clean rebuild |
 | 4. Scoring | Registered extracted recipes, canonical score contract, engine-owned chooser data, financial logic moved from renderer | All strategies match; production imports no experiment runner |
