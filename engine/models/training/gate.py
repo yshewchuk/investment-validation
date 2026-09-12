@@ -112,12 +112,17 @@ def build_dataset(
         decision_dte = pd.to_numeric(rows["dte_decision"], errors="coerce")
         entry_dte = pd.to_numeric(rows["dte_entry"], errors="coerce")
         comparable = decision_dte.notna() & entry_dte.notna()
+        calendar_gap = (
+            pd.to_datetime(rows["entry_date"]).dt.normalize()
+            - pd.to_datetime(rows["decision_date"]).dt.normalize()
+        ).dt.days
         if comparable.any() and not np.allclose(
             decision_dte[comparable].to_numpy(),
-            entry_dte[comparable].to_numpy() + 1.0,
+            (entry_dte + calendar_gap)[comparable].to_numpy(),
         ):
             raise ValueError(
-                "early-decision gate dataset requires dte_decision == dte_entry + 1"
+                "early-decision gate dataset requires DTE difference equal to "
+                "the decision-to-entry calendar-day gap"
             )
 
     as_of_column = "decision_date" if decided_early else "entry_date"

@@ -7,6 +7,7 @@ strategy. It only reads the normalized option-chain store.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -37,7 +38,7 @@ ALPHAS = tuple(replay.ALPHA_GRID)
 
 
 def cache_path(strategy: str, clock: str) -> Path:
-    return RESULTS / "trades" / strategy / f"${clock}.parquet"
+    return RESULTS / "trades" / strategy / f"{clock}.parquet"
 
 
 def complete_events(frame: pd.DataFrame) -> set[str]:
@@ -47,17 +48,22 @@ def complete_events(frame: pd.DataFrame) -> set[str]:
     return set(counts[counts == len(ALPHAS)].index.astype(str))
 
 
-def cached_pair(strategy: str) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+def cached_pair(
+    strategy: str, *, refresh_d1: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    if refresh_d1:
+        print(f"  [{strategy}] D-1 cache refresh requested", flush=True)
+        return None
     d0_path, d1_path = cache_path(strategy, "d0"), cache_path(strategy, "d1")
     if not d0_path.exists() or not d1_path.exists():
         return None
     d0, d1 = pd.read_parquet(d0_path), pd.read_parquet(d1_path)
     if d0.empty or d1.empty:
-        print(f"  [${strategy}] incomplete replay cache ignored", flush=True)
+        print(f"  [{strategy}] incomplete replay cache ignored", flush=True)
         return None
     print(
-        f"  [${strategy}] replay cache: D0 ${d0['event_id'].nunique():,}, "
-        f"D-1 ${d1['event_id'].nunique():,}",
+        f"  [{strategy}] replay cache: D0 {d0['event_id'].nunique():,}, "
+        f"D-1 {d1['event_id'].nunique():,}",
         flush=True,
     )
     return d0, d1
@@ -72,12 +78,14 @@ def existing_d0(strategy: str, label: str) -> pd.DataFrame:
         & (trades["provenance"].astype(str) == "engine.replay")
     ].copy()
     if not rows.empty:
-        print(f"  [${strategy}] using ${rows['event_id'].nunique():,} stored D0 events", flush=True)
+        print(f"  [{strategy}] using {rows['event_id'].nunique():,} stored D0 events", flush=True)
     return rows
 
 
-def replay_pair(strategy: str, events: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    cached = cached_pair(strategy)
+def replay_pair(
+    strategy: str, events: pd.DataFrame, *, refresh_d1: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    cached = cached_pair(strategy, refresh_d1=refresh_d1)
     if cached is not None:
         return cached
     d0_structure = STRUCTURES[strategy]()
@@ -108,8 +116,8 @@ def replay_pair(strategy: str, events: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
         d1_frames.append(d1.trades)
         del index
         print(
-            f"  [${strategy}] ${year}: D0 ${d0_year.n_trades if d0_year else 0:,}, D-1 ${d1.n_trades:,}; "
-            f"${time.time() - started:.0f}s elapsed",
+            f"  [{strategy}] {year}: D0 {d0_year.n_trades if d0_year else 0:,}, D-1 {d1.n_trades:,}; "
+            f"{time.time() - started:.0f}s elapsed",
             flush=True,
         )
     if d0.empty:
@@ -133,7 +141,8 @@ def matched_pair(d0: pd.DataFrame, d1: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
     ]
     paired = mid0.merge(mid1, on="event_id", suffixes=("_d0", "_d1"), how="inner")
     ret_diff = paired["ret_d1"] - paired["ret_d0"]
-    quote_drift = paired["entry_cost"] / paired["quoted_cost"] - 1.0
+    quoted_cost = paired["quoted_cost"].replace(0.0, np.nan)
+    quote_drift = paired["entry_cost"] / quoted_cost - 1.0
     receipt = {
         "d0_priced_events": int(d0["event_id"].nunique()),
         "d1_priced_events": int(d1["event_id"].nunique()),
@@ -163,13 +172,13 @@ def execution_section(strategy: str, clock: str, receipt: dict) -> list[dict]:
         "rows": [
             ["strategy", strategy],
             ["arm", clock],
-            ["D0 priced events", f"${receipt['d0_priced_events']:,}"],
-            ["D-1 priced events", f"${receipt['d1_priced_events']:,}"],
-            ["matched events", f"${receipt['matched_events']:,}"],
-            ["mean D-1 minus D0 mid return", f"${100 * receipt['mid_return_diff_d1_minus_d0_mean']:+.3f}%"],
-            ["median D-1 minus D0 mid return", f"${100 * receipt['mid_return_diff_d1_minus_d0_median']:+.3f}%"],
-            ["D-1 median quote-to-entry drift", f"${100 * receipt['quoted_to_entry_cost_drift_median']:+.3f}%"],
-            ["D-1 median absolute quote-to-entry drift", f"${100 * receipt['quoted_to_entry_cost_drift_abs_median']:.3f}%"],
+            ["D0 priced events", f"{receipt['d0_priced_events']:,}"],
+            ["D-1 priced events", f"{receipt['d1_priced_events']:,}"],
+            ["matched events", f"{receipt['matched_events']:,}"],
+            ["mean D-1 minus D0 mid return", f"{100 * receipt['mid_return_diff_d1_minus_d0_mean']:+.3f}%"],
+            ["median D-1 minus D0 mid return", f"{100 * receipt['mid_return_diff_d1_minus_d0_median']:+.3f}%"],
+            ["D-1 median quote-to-entry drift", f"{100 * receipt['quoted_to_entry_cost_drift_median']:+.3f}%"],
+            ["D-1 median absolute quote-to-entry drift", f"{100 * receipt['quoted_to_entry_cost_drift_abs_median']:.3f}%"],
         ],
     }]
 
@@ -181,15 +190,18 @@ def arm_report(
     trades: pd.DataFrame,
     receipt: dict,
     spy: pd.DataFrame,
+    *,
+    force: bool = False,
+    no_ledger: bool = False,
 ) -> dict:
     arm_dir = ARMS / strategy / clock
     report_path = arm_dir / "REPORT.md"
-    if report_path.exists():
-        print(f"  [${strategy}/${clock}] report cache: ${report_path}", flush=True)
+    if report_path.exists() and not force:
+        print(f"  [{strategy}/{clock}] report cache: {report_path}", flush=True)
         metrics = sorted((arm_dir / "results").glob("metrics_*.json"))
         return json.loads(metrics[-1].read_text()) if metrics else {}
     print(
-        f"  [${strategy}/${clock}] evaluating ${trades['event_id'].nunique():,} matched events",
+        f"  [{strategy}/{clock}] evaluating {trades['event_id'].nunique():,} matched events",
         flush=True,
     )
     result = evaluate(
@@ -202,12 +214,13 @@ def arm_report(
         stress=True,
         mc_paths=500,
         seed=179,
-        input_files=[cache_path(strategy, f"${clock}_matched")],
+        input_files=[cache_path(strategy, f"{clock}_matched")],
         extra_sections=execution_section(strategy, clock, receipt),
         write_report=True,
     )
-    lib.record_evaluation(HERE, spec, result.results)
-    print(f"  [${strategy}/${clock}] report: ${result.report_path}", flush=True)
+    if not no_ledger:
+        lib.record_evaluation(HERE, spec, result.results)
+    print(f"  [{strategy}/{clock}] report: {result.report_path}", flush=True)
     return result.results
 
 
@@ -224,43 +237,124 @@ def write_comparison(rows: list[dict]) -> None:
     ]
     for row in rows:
         lines.append(
-            f"| ${row['strategy']} | ${row['matched_events']:,} | "
-            f"${100 * row['d0_mean']:+.3f}% | ${100 * row['d1_mean']:+.3f}% | "
-            f"${100 * row['paired_diff_mean']:+.3f}% | ${100 * row['d0_win']:.1f}% | "
-            f"${100 * row['d1_win']:.1f}% | ${100 * row['quote_drift_median']:+.3f}% |"
+            f"| {row['strategy']} | {row['matched_events']:,} | "
+            f"{100 * row['d0_mean']:+.3f}% | {100 * row['d1_mean']:+.3f}% | "
+            f"{100 * row['paired_diff_mean']:+.3f}% | {100 * row['d0_win']:.1f}% | "
+            f"{100 * row['d1_win']:.1f}% | {100 * row['quote_drift_median']:+.3f}% |"
         )
     (HERE / "COMPARISON.md").write_text("\n".join(lines) + "\n")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run one or more independent EXP-179 strategy pairs."
+    )
+    parser.add_argument(
+        "--strategies",
+        default="",
+        help="Comma-separated strategy codes. Omit to run every pair sequentially.",
+    )
+    parser.add_argument(
+        "--refresh-d1",
+        action="store_true",
+        help="Ignore the cached pair and rebuild the D-1 replay from Tier 2.",
+    )
+    parser.add_argument(
+        "--force-reports",
+        action="store_true",
+        help="Regenerate arm reports even when an earlier REPORT.md exists.",
+    )
+    parser.add_argument(
+        "--no-ledger",
+        action="store_true",
+        help="Do not append evaluation rows; required for corrective or shard runs.",
+    )
+    parser.add_argument(
+        "--merge-shards",
+        action="store_true",
+        help="Merge completed per-strategy summaries into COMPARISON.md, then exit.",
+    )
+    return parser.parse_args()
+
+
+def shard_path(strategy: str) -> Path:
+    return RESULTS / "shards" / f"{strategy}.json"
+
+
+def write_shard(row: dict) -> None:
+    path = shard_path(row["strategy"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(row, indent=1, default=str) + "\n")
+
+
+def merge_shards() -> None:
+    rows = []
+    missing = []
+    for strategy in D1_DECISION_OFFSETS:
+        path = shard_path(strategy)
+        if not path.exists():
+            missing.append(strategy)
+            continue
+        rows.append(json.loads(path.read_text()))
+    if missing:
+        raise RuntimeError(f"cannot merge: missing shard summaries for {missing}")
+    write_comparison(rows)
+    print(f"[EXP-179] merged {len(rows)} strategy shards", flush=True)
+
+
+def selected_strategies(raw: str) -> list[str]:
+    if not raw.strip():
+        return list(D1_DECISION_OFFSETS)
+    selected = [item.strip() for item in raw.split(",") if item.strip()]
+    unknown = sorted(set(selected) - set(D1_DECISION_OFFSETS))
+    if unknown:
+        raise ValueError(f"unknown D-1 strategy codes: {unknown}")
+    if len(set(selected)) != len(selected):
+        raise ValueError("--strategies contains a duplicate")
+    return selected
+
+
 def main() -> None:
+    args = parse_args()
+    if args.merge_shards:
+        merge_shards()
+        return
+    strategies = selected_strategies(args.strategies)
     spec = lib.load_spec(HERE / "spec.yaml")
     events = event_universe()
     spy = common.load_spy_daily()
     summaries: list[dict] = []
     started = time.time()
     print(
-        f"[EXP-179] ${len(events):,} known-session events; "
-        f"${len(D1_DECISION_OFFSETS)} paired strategies",
+        f"[EXP-179] {len(events):,} known-session events; "
+        f"{len(strategies)} selected strategy pairs",
         flush=True,
     )
-    for number, strategy in enumerate(D1_DECISION_OFFSETS, start=1):
-        print(f"[EXP-179] ${number}/${len(D1_DECISION_OFFSETS)} ${strategy}", flush=True)
-        d0_raw, d1_raw = replay_pair(strategy, events)
+    shard_mode = len(strategies) != len(D1_DECISION_OFFSETS)
+    for number, strategy in enumerate(strategies, start=1):
+        print(f"[EXP-179] {number}/{len(strategies)} {strategy}", flush=True)
+        d0_raw, d1_raw = replay_pair(strategy, events, refresh_d1=args.refresh_d1)
         d0, d1, receipt = matched_pair(d0_raw, d1_raw)
         if d0.empty or d1.empty:
-            raise RuntimeError(f"${strategy}: no matched D0/D-1 events")
+            raise RuntimeError(f"{strategy}: no matched D0/D-1 events")
         for frame, clock in ((d0, "d0_matched"), (d1, "d1_matched")):
             path = cache_path(strategy, clock)
             path.parent.mkdir(parents=True, exist_ok=True)
             frame.to_parquet(path, index=False)
-        receipt_path = RESULTS / "receipts" / f"${strategy}.json"
+        receipt_path = RESULTS / "receipts" / f"{strategy}.json"
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_text(json.dumps(receipt, indent=1, default=str) + "\n")
-        d0_results = arm_report(spec, strategy, "d0", d0, receipt, spy)
-        d1_results = arm_report(spec, strategy, "d1", d1, receipt, spy)
+        d0_results = arm_report(
+            spec, strategy, "d0", d0, receipt, spy,
+            force=args.force_reports, no_ledger=args.no_ledger,
+        )
+        d1_results = arm_report(
+            spec, strategy, "d1", d1, receipt, spy,
+            force=args.force_reports, no_ledger=args.no_ledger,
+        )
         d0_head = d0_results.get("headline", {})
         d1_head = d1_results.get("headline", {})
-        summaries.append({
+        summary = {
             "strategy": strategy,
             "matched_events": receipt["matched_events"],
             "paired_diff_mean": receipt["mid_return_diff_d1_minus_d0_mean"],
@@ -269,10 +363,14 @@ def main() -> None:
             "d1_mean": d1_head.get("mean", float("nan")),
             "d0_win": d0_head.get("win_rate", float("nan")),
             "d1_win": d1_head.get("win_rate", float("nan")),
-        })
-        write_comparison(summaries)
-        print(f"[EXP-179] ${strategy} complete; ${time.time() - started:.0f}s elapsed", flush=True)
-    print(f"[EXP-179] complete in ${time.time() - started:.0f}s", flush=True)
+        }
+        summaries.append(summary)
+        if shard_mode:
+            write_shard(summary)
+        else:
+            write_comparison(summaries)
+        print(f"[EXP-179] {strategy} complete; {time.time() - started:.0f}s elapsed", flush=True)
+    print(f"[EXP-179] complete in {time.time() - started:.0f}s", flush=True)
 
 
 if __name__ == "__main__":

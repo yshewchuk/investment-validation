@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -126,6 +127,9 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cores", type=int, default=max(1, os.cpu_count() // 2),
                         help="pin to this many cores (default: half the box)")
+    parser.add_argument("--cpu-set", default=None,
+                        help="exact taskset CPU list, for example 8 or 8-9; "
+                             "overrides --cores placement")
     parser.add_argument("--max-rss-gb", type=float, default=5.5,
                         help="kill the tree when its proportional RSS crosses "
                              "this cap (default: 5.5)")
@@ -144,15 +148,27 @@ def main() -> int:
         parser.error("--max-rss-gb must be positive")
 
     cap_mb = args.max_rss_gb * 1024.0
-    cores = f"0-{args.cores - 1}" if args.cores > 1 else "0"
+    cores = args.cpu_set or (f"0-{args.cores - 1}" if args.cores > 1 else "0")
+    if not re.fullmatch(r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*", cores):
+        parser.error("--cpu-set must contain comma-separated CPU numbers or ranges")
+    selected_cpus: set[int] = set()
+    for part in cores.split(","):
+        bounds = [int(value) for value in part.split("-")]
+        start, end = (bounds[0], bounds[-1])
+        if end < start:
+            parser.error("--cpu-set ranges must be ascending")
+        selected_cpus.update(range(start, end + 1))
+    if not selected_cpus or max(selected_cpus) >= os.cpu_count():
+        parser.error("--cpu-set contains an unavailable CPU")
+    worker_cores = len(selected_cpus)
     env = os.environ.copy()
     for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
                  "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        env[name] = str(args.cores)
+        env[name] = str(worker_cores)
 
     print(f"[bounded] cap={args.max_rss_gb:g}G warn at {args.warn_pct:g}% "
           f"cores={cores} of {os.cpu_count()} poll={args.poll_s}s "
-          f"nice=19 threads={args.cores}", flush=True)
+          f"nice=19 threads={worker_cores}", flush=True)
     print(f"[bounded] command: {' '.join(command)}", flush=True)
 
     started = time.monotonic()
