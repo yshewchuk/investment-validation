@@ -43,6 +43,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import sys
 import time
 from dataclasses import fields as dataclass_fields
@@ -237,6 +238,13 @@ def _geometry(record: dict, request: dict) -> set[str]:
 
 def covers_of(record: dict, request: dict) -> list[str]:
     out = {f"strategy:{record.get('strategy')}"}
+    # A refusal row covers the strategy axis but protects nothing about its
+    # geometry, valuation or gate behaviour: a NO_FORECAST row has no legs.
+    # Every served strategy therefore also needs a PRICED fixture — legs and
+    # an entry cost — and `priced:S` is a required axis of its own so a corpus
+    # of refusals cannot claim to cover the strategy it refused.
+    if record.get("legs") and record.get("entry_cost") is not None:
+        out.add(f"priced:{record.get('strategy')}")
     if record.get("session"):
         out.add(f"session:{record['session']}")
     for flag in record.get("flags") or []:
@@ -257,6 +265,16 @@ def covers_of(record: dict, request: dict) -> list[str]:
 def required_axes() -> list[str]:
     axes = [f"strategy:{name}" for name in STRUCTURES]
     axes.append(f"strategy:{score_mod.DYNAMIC_STRATEGY}")
+    # Every SERVED strategy must also appear PRICED — legs and an entry cost,
+    # not a refusal. A NO_FORECAST row proves the refusal path and nothing
+    # about the structure's geometry, valuation or gate behaviour; without
+    # this axis a corpus of refusals passes while protecting no successful
+    # trade for nine of the twelve strategies. The disabled pair is exempt:
+    # production refuses them by design, and their priced behaviour is the
+    # research_replay axis instead.
+    axes += [f"priced:{name}" for name in STRUCTURES
+             if name not in score_mod.DISABLED_STRATEGIES]
+    axes.append(f"priced:{score_mod.DYNAMIC_STRATEGY}")
     axes += [f"model_role:{r}" for r in MODEL_ROLES]
     axes += [f"refusal:{c}" for c in REFUSAL_CODES]
     axes += ["session:BMO", "session:AMC", "boundary:year", "boundary:month"]
@@ -403,13 +421,15 @@ def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
     information-free close for a BMO print is the session before.
     """
     out: list[dict] = []
-    # STR-RUNUP carries the year-boundary axis (its d-14 entry is the only one
-    # that lands in December); RAMP7 and CTR5 carry geometry:exact_mirror —
-    # they are the mirror-placed ladders whose seven/five unique strikes are
-    # evenly gapped whenever the listed grid around the anchor is uniform, and
-    # historical events are where they price at all: in the forward window the
-    # forecast-sized families come back NO_FORECAST with empty legs.
-    for strategy in ("STR-THRU", "TWIN-P5", "STR-RUNUP", "RAMP7", "CTR5"):
+    # ALL structures, not a hand-picked few. The historical boundary events are
+    # the only candidates with BOTH real chains and real forecasts, so they are
+    # where the priced:S axes are won: in the forward window the forecast-sized
+    # families come back NO_FORECAST with empty legs. STR-RUNUP additionally
+    # carries the year-boundary axis (its d-14 entry is the only one that lands
+    # in December), and RAMP7/CTR5 the mirror-placed ladders whose unique
+    # strikes are evenly gapped whenever the listed grid around the anchor is
+    # uniform (geometry:exact_mirror).
+    for strategy in STRUCTURES:
         structure = STRUCTURES[strategy]()
         plan = replay_mod.plan_events(structure, events, calendar=scorer.calendar)
         for row in plan.frame.to_dict("records"):
@@ -661,12 +681,35 @@ def _fixture_id(cand: dict, i: int) -> str:
 # --------------------------------------------------------------------------
 
 
+def _publish_current(root: Path, version: str) -> None:
+    """Point ``CURRENT`` at a version directory, atomically."""
+    tmp = root / "CURRENT.tmp"
+    tmp.write_text(json.dumps({"version": version}, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, root / "CURRENT")
+
+
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
-          as_of: pd.Timestamp, snapshot: str) -> dict:
-    pairs_dir = out_dir / "pairs"
-    pairs_dir.mkdir(parents=True, exist_ok=True)
-    for existing in pairs_dir.glob("*.json"):
-        existing.unlink()
+          as_of: pd.Timestamp, snapshot: str, *, replace: bool = False) -> dict:
+    """Publish one immutable version directory, atomically.
+
+    A frozen corpus may not be edited in place. The earlier writer cleared the
+    pairs directory and rewrote it at the same path, so an interrupted re-run
+    left a PARTIAL corpus where everyone trusts it to be whole, and an
+    accidental re-run silently replaced the baseline every later phase states
+    its exit gate against. Now: the version is built under a temporary sibling
+    and published with one rename; an existing non-empty version directory
+    refuses without an explicit ``--replace``.
+    """
+    if out_dir.exists() and any(out_dir.iterdir()) and not replace:
+        raise SystemExit(
+            f"{out_dir} already exists and is not empty. A frozen corpus is "
+            "never overwritten in place: capture a NEW version directory, or "
+            "re-run with --replace to authorize replacing this one explicitly.")
+    tmp = out_dir.parent / (out_dir.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    pairs_dir = tmp / "pairs"
+    pairs_dir.mkdir(parents=True)
 
     manifest_pairs = {}
     for cand in chosen:
@@ -680,7 +723,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "payload_hash": pair["payload_hash"],
             "request_hash": pair["request_hash"],
             "record_kind": cand["kind"],
-            "covers": cand["covers"],
+            "covers": pair["covers"],
         }
 
     missing = sorted(set(required_axes()) - set(index))
@@ -692,6 +735,16 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         "stage_plan_ref": "scorer.v1",
         "tolerance_policy_ref": "score_record.exact.v1",
         "refusal_code_mapping": REFUSAL_CODES,
+        # Everything checks/tier0_corpus.py needs to RE-DERIVE coverage from
+        # the surviving records alone, with no engine import: the coverage
+        # check must not trust this file's claims, only its inputs.
+        "axis_inputs": {
+            "structures": sorted(STRUCTURES),
+            "dynamic_strategy": score_mod.DYNAMIC_STRATEGY,
+            "menu": list(score_mod.DYNAMIC_MENU),
+            "disabled": list(score_mod.DISABLED_STRATEGIES),
+            "model_roles": list(MODEL_ROLES),
+        },
         "pairs": manifest_pairs,
         "coverage": {axis: sorted(ids) for axis, ids in sorted(index.items())},
         "required_axes": required_axes(),
@@ -700,13 +753,22 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             {k: v["payload_hash"] for k, v in sorted(manifest_pairs.items())}
         ),
     }
-    (out_dir / "INDEX.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    (tmp / "INDEX.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    os.rename(tmp, out_dir)
     return doc
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--out", default=None,
+                    help="write exactly here (skips the versioned layout)")
+    ap.add_argument("--version", default=None,
+                    help="version directory name under fixtures/tier0 "
+                         "(default: UTC timestamp)")
+    ap.add_argument("--replace", action="store_true",
+                    help="authorize replacing an existing non-empty version")
     ap.add_argument("--as-of", default=None)
     ap.add_argument("--forward-days", type=int, default=35)
     ap.add_argument("--max-events", type=int, default=40)
@@ -738,9 +800,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"[corpus] candidates: {len(candidates)}", flush=True)
 
     chosen, index = select(candidates)
-    doc = write(Path(args.out), chosen, index, as_of, scorer.snapshot)
+    if args.out:
+        out_dir = Path(args.out)
+    else:
+        version = args.version or datetime.now(
+            timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out_dir = DEFAULT_OUT / version
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    doc = write(out_dir, chosen, index, as_of, scorer.snapshot,
+                replace=args.replace)
+    if not args.out and out_dir.parent == DEFAULT_OUT:
+        _publish_current(DEFAULT_OUT, out_dir.name)
+        print(f"[corpus] CURRENT -> {out_dir.name}")
 
-    print(f"[corpus] wrote {len(chosen)} pairs to {args.out}")
+    print(f"[corpus] wrote {len(chosen)} pairs to {out_dir}")
     print(f"[corpus] corpus hash {doc['corpus_hash']}")
     covered = len(doc["coverage"])
     total = len(doc["required_axes"])

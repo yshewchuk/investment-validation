@@ -231,7 +231,7 @@ def test_the_four_seeded_causes_are_reported_as_independent():
     receipt = compare_records(left, right)
     ids = {f.finding_id for f in receipt.findings}
     for finding in receipt.findings:
-        assert set(finding.independent_of) == ids - {finding.finding_id}, (
+        assert set(finding.not_downstream_of) == ids - {finding.finding_id}, (
             f"{finding.field_path} was not proved independent"
         )
 
@@ -337,7 +337,7 @@ def test_a_field_cannot_be_dropped_from_the_compared_set():
             lambda r: {**r, "legs": [{**r["legs"][0], "strike": 237.5},
                                      *r["legs"][1:]]},
             "geometry",
-            {"legs.0.strike"},
+            {"legs[0].strike"},
         ),
         (
             "model hash",

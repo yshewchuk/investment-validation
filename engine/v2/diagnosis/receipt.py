@@ -7,11 +7,12 @@ and they are what the shapes below exist to make possible:
 * **Stage-localized** — every :class:`Finding` names a stage and a field path,
   and :class:`ComparisonReceipt` carries per-stage input and output hashes so
   "first differing stage" is a computed fact rather than a claim.
-* **Complete, not first-wins** — ``findings`` is a set of independent findings
-  from one pass. ``independent_of`` records which of them the comparator
-  *proved* are not consequences of one another, so several can be fixed at
-  once. Findings it could not separate are reported without that link rather
-  than silently merged.
+* **Complete, not first-wins** — every finding from one pass is reported.
+  ``not_downstream_of`` records which findings the stage graph shows are not
+  consequences of one another, so several can be investigated at once. It is a
+  localization link, not a causal-independence proof: findings inside ONE
+  stage may share a cause. Findings the graph could not separate are reported
+  without the link rather than silently merged.
 
 ``verdict: incomparable`` is a first-class outcome. A missing artifact, an
 unresolvable reference or a zero-row population is not agreement — and
@@ -62,10 +63,12 @@ class Finding:
     field_path: str
     left_value: Any = None
     right_value: Any = None
-    delta: float | None = None
+    #: Exact (``int``) when both values are integers — a float delta would
+    #: round adjacent integers above 2**53 into agreement.
+    delta: int | float | None = None
     unit: str | None = None
     tolerance_applied: str = "exact"
-    exceeded_by: float | None = None
+    exceeded_by: int | float | None = None
     null_mask_left: bool = False
     null_mask_right: bool = False
     #: What kind of disagreement this is: ``value``, ``null_mask``,
@@ -77,9 +80,13 @@ class Finding:
     source_rows_ref: str | None = None
     recipe_and_artifact_versions: dict[str, Any] = field(default_factory=dict)
     affected_count: int = 1
-    #: Findings this one was PROVED not to be a consequence of. Empty means
-    #: "not separated", never "definitely dependent".
-    independent_of: tuple[str, ...] = ()
+    #: Findings this one is not downstream of, per the stage graph: their
+    #: stages received agreeing inputs, so this cannot be a consequence of
+    #: those THROUGH THE DECLARED GRAPH. A localization fact, not a causal
+    #: proof — one defect inside a single stage can still produce several
+    #: linked findings. Empty means "not separated", never "definitely
+    #: dependent".
+    not_downstream_of: tuple[str, ...] = ()
 
     def describe(self) -> str:
         return (

@@ -27,11 +27,13 @@ sys.path.insert(0, str(ROOT))
 from engine import paths  # noqa: E402
 from engine.report import Report, build_provenance  # noqa: E402
 
-#: The seven claims the phase is finished against: §12 of the design for the
+#: The eight claims the phase is finished against: §12 of the design for the
 #: first three, §12 of the guide for the rest.
 GATE_ROWS = (
     ("Every strategy and critical refusal reproducible",
      "tier0_corpus", "checks/tier0_corpus.py over fixtures/tier0"),
+    ("Every score fixture re-scored by the REAL engine against frozen "
+     "dependencies", "tier1_real_replay", "tools/replay_tier1.py receipt"),
     ("Five seeded defects yield five stage-named findings in one pass",
      "negative_controls", "tests/test_phase0_negative_controls.py"),
     ("The layer check runs green with an empty adapter ledger",
@@ -121,18 +123,23 @@ def _rows_for_gate(gate: dict) -> list[list[str]]:
 
 def _corpus_rows(gate: dict) -> list[list[str]]:
     row = gate.get("checks", {}).get("tier0_corpus", {})
+    tier1 = gate.get("checks", {}).get("tier1_real_replay", {})
     pairs = row.get("pairs")
     uncovered = row.get("uncovered_axes") or []
     return [
         ["frozen pairs", str(pairs if pairs is not None else "—"),
-         "captured through `engine.score.score`, `dynamic_short_vol` and "
-         "`engine.replay.replay_one`"],
+          "captured through `engine.score.score`, `dynamic_short_vol` and "
+          "`engine.replay.replay_one`"],
         ["corpus hash", f"`{(row.get('corpus_hash') or '—')[:19]}`",
-         "content hash of every pair's payload hash"],
+          "content hash of every pair's payload hash"],
         ["required axes uncovered", str(len(uncovered)),
-         ", ".join(uncovered) if uncovered else "none"],
-        ["replay runtime", f"{row.get('seconds', 0):.2f}s",
-         "budget is 10s, network disabled, no panel load"],
+          ", ".join(uncovered) if uncovered else "none"],
+        ["tier-0 replay runtime", f"{row.get('seconds', 0):.2f}s",
+          "budget is 10s, network disabled, no panel load"],
+        ["tier-1 real replays", str(tier1.get("pairs_replayed", "—")),
+          f"re-scored through the production entry points against "
+          f"hash-verified frozen dependencies; {tier1.get("pairs_skipped", "—")} "
+          "skipped with named reasons"],
     ]
 
 
@@ -140,8 +147,8 @@ def sections(gate: dict) -> list[dict]:
     ok = gate.get("ok", False)
     return [
         {"title": "The phase-0 exit gate",
-         "note": "Seven claims, each answered by a runnable check rather than by "
-                 "a sentence. `checks/rearchitecture_phase0_gate.py` runs all seven.",
+         "note": "Eight claims, each answered by a runnable check rather than by "
+                 "a sentence. `checks/rearchitecture_phase0_gate.py` runs all eight.",
          "columns": ["claim", "state", "evidence"],
          "align": ["---", ":---:", "---"],
          "rows": _rows_for_gate(gate),
@@ -160,17 +167,25 @@ def sections(gate: dict) -> list[dict]:
          "align": ["---", "---:", "---"],
          "rows": _corpus_rows(gate),
          "body": [
-             "**It does not re-score.** §11 names \"a corpus that fits or "
-             "fetches\" as a failure mode: it stops being seconds, stops "
-             "running on every edit, and becomes a tier-2 check nobody waits "
-             "for. What the corpus proves is that the frozen answers are "
-             "addressable from their full-precision requests, that each file "
-             "agrees with its own digest, and that all of it survives a "
-             "serialized round trip, a reordering, a batch/single split and a "
-             "fresh process. Re-computing these numbers through a *different* "
-             "implementation is what the corpus is FOR, and that is the parity "
-             "comparison of phases 2-8.",
-         ]},
+              "**Tier-0 does not re-score; tier-1 does.** §11 names \"a corpus "
+              "that fits or fetches\" as a failure mode: it stops being seconds, "
+              "stops running on every edit, and becomes a tier-2 check nobody "
+              "waits for. So the integrity half stays seconds-fast: the "
+              "manifest is reconciled against the files (exact membership, "
+              "per-file hashes, corpus hash recomputed from the SURVIVORS), "
+              "coverage is RE-DERIVED from the frozen records by a second "
+              "stdlib-only implementation rather than read from the index's "
+              "claims, and everything survives a serialized round trip, a "
+              "reordering, a batch/single split and a fresh process. The "
+              "compatibility half is `tools/replay_tier1.py`: it hash-verifies "
+              "the frozen dependencies from the baseline package, rebuilds the "
+              "real Scorer, re-scores every fixture through the production "
+              "entry points, and refuses INCOMPARABLE on any drift — a changed "
+              "pricing formula fails the tier-1 receipt even though tier-0 "
+              "stays green. Re-computing these numbers through a *different* "
+              "implementation is what the corpus is FOR, and that is the "
+              "parity comparison of phases 2-8.",
+          ]},
         {"title": "What the negative controls prove",
          "note": "A check that has never failed is not known to work. 1,567 "
                  "tests passed over the five 2026-09-11 defects, and the "
