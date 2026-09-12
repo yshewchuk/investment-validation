@@ -32,6 +32,12 @@ ledger's `health.json`, all of which now exist.**
 - [Component contracts](component_contracts.md): proposed schemas, interfaces,
   time/version semantics, failure behavior and transactional boundaries for
   review before implementation.
+- [Data model diagrams](rearchitecture_data_model.md): entity identities,
+  cardinalities, immutable snapshot membership, model/score lineage and ledger
+  relationships.
+- [Structure generation and PnL simulation](structure_generation_and_simulation.md):
+  exhaustive placement contracts, historical/synthetic scenarios, reusable
+  valuation and accounting, time/IV what-ifs and compatibility tests.
 
 These are design proposals. They describe explicit future changes to the
 runtime choices in convention 7 below, while retaining the research and safety

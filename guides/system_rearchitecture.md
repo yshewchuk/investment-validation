@@ -41,7 +41,10 @@ discrepancy to explain, not evidence that the refactor worked.
 
 For review, start with sections 3-4 for preservation and ownership, sections
 5-8 for storage/scoring/operations, then the separate
-[component contracts](component_contracts.md) for concrete interfaces.
+[component contracts](component_contracts.md) for concrete interfaces. The
+[data model diagrams](rearchitecture_data_model.md) show entity identities and
+relationships; the [structure generation and simulation contracts](structure_generation_and_simulation.md)
+detail the reusable numerical components.
 
 ### Relationship to existing guides
 
@@ -165,6 +168,12 @@ flowchart TD
     F --> S
     M --> S
     G[Strategy registry] --> S
+    S --> SG[Reusable structure generator]
+    S --> SB[Reusable scenario builder]
+    S --> PS[Reusable PnL simulator]
+    SG --> PS
+    SB --> PS
+    PS --> PV[Shared position valuation and accounting]
     X[Experiment runner] --> S
     X --> T
     S --> C[Validated score records]
@@ -187,6 +196,9 @@ stay warm during the decision window only when its memory is reserved.
 | Ingestion | Fetch receipts, normalization, coverage, finality, source revisions | Compute a trading verdict or change a champion |
 | Feature engine | Registered transforms and their causal dependencies | Select an implicit latest dataset or silently change a missing-value policy |
 | Model engine | Training recipes, folds, inference adapters, residuals, evidence | Fit during an ordinary score request |
+| Structure generator | Template resolution, finite placement search, validity and completeness receipts | Rank by PnL or change strategy selection rules |
+| Scenario builder | Causal historical/synthetic outcome populations, weights, mappings and RNG | Choose contracts or price a position |
+| Valuation/simulation domain | Frozen-position revaluation, time/parameter shocks, cash flows and PnL distributions | Select a winning strategy or call model marks executable fills |
 | Scoring application | Forecasts, shape, pricing, gate/chooser decisions, financial diagnostics | Read future outcomes or mutate strategy/model registries |
 | Evaluation/portfolio | Realized outcomes, capital accounting, report generation | Recreate the selection logic used to choose trades |
 | API/projection layer | Filter, paginate, authorize, serialize already computed records | Fit a model, simulate PnL, or fetch vendor data in a GET request |
@@ -195,6 +207,12 @@ stay warm during the decision window only when its memory is reserved.
 
 Keep entry points such as `engine.score.score`, `score_calendar`, and existing
 CLI commands as compatibility adapters while their implementations move.
+
+See the [logical data model](rearchitecture_data_model.md) for three linked
+entity-relationship views: market inputs; templates, positions and scenarios;
+and registered scores, models, publication and the actual-position ledger.
+The diagrams distinguish a generated position from a trade that was actually
+opened, and a template from the strategy that selects its placement.
 
 ## 5. Data storage: contracts and incremental ingestion
 
@@ -475,6 +493,47 @@ and explicitly sanctioned fallback are different outcomes. A model output of
 zero is not a replacement for a missing model. The rule-level gate verdict
 and operational readiness should be separate fields: an old passing forecast
 can remain visible while being too stale for a current decision.
+
+### 6.5 Reusable structure generation
+
+Introduce a generator taking an event revision, frozen contract chain,
+StructureTemplate and explicit finite PlacementDomain. It emits every valid
+placement in that domain with exact contracts, signed quantities, geometry
+resolution and separate structural/quote/strategy-admission statuses. Return
+deterministic pages, rejection counts and a completeness receipt. A truncated
+search is not an exhaustive candidate set.
+
+This separates what can be built from what a strategy chooses. Current
+strategies use their unchanged selector-resolved domains; searching all strikes
+for the best simulated return requires a separately registered strategy.
+Preserve exact listed mirrors, irregular-ladder dollar geometry, zero-quantity
+reference legs, collision checks, pinned exits and existing quote refusals.
+Extract the useful EXP-133 search patterns without making its experiment
+constraints defaults for the entire engine.
+
+### 6.6 Reusable scenarios, valuation and PnL simulation
+
+Given a frozen proposed or actual position, build scenarios from eligible
+similar historical positions, forecast/residual state, or a synthetic joint
+distribution. A separate valuator reprices the same contracts under each
+scenario at the requested time and parameter state. The simulator applies
+signed cash-flow, fill, cost and return-denominator policies and reports the
+resulting distribution. Selection/gates remain in the registered scoring graph.
+
+The contract must distinguish elapsed sessions from calendar time, relative
+IV changes from volatility-point changes, and each leg expiry from a shared
+DTE. It must also separate model-to-model value change from economic PnL
+against an opening fill. Historical returns without suitable factor/path data
+cannot answer arbitrary horizon/IV changes; unsupported mappings refuse.
+Preserve the current put-only simulation and calibrated payoff maps as named
+legacy adapters. More general valuation is new capability, not an implicit
+change to any existing strategy or its gate.
+
+Reuse scenario sets and per-contract valuation blocks when dependencies agree,
+under supervisor resource reservations. Combine per-leg values, not per-leg
+quantiles or win probabilities. The [detailed reusable contracts](structure_generation_and_simulation.md)
+specify input/output schemas, accounting signs and units, completeness,
+capabilities, failure behavior, optimization limits and acceptance tests.
 
 ## 7. Reusable model training and serving
 
@@ -918,7 +977,9 @@ network access, reconcile the ledger and open the report.
 
 The [component contract specification](component_contracts.md) makes the
 boundaries in this guide concrete: schemas, method signatures, time semantics,
-failure types, transactions and compatibility tests. Review those contracts
+failure types, transactions and compatibility tests. Review those contracts,
+the [data model diagrams](rearchitecture_data_model.md), and the
+[generator/simulation specification](structure_generation_and_simulation.md)
 before building the new components.
 
 The rearchitecture is complete when the existing strategy corpus agrees,

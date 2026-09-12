@@ -2,6 +2,8 @@
 
 Date: 2026-09-12. Status: proposed v1 contracts for design review.
 Companion: [system architecture and migration](system_rearchitecture.md).
+Related: [data model diagrams](rearchitecture_data_model.md) and
+[reusable structure generation and simulation](structure_generation_and_simulation.md).
 
 This document specifies the boundaries to implement, not APIs that already
 exist. Names are proposed. JSON examples are synthetic and hashes/IDs are
@@ -23,6 +25,10 @@ fallback, model, threshold, fill convention, or decision clock.
 | Feature engine -> training/scoring | FeatureRecipe and FeatureFrame | Feature store |
 | Strategy registration -> scoring | StrategySpec and DeploymentSpec | Versioned registry |
 | Model training -> inference | ModelRecipe, ArtifactManifest, ModelRelease | Model registry/artifact store |
+| Scoring -> structure generator | StructureTemplate, GenerationRequest, CandidatePosition, GenerationReceipt | Candidate artifact store/catalog |
+| Historical/synthetic source -> scenario builder | ScenarioBuildRequest and ScenarioSet | Scenario artifact store |
+| Simulator -> position valuator | PositionDefinition, MarketState, ValuationPolicy, PositionValuation | Immutable valuation artifacts |
+| Scoring -> PnL simulator | PositionState, SimulationRequest, SimulationResult | Simulation artifact store |
 | Scoring -> experiment/API/ledger | ScoreRequest, ScoreRecord, ScoreBatch | Score store |
 | Experiment -> evaluation | EvaluationInput and ExperimentManifest | Research artifact store |
 | Entrypoints -> supervisor | JobSpec, JobReceipt, ProgressEvent | Job catalog |
@@ -34,6 +40,13 @@ Only the named owner commits authoritative records. Other components submit
 commands or immutable candidate objects. No renderer writes a score, no model
 trainer writes a production promotion directly, and no experiment writes a
 parallel decision formula outside its registered recipe.
+
+The [entity-relationship diagrams](rearchitecture_data_model.md) show how these
+contracts join through stable keys and immutable manifests, including the
+difference between a simulated position and an actual ledger position. The
+[generator and simulator specification](structure_generation_and_simulation.md)
+extends this boundary map with full schemas, units, capability checks and tests.
+Its components are shared engine modules, not additional microservices.
 
 ## 2. Shared types, identity and compatibility
 
@@ -342,6 +355,7 @@ a future observation/label and verify that the score is unchanged or refused.
   "definition_hash": "sha256:example",
   "structure_recipe": "legacy.straddle_through.v1",
   "structure_parameters": {},
+  "component_graph_ref": "legacy.str_thru_components.v1",
   "clock_contract": "legacy.entry_close.v1",
   "entry_policy": "legacy.str_thru_entry.v1",
   "exit_policy": "legacy.str_thru_exit.v1",
@@ -366,6 +380,15 @@ Every referenced legacy policy is exported from the baseline source/config,
 including constants and selectors. The example is not a substitute for those
 resolved definitions. No empty policy identifier may mean use a convenient
 current default. Unknown parameters or undeclared dependencies fail registration.
+
+`component_graph_ref` resolves the template, placement domain/generator,
+scenario source and mapping, valuation/accounting/execution policies and
+candidate selector used by the strategy, with explicit nulls for unused
+components. The graph and the existing policy fields must resolve to the same
+canonical definition; contradictory bindings fail registration. Its detailed
+[registration contract](structure_generation_and_simulation.md#7-integration-and-acceptance-tests)
+keeps exhaustive placement searches and new simulation methods separate from
+the legacy selector and scoring definitions.
 
 Validation status is inherited from the baseline, including disabled versus
 tracked versus promoted. Production refuses CAL-P/CND-P as before. Research
@@ -534,6 +557,7 @@ steps remain independently visible and retryable.
 | Inputs | snapshot bundle, feature frame, consumed ordered values/masks, source/quote refs and per-feature lineage |
 | Models/state | exact model roles/artifacts, forecast folds, residual pools, analog population, payoff/calibration state and recipe versions |
 | Geometry | requested/resolved parameters, selected contracts, legs/quantities/multipliers, forecast-sizing explanation |
+| Reusable domain artifacts | generation request/candidate-set manifest and completeness, selected candidate/position, scenario-set and simulation-result refs, exact valuation/accounting policy refs; explicit nulls if unused |
 | Prices | entry quote date/time, estimated entry cost, normalized spot and conventions, fill alpha, per-leg spread/quality |
 | Estimates | named forecast/model/simulation/analog outputs, target/unit, uncertainty and sample sizes |
 | Decision | gate type, score, threshold, terms, verdict, chooser candidate audit/selection, sanctioned fallback |
