@@ -68,10 +68,16 @@ for finding in receipt.findings:   # every independent finding, not the first
 
 ## Testing
 
-Tier 0. `tests/test_phase0_negative_controls.py` is this package's negative
-control and the phase's reason for existing: it seeds the five independent
-2026-09-11 causes into one record at once and asserts **one** pass reports
-**five** stage-named findings. It also asserts that a record compared against
-itself is `agree`, that an empty population is `incomparable` rather than
-`agree`, and that removing a field from the digest removes it from the
-comparison with no edit to the comparator.
+Tier 0. `tests/test_diagnosis_comparator.py` proves the comparator's own
+properties — among them that every leaf which changes a record's digest is a
+compared path (`28cf8b1` as a property, not a list), that a missing field, a
+null and an integer-become-float each disagree in the stage table as well as
+in the findings, and that a downstream field is localized to the root upstream
+of it. `tests/test_phase0_negative_controls.py` seeds each seedable 2026-09-11
+cause alone and all at once on distinct records against the control spec in
+`checks/replay_identity.py`. The same controls run over the real corpus in
+`checks/tier0_corpus.py` and through real engine stages in
+`tools/replay_tier1.py --seed-defects`.
+
+Localization is observed from record fields along the declared stage graph: it
+names where two records first disagree, not which computation diverged.

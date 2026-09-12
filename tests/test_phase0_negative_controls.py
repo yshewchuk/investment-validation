@@ -1,14 +1,21 @@
-"""The negative controls — this phase's reason for existing (§8).
+"""The seeded negative controls, at the comparator level — tier 0, synthetic.
 
 A check that has never failed is not known to work. On 2026-09-11 a suite of
-1,567 tests passed over five live defects, and the determinism test that should
-have caught the analog ordering bug passed the same frame twice: coverage of
-the executed line was total and the assertion was empty. So the evidence that
-phase 0 worked is not a pass count — it is that every seeded corruption below
-produces the finding it is supposed to, in the stage it is supposed to.
+1,567 tests passed over five live defects. So the evidence that phase 0 works is
+not a pass count: it is that every seeded cause produces the findings it is
+SPECIFIED to produce (``checks/replay_identity.SEEDED_CONTROLS``), in the stage
+it is specified to land in, and nothing else.
 
-The headline assertion is :func:`test_five_seeded_defects_produce_five_findings_in_one_pass`.
-That single test is the difference between five nights and one.
+The same specification is judged in two more places, against real data:
+``checks/tier0_corpus.py`` plants the causes into the real frozen corpus, and
+``tools/replay_tier1.py --seed-defects`` plants them into the real engine
+stages. This file proves the comparator and the judgement themselves, on a
+clean checkout with no corpus.
+
+An earlier version of this file asserted ``len(causes) == 4`` over a literal
+dict, asserted a docstring existed, and seeded the `6b9d5cf` control as a
+``digest`` field that ANY record edit would also have moved. Those assertions
+could not fail; the ones below can.
 """
 from __future__ import annotations
 
@@ -22,16 +29,20 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.replay_identity import FORECAST_BLOCK, SEEDED_CONTROLS, check_control  # noqa: E402
+from checks.tier0_corpus import finding_dicts, round_params  # noqa: E402
 from engine.v2.diagnosis import (  # noqa: E402
     AGREE,
     DIFFER,
     INCOMPARABLE,
-    SCORER_V1,
     compare_records,
     content_hash,
     flatten,
     merge_receipts,
 )
+
+CAUSES = tuple(SEEDED_CONTROLS)
+TIER0_KINDS = ("record", "integrity")
 
 
 # --------------------------------------------------------------------------
@@ -101,215 +112,170 @@ def baseline() -> dict:
     }
 
 
-def with_digest(record: dict, *, stored: str | None = None) -> dict:
-    """A record plus the two identity fields the corpus keeps beside it.
-
-    ``payload_hash`` is what was written to disk; ``digest`` is what the bytes
-    on disk hash to now. They are equal in a healthy fixture and the pair is
-    exactly what `6b9d5cf` broke — a file disagreeing with its own digest — so
-    carrying both is what lets one comparator pass see that defect at all.
-    """
-    computed = content_hash(record)
-    return {**record, "payload_hash": stored or computed, "digest": computed}
-
-
 # --------------------------------------------------------------------------
-# the five 2026-09-11 causes, seeded
+# the seeds
 # --------------------------------------------------------------------------
 
-FORECAST_BLOCK = ("forecast_abs_move", "forecast_p10", "forecast_p90",
-                  "forecast_sd", "forecast_model", "forecast_fold")
 
-
-def seed_forecast_suppressed(record: dict) -> dict:
-    """`e845f3e`: the forecast blanked when a pinned shape suppressed sizing.
-
-    §9.5: selecting contracts from a forecast and replaying with those
-    parameters pinned must still record the same forecast.
-    """
+def seed(cause: str | None, record: dict) -> dict:
+    """The record as a seeded defect leaves it at the defect's own stage."""
     out = copy.deepcopy(record)
-    for key in FORECAST_BLOCK:
-        out[key] = None
+    if cause == "forecast_suppressed":          # e845f3e
+        out.update({key: None for key in FORECAST_BLOCK})
+    elif cause == "analog_bootstrap_reseeded":  # b9aa1fd: only the interval moves
+        out["ci_low"], out["ci_high"] = -0.01488201, 0.03911905
+    elif cause == "replay_input_rounded":       # b33036c
+        out = round_params(out)
     return out
 
 
-def seed_analog_bootstrap_reseeded(record: dict) -> dict:
-    """`b9aa1fd`: a bootstrap sampling by index over an unordered set.
+def seeded_pair(cause: str | None):
+    """``(record receipt, integrity receipt)`` for one pair carrying ``cause``.
 
-    Only the interval moves. The point estimate and the population size are
-    untouched, which is precisely why a determinism test over the whole frame
-    missed it.
+    ``rounded_after_digest`` (`6b9d5cf`) lives on the WRITE path: the digest is
+    taken over the record, then the bytes written are re-rounded. It is caught
+    by comparing the stored digest with the digest of what was written — not by
+    a record field, which every other cause would also move.
     """
-    out = copy.deepcopy(record)
-    out["ci_low"] = -0.01488201
-    out["ci_high"] = 0.03911905
-    return out
+    frozen = baseline()
+    replayed = seed(cause, frozen)
+    stored = content_hash(replayed)
+    written = round_params(replayed) if cause == "rounded_after_digest" else replayed
+    return (
+        compare_records(frozen, replayed, comparison_kind="seeded_record"),
+        compare_records({"payload_hash": stored}, {"payload_hash": content_hash(written)},
+                        comparison_kind="seeded_integrity"),
+    )
 
 
-def seed_replay_input_rounded(record: dict) -> dict:
-    """`b33036c`: `json_safe` rounding a replay input to six places."""
-    out = copy.deepcopy(record)
-    out["structure_params"] = {
-        k: (round(v, 6) if isinstance(v, float) else v)
-        for k, v in out["structure_params"].items()
-    }
-    return out
-
-
-def seed_all_five(record: dict) -> dict:
-    """Every cause at once, which is the situation the phase exists for."""
-    out = seed_forecast_suppressed(record)
-    out = seed_analog_bootstrap_reseeded(out)
-    out = seed_replay_input_rounded(out)
-    return out
+def by_kind(pair) -> dict[str, list[dict]]:
+    record, integrity = pair
+    return {"record": finding_dicts(record), "integrity": finding_dicts(integrity)}
 
 
 # --------------------------------------------------------------------------
-# the headline assertion
+# each cause, and all of them in one pass
 # --------------------------------------------------------------------------
 
 
-def test_five_seeded_defects_produce_five_findings_in_one_pass():
-    """§8: all five seeded at once must produce five findings in ONE pass.
+@pytest.mark.parametrize("cause", CAUSES)
+def test_each_seeded_cause_alone_produces_exactly_its_specified_findings(cause):
+    assert check_control(cause, by_kind(seeded_pair(cause)), kinds=TIER0_KINDS) == []
 
-    | Seeded corruption | Reported as |
-    |---|---|
-    | forecast suppressed on a pinned replay (`e845f3e`) | `forecast`, block null |
-    | a field removed from the compared set (`28cf8b1`) | impossible by construction |
-    | analog bootstrap reseeded by row order (`b9aa1fd`) | `analogs`, ci_low/ci_high only |
-    | a replay input rounded to six places (`b33036c`) | `serialization`, structure_params.* |
-    | rounding reapplied after the exemption (`6b9d5cf`) | `serialization`, file vs its digest |
+
+def test_an_unseeded_pair_is_clean_in_both_receipts():
+    record, integrity = seeded_pair(None)
+    assert record.verdict == AGREE and integrity.verdict == AGREE
+
+
+def test_all_seeded_causes_in_one_pass_each_meet_their_spec():
+    """§8's headline: every cause at once, one pass, each localized, nothing else.
+
+    Each cause rides on its own pair — as it does over the real corpus — so the
+    one pass's findings are attributable, and the clean pair proves the pass
+    does not invent findings of its own.
     """
-    left = with_digest(baseline())
-    corrupted = seed_all_five(baseline())
-    # The digest written BEFORE the re-rounding, which is what `6b9d5cf` left
-    # on disk: a stored hash the bytes beside it no longer produce.
-    right = with_digest(corrupted, stored=left["payload_hash"])
-
-    receipt = compare_records(left, right)
-    assert receipt.verdict == DIFFER
-
-    by_path = {f.field_path: f for f in receipt.findings}
-    forecast = [p for p in by_path if p.startswith("forecast_")]
-    analogs = [p for p in by_path if p.startswith("ci_")]
-    params = [p for p in by_path if p.startswith("structure_params.")]
-
-    causes = {
-        "forecast_suppressed": forecast,
-        "analog_interval": analogs,
-        "replay_input_rounded": params,
-        "file_disagrees_with_digest": [p for p in by_path if p == "digest"],
-    }
-    for name, paths in causes.items():
-        assert paths, f"{name} produced no finding\n{receipt.summary()}"
-
-    # Five independent causes; `28cf8b1` is the fifth and it cannot be seeded,
-    # so four are visible here and the fifth is proved below by construction.
-    assert len(causes) == 4
-    assert test_a_field_cannot_be_dropped_from_the_compared_set.__doc__
-
-    # Every one of them names a STAGE, and the right one.
-    assert all(by_path[p].first_differing_stage == "forecast" for p in forecast)
-    assert all(by_path[p].first_differing_stage == "analogs" for p in analogs)
-    assert all(by_path[p].first_differing_stage == "serialization" for p in params)
-    assert by_path["digest"].first_differing_stage == "serialization"
-
-    # And not one of them names only a row.
-    for finding in receipt.findings:
+    pairs = {cause: seeded_pair(cause) for cause in CAUSES} | {"clean": seeded_pair(None)}
+    receipts = [receipt for pair in pairs.values() for receipt in pair]
+    one_pass = merge_receipts(receipts, comparison_kind="seeded_one_pass",
+                              expected=len(receipts))
+    assert one_pass.verdict == DIFFER
+    for cause in CAUSES:
+        assert check_control(cause, by_kind(pairs[cause]), kinds=TIER0_KINDS) == [], cause
+    assert by_kind(pairs["clean"]) == {"record": [], "integrity": []}
+    assert set(one_pass.stages_named()) == {"forecast", "analogs", "serialization"}
+    for finding in one_pass.findings:
         assert finding.field_path and finding.first_differing_stage
 
 
-def test_the_four_seeded_causes_are_reported_as_independent():
-    """Fix several at once, rather than one per night.
+def test_the_digest_control_is_moved_by_no_other_cause():
+    """`6b9d5cf` must not be a consequence of the others.
 
-    All four stages received agreeing inputs — the forecast does not feed the
-    analogs, and the serialization stage reads geometry, which is untouched —
-    so the comparator can prove none of them is a consequence of another.
+    The first version seeded it as a `digest` field on the record, which moved
+    with any record edit — and then asserted it was not downstream of them.
     """
-    left = with_digest(baseline())
-    right = with_digest(seed_all_five(baseline()), stored=left["payload_hash"])
-    receipt = compare_records(left, right)
-    ids = {f.finding_id for f in receipt.findings}
-    for finding in receipt.findings:
-        assert set(finding.not_downstream_of) == ids - {finding.finding_id}, (
-            f"{finding.field_path} was not proved independent"
-        )
+    for cause in CAUSES:
+        _, integrity = seeded_pair(cause)
+        assert (integrity.verdict == DIFFER) == (cause == "rounded_after_digest"), cause
 
 
-def test_stopping_at_the_first_difference_is_what_this_replaces():
-    """A first-wins comparator would have reported one of these, not four."""
-    left = with_digest(baseline())
-    right = with_digest(seed_all_five(baseline()), stored=left["payload_hash"])
-    stages = set(compare_records(left, right).stages_named())
-    assert stages == {"forecast", "analogs", "serialization"}
+def test_rounding_twice_on_one_record_hides_the_second_rounding():
+    """Why every control gets its own pair.
+
+    Rounding is idempotent. A record already rounded before its digest
+    (`b33036c`) re-rounded after it (`6b9d5cf`) writes the same bytes the digest
+    names, so seeding both on one record would show one cause, not two.
+    """
+    rounded = round_params(baseline())
+    assert content_hash(round_params(rounded)) == content_hash(rounded)
 
 
-# --------------------------------------------------------------------------
-# each cause on its own
-# --------------------------------------------------------------------------
+def test_every_seeded_pair_compares_exactly_its_own_leaves():
+    """`28cf8b1` under seeding: the compared population is the records' leaves."""
+    for cause in CAUSES:
+        frozen = baseline()
+        record, _ = seeded_pair(cause)
+        leaves = set(flatten(frozen)) | set(flatten(seed(cause, frozen)))
+        assert record.population.compared == len(leaves), cause
 
 
-def test_forecast_suppressed_names_the_forecast_stage_and_a_null_mask():
-    receipt = compare_records(baseline(), seed_forecast_suppressed(baseline()))
+def test_a_suppressed_forecast_that_empties_the_simulation_is_one_localized_cause():
+    """What `e845f3e` actually did: the forecast blanked, and the layers behind it.
+
+    Four stages' fields move; one stage is named. That is the difference
+    between "the forecast is broken" and four separate-looking red rows.
+    """
+    replayed = seed("forecast_suppressed", baseline()) | {
+        "exp_pnl_model": None, "win_model": None, "gate_score": None,
+        "chooser_score": None,
+        # The narrative moves with it — the real engine's seeded run showed
+        # this, and `detail` filed under serialization reported it as a
+        # second, independent root.
+        "detail": "TWIN-P5: entry rule fails: no forecast",
+    }
+    receipt = compare_records(baseline(), replayed)
     assert receipt.stages_named() == ("forecast",)
-    assert {f.field_path for f in receipt.findings} == set(FORECAST_BLOCK)
-    assert all(f.kind == "null_mask" for f in receipt.findings)
-    assert all(f.null_mask_right and not f.null_mask_left for f in receipt.findings)
+    assert {f.owning_stage for f in receipt.findings} >= {
+        "forecast", "simulation", "gate", "chooser"}
 
 
-def test_analog_reseed_moves_the_interval_and_nothing_else():
-    receipt = compare_records(baseline(), seed_analog_bootstrap_reseeded(baseline()))
-    assert receipt.stages_named() == ("analogs",)
-    assert {f.field_path for f in receipt.findings} == {"ci_low", "ci_high"}
-    # The point estimate and the population size did NOT move, which is why a
-    # frame-level determinism test passed straight over this.
-    moved = {f.field_path for f in receipt.findings}
-    assert "exp_pnl_analog" not in moved and "n_analogs" not in moved
+# --------------------------------------------------------------------------
+# the judgement is itself a check, so it has negative controls
+# --------------------------------------------------------------------------
 
 
-def test_a_rounded_replay_input_names_serialization_and_the_exact_field():
-    receipt = compare_records(baseline(), seed_replay_input_rounded(baseline()))
-    assert receipt.stages_named() == ("serialization",)
-    assert [f.field_path for f in receipt.findings] == [
-        "structure_params.width_moneyness"
-    ]
-    finding = receipt.findings[0]
-    assert finding.left_value != finding.right_value
-    # Six places kept, so the two agree to the sixth decimal and part at the
-    # seventh: 4.3e-07 on a 0.0512 width. Invisible on a board, and the size
-    # of the difference is exactly why nothing noticed for a night.
-    assert 1e-8 < abs(finding.delta) < 1e-5
-    assert round(finding.left_value, 6) == finding.right_value
+def test_a_control_landing_in_the_wrong_stage_is_reported():
+    found = {"record": finding_dicts(compare_records(baseline(), {**baseline(), "entry_cost": 9.9})),
+             "integrity": []}
+    problems = check_control("forecast_suppressed", found, kinds=TIER0_KINDS)
+    assert any("localized to" in p for p in problems)
+    assert any("no finding at" in p for p in problems)
 
 
-def test_a_file_that_disagrees_with_its_digest_is_caught():
-    record = baseline()
-    stored = content_hash(record)
-    tampered = seed_replay_input_rounded(record)
-    receipt = compare_records(
-        with_digest(record),
-        with_digest(tampered, stored=stored),
-    )
-    digest_findings = [f for f in receipt.findings if f.field_path == "digest"]
-    assert len(digest_findings) == 1
-    assert digest_findings[0].first_differing_stage == "serialization"
+def test_an_undetected_control_is_reported():
+    assert check_control("analog_bootstrap_reseeded", {"record": [], "integrity": []},
+                         kinds=TIER0_KINDS) == [
+        "record: no finding — the seeded defect went undetected"]
 
 
-def test_a_field_cannot_be_dropped_from_the_compared_set():
-    """`28cf8b1`, and why §8 calls it impossible by construction.
+def test_a_control_that_leaks_into_a_receipt_it_should_leave_clean_is_reported():
+    found = by_kind(seeded_pair("replay_input_rounded"))
+    found["integrity"] = found["record"]
+    assert any(p.startswith("integrity:")
+               for p in check_control("replay_input_rounded", found, kinds=TIER0_KINDS))
 
-    The explainer compared 41 of the 70 fields the digest hashed because the 41
-    were typed out somewhere. Here the compared set IS the records' own field
-    set, so there is no list to fall out of date: the only way to remove a
-    field from the comparison is to remove it from the record, which removes it
-    from the digest in the same stroke.
-    """
-    left, right = with_digest(baseline()), with_digest(baseline())
-    expected = set(flatten(left)) | set(flatten(right))
-    receipt = compare_records(left, right)
-    compared = {row.stage_id for row in receipt.stage_hashes}
-    assert compared == set(SCORER_V1.stage_ids())
-    assert receipt.population.compared == len(expected)
+
+def test_a_control_that_moves_a_field_its_defect_leaves_alone_is_reported():
+    replayed = seed("analog_bootstrap_reseeded", baseline()) | {"n_analogs": 171}
+    found = {"record": finding_dicts(compare_records(baseline(), replayed)), "integrity": []}
+    assert any("moved fields" in p for p in check_control(
+        "analog_bootstrap_reseeded", found, kinds=TIER0_KINDS))
+
+
+def test_a_tier_one_receipt_kind_missing_from_a_tier_one_run_is_reported():
+    found = by_kind(seeded_pair("rounded_after_digest"))
+    assert any("no round_trip receipt" in p
+               for p in check_control("rounded_after_digest", found))
 
 
 # --------------------------------------------------------------------------
@@ -320,39 +286,21 @@ def test_a_field_cannot_be_dropped_from_the_compared_set():
 @pytest.mark.parametrize(
     "label,mutate,stage,paths",
     [
-        (
-            "timestamp",
-            lambda r: {**r, "evidence_cutoff": "2026-09-29"},
-            "resolve_context",
-            {"evidence_cutoff"},
-        ),
-        (
-            "feature builder",
-            lambda r: {**r, "model_inputs": {**r["model_inputs"], "or_implied": 6.9}},
-            "features",
-            {"model_inputs.or_implied"},
-        ),
-        (
-            "geometry",
-            lambda r: {**r, "legs": [{**r["legs"][0], "strike": 237.5},
-                                     *r["legs"][1:]]},
-            "geometry",
-            {"legs[0].strike"},
-        ),
-        (
-            "model hash",
-            lambda r: {**r, "model_versions": {**r["model_versions"],
-                                               "size": "size_v1_3"}},
-            "features",
-            {"model_versions.size"},
-        ),
-        (
-            "dataset membership",
-            lambda r: {**r, "n_analogs": 171,
-                       "analog_buckets": {**r["analog_buckets"], "im_t1": "4-6"}},
-            "analogs",
-            {"n_analogs", "analog_buckets.im_t1"},
-        ),
+        ("timestamp", lambda r: {**r, "evidence_cutoff": "2026-09-29"},
+         "resolve_context", {"evidence_cutoff"}),
+        ("feature builder",
+         lambda r: {**r, "model_inputs": {**r["model_inputs"], "or_implied": 6.9}},
+         "features", {"model_inputs.or_implied"}),
+        ("geometry",
+         lambda r: {**r, "legs": [{**r["legs"][0], "strike": 237.5}, *r["legs"][1:]]},
+         "geometry", {"legs[0].strike"}),
+        ("model hash",
+         lambda r: {**r, "model_versions": {**r["model_versions"], "size": "size_v1_3"}},
+         "features", {"model_versions.size"}),
+        ("dataset membership",
+         lambda r: {**r, "n_analogs": 171,
+                    "analog_buckets": {**r["analog_buckets"], "im_t1": "4-6"}},
+         "analogs", {"n_analogs", "analog_buckets.im_t1"}),
     ],
 )
 def test_section_11_controls(label, mutate, stage, paths):
@@ -365,17 +313,15 @@ def test_section_11_controls(label, mutate, stage, paths):
 
 
 def test_a_cross_entity_break_is_caught_rather_than_silently_replayed():
-    """data_model §4: a score must resolve every dependency to a retained object.
-
-    Here the record still claims a forecast model that the model-version block
-    no longer names — the "another candidate borrowed its results" shape. It is
-    two findings in two stages, not one vague mismatch.
-    """
+    """data_model §4: a score must resolve every dependency to a retained object."""
     broken = {**baseline(), "forecast_model": "size_v1_3",
               "model_versions": {"gate": "gate_midfill_str_thru"}}
     receipt = compare_records(baseline(), broken)
     assert receipt.verdict == DIFFER
-    assert set(receipt.stages_named()) == {"features", "forecast"}
+    assert {f.owning_stage for f in receipt.findings} == {"features", "forecast"}
+    # The forecast field moved, but its stage's inputs already differed: the
+    # finding is localized upstream, to the model-version block that changed.
+    assert receipt.stages_named() == ("features",)
     assert any(f.kind == "missing_field" for f in receipt.findings)
 
 
@@ -385,37 +331,18 @@ def test_a_cross_entity_break_is_caught_rather_than_silently_replayed():
 
 
 def test_an_empty_population_never_reports_agreement():
-    """§11: a fixture whose universe collapsed compares zero rows."""
     assert compare_records({}, {}).verdict == INCOMPARABLE
-    assert merge_receipts([], comparison_kind="tier0", expected=12).verdict == (
-        INCOMPARABLE
-    )
+    assert merge_receipts([], comparison_kind="tier0", expected=12).verdict == INCOMPARABLE
 
 
 def test_a_shrunken_corpus_is_incomparable_not_agreement():
     healthy = [compare_records(baseline(), baseline()) for _ in range(12)]
-    assert merge_receipts(healthy, comparison_kind="tier0",
-                          expected=12).verdict == AGREE
-    collapsed = healthy[:3]
-    assert merge_receipts(collapsed, comparison_kind="tier0",
+    assert merge_receipts(healthy, comparison_kind="tier0", expected=12).verdict == AGREE
+    assert merge_receipts(healthy[:3], comparison_kind="tier0",
                           expected=12).verdict == INCOMPARABLE
 
 
-def test_running_the_same_frame_twice_is_not_evidence():
-    """The determinism test that missed `b9aa1fd` compared a frame to itself.
-
-    Asserting that a record equals itself is a test that passes for a broken
-    comparator too, so the suite above never rests on it. This records the
-    distinction rather than relying on it.
-    """
-    same = compare_records(baseline(), baseline())
-    assert same.verdict == AGREE
-    mutated = compare_records(baseline(), seed_analog_bootstrap_reseeded(baseline()))
-    assert mutated.verdict == DIFFER
-
-
 def test_a_receipt_survives_a_json_round_trip():
-    """Tier 1 catches serialization losses; the receipt has to be writable."""
-    receipt = compare_records(baseline(), seed_all_five(baseline()))
+    receipt = compare_records(baseline(), seed("forecast_suppressed", baseline()))
     text = json.dumps(receipt.payload(), sort_keys=True, default=str)
     assert json.loads(text)["verdict"] == DIFFER

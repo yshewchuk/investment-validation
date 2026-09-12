@@ -43,11 +43,13 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import platform
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, is_dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -55,7 +57,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from engine import entry_rules, forecast_sizing, paths, score, structures  # noqa: E402
+from engine import entry_rules, fills, forecast_sizing, paths, score, structures  # noqa: E402
 from engine.models import registry as model_registry  # noqa: E402
 from engine import structure_registry  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
@@ -103,6 +105,37 @@ def _git(*args: str) -> str:
     proc = subprocess.run(["git", "-C", str(ROOT), *args],
                           capture_output=True, text=True, check=False)
     return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _git_bytes(*args: str) -> bytes:
+    proc = subprocess.run(["git", "-C", str(ROOT), *args],
+                          capture_output=True, check=False)
+    return proc.stdout if proc.returncode == 0 else b""
+
+
+def tree_state() -> dict:
+    """The exact code state, uncommitted work included.
+
+    A commit sha alone names a tree the export may not have come from: the
+    ``2026-09-12b`` package recorded 3dc1ecb with ``dirty: true`` and no way to
+    say what the dirt was, so "a second export from the same commit" could not
+    be attempted. The diff hash closes that — the same sha AND the same
+    working-tree diff (tracked changes, plus untracked Python files) is the
+    same state. The branch name is not part of it: renaming a branch changes
+    no code.
+    """
+    tracked = _git("status", "--porcelain", "--untracked-files=no")
+    untracked = sorted(p for p in _git("ls-files", "--others", "--exclude-standard").splitlines()
+                       if p.endswith(".py"))
+    dirty = bool(tracked or untracked)
+    diff_hash = None
+    if dirty:
+        diff_hash = content_hash({
+            "diff": hashlib.sha256(_git_bytes("diff", "HEAD", "--binary")).hexdigest(),
+            "untracked_code": {p: _sha256_file(ROOT / p) for p in untracked},
+        })
+    return {"sha": _git("rev-parse", "HEAD"), "dirty": dirty,
+            "worktree_diff_hash": diff_hash, "untracked_code": untracked}
 
 
 def part(payload: Any, *, knowledge_mode: str, describes: str) -> dict:
@@ -172,11 +205,7 @@ def environment_lock() -> dict:
                 "machine": platform.machine(),
                 "libc": "-".join(x for x in platform.libc_ver() if x),
             },
-            "commit": {
-                "sha": _git("rev-parse", "HEAD"),
-                "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
-                "dirty": bool(_git("status", "--porcelain")),
-            },
+            "commit": tree_state(),
             "packages": packages,
         },
         knowledge_mode=ATTESTED,
@@ -279,6 +308,12 @@ def resolved_gates() -> dict:
             "constants": {
                 "max_rel_spread": entry_rules.MAX_REL_SPREAD,
                 "mcap_floor_usd": entry_rules.MCAP_FLOOR,
+                "bad_quote_cost_pct": fills.BAD_QUOTE_COST_PCT,
+                "bad_quote_cost_pct_note": "the ceiling behind the single "
+                                           "BAD_QUOTE flag: an entry cost above "
+                                           "this percent of spot is not scored. "
+                                           "A threshold, not a refusal code — "
+                                           "phase 0 has six refusal codes",
                 "trailing_bar": "trailing six-month top-20% simulated return",
             },
             "learned_gate_domain": {
@@ -310,18 +345,22 @@ def resolved_dyn_sv() -> dict:
                             "folds' np.isfinite mask",
             "missing_score_fallback": "rank by exp_pnl_sim (the pre-champion "
                                       "resolver) when NO candidate is scored",
-            "tie_behaviour": "stable sort, so a tie is broken by INPUT-ROW "
-                             "ORDER in the scored frame — the order candidates "
-                             "were concatenated before dynamic_short_vol saw "
-                             "them, NOT menu order. Measured, not assumed: "
-                             "reversing two equally scored rows reverses the "
-                             "winner while the menu is unchanged. A replacement "
-                             "that ties by menu position selects different "
-                             "strategies on tied events; the frozen behaviour "
-                             "is frame-order dependence, and parity must "
-                             "reproduce the frame order too. An event where no "
-                             "member produced either ranking key yields no "
-                             "chooser row at all",
+            "tie_behaviour": "a tie is broken by INPUT-ROW ORDER in the "
+                             "scored frame — the order candidates reached "
+                             "dynamic_short_vol — NOT menu order, on BOTH "
+                             "ranking paths. The chooser path sorts with "
+                             "kind='stable'; the exp_pnl_sim fallback uses "
+                             "pandas' default sort, which on menu-sized blocks "
+                             "(at most seven rows) also keeps input order. "
+                             "Measured, not assumed: reversing equally scored "
+                             "rows reverses the winner on both paths, for two "
+                             "and for seven rows (tests/test_baseline_export.py). "
+                             "A replacement that ties by menu position selects "
+                             "different strategies on tied events; parity must "
+                             "reproduce the frame order, which is why a DYN-SV "
+                             "fixture freezes its frame rows in order. An event "
+                             "where no member produced either ranking key "
+                             "yields no chooser row at all",
             "re_gating": "none — the winner keeps its own entry-rule verdict",
             "event_key": list(score._EVENT_KEY),
             "ladder_rows_excluded": True,
@@ -754,13 +793,82 @@ def build() -> dict[str, str]:
     return out
 
 
-def write(out_dir: Path) -> dict[str, str]:
-    files = build()
+def write_files(out_dir: Path, files: dict[str, str]) -> None:
     for name, text in files.items():
         target = out_dir / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
-    return files
+
+
+def _publish_current(root: Path, version: str) -> None:
+    """Point ``root/CURRENT`` at a version directory, atomically."""
+    tmp = root / "CURRENT.tmp"
+    tmp.write_text(json.dumps({"version": version}, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, root / "CURRENT")
+
+
+def publish(root: Path, version: str, files: dict[str, str], *,
+            force: bool = False) -> Path:
+    """Publish one immutable version directory atomically, and point CURRENT at it.
+
+    Built under a temporary sibling and moved into place with one rename, so an
+    interrupted export never leaves a half-written package where the gate and
+    the replay trust it to be whole. An existing non-empty version refuses
+    without ``--force``. The gate and the replay read ``CURRENT``, never
+    "whichever directory name sorts last".
+    """
+    out_dir = root / version
+    if out_dir.exists() and any(out_dir.iterdir()) and not force:
+        raise SystemExit(
+            f"REFUSING to overwrite the frozen baseline at {out_dir}. Export a "
+            "NEW --version, or pass --force to authorize replacing it explicitly.")
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / f"{version}.tmp"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    write_files(tmp, files)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    os.rename(tmp, out_dir)
+    _publish_current(root, version)
+    return out_dir
+
+
+def verify(existing: Path, built: dict[str, str]) -> dict:
+    """Byte-compare a fresh build with an existing package — the §6 acceptance."""
+    differing = sorted(name for name, text in built.items()
+                       if not (existing / name).is_file()
+                       or (existing / name).read_text() != text)
+    extra = sorted(str(p.relative_to(existing)) for p in existing.rglob("*")
+                   if p.is_file() and str(p.relative_to(existing)) not in built)
+    manifest_path = existing / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+    return {
+        "version": existing.name,
+        "package_hash": manifest.get("package_hash"),
+        "rebuilt_package_hash": json.loads(built["MANIFEST.json"])["package_hash"],
+        "byte_identical": not differing and not extra,
+        "differing": differing,
+        "extra": extra,
+        "tree_state": tree_state(),
+    }
+
+
+def write_verify_receipt(root: Path, result: dict) -> Path:
+    """Record a re-export's outcome where the gate reads it.
+
+    The gate cannot re-import the engine to rebuild the package in seconds, so
+    reproducibility is proved here once and read there: a receipt naming the
+    package hash it verified, and whether every byte matched.
+    """
+    out = root / "receipts" / f"{result['version']}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"schema_version": "baseline_verify_receipt.v1.0", "payload": result,
+           "envelope": {"ran_at": datetime.now(timezone.utc).isoformat(timespec="microseconds")}}
+    tmp = out.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, out)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -777,33 +885,29 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.verify:
-        existing = Path(args.verify)
-        built = build()
-        bad = [
-            name for name, text in built.items()
-            if not (existing / name).exists() or (existing / name).read_text() != text
-        ]
-        missing = sorted(
-            str(p.relative_to(existing))
-            for p in existing.rglob("*") if p.is_file()
-            and str(p.relative_to(existing)) not in built
-        )
-        if bad or missing:
-            print(f"BASELINE DIFFERS — {len(bad)} changed, {len(missing)} extra",
-                  file=sys.stderr)
-            for name in sorted(bad) + missing:
+        existing = Path(args.verify).resolve()
+        result = verify(existing, build())
+        if existing.parent == (ROOT / "baseline").resolve():
+            print(f"re-export receipt -> {write_verify_receipt(existing.parent, result)}")
+        if not result["byte_identical"]:
+            print(f"BASELINE DIFFERS — {len(result['differing'])} changed, "
+                  f"{len(result['extra'])} extra", file=sys.stderr)
+            for name in result["differing"] + result["extra"]:
                 print(f"  {name}", file=sys.stderr)
             return 1
-        print(f"BASELINE REPRODUCIBLE — {len(built)} files byte-identical")
+        print(f"BASELINE REPRODUCIBLE — every file byte-identical "
+              f"(package {result['package_hash']})")
         return 0
 
-    out_dir = Path(args.out) if args.out else ROOT / "baseline" / args.version
-    if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
-        print(f"REFUSING to overwrite the frozen baseline at {out_dir}. "
-              "Export a NEW --version, or pass --force to authorize "
-              "replacing it explicitly.", file=sys.stderr)
-        return 1
-    files = write(out_dir)
+    files = build()
+    if args.out:
+        out_dir = Path(args.out)
+        if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
+            print(f"REFUSING to overwrite {out_dir}; pass --force.", file=sys.stderr)
+            return 1
+        write_files(out_dir, files)
+    else:
+        out_dir = publish(ROOT / "baseline", args.version, files, force=args.force)
     manifest = json.loads(files["MANIFEST.json"])
     print(f"baseline package -> {out_dir}")
     for name in sorted(manifest["parts"]):

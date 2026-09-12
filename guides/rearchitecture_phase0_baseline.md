@@ -127,6 +127,11 @@ phase 0; the two behavioural properties are:
   and outputs did not, plus the field path. Stage plan for the current scorer,
   following §6.3: `resolve_context`, `features`, `forecast`, `geometry`,
   `pricing`, `analogs`, `simulation`, `gate`, `chooser`, `serialization`.
+  In phase 0 that localization is *observed* from record fields along the
+  declared stage graph: it names where two records first disagree, not which
+  internal computation diverged. Execution-level per-stage hashes are
+  rearchitecture phase 1, and fine-grained scorer stages arrive with phase 4
+  extraction; a receipt must not claim more than it observed.
 - **Complete, not first-wins.** One pass reports every independent finding.
   Stopping at the first difference is what turned five causes into five nights.
 
@@ -217,9 +222,11 @@ part of this; the export resolves them rather than pointing at them.
 - Each export records its knowledge mode per §5.5. Almost all of it is
   `attested_stable` or `reconstructed`; nothing captured today is `observed`.
 
-**Acceptance.** A second export from the same commit and snapshot is
-byte-identical. Every strategy, model role and legacy adapter named in §3.1
-appears. The lock reproduces the environment on a clean checkout.
+**Acceptance.** A second export from the same tree state — commit plus
+working-tree diff — and snapshot is byte-identical, and
+`tools/baseline_export.py --verify` records that in a receipt the gate reads.
+Every strategy, model role and legacy adapter named in §3.1 appears. The lock
+reproduces the environment on a clean checkout.
 
 ---
 
@@ -236,10 +243,10 @@ contain it."*
 |---|---|
 | Strategies | All 11 in `engine.structures.STRUCTURES` — `STR-THRU`, `STR-RUNUP`, `CAL-P`, `CND-P`, `CND-PS`, `TWIN-P`, `TWIN-P5`, `BFLY-P`, `BFLY-P5`, `RAMP7`, `CTR5` — plus `DYN-SV` |
 | Model roles | All 6: `size`, `implied_t1`, `runup_move`, `iv_crush`, `gate`, `chooser` |
-| Refusal codes | `UNVALIDATED_STRUCTURE`, `OUT_OF_DOMAIN`, `NO_CHAIN`, `BAD_QUOTE`, `BAD_QUOTE_COST_PCT`, `COARSE_LADDER`, `NO_FORECAST` — at least one row each |
+| Refusal codes | `UNVALIDATED_STRUCTURE`, `OUT_OF_DOMAIN`, `NO_CHAIN`, `BAD_QUOTE`, `COARSE_LADDER`, `NO_FORECAST` — at least one row each. `BAD_QUOTE_COST_PCT` is not a seventh code: it is the 30% threshold behind the single `BAD_QUOTE` flag (`engine/score.py` emits `BAD_QUOTE` only on that bar), exported as a constant in the baseline package |
 | Sessions | BMO and AMC; a year boundary; a month boundary |
-| Geometry | Pinned `structure_params` and selector-resolved; a computed `width_moneyness` and a round listed strike; a coarse ladder; an exact-mirror requirement |
-| DYN-SV | Full menu; a partial menu; a tie; a missing chooser score falling back to the resolver |
+| Geometry | Pinned `structure_params` beside the selector-resolved pair it was pinned from; a computed `width_moneyness`, and a requested strike that is itself a listed strike; a coarse ladder; an exact-mirror requirement. Every geometry axis but the coarse-ladder refusal needs a priced row |
+| DYN-SV | Full menu; a partial menu; a missing chooser score falling back to the resolver — each chosen over a board-shaped frame (one row per structure per event), frozen in order. **A tie is not a required fixture** (decision 2026-09-12): no genuine tie between two structures exists in the store or the prediction ledger, and a fixture may not invent one. The tie rule — input-row order, on both ranking paths — is frozen in `definitions/dyn_sv.json` and tested on the real `dynamic_short_vol` with tied rows in both orders. The test calls legacy code, so v2 needs its own test of whatever tie rule it declares |
 | Disabled | `CAL-P` and `CND-P` refusing in production and replaying under research |
 
 `CAL-P` and `CND-P` must appear as *refusals*. A fixture that scores them is a
@@ -271,10 +278,22 @@ Null masks and refusal reasons are compared, not just non-null values. Five of
 the six defects this corpus exists to catch were invisible in the non-null
 values alone.
 
-**Acceptance** (contracts §9.5). Every strategy and every refusal code
-reproduces from its frozen request in a **fresh process**, with **reordered
-inputs**, in **batch and single**, and through a **serialized round trip**.
-Total runtime under ten seconds, network disabled.
+**Acceptance** (contracts §9.5, split by tier). Tier 0 cannot re-score — the
+legacy scorer loads a panel — so the §9.5 cases divide:
+
+- **Tier 0**, under ten seconds, network disabled: the corpus is intact,
+  addressable, covering and round-trip-stable, its pinned fixtures agree with
+  their sources, the seeded controls of §8 behave over the real corpus, and
+  the check is deterministic across batch/single and a fresh process.
+- **Tier 1**, `tools/replay_tier1.py`: every declared pair — every strategy,
+  DYN-SV included, and every refusal code — re-scored through the production
+  entry points in a **fresh process**, written to a real file and read back,
+  against hash-verified frozen dependencies. The receipt binds to the content
+  hash of the code, the frozen dependencies, the baseline and the store
+  snapshot; a partial, skipped or stale receipt does not count.
+- **Rearchitecture phase 1** (acceptance O30): the engine-level matrix of
+  **reordered inputs**, **batch versus single** and restart. A tier-0 case
+  that reorders file loading cannot fail and is not evidence of it.
 
 ---
 
@@ -295,6 +314,18 @@ it, in the right stage:
 All five seeded at once must produce five findings in **one** pass. That single
 assertion is the phase's reason for existing: it is the difference between five
 nights and one.
+
+Seed them twice. At **tier 0**, over the real frozen corpus (contracts §15.3):
+each seedable cause planted into its own distinct pair, one pass, each control
+producing exactly its specified findings with every other pair clean — distinct
+pairs make the one pass an ablation as well. At **tier 1**, through real engine
+stages: `tools/replay_tier1.py --seed-defects` patches the legacy forecast and
+analog stages in its own process and the serialization path, so the controls
+exercise the code the defects lived in rather than a record edited to look like
+their output. The `6b9d5cf` control is an integrity check — the digest stored
+beside a written artifact against the bytes written — not a record field that
+any other corruption would also move. `28cf8b1` stays by construction, and every
+run checks it: each pair's compared population must equal its own leaves.
 
 Add the §11 controls too — corrupt a timestamp, a feature builder, a geometry,
 a model hash and a dataset membership, and prove the corresponding check fails.
@@ -320,6 +351,9 @@ Wire both checks plus `import_layers` into the versioned hook at
 `checks/hooks/pre-commit`, install it, and have the nightly re-run them over
 `HEAD` — including whether the hook is installed. A failure refuses publication
 per §4.7 while ingestion, scoring, settlement and backup advance normally.
+The nightly half of that is phase 1's to wire (design §12), because it edits
+legacy `engine/dashboard/nightly.py`; phase 0 delivers the gate's `--json`
+output the nightly will call.
 
 ---
 
@@ -366,12 +400,19 @@ report documenting the evidence.
 1. The baseline package exports reproducibly, covering all 12 strategies, 6
    model roles, 9 registered models and 6 legacy adapters, with the environment
    locked.
-2. All 12 strategies and all 7 refusal codes reproduce from frozen requests in
-   a fresh process, reordered, batched and round-tripped, network disabled,
-   under ten seconds.
-3. Five seeded defects produce five stage-named findings in one pass.
+2. All 12 strategies and all 6 refusal codes reproduce from frozen requests in
+   a fresh process through the production entry points, written and read back
+   (tier 1, bound to the current code and frozen dependencies), and the corpus
+   passes tier 0 under ten seconds with the network disabled. Reordered and
+   batched engine-level parity is phase 1's O30.
+3. The seeded defects produce their stage-named findings in one pass, over the
+   real corpus at tier 0 and through real engine stages at tier 1.
 4. `import_layers`, `code_budgets` and the README check pass over the v2
    skeleton; `legacy_adapters.json` reads `{"count": 0}`.
-5. The hook is installed and versioned; the nightly reports its state.
+5. The hook is installed and versioned, and its state — with every check
+   above — is machine-readable in `checks/rearchitecture_phase0_gate.py
+   --json`. Wiring the nightly to report it is rearchitecture phase 1 (design
+   §12): it edits legacy `engine/dashboard/nightly.py`, which §10 forbids here,
+   and where this guide and the design disagree the design wins (§2).
 6. The board's numbers are unchanged — the corpus captured them and nothing
    else moved.

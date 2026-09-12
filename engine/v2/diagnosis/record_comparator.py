@@ -4,8 +4,11 @@ It has exactly the two properties component contracts §15 requires, and the
 rest of this module is the machinery that makes them true rather than claimed:
 
 **Stage-localized.** Fields are grouped by the stage plan, each stage gets an
-input and an output hash on both sides, and the first stage whose inputs agreed
-and outputs did not is a computed row of the receipt.
+input and an output hash on both sides, and every finding names the earliest
+stage — upstream of or at the stage owning its field — whose inputs agreed and
+outputs did not. That localization is OBSERVED from record fields along the
+declared graph. It says where the records first disagree, not which internal
+computation diverged; execution-level stage hashes are rearchitecture phase 1.
 
 **Complete, not first-wins.** Every field is compared in one pass. Stopping at
 the first difference is what turned five independent causes into five nights on
@@ -14,14 +17,16 @@ the first difference is what turned five independent causes into five nights on
 The compared field set is **derived from the records**, never from a list kept
 here. That is the `28cf8b1` fix restated as a structural property: the
 explainer that compared 41 of the 70 fields the digest hashed did so because
-the 41 were typed out somewhere. Remove a field from the record and it leaves
-the comparison; add one and it joins it; neither costs an edit to this file.
+the 41 were typed out somewhere. The record IS what the digest hashes, so every
+leaf that can change the digest is a compared path; remove a field from the
+record and it leaves the comparison, add one and it joins it, and neither costs
+an edit to this file.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from engine.v2.diagnosis.canonical import content_hash
@@ -38,7 +43,7 @@ from engine.v2.diagnosis.receipt import (
 )
 from engine.v2.diagnosis.stage_plan import SCORER_V1, StagePlan
 from engine.v2.diagnosis.stage_plan import root_of as _root_of
-from engine.v2.diagnosis.tolerance import SCORE_RECORD_V1, TolerancePolicy
+from engine.v2.diagnosis.tolerance import SCORE_RECORD_V1, Tolerance, TolerancePolicy
 
 __all__ = ["flatten", "root_of", "compare_records", "merge_receipts"]
 
@@ -121,10 +126,13 @@ def _kind(left: Any, right: Any) -> str | None:
     if _is_int(left) and _is_int(right):
         # Exact, and NEVER through float: float(2**53) == float(2**53 + 1), so
         # a float conversion silently agrees adjacent integers above 2**53.
-        # Integer quantities are exact-compared per §7.3; no tolerance applies.
         return None if left == right else "value"
     if _is_number(left) and _is_number(right):
-        return None  # decided numerically below
+        # One int, one float — `2` against `2.0`. §7.3 compares integer
+        # quantities exactly, and a quantity that changed type changed even
+        # where the values coincide. Canonical JSON hashes the two identically,
+        # which is precisely why the comparator must not.
+        return "type" if _is_int(left) or _is_int(right) else None
     if type(left) is not type(right):
         return "type"
     return None if left == right else "value"
@@ -147,6 +155,34 @@ def _int_finding(path: str, left: int, right: int, stage: str) -> Finding:
         tolerance_applied="exact (integer)",
         exceeded_by=abs(delta),
         kind="value",
+        owning_stage=stage,
+    )
+
+
+def _float_finding(path: str, left: float, right: float, tol: Tolerance,
+                   stage: str) -> Finding | None:
+    """A float pair under its declared tolerance. NaN matches only NaN.
+
+    Non-finite values never enter the tolerance arithmetic: ``inf - inf`` is
+    NaN, and a NaN "excess" is neither inside nor outside any tolerance.
+    """
+    if left == right or (math.isnan(left) and math.isnan(right)):
+        return None
+    finite = math.isfinite(left) and math.isfinite(right)
+    exceeded = tol.exceeded_by(left, right) if finite else None
+    if exceeded == 0.0:
+        return None
+    return Finding(
+        finding_id=_finding_id(stage, path, "value"),
+        first_differing_stage=stage,
+        field_path=path,
+        left_value=left,
+        right_value=right,
+        delta=right - left if finite else None,
+        tolerance_applied=tol.reason,
+        exceeded_by=exceeded,
+        kind="value",
+        owning_stage=stage,
     )
 
 
@@ -154,26 +190,10 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
                    stage: str) -> Finding | None:
     """Compare one field path. Returns a finding, or None when they agree."""
     kind = _kind(left, right)
-    tol = policy.for_field(path)
     if _is_int(left) and _is_int(right):
-        # Exact, and NEVER through float: float(2**53) == float(2**53 + 1).
-        # Integer quantities are exact-compared per §7.3; no tolerance applies.
         return None if kind is None else _int_finding(path, left, right, stage)
-    if kind is None and _is_number(left) and _is_number(right):
-        exceeded = tol.exceeded_by(float(left), float(right))
-        if exceeded == 0.0:
-            return None
-        return Finding(
-            finding_id=_finding_id(stage, path, "value"),
-            first_differing_stage=stage,
-            field_path=path,
-            left_value=left,
-            right_value=right,
-            delta=float(right) - float(left),
-            tolerance_applied=tol.reason,
-            exceeded_by=exceeded,
-            kind="value",
-        )
+    if kind is None and isinstance(left, float) and isinstance(right, float):
+        return _float_finding(path, left, right, policy.for_field(path), stage)
     if kind is None:
         return None
     return Finding(
@@ -182,16 +202,35 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
         field_path=path,
         left_value=None if left is _ABSENT else left,
         right_value=None if right is _ABSENT else right,
-        tolerance_applied=tol.reason,
+        tolerance_applied=policy.for_field(path).reason,
         null_mask_left=left is None or left is _ABSENT,
         null_mask_right=right is None or right is _ABSENT,
         kind=kind,
+        owning_stage=stage,
     )
 
 
 # --------------------------------------------------------------------------
 # stages
 # --------------------------------------------------------------------------
+
+
+def _typed(value: Any) -> list[Any]:
+    """A leaf as ``[type, value]``, for the stage hashes.
+
+    Canonical JSON alone hashes an absent field and a null one identically,
+    and ``2`` and ``2.0`` identically — each a finding to the comparator. A
+    stage row that agrees while a finding in that stage exists is a receipt
+    contradicting itself, so the hash carries every distinction the comparison
+    makes.
+    """
+    if value is _ABSENT:
+        return ["absent"]
+    return [type(value).__name__, value]
+
+
+def _hash_of(record: dict[str, Any], paths: list[str]) -> str:
+    return content_hash({p: _typed(record.get(p, _ABSENT)) for p in paths})
 
 
 def _stage_hashes(plan: StagePlan, left: dict[str, Any], right: dict[str, Any],
@@ -218,42 +257,74 @@ def _stage_hashes(plan: StagePlan, left: dict[str, Any], right: dict[str, Any],
             for dep in plan.depends_on(stage_id)
             for path in by_stage.get(dep, ())
         )
-        left_out = content_hash({p: left.get(p, None) for p in own})
-        right_out = content_hash({p: right.get(p, None) for p in own})
+        left_out, right_out = _hash_of(left, own), _hash_of(right, own)
         rows.append(StageHashes(
             stage_id=stage_id,
-            left_input_hash=content_hash({p: left.get(p, None) for p in upstream}),
+            left_input_hash=_hash_of(left, upstream),
             left_output_hash=left_out,
-            right_input_hash=content_hash({p: right.get(p, None) for p in upstream}),
+            right_input_hash=_hash_of(right, upstream),
             right_output_hash=right_out,
             agrees=left_out == right_out,
         ))
     return tuple(rows)
 
 
-def _link_localization(findings: list[Finding],
-                       rows: tuple[StageHashes, ...]) -> tuple[Finding, ...]:
-    """Record which findings the stage graph shows are not downstream of each other.
+def _root_stages(rows: tuple[StageHashes, ...]) -> list[str]:
+    """Stages whose inputs agree and outputs do not, in plan order."""
+    return [r.stage_id for r in rows if r.inputs_agree and not r.agrees]
 
-    A finding in a stage whose inputs already differed MAY be downstream of an
-    earlier one, so it gets no link. Findings in stages that received agreeing
-    inputs cannot be consequences of one another THROUGH THE DECLARED GRAPH, so
-    each names all the others — an operator can investigate that whole set as
-    separate leads, which is the difference between five nights and one.
 
-    This is a localization claim, not a causal-independence proof, and the
-    field is named for exactly what it knows. Two findings in the SAME root
-    stage (``ci_low`` and ``ci_high``, say) are linked to each other here even
-    though one bootstrap defect can produce both: the graph separates stages,
-    not causes within a stage. True independence needs execution-dependency
-    evidence the comparator does not have; until it does, the link says
-    "not downstream", and shared-cause dependence stays possible.
+def _localized(plan: StagePlan, rows: tuple[StageHashes, ...]) -> dict[str, str]:
+    """Owning stage -> the earliest root whose difference can reach it.
+
+    A root reaches a stage only through stages that ALSO differ. A forecast
+    that differs while geometry agrees cannot explain a serialization field
+    that reads geometry, so the walk follows differing dependencies only, and
+    a stage whose own inputs agree is its own origin.
     """
-    root = {r.stage_id for r in rows if r.inputs_agree and not r.agrees}
-    root_ids = [f.finding_id for f in findings if f.first_differing_stage in root]
+    by_id = {row.stage_id: row for row in rows}
+    rank = {row.stage_id: i for i, row in enumerate(rows)}
+    memo: dict[str, str] = {}
+
+    def origin(stage_id: str) -> str:
+        if stage_id not in memo:
+            row = by_id[stage_id]
+            upstream = [] if row.inputs_agree else [
+                origin(dep) for dep in plan.depends_on(stage_id)
+                if dep in by_id and not by_id[dep].agrees
+            ]
+            memo[stage_id] = min(upstream, key=rank.__getitem__) if upstream else stage_id
+        return memo[stage_id]
+
+    return {stage_id: origin(stage_id) for stage_id in by_id}
+
+
+def _link_localization(findings: list[Finding], rows: tuple[StageHashes, ...],
+                       plan: StagePlan) -> tuple[Finding, ...]:
+    """Localize every finding, and link the ones in root stages to each other.
+
+    A finding whose owning stage received differing inputs is reported at the
+    earliest root upstream of it — a blanked forecast that empties the
+    simulation names ``forecast`` on the simulation fields too — and carries no
+    link, because it MAY be a consequence of that root. Findings in root
+    stages cannot be consequences of one another THROUGH THE DECLARED GRAPH,
+    so each names all the others: separate leads to investigate at once.
+
+    This is a localization claim, not a causal-independence proof. Two
+    findings in the SAME root stage (``ci_low`` and ``ci_high``, say) are
+    linked even though one bootstrap defect produces both: the graph separates
+    stages, not causes within a stage.
+    """
+    where = _localized(plan, rows)
+    root = set(_root_stages(rows))
+    localized = [
+        replace(f, first_differing_stage=where.get(f.owning_stage, f.owning_stage))
+        for f in findings
+    ]
+    root_ids = [f.finding_id for f in localized if f.owning_stage in root]
     out: list[Finding] = []
-    for finding in findings:
-        if finding.first_differing_stage in root:
+    for finding in localized:
+        if finding.owning_stage in root:
             others = tuple(i for i in root_ids if i != finding.finding_id)
             out.append(replace(finding, not_downstream_of=others))
         else:
@@ -281,14 +352,7 @@ def _incomparable(kind: str, tier: int, left_ref: str, right_ref: str,
         verdict=INCOMPARABLE,
         population=population,
         problems=(prob,),
-        envelope=_envelope(started),
-    )
-
-
-def _envelope(started: float) -> Envelope:
-    return Envelope(
-        started_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-        duration_seconds=time.monotonic() - started,
+        envelope=Envelope.since(started),
     )
 
 
@@ -305,9 +369,8 @@ def compare_records(
 ) -> ComparisonReceipt:
     """Compare two ScoreRecord-shaped mappings and return one receipt.
 
-    Reports every independent finding in one pass. Returns ``incomparable`` —
-    never ``agree`` — when an input is missing or the compared population is
-    empty.
+    Reports every finding in one pass. Returns ``incomparable`` — never
+    ``agree`` — when an input is missing or the compared population is empty.
     """
     started = time.monotonic()
     for value, ref in ((left, left_ref), (right, right_ref)):
@@ -354,9 +417,9 @@ def compare_records(
         tolerance_policy_ref=tolerance_policy.policy_id,
         verdict=DIFFER if findings else AGREE,
         stage_hashes=rows,
-        findings=_link_localization(findings, rows),
+        findings=_link_localization(findings, rows, stage_plan),
         population=population,
-        envelope=_envelope(started),
+        envelope=Envelope.since(started),
     )
 
 
@@ -418,5 +481,5 @@ def merge_receipts(
         findings=findings,
         population=population,
         problems=tuple(p for r in receipts for p in r.problems),
-        envelope=_envelope(started),
+        envelope=Envelope.since(started),
     )

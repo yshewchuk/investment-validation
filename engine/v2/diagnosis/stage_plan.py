@@ -94,7 +94,6 @@ class StagePlan:
             if stage.stage_id == stage_id:
                 return stage.depends_on
         return ()
-
     def stage_of(self, field_path: str) -> str:
         """The stage owning a field path, by its root key."""
         root = root_of(field_path)
@@ -144,10 +143,21 @@ SCORER_V1 = StagePlan(
         Stage("gate", (
             "gate_score", "gate_threshold", "gate_pass", "extrapolated", "flags",
         ), depends_on=("features", "pricing", "simulation", "analogs")),
-        Stage("chooser", ("chooser_score",),
-              depends_on=("features", "geometry", "simulation")),
+        # The scorer computes the chooser score AFTER the gate, reading the
+        # simulation, the analog stats and the flags every earlier layer set
+        # (`Scorer.score`, "the chooser score sits AFTER the gate").
+        #
+        # `detail` lives here too. It is not serialization output: it is the
+        # narrative the layers append to — a NO_FORECAST reason, the BAD_QUOTE
+        # ceiling, the entry-rule verdict, the chooser's pick — so it reads
+        # every upstream stage, and the last computational stage is the
+        # nearest honest owner. Filed under `serialization` (which reads only
+        # geometry), the tier-1 seeded `e845f3e` control showed a blanked
+        # forecast reported as a second, independent serialization root.
+        Stage("chooser", ("chooser_score", "detail"),
+              depends_on=("features", "geometry", "simulation", "analogs", "gate")),
         Stage("serialization", (
-            "structure_params", "structure_spec", "detail", "schema_version",
+            "structure_params", "structure_spec", "schema_version",
             "score_id", "payload_hash", "request_hash", "canonical_request",
             "digest",
         ), depends_on=("geometry",)),

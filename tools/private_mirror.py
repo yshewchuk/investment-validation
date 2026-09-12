@@ -59,6 +59,11 @@ INCLUDE = (
     ("baseline", "**/*.json"),
     ("baseline", "**/*.txt"),
     ("fixtures", "**/*.json"),
+    # The published-version pointers. Extensionless, so the globs above never
+    # matched them, and a restore without them has every version on disk and
+    # no answer to which one the gate is stated against.
+    ("baseline", "CURRENT"),
+    ("fixtures", "**/CURRENT"),
     ("reports", "**/*.md"),
     ("config/thesis", "**/*"),
     ("experiments", "LEDGER.csv"),
