@@ -49,6 +49,10 @@ Implementation plans, one per migration phase of
 - [Phase 0 — Baseline](rearchitecture_phase0_baseline.md): the tier-0 corpus,
   the ComparisonReceipt, the enforced layer map and the empty `engine/v2/`
   skeleton. Writes no production logic and changes no board number.
+- [Phase 1 — Operations](rearchitecture_phase1_operations.md): durable jobs,
+  automatic resource admission, stage checkpoints, legacy-compatible nightly
+  and experiment workflows, decision/publication safety, and a sequenced
+  implementation plan with fault-injection acceptance tests.
 
 These are design proposals. They describe explicit future changes to the
 runtime choices in convention 7 below, while retaining the research and safety

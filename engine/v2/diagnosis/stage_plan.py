@@ -31,11 +31,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["Stage", "StagePlan", "SCORER_V1", "UNASSIGNED", "load_stage_plan"]
+__all__ = ["Stage", "StagePlan", "SCORER_V1", "UNASSIGNED", "load_stage_plan",
+           "root_of"]
 
 #: Where a field the plan does not name is compared. Last, so it never
 #: shadows a real stage, and named so it is obvious in a receipt.
 UNASSIGNED = "unassigned"
+
+
+def root_of(field_path: str) -> str:
+    """The unescaped root key of a typed field path.
+
+    Paths come from :func:`engine.v2.diagnosis.record_comparator.flatten`:
+    mapping segments are dot-joined with ``.`` and ``\\`` escaped inside each
+    key, sequence segments are ``[i]``. The root of ``a\\.b[0].c`` is the key
+    ``a.b``; splitting on the first ``.`` would cut an escaped key in half
+    and assign it to a stage that does not exist.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(field_path):
+        char = field_path[i]
+        if char == "\\" and i + 1 < len(field_path):
+            out.append(field_path[i + 1])
+            i += 2
+            continue
+        if char in ".[":
+            break
+        out.append(char)
+        i += 1
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -72,7 +97,7 @@ class StagePlan:
 
     def stage_of(self, field_path: str) -> str:
         """The stage owning a field path, by its root key."""
-        root = field_path.split(".", 1)[0]
+        root = root_of(field_path)
         for stage in self.stages:
             if root in stage.fields:
                 return stage.stage_id

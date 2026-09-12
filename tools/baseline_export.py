@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import platform
 import subprocess
@@ -309,9 +310,18 @@ def resolved_dyn_sv() -> dict:
                             "folds' np.isfinite mask",
             "missing_score_fallback": "rank by exp_pnl_sim (the pre-champion "
                                       "resolver) when NO candidate is scored",
-            "tie_behaviour": "stable sort keeps the earlier menu member; an "
-                             "event where no member produced either ranking "
-                             "key yields no chooser row at all",
+            "tie_behaviour": "stable sort, so a tie is broken by INPUT-ROW "
+                             "ORDER in the scored frame — the order candidates "
+                             "were concatenated before dynamic_short_vol saw "
+                             "them, NOT menu order. Measured, not assumed: "
+                             "reversing two equally scored rows reverses the "
+                             "winner while the menu is unchanged. A replacement "
+                             "that ties by menu position selects different "
+                             "strategies on tied events; the frozen behaviour "
+                             "is frame-order dependence, and parity must "
+                             "reproduce the frame order too. An event where no "
+                             "member produced either ranking key yields no "
+                             "chooser row at all",
             "re_gating": "none — the winner keeps its own entry-rule verdict",
             "event_key": list(score._EVENT_KEY),
             "ladder_rows_excluded": True,
@@ -547,6 +557,88 @@ def fitted_state() -> dict:
 # --------------------------------------------------------------------------
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+#: What the fixtures' answers are a function of, beyond the code commit.
+DEPENDENCY_GLOBS = (
+    ("data/models", "*.joblib"),
+    ("data/features", "*.parquet"),
+    ("engine/models", "*.json"),
+)
+
+
+def dependencies() -> dict:
+    """Hash-frozen fitted state: the bytes, not a description of the bytes.
+
+    ``artifacts/state.json`` NAMES the in-process fitted state; a name is not
+    a freeze. This part is the sha256 of every artifact a fixture's answer
+    depends on — model joblibs, the Tier-4 forecast table, the residual and
+    analog pools, the calibration pairs, the panel, the registry — plus the
+    Tier-2 store's snapshot identity. ``tools/replay_tier1.py`` verifies these
+    hashes before a real replay and refuses INCOMPARABLE on any drift, so a
+    replay can never silently re-derive answers against refitted state.
+
+    The Tier-2 store itself (data/curated, ~1.6G of shards) is identified by
+    its manifest snapshot rather than byte-hashed: it is rebuilt nightly from
+    cached sources, and the snapshot id is the version identity the store's
+    own manifest already maintains. Everything here is small enough to hash
+    directly, and hashing ~100MB costs about a second.
+    """
+    from engine.data import manifest as store_manifest
+
+    artifacts = []
+    for rel_dir, pattern in DEPENDENCY_GLOBS:
+        for path in sorted((ROOT / rel_dir).glob(pattern)):
+            artifacts.append({
+                "path": f"{rel_dir}/{path.name}",
+                "bytes": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            })
+    registry = json.loads((ROOT / "engine/models/registry.json").read_text())
+    declared = {
+        entry["artifact"]: entry.get("artifact_sha256")
+        for entry in registry.get("models", [])
+        if isinstance(entry, dict) and entry.get("artifact")
+    }
+    drift = []
+    for row in artifacts:
+        want = declared.get(row["path"])
+        if want is not None and want != row["sha256"]:
+            drift.append({"path": row["path"], "registry_sha256": want,
+                          "on_disk_sha256": row["sha256"]})
+    snap = store_manifest.read_snapshot() or {}
+    corpus_current = ROOT / "fixtures" / "tier0" / "CURRENT"
+    corpus = None
+    if corpus_current.is_file():
+        version = json.loads(corpus_current.read_text()).get("version")
+        index_path = ROOT / "fixtures" / "tier0" / str(version) / "INDEX.json"
+        if index_path.is_file():
+            index = json.loads(index_path.read_text())
+            corpus = {"version": version, "corpus_hash": index.get("corpus_hash"),
+                      "snapshot": index.get("snapshot")}
+    return part(
+        {
+            "artifacts": artifacts,
+            "count": len(artifacts),
+            "registry_sha_drift": drift,
+            "tier2_snapshot": {"snapshot": snap.get("snapshot"),
+                               "tables": sorted(snap.get("tables", {}))},
+            "tier0_corpus": corpus,
+            "verification": "tools/replay_tier1.py verifies every hash above "
+                            "before replaying and refuses on drift",
+        },
+        knowledge_mode=ATTESTED,
+        describes="hash-frozen fitted state: every artifact byte a fixture's "
+                  "answer depends on, plus the store snapshot (§6.3)",
+    )
+
+
 def conventions() -> dict:
     from engine.data import manifest  # local: it reads the store
 
@@ -635,6 +727,7 @@ PARTS = {
     "artifacts/models.json": registered_models,
     "artifacts/legacy_adapters.json": legacy_adapters,
     "artifacts/state.json": fitted_state,
+    "artifacts/dependencies.json": dependencies,
     "conventions/conventions.json": conventions,
     "conventions/worked_examples.json": worked_examples,
 }
@@ -677,6 +770,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None, help="write here instead")
     ap.add_argument("--verify", default=None,
                     help="build and byte-compare against an existing export")
+    ap.add_argument("--force", action="store_true",
+                    help="authorize replacing an existing non-empty version "
+                         "directory; without it a frozen baseline is never "
+                         "overwritten in place")
     args = ap.parse_args(argv)
 
     if args.verify:
@@ -701,6 +798,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     out_dir = Path(args.out) if args.out else ROOT / "baseline" / args.version
+    if out_dir.exists() and any(out_dir.iterdir()) and not args.force:
+        print(f"REFUSING to overwrite the frozen baseline at {out_dir}. "
+              "Export a NEW --version, or pass --force to authorize "
+              "replacing it explicitly.", file=sys.stderr)
+        return 1
     files = write(out_dir)
     manifest = json.loads(files["MANIFEST.json"])
     print(f"baseline package -> {out_dir}")

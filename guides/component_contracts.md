@@ -297,20 +297,35 @@ property of the field.
   clock. No back-dated corpus can be promoted into it, and no future live
   snapshot may claim it without a real receipt.
 - `attested_stable` — no contemporaneous receipt, but the values are attested
-  not to have moved since: either the field class is immutable once settled
-  (a listed option chain for an expired contract is not revised), or the
-  attestation carries a measured cross-source or cross-vintage agreement rate.
-  The attestation names which of the two it relies on, and its measurement.
+  not to have moved since, and the attestation carries a measured cross-source
+  or cross-vintage agreement rate naming what was compared and when. Field
+  class alone is never the attestation: an expired listed option chain is
+  *expected* to be immutable, but expiration is not evidence — a vendor can
+  restate settled history, and only measurement shows whether one does. Note
+  what the measurement does and does not establish: agreement across vintages
+  is revision confidence, and says nothing about WHEN a value first became
+  obtainable. A field can be perfectly stable and still have been unknowable
+  at the simulated decision time.
 - `reconstructed` — a revisable field read from a single late vintage. Earnings
   dates, session classifications and split-adjusted spot stay here, because
   those are exactly the values a later download silently changes.
 
 The two risks being separated are availability (could this have been obtained
-then?) and vintage (has the value changed since?). Only vintage threatens a
-historical simulation's validity; availability threatens a claim about what was
-actually decided. Collapsing them into one flag forces most of an existing
-research corpus to be labelled with the more alarming word for the wrong
-reason. The distinction survives into reports and scores, and a score states
+then?) and vintage (has the value changed since?). They are separated because
+their evidence and their repairs differ — NOT because only one of them binds a
+simulation. Both do. Vintage threatens what a simulation consumed: a revised
+value means the simulation ran on a number that never existed. Availability
+threatens WHEN a simulation may consume it: reading a value that was not yet
+published at the simulated decision time is look-ahead bias even if the value
+was never afterwards revised, and cross-source or cross-vintage agreement
+cannot catch it, because agreement measures drift, not publication lag.
+Decision-time eligibility is therefore enforced against availability evidence
+for every simulated decision, independently of the vintage classification, and
+a knowledge_mode grades the strength of that evidence — it never grants
+eligibility by itself. Collapsing the two into one flag forces most of an
+existing research corpus to be labelled with the more alarming word for the
+wrong reason; separating them must not demote availability into a live-clock
+concern. The distinction survives into reports and scores, and a score states
 the weakest mode among the tables it consumed.
 
 ### 5.2 Event and quote identity

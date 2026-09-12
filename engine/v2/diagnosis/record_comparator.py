@@ -37,9 +37,10 @@ from engine.v2.diagnosis.receipt import (
     problem,
 )
 from engine.v2.diagnosis.stage_plan import SCORER_V1, StagePlan
+from engine.v2.diagnosis.stage_plan import root_of as _root_of
 from engine.v2.diagnosis.tolerance import SCORE_RECORD_V1, TolerancePolicy
 
-__all__ = ["flatten", "compare_records", "merge_receipts"]
+__all__ = ["flatten", "root_of", "compare_records", "merge_receipts"]
 
 #: Sentinel for "this path is not in this record at all", which is a different
 #: fact from "this path is null here".
@@ -51,20 +52,34 @@ _ABSENT = object()
 # --------------------------------------------------------------------------
 
 
-def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
-    """Flatten a record to ``{field_path: leaf}``.
+def _escape_key(key: str) -> str:
+    """Escape a mapping key for a path segment: ``\\`` then ``.``."""
+    return key.replace("\\", "\\\\").replace(".", "\\.")
 
-    Nested mappings become ``a.b``; sequences become ``a.0``, so a leg list of
-    different lengths reports the exact missing positions rather than one
-    opaque "legs differ". An empty container is itself a leaf, so ``{}`` and a
-    populated dict are distinguishable.
+
+def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten a record to ``{field_path: leaf}`` over TYPED, injective paths.
+
+    Mapping keys become ``a.b`` with ``.`` and ``\\`` escaped inside each
+    segment; sequence positions become ``a[0]``. The two segment shapes are
+    what make the mapping unambiguous: a leg LIST flattens to ``legs[0]``
+    while a dict ``{0: leg}`` flattens to ``legs.0``, so containers of
+    different types can never collide onto one path and compare equal, and a
+    mapping key that itself contains a dot (``{"a.b": v}`` → ``a\\.b``) can
+    never collide with the nested path ``{"a": {"b": v}}`` → ``a.b``. An
+    earlier untyped scheme allowed both collisions, and a comparator that can
+    call different records equal is worse than no comparator.
+
+    An empty container is itself a leaf, so ``{}``, ``[]`` and a populated
+    container are all distinguishable — the leaf carries the type.
     """
     if isinstance(value, Mapping):
         if not value:
             return {prefix: {}} if prefix else {}
         out: dict[str, Any] = {}
         for key in value:
-            path = f"{prefix}.{key}" if prefix else str(key)
+            segment = _escape_key(str(key))
+            path = f"{prefix}.{segment}" if prefix else segment
             out.update(flatten(value[key], path))
         return out
     if isinstance(value, (list, tuple)):
@@ -72,10 +87,14 @@ def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
             return {prefix: []} if prefix else {}
         out = {}
         for index, item in enumerate(value):
-            path = f"{prefix}.{index}" if prefix else str(index)
-            out.update(flatten(item, path))
+            out.update(flatten(item, f"{prefix}[{index}]"))
         return out
     return {prefix: value}
+
+
+def root_of(field_path: str) -> str:
+    """Re-export of :func:`stage_plan.root_of` — the typed-path root key."""
+    return _root_of(field_path)
 
 
 # --------------------------------------------------------------------------
@@ -87,6 +106,10 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _kind(left: Any, right: Any) -> str | None:
     """What kind of disagreement, or None when the pair is not yet decided."""
     if left is _ABSENT or right is _ABSENT:
@@ -95,6 +118,11 @@ def _kind(left: Any, right: Any) -> str | None:
         return "null_mask"
     if left is None:
         return None  # both null: agreement, and the mask agrees too
+    if _is_int(left) and _is_int(right):
+        # Exact, and NEVER through float: float(2**53) == float(2**53 + 1), so
+        # a float conversion silently agrees adjacent integers above 2**53.
+        # Integer quantities are exact-compared per §7.3; no tolerance applies.
+        return None if left == right else "value"
     if _is_number(left) and _is_number(right):
         return None  # decided numerically below
     if type(left) is not type(right):
@@ -106,11 +134,31 @@ def _finding_id(stage: str, path: str, kind: str) -> str:
     return content_hash([stage, path, kind])[7:19]
 
 
+def _int_finding(path: str, left: int, right: int, stage: str) -> Finding:
+    """A differing integer pair, reported with an exact int delta."""
+    delta = right - left  # a float delta would round above 2**53
+    return Finding(
+        finding_id=_finding_id(stage, path, "value"),
+        first_differing_stage=stage,
+        field_path=path,
+        left_value=left,
+        right_value=right,
+        delta=delta,
+        tolerance_applied="exact (integer)",
+        exceeded_by=abs(delta),
+        kind="value",
+    )
+
+
 def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
                    stage: str) -> Finding | None:
     """Compare one field path. Returns a finding, or None when they agree."""
     kind = _kind(left, right)
     tol = policy.for_field(path)
+    if _is_int(left) and _is_int(right):
+        # Exact, and NEVER through float: float(2**53) == float(2**53 + 1).
+        # Integer quantities are exact-compared per §7.3; no tolerance applies.
+        return None if kind is None else _int_finding(path, left, right, stage)
     if kind is None and _is_number(left) and _is_number(right):
         exceeded = tol.exceeded_by(float(left), float(right))
         if exceeded == 0.0:
@@ -148,7 +196,16 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
 
 def _stage_hashes(plan: StagePlan, left: dict[str, Any], right: dict[str, Any],
                   paths: list[str]) -> tuple[StageHashes, ...]:
-    """Per-stage input/output hashes. A stage's inputs are its predecessors."""
+    """Per-stage input/output hashes. A stage's inputs are its predecessors.
+
+    PROVISIONAL by construction, and the receipt's readers must treat it so:
+    the input hashes are RECONSTRUCTED from the predecessor stages' output
+    FIELDS, not captured from the execution inputs the scorer actually read.
+    A stage whose real inputs differed while every predecessor output field
+    agrees will be localized as a root. The localization answers "where do the
+    records first disagree along the declared graph", not "which computation
+    diverged".
+    """
     by_stage: dict[str, list[str]] = {sid: [] for sid in plan.stage_ids()}
     for path in paths:
         by_stage[plan.stage_of(path)].append(path)
@@ -174,15 +231,23 @@ def _stage_hashes(plan: StagePlan, left: dict[str, Any], right: dict[str, Any],
     return tuple(rows)
 
 
-def _link_independent(findings: list[Finding],
-                      rows: tuple[StageHashes, ...]) -> tuple[Finding, ...]:
-    """Record which findings were PROVED not to be consequences of each other.
+def _link_localization(findings: list[Finding],
+                       rows: tuple[StageHashes, ...]) -> tuple[Finding, ...]:
+    """Record which findings the stage graph shows are not downstream of each other.
 
-    A finding in a stage whose inputs already differed may be downstream of an
+    A finding in a stage whose inputs already differed MAY be downstream of an
     earlier one, so it gets no link. Findings in stages that received agreeing
-    inputs cannot be consequences of one another, so each names all the others:
-    an operator can fix that whole set at once, which is the difference between
-    five nights and one.
+    inputs cannot be consequences of one another THROUGH THE DECLARED GRAPH, so
+    each names all the others — an operator can investigate that whole set as
+    separate leads, which is the difference between five nights and one.
+
+    This is a localization claim, not a causal-independence proof, and the
+    field is named for exactly what it knows. Two findings in the SAME root
+    stage (``ci_low`` and ``ci_high``, say) are linked to each other here even
+    though one bootstrap defect can produce both: the graph separates stages,
+    not causes within a stage. True independence needs execution-dependency
+    evidence the comparator does not have; until it does, the link says
+    "not downstream", and shared-cause dependence stays possible.
     """
     root = {r.stage_id for r in rows if r.inputs_agree and not r.agrees}
     root_ids = [f.finding_id for f in findings if f.first_differing_stage in root]
@@ -190,7 +255,7 @@ def _link_independent(findings: list[Finding],
     for finding in findings:
         if finding.first_differing_stage in root:
             others = tuple(i for i in root_ids if i != finding.finding_id)
-            out.append(replace(finding, independent_of=others))
+            out.append(replace(finding, not_downstream_of=others))
         else:
             out.append(finding)
     return tuple(out)
@@ -289,7 +354,7 @@ def compare_records(
         tolerance_policy_ref=tolerance_policy.policy_id,
         verdict=DIFFER if findings else AGREE,
         stage_hashes=rows,
-        findings=_link_independent(findings, rows),
+        findings=_link_localization(findings, rows),
         population=population,
         envelope=_envelope(started),
     )

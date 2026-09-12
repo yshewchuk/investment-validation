@@ -147,7 +147,7 @@ def test_a_downstream_finding_is_not_claimed_independent():
     right = record(model_inputs={"or_implied": 9.9}, forecast_abs_move=1.0)
     receipt = compare_records(left, right)
     by_stage = {f.first_differing_stage: f for f in receipt.findings}
-    assert by_stage["forecast"].independent_of == ()
+    assert by_stage["forecast"].not_downstream_of == ()
     assert by_stage["features"].first_differing_stage == "features"
 
 
@@ -157,7 +157,7 @@ def test_unrelated_findings_name_each_other_as_independent():
     receipt = compare_records(left, right)
     ids = {f.finding_id for f in receipt.findings}
     for finding in receipt.findings:
-        assert set(finding.independent_of) == ids - {finding.finding_id}
+        assert set(finding.not_downstream_of) == ids - {finding.finding_id}
 
 
 def test_analogs_do_not_depend_on_the_forecast():
@@ -203,7 +203,7 @@ def test_a_shorter_leg_list_names_the_missing_positions():
     left = record()
     right = record(legs=[{"name": "a", "strike": 240.0}])
     paths = {f.field_path for f in compare_records(left, right).findings}
-    assert paths == {"legs.1.name", "legs.1.strike"}
+    assert paths == {"legs[1].name", "legs[1].strike"}
 
 
 def test_a_type_change_is_reported():
@@ -326,3 +326,84 @@ def test_flatten_distinguishes_an_empty_container_from_an_absent_one():
     assert flatten({"a": {}}) == {"a": {}}
     assert flatten({"a": []}) == {"a": []}
     assert flatten({"a": {"b": 1}}) == {"a.b": 1}
+
+
+# --------------------------------------------------------------------------
+# the 2026-09-12 review defects: a comparator that can call different records
+# equal is worse than no comparator
+# --------------------------------------------------------------------------
+
+
+def test_adjacent_integers_above_2pow53_are_a_finding():
+    """float(2**53) == float(2**53 + 1); ints must never route through float."""
+    left = record(n_analogs=2**53)
+    right = record(n_analogs=2**53 + 1)
+    receipt = compare_records(left, right)
+    assert receipt.verdict == DIFFER
+    finding = receipt.findings[0]
+    assert finding.field_path == "n_analogs"
+    assert finding.delta == 1 and isinstance(finding.delta, int)
+
+
+def test_equal_large_integers_still_agree_exactly():
+    assert compare_records(record(n_analogs=2**53 + 1),
+                           record(n_analogs=2**53 + 1)).verdict == AGREE
+
+
+def test_a_leg_list_and_a_numeric_keyed_dict_do_not_compare_equal():
+    left = record(legs=[{"strike": 240.0}])
+    right = record()
+    right["legs"] = {0: {"strike": 240.0}}
+    receipt = compare_records(left, right)
+    assert receipt.verdict == DIFFER
+    paths = {f.field_path for f in receipt.findings}
+    assert "legs[0].strike" in paths and "legs.0.strike" in paths
+
+
+def test_a_dotted_key_cannot_collide_with_a_nested_path():
+    left = {"model_inputs": {"a.b": 1}}
+    right = {"model_inputs": {"a": {"b": 1}}}
+    receipt = compare_records(left, right)
+    assert receipt.verdict == DIFFER
+    assert {f.field_path for f in receipt.findings} == {
+        r"model_inputs.a\.b", "model_inputs.a.b"}
+
+
+def test_a_dotted_root_key_is_assigned_by_its_full_key():
+    from engine.v2.diagnosis.record_comparator import root_of
+    assert root_of(r"a\.b[0].c") == "a.b"
+    assert root_of("legs[12].strike") == "legs"
+    assert SCORER_V1.stage_of(r"model_inputs.a\.b") == "features"
+
+
+def test_canonical_json_serializes_numbers_per_ecmascript():
+    assert canonical_json(1.0) == "1"
+    assert canonical_json(-0.0) == "0"
+    assert canonical_json(1e-5) == "0.00001"
+    assert canonical_json(1e-7) == "1e-7"
+    assert canonical_json(1e21) == "1e+21"
+    assert canonical_json(1e20) == "100000000000000000000"
+    assert canonical_json(2**53 + 1) == "9007199254740993"
+    assert canonical_json(-1.5e22) == "-1.5e+22"
+
+
+def test_canonical_json_sorts_keys_by_utf16_code_units():
+    """RFC 8785 §3.2.3: astral chars (surrogate-first) sort below U+FB33."""
+    import json as _json
+    doc = {"\u20ac": "a", "\r": "b", "\ufb33": "c", "1": "d",
+           "\U0001f602": "e", "\u00f6": "f", "</script>": "g"}
+    order = _json.loads(canonical_json(doc),
+                        object_pairs_hook=lambda p: [k for k, _ in p])
+    assert order == ["\r", "1", "</script>", "\u00f6", "\u20ac",
+                     "\U0001f602", "\ufb33"]
+
+
+def test_localization_links_do_not_claim_causal_independence():
+    """One bootstrap defect moves BOTH endpoints; the link must not deny that."""
+    receipt = compare_records(record(ci_low=-0.9, ci_high=-0.5),
+                              record(ci_low=0.1, ci_high=0.5))
+    assert len(receipt.findings) == 2
+    for finding in receipt.findings:
+        assert finding.first_differing_stage == "analogs"
+    # the field states what is known — graph separation, not cause separation
+    assert not hasattr(receipt.findings[0], "independent_of")

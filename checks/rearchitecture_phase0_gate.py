@@ -5,11 +5,12 @@
     python3 checks/rearchitecture_phase0_gate.py --json     # for the nightly
 
 `system_rearchitecture.md` §12 states the phase-0 gate as three claims, and the
-guide's §12 adds more. This runs all seven and answers each with a fact:
+guide's §12 adds more. This runs all eight and answers each with a fact:
 
 | Claim | Answered by |
 |---|---|
 | Every strategy and critical refusal reproducible | `checks/tier0_corpus.py` |
+| Every score fixture re-scored by the REAL engine against frozen dependencies | `tools/replay_tier1.py` receipt |
 | Five seeded defects yield five stage-named findings in one pass | `tests/test_phase0_negative_controls.py` |
 | The layer check runs green with an empty adapter ledger | `checks/import_layers.py` |
 | v2 budgets green at zero exemptions | `checks/code_budgets.py` |
@@ -47,6 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks import install_hooks  # noqa: E402
+from checks import tier0_corpus as tier0_check  # noqa: E402
 
 CORPUS = ROOT / "fixtures" / "tier0"
 BASELINE = ROOT / "baseline"
@@ -73,15 +75,18 @@ def _run(argv: list[str]) -> dict:
 
 
 def _tier0() -> dict:
-    if not (CORPUS / "INDEX.json").exists():
+    corpus_dir = tier0_check.resolve_corpus(CORPUS)
+    if not (corpus_dir / "INDEX.json").exists():
         return {"ok": False, "skipped": True, "seconds": 0.0,
                 "detail": f"no tier-0 corpus at {CORPUS}; run "
                           "tools/capture_tier0_corpus.py"}
     result = _run(["checks/tier0_corpus.py", "--corpus", str(CORPUS), "--quiet"])
-    index = json.loads((CORPUS / "INDEX.json").read_text())
+    index = json.loads((corpus_dir / "INDEX.json").read_text())
     result["pairs"] = len(index.get("pairs", {}))
     result["uncovered_axes"] = index.get("uncovered_axes", [])
     result["corpus_hash"] = index.get("corpus_hash")
+    result["corpus_version"] = (corpus_dir.name
+                                if corpus_dir != CORPUS else None)
     if result["uncovered_axes"]:
         result["ok"] = False
         result["detail"] = (
@@ -166,10 +171,56 @@ def _baseline_package() -> dict:
     }
 
 
+def _tier1_receipt() -> dict:
+    """The REAL-replay receipt — the strategy-compatibility claim itself.
+
+    The gate stays seconds-fast by READING the receipt
+    ``tools/replay_tier1.py`` writes after re-scoring every fixture through
+    the production entry points against hash-verified frozen dependencies.
+    The receipt must bind to the CURRENT corpus (version + corpus_hash) and
+    must not have run with dependency verification skipped. Missing or stale
+    is a failure: tier-0 alone is artifact integrity, and a compatibility
+    claim resting on it is the overclaim the 2026-09-12 review named.
+    """
+    corpus_dir = tier0_check.resolve_corpus(CORPUS)
+    index_path = corpus_dir / "INDEX.json"
+    if not index_path.is_file():
+        return {"ok": False, "skipped": True, "seconds": 0.0,
+                "detail": f"no tier-0 corpus at {CORPUS}"}
+    index = json.loads(index_path.read_text())
+    version = corpus_dir.name if corpus_dir != CORPUS else "inline"
+    receipt_path = CORPUS / "receipts" / f"{version}.json"
+    if not receipt_path.is_file():
+        return {"ok": False, "seconds": 0.0,
+                "detail": f"no tier-1 receipt for corpus version {version}; "
+                          "run tools/replay_tier1.py (bounded, ~5 min)"}
+    doc = json.loads(receipt_path.read_text())
+    payload = doc.get("payload", {})
+    bindings = payload.get("bindings", {})
+    problems = []
+    if bindings.get("corpus_hash") != index.get("corpus_hash"):
+        problems.append("receipt binds a different corpus_hash (stale)")
+    if payload.get("verdict") != "agree":
+        problems.append(f"replay verdict is {payload.get('verdict')!r}")
+    if bindings.get("deps_unverified"):
+        problems.append("ran with --skip-deps-verify")
+    if bindings.get("dependency_drift"):
+        problems.append(f"{len(bindings['dependency_drift'])} dependency drift(s)")
+    detail = "; ".join(problems) or (
+        f"agree — {bindings.get('replayed')} pairs re-scored through the "
+        f"production entry points against {bindings.get('dependencies_verified')} "
+        f"hash-verified artifacts; {bindings.get('skipped')} skipped with reasons")
+    return {"ok": not problems, "seconds": 0.0, "detail": detail,
+            "pairs_replayed": bindings.get("replayed"),
+            "pairs_skipped": bindings.get("skipped"),
+            "receipt": str(receipt_path)}
+
+
 def gate() -> dict:
     started = time.monotonic()
     results = {name: _run(argv) for name, argv in _CHECKS}
     results["tier0_corpus"] = _tier0()
+    results["tier1_real_replay"] = _tier1_receipt()
     results["negative_controls"] = _negative_controls()
     results["baseline_package"] = _baseline_package()
 

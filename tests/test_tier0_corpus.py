@@ -32,9 +32,21 @@ from engine.v2.diagnosis import AGREE, DIFFER, INCOMPARABLE, content_hash  # noq
 STRATEGIES = ("STR-THRU", "TWIN-P5", "CAL-P")
 REFUSALS = ("NO_CHAIN", "UNVALIDATED_STRUCTURE")
 
+AXIS_INPUTS = {
+    "structures": list(STRATEGIES),
+    "dynamic_strategy": "DYN-SV",
+    "menu": list(STRATEGIES),
+    "disabled": ["CAL-P"],
+    "model_roles": ["size", "implied_t1", "runup_move", "iv_crush", "gate",
+                    "chooser"],
+    "refusal_code_mapping": {"NO_CHAIN": "NO_CHAIN",
+                             "UNVALIDATED_STRUCTURE": "UNVALIDATED_STRUCTURE"},
+}
 
-def _pair(fixture_id: str, strategy: str, covers: list[str], *,
-          width: float = 0.05123456789012) -> dict:
+
+def _pair(fixture_id: str, strategy: str, *, flags: list[str],
+          width: float = 0.05123456789012,
+          legs: list | None = None, entry_cost: float | None = None) -> dict:
     request = {
         "ticker": "MTN", "strategy": strategy, "event_date": "2026-09-28",
         "session": "AMC", "structure_params": None, "strike": None,
@@ -47,13 +59,18 @@ def _pair(fixture_id: str, strategy: str, covers: list[str], *,
         "forecast_abs_move": 5.218743916,
         "ci_low": -0.01193117, "ci_high": 0.04217742,
         "structure_params": {"width_moneyness": width},
-        "flags": [],
+        "flags": flags,
     }
+    if legs is not None:
+        record["legs"] = legs
+    if entry_cost is not None:
+        record["entry_cost"] = entry_cost
+    covers = t0.derive_covers(record, request, "score_result", AXIS_INPUTS)
     payload = {"request": request, "record": record, "record_kind": "score_result"}
     return {
         "schema_version": "tier0_pair.v1.0",
         "fixture_id": fixture_id,
-        "covers": sorted(covers),
+        "covers": covers,
         "notes": "",
         "payload": payload,
         "payload_hash": content_hash(payload),
@@ -69,11 +86,15 @@ def corpus(tmp_path: Path) -> Path:
     (root / "pairs").mkdir(parents=True)
     pairs = []
     for i, strategy in enumerate(STRATEGIES):
-        covers = [f"strategy:{strategy}"]
-        if i < len(REFUSALS):
-            covers.append(f"refusal:{REFUSALS[i]}")
-        pair = _pair(f"{i:03d}_{strategy}", strategy, covers,
-                     width=0.05123456789012 + i)
+        flags = [REFUSALS[i]] if i < len(REFUSALS) else []
+        # pair 0 is the PRICED one: legs and an entry cost, so the corpus
+        # carries a priced:S axis the deletion tests can lose.
+        legs = ([{"name": "call", "strike": 250.0, "qty": 1},
+                 {"name": "put", "strike": 250.0, "qty": 1}]
+                if i == 0 else None)
+        pair = _pair(f"{i:03d}_{strategy}", strategy, flags=flags,
+                     width=0.05123456789012 + i,
+                     legs=legs, entry_cost=12.34 if i == 0 else None)
         pairs.append(pair)
         (root / "pairs" / f"{pair['fixture_id']}.json").write_text(
             json.dumps(pair, indent=2, sort_keys=True) + "\n"
@@ -82,16 +103,19 @@ def corpus(tmp_path: Path) -> Path:
     for pair in pairs:
         for axis in pair["covers"]:
             coverage.setdefault(axis, []).append(pair["fixture_id"])
-    required = [f"strategy:{s}" for s in STRATEGIES]
-    required += [f"refusal:{c}" for c in REFUSALS]
     (root / "INDEX.json").write_text(json.dumps({
         "schema_version": "tier0_corpus.v1.0",
         "pairs": {p["fixture_id"]: {"payload_hash": p["payload_hash"],
                                     "request_hash": p["request_hash"],
+                                    "record_kind": "score_result",
                                     "covers": p["covers"]} for p in pairs},
+        "axis_inputs": AXIS_INPUTS,
+        "refusal_code_mapping": AXIS_INPUTS["refusal_code_mapping"],
         "coverage": coverage,
-        "required_axes": sorted(required),
+        "required_axes": sorted(coverage),
         "uncovered_axes": [],
+        "corpus_hash": content_hash(
+            {p["fixture_id"]: p["payload_hash"] for p in pairs}),
     }, indent=2, sort_keys=True) + "\n")
     return root
 
@@ -115,8 +139,9 @@ def _rewrite(root: Path, fixture_id: str, mutate) -> None:
 def test_a_healthy_corpus_agrees(corpus):
     merged, cases = t0.run(corpus)
     assert merged.verdict == AGREE, merged.summary()
-    assert set(cases) == {"corpus_replay", "coverage", "batch_vs_single",
-                          "reordered_inputs", "fresh_process"}
+    assert set(cases) == {"manifest", "corpus_replay", "coverage",
+                          "batch_vs_single", "reordered_inputs",
+                          "fresh_process"}
     assert all(r.verdict == AGREE for r in cases.values())
 
 
@@ -181,7 +206,7 @@ def test_a_rounded_request_stops_addressing_its_record(corpus):
     assert merged.verdict == DIFFER
     assert cases["corpus_replay"].verdict == DIFFER
     paths = {f.field_path for f in merged.findings}
-    assert {"request_hash", "resolves_to.0"} & paths
+    assert {"request_hash", "resolves_to[0]"} & paths
 
 
 def test_a_file_that_disagrees_with_its_digest_fails(corpus):
@@ -201,7 +226,7 @@ def test_a_missing_strategy_makes_the_corpus_incomparable(corpus):
     (corpus / "INDEX.json").write_text(json.dumps(index, indent=2, sort_keys=True))
     merged, cases = t0.run(corpus)
     assert cases["coverage"].verdict == DIFFER
-    assert any(f.field_path == f"strategy:{STRATEGIES[2]}"
+    assert any(f.field_path.startswith(f"axes.strategy:{STRATEGIES[2]}")
                for f in cases["coverage"].findings)
 
 
@@ -246,6 +271,72 @@ def test_batch_and_single_agree_on_a_corrupted_corpus_too(corpus):
     merged, cases = t0.run(corpus)
     assert cases["batch_vs_single"].verdict == AGREE
     assert merged.verdict == DIFFER
+
+
+# --------------------------------------------------------------------------
+# the 2026-09-12 review probes: a green check over a gutted corpus
+# --------------------------------------------------------------------------
+
+
+def test_deleting_fixtures_and_keeping_the_index_is_not_a_pass(corpus):
+    """The exact review probe: keep one file of three, leave the index alone."""
+    keep = f"000_{STRATEGIES[0]}"
+    deleted = []
+    for path in (corpus / "pairs").glob("*.json"):
+        if path.stem != keep:
+            deleted.append(path.stem)
+            path.unlink()
+    merged, cases = t0.run(corpus)
+    assert cases["manifest"].verdict == DIFFER
+    paths = {f.field_path for f in cases["manifest"].findings}
+    assert any(p.startswith("pair_ids") for p in paths)
+    for fid in deleted:
+        assert f"pairs.{fid}.payload_hash" in paths
+    # the replay population is the DECLARED one: survivors alone cannot agree
+    assert merged.verdict != AGREE
+    # and the coverage the index claims no longer derives from the survivors
+    assert cases["coverage"].verdict == DIFFER
+
+
+def test_deleting_the_only_priced_fixture_loses_its_axis(corpus):
+    """A refusal-heavy corpus must not keep claiming priced coverage."""
+    _pair_path(corpus, f"000_{STRATEGIES[0]}").unlink()
+    _, cases = t0.run(corpus)
+    paths = {f.field_path for f in cases["coverage"].findings}
+    assert any(p.startswith(f"axes.priced:{STRATEGIES[0]}") for p in paths)
+
+
+def test_an_extra_undeclared_file_is_a_finding(corpus):
+    extra = json.loads(_pair_path(corpus, f"000_{STRATEGIES[0]}").read_text())
+    extra["fixture_id"] = "999_UNDECLARED"
+    (corpus / "pairs" / "999_UNDECLARED.json").write_text(json.dumps(extra))
+    _, cases = t0.run(corpus)
+    assert cases["manifest"].verdict == DIFFER
+
+
+def test_an_inflated_covers_list_is_a_finding(corpus):
+    fid = f"001_{STRATEGIES[1]}"
+    _rewrite(corpus, fid, lambda d: d["covers"].append("geometry:exact_mirror"))
+    _, cases = t0.run(corpus)
+    # the file disagrees with the manifest AND with the re-derivation
+    assert cases["manifest"].verdict == DIFFER
+    assert cases["coverage"].verdict == DIFFER
+
+
+def test_a_tampered_manifest_hash_is_a_finding(corpus):
+    index = json.loads((corpus / "INDEX.json").read_text())
+    index["pairs"][f"002_{STRATEGIES[2]}"]["payload_hash"] = "sha256:" + "0" * 64
+    (corpus / "INDEX.json").write_text(json.dumps(index, indent=2, sort_keys=True))
+    _, cases = t0.run(corpus)
+    assert cases["manifest"].verdict == DIFFER
+
+
+def test_a_tampered_corpus_hash_is_a_finding(corpus):
+    index = json.loads((corpus / "INDEX.json").read_text())
+    index["corpus_hash"] = "sha256:" + "0" * 64
+    (corpus / "INDEX.json").write_text(json.dumps(index, indent=2, sort_keys=True))
+    _, cases = t0.run(corpus)
+    assert cases["manifest"].verdict == DIFFER
 
 
 # --------------------------------------------------------------------------
