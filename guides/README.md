@@ -24,6 +24,29 @@ ledger's `health.json`, all of which now exist.**
 | `phase6_thesis_overlay.md` | AI-correction overlay | Phases 2, 3 |
 | `tier4_feature_models.md` | **Tier 4 — a model's forecast as a feature, causally** | Phase 0 (data tiers); table built, scorer wiring pending |
 
+## Architecture upgrade proposals (2026-09-12)
+
+- [System rearchitecture](system_rearchitecture.md): source review, preserved
+  strategy inventory, incremental storage, shared scoring/model recipes,
+  supervised jobs, lazy UI, live scoring and staged migration. §4.1-4.3 map
+  each owner to a package, declare the import direction and its enforcement,
+  and set module size/fan-out budgets.
+- [Component contracts](component_contracts.md): proposed schemas, interfaces,
+  time/version semantics, failure behavior and transactional boundaries for
+  review before implementation. §2.5 groups every type by kind and lifecycle;
+  §15 specifies the ComparisonReceipt and the tier-0/1/2 latency commitment
+  that keeps confirming a fix off the nightly path.
+- [Data model diagrams](rearchitecture_data_model.md): entity identities,
+  cardinalities, immutable snapshot membership, model/score lineage and ledger
+  relationships.
+- [Structure generation and PnL simulation](structure_generation_and_simulation.md):
+  exhaustive placement contracts, historical/synthetic scenarios, reusable
+  valuation and accounting, time/IV what-ifs and compatibility tests.
+
+These are design proposals. They describe explicit future changes to the
+runtime choices in convention 7 below, while retaining the research and safety
+requirements. They do not change current strategy definitions or deployments.
+
 ## Environment (verified 2026-08-29)
 
 - Python 3.14, system dist-packages: numpy, pandas, scipy, scikit-learn,
