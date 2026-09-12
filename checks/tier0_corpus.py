@@ -7,43 +7,42 @@
 The corpus is the migration's **oracle**: frozen `(request, record)` pairs
 captured once by ``tools/capture_tier0_corpus.py`` through the real public
 entry points. Every later phase states its exit gate as a comparison against
-it, so this check's job is to prove the oracle is well-formed, addressable and
-replay-identical — fast enough to run on every edit.
+it, so this check's job is to prove the oracle is well-formed, addressable,
+covering and able to catch the defects it exists for — fast enough to run on
+every edit.
 
-What it deliberately does **not** do is re-score. §11 lists "a corpus that fits
-or fetches" as a failure mode: it stops being seconds, stops running on every
-edit, and becomes a tier-2 check nobody waits for. Re-computing these records
-through a *different* implementation is what the corpus is **for**, and it is
-the parity comparison of phases 2-8, not this.
-
-`component_contracts.md` §9.5: "Running twice in the same process is
-insufficient: include fresh process, reordered inputs, batch/single and
-serialized round-trip cases." That sentence is the acceptance criterion for the
-whole corpus, and it is these cases:
+**What tier 0 proves.**
 
 1. **manifest membership** — the files on disk are EXACTLY the pairs the index
-   declares, each file's hashes, kind and covers match what the manifest says
-   about it, and the corpus hash re-computes from the survivors. A corpus with
-   fifteen of sixteen fixtures deleted is a failed membership check and an
-   ``incomparable`` verdict, not a quieter pass: the expected population comes
-   from the DECLARED manifest, never from what happened to load.
+   declares, each file's hashes, kind and covers match the manifest row, and
+   the corpus hash re-computes from the survivors. The expected population
+   comes from the DECLARED manifest, never from what happened to load.
 2. **addressing** — every record is reachable from the content hash of its own
    full-precision request. A rounded request hashes differently and stops
    resolving, which is what makes `b33036c` structurally impossible to hide.
 3. **digest** — the payload on disk re-hashes to the ``payload_hash`` beside
    it. `6b9d5cf` was a file disagreeing with its own digest.
-4. **coverage, re-derived** — the coverage table is NOT trusted. Every axis
-   claim is recomputed from the surviving records alone (stdlib only, against
-   the ``axis_inputs`` frozen in the index), and each pair's stored ``covers``
-   must equal the re-derivation. Deleting the only priced RAMP7 fixture removes
-   its axis here even if the index still claims it.
-5. **round trip** — serialized to disk and read back, every record compares
-   equal through the staged comparator.
-6. **batch and single** — the merged receipt over all pairs equals the
-   per-pair receipts folded together.
-7. **reordered, and a fresh process** — the corpus verdict is identical when
-   the pairs are loaded backwards, and identical again in a subprocess that
-   shares no memory with this one.
+4. **serialized round trip** — each record written to a real file and read
+   back compares equal.
+5. **coverage, re-derived** — every axis claim is recomputed from the surviving
+   records by :func:`derive_covers`, the single definition the capture also
+   uses. The index's claims are compared against it, never trusted.
+6. **pinned counterparts** — every pinned fixture names the selector-resolved
+   fixture it was pinned from, that fixture is present, and the two agree on
+   the forecast block and the legs: the `e845f3e` regression, on real data.
+7. **seeded negative controls** — contracts §15.3: the four seedable
+   2026-09-11 causes planted into four distinct REAL frozen pairs, one pass,
+   each localized to its stage with nothing else moving. The spec lives in
+   :mod:`checks.replay_identity`.
+8. **loader determinism** — batch versus single, and a fresh process.
+
+**What tier 0 does not prove.** It does not re-score: §11 lists "a corpus that
+fits or fetches" as a failure mode, and re-scoring is ``tools/replay_tier1.py``.
+Nor does it run the engine-level parity matrix — reordered inputs, batching and
+restart through the scorer — which is rearchitecture phase 1's acceptance test
+O30. An earlier version ran a "reordered inputs" case here that iterated sorted
+ids whichever way the files were loaded; it could not fail, so it is gone
+rather than kept as a claim.
 
 Stdlib plus ``engine/v2/diagnosis`` only. It must run in a bare checkout with
 no pandas, no store and no models, or the "every edit" commitment is not real.
@@ -51,11 +50,12 @@ no pandas, no store and no models, or the "every edit" commitment is not real.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import socket
 import subprocess
-import tempfile
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -63,22 +63,34 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.replay_identity import (  # noqa: E402
+    FORECAST_BLOCK,
+    SEEDED_CONTROLS,
+    check_control,
+    pick_seed_targets,
+)
 from engine.v2.diagnosis import (  # noqa: E402
     AGREE,
+    DIFFER,
     INCOMPARABLE,
     ComparisonReceipt,
     compare_records,
     content_hash,
+    flatten,
     merge_receipts,
     problem,
 )
 
-__all__ = ["Corpus", "load", "run", "main", "TIME_BUDGET_SECONDS"]
+__all__ = ["Corpus", "load", "run", "main", "derive_covers", "seeded_controls",
+           "derived_uncovered", "TIME_BUDGET_SECONDS"]
 
 DEFAULT_CORPUS = ROOT / "fixtures" / "tier0"
 
 #: §7.3: total runtime under ten seconds, network disabled.
 TIME_BUDGET_SECONDS = 10.0
+
+#: The marker ``capture_tier0_corpus.jsonable`` freezes a NaN/Infinity under.
+NONFINITE = "__nonfinite__"
 
 
 # --------------------------------------------------------------------------
@@ -106,10 +118,9 @@ class Corpus:
 def resolve_corpus(root: Path) -> Path:
     """The version directory a corpus root points at.
 
-    A bare ``root/INDEX.json`` is itself the corpus (the layout tests build and
-    the pre-versioning captures wrote). Otherwise ``root/CURRENT`` names the
-    published version directory — the pointer ``capture_tier0_corpus.py``
-    flips atomically after a versioned write.
+    A bare ``root/INDEX.json`` is itself the corpus (the layout tests build).
+    Otherwise ``root/CURRENT`` names the published version directory — the
+    pointer ``capture_tier0_corpus.py`` flips atomically after a versioned write.
     """
     if (root / "INDEX.json").is_file():
         return root
@@ -125,20 +136,14 @@ def resolve_corpus(root: Path) -> Path:
     return root
 
 
-def load(root: Path, *, reverse: bool = False) -> Corpus:
-    """Read the corpus. ``reverse`` is the reordered-inputs case, not a option."""
+def load(root: Path) -> Corpus:
+    """Read the corpus: the index, and every pair file under ``pairs/``."""
     index = json.loads((root / "INDEX.json").read_text())
-    names = sorted((root / "pairs").glob("*.json"), key=lambda p: p.name,
-                   reverse=reverse)
     pairs = {}
-    for path in names:
+    for path in sorted((root / "pairs").glob("*.json")):
         pair = json.loads(path.read_text())
         pairs[pair["fixture_id"]] = pair
     return Corpus(root=root, index=index, pairs=pairs)
-
-
-def declared_ids(corpus: Corpus) -> list[str]:
-    return sorted(corpus.index.get("pairs", {}))
 
 
 # --------------------------------------------------------------------------
@@ -149,12 +154,10 @@ def declared_ids(corpus: Corpus) -> list[str]:
 def case_manifest(corpus: Corpus) -> ComparisonReceipt:
     """Exact membership and per-file agreement with the manifest.
 
-    The loader trusts nothing: files that the index does not declare, declared
-    pairs that have no file, and files whose stored hashes/kind/covers disagree
-    with the manifest row are each a finding. The corpus hash is recomputed
-    from the SURVIVORS, so a deletion changes it. This is the case that turns
-    "keep one fixture of sixteen, leave the index alone" from a green run into
-    a named, stage-localized failure.
+    Files the index does not declare, declared pairs with no file, and files
+    whose stored hashes/kind/covers disagree with the manifest row are each a
+    finding. The corpus hash is recomputed from the SURVIVORS, so a deletion
+    changes it.
     """
     declared = corpus.index.get("pairs", {})
     left: dict[str, Any] = {
@@ -192,17 +195,12 @@ def case_manifest(corpus: Corpus) -> ComparisonReceipt:
 
 
 # --------------------------------------------------------------------------
-# case 1 — addressing
+# cases 1-3 — addressing, digest, serialized round trip
 # --------------------------------------------------------------------------
 
 
 def case_addressing(corpus: Corpus) -> list[ComparisonReceipt]:
-    """Resolve every record from the hash of its own frozen request.
-
-    This is what "reproduces from its frozen request" means for a frozen
-    corpus: the key is the content hash of the full-precision request, so a
-    client that copied a rounded value out of a table addresses nothing.
-    """
+    """Resolve every record from the hash of its own frozen request."""
     by_request: dict[str, list[str]] = {}
     for fixture_id in corpus.ordered_ids:
         by_request.setdefault(content_hash(corpus.request_of(fixture_id)),
@@ -222,11 +220,6 @@ def case_addressing(corpus: Corpus) -> list[ComparisonReceipt]:
     return out
 
 
-# --------------------------------------------------------------------------
-# case 2 — the digest beside the payload
-# --------------------------------------------------------------------------
-
-
 def case_digest(corpus: Corpus) -> list[ComparisonReceipt]:
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
@@ -240,18 +233,8 @@ def case_digest(corpus: Corpus) -> list[ComparisonReceipt]:
     return out
 
 
-# --------------------------------------------------------------------------
-# case 3 — serialized round trip
-# --------------------------------------------------------------------------
-
-
 def case_round_trip(corpus: Corpus, scratch: Path) -> list[ComparisonReceipt]:
-    """Write each record to an actual file and read it back before comparing.
-
-    A round-trip loss through serialization is invisible to any check that
-    keeps the object in memory, which is the whole reason contracts §9.5 names
-    this case separately.
-    """
+    """Write each record to an actual file and read it back before comparing."""
     scratch.mkdir(parents=True, exist_ok=True)
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
@@ -267,28 +250,27 @@ def case_round_trip(corpus: Corpus, scratch: Path) -> list[ComparisonReceipt]:
     return out
 
 
-# --------------------------------------------------------------------------
-# cases 4 and 5 — batch/single, reordered, fresh process
-# --------------------------------------------------------------------------
-
-
 def corpus_case_list(corpus: Corpus, scratch: Path) -> list[ComparisonReceipt]:
     return (case_addressing(corpus) + case_digest(corpus)
             + case_round_trip(corpus, scratch))
 
 
 def corpus_verdict(corpus: Corpus, scratch: Path) -> ComparisonReceipt:
-    """One receipt over every pair and every case. The corpus's answer.
+    """One receipt over every pair and every per-pair case.
 
     The expected population comes from the DECLARED manifest, not from what
-    loaded: a corpus that silently lost fifteen of sixteen files must compare
-    three receipts against an expectation of forty-eight and come back
-    ``incomparable``, not agree over the survivor.
+    loaded: a corpus that silently lost fifteen of sixteen files compares three
+    receipts against an expectation of forty-eight and is ``incomparable``.
     """
     receipts = corpus_case_list(corpus, scratch)
     declared = len(corpus.index.get("pairs") or {}) or len(corpus.pairs)
     return merge_receipts(receipts, comparison_kind="tier0_corpus_replay",
                           tier=0, expected=3 * declared)
+
+
+# --------------------------------------------------------------------------
+# loader determinism — batch/single and a fresh process
+# --------------------------------------------------------------------------
 
 
 def _one(corpus: Corpus, fixture_id: str) -> Corpus:
@@ -297,11 +279,10 @@ def _one(corpus: Corpus, fixture_id: str) -> Corpus:
 
 
 def case_batch_and_single(corpus: Corpus, scratch: Path) -> ComparisonReceipt:
-    """The merged receipt must equal the per-pair receipts folded together.
+    """The corpus verdict folded pair by pair equals the batch verdict.
 
-    A batch that reuses common work is allowed to be faster and is not allowed
-    to be different (contracts §9.2: batching reuses common feature work
-    without changing results).
+    Determinism of THIS check, not of the scorer: the engine-level batch/single
+    parity is rearchitecture phase 1's O30.
     """
     singles = [
         merge_receipts(corpus_case_list(_one(corpus, fid), scratch),
@@ -318,19 +299,6 @@ def case_batch_and_single(corpus: Corpus, scratch: Path) -> ComparisonReceipt:
          "findings": sorted(f.finding_id for f in folded.findings)},
         comparison_kind="tier0_batch_vs_single",
         left_ref="batch", right_ref="single",
-    )
-
-
-def case_reordered(corpus_root: Path, scratch: Path) -> ComparisonReceipt:
-    forward = corpus_verdict(load(corpus_root), scratch)
-    backward = corpus_verdict(load(corpus_root, reverse=True), scratch)
-    return compare_records(
-        {"verdict": forward.verdict, "findings": sorted(
-            f.finding_id for f in forward.findings)},
-        {"verdict": backward.verdict, "findings": sorted(
-            f.finding_id for f in backward.findings)},
-        comparison_kind="tier0_reordered_inputs",
-        left_ref="in-order", right_ref="reversed",
     )
 
 
@@ -351,144 +319,368 @@ def case_fresh_process(corpus_root: Path, this_verdict: str) -> ComparisonReceip
 
 
 # --------------------------------------------------------------------------
-# coverage — re-derived from the survivors, never read from the index's claims
+# coverage — one definition, re-derived from the survivors
 # --------------------------------------------------------------------------
 
-#: The marker ``capture_tier0_corpus.jsonable`` freezes a NaN/Infinity under.
-NONFINITE = "__nonfinite__"
+
+def priced(record: dict) -> bool:
+    """A row that resolved legs and a cost — not a refusal."""
+    return bool(record.get("legs")) and record.get("entry_cost") is not None
 
 
-def _derive_roles(record: dict, roles: list[str]) -> set[str]:
-    """Mirror of the capture's ``_roles_exercised``, over the frozen record."""
+def _missing(value: Any) -> bool:
+    return value is None or (isinstance(value, dict) and NONFINITE in value)
+
+
+def _flags(record: dict) -> list:
+    return record.get("flags") or []
+
+
+def _roles(record: dict, roles: list[str]) -> set[str]:
+    """Which registered model roles this record shows running."""
     out: set[str] = set()
     versions = record.get("model_versions") or {}
     for role in roles:
         if role in versions or any(role in str(k) for k in versions):
             out.add(role)
-    if record.get("forecast_model"):
-        out.add("size")
-    if record.get("driver_prediction") is not None:
-        out.add("size")
-    if record.get("runup_move_prediction") is not None:
-        out.add("runup_move")
-    if record.get("implied_move_at_entry") is not None:
-        out.add("implied_t1")
-    if record.get("exp_pnl_sim") is not None:
-        out.add("iv_crush")
-    if record.get("gate_score") is not None or record.get("gate_pass") is not None:
-        out.add("gate")
-    if record.get("chooser_score") is not None:
-        out.add("chooser")
+    signals = (
+        ("forecast_model", "size"), ("driver_prediction", "size"),
+        ("runup_move_prediction", "runup_move"),
+        ("implied_move_at_entry", "implied_t1"), ("exp_pnl_sim", "iv_crush"),
+        ("gate_score", "gate"), ("gate_pass", "gate"),
+        ("chooser_score", "chooser"),
+    )
+    out |= {role for key, role in signals if not _missing(record.get(key))}
     return out
 
 
-def _derive_geometry(record: dict, request: dict) -> set[str]:
+def _boundaries(record: dict) -> set[str]:
+    entry, exit_ = record.get("entry_date"), record.get("exit_date")
+    if not entry or not exit_:
+        return set()
+    out = set()
+    if entry[:4] != exit_[:4]:
+        out.add("boundary:year")
+    if entry[:7] != exit_[:7]:
+        out.add("boundary:month")
+    return out
+
+
+def _leg_strikes(record: dict) -> list[float]:
+    return sorted({float(leg["strike"]) for leg in record.get("legs") or []
+                   if isinstance(leg, dict) and isinstance(leg.get("strike"), (int, float))})
+
+
+def _geometry(record: dict, request: dict, relations: dict) -> set[str]:
+    """Geometry axes. Every one but the coarse-ladder refusal needs a PRICED row.
+
+    A refusal has no legs, so it demonstrates nothing about how a shape was
+    chosen: the previous definition let a NO_CHAIN row whose requested strike
+    was a computed 14.7615 cover "round listed strike".
+    """
     out: set[str] = set()
+    if "COARSE_LADDER" in _flags(record):
+        out.add("geometry:coarse_ladder")
+    if not priced(record):
+        return out
     params = record.get("structure_params")
     if request.get("structure_params"):
-        out.add("geometry:pinned")
-    elif params:
+        if relations.get("pinned_from"):
+            out.add("geometry:pinned")
+    elif isinstance(params, dict) and params:
         out.add("geometry:selector")
-    if isinstance(params, dict) and params.get("width_moneyness") is not None:
+    if isinstance(params, dict) and isinstance(params.get("width_moneyness"), float):
         out.add("geometry:computed_width")
-    if request.get("strike") is not None:
+    strikes = _leg_strikes(record)
+    requested = request.get("strike")
+    if isinstance(requested, (int, float)) and float(requested) in strikes:
+        # The requested strike IS a listed strike the legs resolved to — not a
+        # computed moneyness the chain snapped away from.
         out.add("geometry:round_listed_strike")
-    if "COARSE_LADDER" in (record.get("flags") or []):
-        out.add("geometry:coarse_ladder")
-    legs = record.get("legs") or []
-    strikes = sorted(leg.get("strike") for leg in legs
-                     if isinstance(leg, dict) and leg.get("strike") is not None)
-    if len(strikes) >= 3:
-        gaps = [round(b - a, 6) for a, b in zip(strikes, strikes[1:])]
-        if len(set(gaps)) == 1:
-            out.add("geometry:exact_mirror")
+    if len(strikes) >= 3 and len({round(b - a, 6) for a, b in zip(strikes, strikes[1:])}) == 1:
+        out.add("geometry:exact_mirror")
+    return out
+
+
+def _dyn_sv(record: dict, request: dict, menu: list[str]) -> set[str]:
+    """DYN-SV axes, only for a choice made over a BOARD-SHAPED frame.
+
+    Board-shaped means one row per menu structure per event, as the board's
+    ``engine.score.score_calendar`` loop produces at its ATM pass. A frame carrying a structure twice — a pinned
+    copy beside its selector row — can "tie" a structure with itself, which is
+    what the first corpus's only tie fixture turned out to be.
+    """
+    rows = request.get("frame_rows") or []
+    in_menu = [(r.get("record") or {}).get("strategy") for r in rows]
+    in_menu = [s for s in in_menu if s in menu]
+    if not rows or len(in_menu) != len(set(in_menu)):
+        return set()
+    out: set[str] = set()
+    size = record.get("menu_size")
+    size = size if isinstance(size, int) and not isinstance(size, bool) else 0
+    out.add("dyn_sv:full_menu" if size >= len(menu) else "dyn_sv:partial_menu")
+    margin = record.get("chosen_margin")
+    if (isinstance(margin, (int, float)) and not isinstance(margin, bool)
+            and float(margin) == 0.0 and size >= 2):
+        out.add("dyn_sv:tie")
+    if _missing(record.get("chooser_score")):
+        out.add("dyn_sv:fallback")
     return out
 
 
 def derive_covers(record: dict, request: dict, record_kind: str | None,
-                  axis_inputs: dict) -> list[str]:
-    """Re-derive one pair's coverage axes from its FROZEN content alone.
+                  axis_inputs: dict, relations: dict | None = None) -> list[str]:
+    """The coverage axes one frozen pair demonstrates. THE definition.
 
-    A deliberate second implementation of the capture's ``covers_of``: two
-    derivations agreeing is evidence, one trusting the other's index is not.
-    Stdlib only — no engine import, no panel, nothing that could make this
-    check slow enough to stop running on every edit.
+    ``tools/capture_tier0_corpus.py`` selects fixtures with this function and
+    this check re-derives with it, so there is exactly one meaning of each
+    axis. What protects the index is not a second implementation — two copies
+    agreeing proves only that they were copied — but that the claims written
+    into the index are recomputed from the surviving records on every run, and
+    that each axis has a crafted positive and negative case in
+    ``tests/test_tier0_corpus.py``.
     """
-    out = {f"strategy:{record.get('strategy')}"}
-    if record.get("legs") and record.get("entry_cost") is not None:
-        out.add(f"priced:{record.get('strategy')}")
+    relations = relations or {}
+    strategy = record.get("strategy")
+    out = {f"strategy:{strategy}"}
+    if priced(record):
+        out.add(f"priced:{strategy}")
     if record.get("session"):
         out.add(f"session:{record['session']}")
-    refusal_map = axis_inputs.get("refusal_code_mapping") or {}
-    for flag in record.get("flags") or []:
-        for code, emitted in refusal_map.items():
-            if emitted == flag:
-                out.add(f"refusal:{code}")
+    mapping = axis_inputs.get("refusal_code_mapping") or {}
+    out |= {f"refusal:{code}" for flag in _flags(record)
+            for code, emitted in mapping.items() if emitted == flag}
     out |= {f"model_role:{r}"
-            for r in _derive_roles(record, axis_inputs.get("model_roles") or [])}
-    entry, exit_ = record.get("entry_date"), record.get("exit_date")
-    if entry and exit_:
-        if entry[:4] != exit_[:4]:
-            out.add("boundary:year")
-        if entry[:7] != exit_[:7]:
-            out.add("boundary:month")
-    out |= _derive_geometry(record, request)
-    disabled = axis_inputs.get("disabled") or []
-    if record.get("strategy") in disabled and (
-            "UNVALIDATED_STRUCTURE" in (record.get("flags") or [])):
-        out.add(f"disabled:{record['strategy']}:refused")
+            for r in _roles(record, axis_inputs.get("model_roles") or [])}
+    out |= _boundaries(record)
+    if record_kind == "score_result":
+        out |= _geometry(record, request, relations)
+    if (strategy in (axis_inputs.get("disabled") or [])
+            and "UNVALIDATED_STRUCTURE" in _flags(record)):
+        out.add(f"disabled:{strategy}:refused")
     if record_kind == "research_replay":
-        out.add(f"disabled:{record.get('strategy')}:research_replay")
+        out.add(f"disabled:{strategy}:research_replay")
     if record_kind == "dyn_sv_choice":
-        menu = axis_inputs.get("menu") or []
-        menu_size = int(record.get("menu_size") or 0)
-        out.add("dyn_sv:full_menu" if menu_size >= len(menu)
-                else "dyn_sv:partial_menu")
-        margin = record.get("chosen_margin")
-        if margin is not None and not isinstance(margin, dict) and float(margin) == 0.0:
-            out.add("dyn_sv:tie")
-        chooser = record.get("chooser_score")
-        if chooser is None or (isinstance(chooser, dict)
-                               and NONFINITE in chooser):
-            out.add("dyn_sv:fallback")
+        out |= _dyn_sv(record, request, axis_inputs.get("menu") or [])
     return sorted(out)
+
+
+def _axis_inputs(corpus: Corpus) -> dict:
+    axis_inputs = dict(corpus.index.get("axis_inputs") or {})
+    axis_inputs.setdefault("refusal_code_mapping",
+                           corpus.index.get("refusal_code_mapping") or {})
+    return axis_inputs
+
+
+def _derived(corpus: Corpus) -> dict[str, list[str]]:
+    """``{fixture_id: covers}``, re-derived from each surviving pair."""
+    axis_inputs = _axis_inputs(corpus)
+    out = {}
+    for fid in corpus.ordered_ids:
+        payload = corpus.pairs[fid].get("payload") or {}
+        out[fid] = derive_covers(payload.get("record") or {},
+                                 payload.get("request") or {},
+                                 payload.get("record_kind"), axis_inputs,
+                                 payload.get("relations"))
+    return out
+
+
+def derived_uncovered(corpus: Corpus) -> list[str]:
+    """Required axes no surviving pair demonstrates — never the index's claim."""
+    covered = {axis for covers in _derived(corpus).values() for axis in covers}
+    return sorted(set(corpus.index.get("required_axes", [])) - covered)
 
 
 def case_coverage(corpus: Corpus) -> ComparisonReceipt:
     """Every axis claim recomputed from the surviving files (§12.2).
 
-    Two comparisons in one receipt: each pair's stored ``covers`` against the
-    re-derivation from its own frozen content, and the index's coverage table
-    against the coverage the survivors actually provide. A deleted fixture
-    fails here through its axes even if every hash in the manifest still
-    "passes", and an inflated ``covers`` list fails even though nothing was
-    deleted.
+    Each pair's stored ``covers`` against the re-derivation from its own frozen
+    content, and the index's coverage table against the coverage the survivors
+    actually provide. A deleted fixture fails through its axes even if every
+    hash in the manifest still passes, and an inflated ``covers`` list fails
+    even though nothing was deleted.
     """
-    axis_inputs = dict(corpus.index.get("axis_inputs") or {})
-    axis_inputs.setdefault("refusal_code_mapping",
-                           corpus.index.get("refusal_code_mapping") or {})
-    required = corpus.index.get("required_axes", [])
-
     left: dict[str, Any] = {"pairs": {}, "axes": {}}
     right: dict[str, Any] = {"pairs": {}, "axes": {}}
     derived_coverage: dict[str, list[str]] = {}
-    for fid in corpus.ordered_ids:
-        pair = corpus.pairs[fid]
-        payload = pair.get("payload") or {}
-        derived = derive_covers(payload.get("record") or {},
-                                payload.get("request") or {},
-                                payload.get("record_kind"), axis_inputs)
-        left["pairs"][fid] = {"covers": pair.get("covers")}
+    for fid, derived in _derived(corpus).items():
+        left["pairs"][fid] = {"covers": corpus.pairs[fid].get("covers")}
         right["pairs"][fid] = {"covers": derived}
         for axis in derived:
             derived_coverage.setdefault(axis, []).append(fid)
     claimed = corpus.index.get("coverage", {})
-    for axis in required:
+    for axis in corpus.index.get("required_axes", []):
         left["axes"][axis] = sorted(claimed.get(axis) or [])
         right["axes"][axis] = sorted(derived_coverage.get(axis) or [])
     return compare_records(
         left, right, comparison_kind="tier0_coverage",
         left_ref="index-claims", right_ref="derived-from-survivors",
+    )
+
+
+# --------------------------------------------------------------------------
+# pinned counterparts — `e845f3e` on real data
+# --------------------------------------------------------------------------
+
+#: What a pinned re-score must reproduce from the selector row it was pinned
+#: from: the forecast that chose the shape, and the contract that was priced.
+PINNED_FIELDS = FORECAST_BLOCK + ("legs",)
+
+
+def case_pinned_counterparts(corpus: Corpus) -> ComparisonReceipt:
+    """Every pinned fixture's source is present and agrees on forecast and legs.
+
+    A pinned fixture alone cannot show `e845f3e` — there is nothing to compare
+    its forecast against. So the capture records which selector-resolved pair
+    each pinned request was pinned FROM, keeps that pair in the corpus, and this
+    case compares the two.
+    """
+    by_request = {pair.get("request_hash"): fid for fid, pair in corpus.pairs.items()}
+    left: dict[str, Any] = {}
+    right: dict[str, Any] = {}
+    for fid in corpus.ordered_ids:
+        payload = corpus.pairs[fid].get("payload") or {}
+        source_hash = (payload.get("relations") or {}).get("pinned_from")
+        if not source_hash:
+            continue
+        source = by_request.get(source_hash)
+        source_record = corpus.record_of(source) if source else {}
+        record = payload.get("record") or {}
+        left[fid] = {"source_request_hash": source_hash,
+                     **{f: source_record.get(f) for f in PINNED_FIELDS}}
+        right[fid] = {"source_request_hash": (corpus.pairs[source]["request_hash"]
+                                              if source else None),
+                      **{f: record.get(f) for f in PINNED_FIELDS}}
+    if not left:
+        # The coverage case owns the absence of a pinned axis; there is simply
+        # nothing to pair here.
+        left = right = {"pinned_fixtures": 0}
+    return compare_records(
+        left, right, comparison_kind="tier0_pinned_counterparts",
+        left_ref="selector-source", right_ref="pinned-rescore",
+    )
+
+
+# --------------------------------------------------------------------------
+# seeded negative controls — contracts §15.3, over the REAL corpus
+# --------------------------------------------------------------------------
+
+#: Tier 0 writes no replayed record, so it has no round-trip receipt.
+TIER0_RECEIPT_KINDS = ("record", "integrity")
+
+
+def _nudged(value: float) -> float:
+    return value + max(abs(value) * 1e-3, 1e-9)
+
+
+def round_params(record: dict) -> dict:
+    """``structure_params`` rounded to six places — the `json_safe` defect."""
+    out = copy.deepcopy(record)
+    params = out.get("structure_params")
+    if isinstance(params, dict):
+        out["structure_params"] = {k: round(v, 6) if isinstance(v, float) else v
+                                   for k, v in params.items()}
+    return out
+
+
+def _seeded_record(cause: str | None, record: dict) -> dict:
+    """The frozen record as the seeded defect leaves it at its first stage."""
+    out = copy.deepcopy(record)
+    if cause == "forecast_suppressed":
+        out.update({key: None for key in FORECAST_BLOCK})
+    elif cause == "analog_bootstrap_reseeded":
+        out["ci_low"], out["ci_high"] = _nudged(out["ci_low"]), _nudged(out["ci_high"])
+    elif cause == "replay_input_rounded":
+        out = round_params(out)
+    return out
+
+
+def finding_dicts(receipt: ComparisonReceipt) -> list[dict]:
+    return [{"first_differing_stage": f.first_differing_stage,
+             "field_path": f.field_path, "kind": f.kind}
+            for f in receipt.findings]
+
+
+def _seed_pair(fid: str, payload: dict, cause: str | None) -> tuple[ComparisonReceipt, ComparisonReceipt]:
+    frozen = payload.get("record") or {}
+    seeded = _seeded_record(cause, frozen)
+    record_receipt = compare_records(
+        frozen, seeded, comparison_kind="tier0_seeded_record",
+        left_ref=f"{fid}#frozen", right_ref=f"{fid}#seeded")
+    written = {**payload, "record": seeded}
+    stored = content_hash(written)
+    if cause == "rounded_after_digest":
+        # `6b9d5cf`: the digest was taken, THEN the bytes were re-rounded.
+        written = {**written, "record": round_params(seeded)}
+    integrity = compare_records(
+        {"payload_hash": stored}, {"payload_hash": content_hash(written)},
+        comparison_kind="tier0_seeded_integrity",
+        left_ref=f"{fid}#stored-digest", right_ref=f"{fid}#written-bytes")
+    return record_receipt, integrity
+
+
+def seeded_controls(corpus: Corpus) -> dict[str, Any]:
+    """Plant every seedable cause into its own real pair, and judge one pass.
+
+    Distinct target pairs make each cause's findings attributable, so the one
+    pass is also an ablation: every control must produce exactly its specified
+    findings, every untargeted pair must stay clean, and every pair's compared
+    population must equal its own leaves — the `28cf8b1` property.
+    """
+    targets, missing = pick_seed_targets(corpus.pairs)
+    cause_of = {fid: cause for cause, fid in targets.items()}
+    receipts: list[ComparisonReceipt] = []
+    found_by_cause: dict[str, dict[str, list[dict]]] = {}
+    untargeted: list[dict] = []
+    field_set_mismatches: list[str] = []
+    for fid in corpus.ordered_ids:
+        payload = corpus.pairs[fid].get("payload") or {}
+        cause = cause_of.get(fid)
+        record_receipt, integrity = _seed_pair(fid, payload, cause)
+        receipts += [record_receipt, integrity]
+        frozen = payload.get("record") or {}
+        leaves = set(flatten(frozen)) | set(flatten(_seeded_record(cause, frozen)))
+        if leaves and record_receipt.population.compared != len(leaves):
+            field_set_mismatches.append(fid)
+        found = {"record": finding_dicts(record_receipt),
+                 "integrity": finding_dicts(integrity)}
+        if cause:
+            found_by_cause[cause] = found
+        else:
+            untargeted += [dict(f, fixture_id=fid) for f in found["record"] + found["integrity"]]
+    one_pass = merge_receipts(receipts, comparison_kind="tier0_seeded_one_pass",
+                              expected=len(receipts))
+    controls = {}
+    for cause, spec in SEEDED_CONTROLS.items():
+        found = found_by_cause.get(cause, {})
+        problems = (["no frozen pair can carry this control"] if cause in missing
+                    else check_control(cause, found, kinds=TIER0_RECEIPT_KINDS))
+        controls[cause] = {
+            "commit": spec["commit"], "target": targets.get(cause),
+            "observed": {kind: sorted({f"{f['first_differing_stage']}: {f['field_path']}"
+                                       for f in rows}) for kind, rows in found.items()},
+            "problems": problems,
+        }
+    return {"one_pass_verdict": one_pass.verdict,
+            "one_pass_findings": len(one_pass.findings),
+            "controls": controls, "untargeted_findings": untargeted[:10],
+            "field_set_mismatches": field_set_mismatches}
+
+
+def case_seeded_controls(corpus: Corpus) -> ComparisonReceipt:
+    """``agree`` exactly when every seeded control behaved as specified."""
+    summary = seeded_controls(corpus)
+    expected: dict[str, Any] = {cause: [] for cause in SEEDED_CONTROLS}
+    observed: dict[str, Any] = {cause: summary["controls"][cause]["problems"]
+                                for cause in SEEDED_CONTROLS}
+    expected.update(one_pass_verdict=DIFFER, untargeted_findings=0,
+                    field_set_mismatches=[])
+    observed.update(one_pass_verdict=summary["one_pass_verdict"],
+                    untargeted_findings=len(summary["untargeted_findings"]),
+                    field_set_mismatches=summary["field_set_mismatches"])
+    return compare_records(
+        expected, observed, comparison_kind="tier0_seeded_controls",
+        left_ref="control-spec", right_ref="one-seeded-pass",
     )
 
 
@@ -534,14 +726,32 @@ def _run(corpus_root: Path,
         "manifest": case_manifest(corpus),
         "corpus_replay": verdict,
         "coverage": case_coverage(corpus),
+        "pinned_counterparts": case_pinned_counterparts(corpus),
+        "seeded_controls": case_seeded_controls(corpus),
         "batch_vs_single": case_batch_and_single(corpus, scratch),
-        "reordered_inputs": case_reordered(corpus_root, scratch),
         "fresh_process": case_fresh_process(corpus_root, verdict.verdict),
     }
     merged = merge_receipts(list(cases.values()),
                             comparison_kind="tier0_corpus", tier=0,
                             expected=len(cases))
     return merged, cases
+
+
+def _json_report(root: Path, merged: ComparisonReceipt,
+                 cases: dict[str, ComparisonReceipt]) -> dict[str, Any]:
+    corpus = load(root)
+    return {
+        "verdict": merged.verdict,
+        "cases": {name: r.verdict for name, r in cases.items()},
+        "findings": [f.describe() for f in merged.findings],
+        "population": {"expected": merged.population.expected,
+                       "compared": merged.population.compared},
+        "pairs": len(corpus.pairs),
+        "declared_pairs": len(corpus.index.get("pairs") or {}),
+        "corpus_hash": corpus.index.get("corpus_hash"),
+        "uncovered_axes": derived_uncovered(corpus),
+        "seeded_controls": seeded_controls(corpus) if corpus.pairs else {},
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -572,15 +782,7 @@ def main(argv: list[str] | None = None) -> int:
 
     merged, cases = run(root)
     if args.json:
-        print(json.dumps({
-            "verdict": merged.verdict,
-            "cases": {name: r.verdict for name, r in cases.items()},
-            "findings": [f.describe() for f in merged.findings],
-            "population": {
-                "expected": merged.population.expected,
-                "compared": merged.population.compared,
-            },
-        }, indent=2, sort_keys=True))
+        print(json.dumps(_json_report(root, merged, cases), indent=2, sort_keys=True))
         return 0 if merged.verdict == AGREE else 1
 
     if not args.quiet:

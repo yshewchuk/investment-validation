@@ -25,7 +25,9 @@ reproducing its elapsed time.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 __all__ = [
@@ -56,7 +58,15 @@ PROBLEM_CATEGORIES = (
 
 @dataclass(frozen=True)
 class Finding:
-    """One independent difference, localized to a stage and a field."""
+    """One difference, named by a field and localized to a stage.
+
+    Two stages, deliberately. ``owning_stage`` is the stage the field belongs
+    to in the declared plan. ``first_differing_stage`` is the earliest stage,
+    upstream of or at the owning one, whose outputs differ while its inputs
+    agree. Both are OBSERVED from record fields along the declared graph: they
+    say where the records first disagree, not which computation diverged, and
+    real per-stage execution hashes arrive in rearchitecture phase 1.
+    """
 
     finding_id: str
     first_differing_stage: str
@@ -77,6 +87,8 @@ class Finding:
     #: bugs, and five of the six defects this corpus exists to catch were
     #: invisible in the non-null values alone.
     kind: str = "value"
+    #: The stage that owns ``field_path`` in the declared plan.
+    owning_stage: str = ""
     source_rows_ref: str | None = None
     recipe_and_artifact_versions: dict[str, Any] = field(default_factory=dict)
     affected_count: int = 1
@@ -89,8 +101,11 @@ class Finding:
     not_downstream_of: tuple[str, ...] = ()
 
     def describe(self) -> str:
+        where = self.first_differing_stage
+        if self.owning_stage and self.owning_stage != where:
+            where = f"{where} -> {self.owning_stage}"
         return (
-            f"{self.first_differing_stage}: {self.field_path} "
+            f"{where}: {self.field_path} "
             f"({self.kind}) {self.left_value!r} != {self.right_value!r}"
         )
 
@@ -139,6 +154,14 @@ class Envelope:
     duration_seconds: float | None = None
     worker_ref: str | None = None
     diagnostic_ref: str | None = None
+
+    @classmethod
+    def since(cls, started_monotonic: float) -> "Envelope":
+        """The envelope of work that began at ``time.monotonic()`` = ``started``."""
+        return cls(
+            started_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            duration_seconds=time.monotonic() - started_monotonic,
+        )
 
 
 @dataclass(frozen=True)

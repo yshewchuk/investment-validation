@@ -146,9 +146,111 @@ def test_a_downstream_finding_is_not_claimed_independent():
     left = record()
     right = record(model_inputs={"or_implied": 9.9}, forecast_abs_move=1.0)
     receipt = compare_records(left, right)
-    by_stage = {f.first_differing_stage: f for f in receipt.findings}
-    assert by_stage["forecast"].not_downstream_of == ()
-    assert by_stage["features"].first_differing_stage == "features"
+    by_owner = {f.owning_stage: f for f in receipt.findings}
+    assert by_owner["forecast"].not_downstream_of == ()
+    assert by_owner["features"].first_differing_stage == "features"
+
+
+def test_a_downstream_finding_is_localized_to_the_root_upstream_of_it():
+    """The forecast field differs, but its stage's inputs already differed.
+
+    `first_differing_stage` is the earliest stage whose inputs agreed and
+    outputs did not — here `features` — while `owning_stage` still says which
+    stage the field belongs to. Reporting `forecast` for it would send an
+    operator to the wrong stage.
+    """
+    receipt = compare_records(
+        record(), record(model_inputs={"or_implied": 9.9}, forecast_abs_move=1.0))
+    forecast = next(f for f in receipt.findings if f.field_path == "forecast_abs_move")
+    assert forecast.owning_stage == "forecast"
+    assert forecast.first_differing_stage == "features"
+    assert receipt.first_differing_stage == "features"
+
+
+def test_a_root_finding_names_its_own_stage_on_both_fields():
+    receipt = compare_records(record(), record(ci_low=-0.9))
+    finding = receipt.findings[0]
+    assert finding.owning_stage == finding.first_differing_stage == "analogs"
+
+
+def test_an_absent_field_makes_its_stage_row_disagree():
+    """A missing field against a null one: the finding and the table agree."""
+    left, right = record(chooser_score=None), record()
+    right.pop("chooser_score")
+    receipt = compare_records(left, right)
+    assert [f.kind for f in receipt.findings] == ["missing_field"]
+    row = next(r for r in receipt.stage_hashes if r.stage_id == "chooser")
+    assert not row.agrees
+    assert receipt.first_differing_stage == "chooser"
+
+
+def test_an_integer_that_became_a_float_is_a_type_finding():
+    """§7.3: integer quantities compare exactly — `2` is not `2.0`."""
+    receipt = compare_records(record(n_analogs=2), record(n_analogs=2.0))
+    assert receipt.verdict == DIFFER
+    assert receipt.findings[0].kind == "type"
+    row = next(r for r in receipt.stage_hashes if r.stage_id == "analogs")
+    assert not row.agrees
+
+
+def test_nan_matches_nan_and_nothing_else():
+    nan = float("nan")
+    assert compare_records(record(ci_low=nan), record(ci_low=nan)).verdict == AGREE
+    receipt = compare_records(record(ci_low=nan), record(ci_low=-0.011))
+    assert receipt.verdict == DIFFER
+    assert receipt.findings[0].delta is None
+
+
+def test_infinities_compare_without_nan_arithmetic():
+    inf = float("inf")
+    assert compare_records(record(ci_high=inf), record(ci_high=inf)).verdict == AGREE
+    receipt = compare_records(record(ci_high=inf), record(ci_high=0.042))
+    assert receipt.verdict == DIFFER
+    assert receipt.findings[0].exceeded_by is None
+
+
+def test_every_leaf_that_changes_the_digest_is_a_compared_path():
+    """`28cf8b1`, as a property rather than an assertion about a list.
+
+    Mutate every leaf of the record one at a time. Each mutation changes the
+    record's content hash — the digest — and each must produce exactly one
+    finding, at exactly that path. A comparator carrying a hand-maintained
+    field list fails this for every leaf the list forgot.
+    """
+    base = record(n_analogs=184, detail="x", payoff={"peak": 40.0})
+    digest = content_hash(base)
+    for path, leaf in flatten(base).items():
+        mutated = _set_path(base, path, _mutate(leaf))
+        assert content_hash(mutated) != digest, path
+        receipt = compare_records(base, mutated)
+        assert [f.field_path for f in receipt.findings] == [path], path
+
+
+def _mutate(leaf):
+    if isinstance(leaf, bool):
+        return not leaf
+    if isinstance(leaf, (int, float)):
+        return leaf + 1
+    if isinstance(leaf, str):
+        return leaf + "~"
+    return leaf
+
+
+def _set_path(value, path, new):
+    import copy
+    import re
+
+    out = copy.deepcopy(value)
+    tokens = re.findall(r"[^.\[\]]+|\[\d+\]", path)
+    target = out
+    for token in tokens[:-1]:
+        target = target[int(token[1:-1])] if token.startswith("[") else target[token]
+    last = tokens[-1]
+    if last.startswith("["):
+        target[int(last[1:-1])] = new
+    else:
+        target[last] = new
+    return out
 
 
 def test_unrelated_findings_name_each_other_as_independent():

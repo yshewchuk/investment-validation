@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture the tier-0 corpus: frozen ``(request, record)`` pairs (phase 0 step 4).
 
-    python3 tools/capture_tier0_corpus.py                 # fixtures/tier0/
+    python3 tools/capture_tier0_corpus.py                 # fixtures/tier0/<version>/
     python3 tools/capture_tier0_corpus.py --out /tmp/c1
     python3 tools/capture_tier0_corpus.py --forward-days 35 --max-events 60
 
@@ -21,20 +21,27 @@ Four capture rules, each of them a defect this program has already paid for:
 * **Deterministic payload, separate envelope.** Wall-clock time, worker id and
   duration live outside the hashed payload (contracts §2.2), so a replay
   reproduces the payload without reproducing the elapsed time.
-* **Real public entry points.** ``engine.score.score`` for scores,
+* **Real public entry points.** ``engine.score.Scorer.score`` for scores,
   ``engine.score.dynamic_short_vol`` for the chooser, ``engine.replay.replay_one``
   for a disabled structure priced under research. §3.2: do not invent a column
   such as ``event_id`` in a fixture if the current serving row does not carry
   one.
 * **Private.** The fixtures carry real quotes. ``checks/repo_hygiene.py`` blocks
-  ``fixtures/`` from the public repo, and that block landed before this script
-  was first run rather than after.
+  ``fixtures/`` from the public repo.
 
-**Coverage is reported, never faked.** The §7.1 table is encoded below as a set
-of axes; the capture scores a wide window and then *selects* the covering
-subset from what the store actually produced. An axis nothing covered is
-written into ``INDEX.json`` as a named gap with the reason. A fixture invented
-to fill a row of a table proves nothing about the engine.
+**Coverage is reported, never faked.** The §7.1 table is a set of axes, and
+what each axis MEANS is :func:`checks.tier0_corpus.derive_covers` — one
+definition, used here to select and there to re-derive. The capture scores a
+wide window and then selects the covering subset from what the store actually
+produced. An axis nothing covered is written into ``INDEX.json`` as a named
+gap. A fixture invented to fill a row of a table proves nothing about the
+engine.
+
+**Relations are frozen, not implied.** A pinned fixture records which
+selector-resolved pair it was pinned FROM, and that pair is kept, so the
+`e845f3e` regression can be checked on real data. A DYN-SV fixture freezes the
+exact rows, in order, the chooser ranked, so tier 1 can re-score them and
+re-run the choice; tie-breaking depends on that order.
 """
 from __future__ import annotations
 
@@ -47,6 +54,7 @@ import shutil
 import sys
 import time
 from dataclasses import fields as dataclass_fields
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -57,14 +65,15 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod, score as score_mod  # noqa: E402
 from engine.data import store  # noqa: E402
 from engine.fills import MID  # noqa: E402
 from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
 
-SCHEMA_VERSION = "tier0_pair.v1.0"
-INDEX_VERSION = "tier0_corpus.v1.0"
+SCHEMA_VERSION = "tier0_pair.v1.1"
+INDEX_VERSION = "tier0_corpus.v1.1"
 DEFAULT_OUT = ROOT / "fixtures" / "tier0"
 
 #: How a NaN is frozen. Not ``null``: contracts §2.1 forbids sending a missing
@@ -73,22 +82,20 @@ DEFAULT_OUT = ROOT / "fixtures" / "tier0"
 #: of what the null-mask comparison exists to catch.
 NONFINITE = "__nonfinite__"
 
-#: The refusal codes of §7.1, and what the current engine actually emits for
-#: each. `BAD_QUOTE_COST_PCT` is a *constant* in `engine.fills`, not a flag:
-#: the flag is BAD_QUOTE and the constant is the threshold named in its detail.
-#: Recorded as a compatibility mapping rather than resolved silently, per
-#: contracts §9.4.
-REFUSAL_CODES = {
-    "UNVALIDATED_STRUCTURE": "UNVALIDATED_STRUCTURE",
-    "OUT_OF_DOMAIN": "OUT_OF_DOMAIN",
-    "NO_CHAIN": "NO_CHAIN",
-    "BAD_QUOTE": "BAD_QUOTE",
-    "BAD_QUOTE_COST_PCT": "BAD_QUOTE",   # same flag; the detail names the bar
-    "COARSE_LADDER": "COARSE_LADDER",
-    "NO_FORECAST": "NO_FORECAST",
-}
+#: The refusal codes of §7.1, and the flag the current engine emits for each.
+#: Six, not seven: ``BAD_QUOTE_COST_PCT`` is the 30% threshold constant in
+#: ``engine.fills`` behind the single ``BAD_QUOTE`` flag (``engine/score.py``
+#: emits ``BAD_QUOTE`` in exactly one place, on that bar), not a separate
+#: refusal. The baseline package exports the constant.
+REFUSAL_CODES = {code: code for code in (
+    "UNVALIDATED_STRUCTURE", "OUT_OF_DOMAIN", "NO_CHAIN", "BAD_QUOTE",
+    "COARSE_LADDER", "NO_FORECAST",
+)}
 
 MODEL_ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate", "chooser")
+
+#: ``ScoreRequest`` fields serialized as dates.
+_DATE_FIELDS = frozenset({"as_of", "event_date", "expiry", "chain_as_of"})
 
 
 # --------------------------------------------------------------------------
@@ -140,14 +147,33 @@ def request_to_dict(request: score_mod.ScoreRequest) -> dict:
     return out
 
 
+def request_from_dict(data: dict) -> score_mod.ScoreRequest:
+    """Inverse of :func:`request_to_dict`, field by field."""
+    kwargs = {}
+    for f in dataclass_fields(score_mod.ScoreRequest):
+        if f.name not in data:
+            continue
+        value = data[f.name]
+        if f.name == "fill":
+            value = score_mod.FillModel(alpha=float(value["alpha"]))
+        elif f.name in _DATE_FIELDS and isinstance(value, str):
+            value = pd.Timestamp(value)
+        kwargs[f.name] = value
+    return score_mod.ScoreRequest(**kwargs)
+
+
 # --------------------------------------------------------------------------
 # one pair
 # --------------------------------------------------------------------------
 
 
 def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
-              *, record_kind: str, duration: float, notes: str = "") -> dict:
-    payload = {"request": request, "record": record, "record_kind": record_kind}
+              *, record_kind: str, duration: float,
+              relations: dict | None = None, notes: str = "") -> dict:
+    payload: dict[str, Any] = {"request": request, "record": record,
+                               "record_kind": record_kind}
+    if relations:
+        payload["relations"] = relations
     return {
         "schema_version": SCHEMA_VERSION,
         "fixture_id": fixture_id,
@@ -167,111 +193,28 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
 
 
 # --------------------------------------------------------------------------
-# what each record covers
-# --------------------------------------------------------------------------
-
-
-def _roles_exercised(record: dict) -> set[str]:
-    """Which of the six registered model roles this record shows running."""
-    out: set[str] = set()
-    versions = record.get("model_versions") or {}
-    for role in MODEL_ROLES:
-        if role in versions or any(role in str(k) for k in versions):
-            out.add(role)
-    if record.get("forecast_model"):
-        out.add("size")
-    if record.get("driver_prediction") is not None:
-        out.add("size")
-    if record.get("runup_move_prediction") is not None:
-        out.add("runup_move")
-    if record.get("implied_move_at_entry") is not None:
-        out.add("implied_t1")
-    if record.get("exp_pnl_sim") is not None:
-        out.add("iv_crush")
-    if record.get("gate_score") is not None or record.get("gate_pass") is not None:
-        out.add("gate")
-    if record.get("chooser_score") is not None:
-        out.add("chooser")
-    return out
-
-
-def _boundary(record: dict) -> set[str]:
-    """Whether this trade's window crosses a month or a year boundary."""
-    entry, exit_ = record.get("entry_date"), record.get("exit_date")
-    if not entry or not exit_:
-        return set()
-    out = set()
-    if entry[:4] != exit_[:4]:
-        out.add("boundary:year")
-    if entry[:7] != exit_[:7]:
-        out.add("boundary:month")
-    return out
-
-
-def _geometry(record: dict, request: dict) -> set[str]:
-    out: set[str] = set()
-    params = record.get("structure_params")
-    if request.get("structure_params"):
-        out.add("geometry:pinned")
-    elif params:
-        out.add("geometry:selector")
-    if isinstance(params, dict) and params.get("width_moneyness") is not None:
-        out.add("geometry:computed_width")
-    if request.get("strike") is not None:
-        out.add("geometry:round_listed_strike")
-    if "COARSE_LADDER" in (record.get("flags") or []):
-        out.add("geometry:coarse_ladder")
-    legs = record.get("legs") or []
-    # SORTED strikes: leg order is position order (the short anchor first, wings
-    # after), which is a property of the structure's leg list, not of its
-    # geometry. Mirror symmetry lives in the strike SET — a priced BFLY-P whose
-    # legs read [7.5, 10, 5] is exactly as symmetric as one that reads
-    # [5, 7.5, 10], and reading gaps in leg order made the axis unreachable.
-    strikes = sorted(leg.get("strike") for leg in legs
-                     if isinstance(leg, dict) and leg.get("strike") is not None)
-    if len(strikes) >= 3:
-        gaps = [round(b - a, 6) for a, b in zip(strikes, strikes[1:])]
-        if len(set(gaps)) == 1:
-            out.add("geometry:exact_mirror")
-    return out
-
-
-def covers_of(record: dict, request: dict) -> list[str]:
-    out = {f"strategy:{record.get('strategy')}"}
-    # A refusal row covers the strategy axis but protects nothing about its
-    # geometry, valuation or gate behaviour: a NO_FORECAST row has no legs.
-    # Every served strategy therefore also needs a PRICED fixture — legs and
-    # an entry cost — and `priced:S` is a required axis of its own so a corpus
-    # of refusals cannot claim to cover the strategy it refused.
-    if record.get("legs") and record.get("entry_cost") is not None:
-        out.add(f"priced:{record.get('strategy')}")
-    if record.get("session"):
-        out.add(f"session:{record['session']}")
-    for flag in record.get("flags") or []:
-        for code, emitted in REFUSAL_CODES.items():
-            if emitted == flag:
-                out.add(f"refusal:{code}")
-    out |= {f"model_role:{r}" for r in _roles_exercised(record)}
-    out |= _boundary(record)
-    out |= _geometry(record, request)
-    return sorted(out)
-
-
-# --------------------------------------------------------------------------
 # required coverage (§7.1)
 # --------------------------------------------------------------------------
+
+
+def axis_inputs() -> dict:
+    """Everything :func:`derive_covers` needs, frozen into the index."""
+    return {
+        "structures": sorted(STRUCTURES),
+        "dynamic_strategy": score_mod.DYNAMIC_STRATEGY,
+        "menu": list(score_mod.DYNAMIC_MENU),
+        "disabled": list(score_mod.DISABLED_STRATEGIES),
+        "model_roles": list(MODEL_ROLES),
+        "refusal_code_mapping": dict(REFUSAL_CODES),
+    }
 
 
 def required_axes() -> list[str]:
     axes = [f"strategy:{name}" for name in STRUCTURES]
     axes.append(f"strategy:{score_mod.DYNAMIC_STRATEGY}")
     # Every SERVED strategy must also appear PRICED — legs and an entry cost,
-    # not a refusal. A NO_FORECAST row proves the refusal path and nothing
-    # about the structure's geometry, valuation or gate behaviour; without
-    # this axis a corpus of refusals passes while protecting no successful
-    # trade for nine of the twelve strategies. The disabled pair is exempt:
-    # production refuses them by design, and their priced behaviour is the
-    # research_replay axis instead.
+    # not a refusal. The disabled pair is exempt: production refuses them by
+    # design, and their priced behaviour is the research_replay axis instead.
     axes += [f"priced:{name}" for name in STRUCTURES
              if name not in score_mod.DISABLED_STRATEGIES]
     axes.append(f"priced:{score_mod.DYNAMIC_STRATEGY}")
@@ -281,8 +224,16 @@ def required_axes() -> list[str]:
     axes += ["geometry:pinned", "geometry:selector", "geometry:computed_width",
              "geometry:round_listed_strike", "geometry:coarse_ladder",
              "geometry:exact_mirror"]
-    axes += ["dyn_sv:full_menu", "dyn_sv:partial_menu", "dyn_sv:tie",
-             "dyn_sv:fallback"]
+    # `dyn_sv:tie` is deliberately NOT required (decision 2026-09-12). No
+    # genuine tie between two different structures exists in the store or in
+    # the prediction ledger — chooser scores are continuous — and the corpus
+    # may not invent one. The tie RULE (input-row order breaks a tie, on both
+    # ranking paths) is guarded instead by the frozen definition in
+    # `definitions/dyn_sv.json` and by
+    # `tests/test_baseline_export.py::test_the_exported_tie_rule_is_the_measured_behaviour`,
+    # which runs the real `dynamic_short_vol` on tied rows in both orders.
+    # `derive_covers` still reports the axis if a real tie is ever captured.
+    axes += ["dyn_sv:full_menu", "dyn_sv:partial_menu", "dyn_sv:fallback"]
     for name in score_mod.DISABLED_STRATEGIES:
         axes += [f"disabled:{name}:refused", f"disabled:{name}:research_replay"]
     return sorted(set(axes))
@@ -316,8 +267,7 @@ def _with_chains(candidates: pd.DataFrame, calendar, per_kind: int,
     ``structure`` is the structure whose plan defines the window. The year kind
     checks STR-RUNUP rather than STR-THRU because STR-THRU enters on the last
     pre-print session and exits on the first post-print one — a one-session
-    window that cannot cross a year boundary for ANY event, so filtering the
-    year candidates through it filtered out the axis itself.
+    window that cannot cross a year boundary for ANY event.
     """
     if candidates.empty:
         return candidates
@@ -338,15 +288,10 @@ def _with_chains(candidates: pd.DataFrame, calendar, per_kind: int,
 def _boundary_events(as_of: pd.Timestamp, per_kind: int, calendar) -> pd.DataFrame:
     """Past events whose trade window crosses a month or a year boundary.
 
-    A year boundary is the scarce one, and measured against the store it needs
-    TWO things the first cut did not have. The print must sit early enough in
-    January that a d-14 entry lands in December — the 2025-01-06..10 cohort
-    (ACI, AIR, AYI, AZZ, CALM, CMC, GBX, HELE, MSM, NEOG, SMPL, STZ, TLRY:
-    thirteen events with both December entry and January exit chains, against
-    ZERO for the Jan-1..3 prints, which are small names the chain store does
-    not carry in December). And the structure scored must actually enter
-    pre-print: STR-THRU's one-session window never crosses the boundary, so the
-    year fixtures ride on STR-RUNUP.
+    The year boundary needs a print early enough in January that a d-14 entry
+    lands in December, on a name the chain store carries in December, and a
+    structure that actually enters pre-print — so the year candidates ride on
+    STR-RUNUP.
     """
     events = store.read_table(
         "earnings_events", columns=["event_id", "ticker", "event_date", "session"]
@@ -366,8 +311,15 @@ def _boundary_events(as_of: pd.Timestamp, per_kind: int, calendar) -> pd.DataFra
     return pd.concat([year, month]).drop_duplicates("event_id").reset_index(drop=True)
 
 
-def _score(scorer, request, *, index=None, as_of) -> tuple[dict, float]:
+def _score(scorer, request, *, index=None) -> tuple[dict, dict, float]:
+    """``(raw as_dict, jsonable record, seconds)`` through ``Scorer.score``.
+
+    The raw row is kept for the chooser frame: ``dynamic_short_vol`` reads the
+    board's own rows, with NaN where the engine produced NaN, not the frozen
+    ``__nonfinite__`` markers.
+    """
     started = time.monotonic()
+    as_of = request.as_of if request.as_of is not None else request.chain_as_of
     try:
         result = (scorer.score(request, chain_index=index) if index is not None
                   else scorer.score(request))
@@ -375,12 +327,21 @@ def _score(scorer, request, *, index=None, as_of) -> tuple[dict, float]:
         result = score_mod.unscorable_result(
             request, as_of=as_of, snapshot=scorer.snapshot, exc=exc
         )
-    return jsonable(result.as_dict()), time.monotonic() - started
+    raw = result.as_dict()
+    return raw, jsonable(raw), time.monotonic() - started
+
+
+def _candidate(request, raw: dict | None, record: dict, took: float, *,
+               kind: str = "score_result", frame: str | None = None,
+               relations: dict | None = None) -> dict:
+    return {"request": request if isinstance(request, dict) else request_to_dict(request),
+            "raw": raw, "record": record, "duration": took, "kind": kind,
+            "frame": frame, "relations": relations or {}}
 
 
 def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
                  quote_max_age: int) -> list[dict]:
-    """Every strategy on every forward event, through ``Scorer.score``."""
+    """Every strategy on every forward event, as the board's scoring loop does."""
     keys: set[tuple[str, pd.Timestamp]] = set()
     for strategy in STRUCTURES:
         if strategy in score_mod.DISABLED_STRATEGIES:
@@ -406,9 +367,8 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
                 event_date=pd.Timestamp(row.event_date), session=str(row.session),
                 fill=MID, quote_max_age_sessions=quote_max_age, chain_as_of=as_of,
             )
-            record, took = _score(scorer, request, index=index, as_of=as_of)
-            out.append({"request": request_to_dict(request), "record": record,
-                        "duration": took, "kind": "score_result"})
+            raw, record, took = _score(scorer, request, index=index)
+            out.append(_candidate(request, raw, record, took, frame="forward"))
     return out
 
 
@@ -417,18 +377,11 @@ def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
 
     ``as_of`` is the structure's DECISION date, resolved through the calendar,
     not the print date. Scoring a BMO print as of the print itself is a leak —
-    ``engine.audit`` refuses it — and the refusal is correct: the last
-    information-free close for a BMO print is the session before.
+    ``engine.audit`` refuses it. These are also where the priced:S axes are
+    won: in the forward window the forecast-sized families come back
+    NO_FORECAST with empty legs.
     """
     out: list[dict] = []
-    # ALL structures, not a hand-picked few. The historical boundary events are
-    # the only candidates with BOTH real chains and real forecasts, so they are
-    # where the priced:S axes are won: in the forward window the forecast-sized
-    # families come back NO_FORECAST with empty legs. STR-RUNUP additionally
-    # carries the year-boundary axis (its d-14 entry is the only one that lands
-    # in December), and RAMP7/CTR5 the mirror-placed ladders whose unique
-    # strikes are evenly gapped whenever the listed grid around the anchor is
-    # uniform (geometry:exact_mirror).
     for strategy in STRUCTURES:
         structure = STRUCTURES[strategy]()
         plan = replay_mod.plan_events(structure, events, calendar=scorer.calendar)
@@ -440,66 +393,68 @@ def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
                 session=str(row["session"]), fill=MID, chain_as_of=as_of,
             )
             try:
-                record, took = _score(scorer, request, as_of=as_of)
+                raw, record, took = _score(scorer, request)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 print(f"[corpus]   skipped {row['ticker']} {strategy}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
                 continue
-            out.append({"request": request_to_dict(request), "record": record,
-                        "duration": took, "kind": "score_result"})
+            out.append(_candidate(request, raw, record, took, frame="boundary"))
     return out
 
 
-def pinned_and_ladder_pass(scorer, scored: list[dict], as_of) -> list[dict]:
-    """Re-score a resolved row with its geometry pinned, and at a ladder strike.
+def _rescore(scorer, source: dict, label: str, **changes) -> dict | None:
+    """Re-score a captured request with some fields changed — same clock.
+
+    The changed request inherits the source's ``as_of``, ``chain_as_of`` and
+    quote-age policy, so a pinned or strike variant of a historical row is
+    scored at that row's decision date rather than today's.
+    """
+    request = replace(request_from_dict(source["request"]), **changes)
+    try:
+        raw, record, took = _score(scorer, request)
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        print(f"[corpus]   {label} skip {request.ticker} {request.strategy}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return None
+    return _candidate(request, raw, record, took)
+
+
+def _anchor_strike(record: dict) -> float | None:
+    """A strike the row's legs actually resolved to — a LISTED strike."""
+    legs = [leg for leg in record.get("legs") or [] if isinstance(leg, dict)]
+    anchor = next((leg for leg in legs if leg.get("name") == "atm"), legs[0] if legs else None)
+    strike = (anchor or {}).get("strike")
+    return float(strike) if isinstance(strike, (int, float)) else None
+
+
+def pinned_and_strike_pass(scorer, scored: list[dict], limit: int = 8) -> list[dict]:
+    """Re-score priced rows with their geometry pinned, and at a listed strike.
 
     The pinned pair is the `e845f3e` regression case made permanent: a replay
-    that pins the shape must still record the forecast that chose it. A fixture
-    of the selector-resolved row alone cannot show that, because there is
-    nothing to compare the pinned one against.
+    that pins the shape must still record the forecast that chose it. It is
+    evidence only beside the selector-resolved row it was pinned FROM, so the
+    relation is recorded and :func:`select` keeps the source.
+
+    The strike pair asks for a strike the source's legs resolved to — a real
+    listed strike, not a computed moneyness the chain would snap away from.
     """
     out: list[dict] = []
-    for row in scored:
-        record = row["record"]
+    for source in scored:
+        record = source["record"]
         params = record.get("structure_params")
-        spot = record.get("spot")
-        if not params or not isinstance(params, dict) or spot is None:
+        if not priced(record) or not isinstance(params, dict) or not params:
             continue
-        # A row that priced: it has legs and a cost. A refusal has neither, and
-        # pinning its (absent) geometry would freeze a fixture of nothing.
-        if not record.get("legs") or record.get("entry_cost") is None:
-            continue
-        base = score_mod.ScoreRequest(
-            ticker=record["ticker"], strategy=record["strategy"],
-            as_of=None, event_date=pd.Timestamp(record["event_date"]),
-            session=record.get("session"), fill=MID,
-            quote_max_age_sessions=row["request"].get("quote_max_age_sessions"),
-            chain_as_of=pd.Timestamp(as_of),
-            structure_params={k: v for k, v in params.items() if v is not None},
-        )
-        try:
-            record_pinned, took = _score(scorer, base, as_of=as_of)
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            print(f"[corpus]   pinned skip {base.ticker}: {exc}", flush=True)
-            continue
-        out.append({"request": request_to_dict(base), "record": record_pinned,
-                    "duration": took, "kind": "score_result"})
-        ladder = score_mod.ScoreRequest(
-            ticker=record["ticker"], strategy=record["strategy"], as_of=None,
-            event_date=pd.Timestamp(record["event_date"]),
-            session=record.get("session"), fill=MID,
-            strike=score_mod.ladder_strike(float(spot), -score_mod.LADDER_STEP),
-            quote_max_age_sessions=row["request"].get("quote_max_age_sessions"),
-            chain_as_of=pd.Timestamp(as_of),
-        )
-        try:
-            record_ladder, took = _score(scorer, ladder, as_of=as_of)
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            print(f"[corpus]   ladder skip {ladder.ticker}: {exc}", flush=True)
-            continue
-        out.append({"request": request_to_dict(ladder), "record": record_ladder,
-                    "duration": took, "kind": "score_result"})
-        if len(out) >= 8:
+        pinned = _rescore(scorer, source, "pinned",
+                          structure_params={k: v for k, v in params.items() if v is not None})
+        if pinned is not None:
+            pinned["relations"] = {"pinned_from": content_hash(source["request"])}
+            out.append(pinned)
+        listed = _anchor_strike(record)
+        at_strike = (_rescore(scorer, source, "strike", strike=listed)
+                     if listed is not None else None)
+        if at_strike is not None:
+            out.append(at_strike)
+        if len(out) >= limit:
             break
     return out
 
@@ -508,77 +463,63 @@ def pinned_and_ladder_pass(scorer, scored: list[dict], as_of) -> list[dict]:
 _COARSE_WIDTHS = (0.002, 0.004, 0.006, 0.01)
 
 
-def coarse_ladder_pass(scorer, scored: list[dict], as_of) -> list[dict]:
+def coarse_ladder_pass(scorer, scored: list[dict]) -> list[dict]:
     """Ask for a width the ticker's listed ladder cannot carry.
 
-    §7.1 requires a coarse ladder in the corpus and it cannot be waited for:
-    whether one appears depends on which names happen to print this month. So
-    it is *requested* — a real `structure_params` width, through the real entry
-    point, narrow enough that two legs resolve onto one contract. That is the
-    refusal `guides/coarse_ladder_collision.md` documents, and asking for it
-    is not the same as inventing it.
+    §7.1 requires a coarse ladder and it cannot be waited for, so it is
+    *requested* — a real ``structure_params`` width, through the real entry
+    point, narrow enough that two legs resolve onto one contract. Asking for a
+    refusal is not the same as inventing one.
     """
-    out: list[dict] = []
-    for row in scored:
-        record = row["record"]
-        spot = record.get("spot")
-        if spot is None or record.get("strategy") not in ("TWIN-P5", "TWIN-P"):
+    for source in scored:
+        record = source["record"]
+        if record.get("spot") is None or record.get("strategy") not in ("TWIN-P5", "TWIN-P"):
             continue
         for width in _COARSE_WIDTHS:
-            request = score_mod.ScoreRequest(
-                ticker=record["ticker"], strategy=record["strategy"], as_of=None,
-                event_date=pd.Timestamp(record["event_date"]),
-                session=record.get("session"), fill=MID,
-                quote_max_age_sessions=row["request"].get("quote_max_age_sessions"),
-                chain_as_of=pd.Timestamp(as_of),
-                structure_params={"width_moneyness": width},
-            )
-            try:
-                got, took = _score(scorer, request, as_of=as_of)
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                print(f"[corpus]   coarse skip {record['ticker']}: {exc}", flush=True)
+            got = _rescore(scorer, source, "coarse",
+                           structure_params={"width_moneyness": width})
+            if got is None:
                 break
-            if "COARSE_LADDER" in (got.get("flags") or []):
-                out.append({"request": request_to_dict(request), "record": got,
-                            "duration": took, "kind": "score_result"})
-                return out
-    return out
+            if "COARSE_LADDER" in (got["record"].get("flags") or []):
+                return [got]
+    return []
 
 
-def dyn_sv_pass(scored: list[dict]) -> list[dict]:
-    """The chooser, resolved through ``dynamic_short_vol`` over the scored frame."""
-    frame = pd.DataFrame([r["record"] for r in scored])
-    if frame.empty:
-        return []
-    chosen = score_mod.dynamic_short_vol(frame)
+def _event_key(record: dict) -> tuple:
+    return (record.get("ticker"), record.get("event_date"))
+
+
+def dyn_sv_pass(candidates: list[dict]) -> list[dict]:
+    """The chooser, run per event over a BOARD-SHAPED frame.
+
+    Only rows the board's scoring loop produces — one per structure per event,
+    at the ATM pass — enter the frame. The first corpus fed the chooser every
+    candidate, pinned copies included, and its only "tie" was BFLY-P tying with
+    its own pinned re-score. The event's rows are frozen in frame order inside
+    the request: ``dynamic_short_vol`` breaks a tie by that order, so a replay
+    that did not reproduce it would not reproduce the choice.
+    """
     out: list[dict] = []
-    for _, row in chosen.iterrows():
-        record = jsonable(row.to_dict())
-        menu_size = int(record.get("menu_size") or 0)
-        margin = record.get("chosen_margin")
-        covers = [f"strategy:{score_mod.DYNAMIC_STRATEGY}"]
-        covers.append("dyn_sv:full_menu" if menu_size >= len(score_mod.DYNAMIC_MENU)
-                      else "dyn_sv:partial_menu")
-        if margin is not None and not isinstance(margin, dict) and float(margin) == 0.0:
-            covers.append("dyn_sv:tie")
-        # The fallback test reads the RAW row, not the jsonable record:
-        # jsonable turns a NaN chooser_score into a ``__nonfinite__`` marker
-        # dict, so `is None` never fired on exactly the rows that took the
-        # resolver path. A chosen row with no finite chooser score IS the
-        # fallback — `dynamic_short_vol` ranks a mixed event on the scores
-        # that exist and filters NaN out, so a NaN winner means NO candidate
-        # carried a score and the pre-champion resolver ranked the event.
-        if pd.isna(row.get("chooser_score")):
-            covers.append("dyn_sv:fallback")
-        request = {
-            "kind": "dyn_sv_resolution",
-            "ticker": record.get("ticker"),
-            "event_date": record.get("event_date"),
-            "menu": list(score_mod.DYNAMIC_MENU),
-            "entry_point": "engine.score.dynamic_short_vol",
-        }
-        out.append({"request": request, "record": record, "duration": 0.0,
-                    "kind": "dyn_sv_choice", "extra_covers": covers})
+    for frame_name in ("forward", "boundary"):
+        members = [c for c in candidates if c.get("frame") == frame_name]
+        events: dict[tuple, list[dict]] = {}
+        for cand in members:
+            events.setdefault(_event_key(cand["record"]), []).append(cand)
+        for key, siblings in events.items():
+            frame = pd.DataFrame([c["raw"] | {"strike_offset": None} for c in siblings])
+            chosen = score_mod.dynamic_short_vol(frame)
+            if chosen.empty:
+                continue
+            request = {
+                "kind": "dyn_sv_resolution",
+                "entry_point": "engine.score.dynamic_short_vol",
+                "menu": list(score_mod.DYNAMIC_MENU),
+                "frame": frame_name,
+                "frame_rows": [{"request": c["request"], "record": c["record"]}
+                               for c in siblings],
+            }
+            record = jsonable(chosen.iloc[0].to_dict())
+            out.append(_candidate(request, None, record, 0.0, kind="dyn_sv_choice"))
     return out
 
 
@@ -586,10 +527,8 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2) -> list[d
     """Price CAL-P and CND-P under research, where the scorer refuses them.
 
     §7.1 requires both to appear as *refusals* on the production path and to
-    *replay* under research. They are in ``STRUCTURES`` precisely so
-    ``engine.replay`` can price them; that is a different entry point with a
-    different record, and conflating the two would lose the distinction the
-    coverage table is drawing.
+    *replay* under research. That is a different entry point with a different
+    record, and conflating the two would lose the distinction.
     """
     out: list[dict] = []
     for strategy in score_mod.DISABLED_STRATEGIES:
@@ -610,14 +549,9 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2) -> list[d
                 "structure": structure.to_dict(),
                 "plan_row": jsonable(row),
             }
-            out.append({
-                "request": request,
-                "record": {"rows": jsonable(rows), "skip_reason": skip,
-                           "strategy": strategy},
-                "duration": time.monotonic() - started,
-                "kind": "research_replay",
-                "extra_covers": [f"disabled:{strategy}:research_replay"],
-            })
+            record = {"rows": jsonable(rows), "skip_reason": skip, "strategy": strategy}
+            out.append(_candidate(request, None, record, time.monotonic() - started,
+                                  kind="research_replay"))
             taken += 1
             if taken >= limit:
                 break
@@ -632,18 +566,15 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2) -> list[d
 def select(candidates: list[dict]) -> tuple[list[dict], dict[str, list[str]]]:
     """A minimal covering subset, greedily, plus the axis -> fixtures index.
 
-    Greedy rather than exhaustive: the corpus has to answer in seconds, so what
-    matters is that every axis is covered by *some* frozen pair, not that the
-    subset is provably the smallest one.
+    Greedy rather than exhaustive: what matters is that every axis is covered
+    by *some* frozen pair, not that the subset is provably the smallest. After
+    the greedy pass every chosen pinned fixture pulls in the pair it was
+    pinned from — without it the pinned pair demonstrates nothing.
     """
+    inputs = axis_inputs()
     for cand in candidates:
-        covers = covers_of(cand["record"], cand["request"])
-        covers += cand.get("extra_covers", [])
-        if cand["record"].get("strategy") in score_mod.DISABLED_STRATEGIES:
-            flags = cand["record"].get("flags") or []
-            if "UNVALIDATED_STRUCTURE" in flags:
-                covers.append(f"disabled:{cand['record']['strategy']}:refused")
-        cand["covers"] = sorted(set(covers))
+        cand["covers"] = derive_covers(cand["record"], cand["request"], cand["kind"],
+                                       inputs, cand.get("relations"))
 
     wanted = set(required_axes())
     chosen: list[dict] = []
@@ -656,6 +587,14 @@ def select(candidates: list[dict]) -> tuple[list[dict], dict[str, list[str]]]:
             break
         chosen.append(best)
         wanted -= gain
+
+    by_request = {content_hash(c["request"]): c for c in candidates}
+    chosen_hashes = {content_hash(c["request"]) for c in chosen}
+    for cand in list(chosen):
+        source = (cand.get("relations") or {}).get("pinned_from")
+        if source and source not in chosen_hashes and source in by_request:
+            chosen.append(by_request[source])
+            chosen_hashes.add(source)
 
     index: dict[str, list[str]] = {}
     for i, cand in enumerate(chosen):
@@ -689,18 +628,14 @@ def _publish_current(root: Path, version: str) -> None:
 
 
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
-          as_of: pd.Timestamp, snapshot: str, *, replace: bool = False) -> dict:
+          as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False) -> dict:
     """Publish one immutable version directory, atomically.
 
-    A frozen corpus may not be edited in place. The earlier writer cleared the
-    pairs directory and rewrote it at the same path, so an interrupted re-run
-    left a PARTIAL corpus where everyone trusts it to be whole, and an
-    accidental re-run silently replaced the baseline every later phase states
-    its exit gate against. Now: the version is built under a temporary sibling
-    and published with one rename; an existing non-empty version directory
-    refuses without an explicit ``--replace``.
+    The version is built under a temporary sibling and published with one
+    rename; an existing non-empty version directory refuses without an
+    explicit ``--replace``.
     """
-    if out_dir.exists() and any(out_dir.iterdir()) and not replace:
+    if out_dir.exists() and any(out_dir.iterdir()) and not replace_existing:
         raise SystemExit(
             f"{out_dir} already exists and is not empty. A frozen corpus is "
             "never overwritten in place: capture a NEW version directory, or "
@@ -716,6 +651,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         pair = make_pair(
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
             record_kind=cand["kind"], duration=cand["duration"],
+            relations=cand.get("relations"),
         )
         text = json.dumps(pair, indent=2, sort_keys=True) + "\n"
         (pairs_dir / f"{cand['fixture_id']}.json").write_text(text)
@@ -736,15 +672,8 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         "tolerance_policy_ref": "score_record.exact.v1",
         "refusal_code_mapping": REFUSAL_CODES,
         # Everything checks/tier0_corpus.py needs to RE-DERIVE coverage from
-        # the surviving records alone, with no engine import: the coverage
-        # check must not trust this file's claims, only its inputs.
-        "axis_inputs": {
-            "structures": sorted(STRUCTURES),
-            "dynamic_strategy": score_mod.DYNAMIC_STRATEGY,
-            "menu": list(score_mod.DYNAMIC_MENU),
-            "disabled": list(score_mod.DISABLED_STRATEGIES),
-            "model_roles": list(MODEL_ROLES),
-        },
+        # the surviving records alone, with no engine import.
+        "axis_inputs": axis_inputs(),
         "pairs": manifest_pairs,
         "coverage": {axis: sorted(ids) for axis, ids in sorted(index.items())},
         "required_axes": required_axes(),
@@ -788,13 +717,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     candidates = forward_pass(scorer, forward, as_of, args.quote_max_age)
     print(f"[corpus] forward scores: {len(candidates)}", flush=True)
 
-    boundaries = _boundary_events(as_of, args.boundary_events,
-                                  scorer.calendar)
+    boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
     print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
     candidates += boundary_pass(scorer, boundaries)
 
-    candidates += pinned_and_ladder_pass(scorer, candidates, as_of)
-    candidates += coarse_ladder_pass(scorer, candidates, as_of)
+    candidates += pinned_and_strike_pass(scorer, candidates)
+    candidates += coarse_ladder_pass(scorer, candidates)
     candidates += dyn_sv_pass(candidates)
     candidates += research_replay_pass(scorer, boundaries)
     print(f"[corpus] candidates: {len(candidates)}", flush=True)
@@ -808,16 +736,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         out_dir = DEFAULT_OUT / version
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     doc = write(out_dir, chosen, index, as_of, scorer.snapshot,
-                replace=args.replace)
+                replace_existing=args.replace)
     if not args.out and out_dir.parent == DEFAULT_OUT:
         _publish_current(DEFAULT_OUT, out_dir.name)
         print(f"[corpus] CURRENT -> {out_dir.name}")
 
     print(f"[corpus] wrote {len(chosen)} pairs to {out_dir}")
     print(f"[corpus] corpus hash {doc['corpus_hash']}")
-    covered = len(doc["coverage"])
     total = len(doc["required_axes"])
-    print(f"[corpus] coverage {covered}/{total} required axes")
+    print(f"[corpus] coverage {total - len(doc['uncovered_axes'])}/{total} required axes")
     if doc["uncovered_axes"]:
         print("[corpus] UNCOVERED (recorded as gaps, not faked):")
         for axis in doc["uncovered_axes"]:
