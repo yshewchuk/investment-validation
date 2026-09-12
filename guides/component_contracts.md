@@ -35,6 +35,7 @@ fallback, model, threshold, fill convention, or decision clock.
 | Scoring -> prediction ledger | ValidatedDecision | Append-only ledger |
 | Execution/settlement -> ledger | PositionEvent | Append-only ledger |
 | Projection/publisher -> UI | ServingRelease and paginated views | Release catalog |
+| Any comparator -> operator or agent | ComparisonReceipt | Diagnosis store |
 
 Only the named owner commits authoritative records. Other components submit
 commands or immutable candidate objects. No renderer writes a score, no model
@@ -136,6 +137,37 @@ not HTTP 500. Transient worker/provider failures are job failures, not a fake
 zero-valued score. HTTP conventions: 422 invalid request; 409 incompatible
 version/idempotency conflict; 404 unknown immutable ID; 429 application rate
 limit; 503 temporary dependency failure; 202 accepted job.
+
+### 2.5 Type kinds
+
+This specification defines roughly seventy named types. They are grouped two
+ways already — the boundary map groups them by durable owner, and sections 3-15
+group them by pipeline stage. Neither says what KIND of thing a type is, which
+is what determines its lifecycle. Every type belongs to exactly one kind, and
+the suffix carries it:
+
+| Kind | Suffix | Lifecycle | Examples |
+|---|---|---|---|
+| Definition | `*Spec`, `*Recipe`, `*Template`, `*Policy` | Registered once, versioned, immutable thereafter; identified by a definition hash | StrategySpec, FeatureRecipe, ValuationPolicy |
+| Handle | `*Ref` | A pinned pointer to an immutable object; cheap to pass, never carries values | SnapshotRef, ObjectRef, EventRef |
+| Command | `*Request` | Transient input to one operation; hashed to form the operation's identity | ScoreRequest, GenerationRequest |
+| Record | `*Record`, `*Release`, `*Set`, `*Frame` | The durable numerical result; content-hashed, replayable, never rewritten | ScoreRecord, ModelRelease, ScenarioSet |
+| Receipt | `*Receipt` | Evidence that an operation happened, and under what conditions; retained even when the operation failed | RawReceipt, PromotionReceipt, ComparisonReceipt |
+| Event | `*Event` | An append-only fact in a sequence | PositionEvent |
+| Envelope | `*Budget`, `*Resources`, `problem` | Operational metadata; explicitly excluded from every content hash | GenerationBudget, ResolvedResources |
+
+Two rules follow from the table and are worth stating because they are the ones
+most easily broken. A Definition may never reference a Command or an Envelope:
+if a budget or a deadline can reach a definition hash, the same strategy gets
+two identities on two machines. And a Record's hash covers only Definition,
+Handle and Command inputs: an Envelope changing must never change a Record's
+identity, which is what lets a replay reproduce a payload without reproducing
+its elapsed time.
+
+Types that do not fit their suffix are the outliers worth fixing before
+implementation, not after: `EvaluationInput` is a Command, `ExperimentPlan` is
+the resolved form of a Definition, and `DataQuery` is a Command. Rename or fold
+them when the contract package is written.
 
 ## 3. Connector -> ingestion
 
@@ -256,10 +288,30 @@ range explicitly through streaming batches and a supervised resource profile.
 Queries are bounded before pandas conversion. A missing version never falls
 back to latest. Snapshot handles keep the same version through the whole call.
 
-`knowledge_mode` is observed or reconstructed. Observed requires original
-availability/receipt evidence at the requested time. Reconstructed historical
-data carries its vintage and assumptions; unknown past availability stays
-unknown. This distinction survives into reports and scores.
+`knowledge_mode` is `observed`, `attested_stable` or `reconstructed`, and it is
+recorded per table rather than per snapshot, because the risk it describes is a
+property of the field.
+
+- `observed` — an original availability/receipt record exists proving the data
+  was held at the requested time. Reserved for decisions made under a live
+  clock. No back-dated corpus can be promoted into it, and no future live
+  snapshot may claim it without a real receipt.
+- `attested_stable` — no contemporaneous receipt, but the values are attested
+  not to have moved since: either the field class is immutable once settled
+  (a listed option chain for an expired contract is not revised), or the
+  attestation carries a measured cross-source or cross-vintage agreement rate.
+  The attestation names which of the two it relies on, and its measurement.
+- `reconstructed` — a revisable field read from a single late vintage. Earnings
+  dates, session classifications and split-adjusted spot stay here, because
+  those are exactly the values a later download silently changes.
+
+The two risks being separated are availability (could this have been obtained
+then?) and vintage (has the value changed since?). Only vintage threatens a
+historical simulation's validity; availability threatens a claim about what was
+actually decided. Collapsing them into one flag forces most of an existing
+research corpus to be labelled with the more alarming word for the wrong
+reason. The distinction survives into reports and scores, and a score states
+the weakest mode among the tables it consumed.
 
 ### 5.2 Event and quote identity
 
@@ -427,7 +479,7 @@ DatasetRecipe:
   sample_weight_rule, label_availability_rule, split_policy
 
 ModelRecipe:
-  recipe_ref, role, target_contract, dataset_recipe_ref
+  recipe_ref, model_role, target_contract, dataset_recipe_ref
   ordered_feature_bindings, preprocessing_recipe
   estimator_adapter, hyperparameters, seed_policy
   fold_policy, validation_policy, residual_and_calibration_policy
@@ -555,7 +607,7 @@ steps remain independently visible and retryable.
 | Identity | schema_version, score_id, payload_hash, request_hash, canonical_request, resolved_request, dependency_manifest_ref |
 | Event/time | event_ref, security/ticker, session, clock/context, planned entry/exit and evidence cutoff |
 | Inputs | snapshot bundle, feature frame, consumed ordered values/masks, source/quote refs and per-feature lineage |
-| Models/state | exact model roles/artifacts, forecast folds, residual pools, analog population, payoff/calibration state and recipe versions |
+| Models/state | exact model roles (`model_role`) and artifacts, forecast folds, residual pools, analog population, payoff/calibration state and recipe versions |
 | Geometry | requested/resolved parameters, selected contracts, legs/quantities/multipliers, forecast-sizing explanation |
 | Reusable domain artifacts | generation request/candidate-set manifest and completeness, selected candidate/position, scenario-set and simulation-result refs, exact valuation/accounting policy refs; explicit nulls if unused |
 | Prices | entry quote date/time, estimated entry cost, normalized spot and conventions, fill alpha, per-leg spread/quality |
@@ -962,7 +1014,113 @@ returns an explicit refusal. All existing strategies remain addressable, but
 those without validated live deployments can only produce the appropriate
 unavailable/shadow result. A UI toggle cannot create live model compatibility.
 
-## 15. One end-to-end consistency example
+## 15. Comparators -> diagnosis
+
+### 15.1 Why this is a contract and not a helper
+
+At least six components compare two things and report whether they agree: the
+nightly self-check, serving/replay parity, training/serving parity,
+incremental-versus-full equality, the causal-source audit and the generator's
+scalar-equivalence test. Each will otherwise invent its own report shape.
+
+The current `engine/dashboard/selfcheck.py` returns `mismatches` as a list of
+`{row_id, reason}` truncated to ten entries. On 2026-09-11 that surfaced one
+red signal — ten of twenty sampled rows — with five independent causes behind
+it: a forecast blanked when a pinned shape suppressed `_size_from_forecast`, an
+explainer comparing 41 of the 70 fields the digest hashes, an analog bootstrap
+sampling by index over an unordered set, `json_safe` rounding a replay input to
+six places, and `_write_pair` re-rounding it after the exemption had already
+been applied. Each fix was correct and the signal stayed red after every one,
+because the report could express "different" but not "differently, in these
+five independent ways".
+
+Two properties are therefore required of every comparator, and they are what
+this contract exists to enforce:
+
+1. **Stage-localized.** A finding names the first stage at which inputs agreed
+   and outputs did not, with per-stage input and output hashes. "Row 47 is red"
+   is not a diagnosis; "serialization: `structure_params.width_moneyness`
+   differs at the 7th significant figure" is.
+2. **Complete, not first-wins.** A comparator reports every independent finding
+   it can establish in one pass. Stopping at the first difference converts N
+   causes into N runs, which is the failure this contract is written against.
+
+### 15.2 ComparisonReceipt
+
+```text
+Comparator.compare(ComparisonRequest) -> ComparisonReceipt
+
+ComparisonRequest:
+  schema_version, comparison_kind, tier
+  left_ref, right_ref, stage_plan_ref
+  tolerance_policy_ref, population_expectation
+  budget_ref
+
+ComparisonReceipt:
+  schema_version, receipt_id, comparison_kind, tier
+  left_ref, right_ref, tolerance_policy_ref
+  stage_hashes: ordered [stage_id, left_input_hash, left_output_hash,
+                         right_input_hash, right_output_hash, agrees]
+  findings: [Finding]
+  population: expected, supported, compared, skipped_with_reasons
+  verdict: agree | differ | incomparable
+  envelope: started_at, duration, worker_ref, diagnostic_ref
+
+Finding:
+  finding_id, first_differing_stage, field_path
+  left_value, right_value, delta, unit
+  tolerance_applied, exceeded_by
+  null_mask_left, null_mask_right
+  source_rows_ref, recipe_and_artifact_versions
+  affected_count, independent_of: [finding_id]
+```
+
+`findings` is a set, not a first-difference. `independent_of` records which
+findings the comparator proved are not consequences of one another, so an
+operator can fix several at once; findings it could not separate are reported
+without that link rather than silently merged.
+
+The compared field set is derived from the identity being checked, never
+maintained by hand. A comparator whose digest covers 70 fields compares 70
+fields. `population` prevents the reciprocal failure: a comparison over an
+empty or collapsed set reports `incomparable`, never `agree`.
+
+`verdict: incomparable` is a first-class outcome. A missing artifact, an
+unresolvable snapshot or a zero-row population is not agreement.
+
+### 15.3 Tiers and the inner loop
+
+Every comparator declares a tier, and the tier is a latency commitment. A check
+that can only run nightly cannot be part of the loop by which a fix is
+confirmed, and the whole point of this section is that confirming a fix must
+not cost a nightly.
+
+| Tier | Budget | Inputs | Runs on |
+|---|---|---|---|
+| 0 | seconds | Frozen ScoreRequests to expected ScoreRecords, from fixtures. No panel load, no network, no fitting, no disk beyond the fixture | Every edit |
+| 1 | ~a minute | One event end to end, real chain, including a real serialize-to-disk and read-back | Every commit |
+| 2 | nightly | Full board, full parity matrix, incremental-versus-full equality | Nightly, and every migration step |
+
+Tier 0 must be reachable without loading the panel or any model artifact
+larger than the fixture pins, or it will not be run. Tier 1 must write to and
+read from an actual file, because a round-trip loss through serialization is
+invisible to any check that keeps the object in memory. Tier 2 remains the
+authority; the lower tiers are a fast path to being wrong less often, not a
+replacement for it.
+
+Every check in the architecture guide's validation table names its tier. A new
+check with no tier defaults to 2, which is a statement that it will not
+participate in the inner loop, and should be treated as a gap to close rather
+than a neutral choice.
+
+**Acceptance:** a fixture corpus seeded with each of the five 2026-09-11 causes
+produces five findings in one Tier-0 run, each naming its stage, and not one
+finding that names only a row. Removing a field from the digest removes it from
+the comparison automatically. An empty population reports `incomparable`. A
+serialization round-trip regression is caught at Tier 1 and missed at Tier 0,
+and the tier table says so rather than the test being deleted as flaky.
+
+## 16. One end-to-end consistency example
 
 For a synthetic Monday AMC event:
 
@@ -988,11 +1146,13 @@ the same flow cannot be shifted to Monday afternoon without changing the
 strategy timing. For an EOD historical replay, knowledge_mode and deployment
 selection explicitly identify its reconstruction assumptions.
 
-## 16. Contract implementation and review order
+## 17. Contract implementation and review order
 
-Review the ScoreRequest/ScoreRecord and time contracts first, then registry
-bindings, storage transactions, jobs and ledger commits. These contain the
-choices that determine whether two components can disagree silently.
+Review the ScoreRequest/ScoreRecord and time contracts first, then the
+ComparisonReceipt and its tiers, then registry bindings, storage transactions,
+jobs and ledger commits. These contain the choices that determine whether two
+components can disagree silently — and the ComparisonReceipt is what determines
+whether such a disagreement can be named when it happens.
 
 Implement schema definitions in one small contract package, with Python
 validation and generated OpenAPI/TypeScript types. Keep numerical functions
@@ -1012,6 +1172,8 @@ Before accepting the contracts, require these demonstrations:
   preserve consistent data and idempotent ledger effects.
 - A mismatched analog recipe, clock, artifact or rounded geometry produces a
   precise failure that identifies the differing component.
+- Five independent seeded defects produce five findings in one Tier-0 pass,
+  each naming its stage, in under the tier's declared budget.
 
 No contract is accepted merely because a schema validator can parse its JSON.
 Its meaning, causal inputs, compatibility and failure behavior must be tested.

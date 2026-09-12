@@ -79,6 +79,8 @@ fill, reporting, privacy, and ledger safeguards continue to apply.
 | [finality.py](../engine/data/finality.py) now requires positive session evidence and records coverage. Decision-aware serving is also present in current `score.py`. | These are existing protections to preserve and strengthen, not missing modules to reinvent from older prompts. |
 | [training/chooser.py](../engine/models/training/chooser.py) imports EXP-169 by path; that dataset depends on earlier experiment code. | Production depends on an experiment directory. Extract the exact promoted recipe into the engine and make old runners call it. |
 | [model_evidence.py](../engine/dashboard/model_evidence.py) dispatches dataset construction by role/feature set and caches evidence by champion artifact hashes. | Dataset recipes and evidence belong in model releases. A feature list alone does not identify feature construction. |
+| [registry.py](../engine/models/registry.py) already enforces one champion per `(strategy, role, decision_offset)`, validates artifact hashes against the manifest, and carries `ROLES`, `MODEL_TIERS` and `ROLE_TIER` — the feature/decision dependency graph whose stated purpose is to answer "what breaks if I re-promote the size model". | The model dependency graph is not new work. Extend this registry and map its `decision_offset` onto the clock contract; do not specify a second graph beside it. |
+| [selfcheck.py](../engine/dashboard/selfcheck.py) reports `mismatches` as `{row_id, reason}` truncated to ten, and its explainer compared 41 of the 70 fields the digest hashes. | A comparison result is a contract, not a report format. It must localize to a stage and carry every independent finding at once, or N causes cost N runs. |
 | Recent commits fix forecast suppression on replay, analog order dependence, and precision loss through serialization. [Serving parity](prompt_serving_parity.md) documents additional context and feature-definition failures. | Test training-versus-serving, serving-versus-replay, serialization, and causal source selection separately. A passing digest cannot prove all four. |
 
 The existing pricing, audit, evaluation, and recovery code is valuable. The
@@ -115,6 +117,29 @@ The active model IDs at the review baseline are:
 - `size_v1_4`, `opf_implied_t1_gbm`, `runup_move_d14_v1_gbm`, `iv_crush_v1_gbm`;
 - `gate_midfill_str_runup`, `gate_midfill_str_thru_forecast_analog`;
 - `dyn_sv_chooser_v1_1`.
+
+These IDs fill six registered model roles, a closed vocabulary validated by
+`engine/models/registry.py`: `size`, `implied_t1`, `runup_move` and `iv_crush`
+are `feature`-tier roles whose outputs can be materialized as Tier-4 columns and
+read by other models; `gate` and `chooser` are `decision`-tier roles that
+consume features and are not read back. That tier split is the existing
+dependency graph, and it is what makes a promotion's blast radius answerable.
+
+The blast radius is wider than one strategy. `iv_crush` reaches
+`_crush_forecast`, then `pnl_sim.expected_pnl`, then `exp_pnl_sim` — which is
+simultaneously a STR-THRU gate input, a DYN-SV chooser dimension in
+`_CHOOSER_ANALOG_DIMS`, and the fallback resolver's ranking key. Promoting one
+feature-tier role therefore invalidates scores across the whole menu. The
+deployment contract must state what a promotion rescores, and the registry can
+already compute it.
+
+The registry's champion key is `(strategy, role, decision_offset)`. The
+contracts generalize `decision_offset` to a clock contract, so the key becomes
+`(strategy, model_role, clock)`. That is a rename of a live primary-key field
+and a widening of its meaning: it is a migration item with an explicit mapping
+table, not a drop-in substitution. The contracts also write `model_role` rather
+than `role`, because this proposal uses "role" in three unrelated senses; the
+registry keeps its own field name and no persisted manifest is rewritten.
 
 Current champions have no separate decision offset registered. Preserve those
 identities, weights, transforms, feature order, thresholds, folds, and execution
@@ -181,6 +206,9 @@ flowchart TD
     C --> P[Serving projections and export]
     P --> A[FastAPI read API]
     A --> U[Lazy-loading UI]
+    C --> CMP[Comparators and diagnosis]
+    D --> CMP
+    M --> CMP
     J[Durable job supervisor] -. schedules .-> I
     J -. schedules .-> T
     J -. schedules .-> S
@@ -195,7 +223,8 @@ stay warm during the decision window only when its memory is reserved.
 |---|---|---|
 | Ingestion | Fetch receipts, normalization, coverage, finality, source revisions | Compute a trading verdict or change a champion |
 | Feature engine | Registered transforms and their causal dependencies | Select an implicit latest dataset or silently change a missing-value policy |
-| Model engine | Training recipes, folds, inference adapters, residuals, evidence | Fit during an ordinary score request |
+| Model inference | Registry, artifact loading, inference adapters, residual and calibration state as frozen data | Fit anything, or reach into a training recipe |
+| Model training | Dataset and model recipes, folds, fitting, residual construction, evidence, release candidates | Run inside a score request, or be imported by a feature or a scorer |
 | Structure generator | Template resolution, finite placement search, validity and completeness receipts | Rank by PnL or change strategy selection rules |
 | Scenario builder | Causal historical/synthetic outcome populations, weights, mappings and RNG | Choose contracts or price a position |
 | Valuation/simulation domain | Frozen-position revaluation, time/parameter shocks, cash flows and PnL distributions | Select a winning strategy or call model marks executable fills |
@@ -203,10 +232,161 @@ stay warm during the decision window only when its memory is reserved.
 | Evaluation/portfolio | Realized outcomes, capital accounting, report generation | Recreate the selection logic used to choose trades |
 | API/projection layer | Filter, paginate, authorize, serialize already computed records | Fit a model, simulate PnL, or fetch vendor data in a GET request |
 | UI | Navigation, formatting, tables, charts, loading/error states | Compute gates, financial ratios, return estimates, or portfolio accounting |
+| Validation/diagnosis | Comparators, tolerance policies, stage plans, ComparisonReceipts and their tiers | Decide whether a difference is acceptable, or repair the data it found wrong |
 | Supervisor/catalog | Transactions, leases, dependencies, capacity, retry history | Decide research conclusions |
 
 Keep entry points such as `engine.score.score`, `score_calendar`, and existing
 CLI commands as compatibility adapters while their implementations move.
+
+### 4.1 Physical layout
+
+The table above is a logical boundary. A logical boundary that is not also a
+physical one constrains nothing: nothing currently stops `render.py` importing
+the scorer, and nothing did. Each owner therefore gets a package, and the
+package is the unit a person or an agent loads to work on that owner.
+
+| Layer | Package | Owner from the table above | May import |
+|---|---|---|---|
+| 0 | `engine/contracts/` | — schemas and types only, no logic, no I/O | nothing |
+| 0 | `engine/foundation/` | paths, env, canonical JSON, session/calendar arithmetic, causality primitives | contracts |
+| 1 | `engine/data/` | Ingestion — sources, normalize, store, catalog | 0 |
+| 2 | `engine/features/` | Feature engine | 0-1 |
+| 3 | `engine/models/` | Model inference — registry and inference only | 0-2 |
+| 4a | `engine/domain/generation/`, `engine/domain/scenarios/`, `engine/domain/valuation/` | Structure generator, scenario builder, position valuator — three peers, none importing another | 0-3 |
+| 4b | `engine/domain/simulation/` | PnL simulator and accounting | 0-4a |
+| 5 | `engine/scoring/` | Scoring application | 0-4b |
+| 6 | `engine/evaluation/`, `engine/ledger/` | Evaluation/portfolio | 0-5 |
+| 6 | `engine/models/training/` | Model training | 0-5 |
+| 7 | `engine/serving/`, `engine/ops/` | API/projection, Supervisor/catalog | 0-6 |
+| 8 | `engine/dashboard/`, `ui/` | UI | 7 only |
+| — | `engine/diagnosis/` | Validation/diagnosis | 0-7; nothing imports it |
+
+Two placements in that table are doing real work and are not arbitrary.
+
+**Training sits above scoring, not beside inference.** `engine/models/`
+contains the registry and inference; `engine/models/training/` is a separate
+layer-6 package that may call the scorer. This is the structural form of the
+contract rule that inference never fits, and it dissolves by construction the
+current situation where `models/training/gate.py` imports `engine.replay` and
+`models/training/gate_forecast_analog.py` imports `engine.score`.
+
+**Features may import inference but never training.** `data/features/tier4.py`
+currently imports `engine.models.training` in five places, which is the
+feature-model cycle the Tier-4 design deliberately creates. Splitting the model
+package at the inference boundary resolves it: a feature depends on a frozen
+artifact it can load and call, never on the code that fits one.
+
+`engine/diagnosis/` is deliberately a sink. It may read every layer's artifacts,
+and no layer may import it, so a comparator can never become a dependency of
+the thing it compares.
+
+The layer split at 4a/4b exists because a direction check cannot enforce a
+prohibition between peers. Three of the ownership table's rules are peer-to-peer
+— the generator must not rank by PnL, the scenario builder must not price a
+position, the valuator must not select a strategy — and if all four domain
+components sat on one layer they could import each other freely and every one
+of those rules would rest on discipline alone. Splitting the simulator below the
+other three makes them structural: the scenario builder cannot price a position
+because valuation is not beneath it.
+
+This is the general limitation, and it is worth stating rather than discovering:
+**a layer check enforces direction between layers, never a prohibition within
+one.** Any "must not" between peers has to become either a sub-layer or an
+explicit rule in the check. The ownership table's remaining peer rules — a
+renderer computing a ratio, an evaluator recreating selection logic — are
+handled by the layering, because those pairs are already on different layers.
+
+The ownership table above splits model inference from model training for the
+same reason. "Fit during an ordinary score request" was previously a rule
+attached to a single Model engine owner, and a single package cannot enforce it;
+two packages on layers 3 and 6 can, because a scorer at layer 5 has no path to
+the training code at all.
+
+### 4.2 Enforced import direction, and the measured distance to it
+
+Declaring layers is worthless without a check, because the direction is invisible
+at the point of writing an import. One `checks/import_layers.py`, in the plain
+assert style of convention 6, holds the layer map and fails on any upward edge.
+It runs at tier 0.
+
+The distance to that state is smaller than the coupling pain suggests. Parsing
+the current `engine/` import graph against the layering above yields **17
+upward edges**, in five groups:
+
+| Upward edge | Count | What it means |
+|---|---|---|
+| `models/training/*` -> `score`, `replay`, `analogs` | 3 | Real. Gate training builds its dataset by calling the scorer; it needs the registered dataset recipe. Resolved by placing training at layer 6. |
+| `data/features/tier4` -> `models.training` | 6 | Real. Resolved by the inference/training split above. |
+| `calendar` -> `data.fetch`, `data.sources.nasdaq` | 4 | `calendar` is two things: session arithmetic (layer 0) and a calendar source (layer 1). Split the module, not the layering. |
+| `features`, `score` -> `audit` | 2 | `audit` is a causality primitive, not an evaluation output. It belongs in `foundation`. |
+| `data/rebuild` -> `data.features` | 2 | `rebuild` is an orchestrator above features, not a peer of the store. Reclassify. |
+
+Six of the seventeen are misclassification in the layer map rather than defects
+in the code. Nine are real, and they are two known problems already named
+elsewhere in this guide. The import graph is close to layered; what is missing
+is any declaration of the layering and any signal when something crosses it.
+
+### 4.3 Module size is a boundary too
+
+`score.py` is 3,394 lines with a fan-out of 17; `nightly.py` is 1,789 with a
+fan-out of 19; `render.py` is 1,471 with a fan-out of 12. A renderer that
+reaches into twelve engine modules is the financial-logic-in-rendering problem
+stated as a number.
+
+Reading a module is how anyone — or any agent — loads the context to change it,
+so length is a direct tax on every fix, paid before any reasoning starts.
+Target a soft cap of about 600 lines per module, enforced as a warning rather
+than a failure, and split by the stages already listed in the scoring execution
+order rather than by arbitrary size. A fan-out above roughly eight for a
+non-orchestrator is the more reliable signal: it usually means the module is
+doing more than one job. Orchestrators are exempt from fan-out and not from
+length.
+
+### 4.4 Where the current modules land
+
+The layering is only actionable with the mapping. Every current `engine/`
+module has a destination; the ones that appear more than once are the modules
+doing more than one job, and those splits are the point of the exercise.
+
+| Layer | Package | Current source |
+|---|---|---|
+| 0 | `engine/contracts/` | new — the dataclasses currently declared inside `score.py` |
+| 0 | `engine/foundation/` | `paths.py`, `env.py`, `jsonio.py`, `audit.py`, session arithmetic from `calendar.py` |
+| 1 | `engine/data/` | `data/sources/`, `data/normalize/`, `data/pulls/`, `store.py`, `fetch.py`, `throttle.py`, `finality.py`, `rebuild.py`, calendar sourcing from `calendar.py` |
+| 2 | `engine/features/` | `features.py`, `data/features/panel.py`, `data/features/tier4.py` |
+| 3 | `engine/models/` | `models/registry.py`, artifact loading and inference adapters |
+| 3 | `engine/registry/` | `structure_registry.py`, plus the StrategySpec/DeploymentSpec store |
+| 4a | `engine/domain/generation/` | `structures.py`, `forecast_sizing.py`, `fills.py` |
+| 4a | `engine/domain/scenarios/` | `analogs.py`, `ResidualPool` from `pnl_sim.py` |
+| 4a | `engine/domain/valuation/` | `payoff.py`, `black_scholes_put` from `pnl_sim.py` |
+| 4b | `engine/domain/simulation/` | `expected_pnl` from `pnl_sim.py` |
+| 5 | `engine/scoring/` | `score.py` split by the stages in §6.3, `entry_rules.py`, `replay.py`, `trailing_cutoff` from `pnl_sim.py` |
+| 6 | `engine/evaluation/` | `evaluate.py`, `report.py`, `build_trades.py`, `calibrate.py`, `recalibrate.py` |
+| 6 | `engine/ledger/` | `ledger.py`, `ledger_settlement.py`, `portfolio.py` |
+| 6 | `engine/models/training/` | `models/training/` unchanged in content, moved above scoring |
+| 7 | `engine/serving/` | the data half of `dashboard/render.py`, `dashboard/earnings_app.py` |
+| 7 | `engine/ops/` | new supervisor and catalog; `dashboard/nightly.py` becomes a job graph; `tools/bounded_run.py` becomes an executor adapter |
+| 8 | `engine/dashboard/`, `ui/` | the formatting half of `dashboard/render.py`, `dashboard/static/` |
+| — | `engine/diagnosis/` | `dashboard/selfcheck.py`, plus the parity comparators |
+
+`pnl_sim.py` is the clearest case for why this is worth doing. It is 260 lines
+that carry four separable jobs on three different layers: a residual pool
+(scenarios, 4a), a Black-Scholes put mark (valuation, 4a), the expected-PnL
+draw loop (simulation, 4b), and `trailing_cutoff`, which computes the trailing
+six-month top-20% bar and is not a simulation component at all — it is a
+STR-THRU gate input and belongs in scoring. A change to the residual pool and a
+change to the gate bar are today edits to the same file, reachable from the
+same import, with nothing distinguishing them.
+
+`score.py` splits along the eight steps already listed in §6.3, which is why
+that execution order is written as a sequence rather than prose. `render.py`
+splits at the line §6.4 already draws: the values move to `serving/`, the
+formatting stays in the UI package.
+
+Two rules keep the mapping honest during the move. A module that appears twice
+in this table is split before either half moves, never copied. And every moved
+module keeps a compatibility shim at its old import path until phase 8, so the
+move is never the thing that breaks a caller.
 
 See the [logical data model](rearchitecture_data_model.md) for three linked
 entity-relationship views: market inputs; templates, positions and scenarios;
@@ -369,10 +549,24 @@ reader follows a glob over both old and staged fragments. Garbage collection
 uses manifest references and retention leases; it cannot remove an object
 needed by an experiment, release, ledger record, or running reader.
 
-Track two replay modes explicitly: **as actually known then**, which requires
-original availability/receipt evidence, and **historical reconstruction**,
-which uses a declared historical data vintage. A timestamp filter on a revised
-2026 download does not prove what was available in 2018.
+Track three knowledge modes explicitly, recorded per table rather than per
+snapshot because the risk each describes is a property of the field:
+**observed**, which requires original availability/receipt evidence and is
+reserved for decisions made under a live clock; **attested_stable**, which has
+no contemporaneous receipt but attests the values have not moved since, either
+because the field class is immutable once settled or because a cross-source or
+cross-vintage agreement rate has been measured; and **reconstructed**, a
+revisable field read from a single late vintage.
+
+The separation exists because availability and vintage are different risks.
+Only vintage threatens a historical simulation; availability threatens a claim
+about what was actually decided. A timestamp filter on a revised 2026 download
+still does not prove what was available in 2018 — but an expired 2018 option
+chain is not revised by anyone, and calling it "reconstructed" alongside an
+earnings date that genuinely moves loses the distinction that matters. Existing
+history is therefore attestable rather than uniformly reconstructed, provided
+each attestation names which ground it rests on. Nothing promotes into
+`observed` retroactively.
 
 ## 6. One scoring application
 
@@ -676,6 +870,22 @@ Settlement is an independent idempotent branch after final data ingestion.
 A failed board must not prevent resolving an existing position when its
 required data is final; a missing exit must remain visible and unresolved.
 
+Every stage in that graph carries a typed input hash and output hash. Two
+different resumptions follow from them, and they need different keys:
+
+- **Crash recovery** re-executes from the last stage whose output was committed.
+  Its key is the stage's inputs.
+- **Change recovery** re-executes from the first stage whose *implementation*
+  hash moved. Its key is inputs plus implementation, which is what §8.2 already
+  requires of a checkpoint — code, inputs, parameters and environment, not a
+  `.done` marker.
+
+Change recovery is the developer loop, and it is the reason the stage hashes
+are worth their cost: editing `analogs.py` should invalidate the analog stage
+and everything downstream of it while leaving ingestion, features and pricing
+intact. Confirming a fix must not cost a full nightly, and without per-stage
+implementation hashes there is no smaller unit to re-run.
+
 Checkpoint event batches and folds. Resume hash-matching shards and recompute
 only unfinished work. This fixes the current loss of expensive computed scores
 even when downloaded data survives a killed nightly.
@@ -763,7 +973,9 @@ must not initiate paid live collection automatically.
 The [component contracts](component_contracts.md) specify the routes and
 payloads. Read endpoints serve saved projections. Expensive what-if/live work
 returns a job ID. Authenticate both HTML and data URLs; restrict stateful and
-quota-consuming actions to operator roles, with CSRF protection where needed.
+quota-consuming actions to an operator permission, with CSRF protection where
+needed. This sense of "role" is access control and is named `principal_role`
+in the contracts, to keep it clear of `model_role`.
 Use bounded filters and allowed sort fields. Provider credentials stay in
 connectors. A new release triggers a visible refresh, never a mix of old lists
 and new details under one timestamp.
@@ -854,19 +1066,30 @@ Retain measured-fill comparisons and the current data-entitlement limits.
 Keep the unit suite and real-data acceptance checks, and add independent
 boundary tests. A same-engine replay alone can agree with a shared bug.
 
-| Check | Required proof | Trigger |
-|---|---|---|
-| Strategy compatibility | Same contracts, timing, nulls, forecasts, thresholds, flags and choices | Every migration step |
-| Training/serving parity | Dataset rows and production context produce the same registered inputs | Model release; sampled nightly |
-| Serving/replay parity | Single/batch, cache/fresh, pinned geometry, reordered inputs, API/export agree | Code change; nightly |
-| Causal sources | Actual observation and label availability respect cutoff; future poisoning changes nothing | Feature/model changes; live snapshots |
-| Incremental/full equality | Append/correction result matches rebuild; unaffected fragments unchanged | Data/recipe changes; bounded audits |
-| Crash/retry atomicity | Last release readable; resume matches uninterrupted output; no duplicate effects | Storage/scheduler changes |
-| Resource admission | Heavy jobs queue, live reservations hold, lease/worker recovery works | Scheduler and operational drills |
-| Provider contracts | Partial batches, empty results, units, auth/rate errors and publication delay are handled correctly | Connector changes; ingestion |
-| Ledger/accounting | Timely decisions, evidence-backed entry/exit, cash and positions reconcile | Commit/settlement |
-| UI contracts | Bounded lazy requests; no mixed release; values/totals match saved records | Frontend changes |
-| Evidence/recovery | Matching deployment/model page; restore replays score and ledger | Promotion; restore drill |
+Every check declares a tier, and the tier is a latency commitment, not a
+priority: **0** runs in seconds from frozen fixtures on every edit, **1** runs
+in about a minute per commit and must include a real write-to-disk and
+read-back, **2** runs nightly. A check that can only run at tier 2 is not part
+of the loop by which a fix is confirmed, so a tier-2 default is a gap to close
+rather than a neutral choice. The receipt every check emits, and the two
+properties it must have — stage localization and complete independent findings
+— are specified in
+[component contracts §15](component_contracts.md#15-comparators---diagnosis).
+
+| Check | Required proof | Tier | Trigger |
+|---|---|---|---|
+| Import direction | No module imports a higher layer; `engine/diagnosis` is imported by nothing; per-module length and fan-out within budget | 0 | Every edit |
+| Strategy compatibility | Same contracts, timing, nulls, forecasts, thresholds, flags and choices | 0 | Every edit; every migration step |
+| Training/serving parity | Dataset rows and production context produce the same registered inputs | 1 | Model release; sampled nightly |
+| Serving/replay parity | Single/batch, cache/fresh, pinned geometry, reordered inputs, API/export agree | 1 | Every commit; full matrix nightly |
+| Causal sources | Actual observation and label availability respect cutoff; future poisoning changes nothing | 1 | Feature/model changes; live snapshots |
+| Incremental/full equality | Append/correction result matches rebuild; unaffected fragments unchanged | 2 | Data/recipe changes; bounded audits |
+| Crash/retry atomicity | Last release readable; resume matches uninterrupted output; no duplicate effects | 2 | Storage/scheduler changes |
+| Resource admission | Heavy jobs queue, live reservations hold, lease/worker recovery works | 2 | Scheduler and operational drills |
+| Provider contracts | Partial batches, empty results, units, auth/rate errors and publication delay are handled correctly | 1 | Connector changes; ingestion |
+| Ledger/accounting | Timely decisions, evidence-backed entry/exit, cash and positions reconcile | 1 | Commit/settlement |
+| UI contracts | Bounded lazy requests; no mixed release; values/totals match saved records | 1 | Frontend changes |
+| Evidence/recovery | Matching deployment/model page; restore replays score and ledger | 2 | Promotion; restore drill |
 
 Name regression cases for the failures this program has encountered:
 
@@ -911,15 +1134,15 @@ this host so a parity check does not need two multi-gigabyte scorers alive.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
-| 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls | Every strategy and critical refusal reproducible |
-| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection |
+| 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green with its nine known exemptions listed and dated |
+| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only |
 | 2. Data access | Snapshot repository, immutable manifests, bounded reads, legacy adapters | Existing scores match; failed rebuild leaves active snapshot intact |
 | 3. Incremental data | Coverage watermarks, changed-key merges, dependency invalidation, correction path | No-op rewrites zero data; append/correction matches clean rebuild |
 | 4. Scoring | Registered extracted recipes, canonical score contract, engine-owned chooser data, financial logic moved from renderer | All strategies match; production imports no experiment runner |
 | 5. Models | Persisted fold artifacts, transforms/residuals, dataset recipes and evidence; atomic promotions | Zero fitting on scoring requests; exact promotion/rollback |
 | 6. UI | Read API then one screen at a time; old UI/export adapters retained | Feature inventory, lazy-load checks, phone/offline access pass |
 | 7. Live shadow | Entitlement/schema proof, snapshots, causal live features, clock-specific experiments | Live guide gates pass; no contamination; timely publication |
-| 8. Cutover | Switch consumers; remove duplicate implementations; update recovery/operations docs | Ten consecutive completed-session runs without manual resource placement; restore and compatibility evidence pass |
+| 8. Cutover | Switch consumers; remove duplicate implementations; update recovery/operations docs | Ten consecutive completed-session runs without manual resource placement; restore and compatibility evidence pass; the layer check has no remaining exemptions |
 
 The UI can start against frozen projections after phase 2. Shadow collection
 can begin before model readiness once its contract/quota are defined. Cutover
@@ -934,9 +1157,12 @@ Measure provider wait, queue wait and computation separately before setting
 a nightly deadline. Live latency must fit the decision/execution deadline.
 None of these timings were measured in this review.
 
-The first implementation slice should deliver the baseline corpus, canonical
-score schema, paginated read API over saved scores, and supervised legacy
-scoring. Add immutable publication before switching rebuild behavior. This
+The first implementation slice should deliver the tier-0 fixture corpus and
+ComparisonReceipt, the canonical score schema, a paginated read API over saved
+scores, and supervised legacy scoring. The fixtures and the receipt come first
+within that slice: they are what makes every subsequent step's parity claim
+checkable in seconds rather than overnight, and every later phase's exit gate
+is stated as a comparison. Add immutable publication before switching rebuild behavior. This
 creates useful UI/operations boundaries without simultaneously rewriting
 storage, scoring and models.
 

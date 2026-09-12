@@ -309,7 +309,7 @@ erDiagram
     }
     DEPLOYMENT_MODEL {
         string deployment_id PK, FK
-        string role PK
+        string model_role PK
         string model_release_id FK
     }
     SCORE_RECORD {
@@ -323,7 +323,7 @@ erDiagram
     }
     SCORE_COMPONENT {
         string score_id PK, FK
-        string role PK
+        string component_kind PK
         string object_ref
     }
     SERVING_RELEASE {
@@ -353,10 +353,13 @@ erDiagram
     }
 ```
 
-ScoreComponent is a typed role binding, such as `generation`, `selected_position`,
-`scenario_set`, `simulation`, or a namespaced child score in the DYN-SV menu.
-Multiple results for a role use a manifest or distinct qualified role keys.
-Commit validation enforces the expected object kind and content hash. These
+ScoreComponent is a typed slot binding, keyed by `component_kind` — such as
+`generation`, `selected_position`, `scenario_set`, `simulation`, or a namespaced
+child score in the DYN-SV menu. It is deliberately NOT called a role: `model_role`
+above names the slot a model release fills, and the two were distinct primary keys
+sharing one word in an earlier draft. Multiple results for one kind use a manifest
+or distinct qualified keys. Commit validation enforces the expected object kind
+and content hash. These
 bindings connect this view to the previous one without copying calculations.
 Model releases/folds actually consumed are likewise pinned in the score; the
 deployment binding alone cannot hide a later wildcard or monthly resolution.
@@ -366,8 +369,15 @@ selection recipes in its registered component graph. The same template/model
 release can be referenced by many strategy versions. A template is not a
 strategy, and an optimizer is not allowed to silently replace its selector.
 
+`DEPLOYMENT_MODEL.model_role` maps one-to-one onto the existing registry field
+`role` in `engine/models/registry.json`, whose closed vocabulary is `size`,
+`implied_t1`, `runup_move`, `iv_crush`, `gate` and `chooser`. The contracts
+qualify the name because this document uses `role` in three unrelated senses;
+the registry keeps its own field name unchanged, and no persisted manifest is
+rewritten by that qualification.
+
 ModelRecipe/ModelRelease work for regressions, neural networks, size forecasts,
-gates and chooser roles. Model artifacts and evidence remain separate from a
+gates and chooser model roles. Model artifacts and evidence remain separate from a
 strategy definition; promotion creates a new deployment, not a rewrite of
 old scores. Training examples, labels and fitted preprocessing state reference
 their own versioned datasets and temporal splits.

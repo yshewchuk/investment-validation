@@ -28,10 +28,14 @@ ledger's `health.json`, all of which now exist.**
 
 - [System rearchitecture](system_rearchitecture.md): source review, preserved
   strategy inventory, incremental storage, shared scoring/model recipes,
-  supervised jobs, lazy UI, live scoring and staged migration.
+  supervised jobs, lazy UI, live scoring and staged migration. §4.1-4.3 map
+  each owner to a package, declare the import direction and its enforcement,
+  and set module size/fan-out budgets.
 - [Component contracts](component_contracts.md): proposed schemas, interfaces,
   time/version semantics, failure behavior and transactional boundaries for
-  review before implementation.
+  review before implementation. §2.5 groups every type by kind and lifecycle;
+  §15 specifies the ComparisonReceipt and the tier-0/1/2 latency commitment
+  that keeps confirming a fix off the nightly path.
 - [Data model diagrams](rearchitecture_data_model.md): entity identities,
   cardinalities, immutable snapshot membership, model/score lineage and ledger
   relationships.
