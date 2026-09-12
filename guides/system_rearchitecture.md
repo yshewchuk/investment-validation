@@ -326,7 +326,7 @@ in the code. Nine are real, and they are two known problems already named
 elsewhere in this guide. The import graph is close to layered; what is missing
 is any declaration of the layering and any signal when something crosses it.
 
-### 4.3 Module size is a boundary too
+### 4.3 Mechanical code budgets
 
 `score.py` is 3,394 lines with a fan-out of 17; `nightly.py` is 1,789 with a
 fan-out of 19; `render.py` is 1,471 with a fan-out of 12. A renderer that
@@ -341,6 +341,54 @@ order rather than by arbitrary size. A fan-out above roughly eight for a
 non-orchestrator is the more reliable signal: it usually means the module is
 doing more than one job. Orchestrators are exempt from fan-out and not from
 length.
+
+Three further budgets run in the same check, at tier 0, for the same reason:
+they are the properties that decide whether a change can be reasoned about
+without loading its neighbours. All are measured from the current tree rather
+than chosen, so each is a tail to close rather than a rewrite to fund.
+
+| Budget | Value | Current tree |
+|---|---|---|
+| Cyclomatic complexity per function | 15 | 942 functions, median 3, p90 12, p95 18; 57 exceed |
+| Lines per function | 80 | median 14, p90 67, p95 89; 61 exceed |
+| Lines per module | 600 (warning) | 8 exceed |
+| Fan-out, non-orchestrator | 8 | see §4.2 |
+
+Roughly six per cent of functions exceed the first two. The worst is
+`run_nightly` at complexity 64 over 585 lines, which is the orchestrator: §4.1
+exempts orchestrators from fan-out and deliberately does not exempt them from
+length or complexity, because an orchestrator is exactly where a failure needs
+to be localizable to a stage.
+
+Complexity is a diagnosis budget, not an aesthetic one. A comparator can only
+name the first differing stage if stages are separable in the code; a function
+with sixty branches has no stages to name, which is why one red row could carry
+five causes.
+
+**Linter.** Prefer `ruff` for style, import order and dead code, pinned to an
+exact version. The environment note records that pytest is not currently
+installable here, so the budgets above must not depend on a package that may
+not install: implement them in `checks/code_budgets.py` using stdlib `ast`, the
+same way `checks/import_layers.py` works. Style linting is a convenience that
+may be unavailable; the budgets are a gate that may not be.
+
+**Coverage.** A percentage threshold is the wrong instrument for this codebase
+and it is worth saying why rather than adopting one by default. On 2026-09-11 a
+suite of 1,567 passing tests sat over five live defects, and the determinism
+test that should have caught the analog ordering bug passed the same frame
+twice — coverage of the executed line was total and the assertion was empty.
+Require instead:
+
+- a **ratchet**: per-package line coverage may not decrease, checked against a
+  committed baseline, with no floor to game;
+- **tier-0 fixture coverage** as the real proof: every registered strategy and
+  every refusal code has a frozen request/record pair, and a new reason code
+  cannot be added without one;
+- a **negative control** for each new comparator, proving the check fails when
+  its input is corrupted.
+
+The ratchet stops erosion; the fixtures are what actually establish that a
+change did not move a number. Do not trade the second for a higher first.
 
 ### 4.4 Where the current modules land
 
@@ -387,6 +435,36 @@ Two rules keep the mapping honest during the move. A module that appears twice
 in this table is split before either half moves, never copied. And every moved
 module keeps a compatibility shim at its old import path until phase 8, so the
 move is never the thing that breaks a caller.
+
+### 4.5 Every package carries a README
+
+A package is only a unit of reasoning if someone arriving at it can tell what
+it is for without reading its callers. Each directory in §4.4 carries a
+`README.md` with seven sections, and the check in §4.3 fails on a missing file
+or a missing heading:
+
+| Section | Content |
+|---|---|
+| Ownership | Which row of the §4 owner table this package implements, and its layer |
+| Responsibilities | What it decides. The list a reader can hold in mind |
+| Non-responsibilities | What it deliberately does not do, taken from the owner table's "Must not do" column, with the package that does it instead |
+| Public interface | The names other packages may import. Everything else is internal regardless of underscore convention |
+| Consumers | Which packages import this one, and for what |
+| Usage | The shortest real example that runs |
+| Testing | Which tier its checks run at, where its fixtures live, and what a negative control looks like here |
+
+Two of these are machine-checkable, which is what keeps the file from rotting
+into decoration. **Consumers** is verifiable against the import graph the layer
+check already parses: a README claiming a consumer that does not import it, or
+omitting one that does, is a failure rather than a stale sentence. **Public
+interface** is verifiable the same way — an import of a name absent from that
+list is an upward-equivalent violation, caught by the same pass.
+
+**Non-responsibilities** is the section that earns the most and is easiest to
+skip. The §4 owner table's prohibitions are the boundaries this architecture
+rests on, and §4.1 showed that several of them could not be made structural.
+Writing each one into the package that must honour it, naming the package that
+owns it instead, is what makes an unenforceable rule at least a visible one.
 
 See the [logical data model](rearchitecture_data_model.md) for three linked
 entity-relationship views: market inputs; templates, positions and scenarios;
@@ -1078,7 +1156,7 @@ properties it must have — stage localization and complete independent findings
 
 | Check | Required proof | Tier | Trigger |
 |---|---|---|---|
-| Import direction | No module imports a higher layer; `engine/diagnosis` is imported by nothing; per-module length and fan-out within budget | 0 | Every edit |
+| Code budgets | No module imports a higher layer; `engine/diagnosis` imported by nothing; complexity, function/module length and fan-out within budget; coverage ratchet not decreased; every package README present with consumers matching the import graph | 0 | Every edit |
 | Strategy compatibility | Same contracts, timing, nulls, forecasts, thresholds, flags and choices | 0 | Every edit; every migration step |
 | Training/serving parity | Dataset rows and production context produce the same registered inputs | 1 | Model release; sampled nightly |
 | Serving/replay parity | Single/batch, cache/fresh, pinned geometry, reordered inputs, API/export agree | 1 | Every commit; full matrix nightly |
@@ -1135,7 +1213,7 @@ this host so a parity check does not need two multi-gigabyte scorers alive.
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green with its nine known exemptions listed and dated |
-| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only |
+| 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; **`checks/code_budgets.py`, pinned linter, coverage ratchet and a README per package**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only; budgets green with their dated exemption lists, every package README present and its consumers matching the import graph |
 | 2. Data access | Snapshot repository, immutable manifests, bounded reads, legacy adapters | Existing scores match; failed rebuild leaves active snapshot intact |
 | 3. Incremental data | Coverage watermarks, changed-key merges, dependency invalidation, correction path | No-op rewrites zero data; append/correction matches clean rebuild |
 | 4. Scoring | Registered extracted recipes, canonical score contract, engine-owned chooser data, financial logic moved from renderer | All strategies match; production imports no experiment runner |
