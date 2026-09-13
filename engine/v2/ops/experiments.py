@@ -9,7 +9,7 @@ from typing import Callable
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import (
     environment_identity,
     file_hash,
@@ -273,7 +273,8 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
     except Exception as exc:
         receipt.status = "failed"
         receipt.evidence["error_code"] = type(exc).__name__
-        receipt.evidence["error"] = str(exc)[:240]
+        if isinstance(exc, OpsError):
+            receipt.evidence["failure_code"] = exc.code
         return receipt.as_dict()
     if mode == "primary" and backup is not None and not synthetic:
         try:

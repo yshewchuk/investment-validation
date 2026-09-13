@@ -1,9 +1,11 @@
 """Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28)."""
+import json
+
 import pytest
 
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.diagnostics import audit_writes, snapshot_sensitive
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
     ExperimentSpec,
     register_hypothesis,
@@ -162,6 +164,35 @@ def test_primary_registration_conflicts_on_changed_input(tmp_path):
     register_hypothesis(conn, spec, "input-a", mode="primary")
     with pytest.raises(OpsError, match="IDEMPOTENCY_CONFLICT"):
         register_hypothesis(conn, spec, "input-b", mode="primary")
+
+
+def test_failure_evidence_carries_no_exception_text(tmp_path):
+    spec = ExperimentSpec("EXP-D2", "plumbing", "fixture", ("fixture",), 7,
+                          ("fold-1",), {"fill": "mid"}, "synthetic")
+
+    def boom(*, run_dir, no_ledger):
+        raise RuntimeError("password=hunter2 leaked-secret")
+
+    receipt = run_experiment(spec, tmp_path, tmp_path / "run3",
+                             runner=boom, mode="smoke", synthetic=True)
+    assert receipt["status"] == "failed"
+    assert receipt["evidence"]["error_code"] == "RuntimeError"
+    assert "error" not in receipt["evidence"]
+    assert "hunter2" not in json.dumps(receipt)
+
+
+def test_failure_evidence_keeps_ops_failure_code_not_text(tmp_path):
+    spec = ExperimentSpec("EXP-D2B", "plumbing", "fixture", ("fixture",), 7,
+                          ("fold-1",), {"fill": "mid"}, "synthetic")
+
+    def boom(*, run_dir, no_ledger):
+        raise fail("VALIDATION_FAILED", "secret-token-xyz should never persist")
+
+    receipt = run_experiment(spec, tmp_path, tmp_path / "run4",
+                             runner=boom, mode="smoke", synthetic=True)
+    assert receipt["evidence"]["error_code"] == "OpsError"
+    assert receipt["evidence"]["failure_code"] == "VALIDATION_FAILED"
+    assert "secret-token-xyz" not in json.dumps(receipt)
 
 
 def test_o16_write_audit_detects_undisclosed_production_writes(tmp_path):
