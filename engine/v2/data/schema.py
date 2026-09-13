@@ -420,6 +420,22 @@ _V2 = (
     CHECK (json_valid(input_receipt_refs_json) AND json_type(input_receipt_refs_json) = 'array')""",
 )
 
+
+# --------------------------------------------------------------------------
+# v3 — Task 1 review fix: data_import_receipts.scope (never edit v1/v2 above)
+# --------------------------------------------------------------------------
+#
+# The receipt-id retry short-circuit (``catalog.py::_existing_receipt``) must
+# refuse a reused ``receipt_id`` whose stored scope differs from the call, but
+# v1/v2 never recorded which scope an import receipt was written for.
+# ``DEFAULT ''`` is an explicit sentinel for the two rows this column cannot
+# meaningfully backfill: a v1/v2-era row (none exist in production yet) and
+# ``catalog.py::record_failed_import``, which is not itself scoped.
+_V3 = (
+    """ALTER TABLE data_import_receipts ADD COLUMN scope TEXT NOT NULL DEFAULT ''""",
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
-MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2))
+MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
+             (3, "import_receipt_scope", _V3))

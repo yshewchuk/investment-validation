@@ -36,6 +36,21 @@ differs raises ``IDENTITY_CONFLICT``. A lost head compare-and-swap — including
 the very first head for a scope, when the precheck already disagrees with the
 caller's expectation — raises ``SNAPSHOT_CONFLICT``.
 
+**Review fix (task 1 follow-up):** a dataset version's/snapshot's ``*_id``
+deliberately excludes ``parent_*_id`` — only ``manifest_hash`` covers it — so a
+candidate identical to an already-stored version except for its declared
+parent is a *reuse*, not a conflict: ``_insert_dataset_version``/
+``_insert_snapshot`` compare only the identity-covered columns and, on reuse,
+return the record reconciled to whatever parent/``manifest_hash`` is truly
+stored (never the candidate's own). ``commit_snapshot`` threads that
+reconciliation up through the snapshot's own ``table_versions`` before
+checking whether the snapshot itself is a reuse, so a *freshly inserted*
+snapshot can never store a ``manifest_hash`` computed over an unreconciled
+child. When the reconciled snapshot already equals the expected head, the
+head is left untouched (generation unchanged) rather than CAS'd to itself.
+Contracts, objects and fragments have no such parent field and keep the
+original same-ID-different-payload rule unchanged.
+
 Required fault points (task brief decision 2), fired through one ``fault``
 hook in commit order: ``before_transaction``, ``after_contracts``,
 ``after_objects``, ``after_fragments``, ``after_dataset_versions``,
@@ -48,7 +63,7 @@ fsync/publication, during inspection) belong to ``objects.py`` and
 """
 from __future__ import annotations
 
-import json
+import dataclasses
 import sqlite3
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
@@ -63,6 +78,7 @@ from engine.v2.contracts import (
     TableContract,
 )
 from engine.v2.data.errors import fail
+from engine.v2.data.manifests import snapshot_ref as build_snapshot_ref
 from engine.v2.data.manifests import (
     table_contract_hash,
     verify_dataset_manifest,
@@ -209,11 +225,11 @@ def _insert_object(conn: sqlite3.Connection, ref: ObjectRef, now: str) -> None:
 
 
 def _insert_fragment(conn: sqlite3.Connection, record: FragmentRecord, now: str) -> None:
-    key_bounds = json.dumps({"primary_key_min": list(record.primary_key_min),
-                             "primary_key_max": list(record.primary_key_max)})
+    key_bounds = canonical_json({"primary_key_min": list(record.primary_key_min),
+                                 "primary_key_max": list(record.primary_key_max)})
     time_bounds = (None if record.time_min is None else
-                  json.dumps({"time_min": record.time_min, "time_max": record.time_max}))
-    receipts = json.dumps(list(record.input_receipt_refs))
+                  canonical_json({"time_min": record.time_min, "time_max": record.time_max}))
+    receipts = canonical_json(list(record.input_receipt_refs))
     payload = (record.object_ref.object_id, record.table_contract_ref.contract_id,
               record.partition_key, record.row_count, record.byte_hash,
               record.logical_content_hash, key_bounds, time_bounds,
@@ -234,27 +250,51 @@ def _insert_fragment(conn: sqlite3.Connection, record: FragmentRecord, now: str)
         (record.fragment_id, *payload, now))
 
 
-def _insert_dataset_version(conn: sqlite3.Connection, manifest: DatasetManifest, now: str) -> None:
+def _reconciled_manifest(manifest: DatasetManifest, true_parent: str | None,
+                         true_manifest_hash: str) -> DatasetManifest:
+    """``manifest`` with its parent/``manifest_hash`` overridden to whatever the
+    catalog actually stores for this ``dataset_version_id`` — a no-op when
+    they already agree (the ordinary fresh-insert and exact-repeat cases).
+    """
     ref = manifest.dataset_version_ref
-    evidence = json.dumps({"coverage_receipt_refs": list(manifest.coverage_receipt_refs),
-                           "availability_evidence_refs": list(manifest.availability_evidence_refs)})
-    payload = (ref.table_contract_ref.contract_id, manifest.parent_dataset_version_id,
-              ref.manifest_hash, manifest.logical_content_hash, manifest.row_count,
-              manifest.knowledge_mode, evidence)
+    if true_parent == manifest.parent_dataset_version_id and true_manifest_hash == ref.manifest_hash:
+        return manifest
+    new_ref = dataclasses.replace(ref, manifest_hash=true_manifest_hash)
+    return dataclasses.replace(manifest, parent_dataset_version_id=true_parent, dataset_version_ref=new_ref)
+
+
+def _insert_dataset_version(conn: sqlite3.Connection, manifest: DatasetManifest,
+                            now: str) -> DatasetManifest:
+    """Insert, or reuse an existing row whose identity-covered fields match.
+
+    ``dataset_version_id`` excludes ``parent_dataset_version_id`` (only
+    ``manifest_hash`` covers it — task brief review fix), so a candidate
+    differing only in its declared parent reuses the stored row instead of
+    conflicting. Returns ``manifest`` reconciled to the truly stored
+    parent/``manifest_hash`` either way (see :func:`_reconciled_manifest`).
+    """
+    ref = manifest.dataset_version_ref
+    evidence = canonical_json({"coverage_receipt_refs": list(manifest.coverage_receipt_refs),
+                               "availability_evidence_refs": list(manifest.availability_evidence_refs)})
+    identity = (ref.table_contract_ref.contract_id, manifest.logical_content_hash, manifest.row_count,
+               manifest.knowledge_mode, evidence)
     existing = conn.execute(
-        "SELECT contract_id, parent_dataset_version_id, manifest_hash, logical_content_hash, "
-        "row_count, knowledge_mode, evidence_json FROM data_dataset_versions "
+        "SELECT contract_id, logical_content_hash, row_count, knowledge_mode, evidence_json, "
+        "parent_dataset_version_id, manifest_hash FROM data_dataset_versions "
         "WHERE dataset_version_id = ?", (ref.dataset_version_id,)).fetchone()
     if existing is not None:
-        if tuple(existing) != payload:
+        if tuple(existing[:5]) != identity:
             raise fail("IDENTITY_CONFLICT", "dataset_version_id already exists with different content",
                       details={"dataset_version_id": ref.dataset_version_id})
-        return
+        return _reconciled_manifest(manifest, existing["parent_dataset_version_id"],
+                                    existing["manifest_hash"])
     conn.execute(
         "INSERT INTO data_dataset_versions (dataset_version_id, contract_id, "
         "parent_dataset_version_id, manifest_hash, logical_content_hash, row_count, "
         "knowledge_mode, evidence_json, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (ref.dataset_version_id, *payload, now))
+        (ref.dataset_version_id, identity[0], manifest.parent_dataset_version_id, ref.manifest_hash,
+         identity[1], identity[2], identity[3], identity[4], now))
+    return manifest
 
 
 def _insert_memberships(conn: sqlite3.Connection, manifest: DatasetManifest) -> None:
@@ -273,28 +313,55 @@ def _insert_memberships(conn: sqlite3.Connection, manifest: DatasetManifest) -> 
             "VALUES (?, ?, ?)", (dsv_id, ordinal, ref.fragment_id))
 
 
-def _insert_snapshot(conn: sqlite3.Connection, snapshot: SnapshotRef, receipt_id: str, now: str) -> None:
-    # commit_receipt_ref is excluded from the compare-and-conflict payload,
-    # like registered_at: it names whichever attempt's receipt first
-    # committed this content, not part of the snapshot's own identity, so a
-    # retry under a fresh receipt_id is still a no-op (§12 D12).
-    payload = (snapshot.parent_snapshot_id, snapshot.manifest_hash, snapshot.calendar_version,
-              snapshot.source_priority_version, json.dumps(list(snapshot.finality_receipt_refs)),
-              json.dumps(dict(snapshot.knowledge_mode_by_table)))
+def _reconcile_snapshot(snapshot: SnapshotRef, table_versions: dict[str, DatasetManifest]) -> SnapshotRef:
+    """Rebuild ``snapshot`` over dataset versions already reconciled to their
+    truly stored parent/``manifest_hash`` (:func:`_insert_dataset_version`), so
+    a snapshot that turns out to be a fresh insert never stores a
+    ``manifest_hash`` computed over an unreconciled child (task brief review
+    fix). ``dataset_version_id`` never changes under reconciliation, so the
+    rebuilt ``snapshot_id`` always equals the candidate's own.
+    """
+    return build_snapshot_ref(
+        table_versions, calendar_version=snapshot.calendar_version,
+        source_priority_version=snapshot.source_priority_version,
+        finality_receipt_refs=snapshot.finality_receipt_refs,
+        parent_snapshot_id=snapshot.parent_snapshot_id)
+
+
+def _insert_snapshot(conn: sqlite3.Connection, snapshot: SnapshotRef, receipt_id: str,
+                     now: str) -> SnapshotRef:
+    """Insert, or reuse an existing row whose identity-covered fields match.
+
+    ``snapshot_id`` excludes ``parent_snapshot_id`` (only ``manifest_hash``
+    covers it — task brief review fix), so a candidate differing only in its
+    declared parent reuses the stored row instead of conflicting. Returns
+    ``snapshot`` reconciled to the truly stored parent/``manifest_hash``
+    either way — never the candidate's own on reuse.
+    """
+    identity = (snapshot.calendar_version, snapshot.source_priority_version,
+               canonical_json(list(snapshot.finality_receipt_refs)),
+               canonical_json(dict(snapshot.knowledge_mode_by_table)))
     existing = conn.execute(
-        "SELECT parent_snapshot_id, manifest_hash, calendar_version, source_priority_version, "
-        "finality_receipt_refs_json, knowledge_mode_by_table_json FROM data_snapshots "
+        "SELECT calendar_version, source_priority_version, finality_receipt_refs_json, "
+        "knowledge_mode_by_table_json, parent_snapshot_id, manifest_hash FROM data_snapshots "
         "WHERE snapshot_id = ?", (snapshot.snapshot_id,)).fetchone()
     if existing is not None:
-        if tuple(existing) != payload:
+        if tuple(existing[:4]) != identity:
             raise fail("IDENTITY_CONFLICT", "snapshot_id already exists with different content",
                       details={"snapshot_id": snapshot.snapshot_id})
-        return
+        if (existing["parent_snapshot_id"] == snapshot.parent_snapshot_id
+                and existing["manifest_hash"] == snapshot.manifest_hash):
+            return snapshot
+        return dataclasses.replace(snapshot, parent_snapshot_id=existing["parent_snapshot_id"],
+                                   manifest_hash=existing["manifest_hash"])
     conn.execute(
         "INSERT INTO data_snapshots (snapshot_id, parent_snapshot_id, manifest_hash, "
         "calendar_version, source_priority_version, finality_receipt_refs_json, "
         "knowledge_mode_by_table_json, commit_receipt_ref, registered_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (snapshot.snapshot_id, *payload, receipt_id, now))
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (snapshot.snapshot_id, snapshot.parent_snapshot_id, snapshot.manifest_hash, *identity,
+         receipt_id, now))
+    return snapshot
 
 
 def _insert_snapshot_tables(conn: sqlite3.Connection, snapshot: SnapshotRef) -> None:
@@ -312,12 +379,14 @@ def _insert_snapshot_tables(conn: sqlite3.Connection, snapshot: SnapshotRef) -> 
             "VALUES (?, ?, ?)", (snapshot.snapshot_id, table_name, ref.dataset_version_id))
 
 
-def _insert_receipt(conn: sqlite3.Connection, receipt: SnapshotImportReceipt, now: str) -> None:
+def _insert_receipt(conn: sqlite3.Connection, receipt: SnapshotImportReceipt, scope: str,
+                    now: str) -> None:
     conn.execute(
         "INSERT INTO data_import_receipts (receipt_id, attempt_id, fence, source_manifest_hash, "
-        "result_snapshot_id, status, problem_json, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "result_snapshot_id, status, problem_json, registered_at, scope) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (receipt.receipt_id, receipt.attempt_id, receipt.fence, receipt.request_hash,
-         receipt.resulting_head_snapshot_id, receipt.status, None, now))
+         receipt.resulting_head_snapshot_id, receipt.status, None, now, scope))
 
 
 # --------------------------------------------------------------------------
@@ -363,14 +432,20 @@ def _update_head(conn: sqlite3.Connection, scope: str, new_snapshot_id: str,
 
 
 def _existing_receipt(conn: sqlite3.Connection, receipt_id: str, request_hash: str, attempt_id: str,
-                      fence: int, snapshot: SnapshotRef,
+                      fence: int, scope: str, snapshot: SnapshotRef,
                       resulting_generation: int) -> SnapshotImportReceipt | None:
+    """A prior committed receipt under ``receipt_id``, only if it is genuinely
+    the same call replayed: same ``request_hash``, ``attempt_id``, ``scope``
+    and resulting ``snapshot_id`` (task brief review fix — the short-circuit
+    must verify what it short-circuits, not just trust the id). Anything else
+    stored under this ``receipt_id`` is ``IDENTITY_CONFLICT``, nothing written.
+    """
     row = conn.execute("SELECT * FROM data_import_receipts WHERE receipt_id = ?",
                        (receipt_id,)).fetchone()
     if row is None:
         return None
-    expected = (attempt_id, fence, request_hash, "committed", snapshot.snapshot_id)
-    found = (row["attempt_id"], row["fence"], row["source_manifest_hash"], row["status"],
+    expected = (attempt_id, fence, request_hash, scope, "committed", snapshot.snapshot_id)
+    found = (row["attempt_id"], row["fence"], row["source_manifest_hash"], row["scope"], row["status"],
             row["result_snapshot_id"])
     if found != expected:
         raise fail("IDENTITY_CONFLICT", "receipt_id already exists with a different outcome",
@@ -404,12 +479,13 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
     """
     fault = fault or (lambda point: None)
     _verify_everything(contracts, records, manifests, snapshot)
+    table_names = [_table_name_for(manifest, snapshot) for manifest in manifests]
     now = format_timestamp(clock.now())
     fault("before_transaction")
     with _immediate_transaction(conn):
         fence_check(conn)
-        shortcut = _existing_receipt(conn, receipt_id, request_hash, attempt_id, fence, snapshot,
-                                     expected_head_generation + 1)
+        shortcut = _existing_receipt(conn, receipt_id, request_hash, attempt_id, fence, scope,
+                                     snapshot, expected_head_generation + 1)
         if shortcut is not None:
             return shortcut
         _check_head_expectation(_current_head(conn, scope), expected_head_snapshot_id,
@@ -423,27 +499,39 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
         for record in records:
             _insert_fragment(conn, record, now)
         fault("after_fragments")
-        for manifest in manifests:
-            _insert_dataset_version(conn, manifest, now)
+        reconciled = [_insert_dataset_version(conn, manifest, now) for manifest in manifests]
         fault("after_dataset_versions")
-        for manifest in manifests:
+        for manifest in reconciled:
             _insert_memberships(conn, manifest)
         fault("after_memberships")
-        _insert_snapshot(conn, snapshot, receipt_id, now)
+        # Rebuild the snapshot over reconciled children before deciding
+        # whether the snapshot itself is a fresh insert or a reuse (task
+        # brief review fix): a fresh insert must never store a manifest_hash
+        # computed over an unreconciled child.
+        snapshot = _reconcile_snapshot(snapshot, dict(zip(table_names, reconciled)))
+        snapshot = _insert_snapshot(conn, snapshot, receipt_id, now)
         fault("after_snapshot")
         _insert_snapshot_tables(conn, snapshot)
         fault("after_snapshot_tables")
+        already_at_head = snapshot.snapshot_id == expected_head_snapshot_id
+        resulting_generation = (expected_head_generation if already_at_head
+                                else expected_head_generation + 1)
         receipt = SnapshotImportReceipt(
             receipt_id=receipt_id, request_hash=request_hash, attempt_id=attempt_id, fence=fence,
             snapshot_ref=snapshot, legacy_snapshot_object_ref=None,
             prior_head_snapshot_id=expected_head_snapshot_id,
             resulting_head_snapshot_id=snapshot.snapshot_id,
-            resulting_head_generation=expected_head_generation + 1, status="committed",
+            resulting_head_generation=resulting_generation, status="committed",
             problem=None, envelope={})
-        _insert_receipt(conn, receipt, now)
+        _insert_receipt(conn, receipt, scope, now)
         fault("before_head_update")
-        _update_head(conn, scope, snapshot.snapshot_id, expected_head_snapshot_id,
-                    expected_head_generation, receipt_id, now)
+        if not already_at_head:
+            # The candidate resolved (possibly by reuse) to a snapshot the
+            # head already points at: no CAS, no generation bump (task brief
+            # review fix — "unless the head is already that snapshot, which
+            # is a no-op").
+            _update_head(conn, scope, snapshot.snapshot_id, expected_head_snapshot_id,
+                        expected_head_generation, receipt_id, now)
         fault("before_commit")
     return receipt
 
