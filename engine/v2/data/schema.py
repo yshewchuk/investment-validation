@@ -399,6 +399,27 @@ _V1 = (
     + _SNAPSHOTS + _SNAPSHOT_TABLES + _SNAPSHOT_HEADS + _IMPORT_RECEIPTS
 )
 
+
+# --------------------------------------------------------------------------
+# v2 — P2-3: data_fragments.input_receipt_refs_json (never edit v1 above)
+# --------------------------------------------------------------------------
+#
+# ``FragmentRecord.input_receipt_refs`` is part of a fragment's
+# ``manifest_hash`` (``manifests.fragment_record``'s docstring) but v1's
+# ``data_fragments`` has no column for it. Every other field
+# ``engine/v2/data/repository.py::Repository.resolve`` needs to rebuild an
+# exact ``FragmentRecord`` — object/contract refs (joins), partition_key,
+# row_count, byte/logical hashes, key/time bounds, import_request_hash — is
+# already a v1 column; this is the one addition P2-3 needs (task brief
+# decision 3). ``DEFAULT '[]'`` lets the existing raw-SQL fixtures in
+# ``tests/test_v2_data_catalog.py`` keep inserting rows that never mention
+# this column; every row ``engine/v2/data/catalog.py::commit_snapshot``
+# writes supplies its real value.
+_V2 = (
+    """ALTER TABLE data_fragments ADD COLUMN input_receipt_refs_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(input_receipt_refs_json) AND json_type(input_receipt_refs_json) = 'array')""",
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
-MIGRATIONS = ((1, "snapshot_catalog", _V1),)
+MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2))
