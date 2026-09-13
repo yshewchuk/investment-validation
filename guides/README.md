@@ -53,6 +53,9 @@ Implementation plans, one per migration phase of
   automatic resource admission, stage checkpoints, legacy-compatible nightly
   and experiment workflows, decision/publication safety, and a sequenced
   implementation plan with fault-injection acceptance tests.
+- [Phase 2 — Data Access](rearchitecture_phase2_data_access.md): immutable
+  dataset/snapshot manifests, bounded Arrow reads, exact event/chain access,
+  legacy scoring adapters, and atomic rebuild/rollback acceptance gates.
 
 These are design proposals. They describe explicit future changes to the
 runtime choices in convention 7 below, while retaining the research and safety
