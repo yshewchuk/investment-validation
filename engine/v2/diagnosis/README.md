@@ -34,7 +34,7 @@ underscore convention, and an import of a name absent from this list fails
 | `AGREE`, `DIFFER`, `INCOMPARABLE` | The three verdicts. There is no fourth. |
 | `StagePlan`, `SCORER_V1`, `load_stage_plan` | The §6.3 stage order, and which stage owns which field. |
 | `Tolerance`, `TolerancePolicy`, `EXACT`, `SCORE_RECORD_V1` | Per-field tolerances. There is no global one. |
-| `canonical_json`, `content_hash` | RFC 8785 canonical form and `sha256:` identity, per contracts §2.2. Moves to `engine/v2/foundation` when that package is written. |
+| `canonical_json`, `content_hash` | RFC 8785 canonical form and `sha256:` identity, per contracts §2.2. Re-exported from `engine/v2/foundation`, which owns the implementation since rearchitecture phase 1 §3.2 — the same objects, not a copy. |
 | `problem` | The shared failure envelope of contracts §2.4. |
 
 <!-- public-interface: compare_records, merge_receipts, flatten, ComparisonReceipt, Finding, StageHashes, Population, Envelope, AGREE, DIFFER, INCOMPARABLE, StagePlan, SCORER_V1, load_stage_plan, Tolerance, TolerancePolicy, EXACT, SCORE_RECORD_V1, canonical_json, content_hash, problem, canonical, receipt, record_comparator, stage_plan, tolerance -->

@@ -49,9 +49,25 @@ __all__ = [
 ]
 
 #: Everything a replay's answer is a function of, beyond the frozen artifacts:
-#: the whole engine (legacy and v2, since the comparator judges the answer),
-#: and the harness that re-scores, serializes and compares.
+#: the legacy engine that re-scores, the v2 packages the harness imports to
+#: compare and hash, and the harness itself.
+#:
+#: ``engine/v2/**`` outside :data:`REPLAY_V2_PACKAGES` is deliberately NOT in
+#: the hash (rearchitecture phase 1 decision D6). Legacy may not import v2
+#: (§4.2 rule 3, enforced), and the harness imports only diagnosis, whose own
+#: dependency closure is foundation and contracts. An edit to ``engine/v2/ops``
+#: therefore cannot change a replay's answer, and binding the receipt to it
+#: would turn the phase-0 gate red on every operations commit — the same
+#: reasoning that rejected binding to a git commit.
+#: ``tests/test_v2_ops_replay_scope.py`` re-derives that closure from the
+#: import graph, so a harness that starts importing another v2 package fails
+#: until this tuple grows with it.
 CODE_ROOTS = (("engine", "**/*.py"),)
+REPLAY_V2_PACKAGES = (
+    "engine/v2/contracts",
+    "engine/v2/diagnosis",
+    "engine/v2/foundation",
+)
 CODE_FILES = (
     "tools/replay_tier1.py",
     "tools/capture_tier0_corpus.py",
@@ -69,6 +85,14 @@ FORECAST_BLOCK = ("forecast_abs_move", "forecast_p10", "forecast_p90",
 # --------------------------------------------------------------------------
 
 
+def in_replay_scope(rel: str) -> bool:
+    """Whether a repo-relative engine file is part of what a replay executes."""
+    if not rel.startswith("engine/v2/"):
+        return True
+    return rel == "engine/v2/__init__.py" or any(
+        rel.startswith(package + "/") for package in REPLAY_V2_PACKAGES)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -84,7 +108,9 @@ def code_hash(root: Path = ROOT) -> str:
         for path in sorted((root / rel_dir).glob(pattern)):
             if "__pycache__" in path.parts or not path.is_file():
                 continue
-            files[path.relative_to(root).as_posix()] = sha256_file(path)
+            rel = path.relative_to(root).as_posix()
+            if in_replay_scope(rel):
+                files[rel] = sha256_file(path)
     for rel in CODE_FILES:
         path = root / rel
         files[rel] = sha256_file(path) if path.is_file() else None

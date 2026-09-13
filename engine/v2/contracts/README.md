@@ -17,6 +17,7 @@ Replaces (§4.4): `the dataclasses currently declared inside score.py`.
 
 - **Compute anything** — `every package above it` does it instead.
 - **Touch the filesystem, a clock or a network** — `engine/v2/foundation` does it instead.
+- **Validate a document** — `engine/v2/foundation` (`from_document`) does it instead, driven by these annotations.
 
 ## Public interface
 
@@ -24,9 +25,12 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+| Module | Names |
+|---|---|
+| `jobs` | `JobSpec`, `SubmitRequest`, `JobReceipt`, `CancellationReceipt`, `StageSpec`, `ArtifactRef`, `LegacyFileRef`, `LegacyInputManifest`, `AttemptReceipt`, `OutputCandidate`, `CheckpointCandidate`, `CheckpointReceipt`, `StageResult`; vocabularies `JobState`, `AttemptState`, `ProcessState`, `EffectClass`; the `*_V1` schema versions. |
+| `operations` | `Problem`, `FAILURE_CODES`, `QueueReason`, `ProgressEvent`, `ResourceProfile`, `ResourcePolicy`, `LiveWindow`, `CapacitySample`, `ResolvedResources`, `ProcessIdentity`; vocabularies `ProblemCategory`, `ExecutorMode`, `Containment`, `ProgressKind`; the `*_V1` schema versions. |
 
-<!-- public-interface: none -->
+<!-- public-interface: jobs, operations, JobSpec, SubmitRequest, JobReceipt, CancellationReceipt, StageSpec, ArtifactRef, LegacyFileRef, LegacyInputManifest, AttemptReceipt, OutputCandidate, CheckpointCandidate, CheckpointReceipt, StageResult, JobState, AttemptState, ProcessState, EffectClass, ARTIFACT_REF_V1, ATTEMPT_RECEIPT_V1, CANCELLATION_RECEIPT_V1, CHECKPOINT_RECEIPT_V1, JOB_RECEIPT_V1, JOB_SPEC_V1, LEGACY_INPUT_MANIFEST_V1, STAGE_RESULT_V1, STAGE_SPEC_V1, SUBMIT_REQUEST_V1, Problem, FAILURE_CODES, QueueReason, ProgressEvent, ResourceProfile, ResourcePolicy, LiveWindow, CapacitySample, ResolvedResources, ProcessIdentity, ProblemCategory, ExecutorMode, Containment, ProgressKind, CAPACITY_SAMPLE_V1, PROBLEM_V1, PROGRESS_EVENT_V1, RESOLVED_RESOURCES_V1, RESOURCE_POLICY_V1 -->
 
 ## Consumers
 
@@ -34,25 +38,29 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+- `engine/v2/foundation` — `ArtifactRef`, returned by the artifact store.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.foundation -->
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+```python
+from engine.v2.contracts import JobSpec
+from engine.v2.foundation import from_document, to_document
+
+spec = JobSpec(kind="synthetic.echo", implementation_ref="impl", spec_hash=None,
+               environment_ref="env", output_namespace="dev", resource_class="io_fetch",
+               retry_policy_ref="retry.none", checkpoint_contract_ref="ckpt.none")
+assert from_document(JobSpec, to_document(spec)) == spec
+```
 
 ## Testing
 
-Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
-panel load, no network, no fitting. Fixtures live in the private
-`fixtures/tier0/` corpus (`checks/tier0_corpus.py`), never in this repo — they
-carry licensed quotes.
+Tier 0, in `tests/test_v2_ops_contracts.py`. The package's own rules are checked
+against its source: imports limited to `dataclasses`/`typing`, no function
+anywhere (a method is where a hash-on-construction would hide), every type
+frozen and keyword-only, one schema family per type, and every contract
+round-tripping exactly through the strict decoder.
 
-A negative control here looks like: corrupt one field of a frozen record, run
-the comparator, and assert it names **this package's stage** and that field
-path — not that "a row is red". A check that has never failed is not known to
-work.
+A negative control here looks like: set `effect_class` to a value outside the
+vocabulary and assert the decoder refuses it with `BAD_ENUM` at that path.
