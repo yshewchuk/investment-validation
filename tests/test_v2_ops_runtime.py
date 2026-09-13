@@ -132,3 +132,42 @@ def test_o07_pid_reuse_and_reparenting():
     reused = replace(parent, start_ticks=100)
     _, alive, memory = observe(known, "boot", table={1: (reused, 0, "S", 1000), 2: (child, 0, "S", 20)})
     assert alive == (child,) and memory == 20
+
+
+def test_live_window_admission_is_conservative_about_unknown_durations():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    window = LiveWindow(name="live_session", weekdays=(1,), start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(window,))
+    utc = timezone.utc
+    before = datetime(2026, 9, 14, 13, 0, tzinfo=utc)   # Monday, 30 min before the window
+    inside = datetime(2026, 9, 14, 15, 0, tzinfo=utc)
+    after = datetime(2026, 9, 14, 21, 0, tzinfo=utc)
+
+    short = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=600)     # finishes 13:10
+    long = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=7200)     # finishes 15:00
+    unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
+    unknown_light = replace(DEFAULT_POLICY.profiles[0], heavy=False, estimated_seconds=None)
+
+    # A job that conservatively completes before the window is admitted.
+    assert live_window_reason(policy, short, before) is None
+    # A job whose conservative completion overlaps the window is refused with
+    # the numbers, and never started on an assumption it will finish early.
+    reason = live_window_reason(policy, long, before)
+    assert reason is not None and reason.code == "LIVE_WINDOW"
+    assert reason.needed["completion_seconds"] == 7200
+    assert reason.available["seconds_until_window"] == 1800
+    # Unknown-duration HEAVY work cannot be assumed safe before or inside the
+    # window; unknown-duration light work may proceed before it.
+    assert live_window_reason(policy, unknown_heavy, before) is not None
+    assert live_window_reason(policy, unknown_heavy, inside) is not None
+    assert live_window_reason(policy, unknown_light, before) is None
+    # After the window everything is admitted again, and a malformed window
+    # fails closed rather than open.
+    assert live_window_reason(policy, unknown_heavy, after) is None
+    broken = replace(policy, live_windows=(replace(window, start_utc="99:99"),))
+    assert live_window_reason(broken, short, before).code == "INVALID_LIVE_WINDOW"

@@ -1,0 +1,256 @@
+{
+  "schema_version": "phase1_coverage.v1.0",
+  "suite_version": "phase1_coverage_suite.v1",
+  "test_files": [
+    "tests/test_diagnosis_comparator.py",
+    "tests/test_v2_ops_artifacts.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_contracts.py",
+    "tests/test_v2_ops_effects.py",
+    "tests/test_v2_ops_effects_backup.py",
+    "tests/test_v2_ops_engineering.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_foundation.py",
+    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/test_v2_ops_replay_scope.py",
+    "tests/test_v2_ops_runner_onboarding.py",
+    "tests/test_v2_ops_runtime.py",
+    "tests/test_v2_ops_serving.py",
+    "tests/test_v2_ops_serving_browser.py",
+    "tests/test_v2_ops_store_barrier.py"
+  ],
+  "source_hash": "sha256:37ed4c760846818421dd3c720c9794df8bfacb70bf7149d1029e4de8163de9b7",
+  "packages": {
+    "engine.v2.contracts": {
+      "executed": 302,
+      "executable": 302,
+      "files": [
+        "engine/v2/contracts/__init__.py",
+        "engine/v2/contracts/jobs.py",
+        "engine/v2/contracts/operations.py"
+      ],
+      "missing_files": [],
+      "empty": false,
+      "percentage": 100.0
+    },
+    "engine.v2.foundation": {
+      "executed": 369,
+      "executable": 383,
+      "files": [
+        "engine/v2/foundation/__init__.py",
+        "engine/v2/foundation/artifacts.py",
+        "engine/v2/foundation/canonical.py",
+        "engine/v2/foundation/clock.py",
+        "engine/v2/foundation/typed.py"
+      ],
+      "missing_files": [],
+      "empty": false,
+      "percentage": 96.34464751958224
+    },
+    "engine.v2.data": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/data/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.features": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/features/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.models": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/models/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.registry": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/registry/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.generation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/generation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.scenarios": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/scenarios/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.valuation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/valuation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.simulation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/simulation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.scoring": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/scoring/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.evaluation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/evaluation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.ledger": {
+      "executed": 84,
+      "executable": 104,
+      "files": [
+        "engine/v2/ledger/__init__.py",
+        "engine/v2/ledger/decisions.py",
+        "engine/v2/ledger/export.py"
+      ],
+      "missing_files": [],
+      "empty": false,
+      "percentage": 80.76923076923077
+    },
+    "engine.v2.models.training": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/models/training/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.serving": {
+      "executed": 99,
+      "executable": 116,
+      "files": [
+        "engine/v2/serving/__init__.py",
+        "engine/v2/serving/operations.py"
+      ],
+      "missing_files": [],
+      "empty": false,
+      "percentage": 85.34482758620689
+    },
+    "engine.v2.ops": {
+      "executed": 2042,
+      "executable": 2755,
+      "files": [
+        "engine/v2/ops/__init__.py",
+        "engine/v2/ops/__main__.py",
+        "engine/v2/ops/backup.py",
+        "engine/v2/ops/bootstrap.py",
+        "engine/v2/ops/catalog.py",
+        "engine/v2/ops/checkpoints.py",
+        "engine/v2/ops/cli.py",
+        "engine/v2/ops/decision_commit.py",
+        "engine/v2/ops/diagnostics.py",
+        "engine/v2/ops/discovery.py",
+        "engine/v2/ops/errors.py",
+        "engine/v2/ops/executor.py",
+        "engine/v2/ops/executor_cgroup.py",
+        "engine/v2/ops/executor_watchdog.py",
+        "engine/v2/ops/experiments.py",
+        "engine/v2/ops/fingerprints.py",
+        "engine/v2/ops/health.py",
+        "engine/v2/ops/legacy_actions.py",
+        "engine/v2/ops/legacy_adapter.py",
+        "engine/v2/ops/lifecycle.py",
+        "engine/v2/ops/migrations.py",
+        "engine/v2/ops/nightly.py",
+        "engine/v2/ops/outbox.py",
+        "engine/v2/ops/plans.py",
+        "engine/v2/ops/profiles.py",
+        "engine/v2/ops/provider_budget.py",
+        "engine/v2/ops/publication.py",
+        "engine/v2/ops/recovery.py",
+        "engine/v2/ops/resources.py",
+        "engine/v2/ops/scheduler.py",
+        "engine/v2/ops/schema.py",
+        "engine/v2/ops/schema_runtime.py",
+        "engine/v2/ops/stages.py",
+        "engine/v2/ops/store_barrier.py",
+        "engine/v2/ops/submission.py",
+        "engine/v2/ops/supervisor.py",
+        "engine/v2/ops/worker.py"
+      ],
+      "missing_files": [],
+      "empty": false,
+      "percentage": 74.11978221415607
+    },
+    "engine.v2.dashboard": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/dashboard/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.diagnosis": {
+      "executed": 332,
+      "executable": 343,
+      "files": [
+        "engine/v2/diagnosis/__init__.py",
+        "engine/v2/diagnosis/canonical.py",
+        "engine/v2/diagnosis/receipt.py",
+        "engine/v2/diagnosis/record_comparator.py",
+        "engine/v2/diagnosis/stage_plan.py",
+        "engine/v2/diagnosis/tolerance.py"
+      ],
+      "missing_files": [],
+      "empty": false,
+      "percentage": 96.7930029154519
+    }
+  }
+}
