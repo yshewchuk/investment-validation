@@ -42,7 +42,7 @@ from engine.v2.contracts.data import (  # noqa: E402
 from engine.v2.data import manifests  # noqa: E402
 from engine.v2.data.documents import decode_document  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
-from engine.v2.data.legacy_adapter import build_legacy_mapping  # noqa: E402
+from engine.v2.data.legacy_mapping import build_legacy_mapping  # noqa: E402
 from engine.v2.data.objects import FragmentInspection, inspect_fragment  # noqa: E402
 from engine.v2.foundation import ArtifactStore, content_hash, to_document  # noqa: E402
 

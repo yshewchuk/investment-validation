@@ -25,7 +25,7 @@ from engine.v2.contracts.data import ObjectRef, TableContract, TableContractRef 
 from engine.v2.contracts.jobs import LegacyFileRef  # noqa: E402
 from engine.v2.data.documents import decode_document  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
-from engine.v2.data.legacy_adapter import build_legacy_mapping  # noqa: E402
+from engine.v2.data.legacy_mapping import build_legacy_mapping  # noqa: E402
 from engine.v2.data.objects import (  # noqa: E402
     PARQUET_FRAGMENT_SCHEMA_REF,
     inspect_fragment,

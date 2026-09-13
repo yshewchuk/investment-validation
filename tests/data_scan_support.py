@@ -25,7 +25,7 @@ from engine.v2.contracts.data import (
 )
 from engine.v2.data import catalog, manifests
 from engine.v2.data.documents import decode_document
-from engine.v2.data.legacy_adapter import build_legacy_mapping
+from engine.v2.data.legacy_mapping import build_legacy_mapping
 from engine.v2.data.objects import FragmentInspection, inspect_fragment
 from engine.v2.data.query import ARROW_TYPES
 from engine.v2.foundation import ArtifactStore, content_hash
@@ -125,17 +125,26 @@ def hand_built_record(store: ArtifactStore, contract: TableContract, contract_re
 def commit_tables(conn, clock, tables: dict[str, list[FragmentRecord]],
                   contracts: dict[str, TableContract], *, scope: str = "shadow",
                   receipt_id: str = "r1", attempt_id: str = "att-1", fence: int = 1,
-                  knowledge_mode: str = "reconstructed") -> SnapshotRef:
+                  knowledge_mode: str = "reconstructed",
+                  partition_logical_hashes: dict[str, dict[str, str]] | None = None,
+                  store: ArtifactStore | None = None) -> SnapshotRef:
     """One fresh snapshot over ``tables`` (``{table_name: [FragmentRecord, ...]}``,
-    already in ascending ``partition_key`` order per table)."""
+    already in ascending ``partition_key`` order per table).
+
+    ``partition_logical_hashes``, when given, is ``{table_name: {partition_key:
+    hash}}`` — required for any table whose ``records`` include a
+    multi-fragment partition (``manifests.dataset_manifest``'s own
+    requirement); every other table's ``None`` default is unchanged.
+    """
     table_manifests: dict[str, DatasetManifest] = {}
     all_records: list[FragmentRecord] = []
     all_objects = []
+    hashes_by_table = partition_logical_hashes or {}
     for table_name, records in tables.items():
         contract_ref = contract_ref_for(contracts[table_name])
         table_manifests[table_name] = manifests.dataset_manifest(
             contract_ref, records, knowledge_mode=knowledge_mode, coverage_receipt_refs=(RECEIPT,),
-            availability_evidence_refs=())
+            availability_evidence_refs=(), partition_logical_hashes=hashes_by_table.get(table_name))
         all_records.extend(records)
         all_objects.extend(r.object_ref for r in records)
     snap = manifests.snapshot_ref(
@@ -150,5 +159,5 @@ def commit_tables(conn, clock, tables: dict[str, list[FragmentRecord]],
         contracts=list(contracts.values()), objects=all_objects, records=all_records,
         manifests=list(table_manifests.values()), snapshot=snap, expected_head_snapshot_id=None,
         expected_head_generation=0, receipt_id=receipt_id, attempt_id=attempt_id, fence=fence,
-        fence_check=_noop_fence, clock=clock)
+        fence_check=_noop_fence, clock=clock, store=store)
     return receipt.snapshot_ref

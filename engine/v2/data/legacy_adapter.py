@@ -1,379 +1,202 @@
-"""Exact mapping from accepted legacy tables/files to v2 ``TableContract``s.
+"""Legacy ``engine.*`` symbols this package is allowed to touch.
 
-Phase-2 guide §3.2 ("Existing implementation to preserve"), §4 (this is the
-package's only legacy-import module), §5.1 ("Do not transcribe column
-definitions by hand in two places"), §12 D02.
+Phase-2 guide §4: this is ``engine.v2.data``'s ONLY legacy-importing module.
+Every legacy import lives here and nowhere else in the package; every name
+below has a matching entry in ``checks/legacy_adapters.json``.
 
-:func:`build_legacy_mapping` produces one ``legacy_table_mapping.v1.0``
-document: one ``TableContract`` (as a strict document) per dataset in guide
-§5.1's table, in order, a top-level ``knowledge_mode_by_table`` (every legacy
-table is ``reconstructed`` — no accepted attestation or availability receipt
-is referenced yet, phase-2 guide §3.3), and a separate
-``legacy_snapshot_metadata`` entry describing the legacy ``SNAPSHOT``
-compatibility object (``engine.paths.SNAPSHOT_FILE``), which is explicitly
-**not** queryable and **not** a ``TableContract``.
+Review round 3, item 1: this module used to also build v2 objects
+(``ColumnContract``/``TableContract``, the mapping document,
+``build_legacy_mapping``) directly, which — combined with the legacy symbols
+the exact-symbol ledger requires (review round 2's stop-and-report finding:
+``[fan_out] engine/v2/data/legacy_adapter.py = 9, budget 8``) — spent this
+module's whole §4.3 fan-out budget and one over. Fixed structurally, not with
+an exemption or collapsed ledger entries: this module now builds NOTHING —
+it only imports the legacy modules and exposes thin accessors/wrappers that
+hand legacy values to v2 code (:func:`legacy_table_schemas`,
+:func:`legacy_panel_columns`, :func:`legacy_tier4_columns`,
+:func:`legacy_tier4_key_columns`, :func:`legacy_source_priority`,
+:func:`read_legacy_part`, :func:`coerce_legacy`). Everything that builds a
+v2 object — contracts, annotations handling, the mapping document,
+materialization planning and writing — lives in
+``engine/v2/data/legacy_mapping.py`` and ``.../legacy_materialization.py``,
+both legacy-free, both calling this module's accessors instead of importing
+legacy code directly. ``build_legacy_mapping`` moved to ``legacy_mapping.py``
+with it; every caller and this package's ``README.md`` were updated in the
+same commit rather than re-exported back through here, since that would
+create an import cycle (``legacy_mapping.py`` already imports this module for
+its accessors).
 
-Column *names* and, for the six Tier-2 tables, physical *dtype*/*nullable*
-come only from the legacy symbols below — never retyped by hand. Every other
-fact a ``ColumnContract``/``TableContract`` needs (unit, scale, sentinel and
-null policy, finality/provenance/coverage text, and — for ``feature_panel``
-and ``tier4_forecasts``, which carry no ``TableSchema`` — physical type and
-nullability too) comes from the separately reviewed
-``engine/v2/data/legacy_annotations.json``, sourced only from
-``engine.data.schemas.Column.doc``/``CONVENTIONS``/``SOURCE_PRIORITY`` and the
-``engine.data.features`` docstrings. An unstated unit or time meaning is
-recorded as the literal string ``"unknown"``, never guessed.
-
-This is the package's only module importing legacy code (phase-2 guide §4);
-every name below has a matching entry in ``checks/legacy_adapters.json``. The
-three legacy ``features/*`` paths (``PANEL_RELATIVE_PATH``,
-``TIER4_RELATIVE_PATH``, ``SNAPSHOT_RELATIVE_PATH``) mirror
-``engine/paths.py``'s ``PANEL``/``TIER4``/``SNAPSHOT_FILE`` (each relative to
-``engine.paths.DATA``) as reviewed literals rather than a fourth legacy
-import: they are exercised empirically by this package's private-schema test
-against the real curated store, which would fail loudly if they ever drifted.
+:func:`materialize` stays here: it is the one place D13/D14 actually invokes
+a legacy reader (:func:`read_legacy_part`) and the legacy schema coercion
+(:func:`coerce_legacy`) to prove a materialized file is readable by
+unchanged legacy code, so it cannot move to a legacy-free module. Every
+other piece of its machinery (dest_root safety, Parquet writing, hashing,
+row comparison, lock-down) already lives in ``legacy_materialization.py``.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: besides the declared legacy
-edges, this module imports only ``engine.v2.contracts``, its own package
-(``documents``, ``manifests``), and ``engine.v2.foundation`` — never
-``engine.v2.ops`` (phase-2 guide §3.3).
+edges, this module imports only its own package's ``errors`` and
+``legacy_materialization`` (both reached through one relative-import edge)
+— never ``engine.v2.contracts``, ``engine.v2.foundation`` or
+``engine.v2.ops``. §4.3 fan-out: 6 distinct modules (``engine.data.schemas``,
+``engine.data.features.panel``, ``engine.data.features.tier4``,
+``engine.data.store``, ``shutil`` — review round 4, the ``materialize()``
+cleanup-on-failure below — and ``"."``) — comfortably under the budget of 8
+that ``build_legacy_mapping``'s old presence here used to exhaust.
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import shutil
 
 from engine.data.features.panel import PANEL_COLUMNS
 from engine.data.features.tier4 import COLUMNS as TIER4_COLUMNS
 from engine.data.features.tier4 import KEY_COLUMNS as TIER4_KEY_COLUMNS
 from engine.data.schemas import SCHEMAS, SOURCE_PRIORITY
-from engine.v2.contracts.data import ColumnContract, TableContract
-from engine.v2.foundation import content_hash, to_document
+from engine.data.schemas import coerce as _legacy_coerce
+from engine.data.store import _read_part as _legacy_read_part
 
-from . import documents, manifests
+from . import errors, legacy_materialization
 
-__all__ = ["LegacyMappingError", "SOURCE_PRIORITY_VERSION", "build_legacy_mapping"]
-
-#: Legacy ``engine.data.schemas.Column.dtype`` -> contract ``physical_type``.
-#: Closed and exhaustive over the five dtypes ``engine/data/schemas.py``
-#: actually declares (its own ``_PANDAS_DTYPE`` table); an unmapped dtype is a
-#: build-time failure, never a silent pass-through.
-LEGACY_DTYPE_MAP: dict[str, str] = {
-    "string": "string",
-    "float64": "float64",
-    "int64": "int64",
-    "bool": "bool",
-    "datetime64[ns]": "timestamp[ns]",
-}
-
-#: ``feature_panel``/``tier4_forecasts`` state their own ``physical_type``
-#: directly in the annotations (no legacy dtype to map from); this is the
-#: closed vocabulary those declarations must land in — the same targets
-#: :data:`LEGACY_DTYPE_MAP` maps onto, plus ``timestamp[us]`` for the two
-#: tables' microsecond-resolution pandas columns (confirmed against the real
-#: curated store's Parquet schema by this package's private-schema test).
-ALLOWED_PHYSICAL_TYPES = frozenset(LEGACY_DTYPE_MAP.values()) | {"timestamp[us]"}
-
-#: Guide §5.1's table, in order. ``build_legacy_mapping`` never reorders it.
-TIER2_DATASETS: tuple[str, ...] = (
-    "securities", "earnings_events", "daily_market", "option_chains", "option_daily", "trades",
-)
-DATASET_ORDER: tuple[str, ...] = TIER2_DATASETS + ("feature_panel", "tier4_forecasts")
-
-ANNOTATIONS_PATH = Path(__file__).resolve().parent / "legacy_annotations.json"
-
-#: Mirror engine.paths.PANEL/TIER4/SNAPSHOT_FILE, each relative to
-#: engine.paths.DATA — see the module docstring for why these are reviewed
-#: literals rather than a fourth legacy import.
-PANEL_RELATIVE_PATH = "features/panel.parquet"
-TIER4_RELATIVE_PATH = "features/tier4_forecasts.parquet"
-SNAPSHOT_RELATIVE_PATH = "features/SNAPSHOT"
-
-#: §7.1's ``SnapshotImportRequest.source_priority_version`` (task brief
-#: decision 2): a deterministic fingerprint of the reviewed source-priority
-#: text engine.data.schemas.SOURCE_PRIORITY documents, so a legacy re-priority
-#: (say ORATS -> another vendor for spot) changes the version an import
-#: request carries, without engine.v2.data.import_snapshot needing its own
-#: legacy import (§4.2: one adapter module per package).
-SOURCE_PRIORITY_VERSION = "legacy_source_priority:" + content_hash(SOURCE_PRIORITY)
-
-MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v1.0"
-CONTRACT_SEMANTIC_VERSION = "1.0.0"
-SCHEMA_EVOLUTION_POLICY = (
-    "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). Changed "
-    "units, key meaning, time meaning, or null policy require a new major contract_id/semantic_version; "
-    "nullable additions require a minor version only."
-)
+__all__ = [
+    "coerce_legacy",
+    "legacy_panel_columns",
+    "legacy_source_priority",
+    "legacy_table_schemas",
+    "legacy_tier4_columns",
+    "legacy_tier4_key_columns",
+    "materialize",
+    "read_legacy_part",
+]
 
 
-class LegacyMappingError(RuntimeError):
-    """A legacy table/annotation mismatch this build refuses to paper over.
+# --------------------------------------------------------------------------
+# thin accessors — the only way any other module reaches a legacy value
+# --------------------------------------------------------------------------
 
-    ``code`` is stable across callers (tests match on it, not on message
-    text); ``dataset`` names which of the eight datasets failed, so a failure
-    never has to be traced back through the annotation file by hand.
+
+def legacy_table_schemas() -> dict:
+    """``engine.data.schemas.SCHEMAS`` — the six Tier-2 ``TableSchema`` objects."""
+    return SCHEMAS
+
+
+def legacy_panel_columns() -> tuple[str, ...]:
+    """``engine.data.features.panel.PANEL_COLUMNS``, as an immutable tuple."""
+    return tuple(PANEL_COLUMNS)
+
+
+def legacy_tier4_columns() -> tuple[str, ...]:
+    """``engine.data.features.tier4.COLUMNS``, as an immutable tuple."""
+    return tuple(TIER4_COLUMNS)
+
+
+def legacy_tier4_key_columns() -> tuple[str, ...]:
+    """``engine.data.features.tier4.KEY_COLUMNS``, as an immutable tuple."""
+    return tuple(TIER4_KEY_COLUMNS)
+
+
+def legacy_source_priority():
+    """``engine.data.schemas.SOURCE_PRIORITY`` — the reviewed source-priority text."""
+    return SOURCE_PRIORITY
+
+
+def read_legacy_part(path, columns):
+    """``engine.data.store._read_part`` — the unchanged legacy single-path reader."""
+    return _legacy_read_part(path, columns)
+
+
+def coerce_legacy(frame, name: str):
+    """``engine.data.schemas.coerce`` — the unchanged legacy schema coercion."""
+    return _legacy_coerce(frame, name)
+
+
+# --------------------------------------------------------------------------
+# P2-6: materialize — the one legacy-touching validation step (§9.1, D13/D14)
+# --------------------------------------------------------------------------
+
+
+#: ``materialize_tree``'s own dest_root safety refusals (raised before this
+#: function's try/except below has written a single byte, from inside
+#: ``legacy_materialization._check_dest_root``) must never trigger the
+#: cleanup ``except`` clause: for ``DEST_ROOT_NOT_EMPTY`` that directory is
+#: the CALLER's own pre-existing content, and for ``DEST_ROOT_UNSAFE`` it may
+#: be a symlink to something else entirely or a path inside the object store
+#: itself — deleting through either would destroy data this function never
+#: touched. Every other failure code is only reachable after
+#: ``_check_dest_root`` has already proven ``dest_root`` a safe, empty
+#: directory this call itself created or is about to fill, so cleanup there
+#: is always safe.
+_DEST_ROOT_SAFETY_CODES = frozenset({"DEST_ROOT_NOT_EMPTY", "DEST_ROOT_UNSAFE"})
+
+
+def materialize(repository, store, request, dest_root) -> dict[str, str]:
+    """Write ``request``'s private legacy layout under ``dest_root``.
+
+    ``dest_root`` must be a fresh, empty, non-symlink directory outside
+    ``store``'s own tree — refused with a stable ``DEST_ROOT_*`` code
+    otherwise. Every written file is re-read with the unchanged legacy
+    readers before the tree is made read-only (chmod 0444 files / 0555
+    dirs). Returns ``{relative_path: content_hash}``.
+
+    A table in ``tree.copied_tables`` (review round 4, decision 1) was
+    written by a verified byte-for-byte object copy, not a rewrite: its
+    bytes are already proven correct by that copy's own hash check, so this
+    only re-opens it with the unchanged legacy reader (never a fresh
+    Repository scan to compare against — that would re-read the whole table
+    a second time, exactly the cost decision 1 exists to avoid).
+
+    Any failure past the dest_root safety checks (corrupt object bytes,
+    a stale Tier-4 cache ref, a legacy coerce()/row-count mismatch, an
+    oversized query, ...) removes every byte this call itself wrote before
+    re-raising — there is no terminal state between "nothing written" and
+    "the full tree, locked down": a caller can never observe a partial,
+    writable materialization and mistake it for a valid one.
     """
-
-    def __init__(self, code: str, dataset: str, detail: str) -> None:
-        super().__init__(f"{code} [{dataset}]: {detail}")
-        self.code = code
-        self.dataset = dataset
-        self.detail = detail
-
-
-def build_legacy_mapping(annotations: dict[str, object] | None = None) -> dict[str, object]:
-    """The ``legacy_table_mapping.v1.0`` document for all eight datasets.
-
-    ``annotations`` defaults to the reviewed ``legacy_annotations.json`` beside
-    this module; a caller may pass a modified copy (tests do) to prove a
-    missing/extra/unmapped annotation fails the build rather than silently
-    passing through.
-    """
-    doc = annotations if annotations is not None else _load_annotations()
-    tables_spec = doc["tables"]
-    modes = doc["knowledge_mode_by_table"]
-    if set(modes) != set(DATASET_ORDER):
-        raise LegacyMappingError(
-            "KNOWLEDGE_MODE_KEYS_MISMATCH", "*",
-            f"knowledge_mode_by_table keys {sorted(modes)} != dataset set {sorted(DATASET_ORDER)}",
-        )
-
-    tables: dict[str, dict[str, object]] = {}
-    for name in TIER2_DATASETS:
-        tables[name] = _build_tier2_contract(name, _spec_for(tables_spec, name))
-    tables["feature_panel"] = _build_feature_panel_contract(_spec_for(tables_spec, "feature_panel"))
-    tables["tier4_forecasts"] = _build_tier4_contract(_spec_for(tables_spec, "tier4_forecasts"))
-    return {
-        "schema_version": MAPPING_SCHEMA_VERSION,
-        "tables": tables,
-        "knowledge_mode_by_table": {name: modes[name] for name in DATASET_ORDER},
-        "legacy_snapshot_metadata": _snapshot_metadata(doc["legacy_snapshot_metadata"]),
-    }
+    try:
+        tree = legacy_materialization.materialize_tree(repository, store, request, dest_root)
+        for table_name, year_paths in tree.curated_files.items():
+            if table_name in tree.copied_tables:
+                _validate_copied_curated_table(year_paths, table_name)
+            else:
+                contract = repository.table_contract(request.snapshot_ref, table_name)
+                _validate_curated_table(repository, request.table_queries[table_name], table_name,
+                                        contract, year_paths)
+        for table_name, path in tree.single_files.items():
+            if table_name in tree.copied_tables:
+                read_legacy_part(path, columns=None)  # proves the unchanged reader opens it; no coerce()
+            else:                                     # feature_panel/tier4_forecasts (no legacy schema)
+                _validate_single_file(repository, request.table_queries[table_name], table_name, path)
+        legacy_materialization.lock_down(dest_root)
+    except errors.DataError as exc:
+        if exc.code not in _DEST_ROOT_SAFETY_CODES:
+            shutil.rmtree(dest_root, ignore_errors=True)
+        raise
+    return tree.manifest
 
 
-def _load_annotations() -> dict[str, object]:
-    return json.loads(ANNOTATIONS_PATH.read_text())
+def _validate_copied_curated_table(year_paths: dict, table_name: str) -> None:
+    for paths_for_year in year_paths.values():
+        for path in paths_for_year:
+            _assert_legacy_coerce_accepts(read_legacy_part(path, columns=None), table_name)
 
 
-def _spec_for(tables_spec: dict[str, object], dataset: str) -> dict[str, object]:
-    if dataset not in tables_spec:
-        raise LegacyMappingError("MISSING_TABLE_ANNOTATION", dataset,
-                                  "legacy_annotations.json has no entry for this dataset")
-    return tables_spec[dataset]
+def _validate_curated_table(repository, query, table_name: str, contract, year_paths: dict) -> None:
+    for year, paths_for_year in year_paths.items():
+        (path,) = paths_for_year  # the rewrite path always writes exactly one part-0000.parquet
+        year_query = legacy_materialization.narrow_query_to_year(query, contract, year)
+        scanned = legacy_materialization.scanned_rows(repository, year_query, table_name)
+        legacy_frame = read_legacy_part(path, columns=None)
+        legacy_materialization.assert_rows_match(scanned, legacy_frame, query.columns)
+        _assert_legacy_coerce_accepts(legacy_frame, table_name)
 
 
-# --------------------------------------------------------------------------
-# column construction, shared by every dataset kind
-# --------------------------------------------------------------------------
+def _validate_single_file(repository, query, table_name: str, path) -> None:
+    scanned = legacy_materialization.scanned_rows(repository, query, table_name)
+    legacy_frame = read_legacy_part(path, columns=None)
+    legacy_materialization.assert_rows_match(scanned, legacy_frame, query.columns)
 
 
-def _build_columns(
-    dataset: str,
-    source: list[tuple[str, str, bool]],
-    ann_columns: dict[str, object],
-    *,
-    dtype_from_source: bool,
-) -> tuple[ColumnContract, ...]:
-    """Combine legacy ``(name, dtype, nullable)`` with reviewed per-column facts.
-
-    ``dtype_from_source`` is True for the six Tier-2 tables (physical_type maps
-    from the legacy dtype; nullable is the legacy declaration) and False for
-    ``feature_panel``/``tier4_forecasts`` (both come from the annotation
-    itself, since the legacy symbols name only columns there).
-    """
-    source_names = [name for name, _, _ in source]
-    _check_column_coverage(dataset, source_names, ann_columns)
-    columns = []
-    for name, dtype, nullable in source:
-        ann = ann_columns[name]
-        if dtype_from_source:
-            physical_type = _map_dtype(dataset, name, dtype)
-        else:
-            physical_type, nullable = _own_type(dataset, name, ann)
-            _check_physical_type(dataset, name, physical_type)
-        columns.append(_column_contract(name, physical_type, nullable, ann))
-    return tuple(columns)
-
-
-def _check_column_coverage(dataset: str, source_names: list[str], ann_columns: dict[str, object]) -> None:
-    source_set = set(source_names)
-    missing = sorted(n for n in source_names if n not in ann_columns)
-    if missing:
-        raise LegacyMappingError(
-            "MISSING_ANNOTATION", dataset,
-            f"column(s) {missing} have a legacy source but no reviewed annotation",
-        )
-    extra = sorted(set(ann_columns) - source_set)
-    if extra:
-        raise LegacyMappingError(
-            "UNKNOWN_ANNOTATED_COLUMN", dataset,
-            f"annotation names column(s) {extra} the legacy source does not have",
-        )
-
-
-def _own_type(dataset: str, name: str, ann: dict[str, object]) -> tuple[str, bool]:
-    """``(physical_type, nullable)`` for a column whose legacy source declares neither.
-
-    ``feature_panel``/``tier4_forecasts`` name columns only; this review's own
-    annotation is the sole source, so a missing sub-field is the same
-    ``MISSING_ANNOTATION`` failure as a wholly-absent column entry.
-    """
-    physical_type = ann.get("physical_type")
-    nullable = ann.get("nullable")
-    if physical_type is None or nullable is None:
-        raise LegacyMappingError(
-            "MISSING_ANNOTATION", dataset,
-            f"column {name!r} annotation is missing physical_type and/or nullable",
-        )
-    return physical_type, nullable
-
-
-def _column_contract(name: str, physical_type: str, nullable: bool, ann: dict[str, object]) -> ColumnContract:
-    allowed_range = ann.get("allowed_range")
-    return ColumnContract(
-        name=name,
-        physical_type=physical_type,
-        nullable=nullable,
-        unit=ann.get("unit"),
-        scale=ann.get("scale"),
-        adjustment_basis=ann.get("adjustment_basis"),
-        timezone=ann.get("timezone"),
-        null_policy=ann.get("null_policy"),
-        sentinel_policy=ann.get("sentinel_policy"),
-        allowed_range=tuple(allowed_range) if allowed_range is not None else None,
-        observation_time_semantics=ann.get("observation_time_semantics"),
-    )
-
-
-def _map_dtype(dataset: str, name: str, dtype: str) -> str:
-    physical = LEGACY_DTYPE_MAP.get(dtype)
-    if physical is None:
-        raise LegacyMappingError(
-            "UNMAPPED_DTYPE", dataset,
-            f"legacy dtype {dtype!r} for column {name!r} has no entry in LEGACY_DTYPE_MAP",
-        )
-    return physical
-
-
-def _check_physical_type(dataset: str, name: str, physical_type: str) -> None:
-    if physical_type not in ALLOWED_PHYSICAL_TYPES:
-        raise LegacyMappingError(
-            "UNMAPPED_DTYPE", dataset,
-            f"declared physical_type {physical_type!r} for column {name!r} is not one of "
-            f"{sorted(ALLOWED_PHYSICAL_TYPES)}",
-        )
-
-
-def _check_declared_subset(dataset: str, label: str, names: list[str], declared: set[str]) -> None:
-    undeclared = sorted(set(names) - declared)
-    if undeclared:
-        raise LegacyMappingError(
-            "UNDECLARED_COLUMN", dataset, f"{label} names undeclared column(s) {undeclared}",
-        )
-
-
-# --------------------------------------------------------------------------
-# per-dataset-kind construction
-# --------------------------------------------------------------------------
-
-
-def _finalize(dataset: str, spec: dict[str, object], columns: tuple[ColumnContract, ...],
-              partition_columns: tuple[str, ...], legacy_mapping_ref: str) -> dict[str, object]:
-    declared = {c.name for c in columns}
-    primary_key = tuple(spec["primary_key"])
-    filterable = tuple(spec["filterable_columns"])
-    orderable = tuple(spec["orderable_columns"])
-    _check_declared_subset(dataset, "primary_key", list(primary_key), declared)
-    _check_declared_subset(dataset, "filterable_columns", list(filterable), declared)
-    _check_declared_subset(dataset, "orderable_columns", list(orderable), declared)
-
-    fields = dict(
-        contract_id=f"legacy.{dataset}.v1",
-        table_name=dataset,
-        semantic_version=CONTRACT_SEMANTIC_VERSION,
-        columns=columns,
-        primary_key=primary_key,
-        duplicate_policy=spec["duplicate_policy"],
-        foreign_keys=(),
-        partition_columns=partition_columns,
-        filterable_columns=filterable,
-        orderable_columns=orderable,
-        observation_time_column=spec["observation_time_column"],
-        publication_time_column=spec["publication_time_column"],
-        receipt_time_column=spec["receipt_time_column"],
-        finality_semantics=spec["finality_semantics"],
-        provenance_semantics=spec["provenance_semantics"],
-        coverage_semantics=spec["coverage_semantics"],
-        schema_evolution_policy=SCHEMA_EVOLUTION_POLICY,
-        maximum_batch_rows=spec["maximum_batch_rows"],
-        maximum_result_rows=spec["maximum_result_rows"],
-        legacy_mapping_ref=legacy_mapping_ref,
-    )
-    # definition_hash is computed by this registration function, never by the
-    # dataclass (phase-2 guide §5.1): build once with a placeholder to get a
-    # hashable payload, then once more with the real hash — never mutated.
-    placeholder = TableContract(definition_hash="sha256:" + "0" * 64, **fields)
-    contract = TableContract(definition_hash=manifests.table_contract_hash(placeholder), **fields)
-    doc = to_document(contract)
-    documents.decode_document(TableContract, doc)  # validated as a document; returned as one (guide §5.1)
-    return doc
-
-
-def _build_tier2_contract(dataset: str, spec: dict[str, object]) -> dict[str, object]:
-    schema = SCHEMAS[dataset]
-    source = [(c.name, c.dtype, c.nullable) for c in schema.columns]
-    columns = _build_columns(dataset, source, spec["columns"], dtype_from_source=True)
-    partition_columns = (schema.partition_by,) if schema.partition_by else ()
-    ref = f"engine.data.schemas.{dataset.upper()}"
-    return _finalize(dataset, spec, columns, partition_columns, ref)
-
-
-def _build_feature_panel_contract(spec: dict[str, object]) -> dict[str, object]:
-    source = [(name, "", False) for name in PANEL_COLUMNS]
-    columns = _build_columns("feature_panel", source, spec["columns"], dtype_from_source=False)
-    # One declared logical partition (phase-2 guide §3.3, §5.1): partition_columns
-    # is empty rather than a physical partitioning column. The partition-key
-    # literal ("all") future manifest construction (P2-2/P2-3) will use is not a
-    # TableContract field, so it is recorded only here and in the task report —
-    # see phase-2 guide §3.3 "Logical partitions are stable".
-    ref = f"engine.paths.PANEL({PANEL_RELATIVE_PATH});engine.data.features.panel.PANEL_COLUMNS"
-    return _finalize("feature_panel", spec, columns, (), ref)
-
-
-def _build_tier4_contract(spec: dict[str, object]) -> dict[str, object]:
-    source = [(name, "", False) for name in TIER4_COLUMNS]
-    columns = _build_columns("tier4_forecasts", source, spec["columns"], dtype_from_source=False)
-    if tuple(spec["primary_key"]) != tuple(TIER4_KEY_COLUMNS):
-        raise LegacyMappingError(
-            "PRIMARY_KEY_MISMATCH", "tier4_forecasts",
-            f"annotation primary_key {spec['primary_key']} != engine.data.features.tier4.KEY_COLUMNS "
-            f"{TIER4_KEY_COLUMNS}",
-        )
-    ref = (f"engine.paths.TIER4({TIER4_RELATIVE_PATH});"
-           "engine.data.features.tier4.KEY_COLUMNS;engine.data.features.tier4.COLUMNS")
-    return _finalize("tier4_forecasts", spec, columns, (), ref)
-
-
-# --------------------------------------------------------------------------
-# legacy snapshot compatibility metadata — not a TableContract, not queryable
-# --------------------------------------------------------------------------
-
-
-def _snapshot_metadata(spec: dict[str, object]) -> dict[str, object]:
-    declared_path = spec["legacy_path"]
-    if SNAPSHOT_RELATIVE_PATH != declared_path:
-        raise LegacyMappingError(
-            "SNAPSHOT_PATH_MISMATCH", "legacy_snapshot_metadata",
-            f"SNAPSHOT_RELATIVE_PATH is {SNAPSHOT_RELATIVE_PATH!r}, annotation says {declared_path!r}",
-        )
-    if spec["queryable"] is not False:
-        raise LegacyMappingError(
-            "SNAPSHOT_MUST_NOT_BE_QUERYABLE", "legacy_snapshot_metadata",
-            "the legacy SNAPSHOT compatibility object is never a queryable dataset (phase-2 guide §5.1)",
-        )
-    return {
-        "queryable": False,
-        "legacy_path": SNAPSHOT_RELATIVE_PATH,
-        "expected_top_level_keys": tuple(spec["expected_top_level_keys"]),
-        "description": spec["description"],
-    }
+def _assert_legacy_coerce_accepts(legacy_frame, table_name: str) -> None:
+    try:
+        coerce_legacy(legacy_frame, table_name)
+    except Exception as exc:
+        raise errors.fail("CONTRACT_MISMATCH",
+                  f"legacy coerce() refused the materialized {table_name!r} file") from exc

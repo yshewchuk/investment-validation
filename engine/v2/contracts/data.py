@@ -140,6 +140,19 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "EVENT_NOT_FOUND": ("dependency", False),
     "DEADLINE_EXCEEDED": ("resource", True),
     "POPULATION_COLLAPSED": ("validation", False),
+    # P2-6: stable codes for the two structural refusals a legacy
+    # materialization's dest_root can trigger before any byte is written.
+    "DEST_ROOT_NOT_EMPTY": ("validation", False),
+    "DEST_ROOT_UNSAFE": ("validation", False),
+    # P2-6 review fix: trades is scanned whole, so its real (ticker, year)
+    # span can escape a too-narrow evidence_scope; this is the stable code
+    # for that refusal, distinct from the generic validation codes above.
+    "EVIDENCE_SCOPE_INCOMPLETE": ("validation", False),
+    # P2-6 review round 4: a pinned Tier-4 serving-model cache ref whose
+    # filename's own embedded panel-hash prefix does not match this
+    # materialization's actual panel object -- a stale ref from a different
+    # snapshot, caught before it is ever copied in.
+    "TIER4_CACHE_STALE": ("validation", False),
 }
 
 

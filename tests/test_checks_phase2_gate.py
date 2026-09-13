@@ -454,11 +454,12 @@ def test_real_repo_smoke_matches_registry_against_the_real_tree():
     all_test_paths = sorted({t for row in registry.values() for t in row.get("tests", [])})
     existing = [t for t in all_test_paths if (root / t).is_file()]
     missing_files = sorted(t for t in all_test_paths if not (root / t).is_file())
-    # D13/D14 (legacy materialization, P2-6) are the one known real gap today:
-    # their registered test file has not been written yet. Any OTHER
-    # registered file going missing is registry/tree drift this test must
-    # catch, so the set is asserted exactly, not just "non-empty is fine".
-    assert missing_files == ["tests/test_v2_data_legacy_materialization.py"], missing_files
+    # Task 6a (P2-6): D13 (synthetic) and the adapter half of D14 now have a
+    # real test file (tests/test_v2_data_legacy_materialization.py), so no
+    # registered test file is missing any more. Any file going missing is
+    # registry/tree drift this test must catch, so the set is asserted
+    # exactly, not just "non-empty is fine".
+    assert missing_files == [], missing_files
 
     collected = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", *existing],
@@ -469,14 +470,10 @@ def test_real_repo_smoke_matches_registry_against_the_real_tree():
     def resolves(test_path):
         return any(n.startswith(test_path + "::") for n in node_ids)
 
-    lacking_real_test_file = {"D13", "D14"}
     tier2_ids = {d_id for d_id, row in registry.items() if row.get("tier") == 2}
     assert tier2_ids == {"D15", "D16", "D19"}, tier2_ids
 
     for d_id, row in registry.items():
-        if d_id in lacking_real_test_file:
-            assert any(t in missing_files for t in row.get("tests", [])), d_id
-            continue
         for test_path in row.get("tests", []):
             assert resolves(test_path), (d_id, test_path)
         if d_id in tier2_ids:

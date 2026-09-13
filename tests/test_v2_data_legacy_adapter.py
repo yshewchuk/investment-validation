@@ -5,10 +5,12 @@ legacy snapshot metadata have complete reviewed mappings. Removing or adding
 one source column fails." Tier 0: seconds, frozen fixtures, no panel load, no
 network (``engine/v2/data/README.md`` "Testing").
 
-``engine.v2.data.legacy_adapter`` is the only module this test drives besides
-the legacy symbols it wraps; the private-schema test at the bottom is the
-sole exception that touches real data, and it is read-only and skipped by
-default.
+``engine.v2.data.legacy_mapping`` (``build_legacy_mapping`` and the mapping
+constants, moved out of ``legacy_adapter.py`` in review round 3, item 1) is
+the module this test drives, besides the legacy symbols
+``engine.v2.data.legacy_adapter``'s thin accessors wrap; the private-schema
+test at the bottom is the sole exception that touches real data, and it is
+read-only and skipped by default.
 """
 from __future__ import annotations
 
@@ -24,8 +26,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from engine.v2.data import legacy_adapter as la  # noqa: E402
-from engine.v2.data.legacy_adapter import (  # noqa: E402
+from engine.v2.data import legacy_adapter, legacy_mapping  # noqa: E402
+from engine.v2.data.legacy_mapping import (  # noqa: E402
     LegacyMappingError,
     build_legacy_mapping,
 )
@@ -51,7 +53,7 @@ EXPECTED_ORDER = (
 
 def _annotations() -> dict:
     """A fresh, independently mutable copy of the reviewed annotations file."""
-    return json.loads(la.ANNOTATIONS_PATH.read_text())
+    return json.loads(legacy_mapping.ANNOTATIONS_PATH.read_text())
 
 
 def _column(doc: dict, table: str, name: str) -> dict:
@@ -66,13 +68,13 @@ def _column(doc: dict, table: str, name: str) -> dict:
 def test_all_eight_datasets_present_in_order():
     doc = build_legacy_mapping()
     assert tuple(doc["tables"].keys()) == EXPECTED_ORDER
-    assert la.DATASET_ORDER == EXPECTED_ORDER
+    assert legacy_mapping.DATASET_ORDER == EXPECTED_ORDER
     assert doc["schema_version"] == "legacy_table_mapping.v1.0"
 
 
 def test_tier2_columns_match_legacy_source_exactly():
     doc = build_legacy_mapping()
-    for name in la.TIER2_DATASETS:
+    for name in legacy_mapping.TIER2_DATASETS:
         expected = [c.name for c in SCHEMAS[name].columns]
         got = [c["name"] for c in doc["tables"][name]["columns"]]
         assert got == expected, name
@@ -87,17 +89,17 @@ def test_panel_and_tier4_columns_match_legacy_source_exactly():
 
 def test_tier2_physical_types_and_nullability_are_derived_from_schemas():
     doc = build_legacy_mapping()
-    for name in la.TIER2_DATASETS:
+    for name in legacy_mapping.TIER2_DATASETS:
         schema = SCHEMAS[name]
         for col in schema.columns:
             contract_col = _column(doc, name, col.name)
-            assert contract_col["physical_type"] == la.LEGACY_DTYPE_MAP[col.dtype], (name, col.name)
+            assert contract_col["physical_type"] == legacy_mapping.LEGACY_DTYPE_MAP[col.dtype], (name, col.name)
             assert contract_col["nullable"] == col.nullable, (name, col.name)
 
 
 def test_tier2_partition_columns_follow_the_declared_legacy_partition():
     doc = build_legacy_mapping()
-    for name in la.TIER2_DATASETS:
+    for name in legacy_mapping.TIER2_DATASETS:
         schema = SCHEMAS[name]
         expected = (schema.partition_by,) if schema.partition_by else ()
         assert tuple(doc["tables"][name]["partition_columns"]) == expected, name
@@ -122,19 +124,19 @@ def test_snapshot_metadata_present_not_queryable_and_not_a_table():
 
 
 def test_hardcoded_relative_paths_match_engine_paths():
-    """The three path constants la.py carries instead of a 4th legacy import
+    """The three path constants legacy_mapping.py carries instead of a 4th legacy import
     (judgement call 4 of the task report) must not silently drift from
     ``engine/paths.py``. The private-schema test only notices a *missing*
     file under an opted-in ``PHASE2_PRIVATE_ROOT`` and is skipped by
     default, so this tier-0 check is the one that always runs.
     """
-    assert la.PANEL_RELATIVE_PATH == (
+    assert legacy_mapping.PANEL_RELATIVE_PATH == (
         legacy_paths.PANEL.relative_to(legacy_paths.DATA).as_posix()
     )
-    assert la.TIER4_RELATIVE_PATH == (
+    assert legacy_mapping.TIER4_RELATIVE_PATH == (
         legacy_paths.TIER4.relative_to(legacy_paths.DATA).as_posix()
     )
-    assert la.SNAPSHOT_RELATIVE_PATH == (
+    assert legacy_mapping.SNAPSHOT_RELATIVE_PATH == (
         legacy_paths.SNAPSHOT_FILE.relative_to(legacy_paths.DATA).as_posix()
     )
 
@@ -161,7 +163,7 @@ def test_extra_source_column_fails_naming_dataset_and_column(monkeypatch):
     patched = dataclasses.replace(schema, columns=schema.columns + (extra,))
     patched_schemas = dict(SCHEMAS)
     patched_schemas["securities"] = patched
-    monkeypatch.setattr(la, "SCHEMAS", patched_schemas)
+    monkeypatch.setattr(legacy_adapter, "SCHEMAS", patched_schemas)
 
     with pytest.raises(LegacyMappingError) as exc:
         build_legacy_mapping()
@@ -200,7 +202,7 @@ def test_unmapped_tier2_dtype_fails(monkeypatch):
     patched = dataclasses.replace(schema, columns=(bad,) + schema.columns[1:])
     patched_schemas = dict(SCHEMAS)
     patched_schemas["securities"] = patched
-    monkeypatch.setattr(la, "SCHEMAS", patched_schemas)
+    monkeypatch.setattr(legacy_adapter, "SCHEMAS", patched_schemas)
 
     with pytest.raises(LegacyMappingError) as exc:
         build_legacy_mapping()
@@ -249,7 +251,7 @@ def test_reordering_two_columns_changes_definition_hash(monkeypatch):
     patched = dataclasses.replace(schema, columns=tuple(cols))
     patched_schemas = dict(SCHEMAS)
     patched_schemas["securities"] = patched
-    monkeypatch.setattr(la, "SCHEMAS", patched_schemas)
+    monkeypatch.setattr(legacy_adapter, "SCHEMAS", patched_schemas)
 
     reordered = build_legacy_mapping()["tables"]["securities"]["definition_hash"]
     assert reordered != original
@@ -329,7 +331,7 @@ def test_private_parquet_schema_matches_contract():
     doc = build_legacy_mapping()
     mismatches: list[str] = []
 
-    for name in la.TIER2_DATASETS:
+    for name in legacy_mapping.TIER2_DATASETS:
         table_dir = root / "curated" / name
         parts = sorted(table_dir.glob("year=*/*.parquet"))
         if not parts:

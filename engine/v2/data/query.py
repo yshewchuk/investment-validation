@@ -57,8 +57,8 @@ __all__ = [
 ]
 
 #: The closed physical-type vocabulary this package's four legacy tables use
-#: (``legacy_adapter.ALLOWED_PHYSICAL_TYPES``, mirrored here rather than
-#: imported — that constant lives one layer up, in the legacy adapter, which
+#: (``legacy_mapping.ALLOWED_PHYSICAL_TYPES``, mirrored here rather than
+#: imported — that constant lives in the legacy-free mapping module, which
 #: this module must not depend on).
 ARROW_TYPES: dict[str, pa.DataType] = {
     "string": pa.string(),

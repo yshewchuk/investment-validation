@@ -1,9 +1,32 @@
 {
+  "schema_version": "phase2_coverage.v1.0",
+  "suite_version": "phase2_coverage_suite:a041f012434ff510c47f6308a17e10856a5223b85e91f506de0541f319df46dc",
+  "test_files": [
+    "tests/test_v2_data_atomicity.py",
+    "tests/test_v2_data_catalog.py",
+    "tests/test_v2_data_commit.py",
+    "tests/test_v2_data_contracts.py",
+    "tests/test_v2_data_events_chains.py",
+    "tests/test_v2_data_import.py",
+    "tests/test_v2_data_legacy_adapter.py",
+    "tests/test_v2_data_legacy_materialization.py",
+    "tests/test_v2_data_manifests.py",
+    "tests/test_v2_data_objects.py",
+    "tests/test_v2_data_partitions.py",
+    "tests/test_v2_data_query.py",
+    "tests/test_v2_data_rebuild_rollback.py",
+    "tests/test_v2_data_repository.py",
+    "tests/test_v2_data_roundtrip.py",
+    "tests/test_v2_ops_effects_graph.py",
+    "tests/test_v2_ops_engineering.py",
+    "tests/test_v2_ops_nightly_completion.py",
+    "tests/test_v2_ops_render_parity.py"
+  ],
+  "source_hash": "sha256:806c0f1dc6120282e543def8e042c99d10376af28c01384343f3b65216ecfac0",
   "packages": {
     "engine.v2.contracts": {
-      "empty": false,
-      "executable": 594,
       "executed": 594,
+      "executable": 594,
       "files": [
         "engine/v2/contracts/__init__.py",
         "engine/v2/contracts/data.py",
@@ -11,22 +34,26 @@
         "engine/v2/contracts/operations.py"
       ],
       "missing_files": [],
+      "empty": false,
       "percentage": 100.0
     },
-    "engine.v2.dashboard": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
+    "engine.v2.foundation": {
+      "executed": 346,
+      "executable": 385,
       "files": [
-        "engine/v2/dashboard/__init__.py"
+        "engine/v2/foundation/__init__.py",
+        "engine/v2/foundation/artifacts.py",
+        "engine/v2/foundation/canonical.py",
+        "engine/v2/foundation/clock.py",
+        "engine/v2/foundation/typed.py"
       ],
       "missing_files": [],
-      "percentage": null
+      "empty": false,
+      "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "empty": false,
-      "executable": 1615,
-      "executed": 1517,
+      "executed": 1910,
+      "executable": 2029,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -36,6 +63,8 @@
         "engine/v2/data/events.py",
         "engine/v2/data/import_snapshot.py",
         "engine/v2/data/legacy_adapter.py",
+        "engine/v2/data/legacy_mapping.py",
+        "engine/v2/data/legacy_materialization.py",
         "engine/v2/data/manifests.py",
         "engine/v2/data/objects.py",
         "engine/v2/data/query.py",
@@ -44,133 +73,135 @@
         "engine/v2/data/time_formats.py"
       ],
       "missing_files": [],
-      "percentage": 93.93188854489163
-    },
-    "engine.v2.diagnosis": {
       "empty": false,
-      "executable": 343,
-      "executed": 0,
-      "files": [
-        "engine/v2/diagnosis/__init__.py",
-        "engine/v2/diagnosis/canonical.py",
-        "engine/v2/diagnosis/receipt.py",
-        "engine/v2/diagnosis/record_comparator.py",
-        "engine/v2/diagnosis/stage_plan.py",
-        "engine/v2/diagnosis/tolerance.py"
-      ],
-      "missing_files": [],
-      "percentage": 0.0
-    },
-    "engine.v2.domain.generation": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
-      "files": [
-        "engine/v2/domain/generation/__init__.py"
-      ],
-      "missing_files": [],
-      "percentage": null
-    },
-    "engine.v2.domain.scenarios": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
-      "files": [
-        "engine/v2/domain/scenarios/__init__.py"
-      ],
-      "missing_files": [],
-      "percentage": null
-    },
-    "engine.v2.domain.simulation": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
-      "files": [
-        "engine/v2/domain/simulation/__init__.py"
-      ],
-      "missing_files": [],
-      "percentage": null
-    },
-    "engine.v2.domain.valuation": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
-      "files": [
-        "engine/v2/domain/valuation/__init__.py"
-      ],
-      "missing_files": [],
-      "percentage": null
-    },
-    "engine.v2.evaluation": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
-      "files": [
-        "engine/v2/evaluation/__init__.py"
-      ],
-      "missing_files": [],
-      "percentage": null
+      "percentage": 94.13504189255791
     },
     "engine.v2.features": {
-      "empty": true,
-      "executable": 0,
       "executed": 0,
+      "executable": 0,
       "files": [
         "engine/v2/features/__init__.py"
       ],
       "missing_files": [],
+      "empty": true,
       "percentage": null
     },
-    "engine.v2.foundation": {
-      "empty": false,
-      "executable": 385,
-      "executed": 346,
+    "engine.v2.models": {
+      "executed": 0,
+      "executable": 0,
       "files": [
-        "engine/v2/foundation/__init__.py",
-        "engine/v2/foundation/artifacts.py",
-        "engine/v2/foundation/canonical.py",
-        "engine/v2/foundation/clock.py",
-        "engine/v2/foundation/typed.py"
+        "engine/v2/models/__init__.py"
       ],
       "missing_files": [],
-      "percentage": 89.87012987012987
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.registry": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/registry/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.generation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/generation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.scenarios": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/scenarios/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.valuation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/valuation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.domain.simulation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/domain/simulation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.scoring": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/scoring/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
+    },
+    "engine.v2.evaluation": {
+      "executed": 0,
+      "executable": 0,
+      "files": [
+        "engine/v2/evaluation/__init__.py"
+      ],
+      "missing_files": [],
+      "empty": true,
+      "percentage": null
     },
     "engine.v2.ledger": {
-      "empty": false,
-      "executable": 117,
       "executed": 73,
+      "executable": 117,
       "files": [
         "engine/v2/ledger/__init__.py",
         "engine/v2/ledger/decisions.py",
         "engine/v2/ledger/export.py"
       ],
       "missing_files": [],
+      "empty": false,
       "percentage": 62.39316239316239
     },
-    "engine.v2.models": {
-      "empty": true,
-      "executable": 0,
-      "executed": 0,
-      "files": [
-        "engine/v2/models/__init__.py"
-      ],
-      "missing_files": [],
-      "percentage": null
-    },
     "engine.v2.models.training": {
-      "empty": true,
-      "executable": 0,
       "executed": 0,
+      "executable": 0,
       "files": [
         "engine/v2/models/training/__init__.py"
       ],
       "missing_files": [],
+      "empty": true,
       "percentage": null
     },
-    "engine.v2.ops": {
+    "engine.v2.serving": {
+      "executed": 0,
+      "executable": 116,
+      "files": [
+        "engine/v2/serving/__init__.py",
+        "engine/v2/serving/operations.py"
+      ],
+      "missing_files": [],
       "empty": false,
-      "executable": 4083,
+      "percentage": 0.0
+    },
+    "engine.v2.ops": {
       "executed": 2707,
+      "executable": 4083,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -220,63 +251,35 @@
         "engine/v2/ops/worker.py"
       ],
       "missing_files": [],
+      "empty": false,
       "percentage": 66.2992897379378
     },
-    "engine.v2.registry": {
-      "empty": true,
-      "executable": 0,
+    "engine.v2.dashboard": {
       "executed": 0,
+      "executable": 0,
       "files": [
-        "engine/v2/registry/__init__.py"
+        "engine/v2/dashboard/__init__.py"
       ],
       "missing_files": [],
+      "empty": true,
       "percentage": null
     },
-    "engine.v2.scoring": {
-      "empty": true,
-      "executable": 0,
+    "engine.v2.diagnosis": {
       "executed": 0,
+      "executable": 343,
       "files": [
-        "engine/v2/scoring/__init__.py"
+        "engine/v2/diagnosis/__init__.py",
+        "engine/v2/diagnosis/canonical.py",
+        "engine/v2/diagnosis/receipt.py",
+        "engine/v2/diagnosis/record_comparator.py",
+        "engine/v2/diagnosis/stage_plan.py",
+        "engine/v2/diagnosis/tolerance.py"
       ],
       "missing_files": [],
-      "percentage": null
-    },
-    "engine.v2.serving": {
       "empty": false,
-      "executable": 116,
-      "executed": 0,
-      "files": [
-        "engine/v2/serving/__init__.py",
-        "engine/v2/serving/operations.py"
-      ],
-      "missing_files": [],
       "percentage": 0.0
     }
   },
-  "schema_version": "phase2_coverage.v1.0",
-  "source_hash": "sha256:170b13748f6a641f5394f1f7da33b80ae5a59b27ac469aa76caedf20a1cab252",
-  "suite_version": "phase2_coverage_suite:a3313ba5c5677fe942a123e51d6e4f6dbd3f5ea7d8f45e4293f68710f6f8b1e4",
-  "test_files": [
-    "tests/test_v2_data_atomicity.py",
-    "tests/test_v2_data_catalog.py",
-    "tests/test_v2_data_commit.py",
-    "tests/test_v2_data_contracts.py",
-    "tests/test_v2_data_events_chains.py",
-    "tests/test_v2_data_import.py",
-    "tests/test_v2_data_legacy_adapter.py",
-    "tests/test_v2_data_manifests.py",
-    "tests/test_v2_data_objects.py",
-    "tests/test_v2_data_partitions.py",
-    "tests/test_v2_data_query.py",
-    "tests/test_v2_data_rebuild_rollback.py",
-    "tests/test_v2_data_repository.py",
-    "tests/test_v2_data_roundtrip.py",
-    "tests/test_v2_ops_effects_graph.py",
-    "tests/test_v2_ops_engineering.py",
-    "tests/test_v2_ops_nightly_completion.py",
-    "tests/test_v2_ops_render_parity.py"
-  ],
   "test_outcomes": [
     {
       "nodeid": "tests/test_v2_data_atomicity.py::test_fault_at_every_commit_boundary_leaves_old_or_new_complete[before_copy]",
@@ -1017,6 +1020,142 @@
     {
       "nodeid": "tests/test_v2_data_legacy_adapter.py::test_private_parquet_schema_matches_contract",
       "outcome": "skipped"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_round_trip_through_legacy_readers",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tree_contains_only_declared_paths_and_is_read_only",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_identical_request_yields_identical_hash_and_manifest",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_changing_scope_or_refs_changes_request_hash",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_changing_a_column_set_changes_request_hash",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_evidence_scope_widens_the_analog_pool_table_scan",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_read_plan_incomplete_when_a_table_query_or_ref_is_missing",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_narrower_evidence_than_direct_scope_is_incomplete",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_non_empty_dest_root",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_dest_root_inside_the_object_store",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_symlinked_dest_root",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_query_exceeding_contract_limits_propagates_the_repository_code",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_format_and_parse_pinned_ref_round_trip",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_format_pinned_ref_rejects_a_separator_in_the_path",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_parse_pinned_ref_rejects_malformed_strings",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_refuses_a_dest_root_that_is_a_regular_file",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_coerce_failure_surfaces_as_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_materialized_chains_readable_by_legacy_load_chain_index",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_interval_has_no_sentinel_bound",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_outside_evidence_scope_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_inside_evidence_scope_is_accepted",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_missing_pinned_ref_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_pinned_ref_with_wrong_hash_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_legacy_adapter_ledger_has_one_entry_per_exact_symbol",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_outputs_are_byte_identical_verified_copies",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_materialized_panel_hash_equals_source_panel_object_hash",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_ref_naming_an_unpublished_object_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tampered_object_byte_is_refused_with_nothing_left_writable",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_copy_source_object_unreadable_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_multi_fragment_feature_panel_falls_back_to_rewrite_and_skips_tier4_cache_check",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_pinned_ref_object_corrupted_between_build_and_materialize_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_hash_prefix_ignores_a_malformed_filename",
+      "outcome": "passed"
     },
     {
       "nodeid": "tests/test_v2_data_manifests.py::test_end_to_end_fragments_dataset_snapshot",

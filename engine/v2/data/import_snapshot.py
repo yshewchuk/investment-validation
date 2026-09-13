@@ -51,10 +51,11 @@ placeholder never reaches anything that treats it as fact. See
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 ``engine.v2.contracts``, ``engine.v2.foundation``, and this package's own
-``errors``/``legacy_adapter`` (for ``build_legacy_mapping``,
+``errors``/``legacy_mapping`` (for ``build_legacy_mapping``,
 ``SOURCE_PRIORITY_VERSION`` and the three reviewed ``*_RELATIVE_PATH``
-literals) — never ``engine.v2.ops`` or legacy ``engine.*`` directly (that one
-import stays confined to ``legacy_adapter.py``, §4.2's "one adapter module per
+literals — moved here from ``legacy_adapter.py`` in review round 3, item 1)
+— never ``engine.v2.ops`` or legacy ``engine.*`` directly (that one import
+stays confined to ``legacy_adapter.py``, §4.2's "one adapter module per
 package").
 """
 from __future__ import annotations
@@ -70,7 +71,7 @@ from engine.v2.contracts import (
     SnapshotImportRequest,
     TableContractRef,
 )
-from engine.v2.data import errors, legacy_adapter
+from engine.v2.data import errors, legacy_mapping
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
 
 __all__ = [
@@ -125,11 +126,11 @@ def plan_import(source_root, *, scope: str, expected_head_snapshot_id: str | Non
                 expected_head_generation: int, mapping: dict | None = None) -> ImportPlan:
     """Enumerate ``source_root`` and freeze one :class:`ImportPlan`.
 
-    ``mapping`` defaults to :func:`legacy_adapter.build_legacy_mapping`; tests
-    pass a modified copy the same way ``legacy_adapter``'s own tests do.
+    ``mapping`` defaults to :func:`legacy_mapping.build_legacy_mapping`; tests
+    pass a modified copy the same way ``legacy_mapping``'s own tests do.
     """
     root = Path(source_root).resolve()
-    mapping = mapping if mapping is not None else legacy_adapter.build_legacy_mapping()
+    mapping = mapping if mapping is not None else legacy_mapping.build_legacy_mapping()
     tables = mapping["tables"]
 
     table_sources: dict[str, tuple[LegacyFileRef, ...]] = {}
@@ -137,7 +138,7 @@ def plan_import(source_root, *, scope: str, expected_head_snapshot_id: str | Non
     partition_layout: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {}
     all_refs: list[LegacyFileRef] = []
 
-    for name in legacy_adapter.TIER2_DATASETS:
+    for name in legacy_mapping.TIER2_DATASETS:
         refs, layout = _enumerate_curated_table(root, name)
         table_sources[name] = refs
         partition_layout[name] = layout
@@ -145,15 +146,15 @@ def plan_import(source_root, *, scope: str, expected_head_snapshot_id: str | Non
         all_refs.extend(refs)
 
     for name, relative in ((
-            "feature_panel", legacy_adapter.PANEL_RELATIVE_PATH),
-            ("tier4_forecasts", legacy_adapter.TIER4_RELATIVE_PATH)):
+            "feature_panel", legacy_mapping.PANEL_RELATIVE_PATH),
+            ("tier4_forecasts", legacy_mapping.TIER4_RELATIVE_PATH)):
         ref = _single_file_ref(root, relative)
         table_sources[name] = (ref,)
         partition_layout[name] = (("all", (relative,)),)
         table_contract_refs[name] = _contract_ref(tables[name])
         all_refs.append(ref)
 
-    snapshot_ref = _single_file_ref(root, legacy_adapter.SNAPSHOT_RELATIVE_PATH)
+    snapshot_ref = _single_file_ref(root, legacy_mapping.SNAPSHOT_RELATIVE_PATH)
     _check_snapshot_shape(root, snapshot_ref, mapping["legacy_snapshot_metadata"])
     all_refs.append(snapshot_ref)
 
@@ -164,7 +165,7 @@ def plan_import(source_root, *, scope: str, expected_head_snapshot_id: str | Non
         source_manifest_hash=content_hash(to_document(manifest)),
         table_sources=table_sources, table_contract_refs=table_contract_refs,
         legacy_snapshot_source_ref=snapshot_ref, calendar_version=PENDING_CALENDAR_VERSION,
-        source_priority_version=legacy_adapter.SOURCE_PRIORITY_VERSION,
+        source_priority_version=legacy_mapping.SOURCE_PRIORITY_VERSION,
         finality_receipt_refs=(), knowledge_mode_by_table=knowledge_mode,
         expected_head_snapshot_id=expected_head_snapshot_id,
         expected_head_generation=expected_head_generation)
