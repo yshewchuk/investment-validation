@@ -25,7 +25,7 @@ from engine.v2.contracts.data import (
 )
 from engine.v2.data import catalog, manifests
 from engine.v2.data.documents import decode_document
-from engine.v2.data.legacy_adapter import build_legacy_mapping
+from engine.v2.data.legacy_mapping import build_legacy_mapping
 from engine.v2.data.objects import FragmentInspection, inspect_fragment
 from engine.v2.data.query import ARROW_TYPES
 from engine.v2.foundation import ArtifactStore, content_hash

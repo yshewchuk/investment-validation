@@ -330,14 +330,17 @@ def _doc_without_hash(request):
 
 
 def test_evidence_scope_widens_the_analog_pool_table_scan(tmp_path):
+    # daily_market is whole_table as of review round 3 (item 2); option_chains
+    # is the remaining evidence-scoped table, so it demonstrates the widening.
     conn, store, snap = _build_snapshot(tmp_path)
     repository = Repository(conn, store)
     request = _build_request(repository, snap, _snapshot_object_ref(store), store,
                              direct_scope={"tickers": ["AAA"], "years": [2020]},
                              evidence_scope={"tickers": ["AAA", "BBB"], "years": [2020, 2021]})
-    daily_query = request.table_queries["daily_market"]
-    ticker_predicate = next(p for p in daily_query.key_filter if p.column == "ticker")
+    chains_query = request.table_queries["option_chains"]
+    ticker_predicate = next(p for p in chains_query.key_filter if p.column == "ticker")
     assert set(ticker_predicate.values) == {"AAA", "BBB"}
+    assert request.table_queries["daily_market"].key_filter == ()
     assert lm.read_plan_complete(request, repository)
 
 
@@ -587,3 +590,26 @@ def test_legacy_adapter_ledger_has_one_entry_per_exact_symbol():
     assert "engine.data.store._read_part" in data_module_symbols
     assert "engine.data.schemas.coerce" in data_module_symbols
     assert "engine.data.schemas.SOURCE_PRIORITY" in data_module_symbols
+
+
+def test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window(tmp_path):
+    """Review round 3, item 2: daily_market must not be scoped narrowly
+    enough that a tier4 serving-model cache miss (im_t1/runup_move's fixed
+    IM_T1_YEARS window, or iv_crush's fully unbounded read) could silently
+    under-read. Chosen resolution: whole_table, not a pinned-artifact refusal
+    (option (a) is not provable — see the module docstring). Direct_scope is
+    named narrower than evidence_scope here specifically to prove daily_market
+    reads every committed row regardless of EITHER — not merely whatever
+    tickers/years this test happened to hand it."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store,
+                             direct_scope={"tickers": ["AAA"], "years": [2020]})
+    daily_query = request.table_queries["daily_market"]
+    assert daily_query.key_filter == ()  # no ticker restriction at all
+    scanned = lm.scanned_rows(repository, daily_query, "daily_market")
+    # All three committed daily_market rows come back regardless of scope —
+    # the query itself, not a trusted scope, is what is complete here.
+    assert {row["ticker"] for row in scanned} == {"AAA", "BBB"}
+    assert {row["year"] for row in scanned} == {2020, 2021}
+    assert lm.read_plan_complete(request, repository)

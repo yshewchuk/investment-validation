@@ -13,9 +13,9 @@ brief decision 1): which curated tables, in what scope, plus which model/
 calendar files, a legacy score batch (``engine.features.FeatureContext.load``
 + ``engine.score.Scorer.__init__``/``.score``/``score_calendar``) actually
 reads. Derived by grepping every ``iter_table``/``read_table``/``_read_part``/
-``paths.<CONST>`` call site reachable from those four entry points (review
-round 2 redid this grep from scratch after round 1 missed a call site — see
-below), not guessed:
+``paths.<CONST>`` call site reachable from those four entry points, redone
+from scratch across three review rounds as each missed something the last
+one didn't, not guessed:
 
 **Tables** (call sites, in the order this module found them):
 
@@ -28,36 +28,32 @@ below), not guessed:
   streams ``store.iter_table("trades", ...)`` with no bound; this is exactly
   "the broader historical analog population required by current behavior"
   the guide's §9.2 names, read at ``Scorer.__init__`` before any board scores.
-* ``daily_market`` — evidence ticker/year scoped, matching
-  ``FeatureContext.load(tickers, years=years)``'s own bound (``engine/
-  features.py`` ``FeatureContext.load``, ``daily_state_frame``). A SECOND site,
-  ``Scorer._entry_implied_move`` (chunked by ``trades``'s own ticker/year
-  span, unconditionally exercised at construction), needs a still-broader
-  span this module cannot derive without reading ``trades`` first — the
-  caller's ``evidence_scope`` is trusted to already cover it (memory note:
-  "the evidence scope must be the score job's FULL ticker set and year
-  range"); ``build_materialization_request``/``materialize_tree`` now PROVE
-  this rather than trust it (decision 4 below), refusing when it does not
-  hold.
+* ``daily_market`` — WHOLE, unconditionally (review round 3, item 2 — was
+  "evidence ticker/year scoped" through round 2; see this table's own
+  ``"reason"`` entry in the dict below for the full derivation, including
+  why option (a), pinning the serving-model artifacts to prevent a cache
+  miss, is provably NOT viable here).
 * ``option_chains`` — evidence ticker/year scoped, matching
   ``load_chain_index``'s own bound. **Missed in review round 1.**
   ``engine.replay.load_chain_index(keys, years=None, ...)`` reads
   ``store.iter_table("option_chains", years=years, columns=list(_CHAIN_COLUMNS))``
   (``years`` derived from ``keys`` when not given; ticker filtering happens
-  in pandas AFTER the read, so the store-level read is years-only — same
-  shape as ``daily_market``'s own real behavior). Two call sites reach it:
-  ``engine.score.score_calendar`` pre-loads one index for the whole board
-  (``keys`` = every strategy's ``plan_events(...).chain_keys``, i.e. the
-  board's own tickers) and passes it into every ``Scorer.score(request,
-  chain_index=index)`` call; ``Scorer._price_entry`` (inside ``.score``) loads
-  its OWN index on demand whenever a caller passes ``chain_index=None``
-  instead — the coordinator's "score_calendar(alt_strikes=0) path" is this
-  pre-load. Columns: ``engine.replay._CHAIN_COLUMNS`` (11 of 21 contract
-  columns: ticker, obs_date, expiry, dte, strike, right, bid, ask, delta,
-  spot, quote_repaired) — a provable subset, plus ``"year"`` (not read by the
+  in pandas AFTER the read, so the store-level read is years-only). Two call
+  sites reach it: ``engine.score.score_calendar`` pre-loads one index for the
+  whole board (``keys`` = every strategy's ``plan_events(...).chain_keys``,
+  i.e. the board's own tickers) and passes it into every ``Scorer.score(
+  request, chain_index=index)`` call; ``Scorer._price_entry`` (inside
+  ``.score``) loads its OWN index on demand whenever a caller passes
+  ``chain_index=None`` instead — the coordinator's "score_calendar(
+  alt_strikes=0) path" is this pre-load. Columns:
+  ``engine.replay._CHAIN_COLUMNS`` (11 of 21 contract columns: ticker,
+  obs_date, expiry, dte, strike, right, bid, ask, delta, spot,
+  quote_repaired) — a provable subset, plus ``"year"`` (not read by the
   loader, but required for this module's own year-partitioned write and for
   legacy ``coerce()`` to accept the file back, since ``year`` is a
-  non-nullable column).
+  non-nullable column). No known cache-miss-style unconditional-widening
+  finding applies to this table the way it does to ``daily_market``: nothing
+  else reachable from the four entry points reads ``option_chains``.
 * ``feature_panel``/``tier4_forecasts`` — WHOLE FILE, unconditionally
   (``engine.features.load_panel()``, ``engine.data.features.tier4.
   load_forecasts()`` both take no scope argument; the latter is read from
@@ -70,30 +66,49 @@ below), not guessed:
   ``FeatureContext.load``, ``Scorer.__init__``, ``Scorer.score``,
   ``score_calendar``, or anything they call.
 
-**Conditional/optional reads found, NOT added to the plan (documented, not
-silently dropped):**
+**Review round 3, item 2 — why ``daily_market`` moved to whole_table.**
+``engine.data.features.tier4.serving_model(fold_start, model=...)`` is called,
+unconditionally reachable from ``Scorer.score()``, for whichever Tier-4
+producer a given row needs (``engine.score.py`` picks ``produces`` — one of
+``pred_abs_move``/``pred_im_t1_d14``/``pred_runup_abs_move_d14``/
+``pred_iv_crush_30`` — per column, at runtime, so materialize() cannot know
+in advance which will be exercised). On a joblib cache MISS it calls
+``fit_fold`` -> ``training_frames(panel, model)`` -> ``model.prepare(panel)``:
 
-* ``engine.data.features.tier4``'s ``im_t1_feature_model``/
-  ``runup_move_feature_model``/``iv_crush_feature_model`` each carry a
-  ``prepare(panel)`` closure that reads ``earnings_events``/``daily_market``
-  over a FIXED historical window (``IM_T1_YEARS = range(2017, 2027)``,
-  independent of ``evidence_scope``). This only executes when
-  ``tier4.serving_model``'s joblib cache misses — a real possibility in a
-  fresh private materialization, since this task does not pin any
-  pre-existing ``data/models/tier4/*.joblib`` cache file. ``earnings_events``
-  is already whole-table (covers any window); ``daily_market`` is not — a
-  caller whose ``evidence_scope`` years exclude 2017–2026 under-covers this
-  path for ``pred_im_t1_d14``/``pred_runup_abs_move_d14``/
-  ``pred_iv_crush_30``. ``pred_abs_move`` (``size_feature_model``, the most
-  common producer) is exempt: its ``prepare`` only touches the
-  already-loaded ``panel`` DataFrame.
-* ``engine.score.Scorer._chooser_analog_pool`` reads
-  ``paths.FEATURES / "chooser_analog_pool.parquet"`` for ``DYNAMIC_MENU``
-  strategies, wrapped in a bare ``try/except Exception: return None`` — a
-  missing file silently degrades the chooser features to NaN rather than
-  raising. Pinned anyway, alongside ``structures.json``, for the same
-  "exact parity over silent degradation" reasoning (see the pinned-ref list
-  below) rather than left optional.
+* ``im_t1_feature_model``/``runup_move_feature_model``'s own ``prepare``
+  closures read ``store.read_table("daily_market", years=range(min(
+  IM_T1_YEARS) - 1, max(IM_T1_YEARS) + 1), columns=[...])`` where
+  ``IM_T1_YEARS = range(2017, 2027)`` — a FIXED window, no ticker filter,
+  independent of ``evidence_scope``.
+* ``iv_crush_feature_model``'s ``prepare = engine.models.training.
+  iv_crush.prepare`` calls ``crush_frame()`` with NO arguments, which reads
+  ``store.read_table("daily_market", columns=[...])`` with NO years bound
+  and NO ticker filter at all — worse than a fixed window, truly unbounded.
+
+**Is the cache miss provably unreachable when the serving-model artifacts are
+pinned (option (a))? No — proven the other way.** ``tier4.serving_model``'s
+own cache key is::
+
+    snapshot = store.file_sha256(paths.PANEL)          # tier4.py:1277 (serving_model)
+    path = _serving_path(model.model_id, fold, snapshot)   # tier4.py:1224
+    # _serving_path: SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib"
+    if cache and path.exists():
+        stored = joblib.load(path)
+        if (... and stored.get("tier3_snapshot") == snapshot and ...):
+            <cache hit>
+
+Both the cache FILENAME and the stored dict's ``tier3_snapshot`` field are
+keyed on ``store.file_sha256(paths.PANEL)`` — the exact byte-hash of THIS
+materialization's own freshly-written ``panel.parquet``, which
+``materialize_tree`` cannot predict before writing it and which a
+production-sourced joblib file's embedded hash will essentially never equal
+(a different snapshot's panel has different bytes, hence a different
+sha256). Pinning "the artifacts that prevent the miss" therefore cannot make
+this path provably unreachable — it is the reverse: the miss is
+provably ALWAYS possible for a freshly materialized root. Option (b) is the
+only one this evidence supports, and it is stronger than "add the fixed
+window" alone: since ``iv_crush``'s path has no window at all, only
+``whole_table`` is provably complete for every producer.
 
 **Registry/model/calendar inputs** are plain pinned files, never
 Repository-scanned tables — not expressible as a bounded ``DataQuery``, so
@@ -105,16 +120,21 @@ read unconditionally by ``Scorer.__init__``'s ``load_registry()``),
 ``engine/models/structures.json`` (``engine.structure_registry.
 CHAMPIONS_PATH`` — optional in legacy code, pinned here for exact
 structure-champion parity), ``data/features/chooser_analog_pool.parquet``
-(optional in legacy code, pinned for the same reason), each champion's
-joblib artifact (``RegistryEntry.artifact``/``.artifact_sha256``, under
-``data/models/...``), and ``data/raw/polygon/gspc_daily.csv``
+(``engine.score.Scorer._chooser_analog_pool``, also optional in legacy code
+— a bare ``try/except Exception: return None`` silently degrades chooser
+features to NaN if absent — pinned for the same parity reasoning), each
+champion's joblib artifact (``RegistryEntry.artifact``/``.artifact_sha256``,
+under ``data/models/...``), and ``data/raw/polygon/gspc_daily.csv``
 (``engine.paths.GSPC_DAILY``, ``engine.calendar.trading_calendar``'s sole
 input).
 
 No STOP finding. Every read this audit found is either a boundable
-``DataQuery``, a nameable pinned file, or a documented conditional/optional
-caveat above. The ``trades``-span-vs-``evidence_scope`` caveat is now a
-PROVEN refusal (decision 4), not a trusted assumption.
+``DataQuery`` or a nameable pinned file. ``daily_market`` moving to
+whole_table also makes ``Scorer._entry_implied_move``'s trades-ticker-span
+need (round 2) and the tier4 cache-miss windows above (round 3) all
+trivially satisfied by construction; ``evidence_scope_covers_trades()``
+still runs and still proves it, now vacuously, rather than being removed —
+a regression guard costs nothing to keep.
 """
 from __future__ import annotations
 
@@ -173,11 +193,28 @@ LEGACY_SCORE_READ_PLAN_V1: dict[str, object] = {
                       "all call store.read_table('earnings_events', ...) with no years/tickers bound",
         },
         "daily_market": {
-            "scope": "evidence_scoped", "columns": "full", "output": "curated",
-            "reason": "engine.features.FeatureContext.load(tickers, years=years) bounds its own read "
-                      "to the caller's tickers/years; engine.score.Scorer._entry_implied_move's own "
-                      "second read site needs the broader trades-ticker span — PROVEN inside "
-                      "evidence_scope by evidence_scope_covers_trades(), not trusted",
+            "scope": "whole_table", "columns": "full", "output": "curated",
+            "reason": "review round 3, item 2: engine.features.FeatureContext.load(tickers, "
+                      "years=years) bounds ITS OWN read narrowly, but two other unconditionally "
+                      "reachable read sites need far more than evidence_scope can promise, so this "
+                      "table is whole_table rather than evidence_scoped. (1) "
+                      "engine.data.features.tier4's im_t1_feature_model/runup_move_feature_model "
+                      "prepare() closures read years=range(2016, 2027) (IM_T1_YEARS padded one year) "
+                      "with NO ticker filter, on a tier4.serving_model() cache miss — proven always "
+                      "reachable below (option (b) was chosen: a pinned joblib cannot prevent the "
+                      "miss, since its cache key embeds store.file_sha256(paths.PANEL), which is the "
+                      "PRIVATE MATERIALIZED panel's own hash and essentially never matches any "
+                      "pre-existing cache file's embedded hash). (2) WORSE: iv_crush_feature_model's "
+                      "prepare = engine.models.training.iv_crush.prepare calls crush_frame() with NO "
+                      "arguments, which reads store.read_table('daily_market', columns=[...]) with "
+                      "NO years bound and NO ticker filter AT ALL — truly unbounded, not just a fixed "
+                      "window. Since materialize() cannot know in advance which of "
+                      "pred_abs_move/pred_im_t1_d14/pred_runup_abs_move_d14/pred_iv_crush_30 a given "
+                      "scoring run will need (engine.score.py picks the producer per Tier-4 column at "
+                      "runtime), whole_table is the only read that is provably never incomplete. "
+                      "engine.score.Scorer._entry_implied_move's own trades-ticker-span need (round 2) "
+                      "is trivially subsumed by this — evidence_scope_covers_trades() still runs and "
+                      "still passes, now vacuously.",
         },
         "trades": {
             "scope": "whole_table", "columns": "full", "output": "curated",

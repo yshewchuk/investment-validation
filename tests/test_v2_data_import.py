@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import ArtifactRef  # noqa: E402
-from engine.v2.data import legacy_adapter as data_legacy_adapter  # noqa: E402
+from engine.v2.data import legacy_mapping as data_legacy_mapping  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.errors import fail as fail_data  # noqa: E402
 from engine.v2.data.import_snapshot import plan_import  # noqa: E402
@@ -46,7 +46,7 @@ from engine.v2.ops.supervisor import Service  # noqa: E402
 from tests.ops_support import TEST_POLICY  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
-MAPPING = data_legacy_adapter.build_legacy_mapping()
+MAPPING = data_legacy_mapping.build_legacy_mapping()
 SCOPE = "legacy_primary"
 
 _ARROW_TYPES = {"string": pa.string(), "float64": pa.float64(), "int64": pa.int64(), "bool": pa.bool_()}
@@ -135,20 +135,20 @@ def _write_parquet(path: Path, table: pa.Table) -> None:
 
 def build_legacy_store(root: Path, *, year: int = 2024, daily_market_parts: int = 1,
                        rows_per_part: int = 2) -> None:
-    for name in data_legacy_adapter.TIER2_DATASETS:
+    for name in data_legacy_mapping.TIER2_DATASETS:
         contract_doc = MAPPING["tables"][name]
         parts = daily_market_parts if name == "daily_market" else 1
         for part in range(parts):
             rows = _synthetic_rows(contract_doc, rows_per_part, year=year, start=part * rows_per_part)
             path = root / "data" / "curated" / name / f"year={year}" / f"part-{part:04d}.parquet"
             _write_parquet(path, _table_from_rows(contract_doc, rows))
-    for name, relative in (("feature_panel", data_legacy_adapter.PANEL_RELATIVE_PATH),
-                           ("tier4_forecasts", data_legacy_adapter.TIER4_RELATIVE_PATH)):
+    for name, relative in (("feature_panel", data_legacy_mapping.PANEL_RELATIVE_PATH),
+                           ("tier4_forecasts", data_legacy_mapping.TIER4_RELATIVE_PATH)):
         contract_doc = MAPPING["tables"][name]
         rows = _synthetic_rows(contract_doc, rows_per_part, year=year)
         _write_parquet(root / relative, _table_from_rows(contract_doc, rows))
     keys = MAPPING["legacy_snapshot_metadata"]["expected_top_level_keys"]
-    snapshot_path = root / data_legacy_adapter.SNAPSHOT_RELATIVE_PATH
+    snapshot_path = root / data_legacy_mapping.SNAPSHOT_RELATIVE_PATH
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(json.dumps({key: None for key in keys}))
 
@@ -162,9 +162,9 @@ def test_plan_import_enumerates_declared_files(tmp_path):
     build_legacy_store(tmp_path, daily_market_parts=3, rows_per_part=2)
     plan = plan_import(tmp_path, scope=SCOPE, expected_head_snapshot_id=None, expected_head_generation=0)
     request = plan.snapshot_import_request
-    assert set(request.table_sources) == set(data_legacy_adapter.DATASET_ORDER)
+    assert set(request.table_sources) == set(data_legacy_mapping.DATASET_ORDER)
     assert len(request.table_sources["daily_market"]) == 3
-    for name in data_legacy_adapter.TIER2_DATASETS:
+    for name in data_legacy_mapping.TIER2_DATASETS:
         if name != "daily_market":
             assert len(request.table_sources[name]) == 1, name
     assert request.legacy_snapshot_source_ref.path == "features/SNAPSHOT"
@@ -267,7 +267,7 @@ def test_snapshot_import_end_to_end(tmp_path):
                             (SCOPE,)).fetchone()
         assert head is not None and head["generation"] == 1
         snapshot = Repository(conn).resolve(head["snapshot_id"])
-        assert set(snapshot.table_versions) == set(data_legacy_adapter.DATASET_ORDER)
+        assert set(snapshot.table_versions) == set(data_legacy_mapping.DATASET_ORDER)
 
         daily_dvs = conn.execute(
             "SELECT partition_logical_hashes_json FROM data_dataset_versions WHERE dataset_version_id=?",

@@ -52,7 +52,7 @@ from pathlib import Path
 
 from engine.v2.contracts import JobSpec, SnapshotImportRequest, SubmitRequest, TableContract
 from engine.v2.data import documents
-from engine.v2.data import legacy_adapter as data_legacy_adapter
+from engine.v2.data import legacy_mapping as data_legacy_mapping
 from engine.v2.data.import_snapshot import ImportPlan, request_hash
 from engine.v2.data.objects import inspect_staged_file
 from engine.v2.foundation import canonical_json, content_hash, from_document, to_document
@@ -95,7 +95,7 @@ def save_import_plan(conn, store, plan: ImportPlan, *, clock):
                                          "legacy_input_manifest.v1.0", clock=clock)
     request_ref = _publish_and_register(store, conn, to_document(plan.snapshot_import_request),
                                         "snapshot_import_request.v1.0", clock=clock)
-    mapping_ref = _publish_and_register(store, conn, data_legacy_adapter.build_legacy_mapping(),
+    mapping_ref = _publish_and_register(store, conn, data_legacy_mapping.build_legacy_mapping(),
                                         "legacy_table_mapping.v1.0", clock=clock)
     document = {
         "schema_version": "snapshot_import_plan.v1.0", "scope": plan.snapshot_import_request.scope,
