@@ -11,6 +11,9 @@ from playwright.sync_api import sync_playwright
 
 from engine.v2.serving.operations import create_server
 
+# Drives a real Playwright browser (see tests/conftest.py's grouping rule).
+pytestmark = pytest.mark.xdist_group("serial")
+
 
 @pytest.mark.parametrize("browser_name", ["chromium"])
 def test_shell_renders_all_legacy_views_and_deep_link(tmp_path, browser_name):

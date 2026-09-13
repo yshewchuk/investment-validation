@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from engine.v2.contracts import ProcessIdentity
 from engine.v2.ops.lifecycle import record_launch
 from engine.v2.ops.recovery import prove_ownership_gone, read_boot_id
 from tests.ops_support import catalog, enqueue_claim
+
+# Real boot identity / process-identity machinery, grouped with its sibling
+# test_v2_ops_recovery_ownership.py (see tests/conftest.py's grouping rule).
+pytestmark = pytest.mark.xdist_group("serial")
 
 
 def test_previous_boot_attempt_is_proven_gone_despite_matching_live_session(tmp_path):

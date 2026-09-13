@@ -18,6 +18,66 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+def pytest_configure(config):
+    # Registered here (not just by the xdist plugin) so the mark is silent
+    # even when pytest-xdist is absent -- e.g. `pytest -p no:xdist`.
+    config.addinivalue_line(
+        "markers",
+        "xdist_group(name): pin this test (or, applied at module level via "
+        "`pytestmark`, every test in the file) to a single pytest-xdist "
+        "worker. Recommended invocation: `-n auto --dist loadgroup`, which "
+        "keeps every test not in a named group free to run on any worker "
+        "and routes each named group to one worker. See the grouping rule "
+        "below for which files use it and why.",
+    )
+
+
+# -- xdist grouping rule ------------------------------------------------------
+#
+# A file gets `pytestmark = pytest.mark.xdist_group("serial")` (or, for a
+# single test, the same mark on just that function) when it touches a REAL,
+# process-wide or host-wide resource that a concurrent sibling test could
+# collide with -- not because it is merely slow. Two xdist workers are two
+# independent OS processes; anything scoped to `tmp_path` and this worker's
+# own subprocesses is already safe run-anywhere.  Grouped so far, and why:
+#
+# - tests/test_v2_ops_executor_faults.py (whole file): real subprocess
+#   spawn/kill/signal, a real `/sys/fs/cgroup` probe, and real watchdog
+#   `observe`/`signal_owned` calls against this HOST's process table --
+#   "Small real-process fault controls for the watchdog and admission
+#   gates" per its own docstring.
+# - tests/test_v2_ops_recovery_ownership.py (whole file): "real short-lived
+#   child processes" (its own docstring) with process-group/session
+#   signaling and a fixed-deadline poll for a real process to die -- a
+#   noisy neighbor process on the same host can push that poll past its
+#   deadline.
+# - tests/test_v2_ops_recovery_reboot.py (whole file): shares the same real
+#   `read_boot_id()`/process-identity machinery as recovery_ownership.py;
+#   small enough to group alongside it rather than split hairs per test.
+# - tests/test_v2_ops_runtime.py::test_o06_actual_child_affinity_threads_and_outputs
+#   only (not the rest of the file): asserts the real CPU affinity and
+#   thread count of a real child process it just launched -- exactly the
+#   "bounded jobs pin from core 0" collision a concurrent sibling could
+#   step on. The file's other tests never touch a real subprocess.
+# - tests/test_v2_ops_serving_browser.py (whole file): drives a real
+#   Playwright browser.
+#
+# NOT grouped, and why: the ~30 other tests that launch a real worker
+# subprocess through `Service`/`tests.ops_support.TEST_POLICY` (in
+# test_v2_data_import.py, test_v2_data_rebuild_rollback.py,
+# test_v2_ops_store_barrier.py, test_v2_ops_supervised_legacy.py,
+# test_v2_ops_nightly_completion.py, and the rest of test_v2_ops_runtime.py
+# and test_v2_ops_executor_faults.py already covered above) each use their
+# own `tmp_path` catalog and their own short-lived child process with no
+# fixed path, port, or process-table assertion against another test's
+# process -- static reading found no shared resource, only a possible CPU
+# time-slice collision on very short (1-3s) subprocesses, which is a
+# performance cost, not a correctness one. This was NOT empirically
+# verified under `-n auto` (pytest-xdist was not installed in this pass --
+# see the ops README Testing section); re-check with real concurrent runs
+# before trusting this list as final.
+
+
 @pytest.fixture
 def tmp_root(tmp_path, monkeypatch):
     """Point ``engine.paths`` at a throwaway tree for the duration of a test."""

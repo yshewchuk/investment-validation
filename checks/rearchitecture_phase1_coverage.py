@@ -132,17 +132,40 @@ def validate_measurement(measured, root=ROOT):
     return findings
 
 
-def measure(root=ROOT):
+def measure(root=ROOT, *, parallel=False):
+    """``parallel=True`` runs the same fixed suite under ``-n auto --dist
+    loadgroup`` instead of one process. Coverage still counts every worker:
+    each xdist worker is a fresh interpreter (execnet, not a fork), so a
+    single ``coverage run`` around the controller process alone would only
+    see the controller's own near-zero execution. Instead every subprocess
+    gets ``COVERAGE_PROCESS_START`` pointing at a ``parallel = true``
+    coveragerc; the system-wide ``coverage.process_startup`` sitecustomize
+    hook (installed as a ``.pth`` file) starts a coverage instance in each
+    new interpreter automatically, writing its own suffixed data file next
+    to the controller's. ``coverage combine`` then merges all of them before
+    ``coverage json`` reads the total -- no pytest-cov needed."""
     tests = suite(root)
     source_hash = measurement_identity(root)
     with tempfile.TemporaryDirectory(prefix="phase1-coverage-") as scratch:
-        env = dict(os.environ, COVERAGE_FILE=str(Path(scratch) / "coverage"))
-        command = [sys.executable, "-m", "coverage", "run", "--source=engine/v2",
-                   "-m", "pytest", "-q", *tests]
-        print(f"[coverage] running fixed suite ({len(tests)} files)", flush=True)
+        data_file = str(Path(scratch) / "coverage")
+        env = dict(os.environ, COVERAGE_FILE=data_file)
+        if parallel:
+            rcfile = Path(scratch) / "parallel.coveragerc"
+            rcfile.write_text("[run]\nparallel = true\nsource = engine/v2\n")
+            env["COVERAGE_PROCESS_START"] = str(rcfile)
+            command = [sys.executable, "-m", "coverage", "run", f"--rcfile={rcfile}",
+                       "-m", "pytest", "-q", "-n", "auto", "--dist", "loadgroup", *tests]
+        else:
+            command = [sys.executable, "-m", "coverage", "run", "--source=engine/v2",
+                       "-m", "pytest", "-q", *tests]
+        print(f"[coverage] running fixed suite ({len(tests)} files)"
+              + (" under -n auto --dist loadgroup" if parallel else ""), flush=True)
         run = subprocess.run(command, cwd=root, env=env, check=False)
         if run.returncode:
             raise RuntimeError("coverage test suite failed")
+        if parallel:
+            subprocess.run([sys.executable, "-m", "coverage", "combine"],
+                           cwd=root, env=env, check=True)
         output = Path(scratch) / "coverage.json"
         subprocess.run([sys.executable, "-m", "coverage", "json", "-o", str(output)],
                        cwd=root, env=env, check=True)
@@ -156,11 +179,14 @@ def measure(root=ROOT):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--parallel", action="store_true",
+                        help="run the fixed suite under -n auto --dist loadgroup "
+                             "(requires pytest-xdist); default is serial")
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--baseline", type=Path, default=BASELINE)
     args = parser.parse_args(argv)
-    result = measure() if args.measure else json.loads(args.input.read_text())
+    result = measure(parallel=args.parallel) if args.measure else json.loads(args.input.read_text())
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n")

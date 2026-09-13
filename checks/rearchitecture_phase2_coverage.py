@@ -95,21 +95,49 @@ def measurement_identity(root=ROOT):
     return source_hash(source_files(root))
 
 
-def measure(root=ROOT):
+def measure(root=ROOT, *, parallel=False):
+    """``parallel=True`` runs the fixed suite under ``-n auto --dist
+    loadgroup``. Coverage under xdist needs coverage.py's own multi-process
+    combine, not pytest-cov: every worker is a fresh interpreter, so
+    ``COVERAGE_PROCESS_START`` plus the system ``coverage.process_startup``
+    ``.pth`` hook starts a coverage instance in each one automatically
+    (config ``parallel = true``), and ``coverage combine`` merges their
+    suffixed data files before ``coverage json`` reads the total. Junit
+    outcomes still come from one ``--junitxml`` on the controller process;
+    xdist forwards every worker's own test reports into that same junit
+    plugin, so per-test outcomes should stay complete regardless of which
+    worker ran which test, and junit's classname/name shape is pytest's own
+    (unaffected by which worker collected/ran a test), not xdist's -- so
+    ``_nodeid`` here should not need to change. NOT yet run under real
+    xdist workers to confirm; verify with a live ``--parallel`` measurement
+    before relying on this comment."""
     registry = load_registry()
     tests = suite(root, registry)
     version = suite_version(tests)
     identity = measurement_identity(root)
     with tempfile.TemporaryDirectory(prefix="phase2-coverage-") as scratch:
-        env = dict(os.environ, COVERAGE_FILE=str(Path(scratch) / "coverage"))
+        data_file = str(Path(scratch) / "coverage")
+        env = dict(os.environ, COVERAGE_FILE=data_file)
         junit = Path(scratch) / "junit.xml"
-        command = [sys.executable, "-m", "coverage", "run", "--source=engine/v2",
-                   "-m", "pytest", "-q", f"--junitxml={junit}", *tests]
-        print(f"[phase2-coverage] running fixed suite ({len(tests)} files)", flush=True)
+        if parallel:
+            rcfile = Path(scratch) / "parallel.coveragerc"
+            rcfile.write_text("[run]\nparallel = true\nsource = engine/v2\n")
+            env["COVERAGE_PROCESS_START"] = str(rcfile)
+            command = [sys.executable, "-m", "coverage", "run", f"--rcfile={rcfile}",
+                       "-m", "pytest", "-q", "-n", "auto", "--dist", "loadgroup",
+                       f"--junitxml={junit}", *tests]
+        else:
+            command = [sys.executable, "-m", "coverage", "run", "--source=engine/v2",
+                       "-m", "pytest", "-q", f"--junitxml={junit}", *tests]
+        print(f"[phase2-coverage] running fixed suite ({len(tests)} files)"
+              + (" under -n auto --dist loadgroup" if parallel else ""), flush=True)
         run = subprocess.run(command, cwd=root, env=env, check=False)
         outcomes = parse_junit(junit, root) if junit.is_file() else []
         if run.returncode and not outcomes:
             raise RuntimeError("phase 2 coverage suite produced no junit report")
+        if parallel:
+            subprocess.run([sys.executable, "-m", "coverage", "combine"],
+                           cwd=root, env=env, check=True)
         output = Path(scratch) / "coverage.json"
         subprocess.run([sys.executable, "-m", "coverage", "json", "-o", str(output)],
                        cwd=root, env=env, check=True)
@@ -175,11 +203,14 @@ def validate_measurement(measured, root=ROOT, registry=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--parallel", action="store_true",
+                        help="run the fixed suite under -n auto --dist loadgroup "
+                             "(requires pytest-xdist); default is serial")
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--baseline", type=Path, default=BASELINE)
     args = parser.parse_args(argv)
-    result = measure() if args.measure else json.loads(args.input.read_text())
+    result = measure(parallel=args.parallel) if args.measure else json.loads(args.input.read_text())
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n")

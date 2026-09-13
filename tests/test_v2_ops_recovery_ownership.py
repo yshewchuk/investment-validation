@@ -21,6 +21,8 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from engine.v2.foundation import SystemClock
 from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
@@ -41,6 +43,10 @@ from engine.v2.ops.supervisor import Service
 from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
 
 CODE_SOURCE = Path(__file__).resolve().parents[1]
+
+# Real short-lived child processes with process-group/session signaling and a
+# fixed-deadline poll for one to die (see tests/conftest.py's grouping rule).
+pytestmark = pytest.mark.xdist_group("serial")
 
 
 def _child(source, *, env=None, new_session=True):
