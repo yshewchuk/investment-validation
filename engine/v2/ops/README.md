@@ -90,9 +90,26 @@ artifacts.  The evidence binds the population, causal cutoffs, selection and
 replayed score content.  Candidate decisions, compatibility-export intent and
 the decision watermark share the attempt-completion transaction.  Missing or
 changed evidence fails closed.  The current general nightly planner does not
-produce this evidence bundle, so this coordinator path is available for
-isolated authority rehearsals but does not make the full nightly complete or
-activate a production writer.
+produce a decision-plan/decision-evidence bundle, so this coordinator path is
+available for isolated authority rehearsals but does not make the full
+nightly complete or activate a production writer.
+
+A worker's `input_bindings` may name a parent job's committed output as
+`job_<id>#<output_name>` instead of a direct artifact ID (P2-5/B1a).
+`input_bindings.resolve_bindings` resolves every entry once, at launch,
+against the parent's committed state — a direct ID must be in
+`spec.input_refs`; a `job_` binding must name a declared dependency whose job
+has succeeded, carrying an explicit `#output_name` that matches one of its
+succeeded attempt's outputs — and `executor._materialize_inputs` records the
+result in `attempt_input_bindings` (migration 7, append-only: update and
+delete are refused by trigger) before staging any byte or launching the
+worker process. The `legacy_decisions` coordinator (`decision_commit.py`)
+resolves its four evidence bindings through that durable record rather than
+re-querying a `job_` binding's parent at commit time, so a parent whose
+output has since changed cannot silently swap what gets committed. Checkpoint
+cache identity (`supervisor.py`, `checkpoints.commit_checkpoint`) folds the
+same resolved `(name, artifact_id)` pairs into its `inputs` hash, so a job
+whose parent output changed cannot reuse a stale checkpoint.
 
 Settlement workers capture only newly appended legacy outcome bytes.  The
 coordinator validates those observations against committed predictions and

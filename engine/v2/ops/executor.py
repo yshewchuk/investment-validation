@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.errors import fail
 from engine.v2.ops.executor_watchdog import observe, process_info, signal_owned
+from engine.v2.ops.input_bindings import resolve_and_record
 from engine.v2.ops.lifecycle import record_launch
 
 THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -78,28 +80,22 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
 
 
 def _materialize_inputs(conn, claim, store, staging):
-    """Copy verified predecessor artifacts into this fresh attempt root."""
-    bindings = claim.spec.parameters.get("input_bindings") or {}
-    for name, artifact_id in bindings.items():
+    """Resolve, durably record, then copy verified predecessor artifacts.
+
+    Resolution and recording happen before any byte is staged and before the
+    worker process is launched (P2-5/B1a): the coordinator later trusts the
+    recorded ``attempt_input_bindings`` rows instead of re-resolving a
+    ``job_`` binding against the parent's possibly-changed current state.
+    """
+    resolved = resolve_and_record(conn, store, claim)
+    for name, item in resolved.items():
         parts = safe_relative_path(name)
-        if str(artifact_id).startswith("job_"):
-            dependency, separator, output_name = str(artifact_id).partition("#")
-            if dependency not in claim.spec.dependency_job_ids:
-                raise ValueError("input binding names an undeclared dependency")
-            row = conn.execute(
-                "SELECT ao.artifact_id FROM attempts a JOIN attempt_outputs ao "
-                "ON ao.attempt_id=a.attempt_id WHERE a.job_id=? "
-                "AND a.state=? AND (?='' OR ao.name=?) "
-                "ORDER BY a.attempt_number DESC LIMIT 1",
-                (dependency, "succeeded", output_name, output_name)).fetchone()
-            if row is None:
-                raise ValueError("predecessor output is not committed")
-            artifact_id = row[0]
-        ref = artifact(conn, store, artifact_id)
+        ref = artifact(conn, store, item.artifact_id)
         destination = staging.joinpath(*parts)
         ensure_directory(destination.parent)
         if destination.exists() or destination.is_symlink():
-            raise ValueError("input binding destination already exists")
+            raise fail("VALIDATION_FAILED", "input binding destination already exists",
+                       details={"name": name})
         destination.write_bytes(store.read_verified(ref))
         destination.chmod(0o444)
 

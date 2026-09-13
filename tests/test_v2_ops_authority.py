@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from engine.v2.contracts import JobSpec, SubmitRequest
+from engine.v2.contracts import ArtifactRef, JobSpec, SubmitRequest
 from engine.v2.foundation import ArtifactStore, content_hash, to_document
 from engine.v2.ledger.decisions import (
     DecisionConflict,
@@ -24,9 +24,11 @@ from engine.v2.ledger.export import export_generation
 from engine.v2.ops.backup import prepare_backup, restore_backup, run_backup
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
+from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.decision_commit import commit_decisions, validate_candidates
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.health import health, record_check
+from engine.v2.ops.input_bindings import ResolvedBinding, record_resolved_bindings
 from engine.v2.ops.lifecycle import request_cancel
 from engine.v2.ops.outbox import claim as claim_effect
 from engine.v2.ops.outbox import fail_effect, watermark
@@ -108,8 +110,20 @@ def _claim(conn, clock, supervisor, input_hash, key="one"):
     policy = NamespacePolicy({"operator": frozenset({"shadow"})})
     submit(conn, registry(), policy, SubmitRequest(namespace="shadow", idempotency_key=key,
                                                    principal="operator", job=job), clock=clock)
-    return claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
-                      supervisor=supervisor, clock=clock, registry=registry())
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry())
+    # These tests exercise commit_decisions_in_transaction's own validation
+    # directly, without a real launch; seed the launch-time record it now
+    # reads (P2-5/B1a) so the fixture reflects a resolved-and-staged claim.
+    ref = ArtifactRef(artifact_id=input_hash, content_hash=input_hash,
+                      schema_ref="legacy_action.v1.0", byte_size=1,
+                      storage_key="fake:" + input_hash)
+    resolved = {name: ResolvedBinding(name=name, binding=input_hash, artifact_id=input_hash,
+                                      content_hash=input_hash) for name in bindings}
+    with transaction(conn):
+        register_artifact(conn, ref, None, clock)
+        record_resolved_bindings(conn, claim.attempt_id, resolved)
+    return claim
 
 
 def _counts(conn):
