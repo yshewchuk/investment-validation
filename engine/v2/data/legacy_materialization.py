@@ -11,60 +11,116 @@ so there is no import cycle between the two.
 :data:`LEGACY_SCORE_READ_PLAN_V1` is this task's central judgement call (task
 brief decision 1): which curated tables, in what scope, plus which model/
 calendar files, a legacy score batch (``engine.features.FeatureContext.load``
-+ ``engine.score.Scorer``/``score_calendar``) actually reads. It was derived
-by reading those loaders end to end, not guessed:
++ ``engine.score.Scorer.__init__``/``.score``/``score_calendar``) actually
+reads. Derived by grepping every ``iter_table``/``read_table``/``_read_part``/
+``paths.<CONST>`` call site reachable from those four entry points (review
+round 2 redid this grep from scratch after round 1 missed a call site — see
+below), not guessed:
 
-* ``earnings_events`` and ``trades`` are read UNCONDITIONALLY WHOLE — every
-  ``store.read_table("earnings_events", ...)``/``store.iter_table("trades",
-  ...)`` call site in ``engine/features.py``/``engine/score.py`` omits
-  ``years``/``tickers`` entirely. ``trades`` in particular is exactly "the
-  broader historical analog population required by current behavior" the
-  guide's §9.2 names: ``Scorer.__init__`` unconditionally enriches the whole
-  table (``_enrich`` -> ``_entry_implied_move``) before any board is scored.
-* ``daily_market`` is read at the evidence ticker/year scope
-  (``FeatureContext.load(tickers, years=years)``'s own bound) for the
-  feature-vector path. Its SECOND read site (``Scorer._entry_implied_move``,
-  chunked by the ``trades`` table's own ticker/year span, unconditionally
-  exercised at construction time) needs a still-broader ticker/year span that
-  this module cannot derive without reading ``trades`` first — so, per this
-  package's judgement call, the caller's ``evidence_scope`` is trusted to
-  already be the union of both needs (the memory note this task was given:
+**Tables** (call sites, in the order this module found them):
+
+* ``earnings_events`` — WHOLE, unconditionally. ``engine.features.
+  _session_index``, ``._next_event``, ``.Scorer._crush_frame``'s fallback, and
+  ``engine.score.score_calendar`` itself all call
+  ``store.read_table("earnings_events", ...)`` with no ``years``/``tickers``
+  bound.
+* ``trades`` — WHOLE, unconditionally. ``engine.score._load_trades_without_legs``
+  streams ``store.iter_table("trades", ...)`` with no bound; this is exactly
+  "the broader historical analog population required by current behavior"
+  the guide's §9.2 names, read at ``Scorer.__init__`` before any board scores.
+* ``daily_market`` — evidence ticker/year scoped, matching
+  ``FeatureContext.load(tickers, years=years)``'s own bound (``engine/
+  features.py`` ``FeatureContext.load``, ``daily_state_frame``). A SECOND site,
+  ``Scorer._entry_implied_move`` (chunked by ``trades``'s own ticker/year
+  span, unconditionally exercised at construction), needs a still-broader
+  span this module cannot derive without reading ``trades`` first — the
+  caller's ``evidence_scope`` is trusted to already cover it (memory note:
   "the evidence scope must be the score job's FULL ticker set and year
-  range"). A caller whose ``evidence_scope`` is only the board's own ticker/
-  year window under-covers the second read site; this is recorded as a
-  caveat in this task's report, not silently patched here.
-* ``feature_panel``/``tier4_forecasts`` are always read whole
+  range"); ``build_materialization_request``/``materialize_tree`` now PROVE
+  this rather than trust it (decision 4 below), refusing when it does not
+  hold.
+* ``option_chains`` — evidence ticker/year scoped, matching
+  ``load_chain_index``'s own bound. **Missed in review round 1.**
+  ``engine.replay.load_chain_index(keys, years=None, ...)`` reads
+  ``store.iter_table("option_chains", years=years, columns=list(_CHAIN_COLUMNS))``
+  (``years`` derived from ``keys`` when not given; ticker filtering happens
+  in pandas AFTER the read, so the store-level read is years-only — same
+  shape as ``daily_market``'s own real behavior). Two call sites reach it:
+  ``engine.score.score_calendar`` pre-loads one index for the whole board
+  (``keys`` = every strategy's ``plan_events(...).chain_keys``, i.e. the
+  board's own tickers) and passes it into every ``Scorer.score(request,
+  chain_index=index)`` call; ``Scorer._price_entry`` (inside ``.score``) loads
+  its OWN index on demand whenever a caller passes ``chain_index=None``
+  instead — the coordinator's "score_calendar(alt_strikes=0) path" is this
+  pre-load. Columns: ``engine.replay._CHAIN_COLUMNS`` (11 of 21 contract
+  columns: ticker, obs_date, expiry, dte, strike, right, bid, ask, delta,
+  spot, quote_repaired) — a provable subset, plus ``"year"`` (not read by the
+  loader, but required for this module's own year-partitioned write and for
+  legacy ``coerce()`` to accept the file back, since ``year`` is a
+  non-nullable column).
+* ``feature_panel``/``tier4_forecasts`` — WHOLE FILE, unconditionally
   (``engine.features.load_panel()``, ``engine.data.features.tier4.
-  load_forecasts()`` both take no scope argument).
-* ``securities``/``option_chains``/``option_daily`` are EXCLUDED: no call
-  site in ``engine/features.py``/``engine/score.py`` reads them (confirmed by
-  source audit — ``score_calendar`` prices structures from panel/Tier-4
-  features, never a live chain lookup, and ``alt_strikes=0`` needs no strike
-  ladder beyond ATM).
-* Registry/model/calendar inputs are plain pinned files, never
-  Repository-scanned tables: ``engine/models/registry.json``
-  (``engine.models.registry.REGISTRY_PATH``, read unconditionally by
-  ``Scorer.__init__``'s ``load_registry()``), ``engine/models/structures.json``
-  (``engine.structure_registry.CHAMPIONS_PATH`` — optional in legacy code,
-  since an absent file falls back to a documented default, but pinned here
-  anyway so a private materialization reproduces which structure shape was
-  actually live), each champion's joblib artifact
-  (``RegistryEntry.artifact``/``.artifact_sha256``, under
-  ``data/models/...``), and ``data/raw/polygon/gspc_daily.csv``
-  (``engine.paths.GSPC_DAILY``, ``engine.calendar.trading_calendar``'s sole
-  input). None of these are expressible as a bounded ``DataQuery`` — they are
-  not Repository-tracked datasets — so they travel as pinned refs instead
-  (this module's judgement call 2 below), never approximated as a query.
+  load_forecasts()`` both take no scope argument; the latter is read from
+  ``tier4.serving_model``/``._pool_before``, unconditionally reachable from
+  ``Scorer.score()``).
+* ``securities``/``option_daily`` — RE-VERIFIED EXCLUDED (review round 2): an
+  explicit grep for the literal strings ``"securities"``/``"option_daily"``
+  across every ``.py`` file under ``engine/`` (excluding ``engine/v2``) finds
+  zero occurrences as a table-name argument. Neither is read by
+  ``FeatureContext.load``, ``Scorer.__init__``, ``Scorer.score``,
+  ``score_calendar``, or anything they call.
 
-No STOP finding: every read this audit found is either a boundable
-``DataQuery`` or a nameable pinned file. The one caveat is the
-``evidence_scope`` completeness note above, which is a scope-input
-responsibility, not an inexpressible read.
+**Conditional/optional reads found, NOT added to the plan (documented, not
+silently dropped):**
+
+* ``engine.data.features.tier4``'s ``im_t1_feature_model``/
+  ``runup_move_feature_model``/``iv_crush_feature_model`` each carry a
+  ``prepare(panel)`` closure that reads ``earnings_events``/``daily_market``
+  over a FIXED historical window (``IM_T1_YEARS = range(2017, 2027)``,
+  independent of ``evidence_scope``). This only executes when
+  ``tier4.serving_model``'s joblib cache misses — a real possibility in a
+  fresh private materialization, since this task does not pin any
+  pre-existing ``data/models/tier4/*.joblib`` cache file. ``earnings_events``
+  is already whole-table (covers any window); ``daily_market`` is not — a
+  caller whose ``evidence_scope`` years exclude 2017–2026 under-covers this
+  path for ``pred_im_t1_d14``/``pred_runup_abs_move_d14``/
+  ``pred_iv_crush_30``. ``pred_abs_move`` (``size_feature_model``, the most
+  common producer) is exempt: its ``prepare`` only touches the
+  already-loaded ``panel`` DataFrame.
+* ``engine.score.Scorer._chooser_analog_pool`` reads
+  ``paths.FEATURES / "chooser_analog_pool.parquet"`` for ``DYNAMIC_MENU``
+  strategies, wrapped in a bare ``try/except Exception: return None`` — a
+  missing file silently degrades the chooser features to NaN rather than
+  raising. Pinned anyway, alongside ``structures.json``, for the same
+  "exact parity over silent degradation" reasoning (see the pinned-ref list
+  below) rather than left optional.
+
+**Registry/model/calendar inputs** are plain pinned files, never
+Repository-scanned tables — not expressible as a bounded ``DataQuery``, so
+they travel as ``"path::content_hash"`` pinned refs instead (judgement call
+2 below), each now verified to actually resolve in the store before the
+request is built (decision 5, review round 2):
+``engine/models/registry.json`` (``engine.models.registry.REGISTRY_PATH``,
+read unconditionally by ``Scorer.__init__``'s ``load_registry()``),
+``engine/models/structures.json`` (``engine.structure_registry.
+CHAMPIONS_PATH`` — optional in legacy code, pinned here for exact
+structure-champion parity), ``data/features/chooser_analog_pool.parquet``
+(optional in legacy code, pinned for the same reason), each champion's
+joblib artifact (``RegistryEntry.artifact``/``.artifact_sha256``, under
+``data/models/...``), and ``data/raw/polygon/gspc_daily.csv``
+(``engine.paths.GSPC_DAILY``, ``engine.calendar.trading_calendar``'s sole
+input).
+
+No STOP finding. Every read this audit found is either a boundable
+``DataQuery``, a nameable pinned file, or a documented conditional/optional
+caveat above. The ``trades``-span-vs-``evidence_scope`` caveat is now a
+PROVEN refusal (decision 4), not a trusted assumption.
 """
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -78,10 +134,9 @@ from engine.v2.contracts.data import (
     TableContract,
     TimeInterval,
 )
-from engine.v2.data.repository import Repository
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
 
-from . import errors
+from . import errors, time_formats
 from . import query as query_mod
 
 __all__ = [
@@ -92,6 +147,7 @@ __all__ = [
     "MaterializedTree",
     "assert_rows_match",
     "build_materialization_request",
+    "evidence_scope_covers_trades",
     "format_pinned_ref",
     "lock_down",
     "materialize_tree",
@@ -99,6 +155,7 @@ __all__ = [
     "parse_pinned_ref",
     "read_plan_complete",
     "scanned_rows",
+    "trades_span",
 ]
 
 LEGACY_LAYOUT_VERSION = "legacy_curated_layout.v1"
@@ -119,14 +176,26 @@ LEGACY_SCORE_READ_PLAN_V1: dict[str, object] = {
             "scope": "evidence_scoped", "columns": "full", "output": "curated",
             "reason": "engine.features.FeatureContext.load(tickers, years=years) bounds its own read "
                       "to the caller's tickers/years; engine.score.Scorer._entry_implied_move's own "
-                      "second read site needs the broader trades-ticker span — trusted to already be "
-                      "inside evidence_scope (see module docstring caveat)",
+                      "second read site needs the broader trades-ticker span — PROVEN inside "
+                      "evidence_scope by evidence_scope_covers_trades(), not trusted",
         },
         "trades": {
             "scope": "whole_table", "columns": "full", "output": "curated",
             "reason": "engine.score._load_trades_without_legs streams store.iter_table('trades', ...) "
                       "with no years/tickers bound; this IS the broader historical analog population "
                       "the guide's §9.2 names, read unconditionally at Scorer.__init__",
+        },
+        "option_chains": {
+            "scope": "evidence_scoped",
+            "columns": ("ticker", "obs_date", "year", "expiry", "dte", "strike", "right", "bid", "ask",
+                       "delta", "spot", "quote_repaired"),
+            "output": "curated",
+            "reason": "engine.replay.load_chain_index(keys, years=None, ...) reads "
+                      "store.iter_table('option_chains', years=years, columns=_CHAIN_COLUMNS); "
+                      "engine.score.score_calendar pre-loads one index for the whole board and passes "
+                      "it to every Scorer.score(chain_index=...) call (missed in review round 1). "
+                      "columns = _CHAIN_COLUMNS plus 'year' (not read by the loader, but required for "
+                      "this module's own year partitioning and for legacy coerce() to accept the file)",
         },
         "feature_panel": {
             "scope": "whole_table", "columns": "full", "output": "single_file",
@@ -138,13 +207,16 @@ LEGACY_SCORE_READ_PLAN_V1: dict[str, object] = {
                       "serving_model/_pool_before, unconditionally reachable from score()",
         },
     },
-    "excluded_tables": ("securities", "option_chains", "option_daily"),
-    "excluded_reason": "no call site in engine/features.py or engine/score.py reads them for a "
-                        "score_calendar(alt_strikes=0) batch",
+    "excluded_tables": ("securities", "option_daily"),
+    "excluded_reason": "re-verified review round 2: zero occurrences of either literal table name as a "
+                        "store.read_table/iter_table argument anywhere under engine/ (excluding v2)",
     "registry_and_model_refs": {
         "engine/models/registry.json": "engine.models.registry.REGISTRY_PATH, load_registry() default",
         "engine/models/structures.json": "engine.structure_registry.CHAMPIONS_PATH (optional in legacy "
                                           "code; pinned here for exact structure-champion parity)",
+        "data/features/chooser_analog_pool.parquet": "engine.score.Scorer._chooser_analog_pool "
+                                          "(optional in legacy code, silently degrades chooser features "
+                                          "if absent; pinned here for the same parity reasoning)",
         "data/models/...": "each champion's joblib artifact named by RegistryEntry.artifact/"
                             ".artifact_sha256 inside registry.json",
     },
@@ -162,15 +234,6 @@ _EVIDENCE_SCOPED_TABLES = frozenset(
 #: own routing, kept here so it is derived from the plan rather than restated.
 TABLE_OUTPUT_KIND: dict[str, str] = {
     name: spec["output"] for name, spec in LEGACY_SCORE_READ_PLAN_V1["tables"].items()}
-
-#: A "no real restriction" time bound for a whole-table read (documents.py's
-#: ``QUERY_NOT_BOUNDED`` check refuses a ``DataQuery`` with neither a
-#: key_filter nor a time_interval — §8.2/§5.3 do not offer an "unbounded but
-#: still legal" mode). This package's judgement call: a deliberately wide,
-#: clearly-named sentinel interval over the table's own observation_time_column,
-#: rather than inventing a third TimeInterval shape.
-_WHOLE_TABLE_START = "1900-01-01"
-_WHOLE_TABLE_END = "2999-12-31"
 
 _PLACEHOLDER_HASH = CONTENT_HASH_PREFIX + "0" * 64
 #: Judgement call 2 (task brief): a "pinned ref" for a plain file that is not
@@ -200,12 +263,53 @@ def parse_pinned_ref(ref: str) -> tuple[str, str]:
     return path, ref_content_hash
 
 
-def _scope_bounds(table_name: str, contract: TableContract,
-                  evidence_scope: dict) -> tuple[tuple[KeyPredicate, ...], TimeInterval]:
-    column = contract.observation_time_column
+def _next_representable(value: str) -> str:
+    """The smallest value strictly after ``value``, in ``value``'s own
+    encoding (review round 2, decision 3) — a naive timestamp advances by one
+    microsecond (the format's own resolution, ``time_formats.
+    NAIVE_TIMESTAMP_FORMAT``'s six-digit fraction); a bare date advances by
+    one day."""
+    if time_formats.is_naive_timestamp(value):
+        parsed = datetime.strptime(value, time_formats.NAIVE_TIMESTAMP_FORMAT)
+        return time_formats.format_naive_timestamp(parsed + timedelta(microseconds=1))
+    return (date.fromisoformat(value) + timedelta(days=1)).isoformat()
+
+
+def _whole_table_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,
+                        contract: TableContract) -> tuple[tuple[KeyPredicate, ...], TimeInterval | None]:
+    """Decision 3 (review round 2): a whole-table read names an explicit
+    interval derived from the PINNED MANIFEST's own fragment records — the
+    minimum ``time_min`` and the maximum ``time_max`` across every fragment,
+    end made exclusive via :func:`_next_representable` — never a sentinel
+    made up out of thin air. A table with no ``observation_time_column`` uses
+    a key predicate over the partition years the manifest actually carries
+    instead (none of this plan's tables hit that branch today, but the rule
+    is general)."""
+    records = repository.fragment_records(snapshot_ref, table_name)
+    if not records:
+        raise errors.fail("CONTRACT_MISMATCH",
+                  "a whole-table read needs at least one fragment to derive its bound",
+                  details={"table_name": table_name})
+    if not contract.observation_time_column:
+        years = tuple(sorted({int(r.partition_key) for r in records}))
+        return (KeyPredicate(column="year", operator="in", values=years),), None
+    time_mins = [r.time_min for r in records if r.time_min is not None]
+    time_maxs = [r.time_max for r in records if r.time_max is not None]
+    if not time_mins or not time_maxs:
+        raise errors.fail("CONTRACT_MISMATCH",
+                  "a whole-table read's observation_time_column has no recorded fragment time bounds",
+                  details={"table_name": table_name})
+    interval = TimeInterval(column=contract.observation_time_column,
+                            start_inclusive=min(time_mins), end_exclusive=_next_representable(max(time_maxs)))
+    return (), interval
+
+
+def _scope_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,
+                  contract: TableContract,
+                  evidence_scope: dict) -> tuple[tuple[KeyPredicate, ...], TimeInterval | None]:
     if table_name not in _EVIDENCE_SCOPED_TABLES:
-        return (), TimeInterval(column=column, start_inclusive=_WHOLE_TABLE_START,
-                                end_exclusive=_WHOLE_TABLE_END)
+        return _whole_table_bounds(repository, snapshot_ref, table_name, contract)
+    column = contract.observation_time_column
     tickers = sorted(set(evidence_scope["tickers"]))
     years = sorted(int(y) for y in evidence_scope["years"])
     key_filter = (KeyPredicate(column="ticker", operator="in", values=tuple(tickers)),)
@@ -214,12 +318,29 @@ def _scope_bounds(table_name: str, contract: TableContract,
     return key_filter, interval
 
 
-def _build_table_query(repository: Repository, snapshot_ref: SnapshotRef, table_name: str,
+def _plan_columns(table_name: str, contract: TableContract) -> tuple[str, ...]:
+    """The plan's declared column set for ``table_name`` — the full contract
+    column list unless :data:`LEGACY_SCORE_READ_PLAN_V1` names a provable
+    subset (``option_chains``: ``engine.replay._CHAIN_COLUMNS`` plus the
+    ``year`` partition column this module's own write needs)."""
+    spec_columns = LEGACY_SCORE_READ_PLAN_V1["tables"][table_name]["columns"]
+    if spec_columns == "full":
+        return tuple(c.name for c in contract.columns)
+    declared = {c.name for c in contract.columns}
+    unknown = sorted(set(spec_columns) - declared)
+    if unknown:
+        raise errors.fail("CONTRACT_MISMATCH", f"plan names undeclared column(s) {unknown}",
+                  details={"table_name": table_name})
+    return tuple(spec_columns)
+
+
+def _build_table_query(repository, snapshot_ref: SnapshotRef, table_name: str,
                        evidence_scope: dict) -> DataQuery:
     contract = repository.table_contract(snapshot_ref, table_name)
     contract_ref = snapshot_ref.table_versions[table_name].table_contract_ref
-    key_filter, time_interval = _scope_bounds(table_name, contract, evidence_scope)
-    columns = tuple(c.name for c in contract.columns)
+    key_filter, time_interval = _scope_bounds(repository, snapshot_ref, table_name, contract,
+                                              evidence_scope)
+    columns = _plan_columns(table_name, contract)
     probe = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=contract_ref, columns=columns,
         key_filter=key_filter, time_interval=time_interval, order_by=contract.primary_key,
@@ -236,20 +357,33 @@ def _build_table_query(repository: Repository, snapshot_ref: SnapshotRef, table_
     return dataclasses.replace(probe, max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
 
 
+def _verify_pinned_ref_exists(store, ref: str) -> None:
+    """Decision 5 (review round 2): a pinned ref must actually resolve in
+    ``store`` — with the exact recorded hash — before it goes into a request,
+    never trusted on the strength of its own string alone."""
+    _, ref_hash = parse_pinned_ref(ref)
+    _resolve_pinned_bytes(store, ref_hash)
+
+
 def build_materialization_request(
-    repository: Repository, snapshot_ref: SnapshotRef, legacy_snapshot_object_ref,
+    repository, store, snapshot_ref: SnapshotRef, legacy_snapshot_object_ref,
     *, direct_scope: dict, evidence_scope: dict, registry_and_model_refs, calendar_refs,
     expected_population: dict,
 ) -> LegacyMaterializationRequest:
     """One ``DataQuery`` per :data:`SCORE_READ_PLAN_TABLES` entry, hashed as a
     Command (decision 2): ``request_hash`` covers everything except itself.
 
-    ``repository`` is not in the brief's own abbreviated signature but is
-    required here (recorded as a deviation in this task's report): computing
-    a manifest-derived ``max_result_rows`` per table needs
-    ``Repository.explain_dependencies``, which only a live repository can
-    answer.
+    ``repository``/``store`` are not in the brief's own abbreviated signature
+    but are required here (recorded as a deviation in this task's report):
+    computing a manifest-derived ``max_result_rows``/whole-table interval per
+    table needs ``Repository.explain_dependencies``/``.fragment_records``,
+    and verifying every pinned ref (decision 5) needs the object store — both
+    only a live instance can answer. Publishing the registry/model/calendar
+    bytes those refs name is NOT this function's job (see this task's
+    report for who is expected to: a snapshot/reference-data import job).
     """
+    for ref in (*registry_and_model_refs, *calendar_refs):
+        _verify_pinned_ref_exists(store, ref)
     table_queries = {name: _build_table_query(repository, snapshot_ref, name, evidence_scope)
                      for name in SCORE_READ_PLAN_TABLES}
     placeholder = LegacyMaterializationRequest(
@@ -274,16 +408,55 @@ def _scope_superset(evidence_scope: dict, direct_scope: dict) -> bool:
     return True
 
 
-def read_plan_complete(request: LegacyMaterializationRequest) -> bool:
-    """Decision 4: True only if every plan entry has a query or ref and the
-    evidence scope is a superset of the direct scope (guide §9.2's refusal:
-    "if the adapter cannot prove its read plan complete, it refuses checkpoint
-    reuse")."""
+def trades_span(repository, request: LegacyMaterializationRequest) -> dict:
+    """The ACTUAL ``(ticker, year)`` span ``trades`` carries under this
+    request's own query (decision 4, review round 2) — scanned, never
+    assumed. Projects ``ticker``/``year`` plus whatever the query's own
+    ``time_interval``/``key_filter`` columns are (``repository.scan``'s row
+    matching reads a predicate's column straight from the projected row, so
+    dropping it out of ``columns`` would silently fail every row rather than
+    matching it) — still a lean pass over the same rows ``materialize_tree``
+    writes anyway, never the ``legs`` blob."""
+    query = request.table_queries["trades"]
+    predicate_columns = {p.column for p in query.key_filter}
+    if query.time_interval is not None:
+        predicate_columns.add(query.time_interval.column)
+    columns = tuple(dict.fromkeys(("ticker", "year", *sorted(predicate_columns))))
+    narrow = dataclasses.replace(query, columns=columns)
+    tickers: set[str] = set()
+    years: set[int] = set()
+    for batch in repository.scan(narrow, table_name="trades"):
+        for row in batch.to_pylist():
+            tickers.add(row["ticker"])
+            years.add(row["year"])
+    return {"tickers": tickers, "years": years}
+
+
+def evidence_scope_covers_trades(repository, request: LegacyMaterializationRequest) -> bool:
+    """True iff ``trades``'s real span sits inside ``evidence_scope`` — the
+    proof ``Scorer._entry_implied_move``'s own ``daily_market`` read (chunked
+    by exactly this span) will not silently under-read."""
+    span = trades_span(repository, request)
+    evidence_tickers = set(request.evidence_scope.get("tickers", ()))
+    evidence_years = {int(y) for y in request.evidence_scope.get("years", ())}
+    return span["tickers"] <= evidence_tickers and span["years"] <= evidence_years
+
+
+def read_plan_complete(request: LegacyMaterializationRequest, repository) -> bool:
+    """Decision 4: True only if every plan entry has a query or ref, the
+    evidence scope is a superset of the direct scope, and (review round 2)
+    ``trades``'s real span sits inside the evidence scope too (guide §9.2's
+    refusal: "if the adapter cannot prove its read plan complete, it refuses
+    checkpoint reuse"). ``repository`` is required, unlike round 1's version,
+    because that last proof needs an actual scan.
+    """
     if set(request.table_queries) != set(SCORE_READ_PLAN_TABLES):
         return False
     if not request.registry_and_model_refs or not request.calendar_refs:
         return False
-    return _scope_superset(request.evidence_scope, request.direct_scope)
+    if not _scope_superset(request.evidence_scope, request.direct_scope):
+        return False
+    return evidence_scope_covers_trades(repository, request)
 
 
 # ==========================================================================
@@ -312,13 +485,17 @@ class MaterializedTree:
     single_files: dict[str, Path]
 
 
-def materialize_tree(repository: Repository, store, request: LegacyMaterializationRequest,
+def materialize_tree(repository, store, request: LegacyMaterializationRequest,
                      dest_root) -> MaterializedTree:
     """Write every declared path under ``dest_root``. Never chmods (decision
     3: lock-down is a separate, later step) and never opens a legacy
     ``engine.*`` symbol."""
     dest_root = Path(dest_root)
     _check_dest_root(store, dest_root)
+    if not evidence_scope_covers_trades(repository, request):
+        raise errors.fail("EVIDENCE_SCOPE_INCOMPLETE",
+                  "trades's real (ticker, year) span is not inside evidence_scope; "
+                  "Scorer._entry_implied_move's own daily_market read would under-cover it")
     manifest: dict[str, str] = {}
     curated_files: dict[str, dict[int, Path]] = {}
     single_files: dict[str, Path] = {}
@@ -375,7 +552,7 @@ def _check_dest_root(store, dest_root: Path) -> None:
 # -- curated (year-partitioned) tables ---------------------------------------
 
 
-def _write_curated_table(repository: Repository, query: DataQuery, table_name: str,
+def _write_curated_table(repository, query: DataQuery, table_name: str,
                          dest_root: Path) -> dict[int, Path]:
     curated_root = dest_root / "data" / "curated" / table_name
     writers: dict[int, pq.ParquetWriter] = {}
@@ -406,7 +583,7 @@ def _split_batch_by_year(batch: pa.RecordBatch, curated_root: Path,
 # -- single-file tables (feature_panel / tier4_forecasts) --------------------
 
 
-def _write_single_file(repository: Repository, query: DataQuery, table_name: str,
+def _write_single_file(repository, query: DataQuery, table_name: str,
                        contract: TableContract, dest_path: Path) -> None:
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     writer = None
@@ -432,11 +609,13 @@ def _write_empty_table(query: DataQuery, contract: TableContract, dest_path: Pat
 # -- SNAPSHOT bytes and pinned registry/model/calendar refs ------------------
 
 
-def _write_pinned_bytes(store, ref_hash: str, dest_path: Path) -> None:
+def _resolve_pinned_bytes(store, ref_hash: str) -> bytes:
     """Resolve ``ref_hash`` against ``store``'s own content-addressed object
     pool (the same ``objects/<hash[:2]>/<hash>`` layout
-    ``engine.v2.foundation.ArtifactStore`` commits to) and copy it to
-    ``dest_path``. Never a symlink/hard link — always a fresh byte copy."""
+    ``engine.v2.foundation.ArtifactStore`` commits to), verifying it exists
+    with exactly that hash. Shared by the build-time existence check
+    (decision 5) and the actual write, so the two can never disagree on what
+    "resolves" means."""
     digest = ref_hash.removeprefix(CONTENT_HASH_PREFIX)
     object_path = Path(store.root) / "objects" / digest[:2] / digest
     try:
@@ -445,6 +624,13 @@ def _write_pinned_bytes(store, ref_hash: str, dest_path: Path) -> None:
         raise errors.fail("OBJECT_CORRUPT", "a pinned ref names no object in the store") from exc
     if CONTENT_HASH_PREFIX + hashlib.sha256(data).hexdigest() != ref_hash:
         raise errors.fail("OBJECT_CORRUPT", "a pinned ref's bytes do not match its recorded hash")
+    return data
+
+
+def _write_pinned_bytes(store, ref_hash: str, dest_path: Path) -> None:
+    """Resolve ``ref_hash`` and copy it to ``dest_path``. Never a symlink/hard
+    link — always a fresh byte copy."""
+    data = _resolve_pinned_bytes(store, ref_hash)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_bytes(data)
 
@@ -460,7 +646,7 @@ def narrow_query_to_year(query: DataQuery, contract: TableContract, year: int) -
         end_exclusive=f"{year + 1}-01-01"))
 
 
-def scanned_rows(repository: Repository, query: DataQuery, table_name: str) -> list[dict]:
+def scanned_rows(repository, query: DataQuery, table_name: str) -> list[dict]:
     return [row for batch in repository.scan(query, table_name=table_name) for row in batch.to_pylist()]
 
 

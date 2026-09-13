@@ -144,6 +144,10 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # materialization's dest_root can trigger before any byte is written.
     "DEST_ROOT_NOT_EMPTY": ("validation", False),
     "DEST_ROOT_UNSAFE": ("validation", False),
+    # P2-6 review fix: trades is scanned whole, so its real (ticker, year)
+    # span can escape a too-narrow evidence_scope; this is the stable code
+    # for that refusal, distinct from the generic validation codes above.
+    "EVIDENCE_SCOPE_INCOMPLETE": ("validation", False),
 }
 
 

@@ -42,7 +42,8 @@ from tests.data_scan_support import (  # noqa: E402
 # synthetic rows — one small, valid fixture per table in the read plan
 # --------------------------------------------------------------------------
 
-TABLES = ("earnings_events", "daily_market", "trades", "feature_panel", "tier4_forecasts")
+TABLES = ("earnings_events", "daily_market", "trades", "option_chains", "feature_panel",
+         "tier4_forecasts")
 
 _EE_COMMON = dict(src_orats=True, src_oquants=False, src_nasdaq=False, src_yfinance=False,
                   date_agree=True, date_conflict=False)
@@ -68,6 +69,15 @@ TRADE_ROWS = {
                   provenance="engine.replay")],
 }
 
+CHAIN_ROWS = {
+    "2020": [dict(ticker="AAA", obs_date=datetime(2020, 1, 3), year=2020, expiry=datetime(2020, 1, 17),
+                 dte=14, strike=100.0, right="C", bid=1.2, ask=1.4, delta=0.5, spot=100.0,
+                 quote_repaired=False)],
+    "2021": [dict(ticker="BBB", obs_date=datetime(2021, 2, 12), year=2021, expiry=datetime(2021, 2, 26),
+                 dte=14, strike=50.0, right="P", bid=0.8, ask=1.0, delta=-0.4, spot=50.0,
+                 quote_repaired=False)],
+}
+
 PANEL_ROWS = [
     dict(ticker="AAA", k=1, date=datetime(2020, 1, 15), n_prior=5, mean_prior_move=0.01,
         mean_prior_abs_move=0.02, year=2020, signed_streak=1, ema12r_abs=0.03),
@@ -88,8 +98,8 @@ def _build_snapshot(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
     contracts = {name: contract_for(name) for name in TABLES}
 
-    records = {"earnings_events": [], "daily_market": [], "trades": [], "feature_panel": [],
-               "tier4_forecasts": []}
+    records = {"earnings_events": [], "daily_market": [], "trades": [], "option_chains": [],
+               "feature_panel": [], "tier4_forecasts": []}
     for year, rows in EE_ROWS.items():
         records["earnings_events"].append(
             publish_and_inspect(store, contracts["earnings_events"], _ref(contracts["earnings_events"]),
@@ -105,6 +115,10 @@ def _build_snapshot(tmp_path):
     for year, rows in TRADE_ROWS.items():
         records["trades"].append(
             publish_and_inspect(store, contracts["trades"], _ref(contracts["trades"]),
+                               rows, partition_key=year))
+    for year, rows in CHAIN_ROWS.items():
+        records["option_chains"].append(
+            publish_and_inspect(store, contracts["option_chains"], _ref(contracts["option_chains"]),
                                rows, partition_key=year))
     records["feature_panel"].append(
         publish_and_inspect(store, contracts["feature_panel"], _ref(contracts["feature_panel"]),
@@ -144,11 +158,11 @@ def _pinned_refs(store):
 def _build_request(repository, snap, snapshot_object_ref, store, *, direct_scope=None, evidence_scope=None):
     registry_refs, calendar_refs = _pinned_refs(store)
     return lm.build_materialization_request(
-        repository, snap, snapshot_object_ref,
+        repository, store, snap, snapshot_object_ref,
         direct_scope=direct_scope or DIRECT_SCOPE, evidence_scope=evidence_scope or EVIDENCE_SCOPE,
         registry_and_model_refs=registry_refs, calendar_refs=calendar_refs,
         expected_population={"earnings_events": 2, "daily_market": 3, "trades": 2,
-                             "feature_panel": 2, "tier4_forecasts": 2})
+                             "option_chains": 2, "feature_panel": 2, "tier4_forecasts": 2})
 
 
 # --------------------------------------------------------------------------
@@ -161,7 +175,7 @@ def test_round_trip_through_legacy_readers(tmp_path, monkeypatch):
     snapshot_object_ref = _snapshot_object_ref(store)
     repository = Repository(conn, store)
     request = _build_request(repository, snap, snapshot_object_ref, store)
-    assert lm.read_plan_complete(request)
+    assert lm.read_plan_complete(request, repository)
 
     dest_root = tmp_path / "legacy_root"
     manifest = materialize(repository, store, request, dest_root)
@@ -237,10 +251,10 @@ def test_identical_request_yields_identical_hash_and_manifest(tmp_path):
     snapshot_object_ref = _snapshot_object_ref(store)
     registry_refs, calendar_refs = _pinned_refs(store)
     request_a = lm.build_materialization_request(
-        repository, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
+        repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
         registry_and_model_refs=registry_refs, calendar_refs=calendar_refs, expected_population={})
     request_b = lm.build_materialization_request(
-        repository, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
+        repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
         registry_and_model_refs=registry_refs, calendar_refs=calendar_refs, expected_population={})
     assert request_a.request_hash == request_b.request_hash
 
@@ -268,7 +282,7 @@ def test_changing_scope_or_refs_changes_request_hash(tmp_path):
                                            store.publish_bytes(b'{"models": [1]}',
                                                               schema_ref="legacy_pinned_ref.v1").content_hash),)
     changed_model_ref = lm.build_materialization_request(
-        repository, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
+        repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
         registry_and_model_refs=other_registry, calendar_refs=calendar_refs, expected_population={})
     assert changed_model_ref.request_hash != base.request_hash
 
@@ -276,13 +290,13 @@ def test_changing_scope_or_refs_changes_request_hash(tmp_path):
                                            store.publish_bytes(b"date\n2099-01-01\n",
                                                               schema_ref="legacy_pinned_ref.v1").content_hash),)
     changed_calendar_ref = lm.build_materialization_request(
-        repository, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
+        repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
         registry_and_model_refs=registry_refs, calendar_refs=other_calendar, expected_population={})
     assert changed_calendar_ref.request_hash != base.request_hash
 
     other_snapshot_object_ref = _snapshot_object_ref(store)
     changed_snapshot_object = lm.build_materialization_request(
-        repository, snap, other_snapshot_object_ref, direct_scope=DIRECT_SCOPE,
+        repository, store, snap, other_snapshot_object_ref, direct_scope=DIRECT_SCOPE,
         evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=registry_refs,
         calendar_refs=calendar_refs, expected_population={})
     assert changed_snapshot_object.request_hash != base.request_hash
@@ -324,7 +338,7 @@ def test_evidence_scope_widens_the_analog_pool_table_scan(tmp_path):
     daily_query = request.table_queries["daily_market"]
     ticker_predicate = next(p for p in daily_query.key_filter if p.column == "ticker")
     assert set(ticker_predicate.values) == {"AAA", "BBB"}
-    assert lm.read_plan_complete(request)
+    assert lm.read_plan_complete(request, repository)
 
 
 def test_read_plan_incomplete_when_a_table_query_or_ref_is_missing(tmp_path):
@@ -336,13 +350,13 @@ def test_read_plan_incomplete_when_a_table_query_or_ref_is_missing(tmp_path):
 
     missing_table = dataclasses.replace(
         request, table_queries={k: v for k, v in request.table_queries.items() if k != "trades"})
-    assert not lm.read_plan_complete(missing_table)
+    assert not lm.read_plan_complete(missing_table, repository)
 
     no_registry_refs = dataclasses.replace(request, registry_and_model_refs=())
-    assert not lm.read_plan_complete(no_registry_refs)
+    assert not lm.read_plan_complete(no_registry_refs, repository)
 
     no_calendar_refs = dataclasses.replace(request, calendar_refs=())
-    assert not lm.read_plan_complete(no_calendar_refs)
+    assert not lm.read_plan_complete(no_calendar_refs, repository)
 
 
 def test_narrower_evidence_than_direct_scope_is_incomplete(tmp_path):
@@ -351,7 +365,7 @@ def test_narrower_evidence_than_direct_scope_is_incomplete(tmp_path):
     request = _build_request(repository, snap, _snapshot_object_ref(store), store,
                              direct_scope={"tickers": ["AAA", "BBB"], "years": [2020, 2021]},
                              evidence_scope={"tickers": ["AAA"], "years": [2020]})
-    assert not lm.read_plan_complete(request)
+    assert not lm.read_plan_complete(request, repository)
 
 
 # --------------------------------------------------------------------------
@@ -454,3 +468,122 @@ def test_coerce_failure_surfaces_as_contract_mismatch():
     with pytest.raises(DataError) as err:
         _assert_legacy_coerce_accepts(bad_frame, "trades")
     assert err.value.code == "CONTRACT_MISMATCH"
+
+
+# --------------------------------------------------------------------------
+# review round 2: option_chains, sentinel-free intervals, trades span proof,
+# pinned-ref existence, ledger exactness
+# --------------------------------------------------------------------------
+
+
+def test_materialized_chains_readable_by_legacy_load_chain_index(tmp_path, monkeypatch):
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    materialize(repository, store, request, dest_root)
+
+    import engine.paths as legacy_paths
+    monkeypatch.setenv("INVESTING_PLAN_ROOT", str(dest_root))
+    importlib.reload(legacy_paths)
+    try:
+        import pandas as pd
+
+        from engine.replay import load_chain_index
+
+        index = load_chain_index([
+            ("AAA", pd.Timestamp(2020, 1, 3)), ("BBB", pd.Timestamp(2021, 2, 12)),
+        ])
+        aaa = index.get("AAA", pd.Timestamp(2020, 1, 3))
+        assert aaa is not None and not aaa.empty
+        assert aaa["strike"].tolist() == [100.0]
+        bbb = index.get("BBB", pd.Timestamp(2021, 2, 12))
+        assert bbb is not None and not bbb.empty
+        assert bbb["strike"].tolist() == [50.0]
+    finally:
+        monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+        importlib.reload(legacy_paths)
+
+
+def test_whole_table_interval_has_no_sentinel_bound(tmp_path):
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+
+    interval = request.table_queries["earnings_events"].time_interval
+    assert interval is not None
+    assert interval.start_inclusive not in ("1900-01-01", "1900-01-01T00:00:00.000000")
+    assert interval.end_exclusive not in ("2999-12-31", "2999-12-31T00:00:00.000000")
+    # Derived exactly from EE_ROWS's own event_date values: min time_min is
+    # 2020's, max time_max is 2021's, end made exclusive by one microsecond.
+    assert interval.start_inclusive == "2020-01-15T00:00:00.000000"
+    assert interval.end_exclusive == "2021-02-10T00:00:00.000001"
+
+
+def test_trades_span_outside_evidence_scope_is_refused(tmp_path):
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    # trades carries BBB (see TRADE_ROWS); an evidence_scope missing it
+    # under-covers Scorer._entry_implied_move's own daily_market read.
+    narrow_evidence = {"tickers": ["AAA"], "years": [2020, 2021]}
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store,
+                             direct_scope={"tickers": ["AAA"], "years": [2020]},
+                             evidence_scope=narrow_evidence)
+    assert not lm.evidence_scope_covers_trades(repository, request)
+    assert not lm.read_plan_complete(request, repository)
+    with pytest.raises(DataError) as err:
+        materialize(repository, store, request, tmp_path / "legacy_root")
+    assert err.value.code == "EVIDENCE_SCOPE_INCOMPLETE"
+
+
+def test_trades_span_inside_evidence_scope_is_accepted(tmp_path):
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    assert lm.evidence_scope_covers_trades(repository, request)
+    assert lm.trades_span(repository, request) == {"tickers": {"AAA", "BBB"}, "years": {2020, 2021}}
+
+
+def test_missing_pinned_ref_is_refused(tmp_path):
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    _, calendar_refs = _pinned_refs(store)
+    never_published = lm.format_pinned_ref("engine/models/registry.json", "sha256:" + "ee" * 32)
+    with pytest.raises(DataError) as err:
+        lm.build_materialization_request(
+            repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
+            evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(never_published,),
+            calendar_refs=calendar_refs, expected_population={})
+    assert err.value.code == "OBJECT_CORRUPT"
+
+
+def test_pinned_ref_with_wrong_hash_is_refused(tmp_path):
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    registry_refs, calendar_refs = _pinned_refs(store)
+    path, _real_hash = lm.parse_pinned_ref(registry_refs[0])
+    tampered = lm.format_pinned_ref(path, "sha256:" + "11" * 32)
+    with pytest.raises(DataError) as err:
+        lm.build_materialization_request(
+            repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
+            evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(tampered,),
+            calendar_refs=calendar_refs, expected_population={})
+    assert err.value.code == "OBJECT_CORRUPT"
+
+
+def test_legacy_adapter_ledger_has_one_entry_per_exact_symbol():
+    import json
+
+    ledger = json.loads((ROOT / "checks" / "legacy_adapters.json").read_text())
+    adapters = ledger["adapters"]
+    assert ledger["count"] == len(adapters)
+    pairs = [(a["module"], a["legacy_symbol"]) for a in adapters]
+    assert len(pairs) == len(set(pairs)), "duplicate (module, legacy_symbol) ledger entries"
+    data_module_symbols = [a["legacy_symbol"] for a in adapters
+                           if a["module"] == "engine.v2.data.legacy_adapter"]
+    assert "engine.data.features.panel.PANEL_COLUMNS" in data_module_symbols
+    assert "engine.data.features.tier4.COLUMNS" in data_module_symbols
+    assert "engine.data.features.tier4.KEY_COLUMNS" in data_module_symbols
+    assert "engine.data.store._read_part" in data_module_symbols
+    assert "engine.data.schemas.coerce" in data_module_symbols
+    assert "engine.data.schemas.SOURCE_PRIORITY" in data_module_symbols

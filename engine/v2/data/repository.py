@@ -416,6 +416,18 @@ class Repository:
         with _read_only(self._conn) as conn:
             return self._full_contract(conn, dvr.table_contract_ref.contract_id)
 
+    def fragment_records(self, snapshot_ref: SnapshotRef, table_name: str) -> tuple[FragmentRecord, ...]:
+        """Every ``FragmentRecord`` a table's pinned dataset version carries —
+        a query planner's only way to see manifest-derived key/time bounds
+        (e.g. a whole-table read's explicit interval, P2-6) without
+        duplicating ``resolve``'s own membership walk."""
+        if table_name not in snapshot_ref.table_versions:
+            raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                      details={"table_name": table_name})
+        dvr = snapshot_ref.table_versions[table_name]
+        with _read_only(self._conn) as conn:
+            return tuple(self._records(conn, dvr.dataset_version_id, dvr.table_contract_ref))
+
     # ----------------------------------------------------------------------
     # P2-4: explain_dependencies — §5.5
     # ----------------------------------------------------------------------
