@@ -6,7 +6,7 @@ from engine.v2.ops.legacy_adapter import legacy_action
 ACTION_NAMES = (
     "legacy_finality", "legacy_score", "legacy_decisions", "legacy_settlement",
     "legacy_model_evidence", "legacy_render", "legacy_selfcheck",
-    "legacy_score_requests",
+    "legacy_score_requests", "legacy_decision_replay",
 )
 
 

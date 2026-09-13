@@ -42,13 +42,14 @@ def registry():
         retry=RetryPolicy("bounded", 3, (1, 5)), checkpoint_contract="receipt.v1.0",
         namespaces=frozenset({"shadow", "smoke"}))]
     profiles = {"legacy_score": "legacy_score", "legacy_score_requests": "legacy_score",
+                "legacy_decision_replay": "legacy_score",
                 "legacy_finality": "validation",
                 "legacy_decisions": "validation", "legacy_settlement": "legacy_rebuild",
                 "legacy_model_evidence": "model_evidence", "legacy_render": "projection",
                 "legacy_selfcheck": "validation"}
     for action in ("legacy_finality", "legacy_score", "legacy_decisions",
                    "legacy_settlement", "legacy_model_evidence", "legacy_render",
-                   "legacy_selfcheck", "legacy_score_requests"):
+                   "legacy_selfcheck", "legacy_score_requests", "legacy_decision_replay"):
         kinds.append(JobKind(
             name=action, worker=action, parameters=LegacyParameters,
             resource_classes=frozenset({profiles[action]}),
