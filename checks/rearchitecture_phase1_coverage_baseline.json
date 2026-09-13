@@ -294,5 +294,6 @@
     "tests/test_v2_ops_serving_browser.py",
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_supervised_legacy.py"
-  ]
+  ],
+  "mode": "serial"
 }

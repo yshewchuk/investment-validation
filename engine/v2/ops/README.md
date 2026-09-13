@@ -80,8 +80,41 @@ because that file is gated byte-for-byte against a frozen Phase 0 baseline)
 is installed:
 
 ```text
-python3 -m pytest -n auto --dist loadgroup -q tests/test_v2_*.py tests/test_checks_phase2_gate.py
+python3 -m pytest -q -p no:cacheprovider -n auto --dist loadgroup tests/test_v2_*.py tests/test_checks_phase2_gate.py
 ```
+
+Measured on this host (12 cores, shared with other agents -- times vary with
+load): serial 70-105s; three consecutive parallel runs at 39.95s (load
+average 1.08), 33.78s (load 6.66), 33.26s (load 6.89) -- 567 passed, 1
+skipped, every time, no parallel-only failures. Re-run three times after any
+change to the grouping in tests/conftest.py to catch a new parallel-safety
+bug before it lands.
+
+`-n auto --dist loadgroup` is recommended ONLY for `tests/test_v2_*.py
+tests/test_checks_phase2_gate.py` above. The LEGACY suite
+(`tests/test_calendar.py`, `tests/test_dashboard.py`, `tests/test_features.py`;
+274 tests, ~100s serial, per main's committed data) runs SERIALLY, full
+stop -- it is not part of the v2 command above, needs the real data trees
+(`earnings_predictions/`, `polygon_cache/`) a bare worktree checkout does
+not have, and a spot check under real data found a genuine parallel-safety
+bug: `python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
+tests/test_features.py tests/test_dashboard.py`, from a real data checkout,
+hung for 22+ minutes (vs ~100s serial) before being killed. Bisected to
+`tests/test_features.py`: 2+ real xdist workers each independently loading
+the real feature panel reliably crashed a worker on this RAM-constrained
+shared host (`[gwN] node down: Not properly terminated`) and then hung
+xdist's own crashed-worker replacement indefinitely; `test_calendar.py` and
+`test_dashboard.py` were each independently parallel-safe alone. Grouping
+`tests/test_features.py` onto one worker (`xdist_group("serial")`, kept as
+a second guard) does NOT make the legacy suite parallel-safe as a whole --
+it stops that file's own tests from piling up on each other, but does
+nothing to stop a DIFFERENT worker from loading the same real panel again
+at the same time from a different legacy test file, which is the same
+memory pressure by another name. Run the legacy suite as
+`python3 -m pytest -q tests/test_calendar.py tests/test_features.py
+tests/test_dashboard.py` (plain serial; main's committed count is 274
+passed) until someone actually re-verifies parallel safety end to end
+against real data, not just against this data-less worktree.
 
 `--dist loadgroup` is required, not optional: a handful of tests touch a
 REAL, host-wide resource (a real child process's CPU affinity, a real
@@ -117,12 +150,26 @@ flag that runs the same fixed suite under `-n auto --dist loadgroup` and
 combines every xdist worker's coverage data with coverage.py's own
 multi-process support (`COVERAGE_PROCESS_START` plus the system
 `coverage.process_startup` `.pth` hook, then `coverage combine`) rather than
-adding pytest-cov. The default stays serial. `--parallel` was implemented but not yet run for
-real: installing `pytest-xdist` here hit PEP 668 (`externally-managed-environment`)
-and was left for a human decision rather than overridden with
-`--break-system-packages`. Once installed, verify `--parallel`'s
-executed/executable counts match the serial measurement on two consecutive
-runs each before trusting it; if they differ, keep both scripts serial-only.
+adding pytest-cov. The default stays serial.
+
+Measured on this host: Phase 1 (41 files) serial 74-85s, parallel 32-35s,
+two runs each -- every per-package executed/executable count identical
+across all four measurements. Phase 2 (18 files) serial ~44s, parallel
+~27-33s; junit outcomes identical (361/361, same nodeids, same per-test
+result) between one serial and one parallel run, but engine.v2.ops's
+executed count came out 2 lines HIGHER under parallel (2709 vs 2707 of
+4083) -- traced to `executor_watchdog.py:37-38`
+(`process_table()`'s real `/proc` scan hitting its own documented TOCTOU
+race more often under real concurrent process churn; see that function's
+docstring and `measure()`'s docstring in both scripts for the full trace).
+This is real host nondeterminism in production code, not a combine bug --
+confirmed by Phase 1's 4-for-4 exact match and Phase 2's exact junit match
+using the identical mechanism -- and it can only ADD lines under
+contention, so it can never trip either script's DECREASE-only regression
+check. `--parallel` is kept available on both scripts rather than refused.
+If a `--parallel` measurement ever looks unexpectedly higher by a line or
+two in engine.v2.ops, that TOCTOU race is the first thing to check, not
+data loss.
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private

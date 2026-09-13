@@ -41,10 +41,40 @@ def test_staged_bad_worktree_good_and_the_reverse(tmp_path):
     assert not run(tmp_path, worktree=True)["ok"]
 
 
-def coverage_document(executed=50001, executable=100000):
-    return {"suite_version": SUITE_VERSION, "packages": {
+def coverage_document(executed=50001, executable=100000, mode="serial"):
+    doc = {"suite_version": SUITE_VERSION, "packages": {
         "engine.v2.ops": {"executed": executed, "executable": executable,
                           "empty": False, "missing_files": []}}}
+    if mode is not None:
+        doc["mode"] = mode
+    return doc
+
+
+def test_parallel_mode_baseline_is_refused():
+    """A baseline captured under --parallel can bake in executor_watchdog.py's
+    real /proc-race noise (execution only ever ADDS lines under contention)
+    as if it were the truth; refuse it outright rather than let a later
+    serial measurement read as a false regression against it."""
+    baseline = coverage_document(mode="parallel")
+    measured = coverage_document()
+    assert compare(measured, baseline)[0]["code"] == "BASELINE_NOT_SERIAL"
+
+
+def test_parallel_measurement_against_serial_baseline_has_no_mode_finding():
+    """The refusal targets the baseline's mode, not the measurement's: a
+    --parallel measurement compared against a serial baseline stays fine."""
+    baseline = coverage_document()
+    measured = coverage_document(mode="parallel")
+    assert compare(measured, baseline) == []
+
+
+def test_baseline_missing_mode_for_todays_suite_version_is_refused():
+    """A baseline that predates this field, for the CURRENT suite version,
+    cannot be trusted as serial either -- it is exactly today's committed
+    baselines before they were migrated to carry "mode"."""
+    baseline = coverage_document(mode=None)
+    measured = coverage_document()
+    assert compare(measured, baseline)[0]["code"] == "BASELINE_NOT_SERIAL"
 
 
 def test_ratchet_does_not_round_away_a_small_regression():

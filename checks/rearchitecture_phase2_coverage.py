@@ -105,12 +105,28 @@ def measure(root=ROOT, *, parallel=False):
     suffixed data files before ``coverage json`` reads the total. Junit
     outcomes still come from one ``--junitxml`` on the controller process;
     xdist forwards every worker's own test reports into that same junit
-    plugin, so per-test outcomes should stay complete regardless of which
-    worker ran which test, and junit's classname/name shape is pytest's own
-    (unaffected by which worker collected/ran a test), not xdist's -- so
-    ``_nodeid`` here should not need to change. NOT yet run under real
-    xdist workers to confirm; verify with a live ``--parallel`` measurement
-    before relying on this comment."""
+    plugin, so per-test outcomes stay complete regardless of which worker
+    ran which test, and junit's classname/name shape is pytest's own
+    (unaffected by which worker collected/ran a test), not xdist's, so
+    ``_nodeid`` needed no change. Verified with a live measurement: 361
+    outcomes both serial and parallel, identical nodeids, identical
+    per-test outcomes.
+
+    Package counts, however, are NOT guaranteed identical here the way
+    rearchitecture_phase1_coverage.py's are: one parallel run measured
+    engine.v2.ops 2 lines HIGHER than two consecutive serial runs (2709 vs
+    2707 executed, out of 4083). Traced to exact line numbers -- only
+    executor_watchdog.py:37-38, the ``except (OSError, ValueError,
+    IndexError): continue`` in ``process_table()``'s real ``/proc`` scan --
+    a genuine TOCTOU race (a process exiting mid-scan) that more real
+    concurrent process churn makes more likely to hit, not a combine bug
+    (junit above and rearchitecture_phase1_coverage.py's 4-for-4 identical
+    packages both confirm the combine mechanism itself is sound). Left
+    available rather than refused: this can only ADD executed lines under
+    contention, never remove them, so it can never trip ``compare()``'s
+    regression check (DECREASE-only) or the Phase 2 gate's coverage row --
+    if a --parallel measurement here looks unexpectedly higher by a line
+    or two, check executor_watchdog.py first before suspecting data loss."""
     registry = load_registry()
     tests = suite(root, registry)
     version = suite_version(tests)
@@ -146,12 +162,22 @@ def measure(root=ROOT, *, parallel=False):
         raise RuntimeError("source changed during coverage measurement; rerun against stable code")
     return {"schema_version": SCHEMA_VERSION, "suite_version": version, "test_files": tests,
             "source_hash": identity, "packages": package_counts(document, root),
-            "test_outcomes": outcomes}
+            "test_outcomes": outcomes, "mode": "parallel" if parallel else "serial"}
 
 
 def compare(measured, baseline):
     """Package-level ratchet findings, using the Phase 2 gate's own code vocabulary."""
     findings = []
+    # See rearchitecture_phase1_coverage.py's compare() for the full reason:
+    # a baseline captured under --parallel can bake in the executor_watchdog.py
+    # /proc-race noise (measured here once: engine.v2.ops 2709 vs 2707/4083)
+    # as if it were the truth, so a later serial measurement would read as a
+    # false regression. Refuse the baseline, not the measurement -- a
+    # parallel measurement against a serial baseline is still fine.
+    baseline_mode = baseline.get("mode")
+    if baseline_mode == "parallel" or (
+            baseline_mode is None and baseline.get("suite_version") == measured.get("suite_version")):
+        findings.append({"code": "BASELINE_NOT_SERIAL"})
     if measured.get("suite_version") != baseline.get("suite_version"):
         findings.append({"code": "SUITE_DRIFT"})
     if set(measured.get("packages", {})) != set(baseline.get("packages", {})):

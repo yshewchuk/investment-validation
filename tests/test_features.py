@@ -15,6 +15,18 @@ import pytest
 from engine import features
 from engine.data.features import panel as panel_mod
 
+# Real parallel-safety failure, found under -n auto --dist loadgroup on
+# main's data (2026-09-13): 2+ concurrent xdist workers each independently
+# load the real feature panel via engine.data.features.panel, and on this
+# RAM-constrained shared host that reliably crashed a worker ("[gwN] node
+# down: Not properly terminated") and then hung xdist's own crashed-worker
+# replacement path. Isolated by bisection: tests/test_calendar.py and
+# tests/test_dashboard.py alone are both parallel-safe; only this file
+# reproduces it, and only with 2+ workers (-n 1 and plain serial are fine).
+# Not a small hidden-shared-state fix -- it is real memory pressure from
+# real data -- so grouped onto one worker instead.
+pytestmark = pytest.mark.xdist_group("serial")
+
 
 class TestAdvanceHistory:
     """The one-step recursion that lets the live path resume the panel's state."""

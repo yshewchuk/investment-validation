@@ -59,6 +59,7 @@ def _write_baseline(root: Path, packages: dict, suite_version: str, test_files: 
     baseline.write_text(json.dumps({
         "schema_version": p2cov.SCHEMA_VERSION, "suite_version": suite_version,
         "test_files": test_files, "source_hash": "sha256:" + "0" * 64, "packages": packages,
+        "mode": "serial",
     }))
 
 
@@ -244,6 +245,43 @@ def test_suite_version_drift_gives_suite_drift_only(tmp_path):
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
     assert codes(result) == {"SUITE_DRIFT"}
+
+
+def test_parallel_mode_baseline_gives_baseline_not_serial_only(tmp_path):
+    """A baseline refreshed from a --parallel run must never become the
+    truth a later serial measurement is judged against (phase-2 guide
+    followup, 2026-09-13): it can bake in executor_watchdog.py's real
+    /proc-race noise as if it belonged there."""
+    registry = {"D01": {"tier": 0, "tests": []}}
+    w = world(tmp_path, registry)
+    baseline_path = w["root"] / "checks/rearchitecture_phase2_coverage_baseline.json"
+    baseline = json.loads(baseline_path.read_text())
+    baseline["mode"] = "parallel"
+    baseline_path.write_text(json.dumps(baseline))
+    # The baseline file lives inside w["root"], so rewriting its bytes shifts
+    # the whole-tree source_hash the fixed measurement was stamped with --
+    # restamp it to the post-mutation tree so only BASELINE_NOT_SERIAL fires.
+    measured = json.loads(w["coverage_path"].read_text())
+    measured["source_hash"] = p2gate.source_hash(p2gate.source_files(w["root"]))
+    w["coverage_path"].write_text(json.dumps(measured))
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+    assert codes(result) == {"BASELINE_NOT_SERIAL"}
+
+
+def test_parallel_measurement_against_serial_baseline_has_no_mode_finding(tmp_path):
+    """The refusal targets the BASELINE's mode, not the fresh measurement's:
+    a --parallel measurement compared against an ordinary serial baseline
+    stays allowed."""
+    registry = {"D01": {"tier": 0, "tests": []}}
+    w = world(tmp_path, registry)
+    measured = json.loads(w["coverage_path"].read_text())
+    measured["mode"] = "parallel"
+    w["coverage_path"].write_text(json.dumps(measured))
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+    assert result["ok"] is True
+    assert codes(result) == set()
 
 
 # -- evidence document codes ------------------------------------------------------
