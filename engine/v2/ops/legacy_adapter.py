@@ -109,6 +109,7 @@ def legacy_action(action, parameters, staging):
         "legacy_render": _action_render,
         "legacy_selfcheck": _action_selfcheck,
         "legacy_score_requests": _action_score_requests,
+        "legacy_decision_replay": _action_decision_replay,
     }
     if action not in actions:
         raise fail("INVALID_REQUEST", "legacy action is not allowlisted")
@@ -229,6 +230,77 @@ def _load_finality(root):
     if not path.is_file():
         raise fail("INPUT_CHANGED", "finality artifact is missing")
     return json.loads(path.read_text())
+
+
+def _load_score_document(root):
+    path = root / "score.json"
+    if not path.is_file():
+        raise fail("INPUT_CHANGED", "score artifact is missing")
+    return json.loads(path.read_text())
+
+
+def _empty_replay(session):
+    from engine.v2.foundation import content_hash
+    return {"schema_version": "decision_replay.v1.0", "session": session,
+            "population": [], "source_rows": [], "replayed_rows": [],
+            "source_rows_hash": content_hash([]), "replayed_rows_hash": content_hash([]),
+            "findings": []}
+
+
+def _action_decision_replay(parameters, root):
+    """B1b: re-score the decision-eligible board rows through the SAME public
+    entrypoint the score stage used, in a fresh process.
+
+    Never rebuilds a ``ScoreRequest`` by hand: a DYN-SV chooser row is not a
+    request the engine can score on its own (``DYN-SV`` names no structure,
+    only ``score_calendar``'s own menu step can produce one), so the only
+    faithful replay is re-running ``score_calendar`` itself and letting the
+    chooser rank the menu again.
+
+    ``FeatureContext`` loads the score job's FULL ticker set — analog pools
+    and the registered gate/chooser champions are read off that context, not
+    off ``score_calendar``'s own ``tickers`` argument, so a narrower context
+    would be a different computation. ``score_calendar``'s own ``tickers``
+    argument, by contrast, only restricts which events are enumerated and
+    which chains are pre-loaded (read ``engine.score.score_calendar``: the
+    events table is filtered by ticker before anything cross-request is
+    built, and the DYN-SV chooser groups by event, never across tickers) — so
+    it is safe, and far cheaper, to restrict it to just the eligible rows'
+    own tickers rather than rescoring the whole board.
+    """
+    from engine.jsonio import json_safe
+    from engine.v2.foundation import content_hash
+    from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
+
+    session = parameters["session"]
+    population = decision_population(_load_score_document(root), session)
+    if not population:
+        return _write_action(root, "replay.json", _empty_replay(session))
+
+    import pandas as pd
+
+    from engine.features import FeatureContext
+    from engine.score import Scorer, score_calendar
+
+    tickers = sorted(set(parameters["tickers"]))
+    years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
+    scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+    eligible_tickers = sorted({str(row["ticker"]) for row in population})
+    frame = score_calendar(pd.Timestamp(session),
+                          horizon_days=int(parameters.get("horizon_days", 35)),
+                          alt_strikes=0, scorer=scorer, tickers=eligible_tickers)
+    rows = json_safe(frame.to_dict(orient="records"), round_to=None)
+    for row in rows:
+        row["row_id"] = _score_row_id(row)
+    eligible_keys = {population_key(row) for row in population}
+    replayed = [row for row in rows if population_key(row) in eligible_keys]
+    return _write_action(root, "replay.json", {
+        "schema_version": "decision_replay.v1.0", "session": session,
+        "population": [population_key(row) for row in population],
+        "source_rows": population, "replayed_rows": replayed,
+        "source_rows_hash": content_hash(population),
+        "replayed_rows_hash": content_hash(replayed),
+        "findings": compare_rows(population, replayed)})
 
 
 def _action_decisions(parameters, root):

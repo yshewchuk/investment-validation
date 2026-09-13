@@ -77,14 +77,14 @@ def test_allowlisted_legacy_dag_submits_with_real_dependencies(tmp_path):
     requests = build_legacy_job_requests(plan, tickers=("FAKE",),
                                          year_start=2025, year_end=2026)
     assert [request.job.kind for request in requests] == [
-        "legacy_finality", "legacy_score", "legacy_decisions", "legacy_settlement",
-        "legacy_model_evidence", "legacy_render", "legacy_selfcheck"]
+        "legacy_finality", "legacy_score", "legacy_decision_replay", "legacy_decisions",
+        "legacy_settlement", "legacy_model_evidence", "legacy_render", "legacy_selfcheck"]
     conn = open_catalog(tmp_path / "ops.sqlite", clock=FakeClock())
     try:
         policy = NamespacePolicy({"operator": frozenset({"shadow"})})
         receipts = submit_graph(conn, registry(), policy, requests, clock=FakeClock())
         assert len(receipts) == len(requests)
-        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 7
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 8
     finally:
         conn.close()
 

@@ -115,11 +115,13 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
                                      "model_evidence.json": _job_output("model_evidence", keys)}
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
+    if action == "legacy_decision_replay":
+        params["input_bindings"] = {"score.json": _job_output("score", keys)}
     return params
 
 
 def _legacy_resource(kind):
-    if kind == "legacy_score":
+    if kind in ("legacy_score", "legacy_decision_replay"):
         return "legacy_score"
     if kind == "legacy_model_evidence":
         return "model_evidence"
@@ -153,9 +155,10 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                                "year_end": year_end,
                                "expected_population": list(expected_population)})[:24]
     stages = (tuple(plan["order"]) if include_prerequisites else
-              ("finality", "score", "decision_commit", "settlement",
+              ("finality", "score", "decision_replay", "decision_commit", "settlement",
                "model_evidence", "projection", "selfcheck"))
     parent_map = {"finality": (), "score": ("finality",),
+                  "decision_replay": ("score",),
                   "decision_commit": ("score", "finality"), "settlement": ("finality",),
                   "model_evidence": ("score",),
                   "projection": ("decision_commit", "model_evidence"),
