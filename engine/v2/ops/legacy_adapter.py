@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -235,16 +236,36 @@ def _action_decisions(parameters, root):
 
     frame = _load_action_frame(root)
     finality = _load_finality(root)
+    plan_path = root / "decision_plan.json"
+    if not plan_path.is_file():
+        raise fail("VALIDATION_FAILED", "decision plan artifact is missing")
+    plan = json.loads(plan_path.read_text())
     rows = build_prediction_rows(frame, as_of=parameters["session"],
+                                 decision_ts=plan.get("decision_clock"),
                                  finality=finality, entry_dated_only=True)
+    for row in rows:
+        row["written_at"] = plan.get("decision_clock")
+        row["decision_ts"] = plan.get("decision_clock")
+        if not row.get("event_id"):
+            row["event_id"] = (row.get("score") or {}).get("event_id")
     return _write_action(root, "decisions.json", {"rows": rows, "expected_rows": len(rows)})
 
 
 def _action_settlement(parameters, root):
+    import base64
+
     from engine.ledger import score_outcomes
 
-    return _write_action(root, "settlement.json",
-                         score_outcomes(through=parameters["session"]))
+    directory = root / "legacy" / "ledger" / "outcomes"
+    before = {path: path.stat().st_size for path in directory.glob("*.jsonl")}
+    result = score_outcomes(through=parameters["session"])
+    captured = []
+    for path in sorted(directory.glob("*.jsonl")):
+        data = path.read_bytes()[before.get(path, 0):]
+        for raw in data.splitlines(keepends=True):
+            captured.append({"original_b64": base64.b64encode(raw).decode("ascii"),
+                             "row": json.loads(raw)})
+    return _write_action(root, "settlement.json", {"result": result, "rows": captured})
 
 
 def _action_model_evidence(parameters, root):

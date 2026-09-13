@@ -28,6 +28,10 @@ underscore convention, and an import of a name absent from this list fails
 - export: export_generation writes a verified compatibility generation.
 - The caller owns the transaction and verifies execution authority. This package
   preserves payloads and enforces unique logical decision identities.
+- Prediction imports retain one immutable identity per legacy row. Outcome
+  imports retain each `(row_id, resolved_at)` observation, so a later
+  resolved append can follow an earlier unresolvable append without overwriting
+  either; changed bytes for the same observation remain a conflict.
 
 <!-- public-interface: decisions, export, install, set_authority, insert, rows, import_lines, DecisionConflict, export_generation -->
 

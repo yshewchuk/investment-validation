@@ -94,7 +94,7 @@ def import_lines(conn, source_hash, lines, *, kind, created_at):
         row_id = payload.get("row_id")
         if not row_id:
             raise DecisionConflict("legacy row has no row_id")
-        decision_id = kind + ":" + row_id
+        decision_id = _import_decision_id(kind, row_id, payload)
         prior = conn.execute("SELECT decision_id,original_bytes FROM decision_imports "
                              "WHERE source_hash=? AND line_number=?", (source_hash, number)).fetchone()
         if prior:
@@ -118,3 +118,21 @@ def import_lines(conn, source_hash, lines, *, kind, created_at):
                      (source_hash, number, receipt["decision_id"], original))
         receipts.append(receipt)
     return receipts
+
+
+def _import_decision_id(kind, row_id, payload):
+    """Keep repeated outcome observations while collapsing copied bytes.
+
+    A prediction has one immutable identity.  Outcomes are observations of
+    that prediction over time: an early ``unresolvable`` row may legitimately
+    be followed by a later ``resolved`` row.  The observation clock and state
+    identify that append; changed content under the same observation remains
+    a conflict in :func:`insert`.
+    """
+    if kind != "outcome":
+        return kind + ":" + row_id
+    observed = payload.get("resolved_at") or payload.get("settled_at")
+    if not observed or payload.get("status") not in ("resolved", "unresolvable"):
+        raise DecisionConflict("legacy outcome has no observation identity")
+    suffix = content_hash([row_id, observed]).split(":")[1][:24]
+    return "outcome:" + row_id + ":" + suffix

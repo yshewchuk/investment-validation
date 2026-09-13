@@ -83,5 +83,20 @@ The tests/test_v2_ops_*.py suite covers catalog uniqueness, lease fencing,
 resource admission, worker identity, immutable checkpoints and effect recovery.
 Fault tests must assert retained reservations and rejected stale effects after
 process death, and exact immutable input identities before checkpoint reuse.
+
+The copy-only `legacy_decisions` coordinator commits a candidate only when its
+job admits immutable score, finality, decision-plan and decision-evidence
+artifacts.  The evidence binds the population, causal cutoffs, selection and
+replayed score content.  Candidate decisions, compatibility-export intent and
+the decision watermark share the attempt-completion transaction.  Missing or
+changed evidence fails closed.  The current general nightly planner does not
+produce this evidence bundle, so this coordinator path is available for
+isolated authority rehearsals but does not make the full nightly complete or
+activate a production writer.
+
+Settlement workers capture only newly appended legacy outcome bytes.  The
+coordinator validates those observations against committed predictions and
+imports them under the active fence; settlement is not checkpoint-shortcut
+eligible because reuse must never skip its catalog effect.
 Real scoring/parity runs are sequential private verification, outside the fast
 commit hook; ops never imports their comparator.

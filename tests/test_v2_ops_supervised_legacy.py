@@ -27,6 +27,7 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
+from engine.v2.ledger.decisions import set_authority
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -49,8 +50,19 @@ def _manifest_ref(store, conn, clock, file_refs, *, complete=True):
     return _publish(store, conn, clock, document, "legacy_input_manifest.v1.0")
 
 
-def _submit_decisions(conn, *, manifest_ref, score_ref, finality_ref, key="dec1"):
+def _submit_decisions(conn, *, manifest_ref, score_ref, finality_ref,
+                      plan_ref=None, evidence_ref=None, key="dec1"):
     profile = profile_named(DEFAULT_POLICY, "validation")
+    bindings = {"legacy_manifest.json": manifest_ref.artifact_id,
+                "score.json": score_ref.artifact_id,
+                "finality.json": finality_ref.artifact_id}
+    refs = [manifest_ref.artifact_id, score_ref.artifact_id, finality_ref.artifact_id]
+    if plan_ref is not None:
+        bindings["decision_plan.json"] = plan_ref.artifact_id
+        refs.append(plan_ref.artifact_id)
+    if evidence_ref is not None:
+        bindings["decision_evidence.json"] = evidence_ref.artifact_id
+        refs.append(evidence_ref.artifact_id)
     job = JobSpec(
         kind="legacy_decisions",
         implementation_ref=content_hash(worker_source_manifest(REPO)),
@@ -58,14 +70,36 @@ def _submit_decisions(conn, *, manifest_ref, score_ref, finality_ref, key="dec1"
         environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
         parameters={"expected_ids": ("legacy_decisions",), "session": SESSION,
                     "tickers": (), "year_start": 2024, "year_end": 2026,
-                    "input_bindings": {"legacy_manifest.json": manifest_ref.artifact_id,
-                                       "score.json": score_ref.artifact_id,
-                                       "finality.json": finality_ref.artifact_id}},
-        input_refs=(manifest_ref.artifact_id, score_ref.artifact_id, finality_ref.artifact_id),
+                    "input_bindings": bindings},
+        input_refs=tuple(refs),
         output_namespace="shadow", resource_class="validation", retry_policy_ref="bounded",
         checkpoint_contract_ref="legacy_action.v1.0")
     return submit(conn, registry(), POLICY, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job), clock=SystemClock())
+
+
+def _decision_evidence(score_ref, finality_ref, plan_ref, score, finality, plan):
+    expected = plan["expected_population"]
+    common = {"schema_version": "decision_receipt.v1.0",
+              "score_artifact_id": score_ref.artifact_id,
+              "score_content_hash": score_ref.content_hash,
+              "finality_artifact_id": finality_ref.artifact_id,
+              "finality_content_hash": finality_ref.content_hash,
+              "plan_artifact_id": plan_ref.artifact_id,
+              "plan_content_hash": plan_ref.content_hash,
+              "session": SESSION, "deployment": plan["deployment"],
+              "decision_clock": plan["decision_clock"], "expected_population": expected}
+    receipts = {kind: dict(common, kind=kind) for kind in (
+        "causality", "coverage", "finality", "selection", "replay")}
+    receipts["causality"]["observed_cutoffs"] = {expected[0]: score["evidence_cutoff"]}
+    receipts["coverage"]["observed_population"] = expected
+    receipts["finality"].update(observed_finality_hash=content_hash(finality),
+                                 covered_tickers=[score["ticker"]])
+    receipts["selection"]["eligible_candidate_keys"] = expected
+    receipts["replay"].update(source_rows=[score], replayed_rows=[score],
+                               source_rows_hash=content_hash([score]),
+                               replayed_rows_hash=content_hash([score]), findings=[])
+    return {"schema_version": "decision_evidence.v1.0", "receipts": receipts}
 
 
 def _run_until_terminal(service, conn, job_id, timeout=18):
@@ -95,14 +129,25 @@ def test_legacy_decisions_runs_supervised_with_real_subprocess(tmp_path):
         manifest_ref = _manifest_ref(store, conn, clock, (LegacyFileRef(
             path="unused.txt", content_hash=file_hash(fixture),
             byte_size=fixture.stat().st_size),))
-        score_ref = _publish(store, conn, clock, {"rows": [
-            {"ticker": "FAKE", "event_date": "2026-09-12", "as_of": "2026-09-12",
-             "strategy": "TWIN-P", "strike": 100.0, "expiry": "2026-10-16",
-             "session": "AMC"}]}, "legacy_action.v1.0")
-        finality_ref = _publish(store, conn, clock,
-                                {"date": "2026-09-12", "is_final": True}, "legacy_action.v1.0")
+        score = {"ticker": "FAKE", "event_id": "event-1", "event_date": SESSION,
+                 "as_of": SESSION, "entry_date": SESSION, "evidence_cutoff": SESSION,
+                 "strategy": "TWIN-P", "strike": 100.0, "expiry": "2026-10-16",
+                 "session": "AMC", "snapshot_hash": "sha256:" + "a" * 64}
+        score_ref = _publish(store, conn, clock, {"rows": [score]}, "legacy_action.v1.0")
+        finality = {"date": SESSION, "is_final": True, "market_wide": True,
+                    "daily_share": 1.0, "chain_share": 1.0, "covered": 1}
+        finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+        plan = {"schema_version": "decision_plan.v1.0", "session": SESSION,
+                "deployment": "shadow-deployment", "decision_clock": SESSION + "T21:00:00+00:00",
+                "expected_population": ["FAKE|TWIN-P|" + SESSION]}
+        plan_ref = _publish(store, conn, clock, plan, "decision_plan.v1.0")
+        evidence = _decision_evidence(score_ref, finality_ref, plan_ref, score, finality, plan)
+        evidence_ref = _publish(store, conn, clock, evidence, "decision_evidence.v1.0")
+        with transaction(conn):
+            set_authority(conn, None, "catalog", SESSION + "T20:00:00.000000Z")
         receipt = _submit_decisions(conn, manifest_ref=manifest_ref, score_ref=score_ref,
-                                    finality_ref=finality_ref)
+                                    finality_ref=finality_ref, plan_ref=plan_ref,
+                                    evidence_ref=evidence_ref)
         service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
@@ -126,7 +171,12 @@ def test_legacy_decisions_runs_supervised_with_real_subprocess(tmp_path):
         assert content["expected_rows"] == 1
         [decision] = content["rows"]
         assert decision["ticker"] == "FAKE"
-        assert decision["finality"] == {"date": "2026-09-12", "is_final": True}
+        assert decision["finality"] == finality
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+        assert sorted(row[0] for row in conn.execute("SELECT kind FROM outbox")) == [
+            "export", "release_intent"]
+        mark = conn.execute("SELECT stage,occurrence FROM watermarks").fetchone()
+        assert tuple(mark) == ("decisions", SESSION)
 
         # A1: the declared legacy read set is a real, read-only, non-linked
         # copy under staging — never a symlink or hard link to production.
@@ -136,6 +186,31 @@ def test_legacy_decisions_runs_supervised_with_real_subprocess(tmp_path):
         assert oct(copied.stat().st_mode)[-3:] == "444"
         assert copied.read_bytes() == fixture.read_bytes()
         assert fixture.read_bytes() == b"a legacy read-set member decisions never opens"
+
+        # A worker may prepare a valid-looking candidate, but missing immutable
+        # replay evidence must roll back its output registration and every
+        # catalog effect when the attempt completes.
+        refused = _submit_decisions(conn, manifest_ref=manifest_ref, score_ref=score_ref,
+                                    finality_ref=finality_ref, plan_ref=plan_ref,
+                                    evidence_ref=None, key="dec-missing-evidence")
+        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+                          code_source=REPO, store_root=store_root)
+        try:
+            service.start()
+            refused_state = _run_until_terminal(service, conn, refused.job_id)
+        finally:
+            service.close()
+        assert refused_state == "failed"
+        failure = conn.execute("SELECT failure_json FROM jobs WHERE job_id=?",
+                               (refused.job_id,)).fetchone()[0]
+        assert "VALIDATION_FAILED" in failure
+        refused_outputs = conn.execute(
+            "SELECT COUNT(*) FROM attempt_outputs ao JOIN attempts a "
+            "ON a.attempt_id=ao.attempt_id WHERE a.job_id=?", (refused.job_id,)).fetchone()[0]
+        assert refused_outputs == 0
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM watermarks").fetchone()[0] == 1
     finally:
         conn.close()
 

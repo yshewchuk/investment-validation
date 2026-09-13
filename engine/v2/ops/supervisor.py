@@ -16,6 +16,11 @@ from engine.v2.ops.checkpoints import (
     register_artifact,
     reuse,
 )
+from engine.v2.ops.decision_commit import (
+    commit_decisions_in_transaction,
+    import_settlement_candidates_in_transaction,
+    validated_decision_candidate,
+)
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.executor_watchdog import is_alive, signal_owned
@@ -134,7 +139,7 @@ class Service:
                 self._populate_legacy_staging(claim, legacy_manifest)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in {
-                    "legacy_decisions", "legacy_render", "legacy_selfcheck"}:
+                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck"}:
                 cached = self._reuse_staged_checkpoint(claim)
                 if cached:
                     return
@@ -257,7 +262,7 @@ class Service:
                                peak_bytes=running.peak, clock=self.clock)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in {
-                    "legacy_decisions", "legacy_render", "legacy_selfcheck"}:
+                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck"}:
                 schema = outputs[0]["schema"]
                 candidate = CheckpointCandidate(
                     shard_key="default",
@@ -282,11 +287,14 @@ class Service:
                 refs = [(o["name"], self.store.publish_candidate(
                     claim.attempt_id, o["path"], schema_ref=o["schema"],
                     max_bytes=claim.resources.scratch_limit_bytes)) for o in outputs]
+            effect = self._coordinator_effect(claim, refs)
             def effects(conn):
                 for name, ref in refs:
                     register_artifact(conn, ref, claim.attempt_id, self.clock)
                     conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
                                  (claim.attempt_id, name, ref.artifact_id))
+                if effect is not None:
+                    effect(conn)
                 for domain, mode in self._store_domains(claim):
                     if mode == "write":
                         verified_write_in(conn, claim.attempt_id, domain)
@@ -297,6 +305,25 @@ class Service:
                 "VALIDATION_FAILED", "worker output failed validation")
             commit_attempt(self.conn, claim.attempt_id, claim.fence,
                            Outcome(False, "verified_dead", status["exit_code"], problem), clock=self.clock)
+
+    def _coordinator_effect(self, claim, refs):
+        """Validate effect candidates before the short fenced commit transaction."""
+        if claim.spec.kind == "legacy_decisions":
+            candidate_ref = _named_ref(refs, "legacy_decisions")
+            candidates, context = validated_decision_candidate(
+                self.conn, self.store, claim, candidate_ref)
+            return lambda conn: commit_decisions_in_transaction(
+                conn, claim, candidates, context, clock=self.clock)
+        if claim.spec.kind == "legacy_settlement":
+            candidate_ref = _named_ref(refs, "legacy_settlement")
+            document = json.loads(self.store.read_verified(candidate_ref))
+            rows = document.get("rows") if isinstance(document, dict) else None
+            if not isinstance(rows, list):
+                raise OpsError(make_problem("VALIDATION_FAILED",
+                                            "settlement candidate artifact has no rows"))
+            return lambda conn: import_settlement_candidates_in_transaction(
+                conn, claim, candidate_ref, rows, clock=self.clock)
+        return None
 
     def close(self):
         for running in self.running.values():
@@ -317,3 +344,10 @@ def serve(service, *, once=False):
             time.sleep(0.1 if once else 1)
     finally:
         service.close()
+
+
+def _named_ref(refs, name):
+    for candidate_name, ref in refs:
+        if candidate_name == name:
+            return ref
+    raise OpsError(make_problem("VALIDATION_FAILED", "required effect artifact is missing"))

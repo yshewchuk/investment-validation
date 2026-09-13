@@ -11,6 +11,7 @@ import os
 
 import pytest
 
+from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import ArtifactStore, content_hash, to_document
 from engine.v2.ledger.decisions import (
     DecisionConflict,
@@ -26,11 +27,15 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.decision_commit import commit_decisions, validate_candidates
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.health import health, record_check
-from engine.v2.ops.lifecycle import heartbeat, request_cancel
+from engine.v2.ops.lifecycle import request_cancel
 from engine.v2.ops.outbox import claim as claim_effect
 from engine.v2.ops.outbox import fail_effect, watermark
+from engine.v2.ops.profiles import DEFAULT_POLICY
 from engine.v2.ops.publication import current, publish_local, stage_release
-from tests.ops_support import catalog, enqueue_claim
+from engine.v2.ops.scheduler import claim_next
+from engine.v2.ops.stages import registry
+from engine.v2.ops.submission import NamespacePolicy, submit
+from tests.ops_support import catalog, enqueue_claim, sample
 
 STAMP = "2026-09-12T00:00:00.000000Z"
 REQUIRED = ("causality", "coverage", "finality", "replay", "selection")
@@ -41,17 +46,70 @@ def _authority(conn):
         set_authority(conn, None, "catalog", STAMP)
 
 
-def _context(input_hash, *, session="2026-09-12", purpose="shadow", scope="shadow"):
-    return {"purpose": purpose, "session": session, "deployment": "deployment-1",
-            "clock": STAMP, "scope": scope, "input_hash": input_hash,
-            "validations": {kind: {"ok": True, "input_hash": input_hash}
-                            for kind in REQUIRED}}
-
-
 def _row(input_hash, *, row_id="r1", event_id="e1", strategy="TWIN-P",
          session="2026-09-12", ladder=False):
-    return {"row_id": row_id, "event_id": event_id, "strategy": strategy,
-            "as_of": session, "snapshot_hash": input_hash, "score": {"is_ladder": ladder}}
+    score = {"ticker": row_id, "strategy": strategy, "event_date": session,
+             "as_of": session, "entry_date": session, "evidence_cutoff": session,
+             "snapshot_hash": input_hash, "is_ladder": ladder}
+    finality = {"date": session, "is_final": True, "market_wide": True,
+                "daily_share": 1.0, "chain_share": 1.0, "covered": 1}
+    return {"row_id": row_id, "event_id": event_id, "ticker": row_id,
+            "event_date": session, "strategy": strategy, "as_of": session,
+            "written_at": STAMP, "decision_ts": STAMP, "snapshot_hash": input_hash,
+            "finality": finality, "score": score}
+
+
+def _strict_context(candidates, input_hash, *, purpose="shadow", scope="shadow"):
+    score_rows = [row["score"] for row in candidates]
+    expected = ["|".join((row["ticker"], row["strategy"], row["event_date"]))
+                for row in score_rows]
+    finality = candidates[0]["finality"] if candidates else {
+        "date": "2026-09-12", "is_final": True, "market_wide": True,
+        "daily_share": 1.0, "chain_share": 1.0, "covered": 1}
+    plan = {"schema_version": "decision_plan.v1.0", "session": "2026-09-12",
+            "deployment": "deployment-1", "decision_clock": STAMP,
+            "expected_population": expected}
+    bindings = {name: {"artifact_id": input_hash, "content_hash": input_hash}
+                for name in ("score", "finality", "plan", "evidence")}
+    common = {"schema_version": "decision_receipt.v1.0",
+              "score_artifact_id": input_hash, "score_content_hash": input_hash,
+              "finality_artifact_id": input_hash, "finality_content_hash": input_hash,
+              "plan_artifact_id": input_hash, "plan_content_hash": input_hash,
+              "session": plan["session"], "deployment": plan["deployment"],
+              "decision_clock": STAMP, "expected_population": expected}
+    receipts = {kind: dict(common, kind=kind) for kind in REQUIRED}
+    receipts["causality"]["observed_cutoffs"] = {key: row["evidence_cutoff"]
+                                                  for key, row in zip(expected, score_rows)}
+    receipts["coverage"]["observed_population"] = expected
+    receipts["finality"].update(observed_finality_hash=content_hash(finality),
+                                 covered_tickers=[row["ticker"] for row in score_rows])
+    receipts["selection"]["eligible_candidate_keys"] = expected
+    receipts["replay"].update(source_rows=score_rows, replayed_rows=score_rows,
+                               source_rows_hash=content_hash(score_rows),
+                               replayed_rows_hash=content_hash(score_rows), findings=[])
+    return {"purpose": purpose, "scope": scope, "session": plan["session"],
+            "deployment": plan["deployment"], "clock": STAMP, "input_hash": input_hash,
+            "validations": receipts, "candidate_rows_hash": content_hash(candidates),
+            "bindings": bindings, "candidate_validation": {
+                "score": {"rows": score_rows}, "finality": finality, "plan": plan,
+                "evidence": {"schema_version": "decision_evidence.v1.0",
+                             "receipts": receipts}, "bindings": bindings}}
+
+
+def _claim(conn, clock, supervisor, input_hash, key="one"):
+    bindings = {name: input_hash for name in (
+        "score.json", "finality.json", "decision_plan.json", "decision_evidence.json")}
+    job = JobSpec(kind="legacy_decisions", implementation_ref="code", spec_hash=None,
+                  environment_ref="env", parameters={
+                      "expected_ids": ("legacy_decisions",), "session": "2026-09-12",
+                      "input_bindings": bindings}, input_refs=(input_hash,),
+                  output_namespace="shadow", resource_class="validation",
+                  retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
+    policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+    submit(conn, registry(), policy, SubmitRequest(namespace="shadow", idempotency_key=key,
+                                                   principal="operator", job=job), clock=clock)
+    return claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                      supervisor=supervisor, clock=clock, registry=registry())
 
 
 def _counts(conn):
@@ -63,21 +121,21 @@ def test_o18_planted_defects_write_no_predictions_and_settlement_proceeds(tmp_pa
     conn, clock, supervisor = catalog(tmp_path)
     _authority(conn)
     input_hash = content_hash({"snapshot": "candidate-scores"})
-    claim = enqueue_claim(conn, clock, supervisor, input_refs=(input_hash,))
+    claim = _claim(conn, clock, supervisor, input_hash)
 
     defects = (
-        lambda ctx, rows_: ctx["validations"]["replay"].update(ok=False),
-        lambda ctx, rows_: ctx["validations"].pop("causality"),
-        lambda ctx, rows_: ctx["validations"]["coverage"].update(input_hash="sha256:" + "0" * 64),
-        lambda ctx, rows_: ctx["validations"]["finality"].update(ok=False),
+        lambda ctx, rows_: ctx["candidate_validation"]["evidence"]["receipts"]["replay"].update(findings=["changed"]),
+        lambda ctx, rows_: ctx["candidate_validation"]["evidence"]["receipts"].pop("causality"),
+        lambda ctx, rows_: ctx["candidate_validation"]["evidence"]["receipts"]["coverage"].update(observed_population=[]),
+        lambda ctx, rows_: ctx["candidate_validation"]["finality"].update(is_final=False),
         lambda ctx, rows_: rows_[0].update(as_of="2026-09-13"),
         lambda ctx, rows_: rows_[0]["score"].update(is_ladder=True),
         lambda ctx, rows_: rows_[0].update(snapshot_hash="sha256:" + "1" * 64),
         lambda ctx, rows_: rows_[0].pop("event_id"),
     )
     for defect in defects:
-        context = _context(input_hash)
         candidates = [_row(input_hash)]
+        context = _strict_context(candidates, input_hash)
         defect(context, candidates)
         with pytest.raises(OpsError) as excinfo:
             validated = validate_candidates(candidates, context)
@@ -97,8 +155,8 @@ def test_o18_planted_defects_write_no_predictions_and_settlement_proceeds(tmp_pa
 
     # The valid candidate commits decisions, release intent and the decisions
     # watermark in one transaction.
-    context = _context(input_hash)
     candidates = [_row(input_hash), _row(input_hash, row_id="r2", event_id="e2")]
+    context = _strict_context(candidates, input_hash)
     validated = validate_candidates(candidates, context)
     receipts = commit_decisions(conn, claim, candidates, context, validated, clock=clock)
     assert len(receipts) == 2
@@ -106,41 +164,59 @@ def test_o18_planted_defects_write_no_predictions_and_settlement_proceeds(tmp_pa
     assert kinds == ["export", "release_intent"]
     mark = conn.execute("SELECT pipeline,scope,stage,occurrence FROM watermarks").fetchone()
     assert tuple(mark) == ("nightly", "shadow", "decisions", "2026-09-12")
+    repeated = commit_decisions(conn, claim, candidates, context, validated, clock=clock)
+    assert [row["decision_id"] for row in repeated] == [row["decision_id"] for row in receipts]
+    assert _counts(conn) == {"decisions": 3, "outbox": 2, "watermarks": 1, "releases": 0}
+
+
+def test_o19_cancelled_or_changed_candidate_cannot_commit(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    _authority(conn)
+    input_hash = content_hash({"snapshot": "candidate-scores"})
+    claim = _claim(conn, clock, supervisor, input_hash)
+    candidates = [_row(input_hash)]
+    context = _strict_context(candidates, input_hash)
+    validated = validate_candidates(candidates, context)
+
+    changed = [dict(candidates[0], ticker="CHANGED")]
+    with pytest.raises(OpsError, match="VALIDATION_FAILED|INPUT_CHANGED"):
+        commit_decisions(conn, claim, changed, context, validated, clock=clock)
+    assert _counts(conn) == {"decisions": 0, "outbox": 0, "watermarks": 0, "releases": 0}
+
+    request_cancel(conn, claim.job_id, claim.attempt_id, clock=clock)
+    with pytest.raises(OpsError, match="CANCELLED|LEASE_LOST"):
+        commit_decisions(conn, claim, candidates, context, validated, clock=clock)
+    assert _counts(conn) == {"decisions": 0, "outbox": 0, "watermarks": 0, "releases": 0}
 
 
 def test_o21_finality_deadline_and_backfill_rules(tmp_path):
     conn, clock, supervisor = catalog(tmp_path)
     _authority(conn)
     input_hash = content_hash({"snapshot": "candidate-scores"})
-    claim = enqueue_claim(conn, clock, supervisor, input_refs=(input_hash,))
+    claim = _claim(conn, clock, supervisor, input_hash)
     candidates = [_row(input_hash)]
 
     # A non-final session cannot freeze an official decision.
-    context = _context(input_hash)
-    context["validations"]["finality"] = {"ok": False, "input_hash": input_hash}
+    context = _strict_context(candidates, input_hash)
+    context["candidate_validation"]["finality"]["is_final"] = False
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):
         validate_candidates(candidates, context)
 
     # Production authority is refused outright in Phase 1, so no backfill can
     # be laundered into a timely production decision through this path.
-    context = _context(input_hash, purpose="production")
+    candidates = [_row(input_hash)]
+    context = _strict_context(candidates, input_hash)
     validated = validate_candidates(candidates, context)
-    with pytest.raises(OpsError, match="shadow-only"):
+    validated["purpose"] = "production"
+    with pytest.raises(OpsError, match="INPUT_CHANGED"):
         commit_decisions(conn, claim, candidates, context, validated, clock=clock)
 
-    # A backfilled night records its REAL creation time and stays labelled a
-    # research reconstruction; the decision is never backdated to its session.
-    # The clock travels in lease-sized steps with heartbeats, exactly as a
-    # live supervisor would keep the attempt's lease renewed.
-    for _ in range(2 * 24 * 36):
-        clock.advance(100)
-        assert heartbeat(conn, claim.attempt_id, claim.fence, clock=clock, lease_seconds=120)
-    context = _context(input_hash, purpose="research_reconstruction")
+    # Research reconstruction is also outside this copy-only shadow writer.
+    context = _strict_context(candidates, input_hash)
     validated = validate_candidates(candidates, context)
-    commit_decisions(conn, claim, candidates, context, validated, clock=clock)
-    row = conn.execute("SELECT created_at, purpose FROM decisions").fetchone()
-    assert row["created_at"].startswith("2026-09-14")
-    assert row["purpose"] == "research_reconstruction"
+    validated["purpose"] = "research_reconstruction"
+    with pytest.raises(OpsError, match="INPUT_CHANGED"):
+        commit_decisions(conn, claim, candidates, context, validated, clock=clock)
 
 
 def test_o22_budget_failure_withholds_publication_only(tmp_path):
@@ -157,9 +233,9 @@ def test_o22_budget_failure_withholds_publication_only(tmp_path):
 
     # Decision work still advances under its own validations.
     input_hash = content_hash({"snapshot": "candidate-scores"})
-    claim = enqueue_claim(conn, clock, supervisor, input_refs=(input_hash,))
-    context = _context(input_hash)
+    claim = _claim(conn, clock, supervisor, input_hash)
     candidates = [_row(input_hash)]
+    context = _strict_context(candidates, input_hash)
     validated = validate_candidates(candidates, context)
     assert len(commit_decisions(conn, claim, candidates, context, validated, clock=clock)) == 1
 

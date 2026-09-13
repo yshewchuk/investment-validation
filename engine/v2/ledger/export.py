@@ -20,7 +20,7 @@ def export_generation(conn, root: Path | str, *, generation: str) -> Path:
     grouped = defaultdict(list)
     for row in rows:
         payload = json.loads(row[1])
-        date = payload.get("as_of") or payload.get("settled_at") or payload.get("event_date")
+        date = _partition_date(payload)
         date = str(date)[:10] if date else "unknown"
         bucket = "predictions" if row[0] == "prediction" else "outcomes"
         grouped[(bucket, date)].append(canonical_json(payload).encode("utf-8") + b"\n")
@@ -45,3 +45,8 @@ def export_generation(conn, root: Path | str, *, generation: str) -> Path:
     os.replace(pointer, root / "CURRENT")
     fsync_directory(root)
     return destination
+
+
+def _partition_date(payload):
+    return (payload.get("as_of") or payload.get("resolved_at")
+            or payload.get("settled_at") or payload.get("event_date"))
