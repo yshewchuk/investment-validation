@@ -37,6 +37,11 @@ class LegacyParameters:
     #: Unused (left "") by every ``legacy_*`` action.
     deployment: str = ""
     decision_clock: str = ""
+    #: P2-5/Task5: the outbox/watermark scope the effects-graph coordinator
+    #: effects (``ledger_export``, ``engineering_gate``, ``publication``,
+    #: ``backup``) use. Left "" (meaning: fall back to ``output_namespace``)
+    #: by every other kind.
+    effect_scope: str = ""
 
 
 def registry():
@@ -57,6 +62,19 @@ def registry():
             checkpoint_contract="decision_evidence_pair.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
     ]
+    # P2-5/Task5: the export/publication/backup outbox effects, wired into the
+    # nightly job DAG (guide §9.4 item 3). Each worker is trivial (it emits a
+    # small receipt); the supervisor's coordinator effect
+    # (``engine.v2.ops.effects_graph``) does the real catalog/outbox/
+    # filesystem work inside the fenced finish path, exactly the pattern
+    # ``decision_evidence`` already uses for a pure, non-legacy stage.
+    for effect_kind in ("ledger_export", "engineering_gate", "publication", "backup"):
+        kinds.append(JobKind(
+            name=effect_kind, worker=effect_kind, parameters=LegacyParameters,
+            resource_classes=frozenset({"delivery"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 3, (5, 30)),
+            checkpoint_contract="effect_receipt.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})))
     profiles = {"legacy_score": "legacy_score", "legacy_score_requests": "legacy_score",
                 "legacy_decision_replay": "legacy_score",
                 "legacy_finality": "validation",

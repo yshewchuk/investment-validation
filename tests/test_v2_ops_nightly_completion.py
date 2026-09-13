@@ -1516,8 +1516,8 @@ def test_decision_evidence_stage_wired_with_parents_and_bindings():
                                          year_start=2025, year_end=2026)
     assert [r.job.kind for r in requests] == [
         "legacy_finality", "legacy_score", "legacy_decision_replay", "decision_evidence",
-        "legacy_decisions", "legacy_settlement", "legacy_model_evidence", "legacy_render",
-        "legacy_selfcheck"]
+        "legacy_decisions", "legacy_settlement", "legacy_model_evidence", "ledger_export",
+        "engineering_gate", "legacy_render", "legacy_selfcheck", "publication", "backup"]
     by_kind = {r.job.kind: r for r in requests}
 
     evidence = by_kind["decision_evidence"]

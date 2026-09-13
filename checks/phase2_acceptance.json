@@ -84,7 +84,7 @@
     },
     "D20": {
       "tier": 1,
-      "tests": ["tests/test_v2_ops_export.py"]
+      "tests": ["tests/test_v2_ops_effects_graph.py"]
     }
   }
 }

@@ -157,7 +157,7 @@ def test_every_emitted_request_environment_ref_matches_launch_formula():
     requests = build_legacy_job_requests(plan, tickers=("FAKE",),
                                          year_start=2025, year_end=2026,
                                          include_prerequisites=False)
-    assert len(requests) == 9
+    assert len(requests) == 13
     for request in requests:
         profile = profile_named(DEFAULT_POLICY, _legacy_resource(request.job.kind))
         thread_count = profile.thread_count or profile.cpu_count

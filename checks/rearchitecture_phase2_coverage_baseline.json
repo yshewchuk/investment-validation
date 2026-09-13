@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:a2823b1e74b71897cd4f951bbe5edc8c6a90a74bd25f20e838522b7e1b4f62ca",
+  "suite_version": "phase2_coverage_suite:90d3a0197ad5d22b8f7141c73b00b61bd0a22fcf24d3c4ba277c8385fb32faf9",
   "test_files": [
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
@@ -10,11 +10,12 @@
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_repository.py",
+    "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_render_parity.py"
   ],
-  "source_hash": "sha256:83d2faeb5f4b7103b7bd2a4bf9d06f8e7df30e1fb15267d077a533198b4b575e",
+  "source_hash": "sha256:d392b4bdf41cf25e4d2bec969f6f0a73461c0c9b5359565ddb3a21411805a5d9",
   "packages": {
     "engine.v2.contracts": {
       "executed": 593,
@@ -30,7 +31,7 @@
       "percentage": 100.0
     },
     "engine.v2.foundation": {
-      "executed": 345,
+      "executed": 346,
       "executable": 385,
       "files": [
         "engine/v2/foundation/__init__.py",
@@ -41,7 +42,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 89.6103896103896
+      "percentage": 89.87012987012987
     },
     "engine.v2.data": {
       "executed": 965,
@@ -153,8 +154,8 @@
       "percentage": null
     },
     "engine.v2.ledger": {
-      "executed": 64,
-      "executable": 114,
+      "executed": 73,
+      "executable": 117,
       "files": [
         "engine/v2/ledger/__init__.py",
         "engine/v2/ledger/decisions.py",
@@ -162,7 +163,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 56.14035087719298
+      "percentage": 62.39316239316239
     },
     "engine.v2.models.training": {
       "executed": 0,
@@ -186,8 +187,8 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 2082,
-      "executable": 3564,
+      "executed": 2464,
+      "executable": 3762,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -202,6 +203,7 @@
         "engine/v2/ops/decision_validation.py",
         "engine/v2/ops/diagnostics.py",
         "engine/v2/ops/discovery.py",
+        "engine/v2/ops/effects_graph.py",
         "engine/v2/ops/errors.py",
         "engine/v2/ops/executor.py",
         "engine/v2/ops/executor_cgroup.py",
@@ -235,7 +237,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 58.417508417508415
+      "percentage": 65.49707602339181
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -1110,6 +1112,70 @@
     },
     {
       "nodeid": "tests/test_v2_data_repository.py::test_resolve_snapshot_head_no_committed_head_raises",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_filters_purposes_and_binds_render",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_rerun_is_idempotent",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_settlement_absent_when_not_committed",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_settlement_present_when_committed",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_scope_subset_leaves_full_scope_untouched",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_engineering_gate_effect_runs_the_real_gate_excluding_coverage",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_all_gates_valid_advances_current_and_watermarks",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_refused_when_a_gate_is_invalid[kwargs0-PUBLICATION_REFUSED]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_refused_when_a_gate_is_invalid[kwargs1-PUBLICATION_REFUSED]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_refused_when_a_gate_is_invalid[kwargs2-PUBLICATION_REFUSED]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_refused_when_a_gate_is_invalid[kwargs3-PUBLICATION_REFUSED]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_refused_on_stale_fence",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_older_occurrence_cannot_replace_newer",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_backup_failure_retries_alone_other_watermarks_unchanged",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_new_stages_are_wired_with_parents_bindings_and_submit",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_subset_ticker_run_uses_hashed_effect_scope",
       "outcome": "passed"
     },
     {

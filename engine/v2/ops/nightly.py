@@ -99,33 +99,48 @@ def _legacy_action(stage):
                          "selfcheck": "selfcheck"}.get(stage, stage)
 
 
+#: Stages whose worker kind IS the stage name (never a ``legacy_*`` action):
+#: ``decision_evidence`` (P2-5/B1c) and the four effects-graph coordinator
+#: stages wired in P2-5/Task5. Each has a trivial pure worker; the real
+#: catalog/outbox/filesystem work runs in the supervisor's coordinator effect
+#: (``engine.v2.ops.effects_graph``), never in the worker subprocess.
+PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate",
+                         "publication", "backup"})
+
+
+def _action_for(stage):
+    return stage if stage in PURE_STAGES else _legacy_action(stage)
+
+
 def _job_output(stage, keys):
     """The ``job_<id>#<output_name>`` binding for a parent stage's committed output.
 
     A worker's recorded output is always named for the action it ran (see
     ``dispatch`` in ``worker.py``), so the exact output name is the parent's
-    own ``_legacy_action`` name, never the JSON filename it happens to write.
+    own action name (``_action_for``), never the JSON filename it happens to
+    write.
     """
-    return keys[stage] + "#" + _legacy_action(stage)
+    return keys[stage] + "#" + _action_for(stage)
 
 
-def _legacy_params(action, plan, tickers, year_start, year_end, keys):
+def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope=""):
     params = {"expected_ids": (action,), "session": plan["session"],
               "tickers": tuple(sorted(tickers)), "year_start": year_start,
-              "year_end": year_end, "input_bindings": {}}
+              "year_end": year_end, "input_bindings": {}, "effect_scope": effect_scope}
     if action == "legacy_decisions":
         params["input_bindings"] = {
             "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
             "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
             "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
     if action == "legacy_render":
-        # No "ledger_generation.tar" binding yet: the export stage (§9.4 item 3,
-        # not yet wired into this graph) is what produces it. Until it exists,
-        # legacy_render refuses at VALIDATION_FAILED("ledger generation not
-        # bound") rather than falling back to a staged mutable ledger.
+        # P2-5/Task5: the ledger generation is the verified output of the
+        # ``ledger_export`` stage (never a staged mutable ledger copy) —
+        # exactly the generation the export coordinator tarred and verified
+        # by reading it back through the compatibility reader.
         params["input_bindings"] = {"score.json": _job_output("score", keys),
                                      "model_evidence.json": _job_output("model_evidence", keys),
-                                     "finality.json": _job_output("finality", keys)}
+                                     "finality.json": _job_output("finality", keys),
+                                     "ledger_generation.tar": _job_output("ledger_export", keys)}
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":
@@ -139,7 +154,26 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
             "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
             "replay.json": _job_output("decision_replay", keys),
             "finality_coverage.json": keys["finality"] + "#legacy_finality_coverage"}
+    if action == "publication":
+        params["input_bindings"] = {
+            "bundle.tar": _job_output("projection", keys),
+            "selfcheck.json": _job_output("selfcheck", keys),
+            "engineering_gate.json": _job_output("engineering_gate", keys)}
     return params
+
+
+def effect_scope_for(tickers, full_universe=None):
+    """The outbox/watermark scope for the effects-graph coordinator stages.
+
+    ``"shadow"`` only when ``tickers`` is exactly the full planned universe;
+    otherwise ``"shadow:" + <hash of the ticker subset>``, so a subset shadow
+    run can never advance the same watermark row a full run does (guide
+    §9.4 item 3). ``full_universe=None`` (no universe declared) is treated as
+    "always the full run" — the pre-existing, single-scope behaviour.
+    """
+    if full_universe is None or sorted(tickers) == sorted(full_universe):
+        return "shadow"
+    return "shadow:" + content_hash(sorted(tickers)).split(":")[1][:16]
 
 
 def _legacy_resource(kind):
@@ -151,6 +185,8 @@ def _legacy_resource(kind):
         return "legacy_rebuild"
     if kind == "legacy_render":
         return "projection"
+    if kind in ("ledger_export", "engineering_gate", "publication", "backup"):
+        return "delivery"
     return "validation"
 
 
@@ -162,7 +198,8 @@ def _thread_count(kind):
 
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
-                              expected_population=(), alt_strikes=1, input_refs=()):
+                              expected_population=(), alt_strikes=1, input_refs=(),
+                              full_universe=None):
     """Build server-allowlisted JobSpecs for the actual legacy worker DAG."""
     from engine.v2.contracts import JobSpec, SubmitRequest
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
@@ -176,26 +213,36 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     scope_hash = content_hash({"tickers": sorted(tickers), "year_start": year_start,
                                "year_end": year_end,
                                "expected_population": list(expected_population)})[:24]
+    effect_scope = effect_scope_for(tickers, full_universe)
     stages = (tuple(plan["order"]) if include_prerequisites else
               ("finality", "score", "decision_replay", "decision_evidence", "decision_commit",
-               "settlement", "model_evidence", "projection", "selfcheck"))
+               "settlement", "model_evidence", "ledger_export", "engineering_gate",
+               "projection", "selfcheck", "publication", "backup"))
+    # P2-5/Task5: ``ledger_export`` and ``backup`` name ``decision_commit`` as
+    # their only hard scheduler dependency, never ``settlement`` — a failed
+    # settlement job would otherwise cascade through ``block_descendants``
+    # and permanently block both (guide: "settlement failure must not block
+    # export"). Each coordinator instead reads the settlement *watermark*
+    # (present or absent) directly, independent of scheduling.
     parent_map = {"finality": (), "score": ("finality",),
                   "decision_replay": ("score",),
                   "decision_evidence": ("score", "finality", "decision_replay"),
                   "decision_commit": ("decision_evidence", "score", "finality"),
                   "settlement": ("finality",),
                   "model_evidence": ("score",),
-                  "projection": ("decision_commit", "model_evidence", "finality", "score"),
-                  "selfcheck": ("projection",)}
+                  "ledger_export": ("decision_commit",),
+                  "engineering_gate": (),
+                  "projection": ("ledger_export", "model_evidence", "finality", "score"),
+                  "selfcheck": ("projection",),
+                  "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit"),
+                  "backup": ("decision_commit",)}
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
-        # "decision_evidence" is a pure, non-legacy worker (P2-5/B1c): its
-        # kind IS the stage name, never run through ``_legacy_action``'s
-        # ``legacy_`` prefixing.
-        action = "decision_evidence" if stage == "decision_evidence" else _legacy_action(stage)
+        action = _action_for(stage)
         kind = action
-        parameters = _legacy_params(action, plan, tickers, year_start, year_end, keys)
+        parameters = _legacy_params(action, plan, tickers, year_start, year_end, keys,
+                                    effect_scope=effect_scope)
         if input_refs:
             parameters["input_bindings"]["legacy_manifest.json"] = input_refs[0]
         parameters["expected_population"] = tuple(expected_population)
@@ -215,6 +262,8 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                         retry_policy_ref="bounded",
                         checkpoint_contract_ref=(
                             "decision_evidence_pair.v1.0" if kind == "decision_evidence"
+                            else "effect_receipt.v1.0" if kind in (
+                                "ledger_export", "engineering_gate", "publication", "backup")
                             else "legacy_action.v1.0"))))
     return tuple(requests)
 

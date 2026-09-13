@@ -62,6 +62,8 @@ def dispatch(worker, parameters, root):
                 "coverage": output}
     if worker == "decision_evidence":
         return _dispatch_decision_evidence(parameters, root)
+    if worker in ("ledger_export", "engineering_gate", "publication", "backup"):
+        return _dispatch_effect_receipt(worker, parameters, root)
     if worker == "artifact_check":
         output = root / "receipt.json"
         output.write_text(json.dumps({"checked": parameters["expected_ids"],
@@ -108,6 +110,24 @@ def _dispatch_decision_evidence(parameters, root):
          "schema": "decision_evidence.v1.0"}],
         "completed_ids": list(parameters["expected_ids"]),
         "no_work": not parameters["expected_ids"]}
+
+
+def _dispatch_effect_receipt(worker, parameters, root):
+    """Trivial pure worker for a coordinator-driven effect stage (P2-5/Task5).
+
+    ``ledger_export``, ``engineering_gate``, ``publication`` and ``backup``
+    never touch the catalog or the outbox from inside a subprocess; all of
+    that real work happens in the supervisor's coordinator effect
+    (``engine.v2.ops.effects_graph``), after this attempt's tiny receipt is
+    validated, inside the same fenced finish path every other coordinator
+    effect uses. This worker only proves the attempt ran.
+    """
+    receipt = {"schema_version": "effect_receipt.v1.0", "kind": worker,
+               "expected_ids": list(parameters["expected_ids"])}
+    (root / "receipt.json").write_text(json.dumps(receipt))
+    return {"outputs": [{"name": worker, "path": "receipt.json", "schema": "effect_receipt.v1.0"}],
+            "completed_ids": list(parameters["expected_ids"]),
+            "no_work": not parameters["expected_ids"]}
 
 
 if __name__ == "__main__":
