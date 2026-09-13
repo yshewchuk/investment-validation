@@ -6,10 +6,9 @@ import os
 import time
 from pathlib import Path
 
-from engine.v2.contracts import CheckpointCandidate, OutputCandidate, ProcessIdentity, ProgressEvent
+from engine.v2.contracts import CheckpointCandidate, OutputCandidate, ProgressEvent
 from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
 from engine.v2.ops import executor
-from engine.v2.ops.catalog import load_json
 from engine.v2.ops.checkpoints import (
     artifact,
     cache_identity,
@@ -19,7 +18,7 @@ from engine.v2.ops.checkpoints import (
 )
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, make_problem
-from engine.v2.ops.executor_watchdog import observe, signal_owned
+from engine.v2.ops.executor_watchdog import is_alive, signal_owned
 from engine.v2.ops.fingerprints import (
     environment_identity,
     snapshot_code,
@@ -32,12 +31,14 @@ from engine.v2.ops.lifecycle import (
     heartbeat,
     record_measurement,
     record_progress,
+    renew_after_resume,
 )
 from engine.v2.ops.recovery import (
     SupervisorLock,
     begin_epoch,
     expire_leases,
     fence_foreign_epochs,
+    prove_ownership_gone,
     read_boot_id,
     reconcile_attempt,
 )
@@ -75,20 +76,11 @@ class Service:
     def reconcile(self):
         rows = self.conn.execute("SELECT * FROM attempts WHERE state = 'recovery_pending'").fetchall()
         for row in rows:
-            members = self.conn.execute("SELECT identity_json FROM process_members WHERE attempt_id = ?",
-                                        (row["attempt_id"],)).fetchall()
-            identities = tuple(load_json(ProcessIdentity, member[0]) for member in members)
-            if not identities and row["process_json"]:
-                identities = (load_json(ProcessIdentity, row["process_json"]),)
-            if not identities and row["host_boot_id"] == self.boot:
-                state = "quarantined"
-            else:
-                known, alive, _ = observe(identities, self.boot)
-                signal_owned(alive, self.boot, hard=True)
-                uncertain = (row["host_boot_id"] == self.boot and not alive
-                             and len(identities) <= 1)
-                state = "quarantined" if alive or uncertain else "verified_dead"
-                executor.persist_members(self.conn, row["attempt_id"], known)
+            proof = prove_ownership_gone(self.conn, row["attempt_id"], boot_id=self.boot)
+            signal_owned(proof.alive, self.boot, hard=True)
+            if proof.known:
+                executor.persist_members(self.conn, row["attempt_id"], proof.known)
+            state = "verified_dead" if proof.proven else "quarantined"
             reconcile_attempt(self.conn, row["attempt_id"], process_state=state, clock=self.clock)
 
     def tick(self):
@@ -109,8 +101,24 @@ class Service:
         wall, mono = self.clock.now(), self.clock.monotonic()
         jump = abs((wall - self.last_wall).total_seconds() - (mono - self.last_mono))
         if jump > 60:
-            fence_foreign_epochs(self.conn, epoch_id="clock_jump", clock=self.clock)
+            self._resume_after_jump()
         self.last_wall, self.last_mono = wall, mono
+
+    def _resume_after_jump(self):
+        """A wall-clock jump (e.g. host suspend) must not fence a live worker (B2).
+
+        Only this supervisor's own tracked attempts are ever touched here: an
+        attempt whose recorded identity is still verifiably alive gets its
+        lease renewed, ignoring wall-clock expiry, before ``expire_leases``
+        runs later this tick. One whose identity is gone is left alone and
+        goes through the normal expiry/reconcile path. No other attempt is
+        fenced by a jump.
+        """
+        for attempt_id, running in self.running.items():
+            identity = running.identities[0] if running.identities else None
+            if identity is not None and is_alive(identity, self.boot):
+                renew_after_resume(self.conn, attempt_id, running.claim.fence,
+                                   clock=self.clock, lease_seconds=120)
 
     def _launch(self, claim):
         try:

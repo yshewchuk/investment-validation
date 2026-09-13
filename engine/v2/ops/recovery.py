@@ -16,18 +16,27 @@ order and never skips ahead:
 
 A tree that cannot be proved gone stays ``recovery_pending`` with its
 reservation held, which keeps replacement heavy work out until an operator or
-a later reconciliation settles it.
+a later reconciliation settles it. "Proved gone" is :func:`prove_ownership_gone`
+(B1): every recorded identity gone or a zombie, no live session still carrying
+the launch pid, and no live process's environ carrying the attempt's staging
+marker — the last two catch a ``setsid()`` escaper and a launch that crashed
+before its identity was ever recorded, neither of which a process-group walk
+alone can see. Ownership is never released on identity count or a guess; an
+operator settles the same proof through ``python3 -m engine.v2.ops reconcile``.
 """
 from __future__ import annotations
 
 import fcntl
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
+from engine.v2.contracts import ProcessIdentity
 from engine.v2.foundation import Clock, content_hash, format_timestamp
-from engine.v2.ops.catalog import transaction
+from engine.v2.ops.catalog import load_json, transaction
 from engine.v2.ops.errors import fail, make_problem
+from engine.v2.ops.executor_watchdog import find_owners, observe
 from engine.v2.ops.lifecycle import (
     RELEASABLE_PROCESS_STATES,
     Outcome,
@@ -37,10 +46,12 @@ from engine.v2.ops.lifecycle import (
 )
 
 __all__ = [
+    "OwnershipProof",
     "SupervisorLock",
     "begin_epoch",
     "expire_leases",
     "fence_foreign_epochs",
+    "prove_ownership_gone",
     "read_boot_id",
     "reconcile_attempt",
 ]
@@ -121,6 +132,49 @@ def fence_foreign_epochs(conn: sqlite3.Connection, *, epoch_id: str, clock: Cloc
         for row in rows:
             _fence_off(conn, row["attempt_id"], row["job_id"], stamp)
     return [row["attempt_id"] for row in rows]
+
+
+@dataclass(frozen=True)
+class OwnershipProof:
+    """The B1 ownership proof for one ``recovery_pending`` attempt (§6.3, §9.1).
+
+    ``proven`` only when (a) every recorded identity is gone or a zombie, (b)
+    no live session still carries the launch pid at or after its own start,
+    and (c) no live process's environ carries this attempt's staging marker.
+    A process-group walk alone (``known``/``alive``) proves (a) but cannot see
+    a ``setsid()`` escaper or a worker whose launch crashed before its
+    identity was recorded — (b) and (c) are what catch those.
+    """
+
+    proven: bool
+    known: tuple[ProcessIdentity, ...]
+    alive: tuple[ProcessIdentity, ...]
+    blockers: tuple[tuple[int, int], ...]
+
+
+def prove_ownership_gone(conn: sqlite3.Connection, attempt_id: str, *,
+                         boot_id: str) -> OwnershipProof:
+    """Prove or refuse release for one attempt, against one fresh ``/proc`` table.
+
+    Never mutates the catalog: callers persist ``known`` and signal ``alive``
+    themselves, then settle through :func:`reconcile_attempt`.
+    """
+    row = conn.execute("SELECT process_json FROM attempts WHERE attempt_id = ?",
+                       (attempt_id,)).fetchone()
+    if row is None:
+        raise fail("INVALID_REQUEST", "unknown attempt")
+    members = conn.execute("SELECT identity_json FROM process_members WHERE attempt_id = ?",
+                           (attempt_id,)).fetchall()
+    identities = tuple(load_json(ProcessIdentity, member[0]) for member in members)
+    launch = load_json(ProcessIdentity, row["process_json"]) if row["process_json"] else None
+    if not identities and launch is not None:
+        identities = (launch,)
+    known, alive, _ = observe(identities, boot_id)
+    blockers = find_owners(boot_id, launch_pid=launch.pid if launch else None,
+                           launch_start_ticks=launch.start_ticks if launch else None,
+                           marker=attempt_id)
+    return OwnershipProof(proven=not alive and not blockers, known=known, alive=alive,
+                          blockers=blockers)
 
 
 def reconcile_attempt(conn: sqlite3.Connection, attempt_id: str, *, process_state: str,
