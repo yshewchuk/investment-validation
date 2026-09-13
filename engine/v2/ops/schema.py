@@ -153,4 +153,8 @@ MIGRATIONS = (
             read_set_complete INTEGER NOT NULL CHECK (read_set_complete IN (0, 1))
         ) STRICT""",
     )),
+    Migration(version=6, name="smoke_runs_hold_no_hypotheses", statements=(
+        "DELETE FROM hypotheses WHERE run_id IN "
+        "(SELECT run_id FROM experiment_runs WHERE mode='smoke')",
+    )),
 )

@@ -6,6 +6,7 @@ from engine.v2.ops.diagnostics import audit_writes, snapshot_sensitive
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import (
     ExperimentSpec,
+    register_hypothesis,
     run_experiment,
     synthetic_fixture_runner,
 )
@@ -25,7 +26,7 @@ from engine.v2.ops.nightly import (
 )
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit_graph
-from tests.ops_support import FakeClock
+from tests.ops_support import FakeClock, catalog
 
 
 def test_private_copy_rejects_indirection_and_is_read_only(tmp_path):
@@ -131,6 +132,36 @@ def test_primary_backup_failure_is_retryable_without_rerun(tmp_path):
     assert receipt["status"] == "succeeded"
     assert calls == ["backup"]
     assert receipt["backup_receipt"]["status"] == "backup_pending"
+
+
+def test_smoke_registration_holds_no_hypothesis_and_retries_idempotently(tmp_path):
+    conn, _, _ = catalog(tmp_path)
+    spec = ExperimentSpec("EXP-D1", "smoke-only", "fixture", ("fixture",), 1,
+                          ("fold-1",), {}, "synthetic")
+    run_id = register_hypothesis(conn, spec, "input-a", mode="smoke")
+    assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
+    assert register_hypothesis(conn, spec, "input-a", mode="smoke") == run_id
+    assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
+
+
+def test_primary_registration_reuses_run_id_after_a_smoke_retry(tmp_path):
+    conn, _, _ = catalog(tmp_path)
+    spec = ExperimentSpec("EXP-D1B", "smoke-then-primary", "fixture", ("fixture",), 1,
+                          ("fold-1",), {}, "synthetic")
+    smoke_id = register_hypothesis(conn, spec, "input-a", mode="smoke")
+    primary_id = register_hypothesis(conn, spec, "input-a", mode="primary")
+    assert primary_id != smoke_id
+    assert register_hypothesis(conn, spec, "input-a", mode="primary") == primary_id
+    assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 1
+
+
+def test_primary_registration_conflicts_on_changed_input(tmp_path):
+    conn, _, _ = catalog(tmp_path)
+    spec = ExperimentSpec("EXP-D1C", "conflict", "fixture", ("fixture",), 1,
+                          ("fold-1",), {}, "synthetic")
+    register_hypothesis(conn, spec, "input-a", mode="primary")
+    with pytest.raises(OpsError, match="IDEMPOTENCY_CONFLICT"):
+        register_hypothesis(conn, spec, "input-b", mode="primary")
 
 
 def test_o16_write_audit_detects_undisclosed_production_writes(tmp_path):

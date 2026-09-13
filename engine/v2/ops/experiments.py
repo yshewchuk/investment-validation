@@ -88,7 +88,15 @@ class ExperimentReceipt:
 
 def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="smoke",
                         run_id=None):
-    """Reserve one economic hypothesis; identical retries return its run ID."""
+    """Reserve one economic run; identical retries return its run ID.
+
+    Smoke mode has no promotion authority: it holds a namespace in
+    ``experiment_runs`` only and never creates a ``hypotheses`` row, even on
+    request. Primary mode reserves exactly one hypothesis per ``spec_hash``;
+    a retry with the same input returns it, and the same ``spec_hash`` asked
+    again with a different input is refused rather than raising the raw
+    ``IntegrityError`` a second unconditional insert would produce.
+    """
     from uuid import uuid4
 
     run_id = run_id or "exp_run_" + uuid4().hex
@@ -98,10 +106,21 @@ def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="sm
                            (spec.spec_hash, input_hash, mode)).fetchone()
         if old:
             return old[0]
+        if mode == "primary":
+            existing = conn.execute(
+                "SELECT run_id, input_hash FROM hypotheses WHERE spec_hash=?",
+                (spec.spec_hash,)).fetchone()
+            if existing:
+                if existing["input_hash"] != input_hash:
+                    raise fail("IDEMPOTENCY_CONFLICT",
+                               "hypothesis is already registered with a different input",
+                               details={"spec_hash": spec.spec_hash})
+                return existing["run_id"]
         conn.execute("INSERT INTO experiment_runs VALUES (?,?,?,?,?,?)",
                      (run_id, spec.spec_hash, input_hash, mode, "{}", None))
-        conn.execute("INSERT INTO hypotheses VALUES (?,?,?,?,?)",
-                     (spec.spec_hash, input_hash, payload_hash, "{}", run_id))
+        if mode == "primary":
+            conn.execute("INSERT INTO hypotheses VALUES (?,?,?,?,?)",
+                         (spec.spec_hash, input_hash, payload_hash, "{}", run_id))
     return run_id
 
 
