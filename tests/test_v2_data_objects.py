@@ -34,8 +34,6 @@ from engine.v2.data.objects import (  # noqa: E402
 )
 from engine.v2.foundation import ArtifactStore  # noqa: E402
 
-IRH = "sha256:" + "0" * 64  # a placeholder import_request_hash; format is uninterpreted here
-
 _ARROW_TYPES = {
     "string": pa.string(),
     "float64": pa.float64(),
@@ -107,8 +105,7 @@ def _publish_bytes(store: ArtifactStore, data: bytes) -> ObjectRef:
 
 
 def _inspect(store, obj, contract, contract_ref, partition_key="2024", **kwargs):
-    return inspect_fragment(store, obj, contract, contract_ref, partition_key,
-                            import_request_hash=IRH, **kwargs)
+    return inspect_fragment(store, obj, contract, contract_ref, partition_key, **kwargs)
 
 
 # --------------------------------------------------------------------------

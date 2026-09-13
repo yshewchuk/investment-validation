@@ -12,9 +12,18 @@ against one explicit per-``(class, field)`` format table (phase-2 guide §5:
 characters") so a new field cannot silently skip validation by drifting from a
 name-guessing convention.
 
+A time bound (``TimeInterval``'s two fields, ``FragmentRecord.time_min``/
+``.time_max``) accepts three mutually exclusive kinds — ``"date"``, the
+offset-required RFC 3339 ``"timestamp"`` (``foundation.clock.parse_timestamp``),
+and the offset-less ``"naive_timestamp"`` legacy observation columns actually
+carry (``time_formats.is_naive_timestamp``) — never a silent alias between
+them: a field mixing two kinds, or a naive/aware pair, is refused.
+
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
-``engine.v2.contracts`` and ``engine.v2.foundation``, per phase-2 guide §3.3
-("data owner ... imports only contracts/foundation").
+``engine.v2.contracts``, ``engine.v2.foundation``, and this package's own
+``time_formats`` (the naive-timestamp wire form ``objects.py`` also writes —
+phase-2 guide §3.3 "data owner ... imports only contracts/foundation" plus
+"the data package may import within itself").
 """
 from __future__ import annotations
 
@@ -25,6 +34,8 @@ import re
 from typing import Any
 
 from engine.v2.foundation import DocumentError, from_document, parse_timestamp
+
+from . import time_formats
 
 __all__ = ["decode_document", "loads_document"]
 
@@ -128,6 +139,8 @@ def _walk_dataclass(value: Any, doc_value: Any, path: str) -> None:
         _check_key_predicate(value, path)
     elif cls_name == "TimeInterval":
         _check_time_interval(value, path)
+    elif cls_name == "FragmentRecord":
+        _check_fragment_record(value, path)
     elif cls_name == "SnapshotRef":
         _check_snapshot_ref(value, path)
     elif cls_name == "SnapshotImportRequest":
@@ -164,9 +177,13 @@ def _is_real_date(value: str) -> bool:
 
 
 def _time_bound_kind(value: str) -> str | None:
-    """"date" or "timestamp" per phase-2 guide §5.3-style bounds, else None."""
+    """"date", "timestamp" or "naive_timestamp" per phase-2 guide §5.3-style
+    bounds (module docstring); ``None`` when ``value`` matches none of the three.
+    """
     if _DATE.match(value) and _is_real_date(value):
         return "date"
+    if time_formats.is_naive_timestamp(value):
+        return "naive_timestamp"
     try:
         parse_timestamp(value)
     except ValueError:
@@ -240,6 +257,20 @@ def _check_time_interval(ti: Any, path: str) -> None:
         if not ti.start_inclusive < ti.end_exclusive:
             raise DocumentError("TIME_BOUNDS_OUT_OF_ORDER", path,
                                 "start_inclusive must be strictly before end_exclusive")
+
+
+def _check_fragment_record(record: Any, path: str) -> None:
+    """``time_min``/``time_max`` are the same kind, and ``time_min`` does not
+    come after ``time_max`` — equal is allowed (a single-row partition).
+    """
+    if record.time_min is None or record.time_max is None:
+        return
+    if _time_bound_kind(record.time_min) != _time_bound_kind(record.time_max):
+        raise DocumentError("MIXED_TIME_BOUND_KINDS", path,
+                            "time_min and time_max must be the same kind")
+    if record.time_min > record.time_max:
+        raise DocumentError("TIME_BOUNDS_OUT_OF_ORDER", path,
+                            "time_min must not come after time_max")
 
 
 def _check_snapshot_ref(sr: Any, path: str) -> None:
