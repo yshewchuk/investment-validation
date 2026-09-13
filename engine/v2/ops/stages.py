@@ -26,6 +26,9 @@ class LegacyParameters:
     alt_strikes: int = 1
     expected_population: tuple[str, ...] = ()
     input_bindings: dict[str, str] | None = None
+    #: A6: where ``legacy_score_requests`` finds its request batch, relative
+    #: to the staging root — under ``legacy/`` once the read set is copied in.
+    requests_path: str = ""
 
 
 def registry():
@@ -41,7 +44,7 @@ def registry():
                 "legacy_selfcheck": "validation"}
     for action in ("legacy_finality", "legacy_score", "legacy_decisions",
                    "legacy_settlement", "legacy_model_evidence", "legacy_render",
-                   "legacy_selfcheck"):
+                   "legacy_selfcheck", "legacy_score_requests"):
         kinds.append(JobKind(
             name=action, worker=action, parameters=LegacyParameters,
             resource_classes=frozenset({profiles[action]}),
