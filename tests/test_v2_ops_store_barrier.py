@@ -32,7 +32,7 @@ from engine.v2.ops.store_barrier import (
 )
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy, submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import POLICY, catalog, request, sample
+from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
 
 
 def _kind(name, mode):
@@ -250,7 +250,7 @@ def _run_supervisor(root, *, mutate, complete):
         implementation_ref=content_hash(worker_source_manifest(repo)),
         environment_ref=content_hash(environment_identity(1))), clock=clock)
 
-    service = Service(conn, root, BOUND_REGISTRY, DEFAULT_POLICY, clock=clock,
+    service = Service(conn, root, BOUND_REGISTRY, TEST_POLICY, clock=clock,
                       code_source=repo, store_root=prod)
     try:
         service.start()

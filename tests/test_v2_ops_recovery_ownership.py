@@ -38,7 +38,7 @@ from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import POLICY, catalog, request, sample
+from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
 
 CODE_SOURCE = Path(__file__).resolve().parents[1]
 
@@ -76,7 +76,7 @@ def _fenced_claim(conn, clock, boot, *, key="one", kind="artifact_check"):
 
 
 def _service(conn, clock, boot, root):
-    service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock, code_source=CODE_SOURCE)
+    service = Service(conn, root, registry(), TEST_POLICY, clock=clock, code_source=CODE_SOURCE)
     service.boot = boot
     return service
 

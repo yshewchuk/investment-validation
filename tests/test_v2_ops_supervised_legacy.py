@@ -23,11 +23,12 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact as load_artifact, register_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
-from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, MIB, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
 from engine.v2.ledger.decisions import set_authority
+from tests.ops_support import TEST_POLICY
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -114,6 +115,16 @@ def _run_until_terminal(service, conn, job_id, timeout=18):
     return state
 
 
+def test_default_policy_reservations_unchanged_and_test_policy_is_smaller():
+    """The host-memory-flake fix must never touch DEFAULT_POLICY: production
+    admission still reserves the full measured peak (profiles.py). TEST_POLICY
+    (tests/ops_support.py) exists only so a real ``Service`` admits its job
+    without racing whatever else happens to be using host memory."""
+    for name in ("validation", "legacy_score"):
+        assert profile_named(DEFAULT_POLICY, name).memory_bytes == 11 * GIB // 2
+        assert profile_named(TEST_POLICY, name).memory_bytes <= 512 * MIB
+
+
 def test_legacy_decisions_runs_supervised_with_real_subprocess(tmp_path):
     root = tmp_path / "case1"
     root.mkdir()
@@ -148,7 +159,7 @@ def test_legacy_decisions_runs_supervised_with_real_subprocess(tmp_path):
         receipt = _submit_decisions(conn, manifest_ref=manifest_ref, score_ref=score_ref,
                                     finality_ref=finality_ref, plan_ref=plan_ref,
                                     evidence_ref=evidence_ref)
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()
@@ -193,7 +204,7 @@ def test_legacy_decisions_runs_supervised_with_real_subprocess(tmp_path):
         refused = _submit_decisions(conn, manifest_ref=manifest_ref, score_ref=score_ref,
                                     finality_ref=finality_ref, plan_ref=plan_ref,
                                     evidence_ref=None, key="dec-missing-evidence")
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()
@@ -232,7 +243,7 @@ def test_missing_legacy_read_set_member_fails_input_changed_and_releases(tmp_pat
         finality_ref = _publish(store, conn, clock, {}, "legacy_action.v1.0")
         receipt = _submit_decisions(conn, manifest_ref=manifest_ref, score_ref=score_ref,
                                     finality_ref=finality_ref, key="dec2")
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()
@@ -281,7 +292,7 @@ def test_worker_crash_writes_private_diagnostics_and_leaks_no_exception_text(tmp
             checkpoint_contract_ref="legacy_action.v1.0")
         receipt = submit(conn, registry(), POLICY, SubmitRequest(
             namespace="shadow", idempotency_key="dec3", principal="operator", job=job), clock=clock)
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()
