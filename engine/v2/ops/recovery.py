@@ -159,10 +159,15 @@ def prove_ownership_gone(conn: sqlite3.Connection, attempt_id: str, *,
     Never mutates the catalog: callers persist ``known`` and signal ``alive``
     themselves, then settle through :func:`reconcile_attempt`.
     """
-    row = conn.execute("SELECT process_json FROM attempts WHERE attempt_id = ?",
+    row = conn.execute("SELECT process_json, host_boot_id FROM attempts WHERE attempt_id = ?",
                        (attempt_id,)).fetchone()
     if row is None:
         raise fail("INVALID_REQUEST", "unknown attempt")
+    if row["host_boot_id"] != boot_id:
+        # Nothing launched under another boot can still run, and its pid and
+        # start ticks mean nothing against this boot's process table: comparing
+        # them would only manufacture blockers out of unrelated sessions.
+        return OwnershipProof(proven=True, known=(), alive=(), blockers=())
     members = conn.execute("SELECT identity_json FROM process_members WHERE attempt_id = ?",
                            (attempt_id,)).fetchall()
     identities = tuple(load_json(ProcessIdentity, member[0]) for member in members)
