@@ -145,6 +145,8 @@ def _walk_dataclass(value: Any, doc_value: Any, path: str) -> None:
         _check_snapshot_ref(value, path)
     elif cls_name == "SnapshotImportRequest":
         _check_snapshot_import_request(value, path)
+    elif cls_name == "DatasetManifest":
+        _check_dataset_manifest(value, path)
 
 
 def _check_format(kind: str, value: Any, path: str) -> None:
@@ -271,6 +273,17 @@ def _check_fragment_record(record: Any, path: str) -> None:
     if record.time_min > record.time_max:
         raise DocumentError("TIME_BOUNDS_OUT_OF_ORDER", path,
                             "time_min must not come after time_max")
+
+
+def _check_dataset_manifest(manifest: Any, path: str) -> None:
+    """``partition_logical_hashes`` is a ``dict[str, str]`` (task brief
+    decision 3), not one plain field ``_FORMATS`` can name — every value is
+    still a hash, checked per entry the way ``_FORMATS`` checks a scalar field.
+    """
+    for key, value in manifest.partition_logical_hashes.items():
+        if not isinstance(value, str) or not _HASH.match(value):
+            raise DocumentError("BAD_HASH_FORMAT", f"{path}.partition_logical_hashes.{key}",
+                                "expected sha256: plus 64 lowercase hex characters")
 
 
 def _check_snapshot_ref(sr: Any, path: str) -> None:

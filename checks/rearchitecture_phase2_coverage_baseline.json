@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:90d3a0197ad5d22b8f7141c73b00b61bd0a22fcf24d3c4ba277c8385fb32faf9",
+  "suite_version": "phase2_coverage_suite:e186373b237a3206bff7877e908db46bdef3150a88c09650c05a9b7b8ed83fce",
   "test_files": [
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
@@ -9,17 +9,18 @@
     "tests/test_v2_data_legacy_adapter.py",
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
+    "tests/test_v2_data_partitions.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_render_parity.py"
   ],
-  "source_hash": "sha256:5a534e33689354b6718da50f693cbbbfa4efaffe9dee5543446bedc590a19e26",
+  "source_hash": "sha256:c58dc13bc11aabc032acb1dbcfe2b5090a575622c4782d0d2fd87e3dfc5245e1",
   "packages": {
     "engine.v2.contracts": {
-      "executed": 593,
-      "executable": 593,
+      "executed": 594,
+      "executable": 594,
       "files": [
         "engine/v2/contracts/__init__.py",
         "engine/v2/contracts/data.py",
@@ -45,8 +46,8 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 965,
-      "executable": 1027,
+      "executed": 1027,
+      "executable": 1091,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -61,7 +62,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 93.96299902629016
+      "percentage": 94.13382218148487
     },
     "engine.v2.features": {
       "executed": 0,
@@ -1088,6 +1089,54 @@
     },
     {
       "nodeid": "tests/test_v2_data_objects.py::test_fault_during_copy_raises_and_a_retry_publishes_the_same_object",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_one_three_and_nineteen_parts_give_identical_hashes",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_single_fragment_dataset_logical_hash_is_unchanged",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_commit_and_resolve_multi_fragment_snapshot",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_overlapping_ranges_are_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_boundary_duplicate_key_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_out_of_order_parts_are_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_missing_partition_hash_for_multi_fragment_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_supplied_single_fragment_hash_must_match_is_still_enforced",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_partition_logical_hash_refuses_internally_unsorted_fragment",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_wrong_stored_partition_hash_caught_by_verify_and_commit",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_v1_1_manifest_round_trips_and_v1_2_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_bad_partition_hash_format_is_refused",
       "outcome": "passed"
     },
     {

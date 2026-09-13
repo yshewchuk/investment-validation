@@ -43,22 +43,19 @@ parent is a *reuse*, not a conflict: ``_insert_dataset_version``/
 ``_insert_snapshot`` compare only the identity-covered columns and, on reuse,
 return the record reconciled to whatever parent/``manifest_hash`` is truly
 stored (never the candidate's own). ``commit_snapshot`` threads that
-reconciliation up through the snapshot's own ``table_versions`` before
-checking whether the snapshot itself is a reuse, so a *freshly inserted*
-snapshot can never store a ``manifest_hash`` computed over an unreconciled
-child. When the reconciled snapshot already equals the expected head, the
-head is left untouched (generation unchanged) rather than CAS'd to itself.
-Contracts, objects and fragments have no such parent field and keep the
-original same-ID-different-payload rule unchanged.
+reconciliation up through the snapshot before deciding whether the snapshot
+itself is a reuse, so a freshly inserted one never stores a ``manifest_hash``
+computed over an unreconciled child; an already-at-head result leaves the
+head untouched rather than CAS'd to itself. Contracts, objects and fragments
+have no parent field and keep the original same-ID-different-payload rule.
 
 Required fault points (task brief decision 2), fired through one ``fault``
 hook in commit order: ``before_transaction``, ``after_contracts``,
 ``after_objects``, ``after_fragments``, ``after_dataset_versions``,
 ``after_memberships``, ``after_snapshot``, ``after_snapshot_tables``,
-``before_head_update``, ``before_commit``. Every one of them fires before the
+``before_head_update``, ``before_commit`` — every one before the
 transaction's own ``COMMIT``, so an injected failure always rolls back to
-nothing new; the object-side fault points (before/during copy, after object
-fsync/publication, during inspection) belong to ``objects.py`` and
+nothing new; the object-side fault points belong to ``objects.py`` and
 ``foundation.ArtifactStore``, run before this module is ever called.
 """
 from __future__ import annotations
@@ -83,10 +80,12 @@ from engine.v2.data.manifests import (
     table_contract_hash,
     verify_dataset_manifest,
     verify_fragment_record,
+    verify_partition_hashes,
     verify_snapshot_ref,
 )
 from engine.v2.foundation import (
     CONTENT_HASH_PREFIX,
+    ArtifactStore,
     Clock,
     canonical_json,
     format_timestamp,
@@ -149,11 +148,9 @@ def _table_name_for(manifest: DatasetManifest, snapshot: SnapshotRef) -> str:
 def _check_no_key_overlap(records: Sequence[FragmentRecord]) -> None:
     """Fragment key ranges must not overlap within one logical partition.
 
-    ``manifests.dataset_manifest`` already refuses a duplicate or out-of-order
-    ``partition_key`` (one fragment per partition), so today no group below
-    ever holds more than one record — this guards the schema-docstring
-    invariant directly (§6 invariant 6) rather than leaning on that upstream
-    rule alone.
+    ``manifests.dataset_manifest``/``verify_dataset_manifest`` already refuse
+    this via ``_check_membership_order`` — this is defense in depth for the
+    schema-docstring invariant (§6 invariant 6) over reconciled records.
     """
     by_partition: dict[str, list[FragmentRecord]] = {}
     for record in records:
@@ -167,18 +164,21 @@ def _check_no_key_overlap(records: Sequence[FragmentRecord]) -> None:
 
 
 def _verify_everything(contracts: Sequence[TableContract], records: Sequence[FragmentRecord],
-                       manifests: Sequence[DatasetManifest], snapshot: SnapshotRef) -> None:
+                       manifests: Sequence[DatasetManifest], snapshot: SnapshotRef, store) -> None:
     for contract in contracts:
         if table_contract_hash(contract) != contract.definition_hash:
             raise fail("MANIFEST_CORRUPT", "contract definition_hash does not match its content",
                       details={"contract_id": contract.contract_id})
     for record in records:
         verify_fragment_record(record)
+    contract_by_id = {c.contract_id: c for c in contracts}
     by_table: dict[str, DatasetManifest] = {}
     for manifest in manifests:
         matched = _records_for(manifest, records)
         verify_dataset_manifest(manifest, matched)
         _check_no_key_overlap(matched)
+        contract = contract_by_id[manifest.dataset_version_ref.table_contract_ref.contract_id]
+        verify_partition_hashes(store, manifest, matched, contract)
         by_table[_table_name_for(manifest, snapshot)] = manifest
     verify_snapshot_ref(snapshot, by_table)
 
@@ -278,6 +278,7 @@ def _insert_dataset_version(conn: sqlite3.Connection, manifest: DatasetManifest,
                                "availability_evidence_refs": list(manifest.availability_evidence_refs)})
     identity = (ref.table_contract_ref.contract_id, manifest.logical_content_hash, manifest.row_count,
                manifest.knowledge_mode, evidence)
+    partition_hashes_json = canonical_json(dict(manifest.partition_logical_hashes))
     existing = conn.execute(
         "SELECT contract_id, logical_content_hash, row_count, knowledge_mode, evidence_json, "
         "parent_dataset_version_id, manifest_hash FROM data_dataset_versions "
@@ -291,9 +292,9 @@ def _insert_dataset_version(conn: sqlite3.Connection, manifest: DatasetManifest,
     conn.execute(
         "INSERT INTO data_dataset_versions (dataset_version_id, contract_id, "
         "parent_dataset_version_id, manifest_hash, logical_content_hash, row_count, "
-        "knowledge_mode, evidence_json, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "knowledge_mode, evidence_json, partition_logical_hashes_json, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ref.dataset_version_id, identity[0], manifest.parent_dataset_version_id, ref.manifest_hash,
-         identity[1], identity[2], identity[3], identity[4], now))
+         identity[1], identity[2], identity[3], identity[4], partition_hashes_json, now))
     return manifest
 
 
@@ -468,7 +469,8 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
                     snapshot: SnapshotRef, expected_head_snapshot_id: str | None,
                     expected_head_generation: int, receipt_id: str, attempt_id: str, fence: int,
                     fence_check: Callable[[sqlite3.Connection], None], clock: Clock,
-                    fault: FaultHook | None = None) -> SnapshotImportReceipt:
+                    fault: FaultHook | None = None,
+                    store: ArtifactStore | None = None) -> SnapshotImportReceipt:
     """§7.3 steps 1-7, over already-built, already-durable inputs.
 
     Re-verifies every manifest (identity, row-sum, key-overlap) before opening
@@ -478,7 +480,7 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
     is the caller's separate, later step for persisting evidence of that.
     """
     fault = fault or (lambda point: None)
-    _verify_everything(contracts, records, manifests, snapshot)
+    _verify_everything(contracts, records, manifests, snapshot, store)
     table_names = [_table_name_for(manifest, snapshot) for manifest in manifests]
     now = format_timestamp(clock.now())
     fault("before_transaction")

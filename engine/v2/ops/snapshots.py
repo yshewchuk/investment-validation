@@ -60,14 +60,18 @@ def resolve_snapshot_head(conn: sqlite3.Connection, store: ArtifactStore, scope:
     return ref
 
 
-def commit_snapshot_for_attempt(conn: sqlite3.Connection, *, scope: str, request_hash: str,
-                                contracts: Sequence[TableContract], objects: Sequence[ObjectRef],
-                                records: Sequence[FragmentRecord],
+def commit_snapshot_for_attempt(conn: sqlite3.Connection, store: ArtifactStore, *, scope: str,
+                                request_hash: str, contracts: Sequence[TableContract],
+                                objects: Sequence[ObjectRef], records: Sequence[FragmentRecord],
                                 manifests: Sequence[DatasetManifest], snapshot: SnapshotRef,
                                 expected_head_snapshot_id: str | None, expected_head_generation: int,
                                 receipt_id: str, attempt_id: str, fence: int, clock: Clock,
                                 fault: Callable[[str], None] | None = None):
-    """``commit_snapshot`` under the real Phase 1 fence, not a test double."""
+    """``commit_snapshot`` under the real Phase 1 fence, not a test double.
+
+    ``store`` lets pre-transaction verification re-stream a multi-fragment
+    partition's objects (``manifests.verify_partition_hashes``).
+    """
     return commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=contracts, objects=objects,
         records=records, manifests=manifests, snapshot=snapshot,
@@ -75,4 +79,4 @@ def commit_snapshot_for_attempt(conn: sqlite3.Connection, *, scope: str, request
         expected_head_generation=expected_head_generation, receipt_id=receipt_id,
         attempt_id=attempt_id, fence=fence,
         fence_check=lambda c: verify_fence(c, attempt_id, fence, clock.now()), clock=clock,
-        fault=fault)
+        fault=fault, store=store)

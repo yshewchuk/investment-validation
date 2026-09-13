@@ -34,7 +34,7 @@ annotations alone.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from engine.v2.contracts.jobs import LegacyFileRef
@@ -97,7 +97,7 @@ OBJECT_REF_V1 = "object_ref.v1.0"
 FRAGMENT_REF_V1 = "fragment_ref.v1.0"
 FRAGMENT_RECORD_V1 = "fragment_record.v1.0"
 DATASET_VERSION_REF_V1 = "dataset_version_ref.v1.0"
-DATASET_MANIFEST_V1 = "dataset_manifest.v1.0"
+DATASET_MANIFEST_V1 = "dataset_manifest.v1.1"
 SNAPSHOT_REF_V1 = "snapshot_ref.v1.0"
 KEY_PREDICATE_V1 = "key_predicate.v1.0"
 TIME_INTERVAL_V1 = "time_interval.v1.0"
@@ -280,6 +280,12 @@ class DatasetManifest:
 
     Readers never follow a parent chain to reconstruct membership (phase-2
     guide §6 invariant 4): every dataset version is a complete logical view.
+
+    ``partition_logical_hashes`` (v1.1, task 7a): a *multi*-fragment
+    partition's key to its streamed ``logical_rows.v1`` hash — nullable-style,
+    default ``{}``, since a single-fragment partition's entry is implicit (its
+    own ``logical_content_hash``). In ``manifest_hash`` but not
+    ``dataset_version_id``, whose identity stays fragment membership alone.
     """
 
     dataset_version_ref: DatasetVersionRef
@@ -290,6 +296,7 @@ class DatasetManifest:
     coverage_receipt_refs: tuple[str, ...]
     knowledge_mode: KnowledgeMode
     availability_evidence_refs: tuple[str, ...]
+    partition_logical_hashes: dict[str, str] = field(default_factory=dict)
     schema_version: str = DATASET_MANIFEST_V1
 
 

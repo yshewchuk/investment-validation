@@ -185,7 +185,7 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
     ).fetchall()
     assert [tuple(r) for r in rows] == [
         ("data", 1, "snapshot_catalog"), ("data", 2, "fragment_input_receipt_refs"),
-        ("data", 3, "import_receipt_scope"),
+        ("data", 3, "import_receipt_scope"), ("data", 4, "dataset_version_partition_hashes"),
     ]
     ops_versions = {r[0] for r in conn.execute(
         "SELECT version FROM schema_versions WHERE owner = 'ops'")}
