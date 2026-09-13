@@ -35,15 +35,21 @@ def artifact(conn, store, artifact_id):
     return ref
 
 
-def commit_checkpoint(conn, store: ArtifactStore, claim, candidate, *, clock, fault=None):
+def commit_checkpoint(conn, store: ArtifactStore, claim, candidate, *, clock, inputs_hash, fault=None):
+    """``inputs_hash`` is the caller's cache-identity ``inputs`` value.
+
+    Callers compute it (see ``engine.v2.ops.input_bindings.resolved_inputs_hash``)
+    so this module never re-derives ``job_``-bound inputs on its own; it only
+    checks the candidate agrees with what the caller says it used.
+    """
     expected = cache_identity(
-        kind=claim.spec.kind, inputs=content_hash(list(claim.spec.input_refs)),
+        kind=claim.spec.kind, inputs=inputs_hash,
         implementation=claim.spec.implementation_ref, parameters=content_hash(claim.spec.parameters),
         environment=claim.spec.environment_ref, schema=candidate.output_schema_ref,
         shard=candidate.shard_key)
     identities = (candidate.input_hash, candidate.implementation_hash,
                   candidate.parameter_hash, candidate.environment_hash)
-    required = (content_hash(list(claim.spec.input_refs)), claim.spec.implementation_ref,
+    required = (inputs_hash, claim.spec.implementation_ref,
                 content_hash(claim.spec.parameters), claim.spec.environment_ref)
     if candidate.cache_key != expected or identities != required or not candidate.outputs:
         raise fail("CHECKPOINT_INCOMPATIBLE", "checkpoint does not match the admitted inputs")

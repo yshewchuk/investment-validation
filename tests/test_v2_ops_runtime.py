@@ -67,9 +67,11 @@ def test_o11_checkpoint_crash_and_reuse(tmp_path, point, committed):
         if observed == point:
             raise RuntimeError(point)
     with pytest.raises(RuntimeError):
-        commit_checkpoint(conn, store, claim, proposed, clock=clock, fault=fault)
+        commit_checkpoint(conn, store, claim, proposed, clock=clock,
+                          inputs_hash=proposed.input_hash, fault=fault)
     assert (reuse(conn, store, proposed.cache_key) is not None) is committed
-    receipt = commit_checkpoint(conn, store, claim, proposed, clock=clock)
+    receipt = commit_checkpoint(conn, store, claim, proposed, clock=clock,
+                                inputs_hash=proposed.input_hash)
     assert store.read_verified(receipt.artifact_refs[0]) == b"immutable"
 
 

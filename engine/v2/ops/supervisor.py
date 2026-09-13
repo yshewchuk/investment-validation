@@ -29,6 +29,7 @@ from engine.v2.ops.fingerprints import (
     snapshot_code,
     worker_source_manifest,
 )
+from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings, resolved_inputs_hash
 from engine.v2.ops.legacy_adapter import copy_read_set
 from engine.v2.ops.lifecycle import (
     Outcome,
@@ -191,9 +192,12 @@ class Service:
 
     def _reuse_staged_checkpoint(self, claim):
         schema = "receipt.v1.0" if claim.spec.kind == "artifact_check" else "legacy_action.v1.0"
+        # Resolve without materializing (B1a): a cache hit here never launches
+        # the worker, so nothing is staged or recorded for this attempt.
+        resolved = resolve_bindings(self.conn, self.store, claim.spec)
         cache_key = cache_identity(
             kind=claim.spec.kind,
-            inputs=content_hash(list(claim.spec.input_refs)),
+            inputs=resolved_inputs_hash(claim.spec, resolved),
             implementation=claim.spec.implementation_ref,
             parameters=content_hash(claim.spec.parameters),
             environment=claim.spec.environment_ref,
@@ -264,16 +268,20 @@ class Service:
                     and claim.spec.kind not in {
                     "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck"}:
                 schema = outputs[0]["schema"]
+                # The attempt already staged from these exact resolved bindings
+                # (recorded at launch); the checkpoint's identity must match.
+                inputs_hash = resolved_inputs_hash(
+                    claim.spec, recorded_bindings(self.conn, claim.attempt_id))
                 candidate = CheckpointCandidate(
                     shard_key="default",
                     cache_key=cache_identity(
                         kind=claim.spec.kind,
-                        inputs=content_hash(list(claim.spec.input_refs)),
+                        inputs=inputs_hash,
                         implementation=claim.spec.implementation_ref,
                         parameters=content_hash(claim.spec.parameters),
                         environment=claim.spec.environment_ref,
                         schema=schema, shard="default"),
-                    input_hash=content_hash(list(claim.spec.input_refs)),
+                    input_hash=inputs_hash,
                     implementation_hash=claim.spec.implementation_ref,
                     parameter_hash=content_hash(claim.spec.parameters),
                     environment_hash=claim.spec.environment_ref,
@@ -281,7 +289,7 @@ class Service:
                     outputs=tuple(OutputCandidate(name=o["name"], staged_path=o["path"],
                                                    schema_ref=o["schema"]) for o in outputs))
                 checkpoint = commit_checkpoint(self.conn, self.store, claim, candidate,
-                                               clock=self.clock)
+                                               clock=self.clock, inputs_hash=inputs_hash)
                 refs = [(str(index), ref) for index, ref in enumerate(checkpoint.artifact_refs)]
             else:
                 refs = [(o["name"], self.store.publish_candidate(

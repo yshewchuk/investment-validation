@@ -157,4 +157,24 @@ MIGRATIONS = (
         "DELETE FROM hypotheses WHERE run_id IN "
         "(SELECT run_id FROM experiment_runs WHERE mode='smoke')",
     )),
+    Migration(version=7, name="attempt_input_bindings", statements=(
+        """CREATE TABLE attempt_input_bindings (
+            attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+            name TEXT NOT NULL,
+            binding TEXT NOT NULL,
+            artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+            content_hash TEXT NOT NULL,
+            PRIMARY KEY (attempt_id, name)
+        ) STRICT""",
+        """CREATE TRIGGER attempt_input_bindings_no_update
+        BEFORE UPDATE ON attempt_input_bindings
+        BEGIN
+            SELECT RAISE(ABORT, 'attempt_input_bindings rows are immutable');
+        END""",
+        """CREATE TRIGGER attempt_input_bindings_no_delete
+        BEFORE DELETE ON attempt_input_bindings
+        BEGIN
+            SELECT RAISE(ABORT, 'attempt_input_bindings rows are immutable');
+        END""",
+    )),
 )

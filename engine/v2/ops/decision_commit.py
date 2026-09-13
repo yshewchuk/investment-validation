@@ -10,6 +10,7 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.decision_validation import validate
 from engine.v2.ops.errors import fail
+from engine.v2.ops.input_bindings import recorded_bindings
 from engine.v2.ops.lifecycle import verify_fence
 from engine.v2.ops.outbox import enqueue, watermark
 
@@ -24,29 +25,44 @@ def _document(conn, store, artifact_id, name):
         raise fail("VALIDATION_FAILED", name + " artifact is not a JSON document") from None
 
 
+def _resolved_evidence_bindings(conn, claim, names):
+    """The recorded launch-time resolution for each evidence binding, verified.
+
+    Reads only ``attempt_input_bindings`` — never re-queries a ``job_``
+    binding's parent — so a coordinator validating this attempt always uses
+    exactly what was staged, even if the parent's current output has since
+    moved on.
+    """
+    input_bindings = claim.spec.parameters.get("input_bindings") or {}
+    missing = [key for key, binding in names.items() if not input_bindings.get(binding)]
+    if missing:
+        raise fail("VALIDATION_FAILED", "decision evidence inputs are unavailable",
+                   details={"missing_bindings": missing})
+    recorded = recorded_bindings(conn, claim.attempt_id)
+    resolved = {}
+    for key, binding_name in names.items():
+        row = recorded.get(binding_name)
+        if row is None or row.binding != str(input_bindings[binding_name]):
+            raise fail("INPUT_CHANGED", "decision validation input was not resolved at launch",
+                       details={"binding": binding_name})
+        resolved[key] = row
+    return resolved
+
+
 def validated_decision_candidate(conn, store, claim, candidate_ref):
     """Load only admitted immutable inputs and return strict validated context."""
-    bindings = claim.spec.parameters.get("input_bindings") or {}
     names = {
         "score": "score.json", "finality": "finality.json",
         "plan": "decision_plan.json", "evidence": "decision_evidence.json",
     }
-    missing = [name for name, binding in names.items()
-               if not bindings.get(binding) or str(bindings[binding]).startswith("job_")]
-    if missing:
-        raise fail("VALIDATION_FAILED", "decision evidence inputs are unavailable",
-                   details={"missing_bindings": missing})
-    score, score_ref = _document(conn, store, bindings[names["score"]], "score")
-    finality, finality_ref = _document(conn, store, bindings[names["finality"]], "finality")
-    plan, plan_ref = _document(conn, store, bindings[names["plan"]], "decision plan")
-    evidence, evidence_ref = _document(conn, store, bindings[names["evidence"]], "decision evidence")
+    resolved = _resolved_evidence_bindings(conn, claim, names)
+    score, score_ref = _document(conn, store, resolved["score"].artifact_id, "score")
+    finality, finality_ref = _document(conn, store, resolved["finality"].artifact_id, "finality")
+    plan, plan_ref = _document(conn, store, resolved["plan"].artifact_id, "decision plan")
+    evidence, evidence_ref = _document(conn, store, resolved["evidence"].artifact_id, "decision evidence")
     candidate = json.loads(store.read_verified(candidate_ref))
     if not isinstance(candidate, dict) or not isinstance(candidate.get("rows"), list):
         raise fail("VALIDATION_FAILED", "decision candidate artifact has no rows")
-    admitted = set(claim.spec.input_refs)
-    if not {score_ref["artifact_id"], finality_ref["artifact_id"], plan_ref["artifact_id"],
-            evidence_ref["artifact_id"]}.issubset(admitted):
-        raise fail("INPUT_CHANGED", "decision validation inputs were not admitted")
     context = validate(candidate["rows"], score=score, finality=finality, plan=plan,
                        evidence=evidence, bindings={
                            "score": score_ref, "finality": finality_ref, "plan": plan_ref,
@@ -72,6 +88,32 @@ def validate_candidates(candidates, context):
                     bindings=strict["bindings"])
 
 
+def _verify_committed_bindings(conn, claim, bindings):
+    """Refuse unless every validated binding still matches the durable record.
+
+    Re-reads ``attempt_input_bindings`` rather than trusting ``context``
+    alone: this is the coordinator's own check that what it is about to
+    commit still matches what launch recorded, never a re-query of a
+    ``job_`` parent's current (possibly since-changed) state.
+    """
+    if not isinstance(bindings, dict):
+        raise fail("INPUT_CHANGED", "validated input bindings are missing")
+    input_bindings = claim.spec.parameters.get("input_bindings") or {}
+    names = {"score": "score.json", "finality": "finality.json",
+             "plan": "decision_plan.json", "evidence": "decision_evidence.json"}
+    recorded = recorded_bindings(conn, claim.attempt_id)
+    admitted = set(claim.spec.input_refs) | {row.artifact_id for row in recorded.values()}
+    for key, name in names.items():
+        ref = bindings.get(key) if isinstance(bindings.get(key), dict) else {}
+        row = recorded.get(name)
+        if (row is None or row.binding != str(input_bindings.get(name))
+                or ref.get("artifact_id") != row.artifact_id
+                or ref.get("content_hash") != row.content_hash
+                or ref.get("artifact_id") not in admitted):
+            raise fail("INPUT_CHANGED", "validated inputs differ from the admitted job",
+                       details={"binding": name})
+
+
 def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
     """Insert decisions plus export/release intent under an already-open attempt transaction."""
     if not conn.in_transaction:
@@ -83,18 +125,7 @@ def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
         raise fail("INPUT_CHANGED", "validated session differs from the admitted job")
     if context.get("candidate_rows_hash") != content_hash(candidates):
         raise fail("INPUT_CHANGED", "candidate rows changed after validation")
-    bindings = context.get("bindings")
-    input_bindings = claim.spec.parameters.get("input_bindings") or {}
-    names = {"score": "score.json", "finality": "finality.json",
-             "plan": "decision_plan.json", "evidence": "decision_evidence.json"}
-    if not isinstance(bindings, dict):
-        raise fail("INPUT_CHANGED", "validated input bindings are missing")
-    admitted = set(claim.spec.input_refs)
-    for key, name in names.items():
-        ref = bindings.get(key) if isinstance(bindings.get(key), dict) else {}
-        if ref.get("artifact_id") != input_bindings.get(name) or ref.get("artifact_id") not in admitted:
-            raise fail("INPUT_CHANGED", "validated inputs differ from the admitted job",
-                       details={"binding": name})
+    _verify_committed_bindings(conn, claim, context.get("bindings"))
     receipts = []
     for row in candidates:
         key = content_hash([context["purpose"], row["event_id"], row["strategy"],

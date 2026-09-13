@@ -93,18 +93,28 @@ def _legacy_action(stage):
                          "selfcheck": "selfcheck"}.get(stage, stage)
 
 
+def _job_output(stage, keys):
+    """The ``job_<id>#<output_name>`` binding for a parent stage's committed output.
+
+    A worker's recorded output is always named for the action it ran (see
+    ``dispatch`` in ``worker.py``), so the exact output name is the parent's
+    own ``_legacy_action`` name, never the JSON filename it happens to write.
+    """
+    return keys[stage] + "#" + _legacy_action(stage)
+
+
 def _legacy_params(action, plan, tickers, year_start, year_end, keys):
     params = {"expected_ids": (action,), "session": plan["session"],
               "tickers": tuple(sorted(tickers)), "year_start": year_start,
               "year_end": year_end, "input_bindings": {}}
     if action == "legacy_decisions":
-        params["input_bindings"] = {"score.json": keys["score"],
-                                     "finality.json": keys["finality"]}
+        params["input_bindings"] = {"score.json": _job_output("score", keys),
+                                     "finality.json": _job_output("finality", keys)}
     if action == "legacy_render":
-        params["input_bindings"] = {"score.json": keys["score"],
-                                     "model_evidence.json": keys["model_evidence"]}
+        params["input_bindings"] = {"score.json": _job_output("score", keys),
+                                     "model_evidence.json": _job_output("model_evidence", keys)}
     if action == "legacy_selfcheck":
-        params["input_bindings"] = {"bundle.tar": keys["projection"]}
+        params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     return params
 
 

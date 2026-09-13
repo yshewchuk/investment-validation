@@ -11,6 +11,10 @@ from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
 @dataclass(frozen=True)
 class CheckParameters:
     expected_ids: tuple[str, ...]
+    #: Exercises the same launch-time input-binding resolution as the legacy
+    #: kinds (P2-5/B1a); the ``artifact_check`` worker never reads a bound
+    #: file, so this is only ever used to test resolution and cache identity.
+    input_bindings: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
