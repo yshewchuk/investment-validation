@@ -51,6 +51,8 @@ from engine.v2.foundation import DocumentError, canonical_json, to_document
 
 H = "sha256:" + "0" * 64
 TIMESTAMP = "2026-01-15T20:00:00.000000Z"
+NAIVE_A = "2026-01-15T20:00:00.000000"
+NAIVE_B = "2026-01-16T20:00:00.000000"
 
 
 # --------------------------------------------------------------------------
@@ -427,6 +429,64 @@ def test_time_interval_with_neither_bound_is_refused():
     with pytest.raises(DocumentError) as err:
         decode_document(TimeInterval, doc)
     assert err.value.code == "TIME_INTERVAL_UNBOUNDED"
+
+
+# --------------------------------------------------------------------------
+# the third time-bound kind: offset-less "naive_timestamp" (legacy columns)
+# --------------------------------------------------------------------------
+
+
+def test_naive_timestamp_bounds_are_accepted_in_a_time_interval():
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = NAIVE_A
+    doc["end_exclusive"] = NAIVE_B
+    assert decode_document(TimeInterval, doc).start_inclusive == NAIVE_A
+
+
+def test_naive_and_aware_bounds_mixed_in_a_time_interval_is_refused():
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = NAIVE_A
+    doc["end_exclusive"] = TIMESTAMP
+    with pytest.raises(DocumentError) as err:
+        decode_document(TimeInterval, doc)
+    assert err.value.code == "MIXED_TIME_BOUND_KINDS"
+
+
+@pytest.mark.parametrize("malformed", [
+    "2026-01-15T20:00:00",   # naive shape but no microseconds
+    "2026-01-15T20:00:00Z",  # naive shape with a trailing Z but no microseconds
+])
+def test_malformed_naive_time_bound_is_refused(malformed):
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = malformed
+    with pytest.raises(DocumentError) as err:
+        decode_document(TimeInterval, doc)
+    assert err.value.code == "BAD_TIME_BOUND_FORMAT"
+
+
+def test_fragment_record_naive_time_bounds_are_accepted():
+    doc = to_document(dataclasses.replace(SAMPLES["FragmentRecord"], time_min=NAIVE_A, time_max=NAIVE_B))
+    decoded = decode_document(FragmentRecord, doc)
+    assert decoded.time_min == NAIVE_A and decoded.time_max == NAIVE_B
+
+
+def test_fragment_record_equal_naive_time_bounds_are_accepted():
+    doc = to_document(dataclasses.replace(SAMPLES["FragmentRecord"], time_min=NAIVE_A, time_max=NAIVE_A))
+    assert decode_document(FragmentRecord, doc).time_min == NAIVE_A
+
+
+def test_fragment_record_mixed_time_bound_kinds_is_refused():
+    doc = to_document(dataclasses.replace(SAMPLES["FragmentRecord"], time_min=NAIVE_A, time_max=TIMESTAMP))
+    with pytest.raises(DocumentError) as err:
+        decode_document(FragmentRecord, doc)
+    assert err.value.code == "MIXED_TIME_BOUND_KINDS"
+
+
+def test_fragment_record_time_bounds_out_of_order_is_refused():
+    doc = to_document(dataclasses.replace(SAMPLES["FragmentRecord"], time_min=NAIVE_B, time_max=NAIVE_A))
+    with pytest.raises(DocumentError) as err:
+        decode_document(FragmentRecord, doc)
+    assert err.value.code == "TIME_BOUNDS_OUT_OF_ORDER"
 
 
 def test_snapshot_ref_missing_knowledge_mode_for_a_table_is_refused():

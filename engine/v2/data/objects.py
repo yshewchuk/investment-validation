@@ -25,10 +25,13 @@ Judgement calls, recorded here rather than silently decided:
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 ``engine.v2.contracts``, ``engine.v2.foundation``, this package's own
-``errors``, and ``pyarrow`` — never ``engine.v2.ops`` or legacy ``engine.*``.
-A handful of stdlib facts (``stat.S_ISREG``, ``uuid4``, ``math.isnan``) are
-reproduced with bit tests/``os`` primitives instead of imported, to keep this
-module's import fan-out inside the §4.3 budget (8, non-orchestrator).
+``errors``/``time_formats`` (``from . import errors, time_formats``, one
+relative-import fan-out edge rather than two absolute ones — the same style
+``legacy_adapter.py`` uses), and ``pyarrow`` — never ``engine.v2.ops`` or
+legacy ``engine.*``. A handful of stdlib facts (``stat.S_ISREG``, ``uuid4``,
+``math.isnan``) are reproduced with bit tests/``os`` primitives instead of
+imported, to keep this module's import fan-out inside the §4.3 budget (8,
+non-orchestrator).
 """
 from __future__ import annotations
 
@@ -47,7 +50,6 @@ from engine.v2.contracts import (
     TableContract,
     TableContractRef,
 )
-from engine.v2.data.errors import fail
 from engine.v2.foundation import (
     CONTENT_HASH_PREFIX,
     ArtifactError,
@@ -55,6 +57,8 @@ from engine.v2.foundation import (
     canonical_json,
     safe_relative_path,
 )
+
+from . import errors, time_formats
 
 __all__ = [
     "FragmentInspection",
@@ -136,7 +140,7 @@ def _safe_source_parts(file_ref: LegacyFileRef) -> tuple[str, ...]:
     try:
         return safe_relative_path(file_ref.path)
     except ArtifactError as exc:
-        raise fail("INPUT_CHANGED", "legacy file reference path is not a safe relative path") from exc
+        raise errors.fail("INPUT_CHANGED", "legacy file reference path is not a safe relative path") from exc
 
 
 def _open_legacy_source(source_root: str, parts: tuple[str, ...]) -> int:
@@ -144,7 +148,7 @@ def _open_legacy_source(source_root: str, parts: tuple[str, ...]) -> int:
     try:
         fd = os.open(source_root, _DIR_FLAGS)
     except OSError as exc:
-        raise fail("INPUT_CHANGED", "legacy source root is not a real directory") from exc
+        raise errors.fail("INPUT_CHANGED", "legacy source root is not a real directory") from exc
     try:
         for part in parts[:-1]:
             nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
@@ -152,7 +156,7 @@ def _open_legacy_source(source_root: str, parts: tuple[str, ...]) -> int:
             fd = nxt
         return os.open(parts[-1], _FILE_FLAGS, dir_fd=fd)
     except OSError as exc:
-        raise fail("INPUT_CHANGED", "legacy source file could not be opened safely") from exc
+        raise errors.fail("INPUT_CHANGED", "legacy source file could not be opened safely") from exc
     finally:
         os.close(fd)
 
@@ -160,9 +164,9 @@ def _open_legacy_source(source_root: str, parts: tuple[str, ...]) -> int:
 def _check_regular_private_copy(src_fd: int) -> None:
     info = os.fstat(src_fd)
     if (info.st_mode & _S_IFMT) != _S_IFREG:
-        raise fail("INPUT_CHANGED", "legacy source is not a regular file")
+        raise errors.fail("INPUT_CHANGED", "legacy source is not a regular file")
     if info.st_nlink != 1:
-        raise fail("INPUT_CHANGED", "legacy source has more than one hard link")
+        raise errors.fail("INPUT_CHANGED", "legacy source has more than one hard link")
 
 
 def _copy_into_staging(store: ArtifactStore, attempt_id: str, src_fd: int, fault) -> tuple[str, str, int]:
@@ -199,7 +203,7 @@ def _check_matches_reference(store: ArtifactStore, attempt_id: str, rel: str, he
     actual_hash = CONTENT_HASH_PREFIX + hexdigest
     if size != file_ref.byte_size or actual_hash != file_ref.content_hash:
         (store.staging_dir(attempt_id) / rel).unlink(missing_ok=True)
-        raise fail("INPUT_CHANGED", "legacy source bytes do not match its recorded file reference")
+        raise errors.fail("INPUT_CHANGED", "legacy source bytes do not match its recorded file reference")
 
 
 # --------------------------------------------------------------------------
@@ -269,14 +273,14 @@ def _verify_object(store: ArtifactStore, object_ref: ObjectRef):
     try:
         return store.verify(ref)
     except ArtifactError as exc:
-        raise fail("OBJECT_CORRUPT", "published object bytes do not match its recorded hash") from exc
+        raise errors.fail("OBJECT_CORRUPT", "published object bytes do not match its recorded hash") from exc
 
 
 def _open_parquet_file(path) -> pq.ParquetFile:
     try:
         return pq.ParquetFile(path)
     except (OSError, pa.ArrowException) as exc:
-        raise fail("OBJECT_CORRUPT", "parquet footer could not be read") from exc
+        raise errors.fail("OBJECT_CORRUPT", "parquet footer could not be read") from exc
 
 
 def _match_contract_columns(contract: TableContract, schema: pa.Schema) -> tuple[list[str], list[str]]:
@@ -284,7 +288,7 @@ def _match_contract_columns(contract: TableContract, schema: pa.Schema) -> tuple
     file_names = set(schema.names)
     extra = sorted(file_names - set(declared))
     if extra:
-        raise fail("CONTRACT_MISMATCH", f"undeclared column(s) in the parquet file: {extra}")
+        raise errors.fail("CONTRACT_MISMATCH", f"undeclared column(s) in the parquet file: {extra}")
     present, missing = [], []
     for column in contract.columns:
         if column.name in file_names:
@@ -293,14 +297,14 @@ def _match_contract_columns(contract: TableContract, schema: pa.Schema) -> tuple
         elif column.nullable:
             missing.append(column.name)
         else:
-            raise fail("CONTRACT_MISMATCH", f"missing non-nullable column {column.name!r}")
+            raise errors.fail("CONTRACT_MISMATCH", f"missing non-nullable column {column.name!r}")
     return present, missing
 
 
 def _check_column_type(column, schema: pa.Schema) -> None:
     actual = normalize_physical_type(str(schema.field(column.name).type))
     if actual != column.physical_type:
-        raise fail("CONTRACT_MISMATCH",
+        raise errors.fail("CONTRACT_MISMATCH",
                    f"{column.name}: contract declares {column.physical_type!r}, parquet has {actual!r}")
 
 
@@ -317,7 +321,7 @@ def _iter_batches(parquet_file: pq.ParquetFile, present: list[str], batch_rows: 
     try:
         yield from parquet_file.iter_batches(batch_size=batch_rows, columns=present)
     except (OSError, pa.ArrowException) as exc:
-        raise fail("OBJECT_CORRUPT", "parquet batch could not be decoded") from exc
+        raise errors.fail("OBJECT_CORRUPT", "parquet batch could not be decoded") from exc
 
 
 def _process_row(contract: TableContract, decoded: dict, i: int, partition_key: str,
@@ -334,9 +338,9 @@ def _check_key_order(state: _StreamState, key: tuple) -> None:
     if state.previous_key is None:
         state.key_min = key
     elif key == state.previous_key:
-        raise fail("CONTRACT_MISMATCH", "duplicate primary key")
+        raise errors.fail("CONTRACT_MISMATCH", "duplicate primary key")
     elif key < state.previous_key:
-        raise fail("CONTRACT_MISMATCH", "primary key is out of order")
+        raise errors.fail("CONTRACT_MISMATCH", "primary key is out of order")
     state.key_max = key
     state.previous_key = key
 
@@ -345,7 +349,7 @@ def _check_partition(contract: TableContract, decoded: dict, i: int, partition_k
     for name in contract.partition_columns:
         value = _partition_value(contract, decoded, name, i)
         if str(value) != partition_key:
-            raise fail("CONTRACT_MISMATCH", f"row does not belong to partition {name}={partition_key!r}")
+            raise errors.fail("CONTRACT_MISMATCH", f"row does not belong to partition {name}={partition_key!r}")
 
 
 def _partition_value(contract: TableContract, decoded: dict, name: str, i: int):
@@ -355,7 +359,7 @@ def _partition_value(contract: TableContract, decoded: dict, name: str, i: int):
     if name == "year" and contract.observation_time_column in decoded:
         raw = decoded[contract.observation_time_column][i]
         return None if raw is None else int(raw[:4])
-    raise fail("CONTRACT_MISMATCH", f"partition column {name!r} cannot be derived")
+    raise errors.fail("CONTRACT_MISMATCH", f"partition column {name!r} cannot be derived")
 
 
 def _update_time_bounds(contract: TableContract, decoded: dict, i: int, state: _StreamState) -> None:
@@ -404,9 +408,9 @@ def _decode_float(column, value: float | None) -> float | None:
     if value != value:  # NaN is the only float that compares unequal to itself
         if column.nullable:
             return None
-        raise fail("CONTRACT_MISMATCH", f"{column.name}: NaN in a non-nullable column")
+        raise errors.fail("CONTRACT_MISMATCH", f"{column.name}: NaN in a non-nullable column")
     if value in (float("inf"), float("-inf")):
-        raise fail("CONTRACT_MISMATCH", f"{column.name}: an infinite value is never valid")
+        raise errors.fail("CONTRACT_MISMATCH", f"{column.name}: an infinite value is never valid")
     return value
 
 
@@ -419,7 +423,7 @@ def _decode_timestamps(column, array: pa.Array, unit: str) -> list[str | None]:
             continue
         if unit == "ns":
             if tick % 1000 != 0:
-                raise fail("CONTRACT_MISMATCH",
+                raise errors.fail("CONTRACT_MISMATCH",
                            f"{column.name}: sub-microsecond timestamp precision is refused")
             micros = tick // 1000
         else:
@@ -429,7 +433,7 @@ def _decode_timestamps(column, array: pa.Array, unit: str) -> list[str | None]:
 
 
 def _format_naive_timestamp(micros: int) -> str:
-    return (_EPOCH + timedelta(microseconds=micros)).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    return (_EPOCH + timedelta(microseconds=micros)).strftime(time_formats.NAIVE_TIMESTAMP_FORMAT)
 
 
 # --------------------------------------------------------------------------

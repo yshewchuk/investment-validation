@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -197,6 +198,64 @@ def test_end_to_end_fragments_dataset_snapshot(tmp_path):
     manifests.verify_snapshot_ref(snap, {"securities": manifest})
     assert decode_document(SnapshotRef, to_document(snap)) == snap
     assert snap.knowledge_mode_by_table == {"securities": "reconstructed"}
+
+
+# --------------------------------------------------------------------------
+# real parquet with a naive observation_time_column: daily_market's `date`
+# --------------------------------------------------------------------------
+
+
+_DAILY_MARKET_CONTRACT = _contract("daily_market")
+_DAILY_MARKET_REF = _contract_ref(_DAILY_MARKET_CONTRACT)
+
+
+def _daily_market_rows(year: int) -> list[dict]:
+    common = dict(spot=100.0, iv10=30.0, iv30=32.0, exern_iv10=29.0, exern_iv30=31.0,
+                  implied_move=5.0, implied_reconstructed=False, rvol30=28.0, skew=1.1,
+                  contango=0.5, fwd90_30=33.0, fexern90_30=34.0, iee=0.2, mcap_usd=1e9,
+                  mcap_log=20.7, mcap_asof=datetime(year, 1, 2), mcap_age_days=0.0,
+                  src_spot="orats", src_iv="orats", src_mcap="orats")
+    return [
+        dict(ticker="AAA", date=datetime(year, 1, 2), year=year, **common),
+        dict(ticker="AAA", date=datetime(year, 1, 3), year=year, **common),
+    ]
+
+
+def _daily_market_records(store: ArtifactStore) -> list[FragmentRecord]:
+    records = []
+    for year in (2024, 2025):
+        table = _table_from_rows(_DAILY_MARKET_CONTRACT, _daily_market_rows(year))
+        obj = _publish_bytes(store, _to_bytes(table))
+        inspection = inspect_fragment(store, obj, _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF, str(year))
+        records.append(manifests.fragment_record(
+            inspection, _DAILY_MARKET_REF, input_receipt_refs=(RECEIPT_A,), import_request_hash=IRH_A))
+    return records
+
+
+def test_end_to_end_naive_observation_time_bounds_decode_and_verify(tmp_path):
+    """``daily_market.date`` is a naive ``timestamp[ns]`` column: this is the
+    real pipeline exercising the ``time_min``/``time_max`` path the securities
+    end-to-end case above never reaches (securities has no observation_time_column)."""
+    store = ArtifactStore(tmp_path)
+    records = _daily_market_records(store)
+
+    for record in records:
+        assert record.time_min is not None and record.time_max is not None
+        assert record.time_min <= record.time_max
+        manifests.verify_fragment_record(record)
+        assert decode_document(FragmentRecord, to_document(record)) == record
+
+    manifest = manifests.dataset_manifest(
+        _DAILY_MARKET_REF, records, knowledge_mode="reconstructed",
+        coverage_receipt_refs=(RECEIPT_A,), availability_evidence_refs=())
+    manifests.verify_dataset_manifest(manifest, records)
+    assert decode_document(DatasetManifest, to_document(manifest)) == manifest
+
+    snap = manifests.snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1", source_priority_version="prio.v1",
+        finality_receipt_refs=(RECEIPT_A,))
+    manifests.verify_snapshot_ref(snap, {"daily_market": manifest})
+    assert decode_document(SnapshotRef, to_document(snap)) == snap
 
 
 # --------------------------------------------------------------------------
