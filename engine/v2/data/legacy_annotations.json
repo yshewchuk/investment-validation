@@ -1,0 +1,2311 @@
+{
+  "annotations_version": "legacy_table_annotations.v1.0",
+  "tables": {
+    "securities": {
+      "columns": {
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "partition year of the (ticker, year) row; not a specific observation date"
+        },
+        "first_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null when this (ticker, year) partition has zero observations",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "first date with any observation backing this (ticker, year) row"
+        },
+        "last_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null when this (ticker, year) partition has zero observations",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "last date with any observation backing this (ticker, year) row"
+        },
+        "mcap_usd": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "not a price; no split/dividend adjustment applies",
+          "timezone": null,
+          "null_policy": "null when no market-cap observation is available for this (ticker, year)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_log": {
+          "unit": "log_usd",
+          "scale": "natural log of mcap_usd",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as mcap_usd (log of an unavailable value)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_raw": {
+          "unit": "ORATS mktCap units, era-dependent: billions before 2017-06-28, millions 2017-06-28..2026-03-10, thousands from 2026-03-11 (see mcap_unit_era)",
+          "scale": "era_dependent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as mcap_usd",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_unit_era": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as the mcap_* fields it describes",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_quantized": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as mcap_raw; True only applies pre-2017-06-28",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "n_obs": {
+          "unit": "count of daily observations",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        }
+      },
+      "primary_key": [
+        "ticker",
+        "year"
+      ],
+      "duplicate_policy": "reject: engine.data.schemas.assert_schema rejects a curated frame carrying more than one row per (ticker, year) before it may enter Tier 2",
+      "filterable_columns": [
+        "ticker",
+        "year"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "year"
+      ],
+      "observation_time_column": null,
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "The legacy schema declares no final/provisional state. A row is treated as final once the normalizer's assert_schema gate admits it to curated storage; there is no later correction/revision marker on this table.",
+      "provenance_semantics": "src records which source supplied the size figure (see engine.data.schemas.SOURCE_PRIORITY['spot'] for the general orats/yfinance priority pattern); no per-row raw-object hash or normalizer version is carried.",
+      "coverage_semantics": "No formal coverage watermark or expected-population declaration; completeness of a (ticker, year) partition is whatever the last curated rebuild produced. Phase 3 owns coverage watermarks (guide \u00a75.3).",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "earnings_events": {
+      "columns": {
+        "event_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "opaque stable id, legacy spelling '{ticker}_{YYYY-MM-DD}'; the embedded date is the ticker/date key at admission time, not a live pointer"
+        },
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "event_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "the canonical, source-priority-resolved event date; the calendar revision this row reflects is not separately versioned in the legacy schema"
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "partition year of event_date"
+        },
+        "session": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when no source in engine.calendar.SESSION_PRIORITY supplied a session",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "session_src": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as session",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "annc_tod": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown (exchange-local HHMM as the winning source reports it; not normalized to UTC)",
+          "null_policy": "null when the session's source did not supply an announcement time-of-day",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_orats": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_oquants": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_nasdaq": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_yfinance": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "date_agree": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "date_conflict": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "updated_at": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown (format and timezone are whatever the contributing source stamped)",
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "unknown"
+        },
+        "event_cluster_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when no reconciled claim cluster was formed",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "claim_count": {
+          "unit": "count of source-date claims in the cluster",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as event_cluster_id",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "reconciliation": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when no reconciliation rule applied",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        }
+      },
+      "primary_key": [
+        "event_id"
+      ],
+      "duplicate_policy": "reject: assert_schema rejects more than one row per event_id before Tier 2 admission",
+      "filterable_columns": [
+        "ticker",
+        "event_id",
+        "year",
+        "session"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "event_date",
+        "event_id"
+      ],
+      "observation_time_column": "event_date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "date_agree/date_conflict/reconciliation record how the canonical date was resolved across sources, but the schema declares no separate calendar-revision identity or supersession chain: a later correction overwrites the row in place, it is not versioned.",
+      "provenance_semantics": "src_orats/src_oquants/src_nasdaq/src_yfinance flag which sources carried this event; session_src names the session winner. engine.data.schemas.SOURCE_PRIORITY['calendar'] documents the priority order (orats for history, nasdaq/yfinance for forward dates, session priority orats > yfinance > nasdaq).",
+      "coverage_semantics": "No formal coverage watermark. event_cluster_id/claim_count describe how a single canonical event was reconciled from possibly-conflicting source claims, not an expected-population denominator.",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "daily_market": {
+      "columns": {
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "trade date (EOD session date)"
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "partition year of date"
+        },
+        "spot": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": "unknown (ORATS stockPrice; split/dividend basis not stated)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "iv10": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "iv30": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "exern_iv10": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "exern_iv30": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "implied_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_implied_zero_sentinel: raw ORATS impliedMove uses 0 to mean 'no quote', not 'no expected movement' (25.8% of daily_market rows); masked to null at normalization (EXP-110). The absence itself is kept separately as the has_implied_quote feature (EXP-111), not a column of this table. orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": "quoted pre-earnings implied move as of date"
+        },
+        "implied_reconstructed": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "false by construction where not explicitly flagged; this column is non-informative about the oquants-pre-2022-reconstruction convention, which applies to the retired oquants implied series, not this ORATS-sourced column",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "rvol30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "skew": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "contango": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "fwd90_30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "fexern90_30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "iee": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_usd": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "not a price; no split/dividend adjustment applies",
+          "timezone": null,
+          "null_policy": "null when no market-cap observation is available as of date",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_log": {
+          "unit": "log_usd",
+          "scale": "natural log of mcap_usd",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as mcap_usd",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mcap_asof": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null under the same condition as mcap_usd/mcap_log",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "date the carried-forward market cap was actually observed; the backward join can leave this far behind date (see mcap_age_days)"
+        },
+        "mcap_age_days": {
+          "unit": "calendar days",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as mcap_asof",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_spot": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_iv": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_mcap": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        }
+      },
+      "primary_key": [
+        "ticker",
+        "date"
+      ],
+      "duplicate_policy": "reject: assert_schema rejects more than one row per (ticker, date) before Tier 2 admission",
+      "filterable_columns": [
+        "ticker",
+        "date",
+        "year"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "date"
+      ],
+      "observation_time_column": "date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "No final/provisional marker; EOD state as normalized. mcap_asof records a separate as-of date for the carried-forward cap, which can lag date (see mcap_age_days).",
+      "provenance_semantics": "src_spot/src_iv/src_mcap record which source won per field. engine.data.schemas.SOURCE_PRIORITY declares spot: orats cross-checked against yfinance close (1.3% tolerance).",
+      "coverage_semantics": "No formal coverage watermark or expected-population declaration.",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "option_chains": {
+      "columns": {
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "obs_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "chain observation (trade) date"
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "partition year of obs_date"
+        },
+        "expiry": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "contract expiry date"
+        },
+        "dte": {
+          "unit": "calendar days",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": [
+            0.0,
+            3650.0
+          ],
+          "observation_time_semantics": null
+        },
+        "strike": {
+          "unit": "usd per share",
+          "scale": null,
+          "adjustment_basis": "unknown (raw ORATS strike; corporate-action adjustment basis not stated)",
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "right": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "bid": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null where ORATS returned no bid quote",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "ask": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null where ORATS returned no ask quote",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "mid": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when bid or ask is null",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "iv": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null where ORATS returned no side-specific mid IV",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "delta": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null where ORATS returned no delta",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "spot": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "unknown (underlying price on obs_date; split/dividend basis not stated)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": "orats_flt_max_sentinel: raw ORATS FLT_MAX (~3.4e38) sentinel for a missing numeric value is masked to null at normalization (0.097% of cells repo-wide); this column never carries the raw sentinel.",
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_file": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "chain_kind": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "volume": {
+          "unit": "contracts",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'this field was never requested' for chains pulled before 2026-09 (the 19,061-file cache did not request liquidity fields); zero means a genuine zero. The two must not be conflated",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "open_interest": {
+          "unit": "contracts",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'this field was never requested' for chains pulled before 2026-09; zero means a genuine zero",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "bid_size": {
+          "unit": "contracts",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'this field was never requested' for chains pulled before 2026-09; zero means a genuine zero",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "ask_size": {
+          "unit": "contracts",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'this field was never requested' for chains pulled before 2026-09; zero means a genuine zero",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "quote_repaired": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown; True marks a crossed (bid > ask) raw quote collapsed to min(bid, ask)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        }
+      },
+      "primary_key": [
+        "ticker",
+        "obs_date",
+        "expiry",
+        "strike",
+        "right"
+      ],
+      "duplicate_policy": "reject: assert_schema rejects more than one row per (ticker, obs_date, expiry, strike, right) before Tier 2 admission",
+      "filterable_columns": [
+        "ticker",
+        "obs_date",
+        "year",
+        "expiry",
+        "strike",
+        "right",
+        "chain_kind"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "obs_date",
+        "expiry",
+        "strike",
+        "right"
+      ],
+      "observation_time_column": "obs_date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "No final/provisional marker. quote_repaired flags a crossed raw quote collapsed to min(bid, ask) rather than dropped; the row is otherwise treated as final once curated.",
+      "provenance_semantics": "src/src_file record the source system and the raw file a row was parsed from. engine.data.schemas.SOURCE_PRIORITY['option_chains'] = orats; this is documented as the only sanctioned P&L price source.",
+      "coverage_semantics": "chain_kind (entry | exit | t14 | c2) records why a chain was pulled, not a completeness denominator. No formal coverage watermark.",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "option_daily": {
+      "columns": {
+        "contract_ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "OCC contract id; expiry/strike/right are parsed from it, not independently observed"
+        },
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "obs_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "utc",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "trade date of the bar (UTC date)"
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "partition year of obs_date"
+        },
+        "expiry": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "contract expiry date, parsed from the OCC id"
+        },
+        "strike": {
+          "unit": "usd per share",
+          "scale": null,
+          "adjustment_basis": "unknown; parsed from the OCC id, standard 100-multiplier assumed but not independently stated for this table",
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "right": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "open": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "real traded price, not a quote (Polygon daily aggregate)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "high": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "real traded price, not a quote (Polygon daily aggregate)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "low": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "real traded price, not a quote (Polygon daily aggregate)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "close": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "real traded price, not a quote (Polygon daily aggregate)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "vwap": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": "real traded price, not a quote (Polygon daily aggregate)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "volume": {
+          "unit": "contracts",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "n_trades": {
+          "unit": "count of fills",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "src_file": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        }
+      },
+      "primary_key": [
+        "contract_ticker",
+        "obs_date"
+      ],
+      "duplicate_policy": "reject: assert_schema rejects more than one row per (contract_ticker, obs_date) before Tier 2 admission",
+      "filterable_columns": [
+        "contract_ticker",
+        "ticker",
+        "obs_date",
+        "year",
+        "expiry",
+        "strike",
+        "right"
+      ],
+      "orderable_columns": [
+        "contract_ticker",
+        "obs_date"
+      ],
+      "observation_time_column": "obs_date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "No final/provisional marker. Real traded bars (Polygon daily aggregates), carrying no bid/ask by construction; exists only from 2024-08-19 (engine.data.schemas.CONVENTIONS['polygon_options_window']).",
+      "provenance_semantics": "src/src_file record the source system and the Tier-1 payload a row was parsed from. engine.data.schemas.SOURCE_PRIORITY['option_daily'] = polygon (real traded bars; 2024-08-19+ only on this plan).",
+      "coverage_semantics": "No formal coverage watermark. Table existence itself is bounded by the polygon_options_window convention (no rows before 2024-08-19).",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "trades": {
+      "columns": {
+        "trade_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "kind": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "strategy": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "variant": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "event_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "event_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "unknown (may be null for a non-earnings trade)"
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "partition year"
+        },
+        "legs": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown; JSON-encoded leg list as resolved, not a typed column",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "entry_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "unknown"
+        },
+        "exit_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "unknown"
+        },
+        "strike": {
+          "unit": "usd per share",
+          "scale": null,
+          "adjustment_basis": "unknown (primary/ATM leg strike; corporate-action basis not stated)",
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "expiry": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "primary leg's expiry date"
+        },
+        "fill_alpha": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown; the FillModel alpha this row was priced at",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "entry_cost": {
+          "unit": "usd",
+          "scale": "net debit",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "exit_value": {
+          "unit": "usd",
+          "scale": "net proceeds",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "ret": {
+          "unit": "fraction",
+          "scale": "fraction",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when entry_cost is null or zero (undefined ratio)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        },
+        "provenance": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null
+        }
+      },
+      "primary_key": [
+        "trade_id"
+      ],
+      "duplicate_policy": "reject: assert_schema rejects more than one row per trade_id before Tier 2 admission",
+      "filterable_columns": [
+        "trade_id",
+        "kind",
+        "strategy",
+        "ticker",
+        "event_id",
+        "year"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "entry_date",
+        "trade_id"
+      ],
+      "observation_time_column": "entry_date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "No final/provisional marker. A trade row is written once by the producing sim/paper/live path; the legacy schema declares no correction/revision mechanism.",
+      "provenance_semantics": "provenance names where the row came from; event_id is a soft FK to earnings_events (nullable, unenforced by a database constraint).",
+      "coverage_semantics": "No formal coverage watermark or expected-population declaration.",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "feature_panel": {
+      "columns": {
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "string",
+          "nullable": false
+        },
+        "k": {
+          "unit": "count of prior admitted events for this ticker",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": false
+        },
+        "date": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "the event (print) date; stored at microsecond resolution (pandas 3 default for a pd.to_datetime-parsed column, unlike the numpy-constructed nanosecond *_asof columns \u2014 see engine.data.schemas._PANDAS_DTYPE comment)",
+          "physical_type": "timestamp[us]",
+          "nullable": false
+        },
+        "quarter": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown; fiscal-quarter number as the oquants moves file supplies it",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": true
+        },
+        "move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "unknown; realized session-aware close-to-close move (BMO: close(t-1)->close(t); AMC: close(t)->close(t+1))",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as move",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "n_prior": {
+          "unit": "count of prior events in the history recursion",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": false
+        },
+        "mean_prior_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "never null for an admitted row: MIN_HISTORY=4 guarantees n_prior>=4 prior events",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": false
+        },
+        "mean_prior_abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "never null for an admitted row: MIN_HISTORY=4 guarantees n_prior>=4 prior events",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": false
+        },
+        "ema2_prior_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 2 (the causal EMA recursion needs 2 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema4_prior_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 4 (the causal EMA recursion needs 4 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema8_prior_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 8 (the causal EMA recursion needs 8 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema12_prior_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 12 (the causal EMA recursion needs 12 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema2_prior_abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 2 (the causal EMA recursion needs 2 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema4_prior_abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 4 (the causal EMA recursion needs 4 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema8_prior_abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 8 (the causal EMA recursion needs 8 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ema12_prior_abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when n_prior < 12 (the causal EMA recursion needs 12 prior events to seed)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "mean_prior_or_implied": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when the ticker has no prior event with a non-null or_implied quote; strictly prior expanding mean, computed after the ORATS block",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "year": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "calendar year of date",
+          "physical_type": "int64",
+          "nullable": false
+        },
+        "spy_ret21": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when the S&P daily series has fewer than the lookback window's sessions before the anchor row",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_ret63": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when the S&P daily series has fewer than the lookback window's sessions before the anchor row",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_ret252": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when the S&P daily series has fewer than the lookback window's sessions before the anchor row",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_dd252": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 252 prior S&P sessions exist before the anchor row",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_vol5": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 5 prior S&P sessions exist before the anchor row; annualized simple-return stdev (ddof=1) x sqrt(252) x 100 \u2014 the legacy pandas pct_change().rolling(w).std() definition, not log returns",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_vol20": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 20 prior S&P sessions exist before the anchor row; annualized simple-return stdev (ddof=1) x sqrt(252) x 100 \u2014 the legacy pandas pct_change().rolling(w).std() definition, not log returns",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_vol60": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 60 prior S&P sessions exist before the anchor row; annualized simple-return stdev (ddof=1) x sqrt(252) x 100 \u2014 the legacy pandas pct_change().rolling(w).std() definition, not log returns",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_vol252": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 252 prior S&P sessions exist before the anchor row; annualized simple-return stdev (ddof=1) x sqrt(252) x 100 \u2014 the legacy pandas pct_change().rolling(w).std() definition, not log returns",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "spy_vol20_rel252": {
+          "unit": "fraction",
+          "scale": "ratio minus one",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null unless both spy_vol20 and spy_vol252 are available and spy_vol252 > 0",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "signed_streak": {
+          "unit": "count of consecutive same-signed prior moves, signed by that run's direction",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "0 for a ticker's first event, never null (integer arithmetic over numpy int arrays)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": false
+        },
+        "ema12r_abs": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "never null for an admitted row: falls back to mean_prior_abs_move when n_prior < 12",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": false
+        },
+        "dist_high": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 252 prior sessions of the ticker's own (yfinance-or-Tier-1) price history exist before the anchor row, or no price history was found for the ticker",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "dist_ema": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as dist_high",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ret5": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 5 prior sessions of the ticker's own price history exist before the anchor row, or no price history was found for the ticker",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ret10": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 10 prior sessions of the ticker's own price history exist before the anchor row, or no price history was found for the ticker",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "ret20": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 20 prior sessions of the ticker's own price history exist before the anchor row, or no price history was found for the ticker",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_implied": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_skewing": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_contango": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_rvol30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_exern30": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_iv30": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_iee": {
+          "unit": "unknown",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_fwd90_30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_fexern90_30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no row with a non-null src_iv before the anchor row (searchsorted 'left' - 1 on the event date; see engine.data.features.panel.add_orats_features)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "or_exern_z252": {
+          "unit": "z-score (dimensionless)",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when fewer than 252 prior in-name exern_iv30 observations exist before the anchor row's IV row (within-ticker standardization, strictly prior)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "mcap_log": {
+          "unit": "log_usd",
+          "scale": "natural log of mcap_usd",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no mcap observation before the anchor row",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "mcap_usd": {
+          "unit": "usd",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null under the same condition as mcap_log",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "mcap_asof": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null under the same condition as mcap_log/mcap_usd",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "date the carried-forward market cap used by this row was actually observed in Tier-2 daily_market",
+          "physical_type": "timestamp[ns]",
+          "nullable": true
+        },
+        "pre_iv30": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no session-aware pre-print row for this event (BMO: last close strictly before date; AMC: last close on-or-before date)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pre_iv10": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no session-aware pre-print row for this event (BMO: last close strictly before date; AMC: last close on-or-before date)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pre_exern_iv30": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no session-aware pre-print row for this event (BMO: last close strictly before date; AMC: last close on-or-before date)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pre_exern_iv10": {
+          "unit": "percent",
+          "scale": "vol points expressed as percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null when Tier-2 daily_market has no session-aware pre-print row for this event (BMO: last close strictly before date; AMC: last close on-or-before date)",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "float64",
+          "nullable": true
+        }
+      },
+      "primary_key": [
+        "ticker",
+        "date"
+      ],
+      "duplicate_policy": "assumed unique by construction (one row per admitted (ticker, event) walk in engine.data.features.panel.build_events); not enforced by an explicit uniqueness check",
+      "filterable_columns": [
+        "ticker",
+        "date",
+        "year"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "date"
+      ],
+      "observation_time_column": "date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "No final/provisional marker. Tier 3 is a deterministic function of Tier 2, rebuilt whole; a row's causal features can only change if Tier 2 or the causal recipe changes.",
+      "provenance_semantics": "No per-row raw-object hash or normalizer version column. Each block's source is fixed by which build_panel stage produced it (oquants moves / S&P daily / yfinance or Tier-1 price history / Tier-2 daily_market); the per-block *_asof anchor dates the panel actually reads are computed but dropped before the table is written (see build_panel).",
+      "coverage_semantics": "Total over admitted events: MIN_HISTORY=4 gates admission (an event needs 4 prior events in the ticker's own history), not a coverage watermark. No formal expected-population declaration.",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    },
+    "tier4_forecasts": {
+      "columns": {
+        "ticker": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "string",
+          "nullable": false
+        },
+        "event_date": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "the Tier-3 event (print) date; the (ticker, event_date) grain is total over every Tier-3 event",
+          "physical_type": "timestamp[us]",
+          "nullable": false
+        },
+        "pred_abs_move": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "point forecast of the realized |move| target",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_abs_move_p10": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "10th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_abs_move_p90": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "90th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_abs_move_sd": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "held-out residual pool standard deviation behind the band",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_abs_move_resid_n": {
+          "unit": "count of held-out residuals behind the band (MIN_RESIDUALS=250 floor for a real band)",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": true
+        },
+        "pred_abs_move_model_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "string",
+          "nullable": true
+        },
+        "pred_abs_move_fold_start": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "first date of the monthly fold whose model, fit strictly before this date, produced this row's forecast",
+          "physical_type": "timestamp[us]",
+          "nullable": true
+        },
+        "pred_im_t1_d14": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "point forecast of the T-1, 14-day-horizon implied move",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_im_t1_d14_p10": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "10th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_im_t1_d14_p90": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "90th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_im_t1_d14_sd": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "held-out residual pool standard deviation behind the band",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_im_t1_d14_resid_n": {
+          "unit": "count of held-out residuals behind the band (MIN_RESIDUALS=250 floor for a real band)",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": true
+        },
+        "pred_im_t1_d14_model_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "string",
+          "nullable": true
+        },
+        "pred_im_t1_d14_fold_start": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "first date of the monthly fold whose model, fit strictly before this date, produced this row's forecast",
+          "physical_type": "timestamp[us]",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "point forecast of the 14-day run-up |move|",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14_p10": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "10th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14_p90": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "90th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14_sd": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "held-out residual pool standard deviation behind the band",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14_resid_n": {
+          "unit": "count of held-out residuals behind the band (MIN_RESIDUALS=250 floor for a real band)",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14_model_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "string",
+          "nullable": true
+        },
+        "pred_runup_abs_move_d14_fold_start": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "first date of the monthly fold whose model, fit strictly before this date, produced this row's forecast",
+          "physical_type": "timestamp[us]",
+          "nullable": true
+        },
+        "pred_iv_crush_30": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "point forecast of the 30-day IV crush",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_iv_crush_30_p10": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "10th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_iv_crush_30_p90": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "90th-percentile band bound from the fold's held-out residual pool",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_iv_crush_30_sd": {
+          "unit": "percent",
+          "scale": "percent",
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "held-out residual pool standard deviation behind the band",
+          "physical_type": "float64",
+          "nullable": true
+        },
+        "pred_iv_crush_30_resid_n": {
+          "unit": "count of held-out residuals behind the band (MIN_RESIDUALS=250 floor for a real band)",
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "int64",
+          "nullable": true
+        },
+        "pred_iv_crush_30_model_id": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": null,
+          "physical_type": "string",
+          "nullable": true
+        },
+        "pred_iv_crush_30_fold_start": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": "unknown",
+          "null_policy": "null means 'no forecast for this (ticker, event_date) under this producer', never zero \u2014 a consumer given null here must decline to size a structure rather than sizing it at zero. Applies when the row's fold was skipped (thinner than MIN_TRAIN_ROWS=500 training pool) or the row predates FIRST_FOLD=2013-01-01.",
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "first date of the monthly fold whose model, fit strictly before this date, produced this row's forecast",
+          "physical_type": "timestamp[us]",
+          "nullable": true
+        },
+        "tier3_snapshot": {
+          "unit": null,
+          "scale": null,
+          "adjustment_basis": null,
+          "timezone": null,
+          "null_policy": null,
+          "sentinel_policy": null,
+          "allowed_range": null,
+          "observation_time_semantics": "the Tier-3 panel content hash this row's features were read from; stamped per row so a --since-stitched table records which rows came from which panel build",
+          "physical_type": "string",
+          "nullable": false
+        }
+      },
+      "primary_key": [
+        "ticker",
+        "event_date"
+      ],
+      "duplicate_policy": "assumed unique by construction (one row per (ticker, event_date), the Tier-3 grain, totality by design per engine.data.features.tier4); not enforced by an explicit uniqueness check",
+      "filterable_columns": [
+        "ticker",
+        "event_date"
+      ],
+      "orderable_columns": [
+        "ticker",
+        "event_date"
+      ],
+      "observation_time_column": "event_date",
+      "publication_time_column": null,
+      "receipt_time_column": null,
+      "finality_semantics": "A row's provenance is versioned by fold, not by a final/provisional flag: each producer's own *_fold_start records which strictly-prior-trained monthly fold produced it. Correcting Tier 2 at date D invalidates every fold from D onward; a rebuild's --since carry-over is refused (Tier4Error) if the carried prefix's fold boundaries, model id, or Tier-3 key coverage do not match the run about to happen.",
+      "provenance_semantics": "Per-producer *_model_id and *_fold_start name which registered model and which monthly fold produced that producer's forecast for this row; tier3_snapshot (per row, not per producer) names the Tier-3 panel content hash every producer in the same build pass read features from.",
+      "coverage_semantics": "Total over Tier 3: every Tier-3 (ticker, event_date) gets a row, forecast columns null where no forecast was possible (thin fold or pre-FIRST_FOLD). A missing row (not merely a null forecast) would mean the table is stale relative to Tier 3, which this schema treats as a build defect, not an expected state.",
+      "maximum_batch_rows": 50000,
+      "maximum_result_rows": 2000000
+    }
+  },
+  "knowledge_mode_by_table": {
+    "securities": "reconstructed",
+    "earnings_events": "reconstructed",
+    "daily_market": "reconstructed",
+    "option_chains": "reconstructed",
+    "option_daily": "reconstructed",
+    "trades": "reconstructed",
+    "feature_panel": "reconstructed",
+    "tier4_forecasts": "reconstructed"
+  },
+  "legacy_snapshot_metadata": {
+    "queryable": false,
+    "legacy_path": "features/SNAPSHOT",
+    "expected_top_level_keys": [
+      "snapshot",
+      "generated_at",
+      "format",
+      "tables",
+      "panel_sha256",
+      "tier4_sha256"
+    ],
+    "description": "engine.data.manifest.write_snapshot/read_snapshot's exact JSON, preserved byte-for-byte as a separate compatibility ObjectRef (phase-2 guide \u00a75.1). 'snapshot' is a sha256 over the Tier-2 content hashes plus the Tier-3 panel digest; 'tables' carries per-table engine.data.store.table_stats(); tier4_sha256 is recorded beside, not inside, the snapshot hash so a champion promotion does not invalidate experiments that never read a forecast."
+  }
+}

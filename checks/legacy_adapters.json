@@ -1,5 +1,5 @@
 {
-  "count": 20,
+  "count": 24,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -304,9 +304,69 @@
       "runtime_dependencies": [
         "experiments/EXP-181_d_1_gated_execution_parity/run.py"
       ]
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.schemas.SCHEMAS",
+      "reason": "Read the six Tier-2 table shapes (column names, legacy dtypes, nullability) as the sole authoritative source for the versioned legacy->v2 TableContract mapping; column definitions are never transcribed by hand in a second place.",
+      "declared_on": "2026-09-13",
+      "runtime": "build_legacy_mapping",
+      "read_set": "in-process module constants only; no filesystem or network access",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "TableContract documents for securities, earnings_events, daily_market, option_chains, option_daily, trades",
+      "removal_phase": "phase-3 ingestion"
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.features.panel.PANEL_COLUMNS",
+      "reason": "Read the feature-panel column order, the only place it is declared, for the feature_panel TableContract mapping.",
+      "declared_on": "2026-09-13",
+      "runtime": "build_legacy_mapping",
+      "read_set": "in-process module constant only; no filesystem or network access",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "TableContract document for feature_panel",
+      "removal_phase": "phase-3 ingestion"
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.features.tier4.COLUMNS",
+      "reason": "Read the Tier-4 forecast column order, the only place it is declared, for the tier4_forecasts TableContract mapping.",
+      "declared_on": "2026-09-13",
+      "runtime": "build_legacy_mapping",
+      "read_set": "in-process module constant only; no filesystem or network access",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "TableContract document for tier4_forecasts",
+      "removal_phase": "phase-3 ingestion"
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.features.tier4.KEY_COLUMNS",
+      "reason": "Read the Tier-4 primary key (ticker, event_date), the only place it is declared, and cross-check it against the reviewed annotation's primary_key.",
+      "declared_on": "2026-09-13",
+      "runtime": "build_legacy_mapping",
+      "read_set": "in-process module constant only; no filesystem or network access",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "TableContract document for tier4_forecasts",
+      "removal_phase": "phase-3 ingestion"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
-  "note": "D1 one-time exact-symbol and runtime-command inventory. After first commit, the ceiling only shrinks. Production activation remains disabled.",
-  "committed_ceiling": 20
+  "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). The ceiling rose only by that reviewed count and now resumes ratcheting downward. Production activation remains disabled.",
+  "committed_ceiling": 24
 }
