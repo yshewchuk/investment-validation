@@ -102,6 +102,7 @@ INCLUDE = (
 #: Individual files at the repo root.
 INCLUDE_FILES = (
     "AGENTS.md",
+    "CLAUDE.md",
     "STRATEGY.md",
     "INVESTMENT_PLAN.md",
     "ADVISOR_BRIEF.md",
