@@ -190,11 +190,14 @@ The fixed suite is `tests/test_v2_ops_*.py + tests/test_diagnosis_comparator.py`
 under `coverage run --source=engine/v2`; the measurement records the sorted
 test list and a source hash, and refuses if the tree changes mid-run. The
 ratchet baseline is `checks/rearchitecture_phase1_coverage_baseline.json`
-(`--baseline` to point elsewhere). **That file does not exist yet**: until the
-first baseline is cut, `--measure` exits 1 with `COVERAGE_BASELINE_MISSING`
-and the gate reports `COVERAGE_EVIDENCE_MISSING`. Cutting it is a reviewed
-evidence update committed by hand — measurement never writes the baseline, and
-a baseline is never lowered automatically.
+(`--baseline` to point elsewhere), cut 2026-09-13 at commit `5fc0146`:
+contracts 100%, diagnosis 96.8%, foundation 96.3%, serving 85.3%, ledger
+80.8%, ops 74.1%, empty packages recorded as empty. Cutting a new baseline is
+a reviewed evidence update committed by hand — measurement never writes the
+baseline, and a baseline is never lowered automatically. If the tree changed
+since the baseline was cut, `--measure` first and pass the fresh measurement
+to the gate; `COVERAGE_SOURCE_DRIFT` means the measurement, not the baseline,
+is stale.
 
 ### c. Tier-1 replay receipts (heavy)
 
@@ -235,21 +238,19 @@ declared dependencies, `engine/models/registry.json`, `data/MANIFEST.md` and
 current `engine/`, `tools/`, `checks/`, `data/curated` sources into the private
 root (read-only, hash-manifested in `INPUT_MANIFEST.json`, plus
 `score_requests.json`). `reference` and `adapted` each run a fresh-process
-scoring runner inside that root; `compare` does per-row tier-1 comparison and
-requires the selfcheck receipt to be `{"ok": true, ...}`.
+scoring runner inside that root, writing scored rows to
+`<output-dir>/reference.json` / `<output-dir>/adapted.json` and a separate run
+log to `<mode>.runlog.json` (the runner output is evidence; the log never
+overwrites it). `compare` does per-row tier-1 comparison, keying real runs by
+`request_id` over each row's `record`, and requires the selfcheck receipt to
+be `{"ok": true, ...}`.
 
-The selfcheck receipt must be **derived from a real serialized-selfcheck run —
-the fresh tier-1 receipts of §5c (both verdict `agree`, baseline binding equal
-to the current `CURRENT` version) are the evidence it rests on. Never
-hand-write it**: `compare` only checks the `ok` flag, so a fabricated file
-silently launders the whole canary.
-
-Two known gaps between the canary runner and `compare` (verified in source,
-not yet reconciled — verify the artifacts before trusting a receipt):
-`_run_fixed` overwrites `<output-dir>/reference.json` / `adapted.json` with a
-run log after the runner exits, and the reference runner emits rows keyed
-`request_id` while `compare`'s loader requires `row_id`. Until these are
-fixed, confirm which file actually holds the scored rows before comparing.
+The selfcheck receipt must be **derived from real evidence — the fresh tier-1
+receipts of §5c (both verdict `agree`, both bound to the current baseline and
+corpus `CURRENT` versions, zero problems, full replayed population) are what
+it rests on. Never hand-write it**: `compare` only checks the `ok` flag, so a
+fabricated file silently launders the whole canary. The derivation used for
+the 2026-09-13 certification run is recorded in its canary receipt.
 
 ### e. Phase gates
 
