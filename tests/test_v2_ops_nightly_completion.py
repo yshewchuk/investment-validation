@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from engine.ledger import build_prediction_rows
 from engine.v2.contracts import (
     ArtifactRef,
     JobSpec,
@@ -32,16 +35,20 @@ from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import cache_identity, register_artifact
 from engine.v2.ops.decision_commit import commit_decisions_in_transaction, validated_decision_candidate
+from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
 from engine.v2.ops.input_bindings import record_resolved_bindings, resolve_bindings, resolved_inputs_hash
+from engine.v2.ops.legacy_actions import ACTION_NAMES
+from engine.v2.ops.legacy_adapter import _action_decision_replay
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.migrations import applied_versions, checksum
+from engine.v2.ops.nightly import _legacy_resource, build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
-from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
+from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit_graph
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import sample
 
@@ -592,3 +599,252 @@ def test_attempt_input_bindings_migration_applies_once_and_checksums_hold(tmp_pa
     conn2 = open_catalog(path, clock=SystemClock())
     assert applied_versions(conn2, schema.OWNER) == applied
     conn2.close()
+
+
+# --------------------------------------------------------------------------
+# P2-5/B1b: the supervised decision-replay stage (pure helpers + DAG wiring)
+# --------------------------------------------------------------------------
+#
+# Tier 0 -- no private data, no real scoring. decision_population is checked
+# against engine.ledger.build_prediction_rows on a synthetic frame the same
+# way tests/test_v2_ops_supervised_legacy.py's own docstring notes:
+# build_prediction_rows degrades to an empty earnings_events join when no
+# store data is present, so the comparison needs nothing private.
+#
+# _action_decision_replay's ticker-scoping is exercised in-process with a
+# monkeypatched FeatureContext.load/Scorer/score_calendar (never real
+# scoring); the DYN-SV replay-through-score_calendar behavior itself needs
+# real data and is not re-verified here.
+
+_REPLAY_SYNTHETIC_ROWS = [
+    # entry-today: eligible.
+    {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+     "as_of": SESSION, "session": "AMC", "fill": 0.5, "strike_offset": None},
+    # a ladder row on the SAME event/strategy -- build_prediction_rows would
+    # record it too (it does not know about ladders); decision_population
+    # excludes it, but the two population-KEY sets still agree because the
+    # ladder row shares its ATM sibling's (ticker, strategy, event_date).
+    {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+     "as_of": SESSION, "session": "AMC", "fill": 0.5, "strike_offset": 0.025},
+    # forward (future entry): not eligible for SESSION.
+    {"ticker": "BBB", "strategy": "TWIN-P", "event_date": "2026-09-15",
+     "as_of": "2026-09-14", "session": "BMO", "fill": 0.5, "strike_offset": None},
+    # null entry/decision date: not eligible.
+    {"ticker": "CCC", "strategy": "TWIN-P", "event_date": "2026-09-16",
+     "as_of": None, "entry_date": None, "session": "BMO", "fill": 0.5,
+     "strike_offset": None},
+]
+
+
+def test_decision_population_agrees_with_ledger_eligibility_as_a_key_set():
+    population = decision_population({"rows": _REPLAY_SYNTHETIC_ROWS}, SESSION)
+    observed = {(row["ticker"], row["strategy"], row["event_date"]) for row in population}
+
+    frame = pd.DataFrame(_REPLAY_SYNTHETIC_ROWS)
+    ledger_rows = build_prediction_rows(frame, as_of=SESSION, entry_dated_only=True)
+    expected = {(row["ticker"], row["strategy"], row["event_date"]) for row in ledger_rows}
+
+    assert observed == expected == {("AAA", "TWIN-P", "2026-09-12")}
+    # decision_population additionally drops the ladder row the ledger keeps
+    # duplicated under the same key; the ledger's list is longer, the key
+    # sets are not.
+    assert len(ledger_rows) == 2
+    assert len(population) == 1
+
+
+def test_decision_population_rejects_duplicate_keys():
+    rows = [
+        {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+         "as_of": SESSION, "strike_offset": None},
+        {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+         "as_of": SESSION, "strike_offset": None},
+    ]
+    with pytest.raises(OpsError, match="duplicate"):
+        decision_population({"rows": rows}, SESSION)
+
+
+def test_decision_population_is_sorted_by_population_key():
+    rows = [
+        {"ticker": "ZZZ", "strategy": "TWIN-P", "event_date": "2026-09-12",
+         "as_of": SESSION, "strike_offset": None},
+        {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+         "as_of": SESSION, "strike_offset": None},
+    ]
+    population = decision_population({"rows": rows}, SESSION)
+    assert [row["ticker"] for row in population] == ["AAA", "ZZZ"]
+
+
+# --------------------------------------------------------------------------
+# compare_rows: only row_id/strike_offset are ignored -- replay now runs the
+# real score_calendar, so chosen_strategy/chosen_margin/menu_size are
+# genuinely recomputed and stay compared like any other field.
+# --------------------------------------------------------------------------
+
+_BASE_REPLAY_ROW = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+                    "exp_pnl_model": 0.123456, "gate_pass": True, "row_id": "AAA|TWIN-P|...",
+                    "strike_offset": None}
+
+
+def test_compare_rows_identical_rows_has_no_findings():
+    assert compare_rows([dict(_BASE_REPLAY_ROW)], [dict(_BASE_REPLAY_ROW)]) == []
+
+
+def test_compare_rows_names_a_planted_float_change_and_a_planted_flag_change():
+    replayed = dict(_BASE_REPLAY_ROW, exp_pnl_model=0.123457, gate_pass=False)
+    findings = compare_rows([_BASE_REPLAY_ROW], [replayed])
+    key = "AAA|TWIN-P|2026-09-12"
+    assert {"key": key, "field": "exp_pnl_model", "reason": "value_mismatch"} in findings
+    assert {"key": key, "field": "gate_pass", "reason": "value_mismatch"} in findings
+    assert len(findings) == 2
+
+
+def test_compare_rows_ignores_only_row_id_and_strike_offset():
+    replayed = dict(_BASE_REPLAY_ROW, row_id="a-completely-different-id", strike_offset=0.0)
+    assert compare_rows([_BASE_REPLAY_ROW], [replayed]) == []
+
+
+def test_compare_rows_now_compares_chosen_strategy_and_menu_fields():
+    source = dict(_BASE_REPLAY_ROW, strategy="DYN-SV", chosen_strategy="TWIN-P",
+                  chosen_margin=0.4, menu_size=3, detail="chose TWIN-P of 3 (...)")
+    assert compare_rows([source], [dict(source)]) == []
+    replayed = dict(source, chosen_strategy="CTR5", chosen_margin=0.5, menu_size=4)
+    findings = compare_rows([source], [replayed])
+    key = "AAA|DYN-SV|2026-09-12"
+    assert {"key": key, "field": "chosen_strategy", "reason": "value_mismatch"} in findings
+    assert {"key": key, "field": "chosen_margin", "reason": "value_mismatch"} in findings
+    assert {"key": key, "field": "menu_size", "reason": "value_mismatch"} in findings
+
+
+def test_compare_rows_names_missing_row_when_an_eligible_key_never_replays():
+    findings = compare_rows([_BASE_REPLAY_ROW], [])
+    assert findings == [{"key": "AAA|TWIN-P|2026-09-12", "field": "<row>", "reason": "row_missing"}]
+
+
+# --------------------------------------------------------------------------
+# _action_decision_replay: FeatureContext gets the score job's FULL ticker
+# set (analog pools / registered champions read off that context); the real
+# score_calendar call is scoped to just the eligible rows' own tickers.
+# --------------------------------------------------------------------------
+
+
+def test_decision_replay_action_scopes_context_full_and_scoring_eligible(monkeypatch, tmp_path):
+    row_aaa = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-12",
+              "as_of": SESSION, "session": "AMC", "fill": 0.5, "strike_offset": None,
+              "exp_pnl_model": 0.1}
+    row_zzz_forward = {"ticker": "ZZZ", "strategy": "TWIN-P", "event_date": "2026-09-15",
+                       "as_of": "2026-09-14", "session": "BMO", "fill": 0.5,
+                       "strike_offset": None}
+    (tmp_path / "score.json").write_text(json.dumps({"rows": [row_aaa, row_zzz_forward]}))
+
+    calls = {}
+
+    def fake_load(tickers, years):
+        calls["context_tickers"] = sorted(tickers)
+        return object()
+
+    class _FakeReplayScorer:
+        def __init__(self, context):
+            self.context = context
+
+    def fake_score_calendar(as_of, *, horizon_days, alt_strikes, scorer, tickers, **kwargs):
+        calls["score_tickers"] = sorted(tickers)
+        calls["alt_strikes"] = alt_strikes
+        return pd.DataFrame([row_aaa])
+
+    import engine.features as features_module
+    import engine.score as score_module
+    monkeypatch.setattr(features_module.FeatureContext, "load", staticmethod(fake_load))
+    monkeypatch.setattr(score_module, "Scorer", _FakeReplayScorer)
+    monkeypatch.setattr(score_module, "score_calendar", fake_score_calendar)
+
+    result = _action_decision_replay(
+        {"session": SESSION, "tickers": ("AAA", "ZZZ"), "year_start": 2024, "year_end": 2026},
+        tmp_path)
+    assert result["hash"]
+
+    # context sees every ticker the score job scored; score_calendar itself
+    # is only asked for the eligible rows' own tickers.
+    assert calls["context_tickers"] == ["AAA", "ZZZ"]
+    assert calls["score_tickers"] == ["AAA"]
+    assert calls["alt_strikes"] == 0
+
+    document = json.loads((tmp_path / "replay.json").read_text())
+    assert document["population"] == ["AAA|TWIN-P|2026-09-12"]
+    assert document["findings"] == []
+    assert document["source_rows"] == [row_aaa]
+    [replayed_row] = document["replayed_rows"]
+    assert replayed_row["ticker"] == "AAA" and "row_id" in replayed_row
+
+
+def test_decision_replay_action_empty_population_skips_scoring(monkeypatch, tmp_path):
+    row = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-15",
+          "as_of": "2026-09-14", "session": "BMO", "fill": 0.5, "strike_offset": None}
+    (tmp_path / "score.json").write_text(json.dumps({"rows": [row]}))
+
+    def boom(*args, **kwargs):
+        raise AssertionError("score_calendar must not run for an empty population")
+
+    import engine.features as features_module
+    import engine.score as score_module
+    monkeypatch.setattr(features_module.FeatureContext, "load", staticmethod(boom))
+    monkeypatch.setattr(score_module, "score_calendar", boom)
+
+    _action_decision_replay(
+        {"session": SESSION, "tickers": ("AAA",), "year_start": 2024, "year_end": 2026}, tmp_path)
+    document = json.loads((tmp_path / "replay.json").read_text())
+    assert document["population"] == []
+    assert document["source_rows"] == document["replayed_rows"] == []
+    assert document["findings"] == []
+
+
+# --------------------------------------------------------------------------
+# DAG: build_legacy_job_requests wires legacy_decision_replay off score
+# --------------------------------------------------------------------------
+
+
+def test_decision_replay_job_depends_on_score_with_named_output_binding():
+    plan = build_nightly_plan(str(REPO), SESSION)
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",),
+                                         year_start=2025, year_end=2026)
+    by_kind = {r.job.kind: r for r in requests}
+    assert "legacy_decision_replay" in by_kind
+    replay = by_kind["legacy_decision_replay"]
+    score = by_kind["legacy_score"]
+    score_job_id = job_id_for("shadow", score.idempotency_key)
+    assert score_job_id in replay.job.dependency_job_ids
+    assert replay.job.parameters["input_bindings"]["score.json"] == (
+        score_job_id + "#legacy_score")
+    assert replay.job.resource_class == "legacy_score"
+
+    conn = open_catalog(Path(tempfile.mkdtemp()) / "ops.sqlite", clock=SystemClock())
+    try:
+        policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+        receipts = submit_graph(conn, registry(), policy, requests, clock=SystemClock())
+        assert len(receipts) == len(requests)
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == len(requests)
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# Registry / environment ref
+# --------------------------------------------------------------------------
+
+
+def test_legacy_decision_replay_kind_is_allowlisted_and_registered():
+    assert "legacy_decision_replay" in ACTION_NAMES
+    assert "legacy_decision_replay" in registry().names()
+
+
+def test_legacy_decision_replay_environment_ref_matches_launch_formula():
+    """A3-style check (see test_v2_ops_legacy_defects.py): the env ref the DAG
+    request carries for this kind must equal what ``_launch`` computes from
+    the SAME resource class -- ``legacy_score``, per ``_legacy_resource``."""
+    assert _legacy_resource("legacy_decision_replay") == "legacy_score"
+    plan = build_nightly_plan(str(REPO), SESSION)
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",),
+                                         year_start=2025, year_end=2026)
+    replay = next(r for r in requests if r.job.kind == "legacy_decision_replay")
+    profile = profile_named(DEFAULT_POLICY, "legacy_score")
+    thread_count = profile.thread_count or profile.cpu_count
+    assert replay.job.environment_ref == content_hash(environment_identity(thread_count))
