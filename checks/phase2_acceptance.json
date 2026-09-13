@@ -27,7 +27,7 @@
     },
     "D07": {
       "tier": 0,
-      "tests": ["tests/test_v2_data_query.py"]
+      "tests": ["tests/test_v2_data_events_chains.py"]
     },
     "D08": {
       "tier": 0,

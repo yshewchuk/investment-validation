@@ -70,6 +70,7 @@ __all__ = [
     "normalize_physical_type",
     "partition_logical_hash",
     "publish_legacy_file",
+    "verify_object_path",
 ]
 
 PARQUET_FRAGMENT_SCHEMA_REF = "parquet_fragment.v1"
@@ -251,7 +252,7 @@ def inspect_fragment(store: ArtifactStore, object_ref: ObjectRef, contract: Tabl
     (P2-2c) takes that directly from its caller instead.
     """
     fault = fault or (lambda point: None)
-    path = _verify_object(store, object_ref)
+    path = verify_object_path(store, object_ref)
     parquet_file = _open_parquet_file(path)
     present, missing = _match_contract_columns(contract, parquet_file.schema_arrow)
     state = _StreamState()
@@ -266,7 +267,11 @@ def inspect_fragment(store: ArtifactStore, object_ref: ObjectRef, contract: Tabl
     )
 
 
-def _verify_object(store: ArtifactStore, object_ref: ObjectRef):
+def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
+    """Re-hash ``object_ref`` against ``store`` (TD-1: no cache, every open) and
+    return its path. Shared by :func:`inspect_fragment` and the repository's
+    scan path (P2-4), so the two never diverge on how an object is opened.
+    """
     digest = object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
     ref = ArtifactRef(artifact_id=object_ref.object_id, content_hash=object_ref.content_hash,
                       schema_ref=PARQUET_FRAGMENT_SCHEMA_REF, byte_size=object_ref.byte_size,
