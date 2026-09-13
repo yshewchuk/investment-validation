@@ -21,7 +21,7 @@ from engine.v2.ops.diagnostics import report as diagnostic_report
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
-from engine.v2.ops.health import health
+from engine.v2.ops.health import health, write_health
 from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
 from engine.v2.ops.nightly import build_legacy_job_requests
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
@@ -40,6 +40,9 @@ def parser():
         sub = commands.add_parser(name)
         sub.add_argument("--root", default=argparse.SUPPRESS)
         sub.add_argument("--json", action="store_true")
+        if name == "health":
+            sub.add_argument("--out", type=Path, default=None,
+                             help="also write the authenticated sidecar health.json here")
     server = commands.add_parser("serve")
     server.add_argument("--root", default=argparse.SUPPRESS)
     server.add_argument("--once", action="store_true")
@@ -93,7 +96,10 @@ def dispatch(args, root, conn, clock):
     if args.command == "init":
         return {"initialized": True, "activation": "shadow_only"}
     if args.command == "health":
-        return health(conn, clock=clock)
+        document = health(conn, clock=clock)
+        if getattr(args, "out", None) is not None:
+            write_health(args.out, document)
+        return document
     if args.command == "serve":
         service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
                           code_source=Path(__file__).resolve().parents[3])

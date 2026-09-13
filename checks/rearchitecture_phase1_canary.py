@@ -33,11 +33,19 @@ def _load(path: Path) -> dict:
 
 def _rows(value: dict) -> dict[str, dict]:
     rows = value if isinstance(value, list) else value.get("rows", [])
-    result = {str(row.get("row_id")): row for row in rows if row.get("row_id")}
+    result = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("request_id") and isinstance(row.get("record"), dict):
+            key, record = str(row["request_id"]), row["record"]
+        elif isinstance(row, dict) and row.get("row_id"):
+            key, record = str(row["row_id"]), row
+        else:
+            raise RuntimeError("canary row lacks both request_id/record and row_id identity")
+        if key in result:
+            raise RuntimeError("canary score population contains duplicate or invalid IDs")
+        result[key] = record
     if not result:
-        raise RuntimeError("canary score population is empty or lacks row_id")
-    if len(result) != len(rows):
-        raise RuntimeError("canary score population contains duplicate or invalid IDs")
+        raise RuntimeError("canary score population is empty")
     return result
 
 
@@ -149,9 +157,13 @@ def _run_fixed(root: Path, mode: str, output: Path) -> int:
         print(f"[{mode}] {line.rstrip()}", flush=True)
         lines.append(line)
     result_code = process.wait()
-    output.write_text(json.dumps({"mode": mode, "returncode": result_code,
-                                  "elapsed_s": round(time.monotonic() - started, 1),
-                                  "stdout_tail": "".join(lines)[-2000:]}, indent=2))
+    # The runner's own output file is the evidence; the run log is a SEPARATE
+    # file, because clobbering the output here would compare run logs, not scores.
+    log_path = output.with_name(output.stem + ".runlog.json")
+    log_path.write_text(json.dumps({"mode": mode, "returncode": result_code,
+                                    "elapsed_s": round(time.monotonic() - started, 1),
+                                    "output": str(output),
+                                    "stdout_tail": "".join(lines)[-2000:]}, indent=2))
     return result_code
 
 
