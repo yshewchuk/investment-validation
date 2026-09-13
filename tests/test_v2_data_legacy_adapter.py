@@ -40,6 +40,7 @@ from engine.data.features.tier4 import (  # noqa: E402
     COLUMNS as TIER4_COLUMNS,
     KEY_COLUMNS as TIER4_KEY_COLUMNS,
 )
+from engine import paths as legacy_paths  # noqa: E402
 
 EXPECTED_ORDER = (
     "securities", "earnings_events", "daily_market", "option_chains", "option_daily",
@@ -117,6 +118,24 @@ def test_snapshot_metadata_present_not_queryable_and_not_a_table():
     assert set(meta["expected_top_level_keys"]) == {
         "snapshot", "generated_at", "format", "tables", "panel_sha256", "tier4_sha256",
     }
+
+
+def test_hardcoded_relative_paths_match_engine_paths():
+    """The three path constants la.py carries instead of a 4th legacy import
+    (judgement call 4 of the task report) must not silently drift from
+    ``engine/paths.py``. The private-schema test only notices a *missing*
+    file under an opted-in ``PHASE2_PRIVATE_ROOT`` and is skipped by
+    default, so this tier-0 check is the one that always runs.
+    """
+    assert la.PANEL_RELATIVE_PATH == (
+        legacy_paths.PANEL.relative_to(legacy_paths.DATA).as_posix()
+    )
+    assert la.TIER4_RELATIVE_PATH == (
+        legacy_paths.TIER4.relative_to(legacy_paths.DATA).as_posix()
+    )
+    assert la.SNAPSHOT_RELATIVE_PATH == (
+        legacy_paths.SNAPSHOT_FILE.relative_to(legacy_paths.DATA).as_posix()
+    )
 
 
 def test_knowledge_mode_is_reconstructed_for_all_eight():
