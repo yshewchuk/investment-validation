@@ -102,6 +102,14 @@ def prepare(root: Path, baseline: Path, corpus: Path, output: Path) -> dict:
         source = root / relative
         if source.is_file():
             copy_one(source, Path(relative))
+    # The trading calendar is derived from this file at import time by
+    # engine.calendar; every canary request needs it, so it is required,
+    # not optional like the informational copies above.
+    calendar_source = root / "earnings_predictions/data/raw/polygon/gspc_daily.csv"
+    if not calendar_source.is_file() or calendar_source.is_symlink():
+        raise RuntimeError(f"trading calendar source missing: {calendar_source}")
+    copy_one(calendar_source,
+             Path("earnings_predictions/data/raw/polygon/gspc_daily.csv"))
     for directory in ("data/curated", "engine", "tools", "checks"):
         source_root = root / directory
         if source_root.is_dir():
