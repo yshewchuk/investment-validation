@@ -100,3 +100,12 @@ imports them under the active fence; settlement is not checkpoint-shortcut
 eligible because reuse must never skip its catalog effect.
 Real scoring/parity runs are sequential private verification, outside the fast
 commit hook; ops never imports their comparator.
+
+The phase-1 engineering gate needs a coverage measurement passed in; run bare
+it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing
+check is never green). The green-path command is:
+
+```text
+python3 checks/rearchitecture_phase1_coverage.py --measure --output /tmp/coverage.json
+python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
+```

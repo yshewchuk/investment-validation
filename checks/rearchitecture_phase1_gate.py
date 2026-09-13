@@ -37,9 +37,20 @@ def source_hash(files):
     return "sha256:" + digest.hexdigest()
 
 
+COVERAGE_COMMAND = ("python3 checks/rearchitecture_phase1_coverage.py --measure "
+                    "--output <file>; then rerun this gate with --coverage <file>")
+
+
 def coverage_check(path, baseline, root=ROOT):
     if path is None or not path.is_file() or not baseline.is_file():
-        return {"ok": False, "findings": [{"code": "COVERAGE_EVIDENCE_MISSING"}]}
+        # Missing evidence is a failing check, never a green one. The bare
+        # invocation is therefore red by design: measure first, then pass
+        # the measurement with --coverage.
+        return {"ok": False, "findings": [{
+            "code": "COVERAGE_EVIDENCE_MISSING",
+            "reason": ("no coverage measurement supplied; run without --coverage "
+                       "is red by design"),
+            "produce_with": COVERAGE_COMMAND}]}
     try:
         measured = json.loads(path.read_text())
         findings = compare(measured, json.loads(baseline.read_text()))
@@ -84,7 +95,10 @@ def gate(root=ROOT, *, coverage_path=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=ROOT)
-    parser.add_argument("--coverage", type=Path)
+    parser.add_argument("--coverage", type=Path,
+                        help="coverage measurement JSON from: " + COVERAGE_COMMAND
+                        + " (required for a green gate; omitting it fails the "
+                        "coverage row with COVERAGE_EVIDENCE_MISSING)")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     result = gate(args.repo_root, coverage_path=args.coverage)

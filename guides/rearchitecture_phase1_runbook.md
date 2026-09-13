@@ -256,8 +256,15 @@ the 2026-09-13 certification run is recorded in its canary receipt.
 
 ```text
 /usr/bin/python3 checks/rearchitecture_phase0_gate.py
+/usr/bin/python3 checks/rearchitecture_phase1_coverage.py --measure --output /tmp/coverage.json
 /usr/bin/python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json --output reports/rearchitecture_phase1_gate.json
 ```
+
+**Do not run the phase-1 gate bare.** Without `--coverage` its coverage row
+fails with `COVERAGE_EVIDENCE_MISSING` and the top-level `ok` is `false`. That
+is by design (a missing check is a failing check, never a green one), not a
+regression: measure coverage first, then pass the measurement. A red gate seen
+without `--coverage` says nothing about the code.
 
 The phase-0 gate re-derives every row now (corpus integrity, both tier-1
 receipts against CURRENT, negative-control suite, structural checks, baseline
