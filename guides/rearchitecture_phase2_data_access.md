@@ -37,6 +37,10 @@ runs the replacement repository and adapter in shadow until the exit gate in
   view and invokes the unchanged scorer through the Phase 1 supervisor.
 - Crash tests, corruption controls, read-consistency tests, and score parity
   evidence against the Phase 0 corpus and one real disk round trip.
+- Completion of the three Phase 1 nightly stages a v1-parity shadow board still
+  lacks (§9.4): a reachable decisions stage with a real plan/evidence producer,
+  a render action that carries the full legacy renderer inputs, and graph
+  consumers for the export, publication, and backup outbox effects.
 
 ### 1.2 Explicitly outside this phase
 
@@ -98,6 +102,11 @@ Before merging any repository implementation:
 Synthetic contract/catalog work may proceed when a large private corpus is not
 available. Score parity, the initial production-data snapshot, and the Phase 2
 exit claim may not.
+
+The three Phase 1 completion items in §9.4 are not prerequisites for starting
+Phase 2. They are Phase 2 deliverables, scheduled as P2-5 ahead of the
+score-parity milestone, because Phase 4 changes scoring and a v1-versus-v2
+board comparison must exist before it does.
 
 ### 3.2 Existing implementation to preserve
 
@@ -748,6 +757,61 @@ Do not delete `LegacyInputManifest`, `store_read_pins`, or the cooperative
 barrier. Mark migrated stage uses in the adapter ledger; remove old paths only
 when their live reference count reaches zero in a later phase.
 
+### 9.4 Phase 1 nightly completion (carried into this phase)
+
+Review of Phase 1 at `2e21e59` found that the supervised nightly cannot yet
+produce a v1-parity board. Phase 2 closes the three gaps below at P2-5, before
+its own score-parity milestone. None of them changes scoring, decision
+semantics, or authority; all of it stays shadow-only under decisions D4/D5 of
+the Phase 1 guide.
+
+1. **Reachable decisions stage.** `build_legacy_job_requests` binds the
+   `legacy_decisions` job's score and finality inputs to parent *job IDs* and
+   binds no `decision_plan.json` or `decision_evidence.json`.
+   `validated_decision_candidate` refuses job-ID bindings and requires both
+   artifacts, and nothing outside the tests produces them, so `ops submit` can
+   never commit a decision and projection/selfcheck never run. Add a
+   coordinator-validated evidence stage between score and decisions that
+   derives the `decision_plan.v1.0` and `decision_evidence.v1.0` artifacts
+   from the committed score and finality artifacts: causality, coverage,
+   finality, selection, and replay receipts bound to the exact artifact IDs
+   and content hashes. Resolve job-ID bindings to the parent's committed
+   output artifact at launch, and have the coordinator validate against those
+   resolved IDs. Do not weaken `validate`. Receipts are derived from the
+   artifacts, never hand-written; the canary selfcheck-receipt rule applies.
+
+2. **Render at parity.** `_action_render` calls `render_bundle` with the score
+   frame, session, and horizon only. The legacy nightly also concatenates the
+   strike ladder rows into the scores and passes `fill_alpha`, `alt_strikes`,
+   `panel`, `trades`, `build_meta` (freshness, quota, late as-ofs, and the
+   execution clock with requested versus resolved session and finality),
+   `build_health`, `flags`, and the registry. Carry the full argument set:
+   the ladder and analog coverage already sit in the score artifact; the
+   model-evidence artifact is already bound to the job but never read; the
+   book view must read the exported ledger generation (item 3), not the
+   staging copy of the mutable ledger. Meta and health are execution metadata:
+   bind them by artifact and keep wall-clock fields out of the content hash
+   the serialized selfcheck compares. Do not rewrite financial rendering; that
+   remains Phase 4.
+
+3. **Outbox consumers on the graph.** `commit_decisions_in_transaction`
+   enqueues `export` and `release_intent` rows that nothing consumes;
+   `export_generation`, `stage_release`, `publish_local`, and `run_backup`
+   have test-only callers, so watermarks never advance and the
+   budget-withholds-publication policy is never exercised on a real release.
+   Wire export as a stage between decision commit and projection, with the
+   projection reading the verified generation; publication as the fenced
+   local pointer replace behind the selfcheck and engineering-gate receipts;
+   and backup as its own optional branch. This is the §10.1 graph of the
+   Phase 1 guide. Watermarks advance per effect and per scope; a subset shadow
+   run cannot advance the global scope.
+
+Stages not carried: refresh, the validate-refresh battery, the Tier 3/4
+rebuild, missed-night backfill, and calibration flags stay outside the shadow
+graph. Every shadow receipt lists them as absent so a shadow board is never
+mistaken for a production one. Phase 3 owns refresh; the rebuild control is
+D16.
+
 ## 10. Replacement rebuild and rollback behavior
 
 Phase 2 does not rewrite normalization. It defines where a legacy rebuild is
@@ -814,6 +878,9 @@ not a suggestion to assert an implementation detail.
 | D15 | 2 | On a bounded cached current-data sample, with no provider calls, legacy direct scoring and snapshot-adapted scoring produce an `agree` `ComparisonReceipt` with nonzero expected/supported/compared populations. |
 | D16 | 2 | The actual legacy rebuild entrypoint, run on a bounded representative private root, is failed during rebuild/import and leaves the active snapshot and legacy official board unchanged; successful rollback restores the prior head without deleting either snapshot. |
 | D17 | 0 | Layer, README, code-budget, lint, hygiene, adapter-ratchet, and package coverage checks remain green with no v2 exemptions. |
+| D18 | 1 | From `ops plan nightly` and `ops submit`, the finality → score → evidence → decisions chain runs through the real supervisor on frozen private inputs and commits decisions exactly once; resubmission returns the same receipts. A planted causality or population defect commits zero decisions and no release intent, while settlement still proceeds. |
+| D19 | 2 | The v2 render stage's bundle, compared with `render_bundle` invoked the legacy way on the same scores, ladder, model evidence, ledger generation, meta, and health, is identical in every serialized view except declared execution-metadata fields; the serialized selfcheck passes in a separate bounded process. |
+| D20 | 1 | Export produces a complete generation that the compatibility reader resolves before projection starts; publication cannot advance `current` without the selfcheck and engineering receipts, and a stale fence cannot advance it; a failed backup retries alone and no watermark other than its own moves. |
 
 Suggested test files:
 
@@ -822,16 +889,18 @@ Suggested test files:
 - `tests/test_v2_data_repository.py` — D05–D10;
 - `tests/test_v2_data_atomicity.py` — D11, D12, D16 synthetic controls;
 - `tests/test_v2_data_legacy_adapter.py` — D02, D13–D15;
+- `tests/test_v2_ops_nightly_completion.py` — D18–D20 (ops-owned; the Phase 1
+  coverage suite picks it up by its `test_v2_ops_` prefix);
 - `checks/rearchitecture_phase2_coverage.py` and its committed baseline —
   run the fixed Phase 2 suite, bind results to the exact code hash, and enforce
   the per-package coverage ratchet;
 - `checks/rearchitecture_phase2_gate.py` — validates fresh evidence for
-  D01–D17 and reruns Phase 0/1 prerequisites.
+  D01–D20 and reruns Phase 0/1 prerequisites.
 
 Do not add tests that only restate dataclass assignments or mock every Arrow
 and disk boundary. D09–D12 must touch real files and SQLite. D14 must invoke the
-real legacy scoring public entrypoint in a fresh supervised process. D15 and
-D16 run sequentially on this host under the resource manager.
+real legacy scoring public entrypoint in a fresh supervised process. D15, D16,
+and D19 run sequentially on this host under the resource manager.
 
 ### 12.1 Gate evidence and invocation
 
@@ -850,7 +919,7 @@ Phase2Evidence:
   authority_mode: shadow
 ```
 
-The evidence validator verifies every referenced artifact, requires all D01–D17
+The evidence validator verifies every referenced artifact, requires all D01–D20
 rows, rejects a code/environment mismatch, rejects zero or collapsed
 populations, and requires the comparison verdict `agree`. It does not accept a
 summary boolean in place of the referenced receipts.
@@ -914,7 +983,27 @@ or a full-data import before the synthetic repository is proven.
 4. Exit: no repository public method can perform an implicit or unbounded table
    read; planted identity/causality defects fail.
 
-### P2-5 — Legacy materialization and score parity
+### P2-5 — Phase 1 nightly completion
+
+Depends only on P2-1's green engineering checks; it may run alongside P2-2 to
+P2-4 but must finish before P2-6.
+
+1. Add the decision plan/evidence producer stage and launch-time resolution
+   of job-ID bindings (§9.4 item 1).
+2. Extend `_action_render` to the full legacy argument set, reading the bound
+   model-evidence artifact and the exported ledger generation (§9.4 item 2).
+3. Wire export, publication, and backup into the supervised graph as the
+   Phase 1 guide's §10.1 shows (§9.4 item 3).
+4. Add D18–D20; run D18 and D20 on synthetic inputs first, then on the frozen
+   private root.
+5. Exit: one shadow nightly submitted with `ops submit` yields a committed
+   decision set, an exported generation, a rendered bundle that passes D19,
+   and a locally published release under the fenced pointer, with no
+   production ledger, registry, publication target, or paid pull touched.
+   This is §14.2 step 3 of the Phase 1 guide; record it in the Phase 1 runbook
+   activation table.
+
+### P2-6 — Legacy materialization and score parity
 
 1. Implement `LegacyMaterializationRequest` and private deterministic layout.
 2. Wire snapshot refs into selected Phase 1 read-only stages; keep other stages
@@ -924,7 +1013,7 @@ or a full-data import before the synthetic repository is proven.
 4. Exit: D13–D15 green, with nonzero populations and no unexplained tolerance
    changes.
 
-### P2-6 — Replacement-build atomicity and phase gate
+### P2-7 — Replacement-build atomicity and phase gate
 
 1. Run the unchanged legacy rebuild entrypoint on a bounded representative
    private root under the supervisor; import its completed output and inject
@@ -976,6 +1065,11 @@ Phase 2 is complete only when all of the following are true:
 10. **Engineering gates green:** fresh Phase 0, Phase 1, and Phase 2 gates,
     coverage ratchet, adapter ratchet, import layers, budgets, READMEs, lint,
     hygiene, and hook checks pass against one commit.
+11. **Phase 1 nightly complete in shadow:** D18–D20 green, and one shadow
+    nightly submitted through `ops submit` has committed decisions, exported a
+    generation, rendered a bundle at parity with the legacy renderer, and
+    published locally under the fenced pointer. Refresh, the rebuild, and
+    backfill remain outside the shadow graph and are listed as absent.
 
 The Phase 2 evidence bundle contains the snapshot manifest/ref, table-contract
 mapping hashes, import/commit receipts, fault matrix, resolved query dependency
