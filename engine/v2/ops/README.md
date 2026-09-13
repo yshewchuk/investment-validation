@@ -74,6 +74,56 @@ pid plus start time only.
 
 ## Testing
 
+Recommended fast invocation, once `pytest-xdist` (pinned in
+`requirements-dev.txt` -- test-runner tooling, kept out of `requirements.txt`
+because that file is gated byte-for-byte against a frozen Phase 0 baseline)
+is installed:
+
+```text
+python3 -m pytest -n auto --dist loadgroup -q tests/test_v2_*.py tests/test_checks_phase2_gate.py
+```
+
+`--dist loadgroup` is required, not optional: a handful of tests touch a
+REAL, host-wide resource (a real child process's CPU affinity, a real
+cgroup/watchdog probe, real process-group/session signaling, a real
+Playwright browser) and are marked `@pytest.mark.xdist_group("serial")` (or
+`pytestmark` for a whole file) so `loadgroup` pins each such group to one
+worker instead of letting two copies collide on the same host resource. See
+`tests/conftest.py` for the exact grouped files and the reason for each.
+Without `pytest-xdist` installed, the plain serial command still works
+unchanged: `python3 -m pytest -q tests/test_v2_*.py tests/test_checks_phase2_gate.py`.
+
+The one real end-to-end Phase 2 check — a fresh coverage measurement of the
+REAL registered suite against the REAL tree, fed into the REAL gate, proving
+it is red for exactly the rows lacking real evidence — is deliberately not
+part of the unit suite (it needs a real `coverage run`, which the fast unit
+tests must not pay for on every run). Run it directly instead:
+
+```text
+python3 checks/rearchitecture_phase2_coverage.py --measure --output /tmp/p2cov.json
+python3 checks/rearchitecture_phase2_gate.py --coverage /tmp/p2cov.json --json
+```
+
+Today this is red with `MISSING_EVIDENCE` for D13/D14 (no real test file yet)
+and D15/D16/D19 (tier-2 rows still needing a real receipt), and clean for
+every other registered row. `tests/test_checks_phase2_gate.py`'s own smoke
+test only checks the registry against the real tree cheaply (file existence
+plus one `pytest --collect-only`, a few seconds) — it does not run this
+measurement.
+
+Both coverage scripts (`rearchitecture_phase1_coverage.py`,
+`rearchitecture_phase2_coverage.py`) accept an opt-in `--measure --parallel`
+flag that runs the same fixed suite under `-n auto --dist loadgroup` and
+combines every xdist worker's coverage data with coverage.py's own
+multi-process support (`COVERAGE_PROCESS_START` plus the system
+`coverage.process_startup` `.pth` hook, then `coverage combine`) rather than
+adding pytest-cov. The default stays serial. `--parallel` was implemented but not yet run for
+real: installing `pytest-xdist` here hit PEP 668 (`externally-managed-environment`)
+and was left for a human decision rather than overridden with
+`--break-system-packages`. Once installed, verify `--parallel`'s
+executed/executable counts match the serial measurement on two consecutive
+runs each before trusting it; if they differ, keep both scripts serial-only.
+
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private
 `fixtures/tier0/` corpus (`checks/tier0_corpus.py`), never in this repo — they

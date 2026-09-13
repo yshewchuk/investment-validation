@@ -155,6 +155,10 @@ venv/
 # checkout reproduce the baseline the tier-0 corpus was captured in.
 !/requirements.txt
 !/ruff.toml
+
+# Test-runner tooling pins that must NOT be gated with requirements.txt --
+# see requirements-dev.txt's own header for why it is separate.
+!/requirements-dev.txt
 !/checks/rearchitecture_phase1_coverage_baseline.json
 !/checks/rearchitecture_phase2_coverage_baseline.json
 

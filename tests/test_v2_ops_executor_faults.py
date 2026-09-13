@@ -31,6 +31,11 @@ from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
 
+# Real subprocess spawn/kill/signal, a real cgroup probe, and real watchdog
+# calls against this host's process table (see tests/conftest.py's grouping
+# rule).
+pytestmark = pytest.mark.xdist_group("serial")
+
 
 def _child(source):
     return subprocess.Popen([sys.executable, "-u", "-c", source],

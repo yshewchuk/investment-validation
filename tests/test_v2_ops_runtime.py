@@ -25,6 +25,11 @@ from engine.v2.ops.supervisor import Service, serve
 from tests.ops_support import POLICY, TEST_POLICY, catalog, enqueue_claim, request
 
 
+# Asserts the real CPU affinity/thread count of a real child process it just
+# launched -- the exact "bounded jobs pin from core 0" collision a concurrent
+# sibling could step on (see tests/conftest.py's grouping rule). No other
+# test in this file touches a real subprocess.
+@pytest.mark.xdist_group("serial")
 def test_o06_actual_child_affinity_threads_and_outputs(tmp_path):
     conn, _, _ = catalog(tmp_path)
     clock = SystemClock()

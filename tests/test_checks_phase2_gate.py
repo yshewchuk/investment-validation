@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from checks import rearchitecture_phase2_coverage as p2cov
@@ -388,22 +389,60 @@ def test_d19_refused_when_render_receipt_verdict_is_not_agree(tmp_path):
 
 
 # -- real repo smoke ----------------------------------------------------------
+#
+# This used to run a full Phase 2 coverage measurement (the whole registered
+# suite under `coverage run`, in a subprocess, from inside one unit test) --
+# 48s, and pure overhead for what this test actually needs to prove: that the
+# REAL acceptance registry matches the REAL tree (every D-row's test file
+# exists and resolves to real collectible tests) and that rows lacking real
+# evidence are correctly the ones still lacking a test file or a receipt.
+#
+# The full "fresh measurement -> gate is red for exactly the rows lacking
+# evidence" check still exists and still runs against the real tree -- it now
+# lives in the documented, runnable gate command (engine/v2/ops/README.md,
+# Testing section), not inside the unit suite, since it needs a real
+# `coverage run` over the fixed suite and that cost belongs to a deliberate
+# invocation, not every test run. The gate-logic assertions above (synthetic
+# worlds) are unchanged.
+#
+# `tests/test_checks_phase2_gate.py` itself is not named in any registry row's
+# "tests" list (only tests/test_v2_ops_engineering.py is added implicitly by
+# p2cov.suite()), so nothing here re-enters a suite measurement of this file.
 
-def test_real_repo_smoke_is_red_for_rows_without_real_tests_or_receipts():
-    measured = p2cov.measure()
-    coverage_path = Path(measured["source_hash"].split(":")[1][:8] + "-phase2-smoke-coverage.json")
-    coverage_path = Path("/tmp") / coverage_path.name
-    coverage_path.write_text(json.dumps(measured))
-    try:
-        result = p2gate.gate(prerequisite_runner=GREEN_RUNNER, coverage_path=coverage_path)
-    finally:
-        coverage_path.unlink(missing_ok=True)
-    assert result["ok"] is False
-    missing = d_ids_with(result, "MISSING_EVIDENCE")
-    for d_id in ("D13", "D14", "D15", "D16"):
-        assert d_id in missing, (d_id, sorted(missing))
-    # P2-5/Task5: D20 now has real, passing tests (tests/test_v2_ops_effects_graph.py).
-    # Task 2 (P2-4): D05-D07 now have real, passing tests (tests/test_v2_data_query.py,
-    # tests/test_v2_data_events_chains.py).
-    for d_id in ("D01", "D02", "D03", "D05", "D06", "D07", "D08", "D20"):
-        assert d_id not in missing, (d_id, sorted(missing))
+def test_real_repo_smoke_matches_registry_against_the_real_tree():
+    registry = p2cov.load_registry(REAL_REGISTRY_PATH)
+    root = p2gate.ROOT
+
+    all_test_paths = sorted({t for row in registry.values() for t in row.get("tests", [])})
+    existing = [t for t in all_test_paths if (root / t).is_file()]
+    missing_files = sorted(t for t in all_test_paths if not (root / t).is_file())
+    # D13/D14 (legacy materialization, P2-6) are the one known real gap today:
+    # their registered test file has not been written yet. Any OTHER
+    # registered file going missing is registry/tree drift this test must
+    # catch, so the set is asserted exactly, not just "non-empty is fine".
+    assert missing_files == ["tests/test_v2_data_legacy_materialization.py"], missing_files
+
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", *existing],
+        cwd=root, capture_output=True, text=True, timeout=60)
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    node_ids = [line for line in collected.stdout.splitlines() if "::" in line]
+
+    def resolves(test_path):
+        return any(n.startswith(test_path + "::") for n in node_ids)
+
+    lacking_real_test_file = {"D13", "D14"}
+    tier2_ids = {d_id for d_id, row in registry.items() if row.get("tier") == 2}
+    assert tier2_ids == {"D15", "D16", "D19"}, tier2_ids
+
+    for d_id, row in registry.items():
+        if d_id in lacking_real_test_file:
+            assert any(t in missing_files for t in row.get("tests", [])), d_id
+            continue
+        for test_path in row.get("tests", []):
+            assert resolves(test_path), (d_id, test_path)
+        if d_id in tier2_ids:
+            # D15 plus the other tier-2 rows (D16, D19) are evidence rows: a
+            # passing test alone can never satisfy them, only a real receipt
+            # can (checked end-to-end by the documented gate command above).
+            assert row.get("evidence_fields"), d_id
