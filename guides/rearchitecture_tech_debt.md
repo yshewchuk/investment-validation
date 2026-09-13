@@ -32,3 +32,9 @@ are not deferred.
   frozen-data D18 run.
 - The Phase 0 gate needs the private tier-0 corpus, so worktree agents cannot
   run it. The supervisor runs it on main.
+- The Phase 0 gate is red on main since the Phase 2 merges
+  (`tier1_real_replay`: "code changed since the replay ran"). Its tier-1
+  receipt is bound to the engine code hash, by design, so any code change
+  invalidates it. Re-run the tier-1 real replay and seeded controls on private
+  data from the final Phase 2 commit (heavy run: needs `--max-rss-gb 6.5` and
+  user approval), then run all three phase gates from that same commit.
