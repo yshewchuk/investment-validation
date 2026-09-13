@@ -85,30 +85,60 @@ in advance which will be exercised). On a joblib cache MISS it calls
   ``store.read_table("daily_market", columns=[...])`` with NO years bound
   and NO ticker filter at all — worse than a fixed window, truly unbounded.
 
-**Is the cache miss provably unreachable when the serving-model artifacts are
-pinned (option (a))? No — proven the other way.** ``tier4.serving_model``'s
-own cache key is::
+**Review round 4 revisits this.** Round 3 concluded the cache miss was
+provably always reachable because ``materialize_tree`` could not predict
+``store.file_sha256(paths.PANEL)`` before writing it (a pyarrow rewrite gives
+the file new bytes, hence a new hash, every time). Decision 1 below removes
+that premise for ``feature_panel`` specifically: it is now copied
+byte-for-byte from its own immutable object, so its hash IS the source
+object's ``content_hash`` — predictable before any byte is written, and
+pinnable in a ``registry_and_model_refs`` ref by an exact filename (decision
+2). That reopens the question decision 2 asks: does a cache HIT (now
+reachable, since a pinned joblib's embedded hash can finally match) return
+before ``prepare()``/``crush_frame()`` runs? **No — proven the other way,
+one level deeper than round 3 looked.** Quoting ``engine/data/features/
+tier4.py`` exactly (line numbers as of this commit)::
 
-    snapshot = store.file_sha256(paths.PANEL)          # tier4.py:1277 (serving_model)
-    path = _serving_path(model.model_id, fold, snapshot)   # tier4.py:1224
-    # _serving_path: SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib"
-    if cache and path.exists():
-        stored = joblib.load(path)
-        if (... and stored.get("tier3_snapshot") == snapshot and ...):
-            <cache hit>
+    # serving_model, the cache-HIT branch (tier4.py:1286-1290):
+        if cache and path.exists():
+            stored = joblib.load(path)
+            if (... and stored.get("tier3_snapshot") == snapshot and ...):
+                pool_pred, pool_res = _pool_before(
+                    fold, model, load_panel() if panel is None else panel
+                )
+                return ServingModel(estimator=stored["estimator"], ...)
 
-Both the cache FILENAME and the stored dict's ``tier3_snapshot`` field are
-keyed on ``store.file_sha256(paths.PANEL)`` — the exact byte-hash of THIS
-materialization's own freshly-written ``panel.parquet``, which
-``materialize_tree`` cannot predict before writing it and which a
-production-sourced joblib file's embedded hash will essentially never equal
-(a different snapshot's panel has different bytes, hence a different
-sha256). Pinning "the artifacts that prevent the miss" therefore cannot make
-this path provably unreachable — it is the reverse: the miss is
-provably ALWAYS possible for a freshly materialized root. Option (b) is the
-only one this evidence supports, and it is stronger than "add the fixed
-window" alone: since ``iv_crush``'s path has no window at all, only
-``whole_table`` is provably complete for every producer.
+    # _pool_before, called on THAT SAME cache-hit branch above (tier4.py:1243-1246):
+        earlier = stored[stored[point].notna() & (stored[fold_col] < pd.Timestamp(fold))]
+        if earlier.empty:
+            return empty
+        _, trainable = training_frames(panel, model)   # <- calls model.prepare(panel)
+
+``_pool_before`` — called UNCONDITIONALLY on the cache-hit path, before
+``serving_model`` ever returns — reads back ``tier4_forecasts`` (``stored =
+load_forecasts()``) and, whenever that table already has an earlier row for
+this producer's column before the current fold (``earlier`` non-empty), it
+calls ``training_frames(panel, model)`` itself — which calls
+``model.prepare(panel)`` regardless of whether the SERVING MODEL's own
+``estimator`` was a cache hit or miss. Since ``tier4_forecasts`` is
+materialized as the real production forecasts table (whole file), and a
+column that has ever been forecast historically will have SOME row before
+almost any realistic fold, ``earlier`` is non-empty for realistic scoring in
+practice — so ``iv_crush_feature_model``'s ``prepare`` (``crush_frame()``,
+unbounded) and ``im_t1_feature_model``/``runup_move_feature_model``'s
+``prepare`` (the fixed ``IM_T1_YEARS`` window) both run independent of
+whether their OWN joblib cache hits. No pinned artifact can prevent this:
+``training_frames``'s own memoization (``_PREPARED``, keyed by
+``(model_id, id(panel))``) is an IN-PROCESS dict, not a file, so it cannot be
+pre-seeded by a pinned ref either. Option (a) therefore still fails — not for
+round 3's reason (an unpredictable hash), but because ``_pool_before``'s own
+unconditional call reaches ``prepare()`` regardless of the serving-model
+cache's hit/miss status. ``daily_market`` stays ``whole_table``: it is the
+only read provably complete for ``iv_crush_feature_model`` (and
+``im_t1``/``runup_move``) via this path. Decision 2's pinned cache refs are
+still implemented and still valuable — they avoid ``fit_fold`` re-fitting a
+DIFFERENT estimator than production's committed one (a real parity risk on
+their own), just not the ``daily_market`` scope question.
 
 **Registry/model/calendar inputs** are plain pinned files, never
 Repository-scanned tables — not expressible as a bounded ``DataQuery``, so
@@ -164,6 +194,7 @@ __all__ = [
     "LEGACY_SCORE_READ_PLAN_V1",
     "SCORE_READ_PLAN_TABLES",
     "TABLE_OUTPUT_KIND",
+    "TIER4_CACHE_DIR",
     "MaterializedTree",
     "assert_rows_match",
     "build_materialization_request",
@@ -175,6 +206,7 @@ __all__ = [
     "parse_pinned_ref",
     "read_plan_complete",
     "scanned_rows",
+    "tier4_cache_refs_match_panel",
     "trades_span",
 ]
 
@@ -481,11 +513,13 @@ def evidence_scope_covers_trades(repository, request: LegacyMaterializationReque
 
 def read_plan_complete(request: LegacyMaterializationRequest, repository) -> bool:
     """Decision 4: True only if every plan entry has a query or ref, the
-    evidence scope is a superset of the direct scope, and (review round 2)
+    evidence scope is a superset of the direct scope, (review round 2)
     ``trades``'s real span sits inside the evidence scope too (guide §9.2's
     refusal: "if the adapter cannot prove its read plan complete, it refuses
-    checkpoint reuse"). ``repository`` is required, unlike round 1's version,
-    because that last proof needs an actual scan.
+    checkpoint reuse"), and (review round 4, decision 2) every pinned Tier-4
+    serving-model cache ref carries this request's own panel-hash prefix.
+    ``repository`` is required, unlike round 1's version, because those last
+    two proofs need an actual scan/fragment lookup.
     """
     if set(request.table_queries) != set(SCORE_READ_PLAN_TABLES):
         return False
@@ -493,7 +527,9 @@ def read_plan_complete(request: LegacyMaterializationRequest, repository) -> boo
         return False
     if not _scope_superset(request.evidence_scope, request.direct_scope):
         return False
-    return evidence_scope_covers_trades(repository, request)
+    if not evidence_scope_covers_trades(repository, request):
+        return False
+    return tier4_cache_refs_match_panel(repository, request)
 
 
 # ==========================================================================
@@ -514,12 +550,19 @@ class MaterializedTree:
     ``curated_files``/``single_files`` name exactly the paths
     ``legacy_adapter.materialize`` must re-read with the legacy loaders;
     ``manifest`` is the full ``{relative_path: content_hash}`` this task's
-    contract returns.
+    contract returns. ``copied_tables`` (review round 4, decision 1) names
+    every table written by a verified byte-for-byte object copy rather than
+    a Repository-scan rewrite — ``legacy_adapter.materialize`` uses it to
+    skip the expensive re-scan-and-compare validation for those tables
+    (their bytes are already proven correct by the copy's own hash check)
+    and only re-read them once, lightly, to prove the unchanged legacy
+    reader still opens them.
     """
 
     manifest: dict[str, str]
-    curated_files: dict[str, dict[int, Path]]
+    curated_files: dict[str, dict[int, list[Path]]]
     single_files: dict[str, Path]
+    copied_tables: frozenset[str] = frozenset()
 
 
 def materialize_tree(repository, store, request: LegacyMaterializationRequest,
@@ -533,20 +576,34 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
         raise errors.fail("EVIDENCE_SCOPE_INCOMPLETE",
                   "trades's real (ticker, year) span is not inside evidence_scope; "
                   "Scorer._entry_implied_move's own daily_market read would under-cover it")
+    _check_tier4_cache_refs(repository, request.snapshot_ref, request.registry_and_model_refs)
     manifest: dict[str, str] = {}
-    curated_files: dict[str, dict[int, Path]] = {}
+    curated_files: dict[str, dict[int, list[Path]]] = {}
     single_files: dict[str, Path] = {}
+    copied_tables: set[str] = set()
     for table_name, query in request.table_queries.items():
         contract = repository.table_contract(request.snapshot_ref, table_name)
+        whole_table = table_name not in _EVIDENCE_SCOPED_TABLES
         if TABLE_OUTPUT_KIND[table_name] == "curated":
-            year_paths = _write_curated_table(repository, query, table_name, dest_root)
+            if whole_table:
+                year_paths = _copy_whole_table_curated(repository, request.snapshot_ref, table_name,
+                                                       store, dest_root)
+                copied_tables.add(table_name)
+            else:
+                year_paths = _write_curated_table(repository, query, table_name, dest_root)
             curated_files[table_name] = year_paths
-            for path in year_paths.values():
-                manifest[str(path.relative_to(dest_root))] = _file_content_hash(path)
+            for paths_for_year in year_paths.values():
+                for path in paths_for_year:
+                    manifest[str(path.relative_to(dest_root))] = _file_content_hash(path)
         else:
             rel = _single_file_relative_path(table_name)
             path = dest_root / rel
-            _write_single_file(repository, query, table_name, contract, path)
+            copied = whole_table and _copy_whole_single_file(repository, request.snapshot_ref,
+                                                              table_name, store, path)
+            if copied:
+                copied_tables.add(table_name)
+            else:
+                _write_single_file(repository, query, table_name, contract, path)
             single_files[table_name] = path
             manifest[rel] = _file_content_hash(path)
     snapshot_rel = "data/features/SNAPSHOT"
@@ -558,7 +615,8 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
         path = dest_root / rel
         _write_pinned_bytes(store, ref_hash, path)
         manifest[rel] = _file_content_hash(path)
-    return MaterializedTree(manifest=manifest, curated_files=curated_files, single_files=single_files)
+    return MaterializedTree(manifest=manifest, curated_files=curated_files, single_files=single_files,
+                            copied_tables=frozenset(copied_tables))
 
 
 def _single_file_relative_path(table_name: str) -> str:
@@ -590,7 +648,7 @@ def _check_dest_root(store, dest_root: Path) -> None:
 
 
 def _write_curated_table(repository, query: DataQuery, table_name: str,
-                         dest_root: Path) -> dict[int, Path]:
+                         dest_root: Path) -> dict[int, list[Path]]:
     curated_root = dest_root / "data" / "curated" / table_name
     writers: dict[int, pq.ParquetWriter] = {}
     paths: dict[int, Path] = {}
@@ -598,7 +656,7 @@ def _write_curated_table(repository, query: DataQuery, table_name: str,
         _split_batch_by_year(batch, curated_root, writers, paths)
     for writer in writers.values():
         writer.close()
-    return paths
+    return {year: [path] for year, path in paths.items()}
 
 
 def _split_batch_by_year(batch: pa.RecordBatch, curated_root: Path,
@@ -615,6 +673,148 @@ def _split_batch_by_year(batch: pa.RecordBatch, curated_root: Path,
             writers[year] = writer
             paths[year] = path
         writer.write_batch(sub)
+
+
+# -- review round 4, decision 1: byte-identical copy for whole outputs ------
+#
+# A whole_table read never filters a row out of any fragment it touches (the
+# manifest-derived interval is built FROM those fragments' own time_min/
+# time_max, so every row in a surviving fragment is in range by
+# construction — see _whole_table_bounds). That makes the object bytes
+# themselves the legacy output: no re-encoding, no re-scan, and — critically
+# for feature_panel — a byte-identical panel.parquet keeps
+# store.file_sha256(paths.PANEL) equal to the SOURCE panel object's own
+# hash, which is what lets a Tier-4 serving-model cache reference be pinned
+# by an exact, predictable filename (decision 2 below) instead of guaranteed
+# to miss.
+
+
+def _copy_verified_object(store, object_ref, dest_path: Path) -> None:
+    """Stream-copy one immutable object's bytes to ``dest_path``, hashing as
+    it goes and refusing a mismatch against ``object_ref``'s own recorded
+    hash/size — never re-encoded, never loaded whole into memory."""
+    digest = object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    source_path = Path(store.root) / "objects" / digest[:2] / digest
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    hasher = hashlib.sha256()
+    size = 0
+    try:
+        with open(source_path, "rb") as src, open(dest_path, "wb") as dst:
+            while chunk := src.read(1 << 20):
+                hasher.update(chunk)
+                size += len(chunk)
+                dst.write(chunk)
+    except OSError as exc:
+        dest_path.unlink(missing_ok=True)
+        raise errors.fail("OBJECT_CORRUPT", "a copied object could not be read from the store") from exc
+    if size != object_ref.byte_size or CONTENT_HASH_PREFIX + hasher.hexdigest() != object_ref.content_hash:
+        dest_path.unlink(missing_ok=True)
+        raise errors.fail("OBJECT_CORRUPT", "a copied object's bytes do not match its recorded hash")
+
+
+def _copy_whole_table_curated(repository, snapshot_ref: SnapshotRef, table_name: str, store,
+                              dest_root: Path) -> dict[int, list[Path]]:
+    """Every fragment of a whole_table curated table, copied to its own
+    ``part-NNNN.parquet`` in manifest order, per partition year — the exact
+    ``part-*.parquet`` glob legacy ``iter_table``/``_partition_files`` already
+    concatenates, so a multi-fragment year needs no new legacy-side support."""
+    curated_root = dest_root / "data" / "curated" / table_name
+    year_paths: dict[int, list[Path]] = {}
+    for record in repository.fragment_records(snapshot_ref, table_name):
+        year = int(record.partition_key)
+        ordinal = len(year_paths.get(year, ()))
+        path = curated_root / f"year={year}" / f"part-{ordinal:04d}.parquet"
+        _copy_verified_object(store, record.object_ref, path)
+        year_paths.setdefault(year, []).append(path)
+    return year_paths
+
+
+def _copy_whole_single_file(repository, snapshot_ref: SnapshotRef, table_name: str, store,
+                            dest_path: Path) -> bool:
+    """Copy ``table_name``'s single fragment byte-for-byte to ``dest_path``.
+
+    Returns False (nothing written) when the logical partition has more than
+    one fragment: legacy ``load_panel``/``load_forecasts`` open ONE fixed
+    file path, never a ``part-*`` directory, so a genuinely multi-fragment
+    ``feature_panel``/``tier4_forecasts`` cannot be represented as a single
+    verified copy — the caller falls back to the existing rewrite path,
+    which stays correct (not byte-identical) for that rare case.
+    """
+    records = repository.fragment_records(snapshot_ref, table_name)
+    if len(records) != 1:
+        return False
+    _copy_verified_object(store, records[0].object_ref, dest_path)
+    return True
+
+
+# --------------------------------------------------------------------------
+# review round 4, decision 2: pinned Tier-4 serving-model cache refs
+# --------------------------------------------------------------------------
+#
+# engine.data.features.tier4._serving_path(model_id, fold, snapshot) names
+# SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib", where
+# SERVING_DIR = paths.DATA / "models" / "tier4" and snapshot =
+# store.file_sha256(paths.PANEL) — the legacy-relative path pattern a pinned
+# ref for one of these files must use is therefore:
+#
+#     data/models/tier4/<model_id>_<fold:%Y%m>_<panel_sha256[:12]>.joblib
+#
+# This module cannot enumerate which exact (model_id, fold) pairs a future
+# score_calendar board will touch (that depends on as_of/horizon_days/which
+# events land in the window, none of which this request carries) — the
+# caller that DOES know the board is responsible for naming the exact refs
+# it needs, the same way it already names registry.json/structures.json.
+# What this module CAN and does check, structurally: every pinned ref that
+# looks like one of these cache files must carry the CORRECT panel-hash
+# prefix for THIS request's own panel object -- a stale ref copied from a
+# different snapshot is refused before it is ever trusted, exactly like a
+# missing one already is via _verify_pinned_ref_exists.
+TIER4_CACHE_DIR = "data/models/tier4"
+
+
+def _panel_object_ref(repository, snapshot_ref: SnapshotRef):
+    """The single fragment's ``ObjectRef`` behind ``feature_panel``, or
+    ``None`` when it is genuinely multi-fragment (no one predictable hash to
+    check a cache ref's filename against)."""
+    records = repository.fragment_records(snapshot_ref, "feature_panel")
+    return records[0].object_ref if len(records) == 1 else None
+
+
+def _tier4_cache_hash_prefix(relative_path: str) -> str | None:
+    """The ``<panel_sha256[:12]>`` segment of a ``TIER4_CACHE_DIR`` ref's
+    filename, or ``None`` if ``relative_path`` is not shaped like one."""
+    prefix = f"{TIER4_CACHE_DIR}/"
+    if not relative_path.startswith(prefix) or not relative_path.endswith(".joblib"):
+        return None
+    stem = relative_path[len(prefix):-len(".joblib")]
+    if "_" not in stem:
+        return None
+    return stem.rsplit("_", 1)[-1]
+
+
+def _check_tier4_cache_refs(repository, snapshot_ref: SnapshotRef, registry_and_model_refs) -> None:
+    panel_object_ref = _panel_object_ref(repository, snapshot_ref)
+    if panel_object_ref is None:
+        return
+    expected = panel_object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)[:12]
+    for ref in registry_and_model_refs:
+        relative_path, _ = parse_pinned_ref(ref)
+        prefix = _tier4_cache_hash_prefix(relative_path)
+        if prefix is not None and prefix != expected:
+            raise errors.fail("TIER4_CACHE_STALE",
+                      "a pinned Tier-4 serving-model cache ref's panel-hash prefix does not match "
+                      "this materialization's own panel object",
+                      details={"path": relative_path})
+
+
+def tier4_cache_refs_match_panel(repository, request: LegacyMaterializationRequest) -> bool:
+    """True iff every pinned Tier-4 cache ref (if any) carries this request's
+    own panel-hash prefix — see :data:`TIER4_CACHE_DIR` above."""
+    try:
+        _check_tier4_cache_refs(repository, request.snapshot_ref, request.registry_and_model_refs)
+    except errors.DataError:
+        return False
+    return True
 
 
 # -- single-file tables (feature_panel / tier4_forecasts) --------------------

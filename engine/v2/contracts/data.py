@@ -148,6 +148,11 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # span can escape a too-narrow evidence_scope; this is the stable code
     # for that refusal, distinct from the generic validation codes above.
     "EVIDENCE_SCOPE_INCOMPLETE": ("validation", False),
+    # P2-6 review round 4: a pinned Tier-4 serving-model cache ref whose
+    # filename's own embedded panel-hash prefix does not match this
+    # materialization's actual panel object -- a stale ref from a different
+    # snapshot, caught before it is ever copied in.
+    "TIER4_CACHE_STALE": ("validation", False),
 }
 
 

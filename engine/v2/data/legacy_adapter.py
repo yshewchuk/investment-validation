@@ -118,20 +118,40 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
     otherwise. Every written file is re-read with the unchanged legacy
     readers before the tree is made read-only (chmod 0444 files / 0555
     dirs). Returns ``{relative_path: content_hash}``.
+
+    A table in ``tree.copied_tables`` (review round 4, decision 1) was
+    written by a verified byte-for-byte object copy, not a rewrite: its
+    bytes are already proven correct by that copy's own hash check, so this
+    only re-opens it with the unchanged legacy reader (never a fresh
+    Repository scan to compare against — that would re-read the whole table
+    a second time, exactly the cost decision 1 exists to avoid).
     """
     tree = legacy_materialization.materialize_tree(repository, store, request, dest_root)
     for table_name, year_paths in tree.curated_files.items():
-        contract = repository.table_contract(request.snapshot_ref, table_name)
-        _validate_curated_table(repository, request.table_queries[table_name], table_name, contract,
-                                year_paths)
+        if table_name in tree.copied_tables:
+            _validate_copied_curated_table(year_paths, table_name)
+        else:
+            contract = repository.table_contract(request.snapshot_ref, table_name)
+            _validate_curated_table(repository, request.table_queries[table_name], table_name, contract,
+                                    year_paths)
     for table_name, path in tree.single_files.items():
-        _validate_single_file(repository, request.table_queries[table_name], table_name, path)
+        if table_name in tree.copied_tables:
+            read_legacy_part(path, columns=None)  # proves the unchanged reader opens it; no coerce()
+        else:                                     # for feature_panel/tier4_forecasts (no legacy schema)
+            _validate_single_file(repository, request.table_queries[table_name], table_name, path)
     legacy_materialization.lock_down(dest_root)
     return tree.manifest
 
 
+def _validate_copied_curated_table(year_paths: dict, table_name: str) -> None:
+    for paths_for_year in year_paths.values():
+        for path in paths_for_year:
+            _assert_legacy_coerce_accepts(read_legacy_part(path, columns=None), table_name)
+
+
 def _validate_curated_table(repository, query, table_name: str, contract, year_paths: dict) -> None:
-    for year, path in year_paths.items():
+    for year, paths_for_year in year_paths.items():
+        (path,) = paths_for_year  # the rewrite path always writes exactly one part-0000.parquet
         year_query = legacy_materialization.narrow_query_to_year(query, contract, year)
         scanned = legacy_materialization.scanned_rows(repository, year_query, table_name)
         legacy_frame = read_legacy_part(path, columns=None)
