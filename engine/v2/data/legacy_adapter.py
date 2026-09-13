@@ -37,6 +37,23 @@ Layer 1 of ``system_rearchitecture.md`` §4.1: besides the declared legacy
 edges, this module imports only ``engine.v2.contracts``, its own package
 (``documents``, ``manifests``), and ``engine.v2.foundation`` — never
 ``engine.v2.ops`` (phase-2 guide §3.3).
+
+**P2-6 fan-out finding, reported rather than gamed (review instruction).**
+``build_legacy_mapping`` alone already spends this module's full §4.3 fan-out
+budget (8 distinct modules, non-orchestrator, zero exemption, per
+``checks/code_budgets.py``). ``materialize()`` (below) needs one more
+*required* legacy edge, ``engine.data.store._read_part`` — the unchanged
+legacy reader D13/D14 must prove reads a written file — and reuses
+``engine.data.schemas`` for ``coerce`` (already an edge, for ``SCHEMAS``/
+``SOURCE_PRIORITY``). Keeping one ledger entry per exact legacy symbol (per
+review) rather than collapsing ``engine.data.features.panel``/``.tier4`` into
+their shared submodule import puts this module at 9 distinct modules,
+1 over budget; every legacy-free piece of ``materialize``'s machinery
+(Parquet writing, hashing, dest_root safety, row comparison, lock-down)
+already lives in ``legacy_materialization.py`` instead, reached through this
+module's own already-counted relative-import edge, and there is no further
+legitimate reduction available. See this task's report for the exact
+``code_budgets.py`` finding.
 """
 from __future__ import annotations
 
@@ -47,12 +64,14 @@ from engine.data.features.panel import PANEL_COLUMNS
 from engine.data.features.tier4 import COLUMNS as TIER4_COLUMNS
 from engine.data.features.tier4 import KEY_COLUMNS as TIER4_KEY_COLUMNS
 from engine.data.schemas import SCHEMAS, SOURCE_PRIORITY
-from engine.v2.contracts.data import ColumnContract, TableContract
+from engine.data.schemas import coerce as legacy_coerce
+from engine.data.store import _read_part as legacy_read_part
+from engine.v2.contracts.data import ColumnContract, LegacyMaterializationRequest, TableContract
 from engine.v2.foundation import content_hash, to_document
 
-from . import documents, manifests
+from . import documents, errors, legacy_materialization, manifests
 
-__all__ = ["LegacyMappingError", "SOURCE_PRIORITY_VERSION", "build_legacy_mapping"]
+__all__ = ["LegacyMappingError", "SOURCE_PRIORITY_VERSION", "build_legacy_mapping", "materialize"]
 
 #: Legacy ``engine.data.schemas.Column.dtype`` -> contract ``physical_type``.
 #: Closed and exhaustive over the five dtypes ``engine/data/schemas.py``
@@ -377,3 +396,65 @@ def _snapshot_metadata(spec: dict[str, object]) -> dict[str, object]:
         "expected_top_level_keys": tuple(spec["expected_top_level_keys"]),
         "description": spec["description"],
     }
+
+
+# --------------------------------------------------------------------------
+# P2-6: materialize — the private, read-only legacy file layout (§9.1)
+# --------------------------------------------------------------------------
+#
+# The pure read-plan/request logic lives in ``legacy_materialization.py``
+# (never touches legacy code); this is the one function that writes legacy
+# Parquet, re-reads it with the unchanged legacy loaders, and locks it down —
+# the only legacy-touching half of D14 this task covers (see module report).
+
+
+def materialize(repository, store, request: LegacyMaterializationRequest, dest_root: Path) -> dict[str, str]:
+    """Write ``request``'s private legacy layout under ``dest_root``.
+
+    ``dest_root`` must be a fresh, empty, non-symlink directory outside
+    ``store``'s own tree — refused with a stable ``DEST_ROOT_*`` code
+    otherwise. Every written file is re-read with the unchanged legacy
+    readers before the tree is made read-only (chmod 0444 files / 0555
+    dirs). Returns ``{relative_path: content_hash}``.
+
+    All the legacy-free work (dest_root safety, Parquet writing, hashing,
+    lock-down) lives in ``legacy_materialization.py``; this function is the
+    thin, legacy-touching remainder — the only two calls in this whole
+    module that could not live there (§4.3 fan-out budget: this module was
+    already at its 8-edge ceiling for ``build_legacy_mapping`` alone, so
+    every byte of new orchestration had to move next door; see this task's
+    report).
+    """
+    tree = legacy_materialization.materialize_tree(repository, store, request, dest_root)
+    for table_name, year_paths in tree.curated_files.items():
+        contract = repository.table_contract(request.snapshot_ref, table_name)
+        _validate_curated_table(repository, request.table_queries[table_name], table_name, contract,
+                                year_paths)
+    for table_name, path in tree.single_files.items():
+        _validate_single_file(repository, request.table_queries[table_name], table_name, path)
+    legacy_materialization.lock_down(dest_root)
+    return tree.manifest
+
+
+def _validate_curated_table(repository, query, table_name: str, contract: TableContract,
+                            year_paths: dict) -> None:
+    for year, path in year_paths.items():
+        year_query = legacy_materialization.narrow_query_to_year(query, contract, year)
+        scanned = legacy_materialization.scanned_rows(repository, year_query, table_name)
+        legacy_frame = legacy_read_part(path, columns=None)
+        legacy_materialization.assert_rows_match(scanned, legacy_frame, query.columns)
+        _assert_legacy_coerce_accepts(legacy_frame, table_name)
+
+
+def _validate_single_file(repository, query, table_name: str, path: Path) -> None:
+    scanned = legacy_materialization.scanned_rows(repository, query, table_name)
+    legacy_frame = legacy_read_part(path, columns=None)
+    legacy_materialization.assert_rows_match(scanned, legacy_frame, query.columns)
+
+
+def _assert_legacy_coerce_accepts(legacy_frame, table_name: str) -> None:
+    try:
+        legacy_coerce(legacy_frame, table_name)
+    except Exception as exc:
+        raise errors.fail("CONTRACT_MISMATCH",
+                  f"legacy coerce() refused the materialized {table_name!r} file") from exc

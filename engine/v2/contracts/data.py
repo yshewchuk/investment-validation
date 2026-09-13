@@ -140,6 +140,10 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "EVENT_NOT_FOUND": ("dependency", False),
     "DEADLINE_EXCEEDED": ("resource", True),
     "POPULATION_COLLAPSED": ("validation", False),
+    # P2-6: stable codes for the two structural refusals a legacy
+    # materialization's dest_root can trigger before any byte is written.
+    "DEST_ROOT_NOT_EMPTY": ("validation", False),
+    "DEST_ROOT_UNSAFE": ("validation", False),
 }
 
 

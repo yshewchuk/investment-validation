@@ -401,6 +401,22 @@ class Repository:
         return chains.get_chain(self, query, snapshot_ref)
 
     # ----------------------------------------------------------------------
+    # P2-6: table_contract — the one public contract lookup a query planner
+    # needs before it can build a DataQuery (observation_time_column, primary
+    # key, per-table row caps). Reuses the same private ``_full_contract``
+    # ``resolve``/``scan`` already trust, so a planner never re-derives
+    # contract facts by hand.
+    # ----------------------------------------------------------------------
+
+    def table_contract(self, snapshot_ref: SnapshotRef, table_name: str) -> TableContract:
+        if table_name not in snapshot_ref.table_versions:
+            raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                      details={"table_name": table_name})
+        dvr = snapshot_ref.table_versions[table_name]
+        with _read_only(self._conn) as conn:
+            return self._full_contract(conn, dvr.table_contract_ref.contract_id)
+
+    # ----------------------------------------------------------------------
     # P2-4: explain_dependencies — §5.5
     # ----------------------------------------------------------------------
 
