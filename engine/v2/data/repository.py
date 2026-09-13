@@ -64,22 +64,22 @@ Judgement calls (task brief decision 1, P2-4):
   primary key does not happen to be partition-aligned (e.g. a table
   partitioned by year but keyed leading-column by ticker). The merge only
   ever buffers one pending row per still-open fragment.
-* the merged stream's own non-decreasing order is still verified end to end
-  (across fragment boundaries, not only within one) before each batch is
-  built, raising ``CONTRACT_MISMATCH`` on a regression — belt-and-suspenders
-  over the merge itself, and the literal implementation of §8.2 step 7's
-  "include hidden primary-key columns ... to verify ordering." A duplicate
-  key is deliberately *not* flagged here (equal, not decreasing): a specific
-  caller with a domain-appropriate code for "more than one row" (e.g.
-  ``events.get_event``'s ``MANIFEST_CORRUPT``) gets to see the rows and name
-  the failure itself, rather than a generic one firing first.
+* the merged stream's own strictly-increasing, unique order is verified end
+  to end (across fragment boundaries, not only within one) before each row
+  is even appended to a pending batch — the literal implementation of §8.2
+  step 7's "include hidden primary-key columns ... to verify ordering" and
+  step 9's ordering guarantee. A duplicate key is exactly as much an
+  integrity defect as a regression (task 2 review fix), so both raise
+  ``MANIFEST_CORRUPT`` here, before the offending row is ever yielded — a
+  duplicate ``event_id`` therefore already surfaces as ``MANIFEST_CORRUPT``
+  by the time ``events.get_event`` sees its rows, through this path rather
+  than a second check of its own.
 * the stat-tuple verification cache §8.2 step 6 describes is DEFERRED
   (tech debt TD-1, task brief): every object open re-hashes via
   ``objects.verify_object_path``, unconditionally.
-* no failure code in the closed ``DATA_FAILURE_CODES`` vocabulary means
-  "deadline exceeded"; ``QUERY_NOT_BOUNDED`` is reused for it (closest to
-  "an execution bound was violated") since inventing an unregistered code is
-  refused by ``errors.make_problem`` outright.
+* "deadline exceeded" is its own registered code, ``DEADLINE_EXCEEDED``
+  (task 2 review fix) — resource category, retryable (a caller may simply
+  retry with a later deadline).
 """
 from __future__ import annotations
 
@@ -354,13 +354,13 @@ class Repository:
         previous_key = None
         pending: list[dict] = []
         for key, row in merged:
-            # Non-decreasing, not strictly increasing: a genuine regression in
-            # key order is this package's problem (CONTRACT_MISMATCH); a
-            # duplicate primary key is a specific caller's problem to name
-            # (events.get_event's own MANIFEST_CORRUPT, for one) rather than
-            # a generic one raised here before that caller ever sees the rows.
-            if previous_key is not None and key < previous_key:
-                raise errors.fail("CONTRACT_MISMATCH", "scan result is not in strict primary-key order")
+            # Strictly increasing, unique PK order across the whole stream
+            # (§8.2 step 9) — a duplicate key (task 2 review fix) is exactly
+            # as much an integrity defect as a regression, so both raise
+            # MANIFEST_CORRUPT here, before the duplicate/out-of-order row is
+            # ever appended to ``pending`` (so it is never yielded).
+            if previous_key is not None and key <= previous_key:
+                raise errors.fail("MANIFEST_CORRUPT", "scan result is not in strict primary-key order")
             previous_key = key
             pending.append(row)
             if len(pending) >= batch_cap:
@@ -388,7 +388,7 @@ class Repository:
 
     def _check_deadline(self, deadline: str) -> None:
         if SystemClock().now() > parse_timestamp(deadline):
-            raise errors.fail("QUERY_NOT_BOUNDED", "deadline exceeded")
+            raise errors.fail("DEADLINE_EXCEEDED", "deadline exceeded")
 
     # ----------------------------------------------------------------------
     # P2-4: get_event / get_chain — §8.3

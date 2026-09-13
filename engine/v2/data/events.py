@@ -12,14 +12,14 @@ Column semantics were read from ``engine.data.schemas.EARNINGS_EVENTS``'s
 mapping:
 
 * ``session``/``session_src`` map straight across, as decision 3 directs.
-  **Stop-and-report**: ``Column.doc`` declares ``session`` nullable ("null
-  when no source in ``engine.calendar.SESSION_PRIORITY`` supplied a
-  session"), but ``EarningsEvent.session`` is a required, non-``None`` ``str``
-  — the two contradict. Rather than leave ``get_event`` unable to map any row
-  with a null session, this module treats a null legacy ``session``/
-  ``session_src`` as the empty string ``""`` (a "no session determined"
-  sentinel), and this contradiction is called out in the task report as
-  instructed rather than silently resolved.
+  **Stop-and-report, resolved**: ``Column.doc`` declares ``session`` nullable
+  ("null when no source in ``engine.calendar.SESSION_PRIORITY`` supplied a
+  session"), which contradicted the original ``EarningsEvent.session: str``
+  (non-``None``). Per the coordinator's review decision, ``EarningsEvent``
+  now declares ``session``/``session_source`` as ``str | None``
+  (``EARNINGS_EVENT_V1`` bumped to ``earnings_event.v1.1``, a nullable
+  addition), and a null legacy ``session``/``session_src`` maps straight to
+  ``None`` here — never the empty string.
 * ``date_conflict``'s doc ("Forward sources disagree ... both rows kept")
   confirms a conflict is visible as *two rows*, not a rewritten duplicate
   primary key — consistent with checking ``event_cluster_id`` across sibling
@@ -64,14 +64,18 @@ def security_id_for_ticker(ticker: str) -> str:
 
 def get_event(repository, event_ref: EventRef, snapshot_ref: SnapshotRef) -> EarningsEvent:
     """§8.3: one bounded query by exact ``event_id``, verified against the
-    requested calendar revision. Zero rows is refused as not found; more than
-    one row for one ``event_id`` is refused as ``MANIFEST_CORRUPT`` — a
-    duplicate primary key is exactly the kind of catalog/fragment integrity
+    requested calendar revision. Zero rows is refused as ``EVENT_NOT_FOUND``.
+    More than one row for one ``event_id`` never reaches this function as a
+    Python list to count: ``repository.scan`` itself enforces a strictly
+    increasing, unique key order across its whole (possibly multi-fragment)
+    result (§8.2 step 9, task 2 review fix) and raises ``MANIFEST_CORRUPT`` —
+    a duplicate primary key is exactly the kind of catalog/fragment integrity
     defect that code already names elsewhere in this package (repository.py's
     own note: the guide's ``INTEGRITY_FAILED`` maps to ``MANIFEST_CORRUPT``
-    here). ``IDENTITY_CONFLICT`` is reserved for an ambiguous *mapping*
-    (task brief decision 4), not a duplicate-row defect, so it is not used
-    for this case.
+    here) — the moment it sees the second ``event_id`` row, before
+    ``_rows_by_event_id`` below ever finishes collecting them.
+    ``IDENTITY_CONFLICT`` is reserved for an ambiguous *mapping* (task brief
+    decision 4), not a duplicate-row defect, so it is not used for this case.
     """
     if TABLE_NAME not in snapshot_ref.table_versions:
         raise fail("CONTRACT_MISMATCH", "snapshot has no earnings_events table")
@@ -82,10 +86,7 @@ def get_event(repository, event_ref: EventRef, snapshot_ref: SnapshotRef) -> Ear
                   details={"event_id": event_ref.event_id})
     rows = _rows_by_event_id(repository, snapshot_ref, dvr.table_contract_ref, event_ref.event_id)
     if not rows:
-        raise fail("CONTRACT_MISMATCH", "event_id is not present under this calendar revision",
-                  details={"event_id": event_ref.event_id})
-    if len(rows) > 1:
-        raise fail("MANIFEST_CORRUPT", "more than one row for one event_id is an integrity failure",
+        raise fail("EVENT_NOT_FOUND", "event_id is not present under this calendar revision",
                   details={"event_id": event_ref.event_id})
     row = rows[0]
     conflict = bool(row["date_conflict"]) or _has_cluster_conflict(
@@ -102,9 +103,9 @@ def map_row(row: dict, *, event_ref: EventRef, conflict: bool) -> EarningsEvent:
         security_id=security_id_for_ticker(row["ticker"]),
         ticker_at_event=row["ticker"],
         scheduled_event_date=scheduled_date,
-        session=row["session"] or "",
+        session=row["session"],
         actual_announcement_at=None,
-        session_source=row["session_src"] or "",
+        session_source=row["session_src"],
         confidence=1.0 if row["date_agree"] else 0.0,
         conflict_status="conflict" if (row["date_conflict"] or conflict) else "none",
         known_from=None,

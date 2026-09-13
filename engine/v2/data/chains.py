@@ -7,15 +7,25 @@ caller-supplied ``Repository``, plus one ``get_event`` call — see the
 judgement call below); :func:`map_row`, :func:`contract_id_for`, and
 :func:`exact_decimal_string` are pure and independently testable.
 
-Judgement call (task brief decision 4 names the row mapping but not how a
-``ChainQuery.security_id`` — a one-way sha256 — is turned back into the
-legacy ``ticker`` ``option_chains`` is actually keyed by): ``get_chain``
-requires ``chain_query.event_ref``, resolves it via :func:`events.get_event`
-to recover ``ticker_at_event``, and verifies
-``events.security_id_for_ticker(ticker) == chain_query.security_id`` before
-querying — refusing with ``IDENTITY_CONFLICT`` on a mismatch and
-``CONTRACT_MISMATCH`` when ``event_ref`` is absent. No reverse ticker index
-exists elsewhere in this package to do this any other way.
+Judgement call, revised per coordinator review (task brief decision 4 names
+the row mapping but not how a ``ChainQuery.security_id`` — a one-way sha256
+— is turned back into the legacy ``ticker`` ``option_chains`` is actually
+keyed by): ``event_ref`` is optional on the contract, so ``get_chain`` does
+not require it.
+
+* When ``event_ref`` is given, it is resolved via :func:`events.get_event`
+  to recover ``ticker_at_event``, and ``events.security_id_for_ticker(ticker)
+  == chain_query.security_id`` is verified — ``IDENTITY_CONFLICT`` on a
+  mismatch.
+* When it is absent, the ticker is recovered by scanning the pinned
+  ``securities`` table (``columns=("ticker",)``, bounded by a ``year`` key
+  predicate derived from ``session_date`` — no new filterable column: `year`
+  is already filterable on ``securities``) and keeping the rows whose
+  ``legacy_ticker.v1`` security_id matches. Zero matches is
+  ``IDENTITY_CONFLICT`` ("unknown security"); more than one distinct ticker
+  matching is also ``IDENTITY_CONFLICT`` ("ambiguous symbology") — two
+  different tickers can never share one sha256 in practice, but the check
+  costs nothing and names the right failure if they ever did.
 
 Judgement call: ``expected_contracts`` counts every distinct
 ``(expiry, right, strike)`` combination the bounded ticker/session scan
@@ -60,6 +70,7 @@ __all__ = [
 ]
 
 TABLE_NAME = "option_chains"
+SECURITIES_TABLE_NAME = "securities"
 QUOTE_POLICY_REF = "legacy_stored_quote.v1"
 
 _CHAIN_COLUMNS = ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask", "mid",
@@ -142,7 +153,7 @@ def get_chain(repository, chain_query: ChainQuery, snapshot_ref: SnapshotRef) ->
     rows = _fetch_rows(repository, snapshot_ref, dvr.table_contract_ref, ticker, chain_query.session_date)
     expected = {(r["expiry"], r["right"], r["strike"]) for r in rows}
     if not expected:
-        raise fail("CONTRACT_MISMATCH", "no contracts exist for this ticker/session")
+        raise fail("POPULATION_COLLAPSED", "no contracts exist for this ticker/session")
 
     members, supported = _build_members(rows, chain_query, ticker, security_id, ceiling_date)
     if len(members) > chain_query.max_contracts:
@@ -162,16 +173,42 @@ def get_chain(repository, chain_query: ChainQuery, snapshot_ref: SnapshotRef) ->
 
 
 def _resolve_ticker(repository, chain_query: ChainQuery, snapshot_ref: SnapshotRef) -> tuple[str, str]:
-    if chain_query.event_ref is None:
-        raise fail("CONTRACT_MISMATCH",
-                  "get_chain requires event_ref to resolve the legacy ticker for security_id",
+    if chain_query.event_ref is not None:
+        event = events.get_event(repository, chain_query.event_ref, snapshot_ref)
+        ticker = event.ticker_at_event
+        if events.security_id_for_ticker(ticker) != chain_query.security_id:
+            raise fail("IDENTITY_CONFLICT", "security_id does not match the event's ticker mapping",
+                      details={"security_id": chain_query.security_id})
+        return ticker, chain_query.security_id
+    return _ticker_from_securities(repository, chain_query, snapshot_ref), chain_query.security_id
+
+
+def _ticker_from_securities(repository, chain_query: ChainQuery, snapshot_ref: SnapshotRef) -> str:
+    """No ``event_ref``: recover the ticker by scanning the pinned
+    ``securities`` table for the ``year`` of ``session_date`` (already a
+    filterable column there — no new one needed) and keeping the rows whose
+    ``legacy_ticker.v1`` security_id matches ``chain_query.security_id``."""
+    if SECURITIES_TABLE_NAME not in snapshot_ref.table_versions:
+        raise fail("CONTRACT_MISMATCH", "snapshot has no securities table")
+    dvr = snapshot_ref.table_versions[SECURITIES_TABLE_NAME]
+    year = date.fromisoformat(chain_query.session_date).year
+    query = DataQuery(
+        snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+        columns=("ticker", "year"),
+        key_filter=(KeyPredicate(column="year", operator="eq", values=(year,)),),
+        order_by=("ticker", "year"), max_batch_rows=_BATCH_CAP, max_result_rows=_RESULT_CAP)
+    tickers = set()
+    for batch in repository.scan(query, table_name=SECURITIES_TABLE_NAME):
+        for row in batch.to_pylist():
+            if events.security_id_for_ticker(row["ticker"]) == chain_query.security_id:
+                tickers.add(row["ticker"])
+    if not tickers:
+        raise fail("IDENTITY_CONFLICT", "unknown security",
                   details={"security_id": chain_query.security_id})
-    event = events.get_event(repository, chain_query.event_ref, snapshot_ref)
-    ticker = event.ticker_at_event
-    if events.security_id_for_ticker(ticker) != chain_query.security_id:
-        raise fail("IDENTITY_CONFLICT", "security_id does not match the event's ticker mapping",
-                  details={"security_id": chain_query.security_id})
-    return ticker, chain_query.security_id
+    if len(tickers) > 1:
+        raise fail("IDENTITY_CONFLICT", "ambiguous symbology",
+                  details={"security_id": chain_query.security_id, "tickers": sorted(tickers)})
+    return next(iter(tickers))
 
 
 def _build_members(rows, chain_query: ChainQuery, ticker: str, security_id: str,

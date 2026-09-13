@@ -367,14 +367,50 @@ def test_max_result_rows_above_contract_cap_is_query_not_bounded(tmp_path):
     assert err.value.code == "QUERY_NOT_BOUNDED"
 
 
-def test_deadline_already_passed_is_query_not_bounded(tmp_path):
+def test_deadline_already_passed_is_deadline_exceeded(tmp_path):
     _conn, store, snap = _securities_snapshot(tmp_path)
     repo = Repository(_conn, store)
     query = DataQuery(snapshot_id=snap.snapshot_id,
                       **_basic_query(deadline="2000-01-01T00:00:00.000000Z"))
     with pytest.raises(DataError) as err:
         list(repo.scan(query, table_name="securities"))
-    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.code == "DEADLINE_EXCEEDED"
+
+
+def test_boundary_duplicate_key_across_fragments_raises_manifest_corrupt(tmp_path):
+    """Two independently-published ``earnings_events`` fragments (different
+    partition years) that happen to share one ``event_id`` at their boundary
+    — a genuine cross-fragment duplicate, not a within-fragment one
+    ``inspect_fragment`` would already refuse."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    events_contract = contract_for("earnings_events")
+    events_ref = contract_ref_for(events_contract)
+
+    def _row(event_id, ticker, year):
+        from datetime import datetime
+        return dict(event_id=event_id, ticker=ticker, event_date=datetime(year, 1, 2), year=year,
+                   session="BMO", session_src="orats", annc_tod=None, src_orats=True,
+                   src_oquants=True, src_nasdaq=False, src_yfinance=False, date_agree=True,
+                   date_conflict=False, updated_at=None, event_cluster_id=None, claim_count=None,
+                   reconciliation=None)
+
+    fragment_2024 = publish_and_inspect(
+        store, events_contract, events_ref,
+        [_row("AAA_2024-01-02", "AAA", 2024), _row("MID_SHARED", "MID", 2024)], "2024")
+    fragment_2025 = publish_and_inspect(
+        store, events_contract, events_ref,
+        [_row("MID_SHARED", "MID", 2025), _row("ZZZ_2025-01-02", "ZZZ", 2025)], "2025")
+    snap = commit_tables(conn, clock, {"earnings_events": [fragment_2024, fragment_2025]},
+                         {"earnings_events": events_contract})
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=events_ref,
+        columns=("event_id", "ticker"),
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "MID", "ZZZ")),),
+        order_by=("event_id",), max_batch_rows=10, max_result_rows=10)
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="earnings_events"))
+    assert err.value.code == "MANIFEST_CORRUPT"
 
 
 # --------------------------------------------------------------------------

@@ -30,6 +30,14 @@ _EVENTS = contract_for("earnings_events")
 _EVENTS_REF = contract_ref_for(_EVENTS)
 _CHAINS = contract_for("option_chains")
 _CHAINS_REF = contract_ref_for(_CHAINS)
+_SEC = contract_for("securities")
+_SEC_REF = contract_ref_for(_SEC)
+
+
+def _securities_row(ticker: str, year: int) -> dict:
+    return dict(ticker=ticker, year=year, first_date=None, last_date=None, mcap_usd=1.5e9,
+               mcap_log=21.1, mcap_raw=1.5, mcap_unit_era="billions", mcap_quantized=False,
+               n_obs=250, src="orats")
 
 
 def _event_row(event_id: str, ticker: str, event_date: datetime, *, session="BMO",
@@ -60,13 +68,16 @@ def _events_snapshot(tmp_path, rows, *, year="2024"):
     return conn, store, snap
 
 
-def _combined_snapshot(tmp_path, event_rows, chain_rows, *, year="2024"):
+def _combined_snapshot(tmp_path, event_rows, chain_rows, *, year="2024", securities_rows=None):
     conn, clock, store = catalog_and_store(tmp_path)
     event_record = publish_and_inspect(store, _EVENTS, _EVENTS_REF, event_rows, year)
     chain_record = publish_and_inspect(store, _CHAINS, _CHAINS_REF, chain_rows, year)
-    snap = commit_tables(conn, clock,
-                         {"earnings_events": [event_record], "option_chains": [chain_record]},
-                         {"earnings_events": _EVENTS, "option_chains": _CHAINS})
+    tables = {"earnings_events": [event_record], "option_chains": [chain_record]}
+    contracts = {"earnings_events": _EVENTS, "option_chains": _CHAINS}
+    if securities_rows is not None:
+        tables["securities"] = [publish_and_inspect(store, _SEC, _SEC_REF, securities_rows, year)]
+        contracts["securities"] = _SEC
+    snap = commit_tables(conn, clock, tables, contracts)
     return conn, store, snap
 
 
@@ -228,7 +239,7 @@ def test_collapsed_expected_population_is_refused(tmp_path):
     query = _chain_query(event_ref=ref)
     with pytest.raises(DataError) as err:
         repo.get_chain(query, snap)
-    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.code == "POPULATION_COLLAPSED"
 
 
 def test_max_contracts_exceeded_is_result_limit_exceeded(tmp_path):
@@ -262,15 +273,48 @@ def test_expected_supported_returned_differ_with_expiry_interval(tmp_path):
     assert chain.returned_contracts == 1
 
 
-def test_missing_event_ref_is_refused(tmp_path):
+def test_get_chain_without_event_ref_resolves_ticker_from_securities(tmp_path):
     event_rows = [_event_row("AAA_2024-01-05", "AAA", datetime(2024, 1, 5))]
     chain_rows = [_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 2, 16), 100.0)]
-    conn, store, snap = _combined_snapshot(tmp_path, event_rows, chain_rows)
+    conn, store, snap = _combined_snapshot(tmp_path, event_rows, chain_rows,
+                                           securities_rows=[_securities_row("AAA", 2024)])
     repo = Repository(conn, store)
+    query = _chain_query(event_ref=None)
+    chain = repo.get_chain(query, snap)
+    assert chain.security_id == events.security_id_for_ticker("AAA")
+    assert chain.returned_contracts == 1
+
+
+def test_get_chain_without_event_ref_and_unknown_security_is_identity_conflict(tmp_path):
+    event_rows = [_event_row("AAA_2024-01-05", "AAA", datetime(2024, 1, 5))]
+    chain_rows = [_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 2, 16), 100.0)]
+    conn, store, snap = _combined_snapshot(tmp_path, event_rows, chain_rows,
+                                           securities_rows=[_securities_row("BBB", 2024)])
+    repo = Repository(conn, store)
+    # security_id names AAA, but the pinned securities table for 2024 only lists BBB.
     query = _chain_query(event_ref=None)
     with pytest.raises(DataError) as err:
         repo.get_chain(query, snap)
-    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.code == "IDENTITY_CONFLICT"
+    assert "unknown security" in str(err.value)
+
+
+def test_get_chain_without_event_ref_and_ambiguous_symbology_is_identity_conflict(
+        tmp_path, monkeypatch):
+    event_rows = [_event_row("AAA_2024-01-05", "AAA", datetime(2024, 1, 5))]
+    chain_rows = [_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 2, 16), 100.0)]
+    conn, store, snap = _combined_snapshot(
+        tmp_path, event_rows, chain_rows,
+        securities_rows=[_securities_row("AAA", 2024), _securities_row("BBB", 2024)])
+    repo = Repository(conn, store)
+    # Force two distinct tickers to collide on one fake security_id — sha256
+    # itself never collides in practice; this proves the ">1 match" branch.
+    monkeypatch.setattr(events, "security_id_for_ticker", lambda ticker: "same-security")
+    query = _chain_query(event_ref=None, security_id="same-security")
+    with pytest.raises(DataError) as err:
+        repo.get_chain(query, snap)
+    assert err.value.code == "IDENTITY_CONFLICT"
+    assert "ambiguous symbology" in str(err.value)
 
 
 def test_security_id_mismatch_is_identity_conflict(tmp_path):
@@ -329,7 +373,7 @@ def test_get_event_without_earnings_events_table_is_contract_mismatch(tmp_path):
     assert err.value.code == "CONTRACT_MISMATCH"
 
 
-def test_get_event_zero_rows_is_contract_mismatch(tmp_path):
+def test_get_event_zero_rows_is_event_not_found(tmp_path):
     conn, store, snap = _events_snapshot(
         tmp_path, [_event_row("AAA_2024-01-05", "AAA", datetime(2024, 1, 5))])
     repo = Repository(conn, store)
@@ -337,7 +381,7 @@ def test_get_event_zero_rows_is_contract_mismatch(tmp_path):
     ref = EventRef(event_id="BBB_2024-01-05", calendar_revision=revision)
     with pytest.raises(DataError) as err:
         repo.get_event(ref, snap)
-    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.code == "EVENT_NOT_FOUND"
 
 
 def test_get_chain_without_option_chains_table_is_contract_mismatch(tmp_path):
