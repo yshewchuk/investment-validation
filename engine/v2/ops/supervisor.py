@@ -25,6 +25,7 @@ from engine.v2.ops.fingerprints import (
     snapshot_code,
     worker_source_manifest,
 )
+from engine.v2.ops.legacy_adapter import copy_read_set
 from engine.v2.ops.lifecycle import (
     Outcome,
     commit_attempt,
@@ -120,7 +121,9 @@ class Service:
             if claim.spec.environment_ref != content_hash(
                     environment_identity(claim.resources.thread_count)):
                 raise OpsError(make_problem("INPUT_CHANGED", "planned worker environment changed"))
-            self._pin_read_set(claim)
+            legacy_manifest = self._pin_read_set(claim)
+            if legacy_manifest is not None:
+                self._populate_legacy_staging(claim, legacy_manifest)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in {
                     "legacy_decisions", "legacy_render", "legacy_selfcheck"}:
@@ -151,7 +154,7 @@ class Service:
 
     def _pin_read_set(self, claim):
         if not any(mode == "read" for _, mode in self._store_domains(claim)):
-            return
+            return None
         bindings = claim.spec.parameters.get("input_bindings") or {}
         manifest_id = str(bindings.get("legacy_manifest.json") or "")
         if not manifest_id or manifest_id.startswith("job_"):
@@ -159,6 +162,19 @@ class Service:
         ref = artifact(self.conn, self.store, manifest_id)
         manifest = json.loads(self.store.read_verified(ref))
         pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root)
+        return manifest
+
+    def _populate_legacy_staging(self, claim, manifest):
+        """A1: nothing else copies the declared legacy inputs into staging."""
+        refs = manifest.get("file_refs", [])
+        total = sum(int(ref["byte_size"]) for ref in refs)
+        if total > claim.resources.scratch_limit_bytes:
+            raise OpsError(make_problem(
+                "RESOURCE_LIMIT_EXCEEDED", "legacy read set exceeds the scratch budget",
+                details={"needed_bytes": total,
+                         "scratch_limit_bytes": claim.resources.scratch_limit_bytes}))
+        staging = self.store.staging_dir(claim.attempt_id)
+        copy_read_set(self.store_root, staging / "legacy", [ref["path"] for ref in refs])
 
     def _reuse_staged_checkpoint(self, claim):
         schema = "receipt.v1.0" if claim.spec.kind == "artifact_check" else "legacy_action.v1.0"
