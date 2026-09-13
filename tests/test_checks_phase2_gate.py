@@ -400,8 +400,10 @@ def test_real_repo_smoke_is_red_for_rows_without_real_tests_or_receipts():
         coverage_path.unlink(missing_ok=True)
     assert result["ok"] is False
     missing = d_ids_with(result, "MISSING_EVIDENCE")
-    for d_id in ("D05", "D06", "D07", "D13", "D14", "D15", "D16"):
+    for d_id in ("D13", "D14", "D15", "D16"):
         assert d_id in missing, (d_id, sorted(missing))
     # P2-5/Task5: D20 now has real, passing tests (tests/test_v2_ops_effects_graph.py).
-    for d_id in ("D01", "D02", "D03", "D08", "D20"):
+    # Task 2 (P2-4): D05-D07 now have real, passing tests (tests/test_v2_data_query.py,
+    # tests/test_v2_data_events_chains.py).
+    for d_id in ("D01", "D02", "D03", "D05", "D06", "D07", "D08", "D20"):
         assert d_id not in missing, (d_id, sorted(missing))

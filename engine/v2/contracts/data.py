@@ -103,7 +103,10 @@ KEY_PREDICATE_V1 = "key_predicate.v1.0"
 TIME_INTERVAL_V1 = "time_interval.v1.0"
 DATA_QUERY_V1 = "data_query.v1.0"
 EVENT_REF_V1 = "event_ref.v1.0"
-EARNINGS_EVENT_V1 = "earnings_event.v1.0"
+#: v1.1 (task 2 review fix): session/session_source became nullable — a
+#: legacy row whose session was never determined maps to None, never "" — a
+#: nullable addition, so the minor version bumps rather than the major one.
+EARNINGS_EVENT_V1 = "earnings_event.v1.1"
 CONTRACT_ID_V1 = "contract_id.v1.0"
 CHAIN_QUERY_V1 = "chain_query.v1.0"
 CHAIN_MEMBER_V1 = "chain_member.v1.0"
@@ -132,6 +135,11 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "MANIFEST_CORRUPT": ("integrity", False),
     "IDENTITY_CONFLICT": ("validation", False),
     "UNSUPPORTED_CONTRACT": ("validation", False),
+    # Task 2 review fix (P2-4): stable codes for three refusals that
+    # previously reused a more generic one.
+    "EVENT_NOT_FOUND": ("dependency", False),
+    "DEADLINE_EXCEEDED": ("resource", True),
+    "POPULATION_COLLAPSED": ("validation", False),
 }
 
 
@@ -395,16 +403,18 @@ class EarningsEvent:
     ``session``/``conflict_status`` stay open strings rather than an invented
     closed vocabulary (see this package's task report). A date move updates
     ``event_ref.calendar_revision`` and ``supersedes_revision`` rather than
-    renaming the event.
+    renaming the event. ``session``/``session_source`` are nullable as of
+    v1.1 (task 2 review fix): a legacy row whose session was never
+    determined maps to ``None``, never the empty string.
     """
 
     event_ref: EventRef
     security_id: str
     ticker_at_event: str
     scheduled_event_date: str
-    session: str
+    session: str | None = None
     actual_announcement_at: str | None = None
-    session_source: str
+    session_source: str | None = None
     confidence: float
     conflict_status: str
     known_from: str | None = None

@@ -1,22 +1,25 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:e186373b237a3206bff7877e908db46bdef3150a88c09650c05a9b7b8ed83fce",
+  "suite_version": "phase2_coverage_suite:292e50ddb4fa9d8e0775e246b96e01d67869622489cdbd3d6a93c3510848c952",
   "test_files": [
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
     "tests/test_v2_data_commit.py",
     "tests/test_v2_data_contracts.py",
+    "tests/test_v2_data_events_chains.py",
     "tests/test_v2_data_legacy_adapter.py",
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
+    "tests/test_v2_data_query.py",
     "tests/test_v2_data_repository.py",
+    "tests/test_v2_data_roundtrip.py",
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_render_parity.py"
   ],
-  "source_hash": "sha256:c58dc13bc11aabc032acb1dbcfe2b5090a575622c4782d0d2fd87e3dfc5245e1",
+  "source_hash": "sha256:a3bf3b23f3006f96e37f45bf29d89981a77628b6d027cccd0c849351cb269be3",
   "packages": {
     "engine.v2.contracts": {
       "executed": 594,
@@ -46,23 +49,26 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 1027,
-      "executable": 1091,
+      "executed": 1405,
+      "executable": 1481,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
+        "engine/v2/data/chains.py",
         "engine/v2/data/documents.py",
         "engine/v2/data/errors.py",
+        "engine/v2/data/events.py",
         "engine/v2/data/legacy_adapter.py",
         "engine/v2/data/manifests.py",
         "engine/v2/data/objects.py",
+        "engine/v2/data/query.py",
         "engine/v2/data/repository.py",
         "engine/v2/data/schema.py",
         "engine/v2/data/time_formats.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 94.13382218148487
+      "percentage": 94.86833220796758
     },
     "engine.v2.features": {
       "executed": 0,
@@ -792,6 +798,98 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_event_maps_a_row",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_revision_mismatch_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_duplicate_event_id_is_manifest_corrupt",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_cluster_conflict_surfaces_as_conflict_status",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_no_cluster_conflict_when_cluster_is_singleton",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_cross_security_chain_row_is_identity_conflict",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_exact_strike_is_preserved_without_display_rounding",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_unusable_quote_is_retained_with_reason",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_quote_repaired_flag_becomes_a_quality_flag",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_chain_organizes_rows_for_the_session",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_post_ceiling_session_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_collapsed_expected_population_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_max_contracts_exceeded_is_result_limit_exceeded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_expected_supported_returned_differ_with_expiry_interval",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_chain_without_event_ref_resolves_ticker_from_securities",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_chain_without_event_ref_and_unknown_security_is_identity_conflict",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_chain_without_event_ref_and_ambiguous_symbology_is_identity_conflict",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_security_id_mismatch_is_identity_conflict",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_unknown_quote_policy_ref_is_unsupported_contract",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_expiry_interval_start_inclusive_excludes_earlier_expiries",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_event_without_earnings_events_table_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_event_zero_rows_is_event_not_found",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_events_chains.py::test_get_chain_without_option_chains_table_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_data_legacy_adapter.py::test_all_eight_datasets_present_in_order",
       "outcome": "passed"
     },
@@ -1140,6 +1238,126 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_data_query.py::test_implicit_latest_snapshot_id_is_not_found",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_unknown_snapshot_id_is_not_found",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_mismatched_table_contract_ref_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_unknown_table_name_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_empty_projection_is_query_not_bounded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_predicate_on_non_filterable_column_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_order_by_not_the_full_primary_key_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_missing_bounds_is_query_not_bounded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_limits_above_contract_cap_is_query_not_bounded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_time_interval_column_must_be_observation_time_column",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_scan_without_a_store_refuses",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_projection_filter_and_order_across_multiple_fragments",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_in_predicate_returns_matching_rows_in_key_order",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_time_interval_across_fragments_with_ticker_pinned",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_hidden_primary_key_columns_dropped_when_not_projected",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_nullable_column_absent_from_an_old_fragment_is_typed_null",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_required_column_missing_from_a_fragment_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_batches_never_exceed_max_batch_rows",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_result_limit_exceeded_even_after_some_batches_were_yielded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_fragment_pruning_shown_by_object_open_counter",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_unknown_projected_column_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_max_result_rows_above_contract_cap_is_query_not_bounded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_deadline_already_passed_is_deadline_exceeded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_boundary_duplicate_key_across_fragments_raises_manifest_corrupt",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_arrow_type_for_unsupported_physical_type_is_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_null_array_for_returns_typed_nulls",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_explain_dependencies_names_surviving_fragments",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_explain_dependencies_without_table_name_is_unsupported_contract",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_explain_dependencies_for_a_chain_query_is_unsupported_contract",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_explain_dependencies_for_an_unrecognized_object_is_unsupported_contract",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_data_repository.py::test_resolve_unknown_snapshot_id_not_found",
       "outcome": "passed"
     },
@@ -1161,6 +1379,14 @@
     },
     {
       "nodeid": "tests/test_v2_data_repository.py::test_resolve_snapshot_head_no_committed_head_raises",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_roundtrip.py::test_full_round_trip_through_arrow_curated_layout_and_legacy_reader",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_roundtrip.py::test_corrupted_object_byte_refuses_the_scan_before_any_row",
       "outcome": "passed"
     },
     {
