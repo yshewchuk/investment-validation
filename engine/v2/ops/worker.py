@@ -62,6 +62,8 @@ def dispatch(worker, parameters, root):
                 "coverage": output}
     if worker == "decision_evidence":
         return _dispatch_decision_evidence(parameters, root)
+    if worker in ("snapshot_import", "legacy_rebuild_candidate"):
+        return _dispatch_snapshot_import(worker, parameters, root)
     if worker in ("ledger_export", "engineering_gate", "publication", "backup"):
         return _dispatch_effect_receipt(worker, parameters, root)
     if worker == "artifact_check":
@@ -110,6 +112,19 @@ def _dispatch_decision_evidence(parameters, root):
          "schema": "decision_evidence.v1.0"}],
         "completed_ids": list(parameters["expected_ids"]),
         "no_work": not parameters["expected_ids"]}
+
+
+def _dispatch_snapshot_import(worker, parameters, root):
+    """P2-7/Task7b: both §7/§10 workers are pure functions of ``parameters``
+    and the staging directory — see ``engine.v2.ops.snapshot_import`` for why
+    neither ever touches the catalog or a live store path."""
+    from engine.v2.ops.snapshot_import import (
+        worker_legacy_rebuild_candidate,
+        worker_snapshot_import,
+    )
+
+    fn = worker_snapshot_import if worker == "snapshot_import" else worker_legacy_rebuild_candidate
+    return fn(parameters, root)
 
 
 def _dispatch_effect_receipt(worker, parameters, root):

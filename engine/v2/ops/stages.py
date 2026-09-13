@@ -18,6 +18,36 @@ class CheckParameters:
 
 
 @dataclass(frozen=True)
+class SnapshotImportParameters:
+    """P2-7/Task7b: the ``snapshot_import`` worker needs nothing scalar at all
+    — its full plan (table sources, contract refs, calendar/source-priority
+    versions, expected head) lives in the bound
+    ``snapshot_import_request.json``/``legacy_table_mapping.json`` documents,
+    resolved through the same ``input_bindings`` machinery every other legacy
+    kind already uses (§7.1 point 4: "the worker receives no mutable-current
+    alias")."""
+
+    expected_ids: tuple[str, ...]
+    input_bindings: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class RebuildCandidateParameters:
+    """P2-7/Task7b (§10): a private candidate root, the paths outside it that
+    must stay untouched, and the pinned fingerprint of those paths taken
+    before submission — ``snapshot_promotion.legacy_rebuild_candidate_effect``
+    recomputes the same fingerprint after the attempt and refuses on any
+    difference."""
+
+    expected_ids: tuple[str, ...]
+    candidate_root: str = ""
+    protected_paths: tuple[str, ...] = ()
+    protected_before_hash: str = ""
+    tables: tuple[str, ...] = ()
+    sample: int | None = None
+
+
+@dataclass(frozen=True)
 class LegacyParameters:
     expected_ids: tuple[str, ...]
     session: str = ""
@@ -60,6 +90,27 @@ def registry():
             resource_classes=frozenset({"validation"}), effects=("staged",),
             retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="decision_evidence_pair.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})),
+        # P2-7/Task7b (§7): streams the pinned legacy read set into per-file
+        # fragment inspections. Coordinator-validated, like decision_evidence
+        # above — see engine.v2.ops.snapshot_promotion.snapshot_import_effect.
+        JobKind(
+            name="snapshot_import", worker="snapshot_import", parameters=SnapshotImportParameters,
+            resource_classes=frozenset({"legacy_rebuild"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 2, (5, 30)),
+            checkpoint_contract="snapshot_import_inspections.v1.0",
+            namespaces=frozenset({"shadow", "smoke"}),
+            store_domains=(("legacy_store", "read"),)),
+        # P2-7/Task7b (§10): runs the real legacy rebuild rooted at a private
+        # candidate directory. No store_domains: it writes only beneath its
+        # own candidate root, never the shared legacy_store domain, so it
+        # never contends with a real legacy-store writer/reader (§9.2).
+        JobKind(
+            name="legacy_rebuild_candidate", worker="legacy_rebuild_candidate",
+            parameters=RebuildCandidateParameters,
+            resource_classes=frozenset({"legacy_rebuild"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 1, (30,)),
+            checkpoint_contract="legacy_rebuild_candidate.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
     ]
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the

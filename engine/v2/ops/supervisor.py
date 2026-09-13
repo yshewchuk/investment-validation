@@ -57,6 +57,7 @@ from engine.v2.ops.recovery import (
     reconcile_attempt,
 )
 from engine.v2.ops.scheduler import Supervisor, claim_next
+from engine.v2.ops.snapshot_promotion import legacy_rebuild_candidate_effect, snapshot_import_effect
 from engine.v2.ops.stages import validate_result
 from engine.v2.ops.store_barrier import (
     confirm_read_set,
@@ -70,7 +71,8 @@ from engine.v2.ops.store_barrier import (
 #: would otherwise skip that work entirely on a cache hit (decision #1).
 _COORDINATOR_EFFECT_KINDS = frozenset({
     "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
-    "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup"})
+    "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
+    "snapshot_import", "legacy_rebuild_candidate"})
 
 
 class Service:
@@ -365,6 +367,10 @@ class Service:
                                       clock=self.clock)
         if claim.spec.kind == "backup":
             return backup_effect(self.conn, self.store, claim, self.root, clock=self.clock)
+        if claim.spec.kind == "snapshot_import":
+            return snapshot_import_effect(self.conn, self.store, claim, refs, clock=self.clock)
+        if claim.spec.kind == "legacy_rebuild_candidate":
+            return legacy_rebuild_candidate_effect(self.conn, self.store, claim, refs, clock=self.clock)
         return None, ()
 
     def close(self):

@@ -1,5 +1,5 @@
 {
-  "count": 30,
+  "count": 31,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -454,9 +454,24 @@
       "retry": "none",
       "output": "finality coverage receipt",
       "removal_phase": "phase-2 data access"
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.schemas.SOURCE_PRIORITY",
+      "reason": "Deterministic SnapshotImportRequest.source_priority_version fingerprint (phase-2 guide section 7.1); the reviewed source-priority text is hashed, never retyped or copied numerically.",
+      "declared_on": "2026-09-13",
+      "runtime": "SOURCE_PRIORITY_VERSION",
+      "read_set": "none (module-level constant)",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "none",
+      "output": "source_priority_version string",
+      "removal_phase": "phase-4 scoring extraction"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
   "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled.",
-  "committed_ceiling": 30
+  "committed_ceiling": 31
 }

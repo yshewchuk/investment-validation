@@ -43,11 +43,11 @@
     },
     "D11": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_atomicity.py"]
+      "tests": ["tests/test_v2_data_atomicity.py", "tests/test_v2_data_import.py"]
     },
     "D12": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_commit.py"]
+      "tests": ["tests/test_v2_data_commit.py", "tests/test_v2_data_import.py"]
     },
     "D13": {
       "tier": 1,
@@ -65,7 +65,7 @@
     },
     "D16": {
       "tier": 2,
-      "tests": [],
+      "tests": ["tests/test_v2_data_import.py", "tests/test_v2_data_rebuild_rollback.py"],
       "evidence_fields": ["rollback_receipt_ref"]
     },
     "D17": {
