@@ -422,9 +422,11 @@ def test_query_exceeding_contract_limits_propagates_the_repository_code(tmp_path
     oversized["trades"] = dataclasses.replace(
         original, max_batch_rows=60_000, max_result_rows=3_000_000)
     bad_request = dataclasses.replace(request, table_queries=oversized)
+    root_over = tmp_path / "root_over"
     with pytest.raises(DataError) as err:
-        materialize(repository, store, bad_request, tmp_path / "root_over")
+        materialize(repository, store, bad_request, root_over)
     assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert not root_over.exists()  # cleanup-on-failure: refused before any table was written
 
 
 # --------------------------------------------------------------------------
@@ -534,9 +536,11 @@ def test_trades_span_outside_evidence_scope_is_refused(tmp_path):
                              evidence_scope=narrow_evidence)
     assert not lm.evidence_scope_covers_trades(repository, request)
     assert not lm.read_plan_complete(request, repository)
+    dest_root = tmp_path / "legacy_root"
     with pytest.raises(DataError) as err:
-        materialize(repository, store, request, tmp_path / "legacy_root")
+        materialize(repository, store, request, dest_root)
     assert err.value.code == "EVIDENCE_SCOPE_INCOMPLETE"
+    assert not dest_root.exists()  # cleanup-on-failure: refused before any table was written
 
 
 def test_trades_span_inside_evidence_scope_is_accepted(tmp_path):
@@ -613,3 +617,164 @@ def test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window(tmp_pa
     assert {row["ticker"] for row in scanned} == {"AAA", "BBB"}
     assert {row["year"] for row in scanned} == {2020, 2021}
     assert lm.read_plan_complete(request, repository)
+
+
+# --------------------------------------------------------------------------
+# review round 4: verified byte-for-byte copies, the panel's hash, and
+# pinned Tier-4 serving-model cache refs
+# --------------------------------------------------------------------------
+
+
+def _fragment_hash(record) -> str:
+    from engine.v2.foundation import CONTENT_HASH_PREFIX
+    return record.object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def test_whole_table_outputs_are_byte_identical_verified_copies(tmp_path):
+    """Decision 1 (review round 4): every whole_table output is a verified
+    byte-for-byte copy of its own source object, never a Repository-scan
+    rewrite -- including a genuinely multi-fragment partition, whose
+    part-NNNN files must keep fragment_records's own manifest order.
+    option_chains stays evidence_scoped, so it is rewritten, not copied."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    tree = lm.materialize_tree(repository, store, request, dest_root)
+
+    assert tree.copied_tables == {"earnings_events", "daily_market", "trades",
+                                  "feature_panel", "tier4_forecasts"}
+    assert "option_chains" not in tree.copied_tables
+
+    # daily_market's deliberately two-fragment 2020 partition (AAA, then BBB
+    # -- see _build_snapshot) keeps its part-NNNN numbering in exactly the
+    # order fragment_records itself returns for that year.
+    dm_2020_records = [r for r in repository.fragment_records(snap, "daily_market")
+                       if r.partition_key == "2020"]
+    dm_2020_paths = tree.curated_files["daily_market"][2020]
+    assert len(dm_2020_paths) == 2 == len(dm_2020_records)
+    assert [p.name for p in dm_2020_paths] == ["part-0000.parquet", "part-0001.parquet"]
+    for path, record in zip(dm_2020_paths, dm_2020_records):
+        assert _file_sha256(path) == _fragment_hash(record)
+
+    for table_name in ("earnings_events", "daily_market", "trades"):
+        for year, paths in tree.curated_files[table_name].items():
+            records = [r for r in repository.fragment_records(snap, table_name)
+                      if int(r.partition_key) == year]
+            assert len(paths) == len(records)
+            for path, record in zip(paths, records):
+                assert _file_sha256(path) == _fragment_hash(record)
+
+    for table_name in ("feature_panel", "tier4_forecasts"):
+        (record,) = repository.fragment_records(snap, table_name)
+        assert _file_sha256(tree.single_files[table_name]) == _fragment_hash(record)
+
+
+def test_materialized_panel_hash_equals_source_panel_object_hash(tmp_path):
+    """Decision 1's whole point: a byte-identical panel.parquet means
+    engine.data.store.file_sha256(paths.PANEL) -- the Tier-4 serving-model
+    cache key -- equals the SOURCE panel object's own hash, not a fresh
+    rewrite's incidental one."""
+    from engine.data.store import file_sha256
+
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    materialize(repository, store, request, dest_root)
+
+    (record,) = repository.fragment_records(snap, "feature_panel")
+    assert file_sha256(dest_root / "data" / "features" / "panel.parquet") == _fragment_hash(record)
+
+
+def test_tier4_cache_ref_naming_an_unpublished_object_is_refused(tmp_path):
+    """A Tier-4 serving-model cache ref whose FILENAME correctly encodes this
+    request's own panel-hash prefix (decision 2's own contract) but whose
+    pinned content_hash names an object never published -- a cache artifact
+    that is genuinely MISSING from the store, distinct from (d) below's
+    STALE, present-but-wrong-hash case -- is refused before the request
+    exists (decision 5's existing pinned-ref-must-resolve check, now proven
+    for this ref category too). A request that never comes into being can
+    never be handed to read_plan_complete as complete."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    registry_refs, calendar_refs = _pinned_refs(store)
+
+    (panel_record,) = repository.fragment_records(snap, "feature_panel")
+    panel_prefix = _fragment_hash(panel_record)[:12]
+    never_published_hash = "sha256:" + "cd" * 32
+    missing_cache_ref = lm.format_pinned_ref(
+        f"{lm.TIER4_CACHE_DIR}/size_202001_{panel_prefix}.joblib", never_published_hash)
+
+    with pytest.raises(DataError) as err:
+        lm.build_materialization_request(
+            repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
+            evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(*registry_refs, missing_cache_ref),
+            calendar_refs=calendar_refs, expected_population={})
+    assert err.value.code == "OBJECT_CORRUPT"
+
+
+def test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale(tmp_path):
+    """(d): a pinned Tier-4 cache ref that DOES resolve in the store but
+    whose filename's embedded panel-hash prefix does not match this
+    request's own panel object -- a stale ref carried over from a different
+    snapshot -- fails tier4_cache_refs_match_panel/read_plan_complete and is
+    refused by materialize() with TIER4_CACHE_STALE. Cleanup-on-failure
+    leaves nothing behind, not even the empty dest_root."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    registry_refs, calendar_refs = _pinned_refs(store)
+    dummy_hash = store.publish_bytes(b"not a real joblib file",
+                                     schema_ref="legacy_pinned_ref.v1").content_hash
+    stale_ref = lm.format_pinned_ref(f"{lm.TIER4_CACHE_DIR}/size_202001_deadbeef0000.joblib", dummy_hash)
+
+    request = lm.build_materialization_request(
+        repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
+        evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(*registry_refs, stale_ref),
+        calendar_refs=calendar_refs, expected_population={})
+
+    assert not lm.tier4_cache_refs_match_panel(repository, request)
+    assert not lm.read_plan_complete(request, repository)
+    dest_root = tmp_path / "legacy_root"
+    with pytest.raises(DataError) as err:
+        materialize(repository, store, request, dest_root)
+    assert err.value.code == "TIER4_CACHE_STALE"
+    assert not dest_root.exists()
+
+
+def test_tampered_object_byte_is_refused_with_nothing_left_writable(tmp_path):
+    """(e): a copied table's source object corrupted on disk after
+    verification (simulated bit rot, not a bug in this module's write path)
+    is caught by _copy_verified_object's own hash check, refused as
+    OBJECT_CORRUPT, and -- via legacy_adapter.materialize's cleanup-on-
+    failure -- leaves NOTHING behind, including tables copied successfully
+    earlier in the same call (earnings_events, daily_market both precede
+    trades in SCORE_READ_PLAN_TABLES order)."""
+    from engine.v2.foundation import CONTENT_HASH_PREFIX
+
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+
+    (trades_record,) = [r for r in repository.fragment_records(snap, "trades")
+                        if r.partition_key == "2020"]
+    digest = trades_record.object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
+    object_path = Path(store.root) / "objects" / digest[:2] / digest
+    corrupted = bytearray(object_path.read_bytes())
+    corrupted[0] ^= 0xFF
+    object_path.write_bytes(bytes(corrupted))
+
+    dest_root = tmp_path / "legacy_root"
+    with pytest.raises(DataError) as err:
+        materialize(repository, store, request, dest_root)
+    assert err.value.code == "OBJECT_CORRUPT"
+    assert not dest_root.exists()

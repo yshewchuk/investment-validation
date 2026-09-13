@@ -37,12 +37,15 @@ Layer 1 of ``system_rearchitecture.md`` §4.1: besides the declared legacy
 edges, this module imports only its own package's ``errors`` and
 ``legacy_materialization`` (both reached through one relative-import edge)
 — never ``engine.v2.contracts``, ``engine.v2.foundation`` or
-``engine.v2.ops``. §4.3 fan-out: 5 distinct modules (``engine.data.schemas``,
+``engine.v2.ops``. §4.3 fan-out: 6 distinct modules (``engine.data.schemas``,
 ``engine.data.features.panel``, ``engine.data.features.tier4``,
-``engine.data.store``, ``"."``) — comfortably under the budget of 8 that
-``build_legacy_mapping``'s old presence here used to exhaust.
+``engine.data.store``, ``shutil`` — review round 4, the ``materialize()``
+cleanup-on-failure below — and ``"."``) — comfortably under the budget of 8
+that ``build_legacy_mapping``'s old presence here used to exhaust.
 """
 from __future__ import annotations
+
+import shutil
 
 from engine.data.features.panel import PANEL_COLUMNS
 from engine.data.features.tier4 import COLUMNS as TIER4_COLUMNS
@@ -110,6 +113,20 @@ def coerce_legacy(frame, name: str):
 # --------------------------------------------------------------------------
 
 
+#: ``materialize_tree``'s own dest_root safety refusals (raised before this
+#: function's try/except below has written a single byte, from inside
+#: ``legacy_materialization._check_dest_root``) must never trigger the
+#: cleanup ``except`` clause: for ``DEST_ROOT_NOT_EMPTY`` that directory is
+#: the CALLER's own pre-existing content, and for ``DEST_ROOT_UNSAFE`` it may
+#: be a symlink to something else entirely or a path inside the object store
+#: itself — deleting through either would destroy data this function never
+#: touched. Every other failure code is only reachable after
+#: ``_check_dest_root`` has already proven ``dest_root`` a safe, empty
+#: directory this call itself created or is about to fill, so cleanup there
+#: is always safe.
+_DEST_ROOT_SAFETY_CODES = frozenset({"DEST_ROOT_NOT_EMPTY", "DEST_ROOT_UNSAFE"})
+
+
 def materialize(repository, store, request, dest_root) -> dict[str, str]:
     """Write ``request``'s private legacy layout under ``dest_root``.
 
@@ -125,21 +142,33 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
     only re-opens it with the unchanged legacy reader (never a fresh
     Repository scan to compare against — that would re-read the whole table
     a second time, exactly the cost decision 1 exists to avoid).
+
+    Any failure past the dest_root safety checks (corrupt object bytes,
+    a stale Tier-4 cache ref, a legacy coerce()/row-count mismatch, an
+    oversized query, ...) removes every byte this call itself wrote before
+    re-raising — there is no terminal state between "nothing written" and
+    "the full tree, locked down": a caller can never observe a partial,
+    writable materialization and mistake it for a valid one.
     """
-    tree = legacy_materialization.materialize_tree(repository, store, request, dest_root)
-    for table_name, year_paths in tree.curated_files.items():
-        if table_name in tree.copied_tables:
-            _validate_copied_curated_table(year_paths, table_name)
-        else:
-            contract = repository.table_contract(request.snapshot_ref, table_name)
-            _validate_curated_table(repository, request.table_queries[table_name], table_name, contract,
-                                    year_paths)
-    for table_name, path in tree.single_files.items():
-        if table_name in tree.copied_tables:
-            read_legacy_part(path, columns=None)  # proves the unchanged reader opens it; no coerce()
-        else:                                     # for feature_panel/tier4_forecasts (no legacy schema)
-            _validate_single_file(repository, request.table_queries[table_name], table_name, path)
-    legacy_materialization.lock_down(dest_root)
+    try:
+        tree = legacy_materialization.materialize_tree(repository, store, request, dest_root)
+        for table_name, year_paths in tree.curated_files.items():
+            if table_name in tree.copied_tables:
+                _validate_copied_curated_table(year_paths, table_name)
+            else:
+                contract = repository.table_contract(request.snapshot_ref, table_name)
+                _validate_curated_table(repository, request.table_queries[table_name], table_name,
+                                        contract, year_paths)
+        for table_name, path in tree.single_files.items():
+            if table_name in tree.copied_tables:
+                read_legacy_part(path, columns=None)  # proves the unchanged reader opens it; no coerce()
+            else:                                     # feature_panel/tier4_forecasts (no legacy schema)
+                _validate_single_file(repository, request.table_queries[table_name], table_name, path)
+        legacy_materialization.lock_down(dest_root)
+    except errors.DataError as exc:
+        if exc.code not in _DEST_ROOT_SAFETY_CODES:
+            shutil.rmtree(dest_root, ignore_errors=True)
+        raise
     return tree.manifest
 
 

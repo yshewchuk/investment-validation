@@ -97,16 +97,23 @@ pinnable in a ``registry_and_model_refs`` ref by an exact filename (decision
 reachable, since a pinned joblib's embedded hash can finally match) return
 before ``prepare()``/``crush_frame()`` runs? **No — proven the other way,
 one level deeper than round 3 looked.** Quoting ``engine/data/features/
-tier4.py`` exactly (line numbers as of this commit)::
+tier4.py`` verbatim (line numbers as of this commit; confirmed unchanged
+from the parent branch by a plain diff of that file)::
 
-    # serving_model, the cache-HIT branch (tier4.py:1286-1290):
+    # serving_model, the cache-HIT branch (tier4.py:1280-1292):
         if cache and path.exists():
+            import joblib
+
             stored = joblib.load(path)
-            if (... and stored.get("tier3_snapshot") == snapshot and ...):
+            if (
+                stored.get("model_id") == model.model_id
+                and pd.Timestamp(stored.get("fold_start")) == fold
+                and stored.get("tier3_snapshot") == snapshot
+                and tuple(stored.get("features", ())) == tuple(model.features)
+            ):
                 pool_pred, pool_res = _pool_before(
                     fold, model, load_panel() if panel is None else panel
                 )
-                return ServingModel(estimator=stored["estimator"], ...)
 
     # _pool_before, called on THAT SAME cache-hit branch above (tier4.py:1243-1246):
         earlier = stored[stored[point].notna() & (stored[fold_col] < pd.Timestamp(fold))]
@@ -128,9 +135,11 @@ practice — so ``iv_crush_feature_model``'s ``prepare`` (``crush_frame()``,
 unbounded) and ``im_t1_feature_model``/``runup_move_feature_model``'s
 ``prepare`` (the fixed ``IM_T1_YEARS`` window) both run independent of
 whether their OWN joblib cache hits. No pinned artifact can prevent this:
-``training_frames``'s own memoization (``_PREPARED``, keyed by
-``(model_id, id(panel))``) is an IN-PROCESS dict, not a file, so it cannot be
-pre-seeded by a pinned ref either. Option (a) therefore still fails — not for
+``training_frames``'s own memoization (``_PREPARED: dict[str, tuple[...]]``,
+keyed by ``model.model_id`` alone, with the panel object itself stored
+alongside so a hit also requires ``hit[0] is panel`` — tier4.py:541,553-554)
+is an IN-PROCESS dict, not a file, so it cannot be pre-seeded by a pinned ref
+either. Option (a) therefore still fails — not for
 round 3's reason (an unpredictable hash), but because ``_pool_before``'s own
 unconditional call reaches ``prepare()`` regardless of the serving-model
 cache's hit/miss status. ``daily_market`` stays ``whole_table``: it is the
