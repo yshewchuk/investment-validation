@@ -14,7 +14,7 @@
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_render_parity.py"
   ],
-  "source_hash": "sha256:b55e54c4152e313abe42b65fd1dd9ce9452c0ec248adc95d4621dd2cc04a23bc",
+  "source_hash": "sha256:83d2faeb5f4b7103b7bd2a4bf9d06f8e7df30e1fb15267d077a533198b4b575e",
   "packages": {
     "engine.v2.contracts": {
       "executed": 593,
@@ -44,8 +44,8 @@
       "percentage": 89.6103896103896
     },
     "engine.v2.data": {
-      "executed": 944,
-      "executable": 1009,
+      "executed": 965,
+      "executable": 1027,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -60,7 +60,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 93.55797819623389
+      "percentage": 93.96299902629016
     },
     "engine.v2.features": {
       "executed": 0,
@@ -498,6 +498,34 @@
     },
     {
       "nodeid": "tests/test_v2_data_commit.py::test_move_head_rejects_stale_expectation",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_reimport_identical_content_with_different_parent_reuses_snapshot",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_reimport_identical_content_onto_same_head_is_a_noop",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_reimport_dataset_version_with_different_parent_reuses_it",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_receipt_shortcut_conflicts_on_different_request_hash",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_receipt_shortcut_conflicts_on_different_attempt_id",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_receipt_shortcut_conflicts_on_different_scope",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_commit.py::test_receipt_shortcut_conflicts_on_different_snapshot_id",
       "outcome": "passed"
     },
     {

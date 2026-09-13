@@ -35,7 +35,7 @@ from checks.rearchitecture_phase2_coverage import (
     load_registry,
     validate_measurement as coverage_validate,
 )
-from checks.rearchitecture_phase2_evidence import authority_mode_ok, validate_evidence
+from checks.rearchitecture_phase2_evidence import validate_evidence
 
 PHASE0_SCRIPT = "checks/rearchitecture_phase0_gate.py"
 PHASE1_COVERAGE_SCRIPT = "checks/rearchitecture_phase1_coverage.py"
@@ -124,7 +124,7 @@ def _prefix_status(prefix, test_outcomes):
     return "missing"
 
 
-def _check_row(d_id, row, test_outcomes, evidence, evidence_valid, phase1_raw):
+def _check_row(d_id, row, test_outcomes, document_ok, field_ok, phase1_raw):
     findings = []
     statuses = [_prefix_status(p, test_outcomes) for p in row.get("tests", [])]
     if "failed" in statuses:
@@ -134,11 +134,14 @@ def _check_row(d_id, row, test_outcomes, evidence, evidence_valid, phase1_raw):
     if row.get("reuse_phase1_structural_engineering") and not _phase1_ok_excluding_coverage(phase1_raw):
         findings.append({"code": "MISSING_EVIDENCE", "d_id": d_id, "reason": "phase1_structural_engineering"})
     if row.get("tier") == 2:
-        if not evidence_valid:
+        if not document_ok:
             findings.append({"code": "MISSING_EVIDENCE", "d_id": d_id, "reason": "evidence_manifest"})
         else:
+            # Per-field, not document-wide: a bad ref unrelated to this row
+            # (say a corrupt fault_matrix_ref) must not invalidate a DIFFERENT
+            # row's own fields -- that is the D15/D19 receipt separation.
             for field in row.get("evidence_fields", []):
-                if evidence.get(field) is None:
+                if not field_ok.get(field):
                     findings.append({"code": "MISSING_EVIDENCE", "d_id": d_id, "reason": field})
     return findings
 
@@ -165,7 +168,7 @@ def gate(root=ROOT, *, coverage_path=None, evidence_manifest_path=None,
     findings.extend(coverage["findings"])
     test_outcomes = coverage["test_outcomes"]
 
-    evidence, evidence_valid = None, False
+    document_ok, field_ok = False, {}
     if evidence_manifest_path is not None and Path(evidence_manifest_path).is_file():
         try:
             evidence = json.loads(Path(evidence_manifest_path).read_text())
@@ -173,14 +176,14 @@ def gate(root=ROOT, *, coverage_path=None, evidence_manifest_path=None,
             evidence = None
         if evidence is not None:
             resolved_root = Path(artifact_root) if artifact_root else root
-            evidence_findings = validate_evidence(evidence, artifact_root=resolved_root,
-                                                   code_hash=code_hash, environment_hash=env_hash)
+            evidence_findings, field_ok, document_ok = validate_evidence(
+                evidence, artifact_root=resolved_root,
+                code_hash=code_hash, environment_hash=env_hash)
             findings.extend(evidence_findings)
-            evidence_valid = not evidence_findings and authority_mode_ok(evidence)
 
     for d_id in sorted(registry):
-        findings.extend(_check_row(d_id, registry[d_id], test_outcomes, evidence,
-                                   evidence_valid, phase1_raw))
+        findings.extend(_check_row(d_id, registry[d_id], test_outcomes, document_ok,
+                                   field_ok, phase1_raw))
 
     return {"schema_version": "phase2_gate.v1.0", "ok": not findings, "code_hash": code_hash,
             "environment_hash": env_hash, "environment_hash_source": env_source,

@@ -80,8 +80,7 @@
     "D19": {
       "tier": 2,
       "tests": ["tests/test_v2_ops_render_parity.py"],
-      "evidence_fields": ["comparison_receipt_ref", "expected_population",
-                          "supported_population", "compared_population"]
+      "evidence_fields": ["render_comparison_receipt_ref"]
     },
     "D20": {
       "tier": 1,

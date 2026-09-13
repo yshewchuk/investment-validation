@@ -94,7 +94,7 @@ def world(tmp_path, registry: dict, *, outcomes=None):
 
 
 def valid_evidence(tmp_path, root, *, populations=(100, 80, 50), authority_mode="shadow",
-                   verdict="agree"):
+                   verdict="agree", render_verdict="agree", include_render_receipt=True):
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.mkdir()
     env_hash, _ = p2gate.environment_hash(root)
@@ -115,6 +115,10 @@ def valid_evidence(tmp_path, root, *, populations=(100, 80, 50), authority_mode=
         "expected_population": populations[0], "supported_population": populations[1],
         "compared_population": populations[2], "authority_mode": authority_mode,
     }
+    if include_render_receipt:
+        evidence["render_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "render_comparison.json",
+            json.dumps({"verdict": render_verdict}).encode())
     return evidence, artifacts_dir
 
 
@@ -142,6 +146,7 @@ def test_fully_valid_evidence_and_passing_junit_and_green_prerequisites_is_ok(tm
         "D15": {"tier": 2, "tests": [], "evidence_fields": [
             "comparison_receipt_ref", "expected_population",
             "supported_population", "compared_population"]},
+        "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
     }
     w = world(tmp_path, registry)
     evidence, artifacts_dir = valid_evidence(tmp_path, w["root"])
@@ -318,10 +323,21 @@ def test_boolean_ref_gives_summary_boolean_refused_only(tmp_path):
     assert codes(result) == {"SUMMARY_BOOLEAN_REFUSED"}
 
 
-# -- authority_mode: no dedicated code, folds into tier-2 MISSING_EVIDENCE -----
+def test_wrong_authority_mode_gives_authority_not_shadow_only(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        evidence["authority_mode"] = "live"
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"AUTHORITY_NOT_SHADOW"}
 
-def test_wrong_authority_mode_invalidates_tier2_evidence(tmp_path):
-    registry = {"D15": {"tier": 2, "tests": [], "evidence_fields": ["rollback_receipt_ref"]}}
+
+# -- authority_mode: document-wide, so it invalidates EVERY tier-2 row --------
+
+def test_wrong_authority_mode_invalidates_every_tier2_row(tmp_path):
+    registry = {
+        "D15": {"tier": 2, "tests": [], "evidence_fields": ["rollback_receipt_ref"]},
+        "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
+    }
     w = world(tmp_path, registry)
     evidence, artifacts_dir = valid_evidence(tmp_path, w["root"], authority_mode="live")
     evidence_path = tmp_path / "evidence_final.json"
@@ -329,8 +345,46 @@ def test_wrong_authority_mode_invalidates_tier2_evidence(tmp_path):
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
-    assert d_ids_with(result, "MISSING_EVIDENCE") == {"D15"}
+    assert d_ids_with(result, "MISSING_EVIDENCE") == {"D15", "D19"}
+    assert "AUTHORITY_NOT_SHADOW" in codes(result)
     assert "CODE_HASH_MISMATCH" not in codes(result)
+
+
+# -- D15/D19 receipt separation: one row's evidence never proves the other ----
+
+def test_d19_refused_when_only_the_score_receipt_is_present(tmp_path):
+    registry = {
+        "D15": {"tier": 2, "tests": [], "evidence_fields": [
+            "comparison_receipt_ref", "expected_population",
+            "supported_population", "compared_population"]},
+        "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
+    }
+    w = world(tmp_path, registry)
+    evidence, artifacts_dir = valid_evidence(tmp_path, w["root"], include_render_receipt=False)
+    evidence_path = tmp_path / "evidence_final.json"
+    evidence_path.write_text(json.dumps(evidence))
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+    assert d_ids_with(result, "MISSING_EVIDENCE") == {"D19"}
+
+
+def test_d19_refused_when_render_receipt_verdict_is_not_agree(tmp_path):
+    registry = {
+        "D15": {"tier": 2, "tests": [], "evidence_fields": [
+            "comparison_receipt_ref", "expected_population",
+            "supported_population", "compared_population"]},
+        "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
+    }
+    w = world(tmp_path, registry)
+    evidence, artifacts_dir = valid_evidence(tmp_path, w["root"], render_verdict="differ")
+    evidence_path = tmp_path / "evidence_final.json"
+    evidence_path.write_text(json.dumps(evidence))
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+    assert d_ids_with(result, "MISSING_EVIDENCE") == {"D19"}
+    assert "VERDICT_NOT_AGREE" in codes(result)
 
 
 # -- real repo smoke ----------------------------------------------------------

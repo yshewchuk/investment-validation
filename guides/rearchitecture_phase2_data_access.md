@@ -914,15 +914,22 @@ Phase2Evidence:
   snapshot_ref, legacy_snapshot_object_ref
   table_contract_mapping_hash
   import_receipt_refs, fault_matrix_ref
-  dependency_plan_refs, comparison_receipt_ref, rollback_receipt_ref
+  dependency_plan_refs, comparison_receipt_ref, render_comparison_receipt_ref,
+  rollback_receipt_ref
   expected_population, supported_population, compared_population
   authority_mode: shadow
 ```
 
+`comparison_receipt_ref` and `render_comparison_receipt_ref` are two separate
+fields, not one shared receipt: D15 is legacy-vs-adapter SCORE parity and D19
+is v2-vs-legacy RENDER BUNDLE parity, over different populations and stage
+graphs, so one field would let D15's receipt silently stand in for D19's.
+
 The evidence validator verifies every referenced artifact, requires all D01–D20
 rows, rejects a code/environment mismatch, rejects zero or collapsed
-populations, and requires the comparison verdict `agree`. It does not accept a
-summary boolean in place of the referenced receipts.
+populations, and requires both comparison receipts present in the document to
+carry verdict `agree`. It does not accept a summary boolean in place of the
+referenced receipts.
 
 Run the final gates from one unchanged commit. Long or memory-heavy checks are
 submitted through the Phase 1 supervisor; the commands below are the
