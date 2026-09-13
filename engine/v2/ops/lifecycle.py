@@ -54,6 +54,7 @@ __all__ = [
     "record_measurement",
     "record_progress",
     "release_reservations",
+    "renew_after_resume",
     "request_cancel",
     "verify_fence",
 ]
@@ -129,6 +130,35 @@ def heartbeat(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: C
                      (format_timestamp(now),
                       format_timestamp(now + timedelta(seconds=lease_seconds)), attempt_id))
     return True
+
+
+def renew_after_resume(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: Clock,
+                       lease_seconds: int) -> bool:
+    """Extend a lease across a wall-clock jump (B2), ignoring lease expiry.
+
+    The same liveness gate as :func:`verify_fence` — job running, this the
+    active attempt, the fence and attempt state both still live — except the
+    lease-expiry check, since the jump itself may already read as "expired" in
+    wall-clock terms. The caller has already verified the recorded identity is
+    still alive; this only extends the lease so the very next
+    :func:`expire_leases` does not fence a healthy worker. False, with no
+    write, when the attempt no longer holds the job's fence.
+    """
+    now = clock.now()
+    with transaction(conn):
+        attempt = conn.execute("SELECT * FROM attempts WHERE attempt_id = ?",
+                               (attempt_id,)).fetchone()
+        if attempt is None:
+            return False
+        job = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (attempt["job_id"],)).fetchone()
+        live = (job["state"] == "running" and job["active_attempt_id"] == attempt_id
+                and job["fence"] == fence == attempt["fence"]
+                and attempt["state"] in ("starting", "running"))
+        if not live:
+            return False
+        conn.execute("UPDATE attempts SET lease_expires_at = ? WHERE attempt_id = ?",
+                     (format_timestamp(now + timedelta(seconds=lease_seconds)), attempt_id))
+        return True
 
 
 def record_measurement(conn: sqlite3.Connection, attempt_id: str, *, current_bytes: int,
