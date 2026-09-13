@@ -132,7 +132,7 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
             if reason is None:
                 reason = live_window_reason(policy, profile, now)
             if reason is None:
-                reason = _provider_reason(conn, row)
+                reason = _provider_reason(conn, row, stamp)
             if reason is None and heavy_held and profile.heavy:
                 reason = QueueReason(code="HEAVY_SLOT_HELD", reconsider="higher_priority_heavy_job")
             if reason is None:
@@ -147,18 +147,27 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
     return None
 
 
-def _provider_reason(conn, row):
+def _provider_reason(conn, row, now_stamp):
     spec = load_json(JobSpec, row["spec_json"])
     if not spec.provider_budget_ref:
         return None
     account = conn.execute(
-        "SELECT remaining, live_reserve, blocked_code FROM provider_accounts WHERE account = ?",
+        "SELECT remaining, live_reserve, blocked_code, next_eligible_at "
+        "FROM provider_accounts WHERE account = ?",
         (spec.provider_budget_ref,)).fetchone()
     calls = spec.parameters.get("provider_calls", 1)
     if account is None or account["blocked_code"]:
         return QueueReason(code="PROVIDER_UNAVAILABLE", reconsider="operator_action")
     if not isinstance(calls, int) or calls <= 0:
         return QueueReason(code="PROVIDER_UNAVAILABLE", reconsider="specification_change")
+    if account["next_eligible_at"] and account["next_eligible_at"] > now_stamp:
+        # A 429 backoff recorded by provider_budget.record_response: no attempt
+        # row until the account is eligible again, so the backoff is not spent
+        # relaunching into the same rate limit. QueueReason.available is
+        # int-valued (contracts §5.3), so the stamp travels as epoch seconds.
+        eligible_at = int(parse_timestamp(account["next_eligible_at"]).timestamp())
+        return QueueReason(code="PROVIDER_BACKOFF", available={"eligible_at": eligible_at},
+                           reconsider="provider_backoff_elapsed")
     active = conn.execute(
         "SELECT 1 FROM provider_reservations WHERE account = ? AND released_at IS NULL",
         (spec.provider_budget_ref,)).fetchone()
@@ -203,7 +212,8 @@ def _create_attempt(conn: sqlite3.Connection, row: sqlite3.Row, profile: Resourc
                      [(attempt_id, cpu) for cpu in resources.assigned_cpu_ids])
     spec = load_json(JobSpec, row["spec_json"])
     if spec.provider_budget_ref:
-        _reserve_provider(conn, spec.provider_budget_ref, attempt_id, fence, spec.parameters)
+        _reserve_provider(conn, spec.provider_budget_ref, attempt_id, fence, spec.parameters,
+                          stamp)
     updated = conn.execute(
         "UPDATE jobs SET state = 'running', fence = ?, attempt_count = ?, active_attempt_id = ?, "
         "queue_reason_json = NULL, next_eligible_at = NULL, updated_at = ? "
@@ -217,16 +227,21 @@ def _create_attempt(conn: sqlite3.Connection, row: sqlite3.Row, profile: Resourc
                  lease_expires_at=lease)
 
 
-def _reserve_provider(conn, account, attempt_id, fence, parameters):
+def _reserve_provider(conn, account, attempt_id, fence, parameters, now_stamp):
     """Reserve the account lease in the claim transaction, before launch."""
     calls = parameters.get("provider_calls", 1) if isinstance(parameters, dict) else 1
     if not isinstance(calls, int) or calls <= 0 or calls > 1_000_000:
         raise fail("INVALID_REQUEST", "provider call estimate is invalid")
     row = conn.execute(
-        "SELECT remaining, live_reserve, blocked_code FROM provider_accounts WHERE account = ?",
+        "SELECT remaining, live_reserve, blocked_code, next_eligible_at "
+        "FROM provider_accounts WHERE account = ?",
         (account,)).fetchone()
     if row is None or row["blocked_code"]:
         raise fail("CREDENTIAL_INVALID", "provider account needs operator action")
+    if row["next_eligible_at"] and row["next_eligible_at"] > now_stamp:
+        # Backstop: admission should already have queued this on
+        # PROVIDER_BACKOFF, but never launch into a live backoff regardless.
+        raise fail("RATE_LIMITED", "provider account is in backoff")
     active = conn.execute(
         "SELECT 1 FROM provider_reservations WHERE account = ? AND released_at IS NULL",
         (account,)).fetchone()
