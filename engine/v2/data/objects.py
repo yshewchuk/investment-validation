@@ -497,7 +497,7 @@ def partition_logical_hash(store: ArtifactStore, object_refs_in_order: list[Obje
 
     def rows():
         for object_ref in object_refs_in_order:
-            path = _verify_object(store, object_ref)
+            path = verify_object_path(store, object_ref)
             parquet_file = _open_parquet_file(path)
             present, missing = _match_contract_columns(contract, parquet_file.schema_arrow)
             yield from _stream_rows(parquet_file, contract, present, missing, partition_key,
