@@ -15,7 +15,7 @@
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_render_parity.py"
   ],
-  "source_hash": "sha256:d392b4bdf41cf25e4d2bec969f6f0a73461c0c9b5359565ddb3a21411805a5d9",
+  "source_hash": "sha256:5a534e33689354b6718da50f693cbbbfa4efaffe9dee5543446bedc590a19e26",
   "packages": {
     "engine.v2.contracts": {
       "executed": 593,
@@ -187,7 +187,7 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 2464,
+      "executed": 2465,
       "executable": 3762,
       "files": [
         "engine/v2/ops/__init__.py",
@@ -237,7 +237,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 65.49707602339181
+      "percentage": 65.52365762892079
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -1164,6 +1164,18 @@
     },
     {
       "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_older_occurrence_cannot_replace_newer",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_refused_when_decisions_watermark_is_an_earlier_session",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_passes_at_the_correct_session",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_passes_on_a_no_entry_night",
       "outcome": "passed"
     },
     {

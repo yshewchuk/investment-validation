@@ -488,25 +488,38 @@ def test_publication_refused_on_stale_fence(tmp_path):
 
 
 def test_publication_older_occurrence_cannot_replace_newer(tmp_path):
-    """Publish an older session first (a real, valid, fully published
-    release, with its own decisions watermark matching at the time), then a
-    newer one; the older release's own claim is still fenced and can never
-    move CURRENT again once a newer occurrence is already published."""
+    """Two different scopes, each staged and published while its own
+    decisions watermark matched its own session — the strict per-session
+    decision gate means one release can never legitimately see a stale
+    decisions watermark, so this is the only way to independently publish
+    two releases at different occurrences without either being refused for
+    the wrong reason.
+
+    ``releases`` carries no scope column (publication.py, as authored): its
+    occurrence staleness check is global. Re-publishing the older release —
+    still genuinely CURRENT for its own scope's pointer, so the per-scope
+    "current changed" check passes — is still refused once a globally newer
+    occurrence exists elsewhere, at the ``newest > row["occurrence"]`` line.
+    """
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
-        scope = "shadow"
-        older = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-10")
+        older_scope = "shadow"
+        older = _publication_setup(conn, clock, supervisor, store, scope=older_scope,
+                                   session="2026-09-10")
         publication_effect(conn, store, older, root, REPO, clock=clock)
-        target = root / "releases" / scope
+        older_target = root / "releases" / older_scope
+        older_release_id = "rel" + content_hash([older_scope, "2026-09-10"]).split(":")[1][:24]
+        pointer_after_older = release_current(older_target)
 
-        newer = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-12")
+        newer_scope = "shadow:newer"
+        newer = _publication_setup(conn, clock, supervisor, store, scope=newer_scope,
+                                   session="2026-09-12")
         publication_effect(conn, store, newer, root, REPO, clock=clock)
-        pointer_after_newer = release_current(target)
 
-        older_release_id = "rel" + content_hash(["shadow", "2026-09-10"]).split(":")[1][:24]
         with pytest.raises(OpsError, match="STALE_EXPECTATION"):
-            publish_local(conn, older, store, target, older_release_id, scope=scope, clock=clock)
-        assert release_current(target) == pointer_after_newer
+            publish_local(conn, older, store, older_target, older_release_id,
+                          scope=older_scope, clock=clock)
+        assert release_current(older_target) == pointer_after_older
     finally:
         conn.close()
 

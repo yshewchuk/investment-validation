@@ -38,7 +38,7 @@
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_supervised_legacy.py"
   ],
-  "source_hash": "sha256:0037d86e7d4a3db1aee487cab5636e40a63e35350cbefb77c36b27d4be536cd3",
+  "source_hash": "sha256:a5a2e7c82266a759b888cbd4cea3c9a839d417ced5e5bd9bcca8d1fa09712bc4",
   "packages": {
     "engine.v2.contracts": {
       "executed": 593,
