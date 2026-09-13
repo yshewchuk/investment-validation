@@ -27,7 +27,20 @@ def main(argv=None):
     entries = json.loads(args.requests.read_text())
     requests = [entry["request"] for entry in entries]
     tickers = sorted({str(item["ticker"]) for item in requests})
-    dates = [pd.Timestamp(item["as_of"]).year for item in requests]
+
+    def request_year(item):
+        # Corpus requests carry whichever date fields their strategy needs;
+        # as_of is often null and `session` is a time-of-day code, not a date.
+        for key in ("as_of", "event_date", "chain_as_of", "expiry"):
+            value = item.get(key)
+            if value:
+                stamp = pd.Timestamp(value)
+                if not pd.isna(stamp):
+                    return int(stamp.year)
+        raise SystemExit("canary request carries no usable date: "
+                         + str(item.get("identity_key", "?")))
+
+    dates = [request_year(item) for item in requests]
     scorer = Scorer(context=FeatureContext.load(tickers, years=range(min(dates), max(dates) + 1)))
     fields = {field.name for field in dataclasses.fields(ScoreRequest)}
     date_fields = {"as_of", "event_date", "expiry", "chain_as_of"}
