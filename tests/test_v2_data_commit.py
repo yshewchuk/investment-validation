@@ -83,13 +83,14 @@ def _row_counts(conn) -> dict:
     return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in _TABLES}
 
 
-def _manifest_and_snapshot(records, *, coverage=(RECEIPT_A,), finality=(RECEIPT_A,)):
+def _manifest_and_snapshot(records, *, coverage=(RECEIPT_A,), finality=(RECEIPT_A,),
+                           parent_dataset_version_id=None, parent_snapshot_id=None):
     manifest = manifests.dataset_manifest(
         _SEC_REF, records, knowledge_mode="reconstructed", coverage_receipt_refs=coverage,
-        availability_evidence_refs=())
+        availability_evidence_refs=(), parent_dataset_version_id=parent_dataset_version_id)
     snap = manifests.snapshot_ref(
         {"securities": manifest}, calendar_version="cal.v1", source_priority_version="prio.v1",
-        finality_receipt_refs=finality)
+        finality_receipt_refs=finality, parent_snapshot_id=parent_snapshot_id)
     return manifest, snap
 
 
@@ -378,3 +379,212 @@ def test_move_head_rejects_stale_expectation(tmp_path):
                  expected_snapshot_id="snap_" + "0" * 32, expected_generation=99,
                  receipt_ref="rollback-bad", clock=clock)
     assert err.value.code == "SNAPSHOT_CONFLICT"
+
+
+# --------------------------------------------------------------------------
+# Review fix: re-importing identical content must reuse the snapshot/dataset
+# version, not conflict merely because a different parent was declared
+# (snapshot_id/dataset_version_id both exclude the parent; only manifest_hash
+# covers it).
+# --------------------------------------------------------------------------
+
+
+def test_reimport_identical_content_with_different_parent_reuses_snapshot(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record_2024 = _record_for("2024")
+    _, snap_a = _commit(conn, clock, [record_2024], receipt_id="ra", scope="shadow")
+
+    record_2025 = _record_for("2025")
+    manifest_ab, snap_b = _manifest_and_snapshot([record_2024, record_2025],
+                                                 parent_snapshot_id=snap_a.snapshot_id)
+    commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("b-request"), contracts=[_SEC_CONTRACT],
+        objects=[record_2024.object_ref, record_2025.object_ref], records=[record_2024, record_2025],
+        manifests=[manifest_ab], snapshot=snap_b, expected_head_snapshot_id=snap_a.snapshot_id,
+        expected_head_generation=1, receipt_id="rb", attempt_id="att-b", fence=1,
+        fence_check=_noop_fence, clock=clock)
+    before = _row_counts(conn)
+
+    # Content identical to A, but this candidate declares its parent as B.
+    # snapshot_id is unaffected (the id excludes parent); manifest_hash is
+    # not (it covers parent), so this candidate's own manifest_hash differs
+    # from A's stored one.
+    manifest_a_again, snap_a_with_parent_b = _manifest_and_snapshot(
+        [record_2024], parent_snapshot_id=snap_b.snapshot_id)
+    assert snap_a_with_parent_b.snapshot_id == snap_a.snapshot_id
+    assert snap_a_with_parent_b.manifest_hash != snap_a.manifest_hash
+
+    receipt_c = commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("c-request"), contracts=[_SEC_CONTRACT],
+        objects=[record_2024.object_ref], records=[record_2024], manifests=[manifest_a_again],
+        snapshot=snap_a_with_parent_b, expected_head_snapshot_id=snap_b.snapshot_id,
+        expected_head_generation=2, receipt_id="rc", attempt_id="att-c", fence=1,
+        fence_check=_noop_fence, clock=clock)
+
+    after = _row_counts(conn)
+    # zero new immutable rows: only data_import_receipts gains this attempt's own row
+    assert {k: v for k, v in after.items() if k != "data_import_receipts"} == \
+        {k: v for k, v in before.items() if k != "data_import_receipts"}
+    assert after["data_import_receipts"] == before["data_import_receipts"] + 1
+
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'shadow'").fetchone()
+    assert head["snapshot_id"] == snap_a.snapshot_id
+    assert head["generation"] == 3
+
+    resolved = Repository(conn).resolve(snap_a.snapshot_id)
+    assert resolved.snapshot_id == snap_a.snapshot_id
+    assert resolved.parent_snapshot_id is None  # A's original parent, not B
+    assert resolved.manifest_hash == snap_a.manifest_hash
+
+    assert receipt_c.snapshot_ref.parent_snapshot_id is None
+    assert receipt_c.snapshot_ref.manifest_hash == snap_a.manifest_hash
+    assert receipt_c.resulting_head_snapshot_id == snap_a.snapshot_id
+    assert receipt_c.resulting_head_generation == 3
+
+
+def test_reimport_identical_content_onto_same_head_is_a_noop(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _, snap_a = _commit(conn, clock, [record], receipt_id="ra", scope="shadow")
+    before = _row_counts(conn)
+
+    manifest_again, snap_again = _manifest_and_snapshot([record])
+    assert snap_again.snapshot_id == snap_a.snapshot_id
+    assert snap_again.manifest_hash == snap_a.manifest_hash
+
+    receipt_b = commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("b-request"), contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref], records=[record], manifests=[manifest_again],
+        snapshot=snap_again, expected_head_snapshot_id=snap_a.snapshot_id, expected_head_generation=1,
+        receipt_id="rb", attempt_id="att-b", fence=1, fence_check=_noop_fence, clock=clock)
+
+    after = _row_counts(conn)
+    assert {k: v for k, v in after.items() if k != "data_import_receipts"} == \
+        {k: v for k, v in before.items() if k != "data_import_receipts"}
+    assert after["data_import_receipts"] == before["data_import_receipts"] + 1
+
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'shadow'").fetchone()
+    assert head["snapshot_id"] == snap_a.snapshot_id
+    assert head["generation"] == 1  # unchanged: already at this snapshot
+
+    assert receipt_b.resulting_head_snapshot_id == snap_a.snapshot_id
+    assert receipt_b.resulting_head_generation == 1
+
+
+def test_reimport_dataset_version_with_different_parent_reuses_it(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    manifest_v1, snap_a = _manifest_and_snapshot([record])
+    commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("a-request"), contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref], records=[record], manifests=[manifest_v1], snapshot=snap_a,
+        expected_head_snapshot_id=None, expected_head_generation=0, receipt_id="ra",
+        attempt_id="att-a", fence=1, fence_check=_noop_fence, clock=clock)
+
+    record_2025 = _record_for("2025")
+    manifest_v2, snap_b = _manifest_and_snapshot(
+        [record, record_2025], parent_dataset_version_id=manifest_v1.dataset_version_ref.dataset_version_id)
+    commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("b-request"), contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref, record_2025.object_ref], records=[record, record_2025],
+        manifests=[manifest_v2], snapshot=snap_b, expected_head_snapshot_id=snap_a.snapshot_id,
+        expected_head_generation=1, receipt_id="rb", attempt_id="att-b", fence=1,
+        fence_check=_noop_fence, clock=clock)
+    before = _row_counts(conn)
+
+    # A brand-new snapshot (different finality refs, so a different
+    # snapshot_id) reuses V1's exact fragment content but declares its
+    # parent as V2's dataset version instead of V1's own (none).
+    manifest_v1_again, snap_c = _manifest_and_snapshot(
+        [record], parent_dataset_version_id=manifest_v2.dataset_version_ref.dataset_version_id,
+        finality=(RECEIPT_B,))
+    assert manifest_v1_again.dataset_version_ref.dataset_version_id == \
+        manifest_v1.dataset_version_ref.dataset_version_id
+    assert manifest_v1_again.dataset_version_ref.manifest_hash != \
+        manifest_v1.dataset_version_ref.manifest_hash
+    assert snap_c.snapshot_id != snap_a.snapshot_id
+
+    receipt_c = commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("c-request"), contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref], records=[record], manifests=[manifest_v1_again], snapshot=snap_c,
+        expected_head_snapshot_id=snap_b.snapshot_id, expected_head_generation=2, receipt_id="rc",
+        attempt_id="att-c", fence=1, fence_check=_noop_fence, clock=clock)
+
+    after = _row_counts(conn)
+    assert after["data_dataset_versions"] == before["data_dataset_versions"]  # V1 reused, no new row
+    assert after["data_fragments"] == before["data_fragments"]
+    assert after["data_snapshots"] == before["data_snapshots"] + 1
+    assert after["data_snapshot_tables"] == before["data_snapshot_tables"] + 1
+
+    dsv_row = conn.execute(
+        "SELECT parent_dataset_version_id FROM data_dataset_versions WHERE dataset_version_id = ?",
+        (manifest_v1.dataset_version_ref.dataset_version_id,)).fetchone()
+    assert dsv_row["parent_dataset_version_id"] is None  # V1's own parent, untouched by C
+
+    resolved_c = Repository(conn).resolve(snap_c.snapshot_id)
+    assert resolved_c.table_versions["securities"].dataset_version_id == \
+        manifest_v1.dataset_version_ref.dataset_version_id
+    assert receipt_c.resulting_head_snapshot_id == snap_c.snapshot_id
+    assert receipt_c.resulting_head_generation == 3
+
+
+# --------------------------------------------------------------------------
+# Review fix: the receipt-id retry short-circuit must verify what it
+# short-circuits — one test per field that must not silently differ.
+# --------------------------------------------------------------------------
+
+
+def _replay(conn, clock, record, *, request_hash, scope, attempt_id):
+    manifest, snap = _manifest_and_snapshot([record])
+    return commit_snapshot(
+        conn, scope=scope, request_hash=request_hash, contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref], records=[record], manifests=[manifest], snapshot=snap,
+        expected_head_snapshot_id=None, expected_head_generation=0, receipt_id="r1",
+        attempt_id=attempt_id, fence=1, fence_check=_noop_fence, clock=clock)
+
+
+def test_receipt_shortcut_conflicts_on_different_request_hash(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1", scope="shadow")
+
+    with pytest.raises(DataError) as err:
+        _replay(conn, clock, record, request_hash=_hash("a-different-request"), scope="shadow",
+               attempt_id="att-1")
+    assert err.value.code == "IDENTITY_CONFLICT"
+
+
+def test_receipt_shortcut_conflicts_on_different_attempt_id(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1", scope="shadow", attempt_id="att-1")
+
+    with pytest.raises(DataError) as err:
+        _replay(conn, clock, record, request_hash=_hash("r1-request"), scope="shadow",
+               attempt_id="att-2")
+    assert err.value.code == "IDENTITY_CONFLICT"
+
+
+def test_receipt_shortcut_conflicts_on_different_scope(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1", scope="shadow")
+
+    with pytest.raises(DataError) as err:
+        _replay(conn, clock, record, request_hash=_hash("r1-request"), scope="other",
+               attempt_id="att-1")
+    assert err.value.code == "IDENTITY_CONFLICT"
+
+
+def test_receipt_shortcut_conflicts_on_different_snapshot_id(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1", scope="shadow")
+
+    other_record = _record_for("2025")
+    with pytest.raises(DataError) as err:
+        _replay(conn, clock, other_record, request_hash=_hash("r1-request"), scope="shadow",
+               attempt_id="att-1")
+    assert err.value.code == "IDENTITY_CONFLICT"
