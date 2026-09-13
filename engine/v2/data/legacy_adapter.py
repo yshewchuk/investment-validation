@@ -46,13 +46,13 @@ from pathlib import Path
 from engine.data.features.panel import PANEL_COLUMNS
 from engine.data.features.tier4 import COLUMNS as TIER4_COLUMNS
 from engine.data.features.tier4 import KEY_COLUMNS as TIER4_KEY_COLUMNS
-from engine.data.schemas import SCHEMAS
+from engine.data.schemas import SCHEMAS, SOURCE_PRIORITY
 from engine.v2.contracts.data import ColumnContract, TableContract
-from engine.v2.foundation import to_document
+from engine.v2.foundation import content_hash, to_document
 
 from . import documents, manifests
 
-__all__ = ["LegacyMappingError", "build_legacy_mapping"]
+__all__ = ["LegacyMappingError", "SOURCE_PRIORITY_VERSION", "build_legacy_mapping"]
 
 #: Legacy ``engine.data.schemas.Column.dtype`` -> contract ``physical_type``.
 #: Closed and exhaustive over the five dtypes ``engine/data/schemas.py``
@@ -88,6 +88,14 @@ ANNOTATIONS_PATH = Path(__file__).resolve().parent / "legacy_annotations.json"
 PANEL_RELATIVE_PATH = "features/panel.parquet"
 TIER4_RELATIVE_PATH = "features/tier4_forecasts.parquet"
 SNAPSHOT_RELATIVE_PATH = "features/SNAPSHOT"
+
+#: §7.1's ``SnapshotImportRequest.source_priority_version`` (task brief
+#: decision 2): a deterministic fingerprint of the reviewed source-priority
+#: text engine.data.schemas.SOURCE_PRIORITY documents, so a legacy re-priority
+#: (say ORATS -> another vendor for spot) changes the version an import
+#: request carries, without engine.v2.data.import_snapshot needing its own
+#: legacy import (§4.2: one adapter module per package).
+SOURCE_PRIORITY_VERSION = "legacy_source_priority:" + content_hash(SOURCE_PRIORITY)
 
 MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v1.0"
 CONTRACT_SEMANTIC_VERSION = "1.0.0"

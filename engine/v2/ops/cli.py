@@ -72,6 +72,28 @@ def parser():
     reconcile.add_argument("--root", default=argparse.SUPPRESS)
     reconcile.add_argument("job_id")
     reconcile.add_argument("--expected-attempt", required=True)
+    snapshot = commands.add_parser("snapshot")
+    snapshot.add_argument("--root", default=argparse.SUPPRESS)
+    snapshot_sub = snapshot.add_subparsers(dest="snapshot_command", required=True)
+    plan_import_p = snapshot_sub.add_parser("plan-import")
+    plan_import_p.add_argument("--source-root", required=True, type=Path)
+    plan_import_p.add_argument("--scope", required=True)
+    plan_import_p.add_argument("--expected-head-snapshot-id", default=None)
+    plan_import_p.add_argument("--expected-head-generation", type=int, default=0)
+    submit_import_p = snapshot_sub.add_parser("submit")
+    submit_import_p.add_argument("plan_ref")
+    submit_import_p.add_argument("--idempotency-key", required=True)
+    promote_p = snapshot_sub.add_parser("promote")
+    promote_p.add_argument("--candidate-scope", required=True)
+    promote_p.add_argument("--target-scope", required=True)
+    promote_p.add_argument("--expected-snapshot-id", default=None)
+    promote_p.add_argument("--expected-generation", type=int, required=True)
+    promote_p.add_argument("--comparison-receipt", required=True)
+    rollback_p = snapshot_sub.add_parser("rollback")
+    rollback_p.add_argument("--scope", required=True)
+    rollback_p.add_argument("--to-snapshot-id", required=True)
+    rollback_p.add_argument("--expected-snapshot-id", default=None)
+    rollback_p.add_argument("--expected-generation", type=int, required=True)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -179,7 +201,50 @@ def dispatch(args, root, conn, clock):
         return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
     if args.command == "reconcile":
         return reconcile_command(args, root, conn, clock)
+    if args.command == "snapshot":
+        return snapshot_command(args, root, conn, clock)
     return job_command(args, conn, clock)
+
+
+# --------------------------------------------------------------------------
+# snapshot import/promotion/rollback (P2-7/Task7b, §7/§10)
+# --------------------------------------------------------------------------
+
+
+def snapshot_command(args, root, conn, clock):
+    """``ops snapshot plan-import|submit|promote|rollback`` — see
+    ``engine.v2.data.import_snapshot``/``engine.v2.ops.snapshot_import``/
+    ``engine.v2.ops.snapshot_promotion`` for what each step actually does.
+    """
+    from engine.v2.data.import_snapshot import plan_import
+    from engine.v2.ops.snapshot_import import save_import_plan, submit_import
+    from engine.v2.ops.snapshot_promotion import promote as promote_snapshot
+    from engine.v2.ops.snapshot_promotion import rollback as rollback_snapshot
+
+    store = ArtifactStore(root)
+    repo_root = Path(__file__).resolve().parents[3]
+    if args.snapshot_command == "plan-import":
+        plan = plan_import(args.source_root, scope=args.scope,
+                           expected_head_snapshot_id=args.expected_head_snapshot_id,
+                           expected_head_generation=args.expected_head_generation)
+        return {"plan_ref": save_import_plan(conn, store, plan, clock=clock).artifact_id}
+    if args.snapshot_command == "submit":
+        policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+        receipt = submit_import(conn, store, args.plan_ref, registry=registry(), policy=policy,
+                                clock=clock, idempotency_key=args.idempotency_key,
+                                repo_root=repo_root)
+        return to_document(receipt)
+    if args.snapshot_command == "promote":
+        ref = promote_snapshot(conn, store, candidate_scope=args.candidate_scope,
+                               target_scope=args.target_scope,
+                               expected_snapshot_id=args.expected_snapshot_id,
+                               expected_generation=args.expected_generation,
+                               comparison_receipt_id=args.comparison_receipt, clock=clock)
+        return {"receipt_ref": ref.artifact_id}
+    ref = rollback_snapshot(conn, store, scope=args.scope, to_snapshot_id=args.to_snapshot_id,
+                            expected_snapshot_id=args.expected_snapshot_id,
+                            expected_generation=args.expected_generation, clock=clock)
+    return {"receipt_ref": ref.artifact_id}
 
 
 def reconcile_command(args, root, conn, clock):

@@ -13,7 +13,8 @@ from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
            "invoke_score_calendar", "manifest_files", "run_engineering_gate",
-           "run_legacy_script", "run_security_scan", "verify_export_generation"]
+           "run_legacy_rebuild", "run_legacy_script", "run_security_scan",
+           "verify_export_generation"]
 
 
 def _digest(path: Path) -> str:
@@ -542,6 +543,27 @@ def verify_export_generation(generation_dir, repo_root, *, timeout=120):
                                 cwd=str(repo_root), env=env, capture_output=True, text=True,
                                 timeout=timeout)
     return _json_stdout(result, "export generation failed the compatibility read-back")
+
+
+def run_legacy_rebuild(candidate_root, repo_root, *, tables=None, sample=None, timeout=3600):
+    """Run the real legacy rebuild, rooted at a private candidate directory
+    (phase-2 guide §10): a fresh subprocess with ``INVESTING_PLAN_ROOT``
+    pointed at ``candidate_root``, so every write lands there alone.
+    """
+    import subprocess
+
+    command = ["/usr/bin/python3", "-m", "engine.data.rebuild"]
+    for table in tables or ():
+        command += ["--table", table]
+    if sample is not None:
+        command += ["--sample", str(sample)]
+    env = dict(os.environ, INVESTING_PLAN_ROOT=str(candidate_root))
+    result = subprocess.run(command, cwd=str(repo_root), env=env, capture_output=True,
+                            text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise fail("VALIDATION_FAILED", "legacy rebuild candidate subprocess did not complete",
+                   details={"stderr": result.stderr[-2000:]})
+    return {"schema_version": "legacy_rebuild_report.v1.0", "returncode": result.returncode}
 
 
 def run_engineering_gate(repo_root, *, timeout=600):

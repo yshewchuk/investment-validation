@@ -35,6 +35,7 @@ non-orchestrator).
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ __all__ = [
     "NAN_POLICY",
     "PARQUET_FRAGMENT_SCHEMA_REF",
     "inspect_fragment",
+    "inspect_staged_file",
     "logical_partition_hash",
     "normalize_physical_type",
     "partition_logical_hash",
@@ -253,6 +255,18 @@ def inspect_fragment(store: ArtifactStore, object_ref: ObjectRef, contract: Tabl
     """
     fault = fault or (lambda point: None)
     path = verify_object_path(store, object_ref)
+    inspection = _inspect_path(path, contract, contract_ref, partition_key, batch_rows, fault)
+    return dataclasses.replace(inspection, object_ref=object_ref, byte_hash=object_ref.content_hash)
+
+
+def _inspect_path(path, contract: TableContract, contract_ref: TableContractRef,
+                  partition_key: str, batch_rows: int, fault) -> FragmentInspection:
+    """Shared streaming/decoding core of :func:`inspect_fragment` and
+    :func:`inspect_staged_file`. ``object_ref``/``byte_hash`` are left as
+    placeholders (``None``/``""``) here — each caller fills them from what it
+    already knows (a published ``ObjectRef``, or a staged file's pinned
+    ``LegacyFileRef``) rather than this function re-deriving them.
+    """
     parquet_file = _open_parquet_file(path)
     present, missing = _match_contract_columns(contract, parquet_file.schema_arrow)
     state = _StreamState()
@@ -260,8 +274,8 @@ def inspect_fragment(store: ArtifactStore, object_ref: ObjectRef, contract: Tabl
                         state, fault)
     logical_hash = logical_partition_hash(contract, contract_ref, partition_key, rows)
     return FragmentInspection(
-        object_ref=object_ref, partition_key=partition_key, row_count=state.row_count,
-        byte_hash=object_ref.content_hash, logical_content_hash=logical_hash,
+        object_ref=None, partition_key=partition_key, row_count=state.row_count,
+        byte_hash="", logical_content_hash=logical_hash,
         primary_key_min=state.key_min, primary_key_max=state.key_max,
         time_min=state.time_min, time_max=state.time_max,
     )
@@ -280,6 +294,49 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
         return store.verify(ref)
     except ArtifactError as exc:
         raise errors.fail("OBJECT_CORRUPT", "published object bytes do not match its recorded hash") from exc
+
+
+def inspect_staged_file(path, contract: TableContract, contract_ref: TableContractRef,
+                        partition_key: str, *, expected_content_hash: str,
+                        expected_byte_size: int, batch_rows: int = 65536,
+                        fault=None) -> FragmentInspection:
+    """Verify, stream and hash one legacy file staged locally — the worker side
+    of the §7 snapshot-import worker/coordinator split (task brief decision 1).
+
+    Unlike :func:`inspect_fragment`, ``path`` is never published as an
+    ``ArtifactStore`` object first: this is a fresh legacy file sitting in a
+    worker's own staging directory, already re-verified once when the read set
+    was pinned/copied (``ops.store_barrier``). This function re-verifies its
+    bytes again, independently, against the same pinned
+    ``expected_content_hash``/``expected_byte_size`` — before opening it as
+    Parquet — then runs exactly ``inspect_fragment``'s own streaming/decoding
+    path. The returned ``object_ref`` carries no real ``object_id`` (nothing is
+    published yet); a coordinator that later publishes this same path replaces
+    it with the real ``ObjectRef`` (``dataclasses.replace``) before building a
+    ``FragmentRecord`` — the published bytes are guaranteed identical, since
+    :func:`publish_legacy_file` independently re-hashes and refuses a mismatch.
+    """
+    fault = fault or (lambda point: None)
+    actual_hash, actual_size = _hash_local_file(path)
+    if actual_size != expected_byte_size or actual_hash != expected_content_hash:
+        raise errors.fail("INPUT_CHANGED",
+                          "staged legacy file no longer matches its pinned reference")
+    inspection = _inspect_path(path, contract, contract_ref, partition_key, batch_rows, fault)
+    placeholder = ObjectRef(kind="parquet_fragment", object_id="", content_hash=expected_content_hash,
+                            byte_size=expected_byte_size)
+    return dataclasses.replace(inspection, object_ref=placeholder, byte_hash=expected_content_hash)
+
+
+def _hash_local_file(path) -> tuple[str, int]:
+    digest, size = hashlib.sha256(), 0
+    with open(path, "rb") as stream:
+        while True:
+            chunk = stream.read(_CHUNK)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    return CONTENT_HASH_PREFIX + digest.hexdigest(), size
 
 
 def _open_parquet_file(path) -> pq.ParquetFile:
