@@ -16,11 +16,6 @@ Two operations, in order:
 
 Judgement calls, recorded here rather than silently decided:
 
-* ``import_request_hash`` is accepted (a caller always has it in hand by this
-  point) but neither stored on ``FragmentInspection`` nor folded into the
-  logical hash: the phase-2 guide gives explicit field/header lists for both
-  and neither names it. A later catalog-insert slice threads it into the
-  ``FragmentRecord`` this module does not build.
 * Partition-column values are read directly from the row when the contract
   declares a same-named physical column (true for all eight legacy-mapped
   tables today — every Tier-2 table already carries an explicit ``year``
@@ -243,16 +238,13 @@ class _StreamState:
 
 def inspect_fragment(store: ArtifactStore, object_ref: ObjectRef, contract: TableContract,
                      contract_ref: TableContractRef, partition_key: str, *,
-                     import_request_hash: str, batch_rows: int = 65536,
-                     fault=None) -> FragmentInspection:
+                     batch_rows: int = 65536, fault=None) -> FragmentInspection:
     """Verify, stream and hash one published object as a fragment candidate.
 
-    ``import_request_hash`` is accepted for call-site symmetry with a later
-    catalog-insert slice; see the module docstring for why it is not stored
-    or hashed here. ``fault``, when given, is invoked with ``"during_inspection"``
-    once per Arrow batch.
+    ``fault``, when given, is invoked with ``"during_inspection"`` once per
+    Arrow batch. Carries no ``import_request_hash``: ``manifests.fragment_record``
+    (P2-2c) takes that directly from its caller instead.
     """
-    del import_request_hash
     fault = fault or (lambda point: None)
     path = _verify_object(store, object_ref)
     parquet_file = _open_parquet_file(path)
