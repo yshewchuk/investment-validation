@@ -43,11 +43,16 @@ def health(conn, *, clock, executor_mode="watchdog"):
                            "WHERE delivered_at IS NOT NULL ORDER BY occurrence DESC LIMIT 1").fetchone()
     withheld = conn.execute("SELECT release_id,occurrence FROM releases WHERE eligible=0 "
                             "ORDER BY occurrence DESC LIMIT 1").fetchone()
+    # A withheld night only stays reportable while no later occurrence has been
+    # delivered since: once delivery catches up to (or passes) it, the banner
+    # must clear rather than stick forever.
+    show_withheld = withheld is not None and (
+        current is None or withheld["occurrence"] > current["occurrence"])
     return {"schema_version": "operations_health.v1.0", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks")],
             "current_release": dict(current) if current else None,
-            "withheld_release": dict(withheld) if withheld else None,
+            "withheld_release": dict(withheld) if show_withheld else None,
             "code_budgets": budget_streak(conn), "activation": "shadow_only"}
 
 
