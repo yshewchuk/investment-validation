@@ -39,9 +39,10 @@ underscore convention, and an import of a name absent from this list fails
 | `from_document`, `to_document`, `parse_schema_version`, `DocumentError` | Strict dataclass ⇄ JSON decoding driven by the contract's own annotations. Errors carry a code and a JSON path, never the offending value. |
 | `Clock`, `SystemClock`, `format_timestamp`, `parse_timestamp` | Injected wall/monotonic clocks, and the one timestamp wire form. |
 | `ArtifactStore`, `ArtifactError` | Attempt staging directories; copy-hash-fsync-link publication; re-verification before reuse. |
+| `artifact_reference` | The identity `ArtifactStore.publish_bytes` would give some bytes, computed without touching storage — so a worker or coordinator that already holds the exact bytes of a published artifact can recompute its `ArtifactRef` and agree with the store by construction. |
 | `safe_relative_path`, `ensure_directory`, `fsync_directory` | The path and durability primitives the store is built from. |
 
-<!-- public-interface: canonical_json, content_hash, CONTENT_HASH_PREFIX, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed -->
+<!-- public-interface: canonical_json, content_hash, CONTENT_HASH_PREFIX, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed -->
 
 ## Consumers
 

@@ -28,17 +28,24 @@ from engine.v2.contracts import (
     LegacyInputManifest,
     SubmitRequest,
 )
-from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document
+from engine.v2.foundation import ArtifactStore, SystemClock, artifact_reference, content_hash, to_document
 from engine.v2.ledger.decisions import set_authority
 from engine.v2.ops import schema
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import cache_identity, register_artifact
 from engine.v2.ops.decision_commit import commit_decisions_in_transaction, validated_decision_candidate
+from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
+from engine.v2.ops.decision_validation import validate
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
-from engine.v2.ops.input_bindings import record_resolved_bindings, resolve_bindings, resolved_inputs_hash
+from engine.v2.ops.input_bindings import (
+    record_resolved_bindings,
+    resolve_and_record,
+    resolve_bindings,
+    resolved_inputs_hash,
+)
 from engine.v2.ops.legacy_actions import ACTION_NAMES
 from engine.v2.ops.legacy_adapter import _action_decision_replay
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
@@ -49,7 +56,7 @@ from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit_graph
-from engine.v2.ops.supervisor import Service
+from engine.v2.ops.supervisor import Service, _verify_decision_evidence
 from tests.ops_support import TEST_POLICY, sample
 
 REPO = Path(__file__).resolve().parents[1]
@@ -848,3 +855,513 @@ def test_legacy_decision_replay_environment_ref_matches_launch_formula():
     profile = profile_named(DEFAULT_POLICY, "legacy_score")
     thread_count = profile.thread_count or profile.cpu_count
     assert replay.job.environment_ref == content_hash(environment_identity(thread_count))
+
+
+# --------------------------------------------------------------------------
+# P2-5/B1c: decision_evidence — a coordinator-validated stage that derives
+# decision_plan.v1.0/decision_evidence.v1.0 from committed artifacts, wired
+# into the nightly job DAG so legacy_decisions finally has something to bind.
+# Everything below is synthetic (D18); no real legacy score/finality/replay
+# run happens anywhere in this section.
+# --------------------------------------------------------------------------
+
+
+# -- pure: derive() and validate() agree on a synthetic score document -----
+
+
+def test_derive_and_validator_agree_on_eligible_forward_and_ladder_rows():
+    """One eligible row, one forward row (future as_of), one ladder row
+    (strike_offset set). ``derive()``'s population must equal the ONE key
+    both ``decision_population`` (strike_offset-aware) and
+    ``build_prediction_rows`` (date-aware, ladder-blind) agree is eligible —
+    the forward and ladder rows are excluded from ELIGIBILITY by two
+    different mechanisms, but land on the same net answer, so the two
+    independent computations never disagree about what got decided.
+    """
+    eligible = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": SESSION, "as_of": SESSION,
+                "entry_date": SESSION, "evidence_cutoff": SESSION, "strike": 100.0,
+                "expiry": "2026-10-16", "session": "AMC", "snapshot_hash": "sha256:" + "a" * 64,
+                "strike_offset": None, "event_id": "evt-aaa"}
+    forward = {"ticker": "BBB", "strategy": "TWIN-P", "event_date": "2026-09-20",
+              "as_of": "2026-09-19", "entry_date": "2026-09-19", "evidence_cutoff": "2026-09-19",
+              "strike": 50.0, "expiry": "2026-10-17", "session": "BMO",
+              "snapshot_hash": "sha256:" + "b" * 64, "strike_offset": None, "event_id": "evt-bbb"}
+    ladder = {"ticker": "CCC", "strategy": "TWIN-P", "event_date": "2026-09-22",
+             "as_of": "2026-09-21", "entry_date": "2026-09-21", "evidence_cutoff": "2026-09-21",
+             "strike": 75.0, "expiry": "2026-10-18", "session": "BMO",
+             "snapshot_hash": "sha256:" + "c" * 64, "strike_offset": 0.025, "event_id": "evt-ccc"}
+    score_doc = {"rows": [eligible, forward, ladder]}
+    finality = {"date": SESSION, "is_final": True, "market_wide": True,
+                "daily_share": 1.0, "chain_share": 1.0, "covered": 3}
+    key = "AAA|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [eligible], "replayed_rows": [eligible],
+                  "source_rows_hash": content_hash([eligible]),
+                  "replayed_rows_hash": content_hash([eligible]), "findings": []}
+    score_ref = artifact_reference(b"synthetic-score-bytes", "legacy_action.v1.0")
+    finality_ref = artifact_reference(b"synthetic-finality-bytes", "legacy_action.v1.0")
+    deployment, decision_clock = "shadow:synthetic-impl", SESSION + "T21:00:00+00:00"
+
+    plan_bytes, evidence_bytes = derive(score_doc, score_ref, finality, finality_ref, replay_doc,
+                                        session=SESSION, deployment=deployment,
+                                        decision_clock=decision_clock)
+    plan = json.loads(plan_bytes)
+    evidence = json.loads(evidence_bytes)
+    assert plan["expected_population"] == [key]
+
+    frame = pd.DataFrame([eligible, forward, ladder])
+    rows = build_prediction_rows(frame, as_of=SESSION, decision_ts=plan["decision_clock"],
+                                 finality=finality, entry_dated_only=True)
+    # legacy_adapter._action_decisions's own post-processing: the clock is
+    # patched onto every candidate after build_prediction_rows returns it.
+    for row in rows:
+        row["written_at"] = plan["decision_clock"]
+        row["decision_ts"] = plan["decision_clock"]
+        if not row.get("event_id"):
+            row["event_id"] = (row.get("score") or {}).get("event_id")
+    assert len(rows) == 1
+
+    plan_ref = artifact_reference(plan_bytes, "decision_plan.v1.0")
+    evidence_ref = artifact_reference(evidence_bytes, "decision_evidence.v1.0")
+    context = validate(rows, score=score_doc, finality=finality, plan=plan, evidence=evidence,
+                       bindings={"score": {"artifact_id": score_ref.artifact_id,
+                                          "content_hash": score_ref.content_hash},
+                                "finality": {"artifact_id": finality_ref.artifact_id,
+                                            "content_hash": finality_ref.content_hash},
+                                "plan": {"artifact_id": plan_ref.artifact_id,
+                                        "content_hash": plan_ref.content_hash},
+                                "evidence": {"artifact_id": evidence_ref.artifact_id,
+                                            "content_hash": evidence_ref.content_hash}})
+    assert context["session"] == SESSION
+    assert context["deployment"] == deployment
+
+
+# -- shared scaffolding for the supervised (real Service) tests below ------
+
+
+def _decision_evidence_request(*, key, score_job, finality_job, replay_job,
+                               deployment, decision_clock):
+    bindings = {"score.json": score_job + "#legacy_score",
+                "finality.json": finality_job + "#legacy_finality",
+                "replay.json": replay_job + "#legacy_decision_replay"}
+    profile = profile_named(DEFAULT_POLICY, "validation")
+    job = JobSpec(
+        kind="decision_evidence",
+        implementation_ref=content_hash(worker_source_manifest(REPO)),
+        spec_hash=None,
+        environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
+        parameters={"expected_ids": ("decision_evidence",), "session": SESSION,
+                    "tickers": (), "year_start": 2024, "year_end": 2026,
+                    "deployment": deployment, "decision_clock": decision_clock,
+                    "input_bindings": bindings},
+        input_refs=(), dependency_job_ids=(score_job, finality_job, replay_job),
+        output_namespace="shadow", resource_class="validation", retry_policy_ref="bounded",
+        checkpoint_contract_ref="decision_evidence_pair.v1.0")
+    return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
+
+
+def _legacy_decisions_request(*, key, manifest_ref, score_job, finality_job, evidence_job):
+    bindings = {"legacy_manifest.json": manifest_ref.artifact_id,
+                "score.json": score_job + "#legacy_score",
+                "finality.json": finality_job + "#legacy_finality",
+                "decision_plan.json": evidence_job + "#decision_plan",
+                "decision_evidence.json": evidence_job + "#decision_evidence"}
+    profile = profile_named(DEFAULT_POLICY, "validation")
+    job = JobSpec(
+        kind="legacy_decisions",
+        implementation_ref=content_hash(worker_source_manifest(REPO)),
+        spec_hash=None,
+        environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
+        parameters={"expected_ids": ("legacy_decisions",), "session": SESSION,
+                    "tickers": (), "year_start": 2024, "year_end": 2026,
+                    "input_bindings": bindings},
+        input_refs=(manifest_ref.artifact_id,),
+        dependency_job_ids=(evidence_job, score_job, finality_job),
+        output_namespace="shadow", resource_class="validation", retry_policy_ref="bounded",
+        checkpoint_contract_ref="legacy_action.v1.0")
+    return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
+
+
+# -- supervised positive path: real Service, real subprocess workers -------
+
+
+def test_decision_evidence_and_decisions_commit_through_submit_graph(tmp_path):
+    root = tmp_path / "evidence-positive"
+    root.mkdir()
+    store_root = root / "prod"
+    store_root.mkdir()
+    fixture = store_root / "unused.txt"
+    fixture.write_bytes(b"a legacy read-set member decisions never opens")
+
+    clock = SystemClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    store = ArtifactStore(root)
+    try:
+        setup_epoch = begin_epoch(conn, clock=clock, boot_id="setup", pid=1)
+        setup = Supervisor(setup_epoch, "setup")
+
+        manifest_ref = _manifest_ref(store, conn, clock, (LegacyFileRef(
+            path="unused.txt", content_hash=file_hash(fixture),
+            byte_size=fixture.stat().st_size),))
+        score, finality = _score_and_finality()
+        key = "FAKE|TWIN-P|" + SESSION
+        score_ref = _publish(store, conn, clock, {"rows": [score]}, "legacy_action.v1.0")
+        finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+        replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                      "population": [key], "source_rows": [score], "replayed_rows": [score],
+                      "source_rows_hash": content_hash([score]),
+                      "replayed_rows_hash": content_hash([score]), "findings": []}
+        replay_ref = _publish(store, conn, clock, replay_doc, "legacy_action.v1.0")
+
+        score_job = _succeed_parent(conn, clock, setup, key="pos-score",
+                                    output_name="legacy_score", ref=score_ref)
+        finality_job = _succeed_parent(conn, clock, setup, key="pos-finality",
+                                       output_name="legacy_finality", ref=finality_ref)
+        replay_job = _succeed_parent(conn, clock, setup, key="pos-replay",
+                                     output_name="legacy_decision_replay", ref=replay_ref)
+
+        with transaction(conn):
+            set_authority(conn, None, "catalog", SESSION + "T20:00:00.000000Z")
+
+        deployment, decision_clock = "shadow:test-impl", SESSION + "T21:00:00+00:00"
+        evidence_request = _decision_evidence_request(
+            key="pos-evidence", score_job=score_job, finality_job=finality_job,
+            replay_job=replay_job, deployment=deployment, decision_clock=decision_clock)
+        evidence_job_id = job_id_for("shadow", "pos-evidence")
+        decisions_request = _legacy_decisions_request(
+            key="pos-decisions", manifest_ref=manifest_ref, score_job=score_job,
+            finality_job=finality_job, evidence_job=evidence_job_id)
+
+        receipts = submit_graph(conn, registry(), POLICY,
+                                [evidence_request, decisions_request], clock=clock)
+        assert len(receipts) == 2
+
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
+                          code_source=REPO, store_root=store_root)
+        try:
+            service.start()
+            evidence_state = _run_until_terminal(service, conn, evidence_job_id)
+            decisions_job_id = job_id_for("shadow", "pos-decisions")
+            decisions_state = _run_until_terminal(service, conn, decisions_job_id)
+        finally:
+            service.close()
+
+        evidence_row = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
+                                    (evidence_job_id,)).fetchone()
+        assert evidence_state == "succeeded", evidence_row["failure_json"]
+        decisions_row = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
+                                     (decisions_job_id,)).fetchone()
+        assert decisions_state == "succeeded", decisions_row["failure_json"]
+
+        evidence_attempt = conn.execute("SELECT attempt_id FROM attempts WHERE job_id=?",
+                                        (evidence_job_id,)).fetchone()[0]
+        evidence_outputs = {r[0] for r in conn.execute(
+            "SELECT name FROM attempt_outputs WHERE attempt_id=?", (evidence_attempt,))}
+        assert evidence_outputs == {"decision_plan", "decision_evidence"}
+
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+        assert sorted(r[0] for r in conn.execute("SELECT kind FROM outbox")) == [
+            "export", "release_intent"]
+
+        # Resubmitting the identical graph is idempotent: the same job
+        # receipts come back and no new decision is recorded.
+        resubmitted = submit_graph(conn, registry(), POLICY,
+                                   [evidence_request, decisions_request], clock=clock)
+        assert [r.job_id for r in resubmitted] == [r.job_id for r in receipts]
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+# -- supervised negative paths: planted defects, each refused ---------------
+
+
+def _succeed_evidence_parent(conn, clock, supervisor, *, key, plan_ref, evidence_ref):
+    """A succeeded ``decision_evidence`` parent job/attempt with BOTH outputs
+    registered on the SAME attempt -- matching the real worker's shape
+    (one job, two outputs), unlike ``_succeed_parent`` above which seeds one
+    output per job."""
+    job = JobSpec(kind="artifact_check", implementation_ref="parent-setup", spec_hash=None,
+                  environment_ref="parent-setup", parameters={"expected_ids": ()},
+                  output_namespace="shadow", resource_class="delivery",
+                  retry_policy_ref="bounded", checkpoint_contract_ref="receipt.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(
+        namespace="shadow", idempotency_key=key, principal="operator", job=job), clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry())
+
+    def effects(inner_conn):
+        register_artifact(inner_conn, plan_ref, claim.attempt_id, clock)
+        register_artifact(inner_conn, evidence_ref, claim.attempt_id, clock)
+        inner_conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                           (claim.attempt_id, "decision_plan", plan_ref.artifact_id))
+        inner_conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                           (claim.attempt_id, "decision_evidence", evidence_ref.artifact_id))
+
+    commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                   clock=clock, effects=effects)
+    return job_id_for("shadow", key)
+
+
+def _run_decisions_with_derived_evidence(tmp_path, tag, score_doc, finality, replay_doc, *,
+                                         deployment="shadow:test-impl", decision_clock=None):
+    """Derive plan/evidence with :func:`derive` (possibly over a tampered
+    score/replay input), seed succeeded score/finality/plan/evidence
+    parents, submit ``legacy_decisions`` for real, run it to completion, and
+    return ``(state, failure_json, decisions_count, outbox_count)``.
+    """
+    decision_clock = decision_clock or (SESSION + "T21:00:00+00:00")
+    root = tmp_path / tag
+    root.mkdir()
+    store_root = root / "prod"
+    store_root.mkdir()
+    fixture = store_root / "unused.txt"
+    fixture.write_bytes(b"a legacy read-set member decisions never opens")
+
+    clock = SystemClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    store = ArtifactStore(root)
+    try:
+        setup_epoch = begin_epoch(conn, clock=clock, boot_id="setup", pid=1)
+        setup = Supervisor(setup_epoch, "setup")
+
+        manifest_ref = _manifest_ref(store, conn, clock, (LegacyFileRef(
+            path="unused.txt", content_hash=file_hash(fixture),
+            byte_size=fixture.stat().st_size),))
+        score_ref = _publish(store, conn, clock, score_doc, "legacy_action.v1.0")
+        finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+
+        plan_bytes, evidence_bytes = derive(score_doc, score_ref, finality, finality_ref, replay_doc,
+                                            session=SESSION, deployment=deployment,
+                                            decision_clock=decision_clock)
+        plan_ref = store.publish_bytes(plan_bytes, schema_ref="decision_plan.v1.0")
+        evidence_ref = store.publish_bytes(evidence_bytes, schema_ref="decision_evidence.v1.0")
+
+        score_job = _succeed_parent(conn, clock, setup, key=tag + "-score",
+                                    output_name="legacy_score", ref=score_ref)
+        finality_job = _succeed_parent(conn, clock, setup, key=tag + "-finality",
+                                       output_name="legacy_finality", ref=finality_ref)
+        evidence_job = _succeed_evidence_parent(conn, clock, setup, key=tag + "-evidence",
+                                                plan_ref=plan_ref, evidence_ref=evidence_ref)
+
+        with transaction(conn):
+            set_authority(conn, None, "catalog", SESSION + "T20:00:00.000000Z")
+
+        decisions_request = _legacy_decisions_request(
+            key=tag + "-decisions", manifest_ref=manifest_ref, score_job=score_job,
+            finality_job=finality_job, evidence_job=evidence_job)
+        receipt = submit(conn, registry(), POLICY, decisions_request, clock=clock)
+
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
+                          code_source=REPO, store_root=store_root)
+        try:
+            service.start()
+            state = _run_until_terminal(service, conn, receipt.job_id)
+        finally:
+            service.close()
+
+        row = conn.execute("SELECT failure_json FROM jobs WHERE job_id=?",
+                           (receipt.job_id,)).fetchone()
+        decisions = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+        outbox = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        return state, row["failure_json"], decisions, outbox
+    finally:
+        conn.close()
+
+
+def test_planted_defect_replayed_float_change_is_refused(tmp_path):
+    score, finality = _score_and_finality()
+    score = dict(score, exp_pnl_model=0.1)
+    score_doc = {"rows": [score]}
+    tampered = dict(score, exp_pnl_model=0.2)
+    key = "FAKE|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [score], "replayed_rows": [tampered],
+                  "source_rows_hash": content_hash([score]),
+                  "replayed_rows_hash": content_hash([tampered]), "findings": []}
+    state, failure, decisions, outbox = _run_decisions_with_derived_evidence(
+        tmp_path, "float", score_doc, finality, replay_doc)
+    assert state == "failed", failure
+    assert "VALIDATION_FAILED" in failure
+    assert decisions == 0
+    assert outbox == 0
+
+
+def test_planted_defect_late_evidence_cutoff_is_refused(tmp_path):
+    score, finality = _score_and_finality()
+    # evidence_cutoff after as_of (SESSION, midnight UTC): decision_validation
+    # refuses this regardless of what the receipt claims -- see
+    # decision_validation._validate_causality.
+    score = dict(score, evidence_cutoff=SESSION + "T23:59:59+00:00")
+    score_doc = {"rows": [score]}
+    key = "FAKE|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [score], "replayed_rows": [score],
+                  "source_rows_hash": content_hash([score]),
+                  "replayed_rows_hash": content_hash([score]), "findings": []}
+    state, failure, decisions, outbox = _run_decisions_with_derived_evidence(
+        tmp_path, "cutoff", score_doc, finality, replay_doc)
+    assert state == "failed", failure
+    assert "VALIDATION_FAILED" in failure
+    assert decisions == 0
+    assert outbox == 0
+
+
+def test_planted_defect_replay_missing_an_eligible_row_is_refused(tmp_path):
+    score, finality = _score_and_finality()
+    score_doc = {"rows": [score]}
+    key = "FAKE|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [score], "replayed_rows": [],
+                  "source_rows_hash": content_hash([score]),
+                  "replayed_rows_hash": content_hash([]), "findings": []}
+    state, failure, decisions, outbox = _run_decisions_with_derived_evidence(
+        tmp_path, "missing", score_doc, finality, replay_doc)
+    assert state == "failed", failure
+    assert "VALIDATION_FAILED" in failure
+    assert decisions == 0
+    assert outbox == 0
+
+
+def test_coordinator_rederivation_catches_tampered_worker_evidence_bytes(tmp_path):
+    """Even if a worker's own output looks plausible, the coordinator
+    independently re-derives from the recorded bindings and refuses a
+    ``decision_evidence`` attempt whose published bytes disagree."""
+    root = tmp_path / "tamper"
+    root.mkdir()
+    clock = SystemClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    store = ArtifactStore(root)
+    try:
+        setup_epoch = begin_epoch(conn, clock=clock, boot_id="setup", pid=1)
+        setup = Supervisor(setup_epoch, "setup")
+
+        score, finality = _score_and_finality()
+        key = "FAKE|TWIN-P|" + SESSION
+        score_ref = _publish(store, conn, clock, {"rows": [score]}, "legacy_action.v1.0")
+        finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+        replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                      "population": [key], "source_rows": [score], "replayed_rows": [score],
+                      "source_rows_hash": content_hash([score]),
+                      "replayed_rows_hash": content_hash([score]), "findings": []}
+        replay_ref = _publish(store, conn, clock, replay_doc, "legacy_action.v1.0")
+
+        score_job = _succeed_parent(conn, clock, setup, key="tp-score",
+                                    output_name="legacy_score", ref=score_ref)
+        finality_job = _succeed_parent(conn, clock, setup, key="tp-finality",
+                                       output_name="legacy_finality", ref=finality_ref)
+        replay_job = _succeed_parent(conn, clock, setup, key="tp-replay",
+                                     output_name="legacy_decision_replay", ref=replay_ref)
+
+        request = _decision_evidence_request(
+            key="tp-evidence", score_job=score_job, finality_job=finality_job,
+            replay_job=replay_job, deployment="shadow:test-impl",
+            decision_clock=SESSION + "T21:00:00+00:00")
+        submit(conn, registry(), POLICY, request, clock=clock)
+        claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                           supervisor=setup, clock=clock, registry=registry())
+        assert claim is not None
+        resolve_and_record(conn, store, claim)
+
+        # A worker that published something other than what re-derivation
+        # from the SAME recorded bindings would produce.
+        wrong_plan = store.publish_bytes(
+            json.dumps({"schema_version": "decision_plan.v1.0", "tampered": True}).encode(),
+            schema_ref="decision_plan.v1.0")
+        wrong_evidence = store.publish_bytes(
+            json.dumps({"schema_version": "decision_evidence.v1.0", "receipts": {}}).encode(),
+            schema_ref="decision_evidence.v1.0")
+        refs = [("decision_plan", wrong_plan), ("decision_evidence", wrong_evidence)]
+
+        with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+            _verify_decision_evidence(conn, store, claim, refs)
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# DAG shape: decision_evidence wired between decision_replay and
+# decision_commit; settlement stays independent of both.
+# --------------------------------------------------------------------------
+
+
+def test_decision_evidence_stage_wired_with_parents_and_bindings():
+    plan = build_nightly_plan(str(REPO), SESSION)
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",),
+                                         year_start=2025, year_end=2026)
+    assert [r.job.kind for r in requests] == [
+        "legacy_finality", "legacy_score", "legacy_decision_replay", "decision_evidence",
+        "legacy_decisions", "legacy_settlement", "legacy_model_evidence", "legacy_render",
+        "legacy_selfcheck"]
+    by_kind = {r.job.kind: r for r in requests}
+
+    evidence = by_kind["decision_evidence"]
+    score_id = job_id_for("shadow", by_kind["legacy_score"].idempotency_key)
+    finality_id = job_id_for("shadow", by_kind["legacy_finality"].idempotency_key)
+    replay_id = job_id_for("shadow", by_kind["legacy_decision_replay"].idempotency_key)
+    assert set(evidence.job.dependency_job_ids) == {score_id, finality_id, replay_id}
+    assert evidence.job.parameters["input_bindings"] == {
+        "score.json": score_id + "#legacy_score", "finality.json": finality_id + "#legacy_finality",
+        "replay.json": replay_id + "#legacy_decision_replay"}
+    assert evidence.job.parameters["deployment"] == "shadow:" + plan["implementation_ref"]
+    assert evidence.job.parameters["decision_clock"] == plan["decision_clock"]
+
+    decisions = by_kind["legacy_decisions"]
+    evidence_id = job_id_for("shadow", evidence.idempotency_key)
+    assert set(decisions.job.dependency_job_ids) == {evidence_id, score_id, finality_id}
+    assert decisions.job.parameters["input_bindings"]["decision_plan.json"] == (
+        evidence_id + "#decision_plan")
+    assert decisions.job.parameters["input_bindings"]["decision_evidence.json"] == (
+        evidence_id + "#decision_evidence")
+
+    settlement = by_kind["legacy_settlement"]
+    assert settlement.job.dependency_job_ids == (finality_id,)
+    assert evidence_id not in settlement.job.dependency_job_ids
+    assert job_id_for("shadow", decisions.idempotency_key) not in settlement.job.dependency_job_ids
+
+    conn = open_catalog(Path(tempfile.mkdtemp()) / "ops.sqlite", clock=SystemClock())
+    try:
+        receipts = submit_graph(conn, registry(), NamespacePolicy({"operator": frozenset({"shadow"})}),
+                                requests, clock=SystemClock())
+        assert len(receipts) == len(requests)
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == len(requests)
+    finally:
+        conn.close()
+
+
+def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(tmp_path, capsys):
+    from engine.v2.ops import cli
+
+    root = tmp_path / "ops"
+    population_file = tmp_path / "population.json"
+    population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
+    manifest_file = tmp_path / "manifest.json"
+    manifest_file.write_text(json.dumps({"manifest_id": "m1"}))
+    assert cli.main(["--root", str(root), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--root", str(root), "plan", "nightly", "--as-of", SESSION,
+                     "--tickers", "FAKE", "--input-manifest", str(manifest_file),
+                     "--expected-population", str(population_file)]) == 0
+    plan_doc = json.loads(capsys.readouterr().out)
+    decision_clock = plan_doc["plan"]["decision_clock"]
+    assert decision_clock
+    plan_ref = plan_doc["plan_ref"]
+
+    assert cli.main(["--root", str(root), "submit", "--plan", plan_ref,
+                     "--idempotency-key", "s1"]) == 0
+    capsys.readouterr()
+    # A second submission of the SAME plan artifact is the "retry" case: the
+    # decision_evidence job it names is unchanged (job ids are keyed off the
+    # plan's own session/scope, not the CLI's --idempotency-key), so its
+    # decision_clock parameter is read back off the ORIGINAL submission.
+    assert cli.main(["--root", str(root), "submit", "--plan", plan_ref,
+                     "--idempotency-key", "s2"]) == 0
+    capsys.readouterr()
+
+    raw = sqlite3.connect(root / "catalog.sqlite")
+    try:
+        rows = raw.execute("SELECT spec_json FROM jobs WHERE kind='decision_evidence'").fetchall()
+        assert len(rows) == 1
+        assert json.loads(rows[0][0])["parameters"]["decision_clock"] == decision_clock
+    finally:
+        raw.close()

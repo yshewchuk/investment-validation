@@ -56,6 +56,8 @@ def dispatch(worker, parameters, root):
                               "schema": "legacy_action.v1.0"}],
                 "completed_ids": [worker], "action": worker,
                 "coverage": output}
+    if worker == "decision_evidence":
+        return _dispatch_decision_evidence(parameters, root)
     if worker == "artifact_check":
         output = root / "receipt.json"
         output.write_text(json.dumps({"checked": parameters["expected_ids"],
@@ -67,6 +69,39 @@ def dispatch(worker, parameters, root):
                 "observed": {"affinity": sorted(os.sched_getaffinity(0)),
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     raise ValueError("unsupported worker")
+
+
+def _dispatch_decision_evidence(parameters, root):
+    """Derive the decision plan/evidence pair from staged, materialized inputs.
+
+    ``score.json``/``finality.json``/``replay.json`` are plain files here —
+    ``executor._materialize_inputs`` writes every ``input_bindings`` entry's
+    verified bytes into staging before any worker runs, legacy or not. This
+    worker never touches the legacy tree or the catalog; it recomputes the
+    score/finality artifact identity locally, from the SAME bytes it just
+    read, with the store's own :func:`artifact_reference` — the coordinator
+    re-derives independently from its recorded bindings and the two must
+    agree byte-for-byte (P2-5/B1c).
+    """
+    from engine.v2.foundation import artifact_reference
+    from engine.v2.ops.decision_evidence import derive
+
+    score_bytes = (root / "score.json").read_bytes()
+    finality_bytes = (root / "finality.json").read_bytes()
+    replay = json.loads((root / "replay.json").read_text())
+    plan_bytes, evidence_bytes = derive(
+        json.loads(score_bytes), artifact_reference(score_bytes, "legacy_action.v1.0"),
+        json.loads(finality_bytes), artifact_reference(finality_bytes, "legacy_action.v1.0"),
+        replay, session=parameters["session"], deployment=parameters["deployment"],
+        decision_clock=parameters["decision_clock"])
+    (root / "decision_plan.json").write_bytes(plan_bytes)
+    (root / "decision_evidence.json").write_bytes(evidence_bytes)
+    return {"outputs": [
+        {"name": "decision_plan", "path": "decision_plan.json", "schema": "decision_plan.v1.0"},
+        {"name": "decision_evidence", "path": "decision_evidence.json",
+         "schema": "decision_evidence.v1.0"}],
+        "completed_ids": list(parameters["expected_ids"]),
+        "no_work": not parameters["expected_ids"]}
 
 
 if __name__ == "__main__":

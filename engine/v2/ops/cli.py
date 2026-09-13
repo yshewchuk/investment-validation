@@ -135,7 +135,7 @@ def _plan_command(args, root, conn, clock):
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
                             tickers=tuple(filter(None, args.tickers.split(","))),
                             year_start=args.year_start, year_end=args.year_end,
-                            expected_population=_read_expected_population(args))
+                            expected_population=_read_expected_population(args), clock=clock)
     else:
         from engine.v2.ops.experiments import experiment_plan
         plan = experiment_plan(args.spec, smoke=args.no_ledger)

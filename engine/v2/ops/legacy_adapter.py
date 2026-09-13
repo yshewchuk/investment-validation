@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
+from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
@@ -199,11 +200,6 @@ def _action_score_requests(parameters, root):
                      "record": record})
     return _write_action(root, "score_requests.json", {"rows": rows,
                                                         "expected_population": len(requests)})
-
-
-def _score_row_id(row):
-    return "|".join(str(row.get(key, "")) for key in
-                     ("ticker", "strategy", "event_date", "strike", "expiry"))
 
 
 def _population_key(row):

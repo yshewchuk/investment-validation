@@ -40,6 +40,7 @@ from engine.v2.foundation.canonical import CONTENT_HASH_PREFIX, content_hash
 __all__ = [
     "ArtifactError",
     "ArtifactStore",
+    "artifact_reference",
     "ensure_directory",
     "fsync_directory",
     "safe_relative_path",
@@ -264,3 +265,16 @@ def _reference(hexdigest: str, size: int, schema_ref: str) -> ArtifactRef:
         byte_size=size,
         storage_key=f"objects/{hexdigest[:2]}/{hexdigest}",
     )
+
+
+def artifact_reference(data: bytes, schema_ref: str) -> ArtifactRef:
+    """The identity ``ArtifactStore.publish_bytes(data, schema_ref=...)`` would
+    give ``data``, without touching storage.
+
+    Pure and side-effect-free: any caller that already holds the exact bytes
+    of a published (or about-to-be-published) artifact — a worker that just
+    read its own staged input, a coordinator re-deriving from a recorded
+    binding — can compute the same identity ``ArtifactStore`` would, and the
+    two are guaranteed to agree because both route through this one function.
+    """
+    return _reference(hashlib.sha256(data).hexdigest(), len(data), schema_ref)

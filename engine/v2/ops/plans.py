@@ -32,8 +32,11 @@ def check_plan(source_root, expected_ids):
 
 
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
-                 tickers=(), year_start=2024, year_end=2026, expected_population=()):
+                 tickers=(), year_start=2024, year_end=2026, expected_population=(),
+                 clock=None):
     from datetime import date
+
+    from engine.v2.foundation import SystemClock, format_timestamp
     date.fromisoformat(session)
     if mode != "shadow":
         raise fail("INVALID_REQUEST", "production cutover has not been activated")
@@ -42,6 +45,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
     blocked = [] if manifest_ref else ["frozen_legacy_input_manifest", "adapter_parity_receipt"]
     if not population:
         blocked.append("planned_population")
+    clock = clock or SystemClock()
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
                 plan_hash=content_hash({"session": session, "manifest": manifest_ref,
                                          "tickers": list(tickers), "year_start": year_start,
@@ -51,6 +55,12 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                 input_manifest_ref=manifest_ref, tickers=list(tickers),
                 year_start=year_start, year_end=year_end,
                 expected_population=list(population),
+                # P2-5/B1c: pinned once, here, at planning time. The saved
+                # plan artifact carries this value forever; every job the DAG
+                # later builds off this SAME plan (including a resubmission
+                # of the identical plan, i.e. a retry) reads it back rather
+                # than invoking the clock again.
+                decision_clock=format_timestamp(clock.now()),
                 effects=["private_shadow_artifacts", "copy_only_decision_authority"],
                 blocked_prerequisites=blocked)
     return plan

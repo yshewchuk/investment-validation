@@ -77,12 +77,18 @@ def _implementation(root: Path) -> str:
 
 
 def build_nightly_plan(source_root: Path | str, session: str, *, mode="shadow",
-                       read_set=()) -> dict:
+                       read_set=(), clock=None) -> dict:
     if mode != "shadow":
         raise fail("INVALID_REQUEST", "production nightly activation is disabled")
+    from engine.v2.foundation import SystemClock, format_timestamp
+    clock = clock or SystemClock()
     return {"schema_version": "nightly_shadow_plan.v1.0", "mode": mode,
             "session": session, "graph": GRAPH, "order": graph_order(),
             "implementation_ref": _implementation(Path(source_root)),
+            # B1c: pinned once here, the way ``plans.py::nightly_plan`` pins
+            # it for the real CLI path; every stage built off this SAME plan
+            # dict (including a retry) carries this one value.
+            "decision_clock": format_timestamp(clock.now()),
             "read_set": list(read_set), "effects": ["private_shadow_artifacts"]}
 
 
@@ -108,8 +114,10 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
               "tickers": tuple(sorted(tickers)), "year_start": year_start,
               "year_end": year_end, "input_bindings": {}}
     if action == "legacy_decisions":
-        params["input_bindings"] = {"score.json": _job_output("score", keys),
-                                     "finality.json": _job_output("finality", keys)}
+        params["input_bindings"] = {
+            "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
+            "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
+            "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
     if action == "legacy_render":
         # No "ledger_generation.tar" binding yet: the export stage (§9.4 item 3,
         # not yet wired into this graph) is what produces it. Until it exists,
@@ -122,6 +130,14 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":
         params["input_bindings"] = {"score.json": _job_output("score", keys)}
+    if action == "decision_evidence":
+        # B1c: pinned once by ``ops plan nightly`` (``plans.py::nightly_plan``)
+        # and carried unchanged on every retry/resubmission of this same plan.
+        params["deployment"] = "shadow:" + plan["implementation_ref"]
+        params["decision_clock"] = plan["decision_clock"]
+        params["input_bindings"] = {"score.json": _job_output("score", keys),
+                                     "finality.json": _job_output("finality", keys),
+                                     "replay.json": _job_output("decision_replay", keys)}
     return params
 
 
@@ -160,18 +176,23 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                                "year_end": year_end,
                                "expected_population": list(expected_population)})[:24]
     stages = (tuple(plan["order"]) if include_prerequisites else
-              ("finality", "score", "decision_replay", "decision_commit", "settlement",
-               "model_evidence", "projection", "selfcheck"))
+              ("finality", "score", "decision_replay", "decision_evidence", "decision_commit",
+               "settlement", "model_evidence", "projection", "selfcheck"))
     parent_map = {"finality": (), "score": ("finality",),
                   "decision_replay": ("score",),
-                  "decision_commit": ("score", "finality"), "settlement": ("finality",),
+                  "decision_evidence": ("score", "finality", "decision_replay"),
+                  "decision_commit": ("decision_evidence", "score", "finality"),
+                  "settlement": ("finality",),
                   "model_evidence": ("score",),
                   "projection": ("decision_commit", "model_evidence", "finality", "score"),
                   "selfcheck": ("projection",)}
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
-        action = _legacy_action(stage)
+        # "decision_evidence" is a pure, non-legacy worker (P2-5/B1c): its
+        # kind IS the stage name, never run through ``_legacy_action``'s
+        # ``legacy_`` prefixing.
+        action = "decision_evidence" if stage == "decision_evidence" else _legacy_action(stage)
         kind = action
         parameters = _legacy_params(action, plan, tickers, year_start, year_end, keys)
         if input_refs:
@@ -191,7 +212,9 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                         output_namespace="shadow",
                         resource_class=_legacy_resource(kind),
                         retry_policy_ref="bounded",
-                        checkpoint_contract_ref="legacy_action.v1.0")))
+                        checkpoint_contract_ref=(
+                            "decision_evidence_pair.v1.0" if kind == "decision_evidence"
+                            else "legacy_action.v1.0"))))
     return tuple(requests)
 
 

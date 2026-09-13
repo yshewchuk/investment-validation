@@ -21,7 +21,16 @@ from __future__ import annotations
 from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
 
-__all__ = ["compare_rows", "decision_population", "population_key"]
+__all__ = ["compare_rows", "decision_population", "population_key", "score_row_id"]
+
+
+def score_row_id(row):
+    """A scored row's identity: ``engine.v2.ops.legacy_adapter``'s own
+    ``_score_row_id`` (moved here for P2-5/B1c so the pure decision-evidence
+    derivation can recompute it too, without importing the legacy adapter).
+    """
+    return "|".join(str(row.get(key, "")) for key in
+                     ("ticker", "strategy", "event_date", "strike", "expiry"))
 
 #: Fields ``engine.v2.ops.legacy_adapter._action_score`` adds to a row AFTER
 #: scoring, on top of whatever ``ScoreResult.as_dict()`` produced:
