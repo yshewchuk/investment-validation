@@ -156,6 +156,12 @@ venv/
 !/requirements.txt
 !/ruff.toml
 !/checks/rearchitecture_phase1_coverage_baseline.json
+!/checks/rearchitecture_phase2_coverage_baseline.json
+
+# The Phase 2 acceptance registry (phase-2 guide §12.1): which tests and,
+# for tier-2 rows, which Phase2Evidence fields prove each D01-D20 row.
+# Config, not data or evidence — the gate reads it to know what to check.
+!/checks/phase2_acceptance.json
 
 # The reviewed legacy->v2 table-contract mapping's per-column facts (unit,
 # scale, sentinel/null policy, etc.) that engine/data/schemas.py itself does

@@ -1,0 +1,91 @@
+{
+  "schema_version": "phase2_acceptance.v1.0",
+  "rows": {
+    "D01": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_contracts.py"]
+    },
+    "D02": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_legacy_adapter.py"]
+    },
+    "D03": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_manifests.py"]
+    },
+    "D04": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_catalog.py", "tests/test_v2_data_commit.py"]
+    },
+    "D05": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_query.py"]
+    },
+    "D06": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_query.py"]
+    },
+    "D07": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_query.py"]
+    },
+    "D08": {
+      "tier": 0,
+      "tests": ["tests/test_v2_data_objects.py"]
+    },
+    "D09": {
+      "tier": 1,
+      "tests": ["tests/test_v2_data_objects.py"]
+    },
+    "D10": {
+      "tier": 1,
+      "tests": ["tests/test_v2_data_repository.py"]
+    },
+    "D11": {
+      "tier": 1,
+      "tests": ["tests/test_v2_data_atomicity.py"]
+    },
+    "D12": {
+      "tier": 1,
+      "tests": ["tests/test_v2_data_commit.py"]
+    },
+    "D13": {
+      "tier": 1,
+      "tests": ["tests/test_v2_data_legacy_materialization.py"]
+    },
+    "D14": {
+      "tier": 1,
+      "tests": ["tests/test_v2_data_legacy_materialization.py"]
+    },
+    "D15": {
+      "tier": 2,
+      "tests": [],
+      "evidence_fields": ["comparison_receipt_ref", "expected_population",
+                          "supported_population", "compared_population"]
+    },
+    "D16": {
+      "tier": 2,
+      "tests": [],
+      "evidence_fields": ["rollback_receipt_ref"]
+    },
+    "D17": {
+      "tier": 0,
+      "tests": ["tests/test_v2_ops_engineering.py"],
+      "reuse_phase1_structural_engineering": true
+    },
+    "D18": {
+      "tier": 1,
+      "tests": ["tests/test_v2_ops_nightly_completion.py"]
+    },
+    "D19": {
+      "tier": 2,
+      "tests": ["tests/test_v2_ops_render_parity.py"],
+      "evidence_fields": ["comparison_receipt_ref", "expected_population",
+                          "supported_population", "compared_population"]
+    },
+    "D20": {
+      "tier": 1,
+      "tests": ["tests/test_v2_ops_export.py"]
+    }
+  }
+}
