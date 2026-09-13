@@ -118,6 +118,24 @@ eligible because reuse must never skip its catalog effect.
 Real scoring/parity runs are sequential private verification, outside the fast
 commit hook; ops never imports their comparator.
 
+`ops/snapshots.py` (P2-3) is the ops-side companion to the data catalog's
+snapshot commit and exact resolve (phase-2 guide §7.3, §8.1).
+`commit_snapshot_for_attempt` wraps `engine.v2.data.catalog.commit_snapshot`
+with the real `lifecycle.verify_fence` as its injected `fence_check` — the
+data package cannot import ops, so the fence check is supplied from here
+instead of called there. `resolve_snapshot_head` reads one
+`data_snapshot_heads` row, resolves it through
+`engine.v2.data.repository.Repository` (never trusting the head row alone),
+and publishes the verified `SnapshotRef` as a Phase 1 artifact with
+`ops/checkpoints.py::register_artifact` — the same publish-then-register
+shape `ops/plans.py::save_plan` already uses — so a job can pin
+`JobSpec.input_refs` to one immutable document instead of a live, movable
+head. Both are exercised end to end, with real SQLite and real Parquet
+objects, by `tests/test_v2_data_commit.py`, `tests/test_v2_data_atomicity.py`
+and `tests/test_v2_data_repository.py` rather than by an ops-local test file,
+since every fault point and concurrency case they prove belongs to the data
+catalog's own commit/resolve contract.
+
 The phase-1 engineering gate needs a coverage measurement passed in; run bare
 it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing
 check is never green). The green-path command is:

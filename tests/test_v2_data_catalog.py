@@ -183,7 +183,9 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
     rows = conn.execute(
         "SELECT owner, version, name FROM schema_versions WHERE owner = 'data'"
     ).fetchall()
-    assert [tuple(r) for r in rows] == [("data", 1, "snapshot_catalog")]
+    assert [tuple(r) for r in rows] == [
+        ("data", 1, "snapshot_catalog"), ("data", 2, "fragment_input_receipt_refs"),
+    ]
     ops_versions = {r[0] for r in conn.execute(
         "SELECT version FROM schema_versions WHERE owner = 'ops'")}
     ledger_versions = {r[0] for r in conn.execute(
@@ -191,7 +193,7 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
     assert ops_versions and ledger_versions  # separate sequences, both non-empty
     conn.close()
 
-    # A second open applies nothing new: same single data row, no error.
+    # A second open applies nothing new: same data rows, no error.
     conn2 = open_catalog(tmp_path / "catalog.sqlite", clock=clock)
     rows2 = conn2.execute(
         "SELECT owner, version, name FROM schema_versions WHERE owner = 'data'"
@@ -206,9 +208,13 @@ def test_edited_migration_is_a_checksum_mismatch(tmp_path):
     # A fresh connection, re-migrated with the same version/name but edited
     # statement text: migrations.py must refuse it rather than silently
     # accept a rewrite of an applied migration. The module's own MIGRATIONS
-    # tuple is never mutated — only a local copy is built here.
+    # tuple is never mutated — only a local copy is built here. Every other
+    # applied version is passed through unedited, or `migrate` would report
+    # the later real version as "newer than this code supports" before ever
+    # reaching the version-1 checksum comparison this test is about.
     version, name, statements = data_schema.MIGRATIONS[0]
-    edited = (Migration(version, name, statements + ("SELECT 1",)),)
+    edited = (Migration(version, name, statements + ("SELECT 1",)),
+             *(Migration(v, n, s) for v, n, s in data_schema.MIGRATIONS[1:]))
     conn2 = sqlite3.connect(str(tmp_path / "catalog.sqlite"), isolation_level=None)
     conn2.execute("PRAGMA foreign_keys = ON")
     try:
