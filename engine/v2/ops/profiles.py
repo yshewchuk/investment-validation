@@ -22,7 +22,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-12.v1"
+POLICY_VERSION = "ops_resources.2026-09-13.v2"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -41,10 +41,15 @@ DEFAULT_POLICY = ResourcePolicy(
                         scratch_bytes=1 * GIB, heavy=False),
         ResourceProfile(name="projection", memory_bytes=2 * GIB, cpu_count=2,
                         scratch_bytes=2 * GIB, heavy=False),
-        # The serialized selfcheck builds a bounded scorer of its own.
-        ResourceProfile(name="validation", memory_bytes=4 * GIB, cpu_count=4,
+        # The serialized selfcheck builds a bounded scorer of its own. Raised
+        # to 11/2 GiB with legacy_score below: the adapted legacy scoring path
+        # (validation shares that code) peaked at 4.15 GiB tree RSS on the
+        # 2026-09-13 38-request canary, above the prior 4 GiB reservation.
+        ResourceProfile(name="validation", memory_bytes=11 * GIB // 2, cpu_count=4,
                         scratch_bytes=1 * GIB, heavy=True),
-        ResourceProfile(name="legacy_score", memory_bytes=4 * GIB, cpu_count=5,
+        # Measured 2026-09-13: 4.15 GiB tree RSS peak on a 38-request canary,
+        # above the prior 4 GiB reservation — the watchdog was killing it.
+        ResourceProfile(name="legacy_score", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=2 * GIB, heavy=True),
         ResourceProfile(name="model_evidence", memory_bytes=4 * GIB, cpu_count=4,
                         scratch_bytes=1 * GIB, heavy=True),
