@@ -18,7 +18,7 @@ from engine.v2.ops import worker as worker_module
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor_cgroup import probe
-from engine.v2.ops.executor_watchdog import observe, process_info, signal_owned
+from engine.v2.ops.executor_watchdog import observe, process_info, process_table, signal_owned
 from engine.v2.ops.health import health
 from engine.v2.ops.lifecycle import record_launch
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
@@ -236,3 +236,36 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     assert b"ANOTHER-SECRET" not in data
     assert "message" not in payload
     assert "exception" not in json.dumps(payload).lower()
+
+
+def _fake_stat_line(pid: int, *, start_ticks: int = 12345, rss_pages: int = 10, pgrp: int = 111,
+                    session: int = 111, ppid: int = 1) -> str:
+    """A syntactically real ``/proc/<pid>/stat`` line — enough fields that
+    ``process_info`` finds ``state``..``rss`` at the same positions the
+    kernel does, after ``rfind(")")`` skips past a parenthesized ``comm``.
+    """
+    extra = ["S", str(ppid), str(pgrp), str(session), "0", "-1", "0", "0", "0", "0", "0",
+            "0", "0", "0", "0", "0", "0", "1", "0", str(start_ticks), "0", str(rss_pages)]
+    return f"{pid} (fake) " + " ".join(extra)
+
+
+def test_process_table_skips_a_pid_that_disappears_mid_scan(tmp_path):
+    """``process_table``'s ``except (OSError, ValueError, IndexError): continue``
+    guards a real kernel race: a pid ``iterdir()`` lists can exit, or have a
+    ``stat`` file mid-write, before it is read. Live-subprocess tests can
+    provoke this only probabilistically (A1/A7's real-process fault tests
+    above do launch and reap real children, but never reliably in this exact
+    window); a synthetic proc tree makes the same guard deterministic
+    instead of leaving it to timing luck.
+    """
+    proc = tmp_path / "proc"
+    good = proc / "111"
+    good.mkdir(parents=True)
+    (good / "stat").write_text(_fake_stat_line(111))
+    bad = proc / "222"
+    bad.mkdir()
+    (bad / "stat").write_text("222 (fake) S")  # far too few fields: IndexError
+
+    table = process_table("boot", proc=proc)
+    assert set(table) == {111}
+    assert table[111][0].start_ticks == 12345
