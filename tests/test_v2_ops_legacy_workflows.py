@@ -2,13 +2,20 @@
 import pytest
 
 from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.diagnostics import audit_writes, snapshot_sensitive
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import (
     ExperimentSpec,
     run_experiment,
     synthetic_fixture_runner,
 )
-from engine.v2.ops.legacy_adapter import copy_read_set, manifest_files
+from engine.v2.ops.legacy_actions import ACTION_NAMES
+from engine.v2.ops.legacy_adapter import (
+    copy_read_set,
+    invoke_nightly_helper,
+    legacy_action,
+    manifest_files,
+)
 from engine.v2.ops.nightly import (
     GRAPH,
     build_legacy_job_requests,
@@ -124,3 +131,46 @@ def test_primary_backup_failure_is_retryable_without_rerun(tmp_path):
     assert receipt["status"] == "succeeded"
     assert calls == ["backup"]
     assert receipt["backup_receipt"]["status"] == "backup_pending"
+
+
+def test_o16_write_audit_detects_undisclosed_production_writes(tmp_path):
+    prod = tmp_path / "prod"
+    (prod / "ledger" / "predictions").mkdir(parents=True)
+    (prod / "data" / "features").mkdir(parents=True)
+    (prod / "ledger" / "predictions" / "2026-09-11.jsonl").write_text("{}\n")
+    (prod / "data" / "features" / "f.parquet").write_bytes(b"x")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    before = snapshot_sensitive(prod)
+    assert set(before) == {"ledger/predictions/2026-09-11.jsonl", "data/features/f.parquet"}
+
+    (staging / "scratch.json").write_text("{}")
+    assert audit_writes(prod, before, disclosed=(staging,)) == []
+
+    (prod / "ledger" / "predictions" / "2026-09-12.jsonl").write_text("{}\n")
+    assert audit_writes(prod, before, disclosed=(staging,)) == [
+        {"path": "ledger/predictions/2026-09-12.jsonl", "kind": "new"}]
+
+    before_modified = snapshot_sensitive(prod)
+    (prod / "ledger" / "predictions" / "2026-09-11.jsonl").write_text('{"leak": 1}\n')
+    findings = audit_writes(prod, before_modified, disclosed=(staging,))
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "modified"
+    assert findings[0]["path"] == "ledger/predictions/2026-09-11.jsonl"
+
+    before_disclosed = snapshot_sensitive(prod)
+    (prod / "reports").mkdir()
+    (prod / "reports" / "ok.json").write_text("{}")
+    assert audit_writes(prod, before_disclosed, disclosed=(prod / "reports",)) == []
+
+
+def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
+    assert not any("nightly" in name for name in ACTION_NAMES)
+    assert not any("nightly" in name for name in registry().names())
+    with pytest.raises(OpsError):
+        legacy_action("run_nightly", {}, tmp_path)
+    with pytest.raises(OpsError, match="not audited"):
+        invoke_nightly_helper(tmp_path, "run_nightly")
+    with pytest.raises(OpsError, match="not audited"):
+        invoke_nightly_helper(tmp_path, "publish")

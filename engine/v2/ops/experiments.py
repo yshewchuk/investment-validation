@@ -4,7 +4,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from engine.v2.foundation import content_hash
@@ -153,6 +153,56 @@ def capability_manifest(spec: ExperimentSpec, root: Path | str) -> dict:
             "spec_hash": spec.spec_hash, "economic_params": spec.economic_params,
             "seed": spec.seed, "folds": list(spec.folds), "price_source": spec.price_source,
             "source_closure": source, "input_set": inputs}
+
+
+#: Reviewed capability inventory, one entry per enabled legacy runner (§11.1).
+#: Mechanical evidence (hashes, closure, flag detection) is re-derived on every
+#: call; the reviewed statements here are the audit record, not runtime config.
+RUNNER_INVENTORY = {
+    "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py": {
+        "spec_source": "experiments/EXP-182_d_1_gated_execution_parity_registered/spec.yaml",
+        "declared_runtime_sources": (
+            "experiments/EXP-181_d_1_gated_execution_parity/run.py",
+        ),
+        "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main(record=...) "
+                                  "unless --no-ledger is passed; the adapter always passes it"),
+        "registry_effects": "none; champion promotion is a separately authorized job",
+        "report_path": "REPORT.md",
+        "resumable_units": "none_declared",
+        "backup_behavior": "none internal; the coordinator performs the single final private backup",
+        "removal_phase": "phase-5 model extraction",
+    },
+}
+
+
+def runner_manifest(root: Path | str, script: str) -> dict:
+    """One reviewed capability manifest per enabled runner (§11.1)."""
+    relative = str(PurePosixPath(script))
+    entry = RUNNER_INVENTORY.get(relative)
+    if entry is None:
+        raise fail("INVALID_REQUEST", "experiment runner is not audited")
+    base = Path(root).resolve()
+    script_path = base / relative
+    spec_path = base / entry["spec_source"]
+    for path in (script_path, spec_path):
+        if not path.is_file() or path.is_symlink():
+            raise fail("INPUT_CHANGED", "registered runner is missing or indirect")
+    closure = source_closure(base, [relative, *entry["declared_runtime_sources"]])
+    sources = (script_path, *(base / rel for rel in entry["declared_runtime_sources"]))
+    if not any("--no-ledger" in path.read_text() for path in sources):
+        raise fail("INVALID_REQUEST", "registered runner lacks the no-ledger control")
+    return {"schema_version": "runner_capability_manifest.v1.0",
+            "runner": relative,
+            "spec_source": entry["spec_source"],
+            "spec_hash": file_hash(spec_path),
+            "source_closure": closure,
+            "no_ledger_support": True,
+            "ledger_write_behavior": entry["ledger_write_behavior"],
+            "registry_effects": entry["registry_effects"],
+            "report_path": entry["report_path"],
+            "resumable_units": entry["resumable_units"],
+            "backup_behavior": entry["backup_behavior"],
+            "removal_phase": entry["removal_phase"]}
 
 
 def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool):

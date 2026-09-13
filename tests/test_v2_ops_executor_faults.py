@@ -1,21 +1,30 @@
 """Small real-process fault controls for the watchdog and admission gates."""
 from __future__ import annotations
 
+import io
+import json
+import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
 
 from engine.v2.contracts import ProcessIdentity
+from engine.v2.foundation import SystemClock
+from engine.v2.ops import worker as worker_module
+from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor_cgroup import probe
 from engine.v2.ops.executor_watchdog import observe, process_info, signal_owned
+from engine.v2.ops.health import health
 from engine.v2.ops.lifecycle import record_launch
-from engine.v2.ops.profiles import DEFAULT_POLICY
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.provider_budget import configure_account
 from engine.v2.ops.recovery import begin_epoch
+from engine.v2.ops.resources import decide
 from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import registry, validate_result
 from engine.v2.ops.submission import submit
@@ -167,5 +176,63 @@ def test_secret_value_is_rejected_before_catalog_write(tmp_path):
         submit(conn, registry(), POLICY, request(kind="artifact_check",
                checkpoint_contract_ref="receipt.v1.0",
                parameters={"expected_ids": ["https://example/?token=synthetic-secret"]}),
-               clock=clock)
+                clock=clock)
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_o14_watchdog_containment_is_declared_not_implied(tmp_path):
+    probe_result = probe(Path("/sys/fs/cgroup"))
+    sample_ = sample_capacity(tmp_path, clock=SystemClock())
+    assert sample_.executor_mode in ("watchdog", "cgroup")
+    if not probe_result["available"]:
+        assert sample_.executor_mode == "watchdog"
+        assert sample_.containment == "best_effort"
+    profile = profile_named(DEFAULT_POLICY, "legacy_score")
+    admission = decide(DEFAULT_POLICY, profile, sample_, [])
+    if admission.admitted:
+        assert admission.resources.executor_mode == sample_.executor_mode
+        assert admission.resources.containment == sample_.containment
+    else:
+        assert admission.reason is not None
+    conn, clock, _ = catalog(tmp_path)
+    document = health(conn, clock=clock)
+    assert document["executor_mode"] == "watchdog"
+    assert document["containment"] == "best_effort"
+    document = health(conn, clock=clock, executor_mode="cgroup")
+    assert document["containment"] == "kernel"
+
+
+def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
+    secret_url = "https://user:S3CRET-VALUE@api.example.invalid/v1?api_key=ANOTHER-SECRET"
+    read_fd, write_fd = os.pipe()
+    envelope = {
+        "worker": "artifact_check",
+        "parameters": {"expected_ids": [], "note": secret_url},
+        "staging": str(tmp_path),
+        "result_fd": write_fd,
+        "job_id": "job_x",
+        "attempt_id": "att_x",
+        "fence": 1,
+        "cpu_ids": sorted(os.sched_getaffinity(0)),
+    }
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"request failed: {secret_url}")
+
+    monkeypatch.setenv("INVESTING_PLAN_ROOT", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(
+        buffer=io.BytesIO(json.dumps(envelope).encode() + b"\n")))
+    monkeypatch.setattr(worker_module, "dispatch", boom)
+    try:
+        rc = worker_module.main()
+        data = os.read(read_fd, 1 << 20)
+    finally:
+        os.close(read_fd)
+    assert rc == 1
+    payload = json.loads(data)
+    assert payload["failure"] == "WORKER_FAILED"
+    assert payload["schema_version"] == "worker_result.v1.0"
+    assert b"S3CRET-VALUE" not in data
+    assert b"ANOTHER-SECRET" not in data
+    assert "message" not in payload
+    assert "exception" not in json.dumps(payload).lower()
