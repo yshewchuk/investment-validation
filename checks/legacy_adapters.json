@@ -1,5 +1,5 @@
 {
-  "count": 24,
+  "count": 29,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -260,15 +260,90 @@
       "package": "engine.v2.ops",
       "module": "engine.v2.ops.legacy_adapter",
       "legacy_symbol": "engine.dashboard.render.render_bundle",
-      "reason": "Call render_bundle against private score artifacts.",
+      "reason": "Call render_bundle against private score, ladder, model evidence and ledger-generation artifacts.",
       "declared_on": "2026-09-12",
       "runtime": "legacy_render",
-      "read_set": "private score and model evidence artifacts",
+      "read_set": "private score, model evidence and ledger-generation artifacts",
       "write_set": "private bundle only",
       "credentials": "none",
       "hidden_subprocesses": "none",
       "retry": "bounded worker retry",
       "output": "private projection bundle",
+      "removal_phase": "phase-6 serving extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.render.build_meta",
+      "reason": "P2-5/D19: build meta.json inside the worker at render parity with the legacy nightly.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "private score artifact",
+      "write_set": "private meta.json only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry",
+      "output": "private meta artifact",
+      "removal_phase": "phase-6 serving extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.render.build_health",
+      "reason": "P2-5/D19: build health.json inside the worker at render parity with the legacy nightly.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "private ledger-generation artifact",
+      "write_set": "private health.json only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry",
+      "output": "private health artifact",
+      "removal_phase": "phase-6 serving extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.render.freshness_summary",
+      "reason": "P2-5/D19: freshness feeds meta.json exactly as the legacy nightly computes it.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "private staged legacy tree",
+      "write_set": "private meta.json only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry",
+      "output": "private meta artifact",
+      "removal_phase": "phase-6 serving extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.render.quota_state",
+      "reason": "P2-5/D19: quota state feeds meta.json exactly as the legacy nightly computes it.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "private staged legacy tree",
+      "write_set": "private meta.json only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry",
+      "output": "private meta artifact",
+      "removal_phase": "phase-6 serving extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.render.size_model_mae_from_ledger",
+      "reason": "P2-5/D19: live size-model MAE feeds health.json exactly as the legacy nightly computes it.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "private ledger-generation artifact",
+      "write_set": "private health.json only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry",
+      "output": "private health artifact",
       "removal_phase": "phase-6 serving extraction"
     },
     {
@@ -367,6 +442,6 @@
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
-  "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). The ceiling rose only by that reviewed count and now resumes ratcheting downward. Production activation remains disabled.",
-  "committed_ceiling": 24
+  "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled.",
+  "committed_ceiling": 29
 }

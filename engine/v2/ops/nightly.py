@@ -111,8 +111,13 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
         params["input_bindings"] = {"score.json": _job_output("score", keys),
                                      "finality.json": _job_output("finality", keys)}
     if action == "legacy_render":
+        # No "ledger_generation.tar" binding yet: the export stage (§9.4 item 3,
+        # not yet wired into this graph) is what produces it. Until it exists,
+        # legacy_render refuses at VALIDATION_FAILED("ledger generation not
+        # bound") rather than falling back to a staged mutable ledger.
         params["input_bindings"] = {"score.json": _job_output("score", keys),
-                                     "model_evidence.json": _job_output("model_evidence", keys)}
+                                     "model_evidence.json": _job_output("model_evidence", keys),
+                                     "finality.json": _job_output("finality", keys)}
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":
@@ -161,7 +166,7 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                   "decision_replay": ("score",),
                   "decision_commit": ("score", "finality"), "settlement": ("finality",),
                   "model_evidence": ("score",),
-                  "projection": ("decision_commit", "model_evidence"),
+                  "projection": ("decision_commit", "model_evidence", "finality", "score"),
                   "selfcheck": ("projection",)}
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage

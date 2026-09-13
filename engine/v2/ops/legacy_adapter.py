@@ -348,19 +348,85 @@ def _action_model_evidence(parameters, root):
 
 
 def _action_render(parameters, root):
+    """P2-5/D19: render at parity with the legacy nightly's own render call.
+
+    Carries the full legacy argument set (guide §9.4 item 2): the score
+    artifact's ``rows`` + ``ladder`` concatenated exactly as the legacy
+    nightly does (:func:`render_inputs.assemble_scores`), the model-evidence
+    artifact placed at its legacy path, the bound ledger generation staged as
+    ``legacy/ledger`` (never the mutable staged copy), and ``meta``/``health``
+    built from those same legacy helpers — mirroring
+    ``engine/dashboard/nightly.py:1580-1622``.
+    """
     import tarfile
 
-    from engine.dashboard.render import render_bundle
+    import pandas as pd
+
+    from engine.dashboard.render import (
+        build_health,
+        build_meta,
+        freshness_summary,
+        quota_state,
+        render_bundle,
+        size_model_mae_from_ledger,
+    )
+    from engine.features import FeatureContext
+    from engine.score import Scorer
+    from engine.v2.ops.render_inputs import (
+        ABSENT_STAGES,
+        absent_stage_flags,
+        assemble_scores,
+        bundle_content_hash,
+        stage_ledger_generation,
+        stage_model_evidence,
+    )
+
+    score_document = _load_score_document(root)
+    scores = assemble_scores(score_document)
+    finality = _load_finality(root)
+
+    evidence_path = root / "model_evidence.json"
+    if not evidence_path.is_file():
+        raise fail("VALIDATION_FAILED", "model evidence artifact is missing")
+    stage_model_evidence(evidence_path, root / "legacy")
+
+    ledger_tar = root / "ledger_generation.tar"
+    if not ledger_tar.is_file():
+        raise fail("VALIDATION_FAILED", "ledger generation not bound")
+    stage_ledger_generation(ledger_tar, root / "legacy")
+    tickers = sorted(set(parameters["tickers"]))
+    years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
+    scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+
+    as_of = parameters["session"]
+    horizon_days = int(parameters.get("horizon_days", 35))
+    alt_strikes = int(parameters.get("alt_strikes", 1))
+    board = pd.DataFrame(score_document.get("rows") or [])
+    fill_alpha = float(board["fill"].iloc[0]) if len(board) and "fill" in board else 0.5
+
+    meta = build_meta(scores, as_of=as_of, horizon_days=horizon_days,
+                      fill_alpha=fill_alpha, alt_strikes=alt_strikes,
+                      freshness=freshness_summary(as_of), quota=quota_state(),
+                      registry=scorer.registry)
+    meta["execution_clock"] = {"requested_as_of": str(pd.Timestamp(as_of).date()),
+                               "resolved_as_of": str(pd.Timestamp(as_of).date()),
+                               "finality": finality}
+    health = build_health(as_of=as_of,
+                          size_mae=size_model_mae_from_ledger(panel=scorer.context.panel))
 
     output = root / "bundle"
-    result = render_bundle(_load_action_frame(root), output,
-                           as_of=parameters["session"],
-                           horizon_days=int(parameters.get("horizon_days", 35)))
+    result = render_bundle(scores, output, as_of=as_of, horizon_days=horizon_days,
+                           fill_alpha=fill_alpha, alt_strikes=alt_strikes,
+                           panel=scorer.context.panel, trades=scorer.trades,
+                           meta=meta, health=health, flags=absent_stage_flags(),
+                           registry=scorer.registry)
+    _write_action(root, "meta.json", meta)
+    _write_action(root, "health.json", health)
     with tarfile.open(root / "bundle.tar", "w") as archive:
         archive.add(output, arcname="bundle")
-    return _write_action(root, "render.json", {"bundle_archive": "bundle.tar",
-                                                "result": result}) | {
-                                                    "path": "bundle.tar"}
+    return _write_action(root, "render.json", {
+        "bundle_archive": "bundle.tar", "bundle_content_hash": bundle_content_hash(output),
+        "absent_stages": list(ABSENT_STAGES), "result": result}) | {"path": "bundle.tar"}
 
 
 def _action_selfcheck(parameters, root):
