@@ -1722,5 +1722,6 @@
       "nodeid": "tests/test_v2_ops_render_parity.py::test_every_job_binding_names_a_declared_dependency",
       "outcome": "passed"
     }
-  ]
+  ],
+  "mode": "serial"
 }

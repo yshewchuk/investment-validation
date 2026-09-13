@@ -162,12 +162,22 @@ def measure(root=ROOT, *, parallel=False):
         raise RuntimeError("source changed during coverage measurement; rerun against stable code")
     return {"schema_version": SCHEMA_VERSION, "suite_version": version, "test_files": tests,
             "source_hash": identity, "packages": package_counts(document, root),
-            "test_outcomes": outcomes}
+            "test_outcomes": outcomes, "mode": "parallel" if parallel else "serial"}
 
 
 def compare(measured, baseline):
     """Package-level ratchet findings, using the Phase 2 gate's own code vocabulary."""
     findings = []
+    # See rearchitecture_phase1_coverage.py's compare() for the full reason:
+    # a baseline captured under --parallel can bake in the executor_watchdog.py
+    # /proc-race noise (measured here once: engine.v2.ops 2709 vs 2707/4083)
+    # as if it were the truth, so a later serial measurement would read as a
+    # false regression. Refuse the baseline, not the measurement -- a
+    # parallel measurement against a serial baseline is still fine.
+    baseline_mode = baseline.get("mode")
+    if baseline_mode == "parallel" or (
+            baseline_mode is None and baseline.get("suite_version") == measured.get("suite_version")):
+        findings.append({"code": "BASELINE_NOT_SERIAL"})
     if measured.get("suite_version") != baseline.get("suite_version"):
         findings.append({"code": "SUITE_DRIFT"})
     if set(measured.get("packages", {})) != set(baseline.get("packages", {})):

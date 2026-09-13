@@ -89,6 +89,21 @@ def package_counts(document, root=ROOT):
 
 def compare(measured, baseline):
     failures = []
+    # A baseline captured under `--parallel` can carry the executor_watchdog.py
+    # /proc-race noise `measure()` documents above (execution can only ADD
+    # lines under contention) baked in as if it were the truth -- comparing
+    # a later serial (contention-free) measurement against it would then
+    # read as a regression that never happened. Refuse the baseline itself,
+    # not the measurement: a parallel MEASUREMENT against a serial baseline
+    # is still fine (only decreases trip COVERAGE_REGRESSION, and this bug
+    # only adds). A baseline missing "mode" entirely, for today's own suite
+    # version, predates this field and cannot be trusted either -- once
+    # every committed baseline carries "mode": "serial" this never fires
+    # for real ones again.
+    baseline_mode = baseline.get("mode")
+    if baseline_mode == "parallel" or (
+            baseline_mode is None and baseline.get("suite_version") == measured.get("suite_version")):
+        failures.append({"code": "BASELINE_NOT_SERIAL"})
     if any(document.get("suite_version") != SUITE_VERSION for document in (measured, baseline)):
         failures.append({"code": "COVERAGE_SUITE_DRIFT"})
     if set(measured["packages"]) != set(baseline.get("packages", {})):
@@ -197,7 +212,8 @@ def measure(root=ROOT, *, parallel=False):
     if measurement_identity(root) != source_hash:
         raise RuntimeError("source changed during coverage measurement; rerun against stable code")
     return {"schema_version": "phase1_coverage.v1.0", "suite_version": SUITE_VERSION,
-            "test_files": tests, "source_hash": source_hash, "packages": package_counts(document, root)}
+            "test_files": tests, "source_hash": source_hash, "packages": package_counts(document, root),
+            "mode": "parallel" if parallel else "serial"}
 
 
 def main(argv=None):

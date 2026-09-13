@@ -90,21 +90,31 @@ skipped, every time, no parallel-only failures. Re-run three times after any
 change to the grouping in tests/conftest.py to catch a new parallel-safety
 bug before it lands.
 
-The LEGACY suite (`tests/test_calendar.py`, `tests/test_dashboard.py`,
-`tests/test_features.py`; 274 tests, ~100s serial, per main's committed
-data) is not part of the v2 command above and needs the real data trees
+`-n auto --dist loadgroup` is recommended ONLY for `tests/test_v2_*.py
+tests/test_checks_phase2_gate.py` above. The LEGACY suite
+(`tests/test_calendar.py`, `tests/test_dashboard.py`, `tests/test_features.py`;
+274 tests, ~100s serial, per main's committed data) runs SERIALLY, full
+stop -- it is not part of the v2 command above, needs the real data trees
 (`earnings_predictions/`, `polygon_cache/`) a bare worktree checkout does
-not have. A spot check under real data found a genuine parallel-safety bug:
-`tests/test_features.py`, 2+ real xdist workers each independently loading
-the real feature panel, reliably crashed a worker on this RAM-constrained
+not have, and a spot check under real data found a genuine parallel-safety
+bug: `python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
+tests/test_features.py tests/test_dashboard.py`, from a real data checkout,
+hung for 22+ minutes (vs ~100s serial) before being killed. Bisected to
+`tests/test_features.py`: 2+ real xdist workers each independently loading
+the real feature panel reliably crashed a worker on this RAM-constrained
 shared host (`[gwN] node down: Not properly terminated`) and then hung
-xdist's own crashed-worker replacement indefinitely. `test_calendar.py` and
-`test_dashboard.py` are each independently parallel-safe. Grouped
-`tests/test_features.py` (whole file) onto one worker rather than chasing a
-memory fix; see tests/conftest.py for the exact bisection. With that grouping,
-`python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
-tests/test_features.py tests/test_dashboard.py` is the right command against
-a real data checkout, expected to match main's serial 274 passed.
+xdist's own crashed-worker replacement indefinitely; `test_calendar.py` and
+`test_dashboard.py` were each independently parallel-safe alone. Grouping
+`tests/test_features.py` onto one worker (`xdist_group("serial")`, kept as
+a second guard) does NOT make the legacy suite parallel-safe as a whole --
+it stops that file's own tests from piling up on each other, but does
+nothing to stop a DIFFERENT worker from loading the same real panel again
+at the same time from a different legacy test file, which is the same
+memory pressure by another name. Run the legacy suite as
+`python3 -m pytest -q tests/test_calendar.py tests/test_features.py
+tests/test_dashboard.py` (plain serial; main's committed count is 274
+passed) until someone actually re-verifies parallel safety end to end
+against real data, not just against this data-less worktree.
 
 `--dist loadgroup` is required, not optional: a handful of tests touch a
 REAL, host-wide resource (a real child process's CPU affinity, a real
