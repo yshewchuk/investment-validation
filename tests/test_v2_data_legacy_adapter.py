@@ -31,6 +31,7 @@ from engine.v2.data.legacy_adapter import (  # noqa: E402
 )
 from engine.v2.data.manifests import table_contract_hash  # noqa: E402
 from engine.v2.data.documents import decode_document  # noqa: E402
+from engine.v2.data.objects import normalize_physical_type  # noqa: E402
 from engine.v2.contracts.data import TableContract  # noqa: E402
 from engine.v2.foundation import canonical_json  # noqa: E402
 
@@ -309,9 +310,6 @@ def test_every_orats_numeric_field_documents_the_flt_max_sentinel():
 # private-schema check — read-only Parquet *schema* only, never rows
 # --------------------------------------------------------------------------
 
-_ALIASES = {"large_string": "string", "double": "float64"}
-
-
 @pytest.mark.skipif(
     not os.environ.get("PHASE2_PRIVATE_ROOT"),
     reason="PHASE2_PRIVATE_ROOT not set; private-schema check is opt-in",
@@ -320,8 +318,9 @@ def test_private_parquet_schema_matches_contract():
     """Physical types in real curated Parquet match this build's contracts.
 
     Reads ONLY ``pyarrow.parquet.read_schema`` — never a row — under
-    ``$PHASE2_PRIVATE_ROOT``. ``large_string``/``double`` are pyarrow's own
-    spellings for ``string``/``float64`` and are treated as equal; any
+    ``$PHASE2_PRIVATE_ROOT``. Uses ``engine.v2.data.objects.normalize_physical_type``,
+    the same normalization ``inspect_fragment`` applies, so ``large_string``/``double``
+    (pyarrow's own spellings for ``string``/``float64``) are treated as equal; any
     timestamp *unit* mismatch (``ns`` vs ``us``) is reported explicitly.
     """
     import pyarrow.parquet as pq
@@ -360,7 +359,7 @@ def _check_physical(table: str, col: dict, by_name: dict[str, str]) -> list[str]
     if name not in by_name:
         return [f"{table}.{name}: not present in the private Parquet schema"]
     actual = by_name[name]
-    normalized = _ALIASES.get(actual, actual)
+    normalized = normalize_physical_type(actual)
     expected = col["physical_type"]
     if normalized == expected:
         return []
