@@ -50,7 +50,7 @@ from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit_graph
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import sample
+from tests.ops_support import TEST_POLICY, sample
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -240,7 +240,7 @@ def test_legacy_decisions_commits_through_job_id_bindings(tmp_path):
             namespace="shadow", idempotency_key="dec-job-bound", principal="operator", job=job),
             clock=clock)
 
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()
@@ -283,7 +283,7 @@ def _run_minimal_and_assert_failed(tmp_path, request, expected_code):
     conn = open_catalog(root / "ops.sqlite", clock=clock)
     try:
         receipt = submit(conn, registry(), POLICY, request, clock=clock)
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()
@@ -534,7 +534,7 @@ def test_cache_identity_changes_when_resolved_parent_output_changes(tmp_path):
         receipt_a = submit(conn, registry(), POLICY, req_a, clock=clock)
         receipt_b = submit(conn, registry(), POLICY, req_b, clock=clock)
 
-        service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=store_root)
         try:
             service.start()

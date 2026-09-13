@@ -7,26 +7,35 @@
     "tests/test_v2_ops_authority.py",
     "tests/test_v2_ops_catalog.py",
     "tests/test_v2_ops_contracts.py",
+    "tests/test_v2_ops_critical_review.py",
     "tests/test_v2_ops_effects.py",
     "tests/test_v2_ops_effects_backup.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_executor_faults.py",
     "tests/test_v2_ops_foundation.py",
+    "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
+    "tests/test_v2_ops_nightly_completion.py",
+    "tests/test_v2_ops_provider_admission.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_recovery_reboot.py",
     "tests/test_v2_ops_replay_scope.py",
     "tests/test_v2_ops_runner_onboarding.py",
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_serving.py",
     "tests/test_v2_ops_serving_browser.py",
-    "tests/test_v2_ops_store_barrier.py"
+    "tests/test_v2_ops_store_barrier.py",
+    "tests/test_v2_ops_supervised_legacy.py"
   ],
-  "source_hash": "sha256:37ed4c760846818421dd3c720c9794df8bfacb70bf7149d1029e4de8163de9b7",
+  "source_hash": "sha256:359196dc6fd48fcdffc17e01034b9a62ae3e4ff47dff282669a15f85df7c27ad",
   "packages": {
     "engine.v2.contracts": {
-      "executed": 302,
-      "executable": 302,
+      "executed": 593,
+      "executable": 593,
       "files": [
         "engine/v2/contracts/__init__.py",
+        "engine/v2/contracts/data.py",
         "engine/v2/contracts/jobs.py",
         "engine/v2/contracts/operations.py"
       ],
@@ -49,14 +58,18 @@
       "percentage": 96.34464751958224
     },
     "engine.v2.data": {
-      "executed": 0,
-      "executable": 0,
+      "executed": 102,
+      "executable": 327,
       "files": [
-        "engine/v2/data/__init__.py"
+        "engine/v2/data/__init__.py",
+        "engine/v2/data/documents.py",
+        "engine/v2/data/legacy_adapter.py",
+        "engine/v2/data/manifests.py",
+        "engine/v2/data/schema.py"
       ],
       "missing_files": [],
-      "empty": true,
-      "percentage": null
+      "empty": false,
+      "percentage": 31.192660550458715
     },
     "engine.v2.features": {
       "executed": 0,
@@ -149,8 +162,8 @@
       "percentage": null
     },
     "engine.v2.ledger": {
-      "executed": 84,
-      "executable": 104,
+      "executed": 102,
+      "executable": 114,
       "files": [
         "engine/v2/ledger/__init__.py",
         "engine/v2/ledger/decisions.py",
@@ -158,7 +171,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 80.76923076923077
+      "percentage": 89.47368421052632
     },
     "engine.v2.models.training": {
       "executed": 0,
@@ -182,8 +195,8 @@
       "percentage": 85.34482758620689
     },
     "engine.v2.ops": {
-      "executed": 2041,
-      "executable": 2755,
+      "executed": 2715,
+      "executable": 3306,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -193,6 +206,8 @@
         "engine/v2/ops/checkpoints.py",
         "engine/v2/ops/cli.py",
         "engine/v2/ops/decision_commit.py",
+        "engine/v2/ops/decision_replay.py",
+        "engine/v2/ops/decision_validation.py",
         "engine/v2/ops/diagnostics.py",
         "engine/v2/ops/discovery.py",
         "engine/v2/ops/errors.py",
@@ -202,6 +217,7 @@
         "engine/v2/ops/experiments.py",
         "engine/v2/ops/fingerprints.py",
         "engine/v2/ops/health.py",
+        "engine/v2/ops/input_bindings.py",
         "engine/v2/ops/legacy_actions.py",
         "engine/v2/ops/legacy_adapter.py",
         "engine/v2/ops/lifecycle.py",
@@ -225,7 +241,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 74.08348457350272
+      "percentage": 82.12341197822141
     },
     "engine.v2.dashboard": {
       "executed": 0,

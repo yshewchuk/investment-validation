@@ -22,7 +22,7 @@ from engine.v2.ops.provider_budget import before_request, configure_account, rec
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service, serve
-from tests.ops_support import POLICY, catalog, enqueue_claim, request
+from tests.ops_support import POLICY, TEST_POLICY, catalog, enqueue_claim, request
 
 
 def test_o06_actual_child_affinity_threads_and_outputs(tmp_path):
@@ -34,7 +34,7 @@ def test_o06_actual_child_affinity_threads_and_outputs(tmp_path):
                        Path(__file__).resolve().parents[1])),
                    environment_ref=content_hash(environment_identity(1)))
     job = submit(conn, registry(), POLICY, spec, clock=clock)
-    service = Service(conn, tmp_path, registry(), DEFAULT_POLICY, clock=clock,
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
                       code_source=Path(__file__).resolve().parents[1])
     serve(service, once=True)
     row = conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job.job_id,)).fetchone()

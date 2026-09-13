@@ -1,10 +1,10 @@
 """Small operations fixtures. No market data, numerical imports or network."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from engine.v2.contracts import CapacitySample, JobSpec, SubmitRequest
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.ops.profiles import DEFAULT_POLICY
+from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
 from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.submission import JobKind, KindRegistry, NamespacePolicy, RetryPolicy, submit
@@ -37,6 +37,24 @@ REGISTRY = KindRegistry([JobKind(
     effects=("staged",), retry=RetryPolicy("bounded", 3, (1, 2)),
     checkpoint_contract="rows.v1.0", namespaces=frozenset({"shadow"}))])
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
+
+#: A small-memory mirror of DEFAULT_POLICY for any test that runs a job
+#: through a real ``Service.tick()``. Unlike ``claim_next(..., sample=sample(clock))``
+#: above (a fixed fake ``CapacitySample``), ``Service.tick()`` samples the
+#: host's *actual* free memory (``discovery.sample_capacity``). DEFAULT_POLICY
+#: reserves up to 11 GiB // 2 for its heavy profiles (profiles.py), which on a
+#: shared host makes admission race whatever else happens to be using memory
+#: at that moment -- a job stays "queued" past a test's fixed poll deadline
+#: whenever headroom is briefly short, with nothing wrong in the code under
+#: test. Every field is copied from DEFAULT_POLICY except each profile's
+#: memory_bytes, capped small: cpu_count/thread_count stay identical, so an
+#: environment_ref built from DEFAULT_POLICY (production code and most tests
+#: still do, since it does not depend on memory_bytes) still matches what
+#: launch resolves under this policy.
+_TEST_PROFILE_MEMORY_BYTES = 256 * MIB
+TEST_POLICY = replace(DEFAULT_POLICY, profiles=tuple(
+    replace(p, memory_bytes=min(p.memory_bytes, _TEST_PROFILE_MEMORY_BYTES))
+    for p in DEFAULT_POLICY.profiles))
 
 
 def request(key="one", **changes):

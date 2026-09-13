@@ -29,7 +29,7 @@ from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import registry, validate_result
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import POLICY, catalog, request, sample
+from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
 
 
 def _child(source):
@@ -155,7 +155,7 @@ def test_restart_quarantines_same_boot_unobserved_tree(tmp_path):
     try:
         record_launch(conn, claim.attempt_id, claim.fence, process_info(child.pid, boot)[0],
                       clock=clock, lease_seconds=120)
-        service = Service(conn, tmp_path, registry(), DEFAULT_POLICY, clock=clock,
+        service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
                           code_source=Path(__file__).resolve().parents[1])
         service.boot = boot
         service.start()
