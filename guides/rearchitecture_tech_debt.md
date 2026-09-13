@@ -16,3 +16,19 @@ what should trigger revisiting it.
 | TD-3 | `artifact_check`'s `CheckParameters` carries an optional `input_bindings` field used only by the cache-identity tests. | P2-5 B1a | A test seam on a production kind; no production caller sets it. | A production caller could start depending on it. | A non-legacy production kind exists that those tests can use instead. |
 | TD-4 | Code shaped to fit the eight-module import fan-out budget. `engine/v2/data/legacy_adapter.py` builds contracts in two passes and hard-codes three legacy paths (tier-0 tested against `engine.paths`). `engine/v2/data/objects.py` uses `os`-only equivalents of `stat`/`uuid`/`math`. `objects.py` and `documents.py` import sibling modules as `from . import errors, time_formats`, which the budget counts as one import. | P2-1b, P2-2b | Behaviour is correct and tested; the cost is readability. | Future edits keep contorting around the budget. | The fan-out budget is revisited, or these modules are split. |
 | TD-5 | Non-legacy subprocess helpers (`verify_export_generation`, `run_engineering_gate`, `run_security_scan`) live in `engine/v2/ops/legacy_adapter.py`, because `checks/import_layers.py` lets only `executor.py` and `legacy_adapter.py` call `subprocess`. | P2-5 task 5 | Behaviour is correct and audited in one place. | Blurs the legacy adapter's meaning: the helpers are not legacy bridges. | Before Phase 8 deletes `legacy_adapter.py` — move them to a dedicated audited subprocess module and update the import-layer allowlist. |
+| TD-6 | `covered_tickers` was added to legacy `engine/data/finality.py` so decision evidence can carry per-ticker finality. | P2-5 B1c | It is additive and reuses the existing `session_finality` test. | Legacy code slated for deletion grew, and v2 depends on it through the adapter ledger. | Phase 3 moves finality into `engine/v2/data`, or before Phase 8 deletes legacy `engine/`. |
+| TD-7 | Two coverage ratchets both measure `engine.v2.data`. The Phase 1 suite (`phase1_coverage_suite.v2`) includes `tests/test_v2_data_*.py` as an interim fix, and the Phase 2 script measures the package too. | P2-5 B1c, task 8 | Both baselines only rise, so nothing is hidden. | Every data change needs two baseline refreshes. | The Phase 2 gate closes: drop the data tests from the Phase 1 suite. |
+| TD-8 | `export_generation(conn, root, *, generation, purposes=None)` exports every purpose by default. The nightly export stage passes `legacy_import` and `shadow`. | P2-5 task 5 | The only production caller filters correctly. | A new caller that forgets the filter mixes `research_reconstruction` rows into legacy ledger files. | A second caller appears; then make `purposes` required. |
+| TD-9 | `tests/ops_support.py::TEST_POLICY` copies CPU and thread counts from `DEFAULT_POLICY`, because environment refs are derived from `DEFAULT_POLICY`. | P2-5 test fix | Tests stay memory-independent and env refs still match. | A production CPU change silently changes test env refs too. | Env refs become derived from the injected policy. |
+
+## Tracked verification items (not debt)
+
+These are scheduled Phase 2 work, recorded here so they are not lost. They
+are not deferred.
+
+- The `projection` profile reserves 2 GiB, but render loads the same panel
+  context that peaked at 4.15 GiB in scoring. Measure it in the heavy-run session.
+- Real replay identity, DYN-SV chooser rows included, is unproven until the
+  frozen-data D18 run.
+- The Phase 0 gate needs the private tier-0 corpus, so worktree agents cannot
+  run it. The supervisor runs it on main.
