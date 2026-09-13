@@ -58,6 +58,20 @@ Initialization installs no timer and makes no production writer change. The
 Phase 1 runbook documents planning, private verification and the separate
 activation boundary.
 
+Settling a stuck `recovery_pending` attempt by hand, when no supervisor is
+ticking:
+
+    python3 -m engine.v2.ops reconcile <job-id> --expected-attempt <attempt-id>
+
+This runs the identical ownership proof a running supervisor applies every
+tick (every recorded identity gone or a zombie; no live session still
+carrying the launch pid; no live process's environ carrying the attempt's
+staging marker) and refuses to release anything the proof cannot clear.
+There is no force flag. It refuses with `RESOURCE_UNAVAILABLE` while a
+supervisor holds the catalog's lock, since that supervisor already
+reconciles every tick; a proof that fails prints its blocking processes as
+pid plus start time only.
+
 ## Testing
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no

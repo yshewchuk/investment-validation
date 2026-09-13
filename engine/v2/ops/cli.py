@@ -14,19 +14,26 @@ from engine.v2.foundation import (
     ensure_directory,
     to_document,
 )
+from engine.v2.ops import executor
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import integrity_errors, transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.diagnostics import report as diagnostic_report
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.executor_watchdog import signal_owned
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.health import health, write_health
 from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
 from engine.v2.ops.nightly import build_legacy_job_requests
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
 from engine.v2.ops.profiles import DEFAULT_POLICY
-from engine.v2.ops.recovery import read_boot_id
+from engine.v2.ops.recovery import (
+    SupervisorLock,
+    prove_ownership_gone,
+    read_boot_id,
+    reconcile_attempt,
+)
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, get_job, submit, submit_graph
 from engine.v2.ops.supervisor import Service, serve
@@ -59,6 +66,10 @@ def parser():
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
+    reconcile = commands.add_parser("reconcile")
+    reconcile.add_argument("--root", default=argparse.SUPPRESS)
+    reconcile.add_argument("job_id")
+    reconcile.add_argument("--expected-attempt", required=True)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -141,7 +152,46 @@ def dispatch(args, root, conn, clock):
             return {"run_id": "run_" + plan["plan_hash"][:24],
                     "jobs": [to_document(item) for item in receipts]}
         return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
+    if args.command == "reconcile":
+        return reconcile_command(args, root, conn, clock)
     return job_command(args, conn, clock)
+
+
+def reconcile_command(args, root, conn, clock):
+    """Settle one ``recovery_pending`` attempt by hand, when no supervisor is ticking.
+
+    Refuses outright if a running supervisor holds the lock (it already
+    reconciles every tick). Otherwise runs the identical B1 ownership proof
+    and settles only if it passes; there is no force flag, so a tree that
+    cannot be proven gone stays quarantined and this prints its blockers.
+    """
+    lock = SupervisorLock(root / "supervisor.lock")
+    if not lock.acquire():
+        raise fail("RESOURCE_UNAVAILABLE",
+                   "a running supervisor already reconciles this catalog")
+    try:
+        job = get_job(conn, args.job_id)
+        if job.active_attempt_id != args.expected_attempt:
+            raise fail("STALE_EXPECTATION",
+                       "the expected attempt is not the job's active attempt")
+        attempt = conn.execute("SELECT state FROM attempts WHERE attempt_id = ?",
+                               (args.expected_attempt,)).fetchone()
+        if attempt is None or attempt["state"] != "recovery_pending":
+            raise fail("STALE_EXPECTATION", "the attempt is not awaiting reconciliation")
+        boot_id = read_boot_id()
+        proof = prove_ownership_gone(conn, args.expected_attempt, boot_id=boot_id)
+        if proof.known:
+            executor.persist_members(conn, args.expected_attempt, proof.known)
+        signal_owned(proof.alive, boot_id, hard=True)
+        if not proof.proven:
+            raise fail("RESOURCE_UNAVAILABLE", "the process tree is not verified gone",
+                      details={"blocking": [{"pid": pid, "start_ticks": ticks}
+                                             for pid, ticks in proof.blockers]})
+        state = reconcile_attempt(conn, args.expected_attempt, process_state="verified_dead",
+                                  clock=clock)
+        return {"attempt_id": args.expected_attempt, "settled": True, "state": state}
+    finally:
+        lock.release()
 
 
 def job_command(args, conn, clock):
