@@ -30,4 +30,7 @@ python3 "$ROOT/checks/code_budgets.py" --quiet
 # 4. §4.5 package READMEs, with consumers checked against the import graph.
 python3 "$ROOT/checks/package_readmes.py" --quiet
 
-echo "pre-commit: hygiene, layers, budgets and READMEs all green"
+# 5. Pinned v2 style/import/dead-code rules, also against staged bytes.
+python3 "$ROOT/checks/rearchitecture_phase1_lint.py" --quiet
+
+echo "pre-commit: hygiene, layers, budgets, READMEs and v2 lint all green"

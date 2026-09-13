@@ -18,8 +18,17 @@ from engine.v2.foundation.artifacts import (
     fsync_directory,
     safe_relative_path,
 )
-from engine.v2.foundation.canonical import CONTENT_HASH_PREFIX, canonical_json, content_hash
-from engine.v2.foundation.clock import Clock, SystemClock, format_timestamp, parse_timestamp
+from engine.v2.foundation.canonical import (
+    CONTENT_HASH_PREFIX,
+    canonical_json,
+    content_hash,
+)
+from engine.v2.foundation.clock import (
+    Clock,
+    SystemClock,
+    format_timestamp,
+    parse_timestamp,
+)
 from engine.v2.foundation.typed import (
     DocumentError,
     from_document,

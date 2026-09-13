@@ -54,12 +54,37 @@ def test_every_declared_package_exists():
     assert il.missing_skeleton(ROOT) == []
 
 
-def test_adapter_ledger_is_empty():
-    """Phase 0 exit gate: the layer check runs green with an empty ledger."""
+def test_adapter_ledger_has_reviewed_phase1_inventory():
+    """D1 bootstraps once; every declared edge carries its operational audit."""
     ledger = il.load_adapters()
-    assert ledger["count"] == 0
-    assert ledger["adapters"] == []
+    assert ledger["count"] > 0
+    assert ledger["count"] <= ledger["committed_ceiling"]
+    required = {"runtime", "read_set", "write_set", "credentials",
+                "hidden_subprocesses", "retry", "output", "removal_phase"}
+    assert all(required <= entry.keys() for entry in ledger["adapters"])
     assert il.check_ledger(ledger) == []
+
+
+def test_adapter_ceiling_rejects_adding_an_edge_without_review():
+    ledger = {"count": 1, "committed_ceiling": 0, "adapters": [{
+        "package": "engine.v2.ops", "module": "engine.v2.ops.legacy_adapter",
+        "legacy_symbol": "engine.score.score_calendar", "reason": "bounded scoring",
+        "declared_on": "2026-09-12"}]}
+    assert any("exceeds committed ceiling" in item for item in il.check_ledger(ledger))
+
+
+def test_exact_callable_allows_its_namespace_but_not_another_callable():
+    ledger = {"count": 1, "adapters": [{
+        "package": "engine.v2.ops", "module": "engine.v2.ops.legacy_adapter",
+        "legacy_symbol": "engine.ledger.build_prediction_rows", "reason": "pure builder",
+        "declared_on": "2026-09-12"}]}
+    path = "engine/v2/ops/legacy_adapter.py"
+    allowed = {path: b"from engine.ledger import build_prediction_rows\n"}
+    assert il.check_files(allowed, ledger).ok
+    bad = {path: b"from engine.ledger import build_prediction_rows, snapshot\n"}
+    assert "undeclared-legacy-import" in rules(il.check_files(bad, ledger))
+    broad = {path: b"import engine.ledger\n"}
+    assert "undeclared-legacy-import" in rules(il.check_files(broad, ledger))
 
 
 # --------------------------------------------------------------------------
@@ -243,6 +268,25 @@ def test_relative_imports_resolve():
 def test_plain_import_statement_is_seen():
     files = {"engine/v2/features/panel.py": b"import engine.v2.scoring.kernel\n"}
     assert "upward-import" in rules(il.check_files(files))
+
+
+@pytest.mark.parametrize("code", [
+    b"from checks import tier0_corpus\n", b"import tests.ops_support\n"])
+def test_verification_cannot_become_a_production_dependency(code):
+    assert "verification-imported" in rules(il.check_files({"engine/v2/ops/bad.py": code}))
+
+
+@pytest.mark.parametrize("code", [
+    b"__import__(name)\n",
+    b"from importlib import import_module as load\nload(name)\n",
+    b"import importlib.util as util\nutil.spec_from_file_location(name, path)\n"])
+def test_dynamic_import_cannot_hide_a_dependency(code):
+    assert "dynamic-import" in rules(il.check_files({"engine/v2/ops/bad.py": code}))
+
+
+def test_process_edge_cannot_hide_outside_the_executor_or_adapter():
+    files = {"engine/v2/scoring/bad.py": b"from subprocess import run as launch\nlaunch(command)\n"}
+    assert "undeclared-process-edge" in rules(il.check_files(files))
 
 
 def test_syntax_error_is_skipped_rather_than_crashing():

@@ -40,7 +40,8 @@ failure rather than a stale sentence.
 
 - `engine/v2/foundation` — `ArtifactRef`, returned by the artifact store.
 
-<!-- consumers: engine.v2.foundation -->
+- engine/v2/ops — durable job, attempt, resource, checkpoint and progress documents.
+<!-- consumers: engine.v2.foundation, engine.v2.ops -->
 
 ## Usage
 

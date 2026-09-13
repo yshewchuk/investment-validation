@@ -191,6 +191,13 @@ def _distributions(roots: set[str]) -> dict[str, str]:
 
 def environment_lock() -> dict:
     packages = _distributions(_imported_roots())
+    # Command-line engineering tools do not necessarily have Python imports.
+    # They still belong to the tested environment lock.
+    for distribution in ("ruff", "pytest", "coverage"):
+        try:
+            packages[distribution] = metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            raise RuntimeError(f"required engineering tool is missing: {distribution}") from None
     return part(
         {
             "python": {

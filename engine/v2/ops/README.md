@@ -25,7 +25,11 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+The operator interface is the versioned command protocol exposed by
+python3 -m engine.v2.ops. It supports immutable planning/submission, job and
+attempt inspection, cancellation, recovery planning, health and supervisor
+execution. Python modules are internal to ops; other production packages consume
+versioned artifacts instead of importing the supervisor.
 
 <!-- public-interface: none -->
 
@@ -35,16 +39,24 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+No other production package imports ops. The CLI starts the coordinator, and
+serving reads a versioned health artifact without a peer-layer import.
 
 <!-- consumers: none -->
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+Read-only host inspection:
+
+    python3 -m engine.v2.ops doctor --json
+
+Initialize an isolated catalog:
+
+    python3 -m engine.v2.ops init --root /tmp/operations-example
+
+Initialization installs no timer and makes no production writer change. The
+Phase 1 runbook documents planning, private verification and the separate
+activation boundary.
 
 ## Testing
 
@@ -53,7 +65,9 @@ panel load, no network, no fitting. Fixtures live in the private
 `fixtures/tier0/` corpus (`checks/tier0_corpus.py`), never in this repo — they
 carry licensed quotes.
 
-A negative control here looks like: corrupt one field of a frozen record, run
-the comparator, and assert it names **this package's stage** and that field
-path — not that "a row is red". A check that has never failed is not known to
-work.
+The tests/test_v2_ops_*.py suite covers catalog uniqueness, lease fencing,
+resource admission, worker identity, immutable checkpoints and effect recovery.
+Fault tests must assert retained reservations and rejected stale effects after
+process death, and exact immutable input identities before checkpoint reuse.
+Real scoring/parity runs are sequential private verification, outside the fast
+commit hook; ops never imports their comparator.

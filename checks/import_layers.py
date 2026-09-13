@@ -65,7 +65,7 @@ __all__ = [
 ADAPTERS_PATH = Path(__file__).resolve().parent / "legacy_adapters.json"
 
 #: Third-party and stdlib roots are irrelevant here; only these two matter.
-_INTERESTING = (V2_ROOT, LEGACY_ROOT)
+_INTERESTING = (V2_ROOT, LEGACY_ROOT, "checks", "tests")
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +212,11 @@ def check_ledger(ledger: dict) -> list[str]:
     """Structural problems with the ledger itself, independent of any import."""
     problems: list[str] = []
     adapters = ledger.get("adapters", [])
+    ceiling = ledger.get("committed_ceiling", ledger.get("count", 0))
+    if not isinstance(ceiling, int) or ceiling < 0:
+        problems.append("committed_ceiling must be a non-negative integer")
+    elif len(adapters) > ceiling:
+        problems.append(f"adapter count {len(adapters)} exceeds committed ceiling {ceiling}")
     if ledger.get("count") != len(adapters):
         problems.append(
             f"count is {ledger.get('count')} but {len(adapters)} adapters are listed"
@@ -290,6 +295,15 @@ def _check_v2_to_legacy(edge: Edge, report: Report, index: dict[str, set[str]]) 
     if any(edge.imported == sym or edge.imported.startswith(sym + ".")
            for sym in declared):
         return
+    # ImportFrom emits both the exact imported symbol and its namespace.
+    # A declared callable authorizes its companion namespace edge at this
+    # source location, without authorizing other callables in that namespace.
+    siblings = [other.imported for other in report.edges
+                if other.importer == edge.importer and other.lineno == edge.lineno
+                and other.path == edge.path and other.imported.startswith(edge.imported + ".")]
+    if siblings and all(any(name == sym or name.startswith(sym + ".") for sym in declared)
+                        for name in siblings):
+        return
     report.add(
         "undeclared-legacy-import", edge,
         f"{edge.imported} is not declared for {edge.importer} in "
@@ -306,7 +320,10 @@ def check_graph(report: Report, ledger: dict) -> Report:
     for edge in report.edges:
         importer_v2 = _is_v2(edge.importer)
         imported_v2 = _is_v2(edge.imported)
-        if importer_v2 and imported_v2:
+        if importer_v2 and edge.imported.split(".")[0] in {"checks", "tests"}:
+            report.add("verification-imported", edge,
+                       "production packages cannot depend on verification or test code")
+        elif importer_v2 and imported_v2:
             _check_v2_to_v2(edge, report)
         elif importer_v2:
             _check_v2_to_legacy(edge, report, index)
@@ -320,9 +337,54 @@ def check_graph(report: Report, ledger: dict) -> Report:
     return report
 
 
+def _call_name(node, aliases):
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        return _call_name(node.value, aliases) + "." + node.attr
+    return ""
+
+
+def check_runtime_edges(files, report):
+    """Refuse unobservable import/command bypasses of the static layer graph."""
+    dynamic = {"__import__", "importlib.import_module", "importlib.util.spec_from_file_location",
+               "importlib.machinery.SourceFileLoader", "runpy.run_path", "runpy.run_module"}
+    process_owners = {"engine.v2.ops.executor", "engine.v2.ops.legacy_adapter"}
+    for rel, blob in files.items():
+        module = module_name(rel)
+        if not module or not _is_v2(module):
+            continue
+        try:
+            tree = ast.parse(blob.decode("utf-8"), filename=rel)
+        except (SyntaxError, UnicodeError):
+            continue
+        aliases = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    aliases[alias.asname or alias.name.split(".")[0]] = (
+                        alias.name if alias.asname else alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and not node.level:
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = (node.module or "") + "." + alias.name
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            call = _call_name(node.func, aliases)
+            edge = Edge(module, call, rel, node.lineno)
+            if call in dynamic:
+                report.add("dynamic-import", edge,
+                           "use declared static imports so layer and implementation closures see the dependency")
+            if (call.startswith("subprocess.") or call in {"os.system", "os.popen"}) and module not in process_owners:
+                report.add("undeclared-process-edge", edge,
+                           "process execution belongs to the fixed executor or audited legacy adapter")
+
+
 def check_files(files: dict[str, bytes], ledger: dict | None = None) -> Report:
     """The pure core the CLI and the tests both drive."""
-    return check_graph(build_graph(files), ledger or load_adapters())
+    report = check_graph(build_graph(files), load_adapters() if ledger is None else ledger)
+    check_runtime_edges(files, report)
+    return report
 
 
 # --------------------------------------------------------------------------

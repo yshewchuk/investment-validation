@@ -154,6 +154,8 @@ venv/
 # The environment lock. Code-adjacent config, and the thing that lets a clean
 # checkout reproduce the baseline the tier-0 corpus was captured in.
 !/requirements.txt
+!/ruff.toml
+!/checks/rearchitecture_phase1_coverage_baseline.json
 
 # Claude Code state, entirely. `settings.local.json` alone was not enough: the
 # default-deny above re-allows directories (`!*/`) and then every `.py`, so a

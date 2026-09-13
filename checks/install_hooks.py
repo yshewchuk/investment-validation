@@ -36,6 +36,9 @@ SOURCE = ROOT / "checks" / "hooks" / "pre-commit"
 #: content so upgrading it is silent and safe, rather than needing --force for
 #: a file we wrote ourselves.
 _PREDECESSOR = "exec python3 \"$(git rev-parse --show-toplevel)/checks/repo_hygiene.py\""
+_KNOWN_PREDECESSOR_HASHES = {
+    "720fec0ba029b58dd0dd3d02ed19825a9284f707e0acbbe5af58ed48db570206",
+}
 
 
 def hooks_dir(root: Path = ROOT) -> Path:
@@ -80,7 +83,8 @@ def install(root: Path = ROOT, *, force: bool = False) -> dict:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and not force:
         found = target.read_text()
-        known = _PREDECESSOR in found or _digest(found) == _digest(source.read_text())
+        known = (_PREDECESSOR in found or _digest(found) == _digest(source.read_text())
+                 or _digest(found) in _KNOWN_PREDECESSOR_HASHES)
         if not known:
             return {**state(root), "written": False,
                     "reason": "an unrecognized pre-commit hook is installed; "

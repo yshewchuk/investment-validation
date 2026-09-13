@@ -24,9 +24,12 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+- decisions: install, set_authority, insert, rows, import_lines and DecisionConflict.
+- export: export_generation writes a verified compatibility generation.
+- The caller owns the transaction and verifies execution authority. This package
+  preserves payloads and enforces unique logical decision identities.
 
-<!-- public-interface: none -->
+<!-- public-interface: decisions, export, install, set_authority, insert, rows, import_lines, DecisionConflict, export_generation -->
 
 ## Consumers
 
@@ -34,16 +37,20 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+engine/v2/ops commits validated decisions and outbox intents in one transaction,
+and rehearses writer changes and compatibility exports against private copies.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.ops -->
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+Run the isolated authority tests with:
+
+    python3 -m pytest tests/test_v2_ops_effects.py -q
+
+Production writer activation requires the separate cutover described in
+guides/rearchitecture_phase1_operations.md. Exporting a compatibility generation
+does not grant another writer ownership.
 
 ## Testing
 
