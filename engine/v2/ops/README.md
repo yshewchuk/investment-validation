@@ -75,7 +75,9 @@ pid plus start time only.
 ## Testing
 
 Recommended fast invocation, once `pytest-xdist` (pinned in
-`requirements.txt`) is installed:
+`requirements-dev.txt` -- test-runner tooling, kept out of `requirements.txt`
+because that file is gated byte-for-byte against a frozen Phase 0 baseline)
+is installed:
 
 ```text
 python3 -m pytest -n auto --dist loadgroup -q tests/test_v2_*.py tests/test_checks_phase2_gate.py

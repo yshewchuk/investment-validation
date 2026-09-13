@@ -1,0 +1,7 @@
+# Test-runner tooling only -- NOT part of the frozen engine dependency set.
+# requirements.txt is gated byte-for-byte against baseline/<package>/requirements.txt
+# by checks/rearchitecture_phase0_gate.py; a package that only speeds up how
+# tests are invoked (never imported by engine/v2 or checks/) has no business
+# forcing a new Phase 0 baseline version, so it lives here instead.
+
+pytest-xdist==3.8.0
