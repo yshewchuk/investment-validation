@@ -157,6 +157,15 @@ venv/
 !/ruff.toml
 !/checks/rearchitecture_phase1_coverage_baseline.json
 
+# The reviewed legacy->v2 table-contract mapping's per-column facts (unit,
+# scale, sentinel/null policy, etc.) that engine/data/schemas.py itself does
+# not declare (phase-2 guide §5.1, §12 D02). Config/review data, not licensed
+# rows: no ticker, price, or quote ever appears here, only column-shape facts
+# quoted from Column.doc/CONVENTIONS/SOURCE_PRIORITY. Same reason as the two
+# re-includes above — engine/v2/data/legacy_adapter.py cannot build a mapping
+# from a clone without it.
+!/engine/v2/data/legacy_annotations.json
+
 # Claude Code state, entirely. `settings.local.json` alone was not enough: the
 # default-deny above re-allows directories (`!*/`) and then every `.py`, so a
 # git WORKTREE checked out under .claude/ — which is where Claude Code puts

@@ -29,8 +29,10 @@ underscore convention, and an import of a name absent from this list fails
 | Module | Names |
 |---|---|
 | `documents` | `loads_document`, `decode_document` — strict decoding of `engine.v2.contracts.data` documents, beyond what `engine.v2.foundation.typed` can express from annotations alone. |
+| `manifests` | `table_contract_hash` — a `TableContract`'s `definition_hash`: `foundation.content_hash` of its canonical payload with `definition_hash` itself excluded (phase-2 guide §5.1). |
+| `legacy_adapter` | `build_legacy_mapping`, `LegacyMappingError` — the versioned `legacy_table_mapping.v1.0` document mapping the six Tier-2 tables, the feature panel, and Tier-4 forecasts to `TableContract`s, plus the separately pinned (non-queryable) legacy `SNAPSHOT` compatibility metadata. This is the package's only module importing legacy code (phase-2 guide §4); its reviewed per-column facts live in `legacy_annotations.json` beside it. |
 
-<!-- public-interface: loads_document, decode_document -->
+<!-- public-interface: loads_document, decode_document, table_contract_hash, build_legacy_mapping, LegacyMappingError -->
 
 ## Consumers
 

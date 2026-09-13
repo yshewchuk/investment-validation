@@ -42,7 +42,9 @@ failure rather than a stale sentence.
 - `engine/v2/foundation` — `ArtifactRef`, returned by the artifact store.
 
 - engine/v2/ops — durable job, attempt, resource, checkpoint and progress documents.
-<!-- consumers: engine.v2.foundation, engine.v2.ops -->
+
+- `engine/v2/data` — `ColumnContract`/`TableContract` (`legacy_adapter.build_legacy_mapping`) and `TableContract` (`manifests.table_contract_hash`).
+<!-- consumers: engine.v2.foundation, engine.v2.ops, engine.v2.data -->
 
 ## Usage
 
