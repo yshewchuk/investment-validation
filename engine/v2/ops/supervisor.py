@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from engine.v2.contracts import CheckpointCandidate, OutputCandidate, ProgressEvent
-from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
+from engine.v2.foundation import ArtifactStore, artifact_reference, content_hash, format_timestamp
 from engine.v2.ops import executor
 from engine.v2.ops.checkpoints import (
     artifact,
@@ -21,6 +21,7 @@ from engine.v2.ops.decision_commit import (
     import_settlement_candidates_in_transaction,
     validated_decision_candidate,
 )
+from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.executor_watchdog import is_alive, signal_owned
@@ -140,7 +141,8 @@ class Service:
                 self._populate_legacy_staging(claim, legacy_manifest)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in {
-                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck"}:
+                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
+                    "decision_evidence"}:
                 cached = self._reuse_staged_checkpoint(claim)
                 if cached:
                     return
@@ -266,7 +268,8 @@ class Service:
                                peak_bytes=running.peak, clock=self.clock)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in {
-                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck"}:
+                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
+                    "decision_evidence"}:
                 schema = outputs[0]["schema"]
                 # The attempt already staged from these exact resolved bindings
                 # (recorded at launch); the checkpoint's identity must match.
@@ -331,6 +334,9 @@ class Service:
                                             "settlement candidate artifact has no rows"))
             return lambda conn: import_settlement_candidates_in_transaction(
                 conn, claim, candidate_ref, rows, clock=self.clock)
+        if claim.spec.kind == "decision_evidence":
+            _verify_decision_evidence(self.conn, self.store, claim, refs)
+            return None
         return None
 
     def close(self):
@@ -359,3 +365,43 @@ def _named_ref(refs, name):
         if candidate_name == name:
             return ref
     raise OpsError(make_problem("VALIDATION_FAILED", "required effect artifact is missing"))
+
+
+_DECISION_EVIDENCE_BINDINGS = {"score": "score.json", "finality": "finality.json",
+                               "replay": "replay.json", "coverage": "finality_coverage.json"}
+
+
+def _verify_decision_evidence(conn, store, claim, refs):
+    """Re-derive the decision plan/evidence pair from recorded bindings and
+    require byte equality with what the worker published (P2-5/B1c).
+
+    Reads only ``attempt_input_bindings`` (never re-queries a ``job_``
+    parent's current, possibly-since-changed output) — the same durable-
+    record discipline ``decision_commit._resolved_evidence_bindings`` uses.
+    Comparing ``content_hash`` values is equivalent to comparing bytes: both
+    sides route through the SAME :func:`artifact_reference` identity
+    function, so identical bytes always hash identically and differing bytes
+    (astronomically) never collide.
+    """
+    recorded = recorded_bindings(conn, claim.attempt_id)
+    missing = [key for key, name in _DECISION_EVIDENCE_BINDINGS.items() if name not in recorded]
+    if missing:
+        raise OpsError(make_problem("VALIDATION_FAILED", "decision evidence inputs are unavailable",
+                                    details={"missing_bindings": missing}))
+    docs = {}
+    for key, name in _DECISION_EVIDENCE_BINDINGS.items():
+        ref = artifact(conn, store, recorded[name].artifact_id)
+        docs[key] = json.loads(store.read_verified(ref))
+    params = claim.spec.parameters
+    plan_bytes, evidence_bytes = derive(
+        docs["score"], recorded["score.json"], docs["finality"], recorded["finality.json"],
+        docs["replay"], docs["coverage"], session=params["session"],
+        deployment=params["deployment"], decision_clock=params["decision_clock"])
+    computed_plan = artifact_reference(plan_bytes, "decision_plan.v1.0")
+    computed_evidence = artifact_reference(evidence_bytes, "decision_evidence.v1.0")
+    worker_plan = _named_ref(refs, "decision_plan")
+    worker_evidence = _named_ref(refs, "decision_evidence")
+    if (computed_plan.content_hash != worker_plan.content_hash
+            or computed_evidence.content_hash != worker_evidence.content_hash):
+        raise OpsError(make_problem("VALIDATION_FAILED",
+                                    "decision evidence disagrees with coordinator re-derivation"))

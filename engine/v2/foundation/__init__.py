@@ -14,6 +14,7 @@ from __future__ import annotations
 from engine.v2.foundation.artifacts import (
     ArtifactError,
     ArtifactStore,
+    artifact_reference,
     ensure_directory,
     fsync_directory,
     safe_relative_path,
@@ -43,6 +44,7 @@ __all__ = [
     "Clock",
     "DocumentError",
     "SystemClock",
+    "artifact_reference",
     "canonical_json",
     "content_hash",
     "ensure_directory",

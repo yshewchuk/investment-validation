@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
+from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
@@ -118,11 +119,19 @@ def legacy_action(action, parameters, staging):
 
 def _action_finality(parameters, root):
     from engine.calendar import trading_calendar
-    from engine.data.finality import resolve_final_session
+    from engine.data.finality import covered_tickers, resolve_final_session
 
     result = resolve_final_session(parameters["session"], parameters["tickers"],
                                    calendar=trading_calendar())
-    return _write_action(root, "finality.json", result.as_dict())
+    # finality.json's dict is embedded verbatim into ledger rows (v1 parity);
+    # per-ticker coverage is a SEPARATE output, never a key added here.
+    primary = _write_action(root, "finality.json", result.as_dict())
+    coverage = _write_action(root, "finality_coverage.json", {
+        "schema_version": "finality_coverage.v1.0", "date": result.date,
+        "covered_tickers": covered_tickers(result.date, parameters["tickers"])})
+    primary["extra"] = [{"name": "legacy_finality_coverage", "path": coverage["path"],
+                         "schema": "finality_coverage.v1.0"}]
+    return primary
 
 
 def _action_score(parameters, root):
@@ -199,11 +208,6 @@ def _action_score_requests(parameters, root):
                      "record": record})
     return _write_action(root, "score_requests.json", {"rows": rows,
                                                         "expected_population": len(requests)})
-
-
-def _score_row_id(row):
-    return "|".join(str(row.get(key, "")) for key in
-                     ("ticker", "strategy", "event_date", "strike", "expiry"))
 
 
 def _population_key(row):

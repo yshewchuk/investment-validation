@@ -33,14 +33,30 @@ class LegacyParameters:
     #: A6: where ``legacy_score_requests`` finds its request batch, relative
     #: to the staging root — under ``legacy/`` once the read set is copied in.
     requests_path: str = ""
+    #: P2-5/B1c: the ``decision_evidence`` worker's pinned session identity.
+    #: Unused (left "") by every ``legacy_*`` action.
+    deployment: str = ""
+    decision_clock: str = ""
 
 
 def registry():
-    kinds = [JobKind(
-        name="artifact_check", worker="artifact_check", parameters=CheckParameters,
-        resource_classes=frozenset({"delivery"}), effects=("staged",),
-        retry=RetryPolicy("bounded", 3, (1, 5)), checkpoint_contract="receipt.v1.0",
-        namespaces=frozenset({"shadow", "smoke"}))]
+    kinds = [
+        JobKind(
+            name="artifact_check", worker="artifact_check", parameters=CheckParameters,
+            resource_classes=frozenset({"delivery"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 3, (1, 5)), checkpoint_contract="receipt.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})),
+        # P2-5/B1c: a pure, non-legacy worker (see worker.py) that derives
+        # decision_plan.v1.0/decision_evidence.v1.0 from bound, already-
+        # committed score/finality/replay artifacts. Never reads the legacy
+        # tree, so it carries no ``store_domains`` read lease.
+        JobKind(
+            name="decision_evidence", worker="decision_evidence", parameters=LegacyParameters,
+            resource_classes=frozenset({"validation"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 2, (5, 30)),
+            checkpoint_contract="decision_evidence_pair.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})),
+    ]
     profiles = {"legacy_score": "legacy_score", "legacy_score_requests": "legacy_score",
                 "legacy_decision_replay": "legacy_score",
                 "legacy_finality": "validation",
