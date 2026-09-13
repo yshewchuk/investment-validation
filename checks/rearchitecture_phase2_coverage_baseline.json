@@ -22,7 +22,7 @@
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_render_parity.py"
   ],
-  "source_hash": "sha256:bb888001496423b742302ffa6d69c6832f5353867b6ee7ad986bce3fa80bcff5",
+  "source_hash": "sha256:806c0f1dc6120282e543def8e042c99d10376af28c01384343f3b65216ecfac0",
   "packages": {
     "engine.v2.contracts": {
       "executed": 594,
@@ -52,8 +52,8 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 1824,
-      "executable": 1938,
+      "executed": 1910,
+      "executable": 2029,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -74,7 +74,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 94.11764705882354
+      "percentage": 94.13504189255791
     },
     "engine.v2.features": {
       "executed": 0,
@@ -1119,6 +1119,42 @@
     },
     {
       "nodeid": "tests/test_v2_data_legacy_materialization.py::test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_outputs_are_byte_identical_verified_copies",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_materialized_panel_hash_equals_source_panel_object_hash",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_ref_naming_an_unpublished_object_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tampered_object_byte_is_refused_with_nothing_left_writable",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_copy_source_object_unreadable_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_multi_fragment_feature_panel_falls_back_to_rewrite_and_skips_tier4_cache_check",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_pinned_ref_object_corrupted_between_build_and_materialize_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_tier4_cache_hash_prefix_ignores_a_malformed_filename",
       "outcome": "passed"
     },
     {
