@@ -12,8 +12,9 @@ score/finality artifacts) is handed in by the caller.
 Two callers use it, independently, over the same inputs:
 
 * the ``decision_evidence`` WORKER (``engine/v2/ops/worker.py``), which reads
-  its bound ``score.json``/``finality.json``/``replay.json`` off disk and
-  recomputes ``score_ref``/``finality_ref`` locally with
+  its bound ``score.json``/``finality.json``/``replay.json``/
+  ``finality_coverage.json`` off disk and recomputes
+  ``score_ref``/``finality_ref`` locally with
   :func:`engine.v2.foundation.artifact_reference` (the artifact store's own
   identity function, over the bytes it just read);
 * the COORDINATOR (``engine/v2/ops/supervisor.py``), which already has the
@@ -99,37 +100,44 @@ def _replay_receipt(common, population, replay_doc):
                     replayed_rows_hash=content_hash(agreed), findings=findings)
 
 
-def _finality_receipt(common, finality_doc, score_rows):
-    """``covered_tickers`` is every ticker carried by the bound score document.
+def _finality_receipt(common, finality_doc, coverage_doc, session):
+    """``covered_tickers`` comes from ``finality_coverage.json`` alone.
 
     ``engine/data/finality.py``'s ``SessionFinality`` (what ``finality.json``
-    actually holds) has no per-ticker coverage field of its own — only the
-    aggregate ``tickers``/``covered`` counts. Naming individual tickers from
-    that document is not possible today; this derives the covered set from
-    the score document instead, which is honest about what it is (every
-    ticker this run actually scored) rather than a claim of per-ticker
-    finality evidence. See this change's report for the full finding.
+    itself holds) has no per-ticker coverage field — only the aggregate
+    ``tickers``/``covered`` counts — so ``finality.json`` is never touched for
+    this (and never gains a key: it is embedded verbatim into ledger rows, a
+    v1 parity requirement). ``legacy_adapter._action_finality`` now writes a
+    SECOND output, ``finality_coverage.json``, from
+    ``engine.data.finality.covered_tickers`` — a real per-ticker finality
+    test, not a stand-in derived from what happened to get scored.
     """
-    covered = sorted({row.get("ticker") for row in score_rows if row.get("ticker") is not None})
+    if not isinstance(coverage_doc, dict) or coverage_doc.get(
+            "schema_version") != "finality_coverage.v1.0":
+        raise fail("VALIDATION_FAILED", "finality coverage document is malformed")
+    if coverage_doc.get("date") != session:
+        raise fail("VALIDATION_FAILED", "finality coverage document is for a different session")
+    covered = coverage_doc.get("covered_tickers")
+    if not isinstance(covered, list) or not all(isinstance(item, str) for item in covered):
+        raise fail("VALIDATION_FAILED", "finality coverage document has no ticker list")
     return _receipt("finality", common, observed_finality_hash=content_hash(finality_doc),
-                    covered_tickers=covered)
+                    covered_tickers=sorted(covered))
 
 
-def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, *,
+def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverage_doc, *,
           session, deployment, decision_clock):
     """Derive ``(plan_bytes, evidence_bytes)`` for one nightly session.
 
     ``score_ref``/``finality_ref`` need only ``artifact_id``/``content_hash``
     attributes (an ``ArtifactRef``, a recorded ``ResolvedBinding``, or a
     locally recomputed :func:`artifact_reference` all satisfy this).
+    ``coverage_doc`` is the parsed ``finality_coverage.json`` document (see
+    :func:`_finality_receipt`); its ``date`` must equal ``session``.
 
     On a night with no decision-eligible rows, ``expected_population`` is
-    simply empty; this function does not special-case it. The validator
-    already refuses an empty ``plan.expected_population`` (§"Plan"), so the
-    plan/evidence pair this produces is well-formed and self-consistent, but
-    a downstream ``legacy_decisions`` commit against it always fails
-    ``VALIDATION_FAILED`` — there is no code path that commits zero decisions
-    as a "success".
+    simply empty; this function does not special-case it. Whether that plan
+    is committable with zero decisions is ``decision_validation.validate``'s
+    call, not this function's.
     """
     score_rows = _score_rows(score_doc)
     population = decision_population(score_doc, session)
@@ -148,7 +156,7 @@ def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, *,
     receipts = {
         "causality": _receipt("causality", common, observed_cutoffs=cutoffs),
         "coverage": _receipt("coverage", common, observed_population=expected),
-        "finality": _finality_receipt(common, finality_doc, score_rows),
+        "finality": _finality_receipt(common, finality_doc, coverage_doc, session),
         "selection": _receipt("selection", common, eligible_candidate_keys=expected),
         "replay": _replay_receipt(common, population, replay_doc),
     }

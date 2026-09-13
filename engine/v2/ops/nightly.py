@@ -135,9 +135,10 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
         # and carried unchanged on every retry/resubmission of this same plan.
         params["deployment"] = "shadow:" + plan["implementation_ref"]
         params["decision_clock"] = plan["decision_clock"]
-        params["input_bindings"] = {"score.json": _job_output("score", keys),
-                                     "finality.json": _job_output("finality", keys),
-                                     "replay.json": _job_output("decision_replay", keys)}
+        params["input_bindings"] = {
+            "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
+            "replay.json": _job_output("decision_replay", keys),
+            "finality_coverage.json": keys["finality"] + "#legacy_finality_coverage"}
     return params
 
 

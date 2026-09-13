@@ -368,7 +368,7 @@ def _named_ref(refs, name):
 
 
 _DECISION_EVIDENCE_BINDINGS = {"score": "score.json", "finality": "finality.json",
-                               "replay": "replay.json"}
+                               "replay": "replay.json", "coverage": "finality_coverage.json"}
 
 
 def _verify_decision_evidence(conn, store, claim, refs):
@@ -395,8 +395,8 @@ def _verify_decision_evidence(conn, store, claim, refs):
     params = claim.spec.parameters
     plan_bytes, evidence_bytes = derive(
         docs["score"], recorded["score.json"], docs["finality"], recorded["finality.json"],
-        docs["replay"], session=params["session"], deployment=params["deployment"],
-        decision_clock=params["decision_clock"])
+        docs["replay"], docs["coverage"], session=params["session"],
+        deployment=params["deployment"], decision_clock=params["decision_clock"])
     computed_plan = artifact_reference(plan_bytes, "decision_plan.v1.0")
     computed_evidence = artifact_reference(evidence_bytes, "decision_evidence.v1.0")
     worker_plan = _named_ref(refs, "decision_plan")

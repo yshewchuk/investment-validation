@@ -119,6 +119,11 @@ def _score_and_finality():
     return score, finality
 
 
+def _finality_coverage(covered_tickers=("FAKE",), *, date=SESSION):
+    return {"schema_version": "finality_coverage.v1.0", "date": date,
+            "covered_tickers": list(covered_tickers)}
+
+
 def _run_until_terminal(service, conn, job_id, timeout=18):
     deadline = time.monotonic() + timeout
     state = "queued"
@@ -898,12 +903,14 @@ def test_derive_and_validator_agree_on_eligible_forward_and_ladder_rows():
                   "population": [key], "source_rows": [eligible], "replayed_rows": [eligible],
                   "source_rows_hash": content_hash([eligible]),
                   "replayed_rows_hash": content_hash([eligible]), "findings": []}
+    coverage_doc = {"schema_version": "finality_coverage.v1.0", "date": SESSION,
+                    "covered_tickers": ["AAA", "BBB", "CCC"]}
     score_ref = artifact_reference(b"synthetic-score-bytes", "legacy_action.v1.0")
     finality_ref = artifact_reference(b"synthetic-finality-bytes", "legacy_action.v1.0")
     deployment, decision_clock = "shadow:synthetic-impl", SESSION + "T21:00:00+00:00"
 
     plan_bytes, evidence_bytes = derive(score_doc, score_ref, finality, finality_ref, replay_doc,
-                                        session=SESSION, deployment=deployment,
+                                        coverage_doc, session=SESSION, deployment=deployment,
                                         decision_clock=decision_clock)
     plan = json.loads(plan_bytes)
     evidence = json.loads(evidence_bytes)
@@ -939,11 +946,38 @@ def test_derive_and_validator_agree_on_eligible_forward_and_ladder_rows():
 # -- shared scaffolding for the supervised (real Service) tests below ------
 
 
+def _succeed_finality_parent(conn, clock, supervisor, *, key, finality_ref, coverage_ref):
+    """A succeeded ``legacy_finality`` parent job/attempt with BOTH outputs
+    registered on the SAME attempt -- matching ``_action_finality``'s real
+    shape (finality.json plus the finality_coverage.json review fix)."""
+    job = JobSpec(kind="artifact_check", implementation_ref="parent-setup", spec_hash=None,
+                  environment_ref="parent-setup", parameters={"expected_ids": ()},
+                  output_namespace="shadow", resource_class="delivery",
+                  retry_policy_ref="bounded", checkpoint_contract_ref="receipt.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(
+        namespace="shadow", idempotency_key=key, principal="operator", job=job), clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry())
+
+    def effects(inner_conn):
+        register_artifact(inner_conn, finality_ref, claim.attempt_id, clock)
+        register_artifact(inner_conn, coverage_ref, claim.attempt_id, clock)
+        inner_conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                           (claim.attempt_id, "legacy_finality", finality_ref.artifact_id))
+        inner_conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                           (claim.attempt_id, "legacy_finality_coverage", coverage_ref.artifact_id))
+
+    commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                   clock=clock, effects=effects)
+    return job_id_for("shadow", key)
+
+
 def _decision_evidence_request(*, key, score_job, finality_job, replay_job,
                                deployment, decision_clock):
     bindings = {"score.json": score_job + "#legacy_score",
                 "finality.json": finality_job + "#legacy_finality",
-                "replay.json": replay_job + "#legacy_decision_replay"}
+                "replay.json": replay_job + "#legacy_decision_replay",
+                "finality_coverage.json": finality_job + "#legacy_finality_coverage"}
     profile = profile_named(DEFAULT_POLICY, "validation")
     job = JobSpec(
         kind="decision_evidence",
@@ -1007,6 +1041,7 @@ def test_decision_evidence_and_decisions_commit_through_submit_graph(tmp_path):
         key = "FAKE|TWIN-P|" + SESSION
         score_ref = _publish(store, conn, clock, {"rows": [score]}, "legacy_action.v1.0")
         finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+        coverage_ref = _publish(store, conn, clock, _finality_coverage(), "finality_coverage.v1.0")
         replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
                       "population": [key], "source_rows": [score], "replayed_rows": [score],
                       "source_rows_hash": content_hash([score]),
@@ -1015,8 +1050,8 @@ def test_decision_evidence_and_decisions_commit_through_submit_graph(tmp_path):
 
         score_job = _succeed_parent(conn, clock, setup, key="pos-score",
                                     output_name="legacy_score", ref=score_ref)
-        finality_job = _succeed_parent(conn, clock, setup, key="pos-finality",
-                                       output_name="legacy_finality", ref=finality_ref)
+        finality_job = _succeed_finality_parent(conn, clock, setup, key="pos-finality",
+                                                finality_ref=finality_ref, coverage_ref=coverage_ref)
         replay_job = _succeed_parent(conn, clock, setup, key="pos-replay",
                                      output_name="legacy_decision_replay", ref=replay_ref)
 
@@ -1104,13 +1139,15 @@ def _succeed_evidence_parent(conn, clock, supervisor, *, key, plan_ref, evidence
 
 
 def _run_decisions_with_derived_evidence(tmp_path, tag, score_doc, finality, replay_doc, *,
-                                         deployment="shadow:test-impl", decision_clock=None):
+                                         coverage_doc=None, deployment="shadow:test-impl",
+                                         decision_clock=None):
     """Derive plan/evidence with :func:`derive` (possibly over a tampered
-    score/replay input), seed succeeded score/finality/plan/evidence
+    score/replay/coverage input), seed succeeded score/finality/plan/evidence
     parents, submit ``legacy_decisions`` for real, run it to completion, and
     return ``(state, failure_json, decisions_count, outbox_count)``.
     """
     decision_clock = decision_clock or (SESSION + "T21:00:00+00:00")
+    coverage_doc = coverage_doc if coverage_doc is not None else _finality_coverage()
     root = tmp_path / tag
     root.mkdir()
     store_root = root / "prod"
@@ -1130,17 +1167,18 @@ def _run_decisions_with_derived_evidence(tmp_path, tag, score_doc, finality, rep
             byte_size=fixture.stat().st_size),))
         score_ref = _publish(store, conn, clock, score_doc, "legacy_action.v1.0")
         finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+        coverage_ref = _publish(store, conn, clock, coverage_doc, "finality_coverage.v1.0")
 
         plan_bytes, evidence_bytes = derive(score_doc, score_ref, finality, finality_ref, replay_doc,
-                                            session=SESSION, deployment=deployment,
+                                            coverage_doc, session=SESSION, deployment=deployment,
                                             decision_clock=decision_clock)
         plan_ref = store.publish_bytes(plan_bytes, schema_ref="decision_plan.v1.0")
         evidence_ref = store.publish_bytes(evidence_bytes, schema_ref="decision_evidence.v1.0")
 
         score_job = _succeed_parent(conn, clock, setup, key=tag + "-score",
                                     output_name="legacy_score", ref=score_ref)
-        finality_job = _succeed_parent(conn, clock, setup, key=tag + "-finality",
-                                       output_name="legacy_finality", ref=finality_ref)
+        finality_job = _succeed_finality_parent(conn, clock, setup, key=tag + "-finality",
+                                                finality_ref=finality_ref, coverage_ref=coverage_ref)
         evidence_job = _succeed_evidence_parent(conn, clock, setup, key=tag + "-evidence",
                                                 plan_ref=plan_ref, evidence_ref=evidence_ref)
 
@@ -1223,6 +1261,87 @@ def test_planted_defect_replay_missing_an_eligible_row_is_refused(tmp_path):
     assert outbox == 0
 
 
+def test_planted_defect_finality_coverage_missing_a_ticker_is_refused(tmp_path):
+    """A finality_coverage.json that never names FAKE -- the ``covered_tickers``
+    subset check in ``decision_validation._validate_finality_receipt`` refuses
+    the whole candidate set, same as before, but now fed from the real
+    coverage document rather than the score rows."""
+    score, finality = _score_and_finality()
+    score_doc = {"rows": [score]}
+    key = "FAKE|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [score], "replayed_rows": [score],
+                  "source_rows_hash": content_hash([score]),
+                  "replayed_rows_hash": content_hash([score]), "findings": []}
+    coverage_doc = _finality_coverage(covered_tickers=())
+    state, failure, decisions, outbox = _run_decisions_with_derived_evidence(
+        tmp_path, "coverage-missing", score_doc, finality, replay_doc, coverage_doc=coverage_doc)
+    assert state == "failed", failure
+    assert "VALIDATION_FAILED" in failure
+    assert decisions == 0
+    assert outbox == 0
+
+
+def test_finality_coverage_document_for_a_different_session_is_refused():
+    """``derive()`` itself refuses a coverage document dated for another
+    session -- a pure, in-process check, not something that needs a real
+    subprocess to observe."""
+    score, finality = _score_and_finality()
+    score_doc = {"rows": [score]}
+    key = "FAKE|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [score], "replayed_rows": [score],
+                  "source_rows_hash": content_hash([score]),
+                  "replayed_rows_hash": content_hash([score]), "findings": []}
+    coverage_doc = _finality_coverage(date="2026-09-11")
+    score_ref = artifact_reference(b"synthetic-score-bytes", "legacy_action.v1.0")
+    finality_ref = artifact_reference(b"synthetic-finality-bytes", "legacy_action.v1.0")
+    with pytest.raises(OpsError, match="VALIDATION_FAILED"):
+        derive(score_doc, score_ref, finality, finality_ref, replay_doc, coverage_doc,
+              session=SESSION, deployment="shadow:test-impl",
+              decision_clock=SESSION + "T21:00:00+00:00")
+
+
+def test_action_finality_writes_a_coverage_output_from_monkeypatched_frames(monkeypatch, tmp_path):
+    """In-process, no real market data: ``_action_finality`` must write a
+    SECOND output, finality_coverage.json, whose per-ticker list is computed
+    for real (through ``engine.data.finality.covered_tickers``) and differs
+    from the requested tickers when the underlying frames say so -- proving
+    this is a genuine per-ticker test, not an echo of the request.
+    """
+    import pandas as pd
+
+    from engine.data import finality as finality_module
+    from engine.v2.ops.legacy_adapter import _action_finality
+
+    class _FixedResult:
+        date = SESSION
+
+        def as_dict(self):
+            return {"date": SESSION, "is_final": True, "market_wide": True,
+                    "daily_share": 1.0, "chain_share": 1.0, "covered": 2, "tickers": 3,
+                    "detail": "final"}
+
+    daily = pd.DataFrame({"ticker": ["AAA", "BBB"], "date": [SESSION, SESSION]})
+    # BBB's chain observation is stale (not at SESSION); CCC is never carried.
+    chains = pd.DataFrame({"ticker": ["AAA", "BBB"], "obs_date": [SESSION, "2026-09-01"]})
+
+    monkeypatch.setattr(finality_module, "resolve_final_session", lambda *a, **k: _FixedResult())
+    monkeypatch.setattr(finality_module, "_market_wide_complete", lambda stamp: True)
+    monkeypatch.setattr(finality_module, "_coverage_frame",
+                        lambda table, column, stamp: daily if table == "daily_market" else chains)
+    import engine.calendar as calendar_module
+    monkeypatch.setattr(calendar_module, "trading_calendar", lambda extend_days=400: object())
+
+    result = _action_finality({"session": SESSION, "tickers": ("AAA", "BBB", "CCC")}, tmp_path)
+    assert result["path"] == "finality.json"
+    assert (tmp_path / "finality.json").is_file()
+    coverage = json.loads((tmp_path / "finality_coverage.json").read_text())
+    assert coverage == {"schema_version": "finality_coverage.v1.0", "date": SESSION,
+                        "covered_tickers": ["AAA"]}
+    assert coverage["covered_tickers"] != sorted(("AAA", "BBB", "CCC"))
+
+
 def test_coordinator_rederivation_catches_tampered_worker_evidence_bytes(tmp_path):
     """Even if a worker's own output looks plausible, the coordinator
     independently re-derives from the recorded bindings and refuses a
@@ -1240,6 +1359,7 @@ def test_coordinator_rederivation_catches_tampered_worker_evidence_bytes(tmp_pat
         key = "FAKE|TWIN-P|" + SESSION
         score_ref = _publish(store, conn, clock, {"rows": [score]}, "legacy_action.v1.0")
         finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+        coverage_ref = _publish(store, conn, clock, _finality_coverage(), "finality_coverage.v1.0")
         replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
                       "population": [key], "source_rows": [score], "replayed_rows": [score],
                       "source_rows_hash": content_hash([score]),
@@ -1248,8 +1368,8 @@ def test_coordinator_rederivation_catches_tampered_worker_evidence_bytes(tmp_pat
 
         score_job = _succeed_parent(conn, clock, setup, key="tp-score",
                                     output_name="legacy_score", ref=score_ref)
-        finality_job = _succeed_parent(conn, clock, setup, key="tp-finality",
-                                       output_name="legacy_finality", ref=finality_ref)
+        finality_job = _succeed_finality_parent(conn, clock, setup, key="tp-finality",
+                                                finality_ref=finality_ref, coverage_ref=coverage_ref)
         replay_job = _succeed_parent(conn, clock, setup, key="tp-replay",
                                      output_name="legacy_decision_replay", ref=replay_ref)
 
@@ -1280,6 +1400,111 @@ def test_coordinator_rederivation_catches_tampered_worker_evidence_bytes(tmp_pat
 
 
 # --------------------------------------------------------------------------
+# review fix #2: a no-entry night must succeed with zero decisions -- v1
+# renders every night, and projection depends on decision_commit.
+# --------------------------------------------------------------------------
+
+
+def test_no_entry_night_commits_zero_decisions_and_still_enqueues_release(tmp_path):
+    """No score row is entry-dated for SESSION; the plan's expected_population
+    is genuinely empty, and legacy_decisions must SUCCEED with zero
+    decisions while still enqueueing export/release_intent -- the board
+    still renders on a no-entry night."""
+    forward = {"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-15",
+              "as_of": "2026-09-14", "entry_date": "2026-09-14", "evidence_cutoff": "2026-09-14",
+              "strike": 100.0, "expiry": "2026-10-16", "session": "AMC",
+              "snapshot_hash": "sha256:" + "a" * 64}
+    score_doc = {"rows": [forward]}
+    finality = {"date": SESSION, "is_final": True, "market_wide": True,
+                "daily_share": 1.0, "chain_share": 1.0, "covered": 1}
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [], "source_rows": [], "replayed_rows": [],
+                  "source_rows_hash": content_hash([]), "replayed_rows_hash": content_hash([]),
+                  "findings": []}
+    coverage_doc = _finality_coverage(covered_tickers=("FAKE",))
+    state, failure, decisions, outbox = _run_decisions_with_derived_evidence(
+        tmp_path, "no-entry", score_doc, finality, replay_doc, coverage_doc=coverage_doc)
+    assert state == "succeeded", failure
+    assert decisions == 0
+    assert outbox == 2
+
+
+def _empty_plan_and_evidence(score_doc, finality, coverage_doc):
+    """A hand-built (never through ``derive()``) plan/evidence pair claiming
+    an empty population, for the two adversarial pure tests below -- neither
+    scenario is something an honest ``derive()`` call would ever produce."""
+    plan = {"schema_version": "decision_plan.v1.0", "session": SESSION,
+            "deployment": "shadow:test-impl", "decision_clock": SESSION + "T21:00:00+00:00",
+            "expected_population": []}
+    score_ref = artifact_reference(json.dumps(score_doc, sort_keys=True).encode(), "legacy_action.v1.0")
+    finality_ref = artifact_reference(json.dumps(finality, sort_keys=True).encode(), "legacy_action.v1.0")
+    plan_ref = artifact_reference(json.dumps(plan, sort_keys=True).encode(), "decision_plan.v1.0")
+    common = {"schema_version": "decision_receipt.v1.0",
+              "score_artifact_id": score_ref.artifact_id, "score_content_hash": score_ref.content_hash,
+              "finality_artifact_id": finality_ref.artifact_id,
+              "finality_content_hash": finality_ref.content_hash,
+              "plan_artifact_id": plan_ref.artifact_id, "plan_content_hash": plan_ref.content_hash,
+              "session": SESSION, "deployment": plan["deployment"],
+              "decision_clock": plan["decision_clock"], "expected_population": []}
+    receipts = {kind: dict(common, kind=kind) for kind in
+               ("causality", "coverage", "finality", "selection", "replay")}
+    receipts["causality"]["observed_cutoffs"] = {population_key(row): row.get("evidence_cutoff")
+                                                 for row in score_doc["rows"]}
+    receipts["coverage"]["observed_population"] = []
+    receipts["finality"].update(observed_finality_hash=content_hash(finality),
+                                covered_tickers=coverage_doc["covered_tickers"])
+    receipts["selection"]["eligible_candidate_keys"] = []
+    receipts["replay"].update(source_rows=[], replayed_rows=[], source_rows_hash=content_hash([]),
+                              replayed_rows_hash=content_hash([]), findings=[])
+    evidence = {"schema_version": "decision_evidence.v1.0", "receipts": receipts}
+    bindings = {"score": {"artifact_id": score_ref.artifact_id, "content_hash": score_ref.content_hash},
+               "finality": {"artifact_id": finality_ref.artifact_id,
+                           "content_hash": finality_ref.content_hash},
+               "plan": {"artifact_id": plan_ref.artifact_id, "content_hash": plan_ref.content_hash},
+               "evidence": {"artifact_id": "art_synthetic_evidence", "content_hash": "sha256:" + "0" * 64}}
+    return plan, evidence, bindings
+
+
+def test_empty_plan_population_with_eligible_score_rows_is_refused():
+    """The plan and its (hand-built) evidence agree on zero eligible rows,
+    but the bound score document actually has one for SESSION -- the
+    validator's own recomputation (not a trust of the evidence receipt)
+    catches the understated plan."""
+    score, finality = _score_and_finality()
+    score_doc = {"rows": [score]}
+    coverage_doc = _finality_coverage()
+    plan, evidence, bindings = _empty_plan_and_evidence(score_doc, finality, coverage_doc)
+    with pytest.raises(OpsError, match="VALIDATION_FAILED") as excinfo:
+        validate([], score=score_doc, finality=finality, plan=plan, evidence=evidence, bindings=bindings)
+    findings = excinfo.value.problem.details["findings"]
+    assert any(item["reason"] == "eligible_rows_exist" for item in findings)
+
+
+def test_empty_population_with_one_candidate_is_refused():
+    """The plan and score genuinely agree on zero eligible rows, but a
+    candidate is presented anyway -- refused by the existing population-
+    mismatch check, unchanged by review fix #2."""
+    forward = {"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-20",
+              "as_of": "2026-09-19", "entry_date": "2026-09-19", "evidence_cutoff": "2026-09-19",
+              "strike": 100.0, "expiry": "2026-10-16", "session": "AMC",
+              "snapshot_hash": "sha256:" + "a" * 64}
+    score_doc = {"rows": [forward]}
+    finality = {"date": SESSION, "is_final": True, "market_wide": True,
+                "daily_share": 1.0, "chain_share": 1.0, "covered": 1}
+    coverage_doc = _finality_coverage()
+    plan, evidence, bindings = _empty_plan_and_evidence(score_doc, finality, coverage_doc)
+    stray = {"row_id": "stray-1", "event_id": "evt-1", "ticker": "FAKE", "strategy": "TWIN-P",
+            "event_date": SESSION, "as_of": SESSION, "written_at": plan["decision_clock"],
+            "decision_ts": plan["decision_clock"], "score": {}, "snapshot_hash": "sha256:" + "b" * 64,
+            "finality": finality}
+    with pytest.raises(OpsError, match="VALIDATION_FAILED") as excinfo:
+        validate([stray], score=score_doc, finality=finality, plan=plan, evidence=evidence,
+                bindings=bindings)
+    findings = excinfo.value.problem.details["findings"]
+    assert any(item["reason"] == "expected_population_mismatch" for item in findings)
+
+
+# --------------------------------------------------------------------------
 # DAG shape: decision_evidence wired between decision_replay and
 # decision_commit; settlement stays independent of both.
 # --------------------------------------------------------------------------
@@ -1302,7 +1527,8 @@ def test_decision_evidence_stage_wired_with_parents_and_bindings():
     assert set(evidence.job.dependency_job_ids) == {score_id, finality_id, replay_id}
     assert evidence.job.parameters["input_bindings"] == {
         "score.json": score_id + "#legacy_score", "finality.json": finality_id + "#legacy_finality",
-        "replay.json": replay_id + "#legacy_decision_replay"}
+        "replay.json": replay_id + "#legacy_decision_replay",
+        "finality_coverage.json": finality_id + "#legacy_finality_coverage"}
     assert evidence.job.parameters["deployment"] == "shadow:" + plan["implementation_ref"]
     assert evidence.job.parameters["decision_clock"] == plan["decision_clock"]
 

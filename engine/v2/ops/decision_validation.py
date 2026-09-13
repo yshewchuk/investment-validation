@@ -30,12 +30,23 @@ def _add(findings, field, reason):
 
 
 def _validate_plan(plan, findings):
+    """Return ``plan.expected_population`` as a list, or ``None`` if the plan
+    does not even carry a well-typed one.
+
+    An empty list is a legitimate population (a no-entry night, review fix
+    #2) — only an ABSENT or wrongly-typed ``expected_population`` is
+    "missing"; every other required plan field still may not be empty.
+    """
     if plan.get("schema_version") != "decision_plan.v1.0":
         _add(findings, "plan.schema_version", "unsupported")
-    for field in ("session", "deployment", "decision_clock", "expected_population"):
+    for field in ("session", "deployment", "decision_clock"):
         if not plan.get(field):
             _add(findings, "plan." + field, "missing")
-    expected = list(plan.get("expected_population") or ())
+    population = plan.get("expected_population")
+    if not isinstance(population, list) or not all(isinstance(item, str) for item in population):
+        _add(findings, "plan.expected_population", "missing")
+        population = None
+    expected = list(population or ())
     if len(expected) != len(set(expected)):
         _add(findings, "plan.expected_population", "duplicate")
     if _stamp(plan.get("decision_clock")) is None:
@@ -83,6 +94,23 @@ def _validate_receipt_bindings(receipts, bindings, plan, findings):
                 _add(findings, "evidence." + kind + "." + field, "binding_mismatch")
 
 
+def _validate_no_eligible_rows(score, plan, findings):
+    """Review fix #2: an empty ``expected_population`` is trusted only after
+    independently recomputing the decision-eligible population from the
+    BOUND score document and finding it genuinely empty too — never merely
+    because the plan and the evidence receipt happen to agree with each
+    other on an unverified claim.
+    """
+    from engine.v2.ops.decision_replay import decision_population
+    try:
+        population = decision_population(score, plan.get("session"))
+    except Exception:
+        _add(findings, "plan.expected_population", "population_recompute_failed")
+        return
+    if population:
+        _add(findings, "plan.expected_population", "eligible_rows_exist")
+
+
 def _validate_rows(candidates, score, finality, plan, expected, findings):
     score_rows = score.get("rows") if isinstance(score, dict) else None
     if not isinstance(score_rows, list) or not all(isinstance(row, dict) for row in score_rows):
@@ -92,6 +120,8 @@ def _validate_rows(candidates, score, finality, plan, expected, findings):
     actual = [population_key(row) for row in candidates]
     if len(source) != len(score_rows) or set(actual) != set(expected) or len(actual) != len(set(actual)):
         _add(findings, "candidates.population", "expected_population_mismatch")
+    if not expected:
+        _validate_no_eligible_rows(score, plan, findings)
     for index, row in enumerate(candidates):
         _validate_candidate(row, index, source.get(population_key(row)), finality, plan, findings)
     return source, actual

@@ -23,7 +23,7 @@ from engine.data import fetch, store
 
 __all__ = [
     "MIN_FINAL_DAILY_SHARE", "MIN_FINAL_CHAIN_SHARE", "SessionFinality",
-    "session_finality", "resolve_final_session",
+    "session_finality", "resolve_final_session", "covered_tickers",
 ]
 
 # These match the existing nightly coverage floor. A lower number would permit
@@ -177,6 +177,27 @@ def session_finality(date, tickers: Iterable[str], *, frames=None) -> SessionFin
         tickers=len(wanted),
         covered=int(covered),
     )
+
+
+def covered_tickers(date, tickers: Iterable[str]) -> list[str]:
+    """The subset of ``tickers`` individually final at ``date``.
+
+    The same finality test :func:`session_finality` applies market-wide,
+    evaluated one name at a time — a ticker is covered iff
+    ``session_finality(date, [ticker], frames=...).is_final`` for it. The
+    ``daily_market``/``option_chains`` coverage frames are loaded once (the
+    same cost-saving :func:`resolve_final_session` uses for its own
+    multi-session walk) and reused for every ticker, rather than re-read once
+    per name.
+    """
+    stamp = pd.Timestamp(date).normalize()
+    frames = {
+        "daily_market": _coverage_frame("daily_market", "date", stamp),
+        "option_chains": _coverage_frame("option_chains", "obs_date", stamp),
+    }
+    wanted = sorted({str(t) for t in tickers if t is not None and str(t)})
+    return [ticker for ticker in wanted
+            if session_finality(stamp, [ticker], frames=frames).is_final]
 
 
 def resolve_final_session(

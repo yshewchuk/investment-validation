@@ -2,8 +2,17 @@
 """Per-package v2 line coverage ratchet. Measurement never changes the baseline.
 
 Fixed command: coverage run --source=engine/v2 -m pytest
-tests/test_v2_ops_*.py tests/test_diagnosis_comparator.py.
+tests/test_v2_ops_*.py tests/test_v2_data_*.py tests/test_diagnosis_comparator.py.
 The exact sorted test-file list is recorded in every measurement.
+
+``SUITE_VERSION`` bumped to v2 (P2-5/B1c review fix #3): the fixed suite
+covered only ``tests/test_v2_ops_*.py`` plus one diagnosis file, so every
+``engine.v2.data`` module merged since Phase 2 opened lowered that package's
+measured percentage without a single line of it actually going untested --
+its own ``tests/test_v2_data_*.py`` files simply were never run here. Widening
+the suite is a real behavior change (the measured numbers move), which is
+exactly why the version is part of ``compare``'s drift check: a v1 baseline
+can never be compared against a v2 measurement by accident.
 """
 from __future__ import annotations
 
@@ -22,11 +31,12 @@ sys.path.insert(0, str(ROOT))
 from checks.layer_map import PACKAGES, package_of
 
 BASELINE = ROOT / "checks/rearchitecture_phase1_coverage_baseline.json"
-SUITE_VERSION = "phase1_coverage_suite.v1"
+SUITE_VERSION = "phase1_coverage_suite.v2"
 
 
 def suite(root=ROOT):
     return sorted([p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_ops_*.py")]
+                  + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
                   + ["tests/test_diagnosis_comparator.py"])
 
 
