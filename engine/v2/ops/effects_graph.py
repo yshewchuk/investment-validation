@@ -171,11 +171,15 @@ def _gate_dict(store, document):
 
 
 def _decision_gate(conn, store, scope, session, binding_hash):
-    # Passed once decisions have been committed for this scope at all — a
-    # release may legitimately bundle a stable, already-committed decisions
-    # state rather than only ever the same-session one.
+    # Passed only when the ("nightly", scope, "decisions") watermark shows
+    # occurrence == this release's own session — the exact session decision
+    # commit's watermark(...) call wrote, whether or not it carried any
+    # candidates: a no-entry night still commits (zero decisions, export and
+    # release_intent still enqueued) and still advances this watermark, so it
+    # still passes. An earlier (or absent) watermark means this release does
+    # not speak for its own session's decisions and must be refused.
     row = _watermark_row(conn, scope, "decisions")
-    passed = row is not None
+    passed = row is not None and row["occurrence"] == session
     document = {"schema_version": "decision_gate.v1.0", "kind": "decision",
                 "status": "passed" if passed else "failed", "input_hash": binding_hash,
                 "release_key": row["receipt_ref"] if row else None}

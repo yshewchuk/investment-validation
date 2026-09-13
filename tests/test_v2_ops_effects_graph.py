@@ -48,6 +48,7 @@ from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.outbox import enqueue, watermark
 from engine.v2.ops.publication import current as release_current
+from engine.v2.ops.publication import publish_local
 from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
@@ -388,10 +389,18 @@ def _bundle_tar(*, secret=False):
 
 
 def _publication_setup(conn, clock, supervisor, store, *, scope, session,
-                       selfcheck="ok", engineering="ok", secret=False):
+                       selfcheck="ok", engineering="ok", secret=False,
+                       decisions_session=None, no_entry=False):
     """A publication job with real, resolvable job-id bindings to a fake
-    render bundle plus fake selfcheck/engineering-gate parent outputs."""
-    _seed_decisions(conn, clock, scope, session, predictions=[_row("evt-1", "pred")])
+    render bundle plus fake selfcheck/engineering-gate parent outputs.
+
+    ``decisions_session`` lets the decisions watermark be seeded at a
+    session other than the release's own (for the earlier-session refusal
+    case); ``no_entry`` seeds no rows at all but still advances the
+    watermark, mirroring a genuine no-entry night's commit.
+    """
+    _seed_decisions(conn, clock, scope, decisions_session or session,
+                    predictions=() if no_entry else [_row("evt-1", "pred")])
     tag = scope + ":" + session
     bundle_ref = _publish_raw(store, conn, clock, _bundle_tar(secret=secret), "legacy_action.v1.0")
     projection_job = _succeed_parent(conn, clock, supervisor, key="proj-" + tag,
@@ -479,18 +488,66 @@ def test_publication_refused_on_stale_fence(tmp_path):
 
 
 def test_publication_older_occurrence_cannot_replace_newer(tmp_path):
+    """Publish an older session first (a real, valid, fully published
+    release, with its own decisions watermark matching at the time), then a
+    newer one; the older release's own claim is still fenced and can never
+    move CURRENT again once a newer occurrence is already published."""
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
         scope = "shadow"
+        older = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-10")
+        publication_effect(conn, store, older, root, REPO, clock=clock)
+        target = root / "releases" / scope
+
         newer = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-12")
         publication_effect(conn, store, newer, root, REPO, clock=clock)
-        target = root / "releases" / scope
         pointer_after_newer = release_current(target)
 
-        older = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-10")
+        older_release_id = "rel" + content_hash(["shadow", "2026-09-10"]).split(":")[1][:24]
         with pytest.raises(OpsError, match="STALE_EXPECTATION"):
-            publication_effect(conn, store, older, root, REPO, clock=clock)
+            publish_local(conn, older, store, target, older_release_id, scope=scope, clock=clock)
         assert release_current(target) == pointer_after_newer
+    finally:
+        conn.close()
+
+
+def test_publication_refused_when_decisions_watermark_is_an_earlier_session(tmp_path):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session="2026-09-12",
+                                   decisions_session="2026-09-11")
+        target = root / "releases" / scope
+        with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
+            publication_effect(conn, store, claim, root, REPO, clock=clock)
+        assert release_current(target) is None
+    finally:
+        conn.close()
+
+
+def test_publication_passes_at_the_correct_session(tmp_path):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION,
+                                   decisions_session=SESSION)
+        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        assert release_current(root / "releases" / scope) is not None
+    finally:
+        conn.close()
+
+
+def test_publication_passes_on_a_no_entry_night(tmp_path):
+    """Zero decision rows still commits (export/release_intent still
+    enqueued) and still advances the decisions watermark for its session —
+    the decision gate cares about the watermark, never row count."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION,
+                                   no_entry=True)
+        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        assert release_current(root / "releases" / scope) is not None
     finally:
         conn.close()
 
