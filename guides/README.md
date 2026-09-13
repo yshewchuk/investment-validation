@@ -56,6 +56,9 @@ Implementation plans, one per migration phase of
 - [Phase 2 — Data Access](rearchitecture_phase2_data_access.md): immutable
   dataset/snapshot manifests, bounded Arrow reads, exact event/chain access,
   legacy scoring adapters, and atomic rebuild/rollback acceptance gates.
+- [Rearchitecture tech debt](rearchitecture_tech_debt.md): nice-to-haves
+  deferred until after Phase 6. Anything a later phase needs stays in its
+  own phase instead.
 
 These are design proposals. They describe explicit future changes to the
 runtime choices in convention 7 below, while retaining the research and safety
