@@ -32,8 +32,10 @@ underscore convention, and an import of a name absent from this list fails
 | `manifests` | `table_contract_hash` — a `TableContract`'s `definition_hash`: `foundation.content_hash` of its canonical payload with `definition_hash` itself excluded (phase-2 guide §5.1). |
 | `legacy_adapter` | `build_legacy_mapping`, `LegacyMappingError` — the versioned `legacy_table_mapping.v1.0` document mapping the six Tier-2 tables, the feature panel, and Tier-4 forecasts to `TableContract`s, plus the separately pinned (non-queryable) legacy `SNAPSHOT` compatibility metadata. This is the package's only module importing legacy code (phase-2 guide §4); its reviewed per-column facts live in `legacy_annotations.json` beside it. |
 | `schema` | `OWNER`, `MIGRATIONS` — the data-owner catalog schema (phase-2 guide §6) as plain `(version, name, statements)` tuples, never `engine.v2.ops.migrations.Migration` objects. `engine/v2/ops/bootstrap.py` is the only consumer: it wraps these into `Migration`s and applies them as migration owner `"data"`, colocated in the same SQLite file as the `ops`/`ledger` owners (phase-2 guide §3.3). This module never imports `engine.v2.ops`. |
+| `objects` | `publish_legacy_file`, `inspect_fragment`, `FragmentInspection` — publish one legacy Parquet file as an immutable, content-addressed object via `foundation.ArtifactStore` (never a rename, symlink or hard link), then stream it in bounded Arrow batches into a fragment candidate: row count, primary-key and time bounds, byte hash, and a streaming `logical_rows.v1` content hash, validated against a `TableContract`. No catalog insert, no fragment/dataset ID, no manifest — that is a later slice (phase-2 guide §7.2). |
+| `errors` | `DataError` — the `Problem` envelope every refusal in this package raises, built only from `contracts.data.DATA_FAILURE_CODES` (category and retryability come from that table, never guessed at a call site). Messages are redacted: no legacy filesystem path, no row value. |
 
-<!-- public-interface: loads_document, decode_document, table_contract_hash, build_legacy_mapping, LegacyMappingError, OWNER, MIGRATIONS -->
+<!-- public-interface: loads_document, decode_document, table_contract_hash, build_legacy_mapping, LegacyMappingError, OWNER, MIGRATIONS, publish_legacy_file, inspect_fragment, FragmentInspection, DataError -->
 
 ## Consumers
 
