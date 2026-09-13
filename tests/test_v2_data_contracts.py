@@ -191,7 +191,8 @@ def _formats_declared_in_documents_py() -> set[tuple[str, str]]:
 def test_every_hash_and_time_field_is_in_the_format_table():
     declared = _formats_declared_in_documents_py()
     checked_names = ("_hash", "_at")
-    checked_exact = {"deadline", "observation_ceiling", "known_from"}
+    checked_exact = {"deadline", "observation_ceiling", "known_from",
+                     "start_inclusive", "end_exclusive", "time_min", "time_max"}
     data_types = [obj for obj in vars(contracts).values()
                   if isinstance(obj, type) and dataclasses.is_dataclass(obj)
                   and obj.__module__ == "engine.v2.contracts.data"]
@@ -383,3 +384,62 @@ def test_query_with_neither_predicate_nor_time_bound_is_refused():
     with pytest.raises(DocumentError) as err:
         decode_document(DataQuery, doc)
     assert err.value.code == "QUERY_NOT_BOUNDED"
+
+
+def test_empty_order_by_is_refused():
+    doc = to_document(SAMPLES["DataQuery"])
+    doc["order_by"] = []
+    with pytest.raises(DocumentError) as err:
+        decode_document(DataQuery, doc)
+    assert err.value.code == "EMPTY_ORDER_BY"
+
+
+def test_bad_time_bound_string_is_refused():
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = "not-a-date"
+    with pytest.raises(DocumentError) as err:
+        decode_document(TimeInterval, doc)
+    assert err.value.code == "BAD_TIME_BOUND_FORMAT"
+
+
+def test_time_bounds_out_of_order_is_refused():
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = "2026-06-01"
+    doc["end_exclusive"] = "2026-01-01"
+    with pytest.raises(DocumentError) as err:
+        decode_document(TimeInterval, doc)
+    assert err.value.code == "TIME_BOUNDS_OUT_OF_ORDER"
+
+
+def test_mixed_date_and_timestamp_bounds_is_refused():
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = "2026-01-01"
+    doc["end_exclusive"] = TIMESTAMP
+    with pytest.raises(DocumentError) as err:
+        decode_document(TimeInterval, doc)
+    assert err.value.code == "MIXED_TIME_BOUND_KINDS"
+
+
+def test_time_interval_with_neither_bound_is_refused():
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = None
+    doc["end_exclusive"] = None
+    with pytest.raises(DocumentError) as err:
+        decode_document(TimeInterval, doc)
+    assert err.value.code == "TIME_INTERVAL_UNBOUNDED"
+
+
+def test_snapshot_ref_missing_knowledge_mode_for_a_table_is_refused():
+    doc = to_document(SAMPLES["SnapshotRef"])
+    doc["knowledge_mode_by_table"] = {}
+    with pytest.raises(DocumentError) as err:
+        decode_document(SnapshotRef, doc)
+    assert err.value.code == "TABLE_KEYS_MISMATCH"
+
+
+def test_snapshot_import_request_extra_source_table_is_refused():
+    doc = to_document(SAMPLES["SnapshotImportRequest"])
+    doc["table_sources"]["extra_table"] = doc["table_sources"]["securities"]
+    with pytest.raises(DocumentError) as err:
+        decode_document(SnapshotImportRequest, doc)
+    assert err.value.code == "TABLE_KEYS_MISMATCH"

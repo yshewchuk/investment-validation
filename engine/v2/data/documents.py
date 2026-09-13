@@ -66,6 +66,10 @@ _FORMATS: dict[tuple[str, str], str] = {
     ("SnapshotImportReceipt", "request_hash"): "hash",
     ("LegacyMaterializationRequest", "request_hash"): "hash",
     ("LegacyFileRef", "content_hash"): "hash",
+    ("TimeInterval", "start_inclusive"): "date_or_timestamp",
+    ("TimeInterval", "end_exclusive"): "date_or_timestamp",
+    ("FragmentRecord", "time_min"): "date_or_timestamp",
+    ("FragmentRecord", "time_max"): "date_or_timestamp",
 }
 
 
@@ -122,6 +126,12 @@ def _walk_dataclass(value: Any, doc_value: Any, path: str) -> None:
         _check_data_query(value, path)
     elif cls_name == "KeyPredicate":
         _check_key_predicate(value, path)
+    elif cls_name == "TimeInterval":
+        _check_time_interval(value, path)
+    elif cls_name == "SnapshotRef":
+        _check_snapshot_ref(value, path)
+    elif cls_name == "SnapshotImportRequest":
+        _check_snapshot_import_request(value, path)
 
 
 def _check_format(kind: str, value: Any, path: str) -> None:
@@ -132,21 +142,36 @@ def _check_format(kind: str, value: Any, path: str) -> None:
             raise DocumentError("BAD_HASH_FORMAT", path,
                                 "expected sha256: plus 64 lowercase hex characters")
     elif kind == "date":
-        if not _DATE.match(value):
+        if not (_DATE.match(value) and _is_real_date(value)):
             raise DocumentError("BAD_DATE_FORMAT", path, "expected YYYY-MM-DD")
-        _check_real_date(value, path)
     elif kind == "timestamp":
         try:
             parse_timestamp(value)
         except ValueError as exc:
             raise DocumentError("BAD_TIMESTAMP_FORMAT", path, str(exc)) from exc
+    elif kind == "date_or_timestamp":
+        if _time_bound_kind(value) is None:
+            raise DocumentError("BAD_TIME_BOUND_FORMAT", path,
+                                "expected YYYY-MM-DD or an RFC 3339 UTC timestamp")
 
 
-def _check_real_date(value: str, path: str) -> None:
+def _is_real_date(value: str) -> bool:
     try:
         datetime.date.fromisoformat(value)
-    except ValueError as exc:
-        raise DocumentError("BAD_DATE_FORMAT", path, str(exc)) from exc
+        return True
+    except ValueError:
+        return False
+
+
+def _time_bound_kind(value: str) -> str | None:
+    """"date" or "timestamp" per phase-2 guide §5.3-style bounds, else None."""
+    if _DATE.match(value) and _is_real_date(value):
+        return "date"
+    try:
+        parse_timestamp(value)
+    except ValueError:
+        return None
+    return "timestamp"
 
 
 def _check_table_contract(tc: Any, path: str) -> None:
@@ -191,9 +216,49 @@ def _check_data_query(dq: Any, path: str) -> None:
     if len(set(predicate_columns)) != len(predicate_columns):
         raise DocumentError("DUPLICATE_PREDICATE_COLUMN", f"{path}.key_filter",
                             "the same column is filtered twice")
+    if not dq.order_by:
+        raise DocumentError("EMPTY_ORDER_BY", f"{path}.order_by",
+                            "order_by must be non-empty")
+    if len(set(dq.order_by)) != len(dq.order_by):
+        raise DocumentError("DUPLICATE_ORDER_BY_COLUMN", f"{path}.order_by",
+                            "order_by must not repeat a column")
     if not dq.key_filter and dq.time_interval is None:
         raise DocumentError("QUERY_NOT_BOUNDED", path,
                             "needs at least one key predicate or a time bound")
+
+
+def _check_time_interval(ti: Any, path: str) -> None:
+    if ti.start_inclusive is None and ti.end_exclusive is None:
+        raise DocumentError("TIME_INTERVAL_UNBOUNDED", path,
+                            "needs at least one of start_inclusive/end_exclusive")
+    if ti.start_inclusive is not None and ti.end_exclusive is not None:
+        start_kind = _time_bound_kind(ti.start_inclusive)
+        end_kind = _time_bound_kind(ti.end_exclusive)
+        if start_kind != end_kind:
+            raise DocumentError("MIXED_TIME_BOUND_KINDS", path,
+                                "start_inclusive and end_exclusive must be the same kind")
+        if not ti.start_inclusive < ti.end_exclusive:
+            raise DocumentError("TIME_BOUNDS_OUT_OF_ORDER", path,
+                                "start_inclusive must be strictly before end_exclusive")
+
+
+def _check_snapshot_ref(sr: Any, path: str) -> None:
+    table_keys = set(sr.table_versions)
+    mode_keys = set(sr.knowledge_mode_by_table)
+    if table_keys != mode_keys:
+        raise DocumentError("TABLE_KEYS_MISMATCH", f"{path}.knowledge_mode_by_table",
+                            "knowledge_mode_by_table keys must equal table_versions keys")
+
+
+def _check_snapshot_import_request(req: Any, path: str) -> None:
+    key_sets = (("table_sources", set(req.table_sources)),
+                ("table_contract_refs", set(req.table_contract_refs)),
+                ("knowledge_mode_by_table", set(req.knowledge_mode_by_table)))
+    base_name, base_keys = key_sets[0]
+    for field_name, keys in key_sets[1:]:
+        if keys != base_keys:
+            raise DocumentError("TABLE_KEYS_MISMATCH", f"{path}.{field_name}",
+                                f"{field_name} keys must match {base_name} keys")
 
 
 def _check_key_predicate(kp: Any, path: str) -> None:
