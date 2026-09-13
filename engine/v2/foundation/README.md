@@ -52,11 +52,12 @@ failure rather than a stale sentence.
 - `engine/v2/diagnosis` — re-exports `canonical_json` and `content_hash`, so the
   corpus, receipts and baseline hash through the one implementation.
 
+- engine/v2/data — `DocumentError`, `from_document`, `parse_timestamp` for the strict document checks `engine.v2.foundation.typed` cannot express from annotations alone.
 - engine/v2/ops — content identity, safe artifact storage, typed decoding and clocks.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
 - engine/v2/serving — safe immutable release paths and health timestamps.
 
-<!-- consumers: engine.v2.diagnosis, engine.v2.ops, engine.v2.ledger, engine.v2.serving -->
+<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving -->
 
 ## Usage
 
