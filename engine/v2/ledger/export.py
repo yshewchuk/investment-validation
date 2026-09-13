@@ -9,14 +9,28 @@ from pathlib import Path
 from engine.v2.foundation import canonical_json, fsync_directory
 
 
-def export_generation(conn, root: Path | str, *, generation: str) -> Path:
-    """Write all prediction rows through a durable generation and switch CURRENT atomically."""
+def export_generation(conn, root: Path | str, *, generation: str, purposes=None) -> Path:
+    """Write all prediction rows through a durable generation and switch CURRENT atomically.
+
+    ``purposes``, when given, restricts the export to ``decisions`` rows whose
+    ``purpose`` column is in that set (P2-5/D20: only ``legacy_import`` and
+    ``shadow`` ever belong in a legacy-compatible export; a
+    ``research_reconstruction`` row is never a legacy row and must never
+    appear). Left ``None``, every row is exported — the pre-existing,
+    unfiltered behaviour every caller before D20 still relies on.
+    """
     if "/" in generation or generation in ("", ".", ".."):
         raise ValueError("unsafe export generation")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     destination = root / generation
-    rows = conn.execute("SELECT kind,payload_json FROM decisions ORDER BY sequence").fetchall()
+    if purposes is None:
+        rows = conn.execute("SELECT kind,payload_json FROM decisions ORDER BY sequence").fetchall()
+    else:
+        placeholders = ",".join("?" for _ in purposes)
+        rows = conn.execute(
+            "SELECT kind,payload_json FROM decisions WHERE purpose IN (" + placeholders + ") "
+            "ORDER BY sequence", tuple(purposes)).fetchall()
     grouped = defaultdict(list)
     for row in rows:
         payload = json.loads(row[1])

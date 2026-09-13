@@ -12,7 +12,8 @@ from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
-           "invoke_score_calendar", "manifest_files", "run_legacy_script"]
+           "invoke_score_calendar", "manifest_files", "run_engineering_gate",
+           "run_legacy_script", "run_security_scan", "verify_export_generation"]
 
 
 def _digest(path: Path) -> str:
@@ -495,3 +496,98 @@ def run_legacy_script(root, script, args=()):
     command = ["/usr/bin/python3", "-u", str(script_path), "--no-ledger"]
     return subprocess.run(command, cwd=base, check=False,
                           capture_output=True, text=True, timeout=3600)
+
+
+# --------------------------------------------------------------------------
+# P2-5/Task5: the effects-graph coordinator's own audited subprocess edges.
+#
+# ``checks/import_layers.py``'s ``check_runtime_edges`` allows exactly two
+# ``engine/v2/ops`` modules to call ``subprocess`` at all: this one and
+# ``executor.py``. ``engine.v2.ops.effects_graph`` needs three isolated
+# subprocess calls of its own — none of them the frozen legacy tree, but all
+# of them process boundaries a coordinator must not cross in its own
+# long-lived process (a fresh ``INVESTING_PLAN_ROOT``-scoped compatibility
+# read, and two crossings into ``checks/*``, which production code may never
+# import directly). They live here, audited, rather than adding a third
+# process owner.
+# --------------------------------------------------------------------------
+
+_VERIFY_GENERATION_SCRIPT = (
+    "import json\n"
+    "from engine import ledger\n"
+    "print(json.dumps({'predictions': len(ledger.read_predictions(resolve_supersedes=False)),\n"
+    "                   'outcomes': len(ledger.read_outcomes())}))\n"
+)
+
+
+def verify_export_generation(generation_dir, repo_root, *, timeout=120):
+    """Read one export generation back through the real compatibility reader.
+
+    ``engine.paths.ROOT`` is fixed at first import from ``INVESTING_PLAN_ROOT``,
+    so this always runs in a fresh subprocess, never the caller's own
+    long-lived process. ``generation_dir`` must directly contain
+    ``predictions/`` and/or ``outcomes/`` (an export generation's own shape);
+    a private symlinked root makes that true without copying any byte.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="ledger-export-verify-") as scratch:
+        link_root = Path(scratch) / "root"
+        link_root.mkdir()
+        os.symlink(Path(generation_dir).resolve(), link_root / "ledger")
+        env = dict(os.environ, INVESTING_PLAN_ROOT=str(link_root))
+        result = subprocess.run(["/usr/bin/python3", "-c", _VERIFY_GENERATION_SCRIPT],
+                                cwd=str(repo_root), env=env, capture_output=True, text=True,
+                                timeout=timeout)
+    return _json_stdout(result, "export generation failed the compatibility read-back")
+
+
+def run_engineering_gate(repo_root, *, timeout=600):
+    """Run the Phase 1 structural/engineering gate over ``repo_root``.
+
+    ``checks/*`` is verification tooling, never importable from
+    ``engine/v2/**`` — this is a subprocess boundary, not a Python import.
+    """
+    import subprocess
+
+    script = Path(repo_root) / "checks" / "rearchitecture_phase1_gate.py"
+    result = subprocess.run(["/usr/bin/python3", str(script)], cwd=str(repo_root),
+                            capture_output=True, text=True, timeout=timeout)
+    return _json_stdout(result, "engineering gate produced no JSON")
+
+
+_SECURITY_SCAN_SCRIPT = (
+    "import json, sys, tarfile\n"
+    "from checks.repo_hygiene import check_files, load_secrets\n"
+    "from pathlib import Path\n"
+    "bundle, repo_root = Path(sys.argv[1]), Path(sys.argv[2])\n"
+    "files = {}\n"
+    "with tarfile.open(bundle) as archive:\n"
+    "    for member in archive.getmembers():\n"
+    "        if member.isfile():\n"
+    "            files[member.name] = archive.extractfile(member).read()\n"
+    "needles = load_secrets(repo_root / '.env')\n"
+    "report = check_files(files, needles)\n"
+    "print(json.dumps({'ok': report.ok, 'checked': report.checked,\n"
+    "                   'violations': [[v.path, v.rule, v.detail] for v in report.violations]}))\n"
+)
+
+
+def run_security_scan(bundle_path, repo_root, *, timeout=120):
+    """Secret-scan a release bundle tar with ``checks.repo_hygiene``, isolated."""
+    import subprocess
+
+    result = subprocess.run(
+        ["/usr/bin/python3", "-c", _SECURITY_SCAN_SCRIPT, str(bundle_path), str(repo_root)],
+        cwd=str(repo_root), capture_output=True, text=True, timeout=timeout)
+    return _json_stdout(result, "security scan produced no JSON")
+
+
+def _json_stdout(result, message):
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        raise fail("VALIDATION_FAILED", message,
+                   details={"stderr": result.stderr[-2000:]}) from None

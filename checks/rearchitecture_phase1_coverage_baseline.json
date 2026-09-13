@@ -18,6 +18,7 @@
     "tests/test_v2_ops_critical_review.py",
     "tests/test_v2_ops_effects.py",
     "tests/test_v2_ops_effects_backup.py",
+    "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_executor_faults.py",
     "tests/test_v2_ops_foundation.py",
@@ -37,7 +38,7 @@
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_supervised_legacy.py"
   ],
-  "source_hash": "sha256:af2ee07d07a339bd4ce940bc43ef021bb8ba8cd5710d6e86c38a0372d97074d0",
+  "source_hash": "sha256:0037d86e7d4a3db1aee487cab5636e40a63e35350cbefb77c36b27d4be536cd3",
   "packages": {
     "engine.v2.contracts": {
       "executed": 593,
@@ -67,8 +68,8 @@
       "percentage": 96.36363636363636
     },
     "engine.v2.data": {
-      "executed": 944,
-      "executable": 1009,
+      "executed": 965,
+      "executable": 1027,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -83,7 +84,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 93.55797819623389
+      "percentage": 93.96299902629016
     },
     "engine.v2.features": {
       "executed": 0,
@@ -176,8 +177,8 @@
       "percentage": null
     },
     "engine.v2.ledger": {
-      "executed": 102,
-      "executable": 114,
+      "executed": 105,
+      "executable": 117,
       "files": [
         "engine/v2/ledger/__init__.py",
         "engine/v2/ledger/decisions.py",
@@ -185,7 +186,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 89.47368421052632
+      "percentage": 89.74358974358974
     },
     "engine.v2.models.training": {
       "executed": 0,
@@ -209,8 +210,8 @@
       "percentage": 85.34482758620689
     },
     "engine.v2.ops": {
-      "executed": 2960,
-      "executable": 3564,
+      "executed": 3146,
+      "executable": 3762,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -225,6 +226,7 @@
         "engine/v2/ops/decision_validation.py",
         "engine/v2/ops/diagnostics.py",
         "engine/v2/ops/discovery.py",
+        "engine/v2/ops/effects_graph.py",
         "engine/v2/ops/errors.py",
         "engine/v2/ops/executor.py",
         "engine/v2/ops/executor_cgroup.py",
@@ -258,7 +260,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 83.05274971941638
+      "percentage": 83.62573099415205
     },
     "engine.v2.dashboard": {
       "executed": 0,

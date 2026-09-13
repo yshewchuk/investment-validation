@@ -23,6 +23,12 @@ from engine.v2.ops.decision_commit import (
 )
 from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.discovery import sample_capacity
+from engine.v2.ops.effects_graph import (
+    backup_effect,
+    engineering_gate_effect,
+    ledger_export_effect,
+    publication_effect,
+)
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.executor_watchdog import is_alive, signal_owned
 from engine.v2.ops.fingerprints import (
@@ -58,6 +64,13 @@ from engine.v2.ops.store_barrier import (
     read_set_complete,
     verified_write_in,
 )
+
+#: Kinds whose coordinator effect does real, non-idempotent catalog/outbox/
+#: filesystem work every attempt — the generic checkpoint-reuse shortcut
+#: would otherwise skip that work entirely on a cache hit (decision #1).
+_COORDINATOR_EFFECT_KINDS = frozenset({
+    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
+    "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup"})
 
 
 class Service:
@@ -140,9 +153,7 @@ class Service:
             if legacy_manifest is not None:
                 self._populate_legacy_staging(claim, legacy_manifest)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
-                    and claim.spec.kind not in {
-                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
-                    "decision_evidence"}:
+                    and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
                 cached = self._reuse_staged_checkpoint(claim)
                 if cached:
                     return
@@ -267,9 +278,7 @@ class Service:
             record_measurement(self.conn, claim.attempt_id, current_bytes=0,
                                peak_bytes=running.peak, clock=self.clock)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
-                    and claim.spec.kind not in {
-                    "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
-                    "decision_evidence"}:
+                    and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
                 schema = outputs[0]["schema"]
                 # The attempt already staged from these exact resolved bindings
                 # (recorded at launch); the checkpoint's identity must match.
@@ -298,9 +307,9 @@ class Service:
                 refs = [(o["name"], self.store.publish_candidate(
                     claim.attempt_id, o["path"], schema_ref=o["schema"],
                     max_bytes=claim.resources.scratch_limit_bytes)) for o in outputs]
-            effect = self._coordinator_effect(claim, refs)
+            effect, extra_refs = self._coordinator_effect(claim, refs)
             def effects(conn):
-                for name, ref in refs:
+                for name, ref in (*refs, *extra_refs):
                     register_artifact(conn, ref, claim.attempt_id, self.clock)
                     conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
                                  (claim.attempt_id, name, ref.artifact_id))
@@ -318,13 +327,21 @@ class Service:
                            Outcome(False, "verified_dead", status["exit_code"], problem), clock=self.clock)
 
     def _coordinator_effect(self, claim, refs):
-        """Validate effect candidates before the short fenced commit transaction."""
+        """Validate effect candidates before the short fenced commit transaction.
+
+        Returns ``(effect_fn_or_None, extra_refs)``: ``effect_fn`` runs inside
+        the caller's own fenced ``commit_attempt`` transaction (or is
+        ``None``), and ``extra_refs`` are additional ``(name, ArtifactRef)``
+        outputs the coordinator itself produced — beyond the worker's own
+        ``refs`` — to register and record as this attempt's outputs (P2-5/
+        Task5: ``ledger_export``'s tar, ``engineering_gate``'s rows).
+        """
         if claim.spec.kind == "legacy_decisions":
             candidate_ref = _named_ref(refs, "legacy_decisions")
             candidates, context = validated_decision_candidate(
                 self.conn, self.store, claim, candidate_ref)
-            return lambda conn: commit_decisions_in_transaction(
-                conn, claim, candidates, context, clock=self.clock)
+            return (lambda conn: commit_decisions_in_transaction(
+                conn, claim, candidates, context, clock=self.clock)), ()
         if claim.spec.kind == "legacy_settlement":
             candidate_ref = _named_ref(refs, "legacy_settlement")
             document = json.loads(self.store.read_verified(candidate_ref))
@@ -332,12 +349,23 @@ class Service:
             if not isinstance(rows, list):
                 raise OpsError(make_problem("VALIDATION_FAILED",
                                             "settlement candidate artifact has no rows"))
-            return lambda conn: import_settlement_candidates_in_transaction(
-                conn, claim, candidate_ref, rows, clock=self.clock)
+            return (lambda conn: import_settlement_candidates_in_transaction(
+                conn, claim, candidate_ref, rows, clock=self.clock)), ()
         if claim.spec.kind == "decision_evidence":
             _verify_decision_evidence(self.conn, self.store, claim, refs)
-            return None
-        return None
+            return None, ()
+        if claim.spec.kind == "ledger_export":
+            return ledger_export_effect(self.conn, self.store, claim, self.root, self.code_source,
+                                        clock=self.clock)
+        if claim.spec.kind == "engineering_gate":
+            return engineering_gate_effect(self.conn, self.store, claim, self.code_source,
+                                           clock=self.clock)
+        if claim.spec.kind == "publication":
+            return publication_effect(self.conn, self.store, claim, self.root, self.code_source,
+                                      clock=self.clock)
+        if claim.spec.kind == "backup":
+            return backup_effect(self.conn, self.store, claim, self.root, clock=self.clock)
+        return None, ()
 
     def close(self):
         for running in self.running.values():

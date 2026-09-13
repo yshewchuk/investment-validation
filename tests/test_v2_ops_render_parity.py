@@ -449,11 +449,16 @@ def test_render_job_binds_finality_score_and_model_evidence_as_job_outputs():
     requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026)
     render_request = next(r for r in requests if r.job.kind == "legacy_render")
     bindings = render_request.job.parameters["input_bindings"]
-    assert set(bindings) == {"score.json", "model_evidence.json", "finality.json"}
+    # P2-5/Task5: the export stage is now wired between decision commit and
+    # projection (guide §9.4 item 3), so render's ledger generation is the
+    # verified ``ledger_export`` output, never a staged mutable ledger copy.
+    assert set(bindings) == {"score.json", "model_evidence.json", "finality.json",
+                             "ledger_generation.tar"}
     assert bindings["finality.json"].endswith("#legacy_finality")
     assert bindings["score.json"].endswith("#legacy_score")
     assert bindings["model_evidence.json"].endswith("#legacy_model_evidence")
-    assert "ledger_generation.tar" not in bindings
+    assert bindings["ledger_generation.tar"].endswith("#ledger_export")
+    assert bindings["ledger_generation.tar"].split("#")[0] in render_request.job.dependency_job_ids
 
 
 def test_every_job_binding_names_a_declared_dependency():
