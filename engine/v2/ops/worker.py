@@ -9,7 +9,19 @@ import json
 import os
 import resource
 import sys
+import traceback
 from pathlib import Path
+
+
+def _write_diagnostics(root: Path) -> None:
+    """A7: the traceback goes to a private file, never the result pipe."""
+    directory = root / "diagnostics"
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(directory / "worker.stderr", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, traceback.format_exc().encode())
+    finally:
+        os.close(fd)
 
 
 def main():
@@ -24,6 +36,10 @@ def main():
                       attempt_id=envelope["attempt_id"], fence=envelope["fence"])
         result["self_peak_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
     except BaseException:
+        try:
+            _write_diagnostics(root)
+        except OSError:
+            pass
         result = {"schema_version": "worker_result.v1.0", "failure": "WORKER_FAILED"}
     data = json.dumps(result, allow_nan=False).encode()
     os.write(fd, data + b"\n")

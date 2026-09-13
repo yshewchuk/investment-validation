@@ -144,15 +144,20 @@ def _action_score(parameters, root):
     expected = tuple(parameters.get("expected_population", ()))
     if not expected:
         raise fail("VALIDATION_FAILED", "score population must be planned before execution")
-    observed = tuple(_score_row_id(row) for row in rows)
-    if set(expected) != set(observed):
-        raise fail("VALIDATION_FAILED", "score population differs from planned inputs")
+    if len(set(expected)) != len(expected):
+        raise fail("VALIDATION_FAILED", "planned population has duplicate keys")
+    observed_keys = {_population_key(row) for row in rows}
+    missing = sorted(set(expected) - observed_keys)
+    unplanned = sorted(observed_keys - set(expected))
+    if missing or unplanned:
+        raise fail("VALIDATION_FAILED", "score population differs from planned inputs",
+                   details={"missing": missing, "unplanned": unplanned})
     ladder = strike_ladder(frame, scorer=scorer,
                            alt_strikes=int(parameters.get("alt_strikes", 1)),
                            as_of=pd.Timestamp(parameters["session"]))
     return _write_action(root, "score.json", {
         "rows": rows, "expected_population": list(expected),
-        "observed_population": list(observed), "ladder": json_safe(ladder, round_to=None),
+        "observed_population": sorted(observed_keys), "ladder": json_safe(ladder, round_to=None),
         "tickers": tickers, "analog_entry_coverage": scorer.analog_entry_coverage})
 
 
@@ -199,6 +204,12 @@ def _score_row_id(row):
                      ("ticker", "strategy", "event_date", "strike", "expiry"))
 
 
+def _population_key(row):
+    """A2: the planned population is keyed before strike/expiry are known —
+    they only exist after scoring, so the plan cannot name them in advance."""
+    return "|".join(str(row.get(key, "")) for key in ("ticker", "strategy", "event_date"))
+
+
 def _load_action_frame(root):
     import json
 
@@ -210,13 +221,22 @@ def _load_action_frame(root):
     return pd.DataFrame(json.loads(path.read_text())["rows"])
 
 
+def _load_finality(root):
+    import json
+
+    path = root / "finality.json"
+    if not path.is_file():
+        raise fail("INPUT_CHANGED", "finality artifact is missing")
+    return json.loads(path.read_text())
+
+
 def _action_decisions(parameters, root):
     from engine.ledger import build_prediction_rows
 
     frame = _load_action_frame(root)
+    finality = _load_finality(root)
     rows = build_prediction_rows(frame, as_of=parameters["session"],
-                                 finality=parameters.get("finality"),
-                                 entry_dated_only=True)
+                                 finality=finality, entry_dated_only=True)
     return _write_action(root, "decisions.json", {"rows": rows, "expected_rows": len(rows)})
 
 

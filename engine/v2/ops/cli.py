@@ -60,6 +60,8 @@ def parser():
     plan.add_argument("--spec", type=Path)
     plan.add_argument("--no-ledger", action="store_true")
     plan.add_argument("--input-manifest", type=Path)
+    plan.add_argument("--expected-population", type=Path,
+                      help="JSON file: a list of 'ticker|strategy|event_date' keys")
     plan.add_argument("--tickers", default="")
     plan.add_argument("--year-start", type=int, default=2024)
     plan.add_argument("--year-end", type=int, default=2026)
@@ -103,6 +105,44 @@ def doctor(root, clock):
     return result
 
 
+def _read_input_manifest_ref(args, root, conn, clock):
+    if not args.input_manifest:
+        return None
+    if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
+        raise fail("INPUT_CHANGED", "input manifest is missing")
+    manifest = ArtifactStore(root).publish_bytes(
+        args.input_manifest.read_bytes(), schema_ref="legacy_input_manifest.v1.0")
+    from engine.v2.ops.checkpoints import register_artifact
+    with transaction(conn):
+        register_artifact(conn, manifest, None, clock)
+    return manifest.artifact_id
+
+
+def _read_expected_population(args):
+    if not args.expected_population:
+        return ()
+    if not args.expected_population.is_file() or args.expected_population.is_symlink():
+        raise fail("INPUT_CHANGED", "expected population file is missing")
+    payload = json.loads(args.expected_population.read_text())
+    if not isinstance(payload, list) or not all(isinstance(v, str) for v in payload):
+        raise fail("INVALID_REQUEST", "expected population must be a JSON list of strings")
+    return tuple(payload)
+
+
+def _plan_command(args, root, conn, clock):
+    if args.kind == "nightly":
+        plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
+                            mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
+                            tickers=tuple(filter(None, args.tickers.split(","))),
+                            year_start=args.year_start, year_end=args.year_end,
+                            expected_population=_read_expected_population(args))
+    else:
+        from engine.v2.ops.experiments import experiment_plan
+        plan = experiment_plan(args.spec, smoke=args.no_ledger)
+    ref = save_plan(conn, root, plan, clock=clock)
+    return {"plan_ref": ref.artifact_id, "plan": plan}
+
+
 def dispatch(args, root, conn, clock):
     if args.command == "init":
         return {"initialized": True, "activation": "shadow_only"}
@@ -117,36 +157,21 @@ def dispatch(args, root, conn, clock):
         serve(service, once=args.once)
         return {"stopped": True}
     if args.command == "plan":
-        if args.kind == "nightly":
-            manifest_ref = None
-            if args.input_manifest:
-                if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
-                    raise fail("INPUT_CHANGED", "input manifest is missing")
-                manifest = ArtifactStore(root).publish_bytes(
-                    args.input_manifest.read_bytes(), schema_ref="legacy_input_manifest.v1.0")
-                from engine.v2.ops.checkpoints import register_artifact
-                with transaction(conn):
-                    register_artifact(conn, manifest, None, clock)
-                manifest_ref = manifest.artifact_id
-            plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
-                                mode=args.mode, manifest_ref=manifest_ref,
-                                tickers=tuple(filter(None, args.tickers.split(","))),
-                                year_start=args.year_start, year_end=args.year_end)
-        else:
-            from engine.v2.ops.experiments import experiment_plan
-            plan = experiment_plan(args.spec, smoke=args.no_ledger)
-        ref = save_plan(conn, root, plan, clock=clock)
-        return {"plan_ref": ref.artifact_id, "plan": plan}
+        return _plan_command(args, root, conn, clock)
     if args.command == "submit":
         store = ArtifactStore(root)
         ref = artifact(conn, store, args.plan)
         plan = json.loads(store.read_verified(ref))
         policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
         if plan.get("kind") == "nightly":
+            if plan.get("blocked_prerequisites"):
+                raise fail("INVALID_REQUEST", "nightly plan has unresolved prerequisites",
+                          details={"blocked_prerequisites": plan["blocked_prerequisites"]})
             requests = build_legacy_job_requests(
                 plan, tickers=tuple(plan.get("tickers", ())),
                 year_start=plan["year_start"], year_end=plan["year_end"],
                 input_refs=(plan["input_manifest_ref"],),
+                expected_population=tuple(plan.get("expected_population", ())),
                 include_prerequisites=False)
             receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
             return {"run_id": "run_" + plan["plan_hash"][:24],

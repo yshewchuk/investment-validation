@@ -15,6 +15,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.legacy_adapter import copy_read_set
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 GRAPH = {
     "refresh": (), "finality": ("refresh",), "features": ("finality",),
@@ -97,7 +98,8 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys):
               "tickers": tuple(sorted(tickers)), "year_start": year_start,
               "year_end": year_end, "input_bindings": {}}
     if action == "legacy_decisions":
-        params["input_bindings"] = {"score.json": keys["score"]}
+        params["input_bindings"] = {"score.json": keys["score"],
+                                     "finality.json": keys["finality"]}
     if action == "legacy_render":
         params["input_bindings"] = {"score.json": keys["score"],
                                      "model_evidence.json": keys["model_evidence"]}
@@ -116,6 +118,12 @@ def _legacy_resource(kind):
     if kind == "legacy_render":
         return "projection"
     return "validation"
+
+
+def _thread_count(kind):
+    """A3: the same formula ``_launch`` uses to verify ``environment_ref``."""
+    profile = profile_named(DEFAULT_POLICY, _legacy_resource(kind))
+    return profile.thread_count or profile.cpu_count
 
 
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
@@ -138,7 +146,7 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
               ("finality", "score", "decision_commit", "settlement",
                "model_evidence", "projection", "selfcheck"))
     parent_map = {"finality": (), "score": ("finality",),
-                  "decision_commit": ("score",), "settlement": ("finality",),
+                  "decision_commit": ("score", "finality"), "settlement": ("finality",),
                   "model_evidence": ("score",),
                   "projection": ("decision_commit", "model_evidence"),
                   "selfcheck": ("projection",)}
@@ -157,10 +165,8 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
             namespace="shadow", idempotency_key=key, principal="operator",
             job=JobSpec(kind=kind, implementation_ref=implementation_ref,
                         spec_hash=None, environment_ref=(
-                            provided_environment_ref or content_hash(environment_identity(
-                                {"legacy_score": 5, "legacy_settlement": 5,
-                                 "model_evidence": 4, "projection": 2,
-                                 "artifact_check": 1}.get(kind, 4)))),
+                            provided_environment_ref or content_hash(
+                                environment_identity(_thread_count(kind)))),
                         parameters=parameters,
                         input_refs=tuple(input_refs),
                         dependency_job_ids=tuple(keys[parent] for parent in parents),

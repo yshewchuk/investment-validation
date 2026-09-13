@@ -40,16 +40,23 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
     env.update({key: str(claim.resources.thread_count) for key in THREAD_VARIABLES})
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
+    # A7: raw stderr goes to a private per-attempt file, never DEVNULL and
+    # never the result pipe — a crash is otherwise a bare WORKER_FAILED.
+    diagnostics = staging / "diagnostics"
+    ensure_directory(diagnostics)
+    stderr_fd = os.open(diagnostics / "worker.stderr",
+                        os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         child = subprocess.Popen([sys.executable, "-u", "-m", "engine.v2.ops.worker"],
                                  cwd=code_root, env=env, stdin=subprocess.PIPE,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=stderr_fd,
                                  pass_fds=(write_fd,), start_new_session=True)
     except BaseException:
         os.close(read_fd)
         raise
     finally:
         os.close(write_fd)
+        os.close(stderr_fd)
     try:
         identity = process_info(child.pid, boot_id)[0]
         record_launch(conn, claim.attempt_id, claim.fence, identity,
@@ -82,7 +89,7 @@ def _materialize_inputs(conn, claim, store, staging):
             row = conn.execute(
                 "SELECT ao.artifact_id FROM attempts a JOIN attempt_outputs ao "
                 "ON ao.attempt_id=a.attempt_id WHERE a.job_id=? "
-                "AND a.state=? AND (?= OR ao.name=?) "
+                "AND a.state=? AND (?='' OR ao.name=?) "
                 "ORDER BY a.attempt_number DESC LIMIT 1",
                 (dependency, "succeeded", output_name, output_name)).fetchone()
             if row is None:
