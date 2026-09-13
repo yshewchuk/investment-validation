@@ -95,11 +95,13 @@ class Repository:
         contract_ref = self._contract_ref(conn, dsv_row["contract_id"])
         records = self._records(conn, dataset_version_id, contract_ref)
         evidence = json.loads(dsv_row["evidence_json"])
+        partition_hashes = json.loads(dsv_row["partition_logical_hashes_json"])
         manifest = manifests.dataset_manifest(
             contract_ref, records, knowledge_mode=dsv_row["knowledge_mode"],
             coverage_receipt_refs=tuple(evidence["coverage_receipt_refs"]),
             availability_evidence_refs=tuple(evidence["availability_evidence_refs"]),
-            parent_dataset_version_id=dsv_row["parent_dataset_version_id"])
+            parent_dataset_version_id=dsv_row["parent_dataset_version_id"],
+            partition_logical_hashes=partition_hashes)
         ref = manifest.dataset_version_ref
         if (ref.dataset_version_id != dsv_row["dataset_version_id"]
                 or ref.manifest_hash != dsv_row["manifest_hash"]):

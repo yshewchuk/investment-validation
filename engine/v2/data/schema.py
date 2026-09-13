@@ -435,7 +435,27 @@ _V3 = (
     """ALTER TABLE data_import_receipts ADD COLUMN scope TEXT NOT NULL DEFAULT ''""",
 )
 
+
+# --------------------------------------------------------------------------
+# v4 — task 7a: data_dataset_versions.partition_logical_hashes_json (never edit v1-v3 above)
+# --------------------------------------------------------------------------
+#
+# A logical partition may now hold several ordered, non-overlapping fragments
+# (``engine/v2/data/manifests.py``'s task 7a docstring note): ``DatasetManifest
+# .partition_logical_hashes`` maps a multi-fragment partition_key to its
+# streamed ``logical_rows.v1`` hash — required for such a partition, implicit
+# (defaults to the lone fragment's own hash) for every other one. ``DEFAULT
+# '{}'`` matches the dataclass's own nullable-style default, the same way
+# v2's ``DEFAULT '[]'`` let existing fixtures keep inserting rows that never
+# mention the column, and every pre-task-7a commit decodes identically to "no
+# multi-fragment partitions".
+_V4 = (
+    """ALTER TABLE data_dataset_versions ADD COLUMN partition_logical_hashes_json TEXT NOT NULL
+    DEFAULT '{}' CHECK (json_valid(partition_logical_hashes_json)
+    AND json_type(partition_logical_hashes_json) = 'object')""",
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
-             (3, "import_receipt_scope", _V3))
+             (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4))

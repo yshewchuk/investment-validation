@@ -10,6 +10,7 @@
     "tests/test_v2_data_legacy_adapter.py",
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
+    "tests/test_v2_data_partitions.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_ops_artifacts.py",
     "tests/test_v2_ops_authority.py",
@@ -38,11 +39,11 @@
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_supervised_legacy.py"
   ],
-  "source_hash": "sha256:a5a2e7c82266a759b888cbd4cea3c9a839d417ced5e5bd9bcca8d1fa09712bc4",
+  "source_hash": "sha256:f83b21f7913e6708a845bfaa8cd71124329249f30ece74348cc80769fb9fccdd",
   "packages": {
     "engine.v2.contracts": {
-      "executed": 593,
-      "executable": 593,
+      "executed": 594,
+      "executable": 594,
       "files": [
         "engine/v2/contracts/__init__.py",
         "engine/v2/contracts/data.py",
@@ -68,8 +69,8 @@
       "percentage": 96.36363636363636
     },
     "engine.v2.data": {
-      "executed": 965,
-      "executable": 1027,
+      "executed": 1027,
+      "executable": 1091,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -84,7 +85,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 93.96299902629016
+      "percentage": 94.13382218148487
     },
     "engine.v2.features": {
       "executed": 0,

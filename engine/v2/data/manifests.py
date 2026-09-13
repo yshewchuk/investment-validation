@@ -40,10 +40,30 @@ Judgement calls recorded here (this package's own, not the guide's):
   ``objects.logical_partition_hash``: a payload/hash helper worth pinning by
   its own permutation test is worth naming.
 
+Task 7a reverses the earlier one-fragment-per-partition rule (§3.3: "a
+logical partition is the legacy table year", not a physical file): a
+partition may now hold several ordered, non-overlapping fragments. Its own
+judgement calls, layered onto the ones above:
+
+* records are ordered by ``(partition_key, primary_key_min)``;
+  ``_check_membership_order`` enforces both the across-partition order the
+  original rule already had and, new here, strict non-overlap between
+  consecutive same-partition fragments;
+* ``DatasetManifest.partition_logical_hashes`` stores exactly the caller-
+  supplied mapping, never the fully resolved one — a single-fragment
+  partition's entry stays implicit (``_resolve_partition_hashes``'s default)
+  unless a caller chooses to state it explicitly, so every dataset with no
+  multi-fragment partition keeps an empty mapping and an unchanged
+  ``logical_content_hash``;
+* the mapping is part of ``manifest_hash`` but not ``dataset_version_id``:
+  membership (which fragments) is identity; how their partition hashes were
+  supplied is provenance.
+
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 ``engine.v2.contracts``, ``engine.v2.foundation``, and this package's own
 ``errors``/``objects`` (for the ``FragmentInspection`` type built one slice
-down) — never ``engine.v2.ops`` or legacy ``engine.*``.
+down, and now ``partition_logical_hash`` for the expensive verifier) — never
+``engine.v2.ops`` or legacy ``engine.*``.
 """
 from __future__ import annotations
 
@@ -61,8 +81,8 @@ from engine.v2.contracts.data import (
     TableContractRef,
 )
 from engine.v2.data.errors import fail
-from engine.v2.data.objects import FragmentInspection
-from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
+from engine.v2.data.objects import FragmentInspection, partition_logical_hash
+from engine.v2.foundation import CONTENT_HASH_PREFIX, ArtifactStore, content_hash, to_document
 
 __all__ = [
     "DATASET_LOGICAL_ALGORITHM",
@@ -76,6 +96,7 @@ __all__ = [
     "table_contract_hash",
     "verify_dataset_manifest",
     "verify_fragment_record",
+    "verify_partition_hashes",
     "verify_snapshot_ref",
 ]
 
@@ -210,16 +231,72 @@ def _check_same_contract(contract_ref: TableContractRef, records: Sequence[Fragm
 
 
 def _check_membership_order(records: Sequence[FragmentRecord]) -> None:
-    previous: str | None = None
+    """Records are ordered by ``(partition_key, primary_key_min)`` (task brief
+    decision 1): a logical partition may now hold several fragments, so long
+    as they are consecutive in this order and each strictly follows the last
+    — ``prev.primary_key_max < next.primary_key_min`` — with no duplicate
+    boundary key, overlap, or out-of-order input. This builder never sorts
+    silently.
+    """
+    previous: FragmentRecord | None = None
     for record in records:
         if previous is not None:
-            if record.partition_key == previous:
-                raise fail("MANIFEST_CORRUPT",
-                          f"duplicate partition key {record.partition_key!r} in fragment membership")
-            if record.partition_key < previous:
+            if record.partition_key == previous.partition_key:
+                if record.primary_key_min <= previous.primary_key_max:
+                    raise fail("MANIFEST_CORRUPT",
+                              "fragment key ranges overlap or are out of order within partition "
+                              f"{record.partition_key!r}")
+            elif record.partition_key < previous.partition_key:
                 raise fail("MANIFEST_CORRUPT",
                           f"fragment membership is out of partition_key order at {record.partition_key!r}")
-        previous = record.partition_key
+        previous = record
+
+
+def _group_by_partition(records: Sequence[FragmentRecord]) -> list[tuple[str, list[FragmentRecord]]]:
+    """``records`` grouped into consecutive same-``partition_key`` runs, order
+    preserved. Never sorts or merges non-adjacent runs — pair with
+    :func:`_check_membership_order`, which is what makes "consecutive" also
+    "correct" (ascending, non-overlapping).
+    """
+    groups: list[tuple[str, list[FragmentRecord]]] = []
+    for record in records:
+        if groups and groups[-1][0] == record.partition_key:
+            groups[-1][1].append(record)
+        else:
+            groups.append((record.partition_key, [record]))
+    return groups
+
+
+def _resolve_partition_hashes(records: Sequence[FragmentRecord],
+                              partition_logical_hashes: Mapping[str, str]) -> list[tuple[str, str]]:
+    """One ``(partition_key, hash)`` pair per partition, in order (task brief
+    decision 3): a multi-fragment partition's hash must be supplied in
+    ``partition_logical_hashes``; a single-fragment partition's may be
+    omitted (defaults to that fragment's own ``logical_content_hash``) or
+    supplied, but only if it agrees. Every key in ``partition_logical_hashes``
+    must name a real partition.
+    """
+    provided = dict(partition_logical_hashes)
+    resolved: list[tuple[str, str]] = []
+    for partition_key, group in _group_by_partition(records):
+        if len(group) > 1:
+            if partition_key not in provided:
+                raise fail("MANIFEST_CORRUPT",
+                          f"partition {partition_key!r} has {len(group)} fragments but no "
+                          "partition_logical_hashes entry")
+            resolved.append((partition_key, provided.pop(partition_key)))
+        else:
+            fragment_hash = group[0].logical_content_hash
+            supplied = provided.pop(partition_key, fragment_hash)
+            if supplied != fragment_hash:
+                raise fail("MANIFEST_CORRUPT",
+                          f"partition_logical_hashes[{partition_key!r}] does not match its single "
+                          "fragment's logical_content_hash")
+            resolved.append((partition_key, supplied))
+    if provided:
+        raise fail("MANIFEST_CORRUPT",
+                  f"partition_logical_hashes has key(s) not in fragment membership: {sorted(provided)}")
+    return resolved
 
 
 def _dataset_logical_hash(contract_ref: TableContractRef,
@@ -257,22 +334,27 @@ def dataset_version_identity_payload(contract_ref: TableContractRef, fragment_id
 def dataset_manifest(contract_ref: TableContractRef, records: Sequence[FragmentRecord], *,
                      knowledge_mode: KnowledgeMode, coverage_receipt_refs: Sequence[str],
                      availability_evidence_refs: Sequence[str],
-                     parent_dataset_version_id: str | None = None) -> DatasetManifest:
+                     parent_dataset_version_id: str | None = None,
+                     partition_logical_hashes: Mapping[str, str] | None = None) -> DatasetManifest:
     """Build a complete, ordered ``DatasetManifest`` from ``records``.
 
-    ``records`` must already be in strict ascending ``partition_key`` order
-    with no duplicate — this builder never sorts silently (§6 invariant 4:
-    every dataset version is a complete logical view).
+    ``records`` must already be in strict ``(partition_key, primary_key_min)``
+    order, with consecutive same-partition fragments non-overlapping — this
+    builder never sorts silently (§6 invariant 4: every dataset version is a
+    complete logical view). ``partition_logical_hashes`` is required, with
+    every key present, for a partition holding more than one fragment; see
+    ``_resolve_partition_hashes``.
     """
     _check_same_contract(contract_ref, records)
     _check_membership_order(records)
     if knowledge_mode in ("observed", "attested_stable") and not availability_evidence_refs:
         raise fail("CONTRACT_MISMATCH",
                   f"{knowledge_mode} dataset version requires non-empty availability_evidence_refs")
+    given_hashes = dict(partition_logical_hashes or {})
+    partition_pairs = _resolve_partition_hashes(records, given_hashes)
     refs = tuple(fragment_ref(r) for r in records)
     row_count = sum(r.row_count for r in records)
-    logical_hash = _dataset_logical_hash(
-        contract_ref, [(r.partition_key, r.logical_content_hash) for r in records])
+    logical_hash = _dataset_logical_hash(contract_ref, partition_pairs)
     payload = dataset_version_identity_payload(
         contract_ref, [r.fragment_id for r in records], knowledge_mode=knowledge_mode,
         coverage_receipt_refs=coverage_receipt_refs,
@@ -285,6 +367,7 @@ def dataset_manifest(contract_ref: TableContractRef, records: Sequence[FragmentR
         parent_dataset_version_id=parent_dataset_version_id, fragment_refs=refs,
         coverage_receipt_refs=tuple(coverage_receipt_refs), knowledge_mode=knowledge_mode,
         availability_evidence_refs=tuple(availability_evidence_refs),
+        partition_logical_hashes=given_hashes,
     )
     final_ref = dataclasses.replace(version_ref, manifest_hash=_manifest_hash(manifest))
     return dataclasses.replace(manifest, dataset_version_ref=final_ref)
@@ -297,7 +380,13 @@ def _manifest_hash(manifest: DatasetManifest) -> str:
 
 
 def verify_dataset_manifest(manifest: DatasetManifest, records: Sequence[FragmentRecord]) -> None:
-    """Recompute ``manifest`` end to end against ``records``; raise on any mismatch."""
+    """Recompute ``manifest`` end to end against ``records``; raise on any mismatch.
+
+    Cheap (task brief decision 4): the dataset hash is recomputed from
+    ``manifest.partition_logical_hashes``, the stored per-partition hashes —
+    never by re-streaming an object. :func:`verify_partition_hashes` is the
+    separate, expensive check that those stored hashes are themselves right.
+    """
     contract_ref = manifest.dataset_version_ref.table_contract_ref
     _check_same_contract(contract_ref, records)
     _check_membership_order(records)
@@ -308,8 +397,8 @@ def verify_dataset_manifest(manifest: DatasetManifest, records: Sequence[Fragmen
     if manifest.row_count != row_count:
         raise fail("MANIFEST_CORRUPT",
                   "dataset row_count does not equal the sum of its fragment row counts")
-    logical_hash = _dataset_logical_hash(
-        contract_ref, [(r.partition_key, r.logical_content_hash) for r in records])
+    partition_pairs = _resolve_partition_hashes(records, manifest.partition_logical_hashes)
+    logical_hash = _dataset_logical_hash(contract_ref, partition_pairs)
     if manifest.logical_content_hash != logical_hash:
         raise fail("MANIFEST_CORRUPT", "dataset logical_content_hash does not match its fragments")
     payload = dataset_version_identity_payload(
@@ -321,6 +410,40 @@ def verify_dataset_manifest(manifest: DatasetManifest, records: Sequence[Fragmen
         raise fail("MANIFEST_CORRUPT", "dataset_version_id does not match the dataset manifest payload")
     if manifest.dataset_version_ref.manifest_hash != _manifest_hash(manifest):
         raise fail("MANIFEST_CORRUPT", "manifest_hash does not match the dataset manifest")
+
+
+def verify_partition_hashes(store: ArtifactStore | None, manifest: DatasetManifest,
+                            records: Sequence[FragmentRecord], contract: TableContract) -> None:
+    """Re-stream every multi-fragment partition's objects and recompute its
+    hash (task brief decision 4) — the expensive check ``verify_dataset_manifest``
+    deliberately does not do. A single-fragment partition needs no re-stream:
+    its hash is already re-verified byte-for-byte by ``verify_fragment_record``
+    plus the object-store hash check inside ``objects.inspect_fragment``, so
+    this only ever touches ``store`` for a partition that actually has more
+    than one fragment (this package's judgement call).
+
+    Call before a commit transaction opens (``catalog.commit_snapshot``);
+    ``Repository.resolve`` never calls this — the guide's read path stays
+    cheap, matching ``verify_dataset_manifest`` alone.
+    """
+    contract_ref = manifest.dataset_version_ref.table_contract_ref
+    _check_membership_order(records)
+    for partition_key, group in _group_by_partition(records):
+        if len(group) < 2:
+            continue
+        expected = manifest.partition_logical_hashes.get(partition_key)
+        if expected is None:
+            raise fail("MANIFEST_CORRUPT",
+                      f"partition {partition_key!r} has no stored partition_logical_hashes entry")
+        if store is None:
+            raise fail("MANIFEST_CORRUPT",
+                      f"partition {partition_key!r} has {len(group)} fragments but no store was "
+                      "given to verify its streamed hash")
+        object_refs = [r.object_ref for r in group]
+        actual = partition_logical_hash(store, object_refs, contract, contract_ref, partition_key)
+        if actual != expected:
+            raise fail("MANIFEST_CORRUPT", "partition hash does not match its streamed content",
+                      details={"partition_key": partition_key})
 
 
 # --------------------------------------------------------------------------

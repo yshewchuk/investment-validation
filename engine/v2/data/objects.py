@@ -68,6 +68,7 @@ __all__ = [
     "inspect_fragment",
     "logical_partition_hash",
     "normalize_physical_type",
+    "partition_logical_hash",
     "publish_legacy_file",
 ]
 
@@ -460,3 +461,41 @@ def logical_partition_hash(contract: TableContract, contract_ref: TableContractR
         digest.update(b"\n")
         digest.update(canonical_json(row).encode("utf-8"))
     return CONTENT_HASH_PREFIX + digest.hexdigest()
+
+
+# --------------------------------------------------------------------------
+# partition_logical_hash — several ordered fragments as one logical partition
+# --------------------------------------------------------------------------
+
+
+def partition_logical_hash(store: ArtifactStore, object_refs_in_order: list[ObjectRef],
+                           contract: TableContract, contract_ref: TableContractRef,
+                           partition_key: str, *, batch_rows: int = 65536) -> str:
+    """A logical partition may hold several ordered, non-overlapping fragments
+    (task brief decision 2): stream every one of ``object_refs_in_order`` in
+    order and hash them as if they were one file, never holding the partition
+    in memory.
+
+    Exactly one ``logical_rows.v1`` header is emitted, then every row of every
+    fragment. Strict primary-key order and uniqueness are enforced *across*
+    fragment boundaries too, by sharing one :class:`_StreamState` across every
+    fragment: the same :func:`_check_key_order` that guards one fragment in
+    :func:`inspect_fragment` also guards the seam between two fragments here,
+    since it only ever compares a row to the previous row it saw — it does
+    not know or care whether that previous row came from the same file. With
+    bounded memory, this equals :func:`logical_partition_hash` over the same
+    rows written as one file (D08); for a single-fragment partition it equals
+    that fragment's own hash.
+    """
+    state = _StreamState()
+    no_fault = lambda point: None  # noqa: E731 — streamed once per fragment, not worth a fault hook
+
+    def rows():
+        for object_ref in object_refs_in_order:
+            path = _verify_object(store, object_ref)
+            parquet_file = _open_parquet_file(path)
+            present, missing = _match_contract_columns(contract, parquet_file.schema_arrow)
+            yield from _stream_rows(parquet_file, contract, present, missing, partition_key,
+                                    batch_rows, state, no_fault)
+
+    return logical_partition_hash(contract, contract_ref, partition_key, rows())

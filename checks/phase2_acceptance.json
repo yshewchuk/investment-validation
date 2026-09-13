@@ -11,7 +11,7 @@
     },
     "D03": {
       "tier": 0,
-      "tests": ["tests/test_v2_data_manifests.py"]
+      "tests": ["tests/test_v2_data_manifests.py", "tests/test_v2_data_partitions.py"]
     },
     "D04": {
       "tier": 0,
@@ -31,7 +31,7 @@
     },
     "D08": {
       "tier": 0,
-      "tests": ["tests/test_v2_data_objects.py"]
+      "tests": ["tests/test_v2_data_objects.py", "tests/test_v2_data_partitions.py"]
     },
     "D09": {
       "tier": 1,
