@@ -26,9 +26,11 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+| Module | Names |
+|---|---|
+| `documents` | `loads_document`, `decode_document` — strict decoding of `engine.v2.contracts.data` documents, beyond what `engine.v2.foundation.typed` can express from annotations alone. |
 
-<!-- public-interface: none -->
+<!-- public-interface: loads_document, decode_document -->
 
 ## Consumers
 
@@ -42,10 +44,15 @@ _Nothing yet — no package imports this one. The first importer is added here i
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+```python
+from engine.v2.contracts import EventRef
+from engine.v2.data import decode_document, loads_document
+from engine.v2.foundation import to_document, canonical_json
+
+ref = EventRef(event_id="evt_1", calendar_revision="cal.v1")
+assert decode_document(EventRef, to_document(ref)) == ref
+assert loads_document(EventRef, canonical_json(to_document(ref))) == ref
+```
 
 ## Testing
 
