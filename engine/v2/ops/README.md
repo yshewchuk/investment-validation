@@ -80,8 +80,31 @@ because that file is gated byte-for-byte against a frozen Phase 0 baseline)
 is installed:
 
 ```text
-python3 -m pytest -n auto --dist loadgroup -q tests/test_v2_*.py tests/test_checks_phase2_gate.py
+python3 -m pytest -q -p no:cacheprovider -n auto --dist loadgroup tests/test_v2_*.py tests/test_checks_phase2_gate.py
 ```
+
+Measured on this host (12 cores, shared with other agents -- times vary with
+load): serial 70-105s; three consecutive parallel runs at 39.95s (load
+average 1.08), 33.78s (load 6.66), 33.26s (load 6.89) -- 567 passed, 1
+skipped, every time, no parallel-only failures. Re-run three times after any
+change to the grouping in tests/conftest.py to catch a new parallel-safety
+bug before it lands.
+
+The LEGACY suite (`tests/test_calendar.py`, `tests/test_dashboard.py`,
+`tests/test_features.py`; 274 tests, ~100s serial, per main's committed
+data) is not part of the v2 command above and needs the real data trees
+(`earnings_predictions/`, `polygon_cache/`) a bare worktree checkout does
+not have. A spot check under real data found a genuine parallel-safety bug:
+`tests/test_features.py`, 2+ real xdist workers each independently loading
+the real feature panel, reliably crashed a worker on this RAM-constrained
+shared host (`[gwN] node down: Not properly terminated`) and then hung
+xdist's own crashed-worker replacement indefinitely. `test_calendar.py` and
+`test_dashboard.py` are each independently parallel-safe. Grouped
+`tests/test_features.py` (whole file) onto one worker rather than chasing a
+memory fix; see tests/conftest.py for the exact bisection. With that grouping,
+`python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
+tests/test_features.py tests/test_dashboard.py` is the right command against
+a real data checkout, expected to match main's serial 274 passed.
 
 `--dist loadgroup` is required, not optional: a handful of tests touch a
 REAL, host-wide resource (a real child process's CPU affinity, a real
@@ -117,12 +140,26 @@ flag that runs the same fixed suite under `-n auto --dist loadgroup` and
 combines every xdist worker's coverage data with coverage.py's own
 multi-process support (`COVERAGE_PROCESS_START` plus the system
 `coverage.process_startup` `.pth` hook, then `coverage combine`) rather than
-adding pytest-cov. The default stays serial. `--parallel` was implemented but not yet run for
-real: installing `pytest-xdist` here hit PEP 668 (`externally-managed-environment`)
-and was left for a human decision rather than overridden with
-`--break-system-packages`. Once installed, verify `--parallel`'s
-executed/executable counts match the serial measurement on two consecutive
-runs each before trusting it; if they differ, keep both scripts serial-only.
+adding pytest-cov. The default stays serial.
+
+Measured on this host: Phase 1 (41 files) serial 74-85s, parallel 32-35s,
+two runs each -- every per-package executed/executable count identical
+across all four measurements. Phase 2 (18 files) serial ~44s, parallel
+~27-33s; junit outcomes identical (361/361, same nodeids, same per-test
+result) between one serial and one parallel run, but engine.v2.ops's
+executed count came out 2 lines HIGHER under parallel (2709 vs 2707 of
+4083) -- traced to `executor_watchdog.py:37-38`
+(`process_table()`'s real `/proc` scan hitting its own documented TOCTOU
+race more often under real concurrent process churn; see that function's
+docstring and `measure()`'s docstring in both scripts for the full trace).
+This is real host nondeterminism in production code, not a combine bug --
+confirmed by Phase 1's 4-for-4 exact match and Phase 2's exact junit match
+using the identical mechanism -- and it can only ADD lines under
+contention, so it can never trip either script's DECREASE-only regression
+check. `--parallel` is kept available on both scripts rather than refused.
+If a `--parallel` measurement ever looks unexpectedly higher by a line or
+two in engine.v2.ops, that TOCTOU race is the first thing to check, not
+data loss.
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private

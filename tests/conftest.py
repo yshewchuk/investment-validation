@@ -72,10 +72,25 @@ def pytest_configure(config):
 # fixed path, port, or process-table assertion against another test's
 # process -- static reading found no shared resource, only a possible CPU
 # time-slice collision on very short (1-3s) subprocesses, which is a
-# performance cost, not a correctness one. This was NOT empirically
-# verified under `-n auto` (pytest-xdist was not installed in this pass --
-# see the ops README Testing section); re-check with real concurrent runs
-# before trusting this list as final.
+# performance cost, not a correctness one. Empirically confirmed once
+# pytest-xdist was installed: `-n auto --dist loadgroup` over the whole
+# tests/test_v2_*.py + tests/test_checks_phase2_gate.py suite passed
+# (567 passed, 1 skipped) three consecutive times.
+#
+# - tests/test_features.py (legacy suite, whole file, grouped 2026-09-13):
+#   NOT in the v2 suite above, found during a legacy spot-check. 2+
+#   concurrent xdist workers each independently load the real feature panel
+#   (`engine.data.features.panel`) on this RAM-constrained shared host,
+#   which reliably crashed a worker (`[gwN] node down: Not properly
+#   terminated`) and then hung xdist's crashed-worker replacement --
+#   `python3 -m pytest -q -n auto --dist loadgroup tests/test_calendar.py
+#   tests/test_features.py tests/test_dashboard.py` never returned in 22+
+#   minutes (vs ~100s serial) before being killed. Bisected file-by-file:
+#   test_calendar.py and test_dashboard.py are each independently
+#   parallel-safe; only test_features.py reproduces it, and only at 2+
+#   workers (`-n 1` and plain serial both pass in ~33s). Real memory
+#   pressure from real data, not a small hidden-shared-state bug, so
+#   grouped rather than fixed.
 
 
 @pytest.fixture

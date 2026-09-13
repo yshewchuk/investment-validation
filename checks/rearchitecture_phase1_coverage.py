@@ -143,7 +143,31 @@ def measure(root=ROOT, *, parallel=False):
     hook (installed as a ``.pth`` file) starts a coverage instance in each
     new interpreter automatically, writing its own suffixed data file next
     to the controller's. ``coverage combine`` then merges all of them before
-    ``coverage json`` reads the total -- no pytest-cov needed."""
+    ``coverage json`` reads the total -- no pytest-cov needed.
+
+    Verified against two consecutive serial and two consecutive parallel
+    measurements: identical per-package executed/executable counts every
+    time (engine.v2.ops included). ``coverage combine``'s "skipped N" line
+    is its own content-hash dedup of data files whose recorded lines are
+    byte-identical to one already combined (``coverage/data.py``'s
+    ``DataFileClassifier``) -- real, correct behavior, not lost data; most
+    of engine.v2.ops's real short-lived subprocess tests execute the same
+    handful of lines, so many of their data files hash identically.
+
+    One known, small, execution-order-dependent noise source in
+    engine.v2.ops specifically (not caused by this flag, and not always
+    triggered): ``process_table()`` in ``executor_watchdog.py`` scans every
+    PID under ``/proc`` and can hit a real TOCTOU race when a process exits
+    mid-scan (caught by its own ``except (OSError, ValueError, IndexError):
+    continue``) -- more real concurrent process churn (more xdist workers,
+    more real subprocesses alive at once) makes that except branch more
+    likely to execute, never less. Seen once, isolated to exactly those two
+    lines, in a Phase 2 --parallel run (see rearchitecture_phase2_coverage.py).
+    It can only ADD executed lines under contention, so it can never trip
+    ``compare()``'s regression check (which only fires on a DECREASE) --
+    but if a --parallel measurement here ever looks unexpectedly higher by
+    a line or two, check this function first before suspecting the combine
+    step."""
     tests = suite(root)
     source_hash = measurement_identity(root)
     with tempfile.TemporaryDirectory(prefix="phase1-coverage-") as scratch:
