@@ -43,7 +43,9 @@
     },
     "D11": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_atomicity.py", "tests/test_v2_data_import.py"]
+      "tests": ["tests/test_v2_data_atomicity.py", "tests/test_v2_data_import.py",
+                "tests/test_checks_phase2_fault_matrix.py"],
+      "evidence_fields": ["fault_matrix_ref"]
     },
     "D12": {
       "tier": 1,
@@ -64,7 +66,7 @@
     },
     "D15": {
       "tier": 2,
-      "tests": [],
+      "tests": ["tests/test_v2_ops_parity.py", "tests/test_checks_phase2_parity.py"],
       "evidence_fields": ["comparison_receipt_ref", "expected_population",
                           "supported_population", "compared_population"]
     },

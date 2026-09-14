@@ -1,7 +1,9 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:64c61f556cca9ad65ff5cbda075cf14dd2719d56c271d62ad5f01e2f21766c7d",
+  "suite_version": "phase2_coverage_suite:986701953f75cd22168b0d356873a3ee5fa72ce787a2a7c814c8bb5e39ca7da4",
   "test_files": [
+    "tests/test_checks_phase2_fault_matrix.py",
+    "tests/test_checks_phase2_parity.py",
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
     "tests/test_v2_data_commit.py",
@@ -21,14 +23,15 @@
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_nightly_completion.py",
+    "tests/test_v2_ops_parity.py",
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_snapshot_stages.py"
   ],
-  "source_hash": "sha256:e2c512c95e7104de1fc08ca0c2af343e948b290361ed2f6b5b38a790c203f7b0",
+  "source_hash": "sha256:fd72f49b64c45f7d726f5033d3ae404a4d8f3843af52b03a8b9df0edf528a056",
   "packages": {
     "engine.v2.contracts": {
-      "executed": 594,
-      "executable": 594,
+      "executed": 605,
+      "executable": 605,
       "files": [
         "engine/v2/contracts/__init__.py",
         "engine/v2/contracts/data.py",
@@ -54,8 +57,8 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 2071,
-      "executable": 2194,
+      "executed": 2203,
+      "executable": 2352,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -74,11 +77,12 @@
         "engine/v2/data/reference_inputs.py",
         "engine/v2/data/repository.py",
         "engine/v2/data/schema.py",
+        "engine/v2/data/tier4_coverage.py",
         "engine/v2/data/time_formats.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 94.39380127620784
+      "percentage": 93.66496598639456
     },
     "engine.v2.features": {
       "executed": 0,
@@ -171,8 +175,8 @@
       "percentage": null
     },
     "engine.v2.ledger": {
-      "executed": 73,
-      "executable": 117,
+      "executed": 101,
+      "executable": 145,
       "files": [
         "engine/v2/ledger/__init__.py",
         "engine/v2/ledger/decisions.py",
@@ -180,7 +184,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 62.39316239316239
+      "percentage": 69.65517241379311
     },
     "engine.v2.models.training": {
       "executed": 0,
@@ -204,8 +208,8 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 3197,
-      "executable": 4563,
+      "executed": 3649,
+      "executable": 5030,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -227,6 +231,7 @@
         "engine/v2/ops/executor_watchdog.py",
         "engine/v2/ops/experiments.py",
         "engine/v2/ops/fingerprints.py",
+        "engine/v2/ops/generation_binding.py",
         "engine/v2/ops/health.py",
         "engine/v2/ops/input_bindings.py",
         "engine/v2/ops/legacy_actions.py",
@@ -236,6 +241,7 @@
         "engine/v2/ops/migrations.py",
         "engine/v2/ops/nightly.py",
         "engine/v2/ops/outbox.py",
+        "engine/v2/ops/parity.py",
         "engine/v2/ops/plans.py",
         "engine/v2/ops/profiles.py",
         "engine/v2/ops/provider_budget.py",
@@ -246,6 +252,7 @@
         "engine/v2/ops/scheduler.py",
         "engine/v2/ops/schema.py",
         "engine/v2/ops/schema_runtime.py",
+        "engine/v2/ops/session_resolution.py",
         "engine/v2/ops/snapshot_import.py",
         "engine/v2/ops/snapshot_planning.py",
         "engine/v2/ops/snapshot_promotion.py",
@@ -260,7 +267,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 70.0635546789393
+      "percentage": 72.54473161033798
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -273,8 +280,8 @@
       "percentage": null
     },
     "engine.v2.diagnosis": {
-      "executed": 0,
-      "executable": 343,
+      "executed": 170,
+      "executable": 348,
       "files": [
         "engine/v2/diagnosis/__init__.py",
         "engine/v2/diagnosis/canonical.py",
@@ -285,10 +292,30 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 0.0
+      "percentage": 48.85057471264368
     }
   },
   "test_outcomes": [
+    {
+      "nodeid": "tests/test_checks_phase2_fault_matrix.py::test_build_covers_every_declared_fault_point",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_fault_matrix.py::test_cli_publishes_and_matrix_passes_the_validator",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_fault_matrix.py::test_removing_one_point_fails_the_validator",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_cli_agree_exits_zero_and_prints_verdict",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_cli_refused_session_mismatch_exits_nonzero",
+      "outcome": "passed"
+    },
     {
       "nodeid": "tests/test_v2_data_atomicity.py::test_fault_at_every_commit_boundary_leaves_old_or_new_complete[before_copy]",
       "outcome": "passed"
@@ -938,6 +965,18 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_data_import.py::test_import_keeps_its_lease_per_object_and_never_restreams",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_import.py::test_tampered_bytes_are_still_refused_at_publish",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_import.py::test_import_that_loses_its_lease_recovers_and_resubmits_cleanly",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_data_legacy_adapter.py::test_all_eight_datasets_present_in_order",
       "outcome": "passed"
     },
@@ -1127,6 +1166,26 @@
     },
     {
       "nodeid": "tests/test_v2_data_legacy_materialization.py::test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_narrowed_whole_table_query_never_silently_copies_the_whole_table",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_ceiling_below_actual_rows_is_refused_not_clamped",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_copy_eligible_rejects_a_narrower_projection",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_whole_table_copy_eligible_rejects_a_narrower_time_interval",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_interval_covers_direct_cases",
       "outcome": "passed"
     },
     {
@@ -1422,6 +1481,14 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_data_partitions.py::test_staged_partition_single_pass_matches_the_published_audit",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_partitions.py::test_staged_partition_refuses_seam_disorder_and_changed_bytes",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_data_query.py::test_implicit_latest_snapshot_id_is_not_found",
       "outcome": "passed"
     },
@@ -1479,6 +1546,10 @@
     },
     {
       "nodeid": "tests/test_v2_data_query.py::test_hidden_primary_key_columns_dropped_when_not_projected",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_query.py::test_narrow_projection_with_hidden_filter_columns_matches_full_projection",
       "outcome": "passed"
     },
     {
@@ -1650,6 +1721,14 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_resumes_after_partial_failure_without_catalog_conflict",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_retry_after_crash_before_current_switch",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_effects_graph.py::test_engineering_gate_effect_runs_the_real_gate_excluding_coverage",
       "outcome": "passed"
     },
@@ -1694,7 +1773,23 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_binds_and_delivers_release_intent",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_publication_failure_leaves_release_intent_bound_and_retry_delivers_once",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_export_release_intent_publication_backup_independently_verifiable",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_effects_graph.py::test_backup_failure_retries_alone_other_watermarks_unchanged",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_effects_graph.py::test_backup_retry_after_clock_advance_keeps_original_cutoff",
       "outcome": "passed"
     },
     {
@@ -1886,6 +1981,34 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_ops_parity.py::test_identical_rows_agree_with_correct_populations",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_float_beyond_tolerance_disagrees_naming_row_and_field",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_within_tolerance_agrees",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_null_mask_difference_disagrees",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_missing_row_on_either_side_disagrees",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_session_mismatch_between_jobs_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_receipt_binds_snapshot_and_passes_evidence_binding_checks",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_render_parity.py::test_d19_v2_render_matches_render_bundle_the_legacy_way",
       "outcome": "passed"
     },
@@ -1918,11 +2041,35 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_render_flags_cover_every_class_with_nonempty_scenario",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_health_selfcheck_is_explicit_unknown_when_nothing_bound",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_health_reflects_a_bound_prior_selfcheck",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_model_evidence_action_preserves_degraded_state_for_render",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_model_evidence_action_marks_a_clean_rebuild_not_degraded",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_render_parity.py::test_render_job_binds_finality_score_and_model_evidence_as_job_outputs",
       "outcome": "passed"
     },
     {
       "nodeid": "tests/test_v2_ops_render_parity.py::test_every_job_binding_names_a_declared_dependency",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_prior_selfcheck_ref_binds_only_when_the_caller_supplies_one",
       "outcome": "passed"
     },
     {
