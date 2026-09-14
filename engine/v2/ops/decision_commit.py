@@ -121,8 +121,16 @@ def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
     verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
     if context["purpose"] != "shadow" or context["scope"] != claim.spec.output_namespace:
         raise fail("VALIDATION_FAILED", "only pinned shadow authority is enabled")
-    if context.get("session") != claim.spec.parameters.get("session"):
+    # P2-C03: the job's own ``session`` parameter is always the REQUESTED
+    # date (walk-back never changes job identity) — compare it against the
+    # plan's ``requested_session``, never against the resolved ``session``,
+    # which legitimately differs from it on a walk-back night. The resolved
+    # session is independently cross-checked against the recorded finality
+    # binding's own date, never merely trusted from ``context``.
+    if context.get("requested_session") != claim.spec.parameters.get("session"):
         raise fail("INPUT_CHANGED", "validated session differs from the admitted job")
+    if context.get("session") != context.get("finality_date"):
+        raise fail("INPUT_CHANGED", "validated session differs from the recorded finality binding")
     if context.get("candidate_rows_hash") != content_hash(candidates):
         raise fail("INPUT_CHANGED", "candidate rows changed after validation")
     _verify_committed_bindings(conn, claim, context.get("bindings"))
@@ -156,8 +164,16 @@ def commit_decisions(conn, claim, candidates, context, validated_context, *, clo
         return commit_decisions_in_transaction(conn, claim, candidates, validated_context, clock=clock)
 
 
-def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows, *, clock):
-    """Import only rows captured from the isolated legacy append, under the active fence."""
+def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows, *, clock,
+                                                 session=None):
+    """Import only rows captured from the isolated legacy append, under the active fence.
+
+    ``session`` is the finality-resolved date the settlement worker actually
+    scored ``through`` (P2-C03) — the caller reads it off the bound
+    ``settlement.json`` document (``_action_settlement``'s own ``session``
+    field). It defaults to the job's REQUESTED ``session`` parameter for a
+    caller that predates that field (no walk-back, same value either way).
+    """
     if not conn.in_transaction:
         raise ValueError("settlement import requires the attempt transaction")
     verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
@@ -171,7 +187,7 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
                                 candidate_ref.content_hash])
     enqueue(conn, "export", release_key, {"settlement_candidate": candidate_ref.content_hash})
     watermark(conn, "nightly", claim.spec.output_namespace, "settlement",
-              claim.spec.parameters["session"], release_key, clock=clock)
+              session or claim.spec.parameters["session"], release_key, clock=clock)
     return receipts
 
 

@@ -127,6 +127,13 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
     params = {"expected_ids": (action,), "session": plan["session"],
               "tickers": tuple(sorted(tickers)), "year_start": year_start,
               "year_end": year_end, "input_bindings": {}, "effect_scope": effect_scope}
+    if action == "legacy_score":
+        # P2-C03: the score stage needs the finality-resolved session, never
+        # the requested one, so it binds the finality job's own output.
+        params["input_bindings"] = {"finality.json": _job_output("finality", keys)}
+    if action == "legacy_settlement":
+        # P2-C03: settlement's ``through`` must be the resolved session too.
+        params["input_bindings"] = {"finality.json": _job_output("finality", keys)}
     if action == "legacy_decisions":
         params["input_bindings"] = {
             "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
@@ -144,7 +151,9 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":
-        params["input_bindings"] = {"score.json": _job_output("score", keys)}
+        # P2-C03: replay must re-score at the same resolved session score used.
+        params["input_bindings"] = {"score.json": _job_output("score", keys),
+                                     "finality.json": _job_output("finality", keys)}
     if action == "decision_evidence":
         # B1c: pinned once by ``ops plan nightly`` (``plans.py::nightly_plan``)
         # and carried unchanged on every retry/resubmission of this same plan.
@@ -158,7 +167,12 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
         params["input_bindings"] = {
             "bundle.tar": _job_output("projection", keys),
             "selfcheck.json": _job_output("selfcheck", keys),
-            "engineering_gate.json": _job_output("engineering_gate", keys)}
+            "engineering_gate.json": _job_output("engineering_gate", keys),
+            # P2-C03: the independent anchor for "which session does this
+            # release speak for" — never trust the decisions watermark's own
+            # occurrence alone (a stale one for the wrong session must still
+            # refuse the decision gate; see effects_graph.publication_effect).
+            "finality.json": _job_output("finality", keys)}
     return params
 
 
@@ -207,7 +221,7 @@ _DAG_STAGES = ("finality", "score", "decision_replay", "decision_evidence", "dec
 # export"). Each coordinator instead reads the settlement *watermark*
 # (present or absent) directly, independent of scheduling.
 _DAG_PARENTS = {"finality": (), "score": ("finality",),
-                "decision_replay": ("score",),
+                "decision_replay": ("score", "finality"),
                 "decision_evidence": ("score", "finality", "decision_replay"),
                 "decision_commit": ("decision_evidence", "score", "finality"),
                 "settlement": ("finality",),
@@ -216,7 +230,8 @@ _DAG_PARENTS = {"finality": (), "score": ("finality",),
                 "engineering_gate": (),
                 "projection": ("ledger_export", "model_evidence", "finality", "score"),
                 "selfcheck": ("projection",),
-                "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit"),
+                "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit",
+                                "finality"),
                 "backup": ("decision_commit",)}
 #: P2-6 §9.3: DAG stages whose kinds read a verified snapshot materialization
 #: in snapshot input mode. Every other stage keeps the Phase 1 barrier.

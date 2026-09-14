@@ -390,23 +390,31 @@ def _bundle_tar(*, secret=False):
 
 def _publication_setup(conn, clock, supervisor, store, *, scope, session,
                        selfcheck="ok", engineering="ok", secret=False,
-                       decisions_session=None, no_entry=False):
+                       decisions_session=None, no_entry=False, finality_session=None):
     """A publication job with real, resolvable job-id bindings to a fake
     render bundle plus fake selfcheck/engineering-gate parent outputs.
 
     ``decisions_session`` lets the decisions watermark be seeded at a
     session other than the release's own (for the earlier-session refusal
     case); ``no_entry`` seeds no rows at all but still advances the
-    watermark, mirroring a genuine no-entry night's commit.
+    watermark, mirroring a genuine no-entry night's commit. ``finality_session``
+    lets the bound finality document resolve somewhere other than ``session``
+    (P2-C03 walk-back); it defaults to ``session`` (no walk-back).
     """
     _seed_decisions(conn, clock, scope, decisions_session or session,
                     predictions=() if no_entry else [_row("evt-1", "pred")])
     tag = scope + ":" + session
+    finality_doc = {"date": finality_session or session, "is_final": True, "market_wide": True,
+                    "daily_share": 1.0, "chain_share": 1.0, "covered": 1, "detail": "final"}
+    finality_ref = _publish(store, conn, clock, finality_doc, "legacy_action.v1.0")
+    finality_job = _succeed_parent(conn, clock, supervisor, key="fin-" + tag,
+                                   output_name="legacy_finality", ref=finality_ref)
     bundle_ref = _publish_raw(store, conn, clock, _bundle_tar(secret=secret), "legacy_action.v1.0")
     projection_job = _succeed_parent(conn, clock, supervisor, key="proj-" + tag,
                                      output_name="legacy_render", ref=bundle_ref)
-    input_bindings = {"bundle.tar": projection_job + "#legacy_render"}
-    dependency_job_ids = [projection_job]
+    input_bindings = {"bundle.tar": projection_job + "#legacy_render",
+                      "finality.json": finality_job + "#legacy_finality"}
+    dependency_job_ids = [projection_job, finality_job]
     if selfcheck != "missing":
         selfcheck_ref = _publish(store, conn, clock, {"ok": selfcheck == "ok"}, "legacy_action.v1.0")
         selfcheck_job = _succeed_parent(conn, clock, supervisor, key="self-" + tag,
@@ -644,7 +652,8 @@ def test_new_stages_are_wired_with_parents_bindings_and_submit(tmp_path):
     assert job_id("ledger_export") in render_deps
     publication_deps = set(by_kind["publication"].job.dependency_job_ids)
     assert publication_deps == {job_id("legacy_selfcheck"), job_id("engineering_gate"),
-                                job_id("legacy_render"), job_id("legacy_decisions")}
+                                job_id("legacy_render"), job_id("legacy_decisions"),
+                                job_id("legacy_finality")}
     assert job_id("legacy_decisions") in by_kind["backup"].job.dependency_job_ids
     assert job_id("legacy_settlement") not in by_kind["backup"].job.dependency_job_ids
 

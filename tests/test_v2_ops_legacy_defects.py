@@ -58,12 +58,21 @@ def _score_parameters(**overrides):
     return parameters
 
 
+def _write_finality(root, date="2026-09-12"):
+    """P2-C03: every legacy stage that resolves the finality session now
+    reads its bound ``finality.json`` — no walk-back, matching ``session``."""
+    (root / "finality.json").write_text(json.dumps({
+        "date": date, "is_final": True, "market_wide": True,
+        "daily_share": 1.0, "chain_share": 1.0, "covered": 1, "detail": "final"}))
+
+
 def test_action_score_accepts_a_population_planned_before_strikes_exist(monkeypatch, tmp_path):
     rows = [{"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-12",
             "strike": 100.0, "expiry": "2026-10-16"},
            {"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-12",
             "strike": 105.0, "expiry": "2026-10-16"}]
     _stub_scoring(monkeypatch, rows)
+    _write_finality(tmp_path)
     result = _action_score(_score_parameters(
         expected_population=("FAKE|TWIN-P|2026-09-12",)), tmp_path)
     assert result["hash"]
@@ -75,6 +84,7 @@ def test_action_score_accepts_a_population_planned_before_strikes_exist(monkeypa
 def test_action_score_rejects_missing_duplicate_and_unplanned_keys(monkeypatch, tmp_path):
     rows = [{"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-12"}]
     _stub_scoring(monkeypatch, rows)
+    _write_finality(tmp_path)
     with pytest.raises(OpsError, match="must be planned"):
         _action_score(_score_parameters(expected_population=()), tmp_path)
     with pytest.raises(OpsError, match="duplicate"):

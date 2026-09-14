@@ -36,6 +36,7 @@ from engine.v2.ops.legacy_adapter import verify_export_generation as _verify_gen
 from engine.v2.ops.outbox import fail_effect, watermark
 from engine.v2.ops.publication import current as release_current
 from engine.v2.ops.publication import publish_local, stage_release
+from engine.v2.ops.session_resolution import resolve_effective_session
 
 __all__ = ["EXPORT_PURPOSES", "backup_effect", "effect_scope", "engineering_gate_effect",
            "ledger_export_effect", "publication_effect"]
@@ -100,11 +101,18 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
     recording settlement as absent in its receipt.
     """
     scope = effect_scope(claim)
-    session = claim.spec.parameters["session"]
+    # P2-C03: the job's own ``session`` param is always the REQUESTED date;
+    # the decisions watermark's occurrence is decision_commit's own
+    # finality-RESOLVED date (context["session"], written verbatim by
+    # commit_decisions_in_transaction) — export refers to that resolved
+    # session, never the requested one, which legitimately differs on a
+    # walk-back night.
+    requested_session = claim.spec.parameters["session"]
     decisions_wm = _watermark_row(conn, scope, "decisions")
-    if decisions_wm is None or decisions_wm["occurrence"] != session:
+    if decisions_wm is None:
         raise fail("VALIDATION_FAILED", "no committed decisions for this session",
-                   details={"scope": scope, "session": session})
+                   details={"scope": scope, "session": requested_session})
+    session = decisions_wm["occurrence"]
     release_key = decisions_wm["receipt_ref"]
     settlement_wm = _watermark_row(conn, scope, "settlement")
     settlement_present = settlement_wm is not None and settlement_wm["occurrence"] == session
@@ -122,6 +130,7 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
     tar_ref = store.publish_bytes(_tar_bytes(generation_dir), schema_ref="ledger_generation.v1.0")
     keepalive()
     receipt = {"schema_version": "ledger_export_receipt.v1.0", "scope": scope, "session": session,
+               "requested_session": requested_session,
                "generation": release_key, "counts": verified_counts,
                "settlement": {"present": settlement_present,
                               "release_key": settlement_wm["receipt_ref"] if settlement_present
@@ -240,8 +249,17 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
     to the caller is a no-op.
     """
     scope = effect_scope(claim)
-    session = claim.spec.parameters["session"]
     bindings = recorded_bindings(conn, claim.attempt_id)
+    # P2-C03: the bound finality document is the independent anchor for
+    # "which session does this release speak for" — never the decisions
+    # watermark's own occurrence alone, so a stale watermark for the wrong
+    # session still refuses ``_decision_gate`` below, exactly as before,
+    # while a genuine walk-back (resolved != requested) still passes.
+    finality_row = bindings.get("finality.json")
+    if finality_row is None:
+        raise fail("VALIDATION_FAILED", "publication has no finality bound")
+    finality_doc = json.loads(store.read_verified(artifact(conn, store, finality_row.artifact_id)))
+    session = resolve_effective_session(finality_doc, claim.spec.parameters["session"])
     bundle_row = bindings.get("bundle.tar")
     if bundle_row is None:
         raise fail("VALIDATION_FAILED", "publication has no projection bundle bound")
@@ -278,7 +296,11 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     to pending (rather than waiting out its lease) so an immediate retry can
     claim it — the job's own retry policy is what makes this "retryable"."""
     scope = effect_scope(claim)
-    session = claim.spec.parameters["session"]
+    # P2-C03: key/watermark the backup by the same resolved session export
+    # and decisions use, falling back to the requested one before any
+    # decisions watermark exists.
+    decisions_wm = _watermark_row(conn, scope, "decisions")
+    session = decisions_wm["occurrence"] if decisions_wm is not None else claim.spec.parameters["session"]
     key = "bkp" + content_hash([scope, session]).split(":")[1][:24]
     owner = claim.attempt_id
     prepare_backup(conn, key, {}, clock=clock)

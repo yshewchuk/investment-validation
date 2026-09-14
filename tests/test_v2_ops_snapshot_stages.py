@@ -536,7 +536,13 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     inputs = planned["plan"]["snapshot_inputs"]
     assert inputs["snapshot_ref_artifact_id"] == case.snapshot_ref.artifact_id
     assert inputs["snapshot_manifest_hash"] == case.snap.manifest_hash
-    assert inputs["materialization_request_hash"] == case.request.request_hash  # refs from the catalog
+    # P2-C03: pin_snapshot_inputs widens the evidence-scope YEARS by one at
+    # the start (a walk-back can cross a year boundary the requested year
+    # alone would miss) -- case.request was built with the un-widened
+    # EVIDENCE_SCOPE, so the comparison request here must widen the same way.
+    widened = _build_request(case.repository, case.snap, case.snapshot_object, case.store,
+                             evidence_scope={"tickers": ["AAA", "BBB"], "years": [2019, 2020, 2021]})
+    assert inputs["materialization_request_hash"] == widened.request_hash  # refs from the catalog
 
     ids, specs = _submitted_specs(case, planned["plan_ref"], "k1")
     by_kind = {spec["kind"]: (job_id, spec) for job_id, spec in specs.items()}

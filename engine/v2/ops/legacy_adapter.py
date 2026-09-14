@@ -126,8 +126,15 @@ def _action_finality(parameters, root):
     from engine.calendar import trading_calendar
     from engine.data.finality import covered_tickers, resolve_final_session
 
-    result = resolve_final_session(parameters["session"], parameters["tickers"],
-                                   calendar=trading_calendar())
+    # P2-C03: v1 never falls back to the requested date when no session
+    # qualifies (engine/dashboard/nightly.py:1223-1232 stops the run); the
+    # supervised equivalent is an explicit, registered refusal so nothing
+    # downstream can mistake a missing walk-back for a scored session.
+    try:
+        result = resolve_final_session(parameters["session"], parameters["tickers"],
+                                       calendar=trading_calendar())
+    except RuntimeError as exc:
+        raise fail("SOURCE_NOT_FINAL", str(exc)) from exc
     # finality.json's dict is embedded verbatim into ledger rows (v1 parity);
     # per-ticker coverage is a SEPARATE output, never a key added here.
     primary = _write_action(root, "finality.json", result.as_dict())
@@ -146,11 +153,13 @@ def _action_score(parameters, root):
     from engine.features import FeatureContext
     from engine.jsonio import json_safe
     from engine.score import Scorer, score_calendar
+    from engine.v2.ops.session_resolution import resolve_effective_session
 
+    session = resolve_effective_session(_load_finality(root), parameters["session"])
     tickers = sorted(set(parameters["tickers"]))
     years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
     scorer = Scorer(context=FeatureContext.load(tickers, years=years))
-    frame = score_calendar(pd.Timestamp(parameters["session"]),
+    frame = score_calendar(pd.Timestamp(session),
                           horizon_days=int(parameters.get("horizon_days", 35)),
                           alt_strikes=0, scorer=scorer, tickers=tickers,
                           progress_every=10)
@@ -170,11 +179,12 @@ def _action_score(parameters, root):
                    details={"missing": missing, "unplanned": unplanned})
     ladder = strike_ladder(frame, scorer=scorer,
                            alt_strikes=int(parameters.get("alt_strikes", 1)),
-                           as_of=pd.Timestamp(parameters["session"]))
+                           as_of=pd.Timestamp(session))
     return _write_action(root, "score.json", {
         "rows": rows, "expected_population": list(expected),
         "observed_population": sorted(observed_keys), "ladder": json_safe(ladder, round_to=None),
-        "tickers": tickers, "analog_entry_coverage": scorer.analog_entry_coverage})
+        "tickers": tickers, "analog_entry_coverage": scorer.analog_entry_coverage,
+        "session": session, "requested_session": parameters["session"]})
 
 
 def _action_score_requests(parameters, root):
@@ -248,9 +258,10 @@ def _load_score_document(root):
     return json.loads(path.read_text())
 
 
-def _empty_replay(session):
+def _empty_replay(session, requested_session):
     from engine.v2.foundation import content_hash
     return {"schema_version": "decision_replay.v1.0", "session": session,
+            "requested_session": requested_session,
             "population": [], "source_rows": [], "replayed_rows": [],
             "source_rows_hash": content_hash([]), "replayed_rows_hash": content_hash([]),
             "findings": []}
@@ -280,11 +291,12 @@ def _action_decision_replay(parameters, root):
     from engine.jsonio import json_safe
     from engine.v2.foundation import content_hash
     from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
+    from engine.v2.ops.session_resolution import resolve_effective_session
 
-    session = parameters["session"]
+    session = resolve_effective_session(_load_finality(root), parameters["session"])
     population = decision_population(_load_score_document(root), session)
     if not population:
-        return _write_action(root, "replay.json", _empty_replay(session))
+        return _write_action(root, "replay.json", _empty_replay(session, parameters["session"]))
 
     import pandas as pd
 
@@ -305,6 +317,7 @@ def _action_decision_replay(parameters, root):
     replayed = [row for row in rows if population_key(row) in eligible_keys]
     return _write_action(root, "replay.json", {
         "schema_version": "decision_replay.v1.0", "session": session,
+        "requested_session": parameters["session"],
         "population": [population_key(row) for row in population],
         "source_rows": population, "replayed_rows": replayed,
         "source_rows_hash": content_hash(population),
@@ -321,7 +334,10 @@ def _action_decisions(parameters, root):
     if not plan_path.is_file():
         raise fail("VALIDATION_FAILED", "decision plan artifact is missing")
     plan = json.loads(plan_path.read_text())
-    rows = build_prediction_rows(frame, as_of=parameters["session"],
+    # The plan's own ``session`` is decision_evidence's finality-resolved
+    # date (P2-C03) — never re-derived here, so a candidate row's ``as_of``
+    # always agrees with what the commit-time validator checks it against.
+    rows = build_prediction_rows(frame, as_of=plan.get("session"),
                                  decision_ts=plan.get("decision_clock"),
                                  finality=finality, entry_dated_only=True)
     for row in rows:
@@ -336,17 +352,21 @@ def _action_settlement(parameters, root):
     import base64
 
     from engine.ledger import score_outcomes
+    from engine.v2.ops.session_resolution import resolve_effective_session
 
+    session = resolve_effective_session(_load_finality(root), parameters["session"])
     directory = root / "legacy" / "ledger" / "outcomes"
     before = {path: path.stat().st_size for path in directory.glob("*.jsonl")}
-    result = score_outcomes(through=parameters["session"])
+    result = score_outcomes(through=session)
     captured = []
     for path in sorted(directory.glob("*.jsonl")):
         data = path.read_bytes()[before.get(path, 0):]
         for raw in data.splitlines(keepends=True):
             captured.append({"original_b64": base64.b64encode(raw).decode("ascii"),
                              "row": json.loads(raw)})
-    return _write_action(root, "settlement.json", {"result": result, "rows": captured})
+    return _write_action(root, "settlement.json", {
+        "result": result, "rows": captured,
+        "session": session, "requested_session": parameters["session"]})
 
 
 def _action_model_evidence(parameters, root):
@@ -383,16 +403,19 @@ def _action_render(parameters, root):
     from engine.score import Scorer
     from engine.v2.ops.render_inputs import (
         ABSENT_STAGES,
-        absent_stage_flags,
         assemble_scores,
         bundle_content_hash,
+        execution_clock_and_flags,
         stage_ledger_generation,
         stage_model_evidence,
     )
+    from engine.v2.ops.session_resolution import resolve_effective_session
 
     score_document = _load_score_document(root)
     scores = assemble_scores(score_document)
     finality = _load_finality(root)
+    requested_as_of = parameters["session"]
+    resolved_as_of = resolve_effective_session(finality, requested_as_of)
 
     evidence_path = root / "model_evidence.json"
     if not evidence_path.is_file():
@@ -407,7 +430,7 @@ def _action_render(parameters, root):
     years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
     scorer = Scorer(context=FeatureContext.load(tickers, years=years))
 
-    as_of = parameters["session"]
+    as_of = resolved_as_of
     horizon_days = int(parameters.get("horizon_days", 35))
     alt_strikes = int(parameters.get("alt_strikes", 1))
     board = pd.DataFrame(score_document.get("rows") or [])
@@ -417,17 +440,14 @@ def _action_render(parameters, root):
                       fill_alpha=fill_alpha, alt_strikes=alt_strikes,
                       freshness=freshness_summary(as_of), quota=quota_state(),
                       registry=scorer.registry)
-    meta["execution_clock"] = {"requested_as_of": str(pd.Timestamp(as_of).date()),
-                               "resolved_as_of": str(pd.Timestamp(as_of).date()),
-                               "finality": finality}
+    meta["execution_clock"], flags = execution_clock_and_flags(requested_as_of, resolved_as_of, finality)
     health = build_health(as_of=as_of,
                           size_mae=size_model_mae_from_ledger(panel=scorer.context.panel))
-
     output = root / "bundle"
     result = render_bundle(scores, output, as_of=as_of, horizon_days=horizon_days,
                            fill_alpha=fill_alpha, alt_strikes=alt_strikes,
                            panel=scorer.context.panel, trades=scorer.trades,
-                           meta=meta, health=health, flags=absent_stage_flags(),
+                           meta=meta, health=health, flags=flags,
                            registry=scorer.registry)
     _write_action(root, "meta.json", meta)
     _write_action(root, "health.json", health)
