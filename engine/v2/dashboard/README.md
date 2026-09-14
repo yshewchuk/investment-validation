@@ -23,9 +23,12 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+`preview.main`, `preview.run`, `preview.is_loopback`, `preview.resolve_release_id`
+and `preview.TOKEN_ENV_VAR` — the P3-0 compatibility preview launcher. It
+composes only `engine.v2.serving.operations.create_server` (this package's "7
+only" import rule); it does not implement serving or rendering itself.
 
-<!-- public-interface: none -->
+<!-- public-interface: preview -->
 
 ## Consumers
 
@@ -39,17 +42,26 @@ _Nothing yet — no package imports this one. The first importer is added here i
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+Start the compatibility preview against a release root (real or synthetic)
+and a health artifact, loopback-only:
+
+    V2_DASHBOARD_TOKEN=secret python3 -m engine.v2.dashboard.preview \
+        --host 127.0.0.1 --port 8765 \
+        --release-root /path/to/release_root --health-path /path/to/health.json
+
+It refuses to start with no `V2_DASHBOARD_TOKEN` set, and refuses a
+non-loopback `--host` unless `--allow-non-loopback` is also passed. It never
+prints the token; it prints the URL and the release id resolved once from the
+server's own `/release/current.json`.
 
 ## Testing
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private
 `fixtures/tier0/` corpus (`checks/tier0_corpus.py`), never in this repo — they
-carry licensed quotes.
+carry licensed quotes. `tests/test_v2_dashboard_preview.py` builds its own
+synthetic release bundles under `tmp_path` rather than using that corpus, since
+P3-0 has no real published release yet.
 
 A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field

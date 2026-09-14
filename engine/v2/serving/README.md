@@ -13,6 +13,10 @@ Replaces (§4.4): `the data half of dashboard/render.py`, `dashboard/earnings_ap
 - Bounded, paginated reads over saved score records.
 - The financial display values §6.4 moves out of rendering.
 - Immutable release publication, one release per read.
+- Resolve-once release identity: `GET /release/current.json` returns
+  `{"release_id": ...}` for a client (the shell, the launcher) to pin and
+  reuse, instead of re-following `/release/current`'s redirect on every
+  navigation. `/release/current/...` keeps working for direct requests.
 
 ## Non-responsibilities
 
@@ -38,10 +42,11 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-No other production package imports this surface yet. An external launcher may
-start it alongside ops; their layer-7 processes communicate through artifacts.
+`engine.v2.dashboard` imports `operations.create_server` — the compatibility
+preview launcher (`engine/v2/dashboard/preview.py`) composes only this
+surface, per its layer-8 "7 only" import rule.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.dashboard -->
 
 ## Usage
 
