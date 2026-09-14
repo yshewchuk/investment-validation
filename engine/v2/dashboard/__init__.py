@@ -2,8 +2,8 @@
 
 Layer 8 of `system_rearchitecture.md` §4.1. Replaces `the formatting half of dashboard/render.py`, `dashboard/static/`.
 
-Empty by construction: phase 0 writes no production logic
-(`guides/rearchitecture_phase0_baseline.md` §10). See ``README.md`` for what
-this package will own, what it deliberately will not, and which packages may
-import it.
+P3-0 (`guides/rearchitecture_phase3_parity_launch.md` §8) adds the first
+production code: `preview.py`, the compatibility preview launcher, which
+composes only `engine.v2.serving` per this package's "7 only" import rule. See
+``README.md`` for the public interface and which packages may import it.
 """
