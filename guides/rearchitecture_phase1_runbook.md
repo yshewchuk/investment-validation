@@ -66,7 +66,7 @@ manifest.
 | `serve` | Run the supervisor claim/execute loop; `--once` drains and exits when nothing is active. `--store-root PATH` points a snapshot-backed launch at the legacy checkout, when it is not the code checkout `serve` runs from (see above). | `python3 -m engine.v2.ops serve --once --store-root /path/to/legacy/checkout` |
 | `plan nightly` | Immutable shadow nightly plan. `--as-of` (ISO date, required), `--mode shadow` (only choice), `--input-manifest` (frozen legacy inputs; without it the plan carries `blocked_prerequisites` and cannot be submitted), `--tickers a,b`, `--context-tickers a,b` (historical evidence universe; defaults to `--tickers`), `--year-start/--year-end` (default 2024/2026), `--full-run` (declares this run scores its whole context — writes the global `shadow` effect scope instead of a subset hash; refused unless `--tickers` equals `--context-tickers` exactly). Without `--full-run` the effect scope is ALWAYS the subset hash, even when the watchlist happens to equal the context — writing the global watermark requires the explicit flag, so a small debugging run can no longer silently advance it. | `python3 -m engine.v2.ops plan nightly --as-of 2026-09-12 --input-manifest manifest.json --full-run` |
 | `plan experiment` | Smoke plumbing plan from `--spec` JSON (must carry `experiment_id`). `--no-ledger` is required in practice: without it the plan refuses (production experiments disabled). | `python3 -m engine.v2.ops plan experiment --spec /tmp/spec.json --no-ledger` |
-| `submit` | Submit a saved plan under `--idempotency-key` (both required). Operator namespace policy admits `shadow` and `smoke` only. A blocked plan is refused with `INVALID_REQUEST`, exit 2. | `python3 -m engine.v2.ops submit --plan art_... --idempotency-key nightly-2026-09-12-01` |
+| `submit` | Submit a saved plan under `--idempotency-key` (both required). Operator namespace policy admits `shadow` and `smoke` only. A blocked plan is refused with `INVALID_REQUEST`, exit 2. For a `plan nightly` document, `--idempotency-key` is grammar-required but NOT used for job identity — see "`--idempotency-key` semantics for nightly submission" below. | `python3 -m engine.v2.ops submit --plan art_... --idempotency-key nightly-2026-09-12-01` |
 | `get` | Job document + attempt receipts. | `python3 -m engine.v2.ops get job_... --json` |
 | `logs` | Progress events; `--follow` re-polls every 2s until the job reaches a terminal state. | `python3 -m engine.v2.ops logs job_... --follow` |
 | `cancel` | Fenced cancellation; pass `--expected-attempt` with the job's active attempt — the fence is invalidated first, and the job completes as cancelled only once nothing is running. Omit it only for a job with no active attempt (queued, never started, or `retry_wait`): omission means "expect none", so a job that does have an active attempt still refuses (`conflict`, `STALE_EXPECTATION`). | `python3 -m engine.v2.ops cancel job_... --expected-attempt att_...` |
@@ -75,6 +75,35 @@ manifest.
 
 The `--json` flag on `init`/`doctor`/`health`/`get` is accepted but cosmetic:
 the CLI prints JSON regardless.
+
+### 2.1 `--idempotency-key` semantics for nightly submission
+
+(Phase 3 launch §5.5 item 1, fixed a18feffaa18a.) `submit` always
+requires `--idempotency-key`, but what it MEANS depends on the plan kind:
+
+- **Non-nightly plan** (`artifact_check`, `experiment`): the key you pass IS
+  the job's identity — `job_id_for(namespace, key)`. Two submissions with the
+  same key and the same plan return the same job; the same key with a
+  DIFFERENT plan is `IDEMPOTENCY_CONFLICT`.
+- **Nightly plan**: the key you pass is accepted (the CLI grammar requires
+  one) but never read. Every stage's own idempotency key is derived
+  entirely from the saved plan document — session, ticker/year/population/
+  snapshot scope, AND the plan's pinned identity (implementation, legacy
+  manifest, `decision_clock`; `nightly.py`'s `_plan_identity`). Concretely:
+  - Two `submit --plan <same plan_ref>` calls, with the SAME or DIFFERENT
+    `--idempotency-key`, are both retries of the identical saved plan: they
+    resolve to the exact same jobs, no duplicates, regardless of the key.
+  - A fresh `plan nightly` call — even with byte-identical
+    `--tickers/--year-start/--year-end/--expected-population`/snapshot
+    scope — always re-pins `decision_clock` from the current clock, so it
+    always produces a plan with a new identity and therefore new job ids
+    when submitted. A changed `--input-manifest` or a code change between
+    two `plan nightly` calls changes the identity independently of the
+    clock.
+  - This is why a cancelled run's jobs are never silently reused: re-running
+    `ops plan nightly` (never resubmitting the old `plan_ref`) always gets a
+    fresh plan identity and therefore fresh job ids, leaving the old
+    (cancelled) rows exactly where they were.
 
 ## 3. Health surface
 

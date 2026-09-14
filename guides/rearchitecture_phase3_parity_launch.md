@@ -284,16 +284,51 @@ Owner: this Phase 3 launch, carried from the Sep-13 Phase 2 review of
 These tasks do not delay opening an already validated P3-0 candidate, but
 must finish before P3-4 claims repeatable updates or authoritative live health.
 
-1. **Separate a retry from a new same-session plan.**
-   `ops/nightly.py::_scope_hash` currently omits the legacy manifest,
-   implementation, and pinned decision clock, while `ops/cli.py` ignores
-   `--idempotency-key` for nightly submission. A new plan can therefore use
-   existing job keys with different payloads. Bind stage keys to the saved
-   run/plan identity, preserve identical-plan retries, and make the CLI key
-   semantics explicit. The release identity must also distinguish a permitted
-   new generation for the same session; do not overwrite an old release or
-   weaken conflicting-content checks. Test an identical resubmission, a fresh
-   same-session plan with changed inputs, and rollback to the prior release.
+1. **Separate a retry from a new same-session plan.** **Done**, commit
+   a18feffaa18a; see
+   `tests/test_v2_ops_same_session_replan.py`, which reproduces the Sep-14
+   operator trace (plan -> submit -> cancel all -> re-plan after a code/
+   manifest change -> submit) and proves it now succeeds with fresh job ids
+   while the cancelled rows are untouched.
+
+   `nightly.py::_plan_identity` folds the legacy manifest, implementation
+   (`plan["implementation_ref"]`), and pinned `decision_clock` into every
+   stage's idempotency key (`_scope_hash`), so a genuinely new same-session
+   plan (changed code/manifest, or simply a fresh `plan nightly` call, which
+   always re-pins `decision_clock`) gets fresh job identities, while
+   resubmitting the identical saved plan artifact reproduces the exact same
+   keys. `cli.py`'s `--idempotency-key` semantics for nightly submission are
+   now documented explicitly (`guides/rearchitecture_phase1_runbook.md`
+   §2.1): accepted by the grammar, never read for job identity, which comes
+   entirely from the plan. `effects_graph.py::_generation_ref` mirrors the
+   same plan identity into the release id, so `publication_effect`'s
+   `stage_release` call no longer raises `IDEMPOTENCY_CONFLICT` ("release
+   manifest changed") for a genuinely new generation's bundle, and an old
+   release's own row/manifest/files are never touched.
+
+   **Not done, and not attempted here — a stop-and-report finding**: even
+   with a distinct release id, actually PUBLISHING a second same-session
+   generation (moving `CURRENT`) or committing its decisions still conflicts.
+   `outbox.watermark`'s one-receipt-per-occurrence rule — the same mechanism
+   that correctly keeps `decisions` from silently double-recording a changed
+   prediction under a new `deployment`/`decision_clock` — also fires inside
+   `publish_local`'s own `_acknowledge` for the `publication`/`delivery`
+   watermarks, and it is not transient (retrying does not help; generation
+   1's watermark row for that occurrence never clears). It fails safely (the
+   SQL transaction rolls back; no double record), but the on-disk `CURRENT`
+   pointer swap happens earlier in the same function and is not covered by
+   that rollback, so a caller that hits this is left with `CURRENT` naming
+   an unacknowledged release (`releases.published_at IS NULL`) — detectable
+   (the watermark still names the prior release) but not self-healing.
+   Resolving this needs an explicit design decision (a generation-aware
+   publication watermark, or refusing the pointer swap until the watermark
+   write would also succeed, or requiring explicit decision supersession)
+   that this task does not make on its own judgement. Until that lands, an
+   operator must not attempt to publish or re-commit decisions for a second
+   generation of an already-published same-session run — only the FIRST
+   generation to reach `publication`/`decision_commit` for a given
+   (scope, session) may do so; a superseding generation needs its own
+   decision.
 2. **Populate live engineering health from real observations.**
    `engineering_gate_effect` records a watermark but does not populate
    `health.record_check`. Wire scheduled occurrences to durable engineering

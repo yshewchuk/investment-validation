@@ -188,6 +188,13 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
             # occurrence alone (a stale one for the wrong session must still
             # refuse the decision gate; see effects_graph.publication_effect).
             "finality.json": _job_output("finality", keys)}
+        # guide §5.5 item 1: the SAME pinned plan identity ``decision_evidence``
+        # carries, so ``effects_graph.publication_effect`` can bind a release
+        # identity that distinguishes a genuinely new same-session generation
+        # (new implementation/manifest/decision_clock) from a retry of this
+        # exact saved plan (unchanged, so it reproduces the same release id).
+        params["deployment"] = "shadow:" + plan["implementation_ref"]
+        params["decision_clock"] = plan["decision_clock"]
     return params
 
 
@@ -286,10 +293,34 @@ def _snapshot_inputs(input_mode, snapshot_inputs, include_prerequisites):
     return snapshot_inputs
 
 
-def _scope_hash(tickers, year_start, year_end, expected_population, snapshot, context_tickers=()):
+def _plan_identity(plan, input_refs):
+    """The saved plan's own identity: pinned implementation, decision clock,
+    and legacy manifest -- exactly what the Sep-14 operator trace (guide
+    §5.5 item 1) found ``_scope_hash`` omitted.
+
+    These three values are written ONCE into the immutable plan document at
+    planning time (``plans.py::nightly_plan``/``build_nightly_plan``) and the
+    manifest artifact a caller resolves alongside it. Resubmitting the SAME
+    saved plan artifact (a retry) reads all three back completely unchanged,
+    so this identity -- and therefore every stage key derived from it --
+    stays identical. A fresh ``ops plan nightly`` call always re-pins
+    ``decision_clock`` from the current clock, so a genuinely new same-
+    session plan always changes this identity even when
+    tickers/years/population/snapshot happen to match exactly; a code or
+    manifest change (the operator's actual Sep-14 scenario) changes it
+    independently of the clock.
+    """
+    return {"implementation_ref": plan.get("implementation_ref") or "",
+            "decision_clock": plan.get("decision_clock") or "",
+            "legacy_manifest_ref": input_refs[0] if input_refs else ""}
+
+
+def _scope_hash(tickers, year_start, year_end, expected_population, snapshot, context_tickers=(),
+                plan_identity=None):
     scope = {"tickers": sorted(tickers), "context_tickers": sorted(context_tickers),
              "year_start": year_start, "year_end": year_end,
-             "expected_population": list(expected_population)}
+             "expected_population": list(expected_population),
+             "plan_identity": plan_identity or {}}
     if snapshot is not None:
         scope.update(input_mode="snapshot", snapshot_ref=snapshot["snapshot_ref_artifact_id"],
                      materialization_request=snapshot["materialization_request_ref"])
@@ -401,8 +432,9 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     if full_universe is not None and sorted(tickers) != sorted(context_tickers):
         raise fail("INVALID_REQUEST", "a full run must score its whole context",
                   details={"tickers": sorted(tickers), "context_tickers": sorted(context_tickers)})
+    plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
-                             context_tickers=context_tickers)
+                             context_tickers=context_tickers, plan_identity=plan_identity)
     effect_scope = effect_scope_for(tickers, full_universe)
     stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
     if snapshot is not None:
