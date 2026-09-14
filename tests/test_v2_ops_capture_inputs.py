@@ -131,6 +131,39 @@ def test_manifest_problems_rejects_wrong_capture_ref():
     assert "snapshot_import_plan.v1" in problems[0]["reason"]
 
 
+def test_cli_guard_refuses_a_snapshot_import_manifest():
+    """End-to-end guard proof (task brief's verify step): the real
+    2026-09-14 failure was the ``snapshot_import_plan.v1`` manifest --
+    ``engine.v2.data.import_snapshot``'s own shape, with real curated
+    file_refs and no ``data/raw/fetch/**`` at all -- reaching a barrier-mode
+    nightly's ``--input-manifest``. ``test_manifest_problems_rejects_wrong_capture_ref``
+    already proves the pure function; this proves the CLI-wired guard
+    (``engine.v2.ops.cli._check_nightly_manifest``, called from both
+    ``plan nightly`` and ``submit``) raises a typed ``OpsError`` for exactly
+    that document shape, not just an empty stub.
+    """
+    from engine.v2.ops.cli import _check_nightly_manifest
+
+    document = {
+        "manifest_id": "snap1",
+        "file_refs": [{"path": "data/curated/daily_market/year=2024/part-0000.parquet",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                      {"path": "data/curated/option_chains/year=2024/part-0000.parquet",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
+        "table_contract_refs": [], "registry_and_model_refs": ["placeholder::sha256:" + "0" * 64],
+        "calendar_ref": "placeholder::sha256:" + "0" * 64, "selected_session": SESSION,
+        "finality_receipt_refs": [], "knowledge_mode_by_table": {},
+        "availability_evidence_refs": [], "read_set_complete": True,
+        "capture_implementation_ref": "snapshot_import_plan.v1",
+    }
+    with pytest.raises(OpsError) as excinfo:
+        _check_nightly_manifest(json.dumps(document).encode())
+    assert excinfo.value.code == "INPUT_CHANGED"
+    problems = excinfo.value.problem.details["problems"]
+    assert len(problems) == 1 and problems[0]["kind"] is None
+    assert "snapshot_import_plan.v1" in problems[0]["reason"]
+
+
 def test_manifest_problems_flags_missing_family():
     """An empty read set flags every required family for the kind -- exactly
     the real defect: the snapshot-import manifest had zero
