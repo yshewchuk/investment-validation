@@ -277,6 +277,71 @@ create an independently advancing UI-latest pointer. A crash after index
 insertion but before publication leaves an unselected candidate. The previous
 release remains readable.
 
+**Implemented (P3-1c).** The binding is a plain document (`projection_
+binding.v1.0`, `engine.v2.serving.projections.projection_binding`), built
+purely from the committed serving index (no ops import): `projection_
+release_id`, `source_release_id`, `projection_manifest_ref` plus its own
+`projection_manifest_hash` (the manifest object's real content hash),
+`bundle_manifest_ref` (P3-4's byte-bound render-bundle identity, restated
+from the release), `serving_index_identity` (a fingerprint of the release's
+own committed row — document plus findings — so a direct edit to the index,
+not only a swapped manifest object, is caught), and `comparison_receipt_refs`
+(the release's own parity evidence: score/render comparison plus the
+findings receipt). Security evidence is not duplicated into it — the ops
+release manifest already binds the security gate's receipt to the same
+candidate via `binding_hash` (below).
+
+The operator entry point is the smaller of this section's two options: a
+`publication_effect` input, not a new coordinator stage.
+`engine.v2.ops.effects_graph.publication_effect` accepts an optional named
+`projection_binding.json` entry in the job's already-existing `input_
+bindings`, exactly the mechanism `bundle.tar`/`finality.json`/`selfcheck.
+json`/`engineering_gate.json` use — no new job kind or DAG wiring. Its
+presence is the only branch: a bundle-only publication (no projection
+candidate yet, e.g. still the P3-0 compatibility preview) behaves exactly
+as before. Because `binding_hash = content_hash({release_id, occurrence,
+files})` is computed over the exact `files` dict passed to `stage_release`,
+adding this file changes it, so every gate `publication_effect` builds is
+freshly bound to the candidate this publication now carries — never a
+receipt computed for an earlier, projection-less binding, and gates minted
+for one generation's files never validate a different generation's.
+`tools/v2_dashboard_project.py` (the one place allowed to compose serving
+and ops) is what actually BUILDS the document — it now emits `projection_
+binding` alongside its existing `release`/`findings` output — so an
+operator/submission script registers those bytes as an ops artifact and
+binds them the same way it already binds the render bundle; the tool
+itself stays offline and never publishes.
+
+The read API's current resolution (`engine.v2.serving.api._publication_
+resolver`) is the one pointer chain: the existing fenced ops publisher's
+own `CURRENT` under its release root, that release's bound `projection_
+binding.json`, reverified against the LIVE `serving.sqlite` index
+(`projections.verify_projection_binding`) before being trusted. Files (plus
+one bounded `serving.sqlite` connection) only — no `engine.v2.ops` import,
+so the layering stays intact. A release with no bound projection at all
+resolves to the ordinary "no current release" (503 `NO_CURRENT_RELEASE`,
+retryable); a binding that names a release id which is not fully committed
+or whose manifest/index hash no longer matches (a tampered binding
+document or a changed index row) is a typed, non-retryable refusal (500
+`CURRENT_BINDING_INVALID`) — never the same code, and never a silent
+fallback to "latest". The temporary `serving_root/CURRENT` default this
+module used before P3-1c is retired outright, not replaced by a new
+fallback; `create_app`'s `resolver` seam is unchanged in shape (any zero-
+argument `Callable[[], str | None]`, may also raise `ApiError`).
+
+Crash safety: a crash after `build_candidate`'s index insertion but before
+its operator entry point runs leaves that candidate committed-but-unbound
+in `serving.sqlite` — the ops `CURRENT`/binding are untouched, so the API
+keeps serving the previous release exactly as before, and a rerun (compute
+the binding, bind it, publish) completes cleanly. Rollback goes through the
+existing typed path: restage the prior generation's own content (here, its
+bound `projection_binding.json`) under a fresh release id and publish it —
+`publish_local`'s existing generation-aware watermarking (§5.5 item 1)
+means a second-generation publish, and a rollback after it, never collide.
+Both generations stay independently readable via `/api/v1/releases/{id}`.
+
+Tests: `tests/test_v2_serving_publication_binding.py`.
+
 ### 5.5 Review follow-through for repeatable updates and live health
 
 Owner: this Phase 3 launch, carried from the Sep-13 Phase 2 review of

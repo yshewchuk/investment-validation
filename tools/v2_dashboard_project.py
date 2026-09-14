@@ -55,6 +55,7 @@ from engine.v2.foundation import (  # noqa: E402
     to_document,
 )
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
@@ -105,8 +106,20 @@ def _result_document(result: PreviewRelease | Problem, conn) -> dict:
     row = conn.execute("SELECT findings_json FROM serving_release WHERE release_id = ?",
                        (result.release_id,)).fetchone()
     findings = json.loads(row["findings_json"]) if row is not None else None
+    # guide §5.4/§8 P3-1 step 3 (P3-1c): the operator entry point for
+    # binding this candidate to the existing fenced ops publisher is "a
+    # publication-effect input" (engine.v2.ops.effects_graph.
+    # publication_effect now accepts an optional named "projection_binding.
+    # json" input binding, the same mechanism bundle.tar/finality.json
+    # already use) -- not a new coordinator stage here. This tool's own
+    # contribution stays the smaller half: emit the binding document
+    # alongside the release it already prints, so an operator/submission
+    # script can register these bytes as an ops artifact and bind them into
+    # the publication job exactly the way it already binds the render
+    # bundle. Never published/staged here -- this tool stays offline.
+    binding = projections.projection_binding(conn, result.release_id)
     return {"ok": True, "release_id": result.release_id, "release": to_document(result),
-            "findings": findings}
+            "findings": findings, "projection_binding": binding}
 
 
 def main(argv: list[str] | None = None) -> int:

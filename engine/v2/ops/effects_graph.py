@@ -303,6 +303,36 @@ def _bind_release_intent(conn, scope, session, release_id, *, clock):
             (dumps(receipt), row["receipt_ref"]))
 
 
+def _publication_files(conn, store, bindings):
+    """The release's own file set: the bundle, plus an optional bound
+    ``projection_binding.json`` (guide §5.4/P3-1c) -- the chosen operator
+    entry point for binding a Phase-3 projection candidate to this fenced
+    publisher. This is the smaller of the guide's two named options ("a
+    coordinator step in tools/v2_dashboard_project.py, or a publication-
+    effect input"): one more optional named ``input_bindings`` entry, the
+    same mechanism ``bundle.tar``/``finality.json``/``selfcheck.json``/
+    ``engineering_gate.json`` already use -- no new job kind or DAG wiring.
+    `tools/v2_dashboard_project.py` (the one place allowed to compose
+    serving and ops) is what actually BUILDS this document, via
+    ``engine.v2.serving.projections.projection_binding``, and emits it
+    alongside its existing release output so an operator/submission script
+    can register it and bind it here the same way it already binds the
+    render bundle. Its presence is the only branch: an ordinary bundle-only
+    publication (no projection candidate yet, e.g. still on the P3-0
+    compatibility preview) behaves exactly as before. Adding this file
+    changes the caller's ``binding_hash``, so a candidate with a bound
+    projection always gets freshly bound gates -- never a receipt computed
+    for an earlier, projection-less binding."""
+    bundle_row = bindings.get("bundle.tar")
+    if bundle_row is None:
+        raise fail("VALIDATION_FAILED", "publication has no projection bundle bound")
+    files = {"bundle.tar": artifact(conn, store, bundle_row.artifact_id)}
+    binding_row = bindings.get("projection_binding.json")
+    if binding_row is not None:
+        files["projection_binding.json"] = artifact(conn, store, binding_row.artifact_id)
+    return files
+
+
 def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
                        keepalive=_no_keepalive, fault=None):
     """Build the four gate receipts, stage the release, then publish it.
@@ -333,10 +363,7 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
         raise fail("VALIDATION_FAILED", "publication has no finality bound")
     finality_doc = json.loads(store.read_verified(artifact(conn, store, finality_row.artifact_id)))
     session = resolve_effective_session(finality_doc, claim.spec.parameters["session"])
-    bundle_row = bindings.get("bundle.tar")
-    if bundle_row is None:
-        raise fail("VALIDATION_FAILED", "publication has no projection bundle bound")
-    files = {"bundle.tar": artifact(conn, store, bundle_row.artifact_id)}
+    files = _publication_files(conn, store, bindings)
     target = Path(ops_root) / "releases" / scope
     # guide §5.5 item 1: fold the pinned plan identity into the release id so
     # a genuinely new same-session generation (changed implementation,

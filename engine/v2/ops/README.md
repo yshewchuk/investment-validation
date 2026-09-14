@@ -228,6 +228,32 @@ leaves open — and `tests/test_v2_ops_render_parity.py`'s
 checks every `#output_name` binding against the set its producer kind
 actually registers.
 
+`publication_effect` (P3-1c, rearchitecture phase-3 guide §5.4) binds a
+Phase 3 serving projection candidate to this fenced publisher through one
+more optional named `input_bindings` entry, `projection_binding.json` —
+the smaller of the guide's two named operator-entry-point options ("a
+coordinator step in `tools/v2_dashboard_project.py`, or a publication-
+effect input"): no new job kind or DAG wiring, the same mechanism
+`bundle.tar`/`finality.json`/`selfcheck.json`/`engineering_gate.json`
+already use (`_publication_files`). Its content is an inert document
+(`engine.v2.serving.projections.projection_binding` builds it; this
+package never imports `engine.v2.serving`, keeping the layering intact) —
+`tools/v2_dashboard_project.py` is what actually builds and emits it, and
+an operator/submission script registers and binds it exactly like the
+render bundle. Presence is the only branch: an ordinary bundle-only
+publication (no projection candidate yet) behaves exactly as before.
+Because `stage_release`'s `binding_hash` is computed over the exact `files`
+dict passed to it, adding this file changes that hash, so every gate
+`publication_effect` builds is freshly bound to the candidate this
+publication now carries — gates minted for one generation's files never
+validate a different generation's (`stage_release`'s `_gate_is_bound`
+refuses on the `input_hash` mismatch, reported as `eligible: False`).
+`engine.v2.serving.api`'s read-only current-resolver reads the published
+`projection_binding.json` back (files only, no ops import) to answer
+"current" for the Phase 3 board — see `engine/v2/serving/README.md`.
+Tests: `tests/test_v2_serving_publication_binding.py` (ops+serving
+together; `tests/` may compose both).
+
 Writing the global `"shadow"` effect scope (`nightly.effect_scope_for`) must
 be explicit: `ops plan nightly --full-run` records the declaration and
 refuses unless `--tickers` equals `--context-tickers`; without it, every

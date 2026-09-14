@@ -181,21 +181,60 @@ score/event-scope routes require one — never search across releases),
 `CURSOR_MISMATCH` (409), `NO_CURRENT_RELEASE` (503), `UNKNOWN_RELEASE`/
 `UNKNOWN_EVENT`/`UNKNOWN_SCORE` (404), `OPERATIONS_UNAVAILABLE` (503).
 
-**Current-release resolution (§5.4) is one injected seam.** `create_app`'s
-`resolver` parameter is any zero-argument `Callable[[], str | None]`; the
-default (`_default_resolver`) reads a plain `CURRENT` file directly under
-`serving_root`, refusing a symlinked pointer or one whose content is not a
-single clean path segment — the same check `operations.py`'s own
-`_resolve_current_id` applies, reimplemented rather than imported. A pointer
-naming a release with no committed projection is `NO_CURRENT_RELEASE` (503),
-never a silent fallback to "latest". The publisher that will OWN this
-pointer is a later task; this seam is what it plugs into. `/releases/current`
-stays `Cache-Control: no-store` (its resolution can change between requests)
-but now also carries a strong ETag and answers `If-None-Match` with 304 —
-`no-store` and ETag/304 are not mutually exclusive: the first says a cache
-must not reuse the response unasked, the second makes asking again cheap.
-This keeps `ui/src/hooks.ts` `usePinnedRelease`'s ~4s background poll cheap
-without ever letting a stale release get cached and reused.
+**Current-release resolution (§5.4/P3-1c) is bound to the existing fenced ops
+publisher; `create_app`'s `resolver` stays the injected seam.** There is one
+authoritative published pointer — the existing fenced ops publisher's own
+`CURRENT` under its release root (`engine/v2/ops/publication.py`) — never a
+second, independently-advancing "UI latest" pointer. The default resolver
+(`_publication_resolver(publication_root, serving_db)`, selected by
+`create_app`'s `publication_root` parameter when no explicit `resolver` is
+given) follows it one more hop: that release's bound `projection_binding.
+json` names the projection `release_id`. Both files are read directly (the
+same symlink/one-clean-segment safety `operations.py`'s own
+`_resolve_current_id` applies, reimplemented since serving may not import
+ops), then the named release is reverified against the LIVE `serving.sqlite`
+index (`projections.verify_projection_binding`) before being trusted — never
+a silent fallback to "latest". A release published with no bound projection
+at all (the plain P3-0 compatibility preview) resolves to the ordinary
+`NO_CURRENT_RELEASE` (503, retryable); a binding that names a release id
+which is not fully committed, or whose manifest/index hash no longer
+matches (a tampered binding document or a changed index row), is instead a
+typed, non-retryable `CURRENT_BINDING_INVALID` (500) — distinct from "no
+current release" on purpose. With neither `resolver` nor `publication_root`
+given, "current" always resolves to `None` — the temporary `serving_root/
+CURRENT` default this module used before P3-1c is retired outright, not
+replaced by a new fallback. `resolver` itself is unchanged in shape (any
+zero-argument `Callable[[], str | None]`, may also raise `ApiError`) — tests
+use it to pin a release without touching the filesystem.
+
+`/releases/current` stays `Cache-Control: no-store` (its resolution can
+change between requests) but also carries a strong ETag and answers
+`If-None-Match` with 304 — `no-store` and ETag/304 are not mutually
+exclusive: the first says a cache must not reuse the response unasked, the
+second makes asking again cheap. This keeps `ui/src/hooks.ts`
+`usePinnedRelease`'s ~4s background poll cheap without ever letting a stale
+release get cached and reused.
+
+**The binding document itself (P3-1c) lives in `projections`, not `api` or
+ops.** `projections.projection_binding(conn, release_id)` builds a plain
+`projection_binding.v1.0` dict purely from the committed serving index: the
+projection `release_id`, `source_release_id`, `projection_manifest_ref`
+plus its own content hash, `bundle_manifest_ref` (P3-4's byte-bound
+render-bundle identity, restated from the release), `serving_index_
+identity` (a fingerprint of the release's own committed row — document
+plus findings — catching a direct index edit, not only a swapped manifest
+object), and `comparison_receipt_refs` (the release's own parity evidence).
+`projections.verify_projection_binding(conn, binding)` is the paired check
+the resolver runs. Neither function imports ops; the document crosses the
+layering boundary as inert JSON, carried by `tools/v2_dashboard_project.py`
+(the one place allowed to compose both) and bound into the fenced publisher
+through `engine.v2.ops.effects_graph.publication_effect`'s optional
+`projection_binding.json` named input — the chosen operator entry point,
+being the smaller of the guide's two options ("a coordinator step... or a
+publication-effect input"): no new job kind or DAG wiring, the same
+mechanism `bundle.tar`/`finality.json` already use. See `engine/v2/ops/
+README.md` and `guides/rearchitecture_phase3_parity_launch.md` §5.4 for the
+ops-side half. Tests: `tests/test_v2_serving_publication_binding.py`.
 
 **UI-alignment fixes (mid-task, after `ui/` P3-3a landed at `bc6da8d`),
 reconciled against `tests/fixtures/v2_ui_mock_api.py` per the rule "if §6 and
@@ -272,26 +311,34 @@ The server requires a nonempty authentication token supplied at construction.
 Credentials never belong in a release manifest, URL or status artifact.
 
 `tools/v2_dashboard_project.py` is the offline projection coordinator CLI
-(P3-1b/P3-4): given a saved `score.json`, a rendered bundle, a Phase 2
+(P3-1b/P3-4/P3-1c): given a saved `score.json`, a rendered bundle, a Phase 2
 catalog/store and a snapshot id, it builds one candidate against a serving
 root (`serving.sqlite` plus its own `objects/`) and prints `{"release_id":
-..., "findings": {...}}` (or the refusal) as JSON. `--bundle-format legacy`
-(the default) reads a real `render_bundle` output tree through
-`legacy_bundle.load_legacy_bundle` and folds `content_hash(bundle_manifest)`
-into the release's `bundle_manifest_ref`, overriding whatever the
-`--preview-input` document declared; `--bundle-format flat` keeps the
-pre-P3-4 simplified one-array-per-ticker shape for tests that predate the
-real adapter. No scoring, no provider calls, no legacy import — it composes
-`engine.v2.ops.bootstrap.open_catalog` and this package in the one place
-(`tools/`) allowed to import both.
+..., "findings": {...}, "projection_binding": {...}}` (or the refusal) as
+JSON. `--bundle-format legacy` (the default) reads a real `render_bundle`
+output tree through `legacy_bundle.load_legacy_bundle` and folds
+`content_hash(bundle_manifest)` into the release's `bundle_manifest_ref`,
+overriding whatever the `--preview-input` document declared; `--bundle-
+format flat` keeps the pre-P3-4 simplified one-array-per-ticker shape for
+tests that predate the real adapter. `projection_binding` (P3-1c) is
+`projections.projection_binding` over the just-built release — never
+published or staged here, this tool stays offline; an operator/submission
+script registers those bytes as an ops artifact and binds them into a
+publication job's `projection_binding.json` input the same way it already
+binds the render bundle. No scoring, no provider calls, no legacy import —
+it composes `engine.v2.ops.bootstrap.open_catalog` and this package in the
+one place (`tools/`) allowed to import both.
 
 `python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-db
-serving/serving.sqlite --store-root serving/objects --serving-root serving`
-starts the read API under uvicorn. The token comes from the `V2_DASHBOARD_
-TOKEN` environment variable — the launcher refuses to start without one, and
-refuses a non-loopback `--host` without `--allow-non-loopback`, exactly the
-two refusals `engine/v2/dashboard/preview.py`'s launcher already makes for
-the compatibility surface.
+serving/serving.sqlite --store-root serving/objects --serving-root serving
+--publication-root <ops_root>/releases/<scope>` starts the read API under
+uvicorn, "current" resolved through that fenced ops publisher's own pointer
+(§5.4/P3-1c; omit `--publication-root` for no configured pointer). The
+token comes from the `V2_DASHBOARD_TOKEN` environment variable — the
+launcher refuses to start without one, and refuses a non-loopback `--host`
+without `--allow-non-loopback`, exactly the two refusals `engine/v2/
+dashboard/preview.py`'s launcher already makes for the compatibility
+surface.
 
 ## Testing
 
