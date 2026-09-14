@@ -977,6 +977,82 @@ def _succeed_finality_parent(conn, clock, supervisor, *, key, finality_ref, cove
     return job_id_for("shadow", key)
 
 
+def test_finality_checkpoint_records_real_names_through_the_real_supervisor_path(tmp_path):
+    """Gap-closer (2026-09-14 checkpoint-naming defect): every other test in
+    this file that needs a succeeded ``legacy_finality`` parent goes through
+    ``_succeed_finality_parent`` above, which hand-inserts ``attempt_outputs``
+    rows already named ``legacy_finality``/``legacy_finality_coverage`` --
+    it never calls ``Service._checkpoint_refs``, so this whole file passed
+    the entire time the real method enumerated names as '0'/'1'. This test
+    drives a real ``Service`` (real catalog, real ``ArtifactStore``, real
+    ``_checkpoint_refs``) instead, staging both outputs itself and letting
+    the supervisor name them -- the same real method the production
+    ``legacy_finality`` worker result flows through in ``_commit_success``.
+    """
+    root = tmp_path / "finality-checkpoint-real"
+    root.mkdir()
+    store_root = root / "prod"
+    store_root.mkdir()
+    clock = SystemClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO, store_root=store_root)
+    service.start()
+
+    job = JobSpec(kind="artifact_check", implementation_ref="parent-real", spec_hash=None,
+                  environment_ref="parent-real", parameters={"expected_ids": ()},
+                  output_namespace="shadow", resource_class="delivery",
+                  retry_policy_ref="bounded", checkpoint_contract_ref="receipt.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(
+        namespace="shadow", idempotency_key="finality-real", principal="operator", job=job),
+        clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=service.identity, clock=clock, registry=registry())
+    finality_job_id = job_id_for("shadow", "finality-real")
+
+    staging = service.store.staging_dir(claim.attempt_id)
+    finality_bytes = json.dumps({"date": SESSION, "is_final": True}, sort_keys=True).encode()
+    coverage_bytes = json.dumps(_finality_coverage(), sort_keys=True).encode()
+    (staging / "finality.json").write_bytes(finality_bytes)
+    (staging / "finality_coverage.json").write_bytes(coverage_bytes)
+    outputs = [{"name": "legacy_finality", "path": "finality.json", "schema": "legacy_action.v1.0"},
+              {"name": "legacy_finality_coverage", "path": "finality_coverage.json",
+               "schema": "finality_coverage.v1.0"}]
+
+    refs = service._checkpoint_refs(claim, outputs, None)
+    assert [name for name, _ in refs] == ["legacy_finality", "legacy_finality_coverage"]
+
+    def effects(inner_conn):
+        for name, ref in refs:
+            register_artifact(inner_conn, ref, claim.attempt_id, clock)
+            inner_conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                               (claim.attempt_id, name, ref.artifact_id))
+    commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                   clock=clock, effects=effects)
+
+    child_job = JobSpec(kind="artifact_check", implementation_ref="child-real", spec_hash=None,
+                        environment_ref="child-real",
+                        parameters={"expected_ids": (),
+                                    "input_bindings": {
+                                        "finality.json": finality_job_id + "#legacy_finality",
+                                        "finality_coverage.json":
+                                            finality_job_id + "#legacy_finality_coverage"}},
+                        dependency_job_ids=(finality_job_id,),
+                        output_namespace="shadow", resource_class="delivery",
+                        retry_policy_ref="bounded", checkpoint_contract_ref="receipt.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(
+        namespace="shadow", idempotency_key="score-real", principal="operator", job=child_job),
+        clock=clock)
+    child_claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                             supervisor=service.identity, clock=clock, registry=registry())
+
+    # Before the fix: OpsError(INPUT_CHANGED, "input binding names an output
+    # its parent did not produce") -- the parent's rows were '0'/'1'.
+    resolved = resolve_and_record(conn, service.store, child_claim)
+    assert resolved["finality.json"].content_hash == refs[0][1].content_hash
+    assert resolved["finality_coverage.json"].content_hash == refs[1][1].content_hash
+
+
 def _decision_evidence_request(*, key, score_job, finality_job, replay_job,
                                deployment, decision_clock):
     bindings = {"score.json": score_job + "#legacy_score",
