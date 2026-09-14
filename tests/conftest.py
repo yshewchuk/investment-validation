@@ -6,7 +6,11 @@ a fake adapter.
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import importlib
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -93,6 +97,119 @@ def pytest_configure(config):
 #   workers (`-n 1` and plain serial both pass in ~33s). Real memory
 #   pressure from real data, not a small hidden-shared-state bug, so
 #   grouped rather than fixed.
+
+
+# -- ui/ build fixtures -------------------------------------------------------
+#
+# tests/test_v2_dashboard_browser.py and tests/test_v2_dashboard_integration.py
+# both drive a real Playwright browser against a real `npm --prefix ui run
+# build` output. A fresh worktree has no `ui/node_modules` at all (it is
+# `.gitignore`d, per ui/README.md's "Allowlist" section), so the bare `npm
+# run build` those tests used to call directly fails with `tsc: not found`
+# before it ever gets to Vite. `ui_dist_dir` below installs (`npm ci --prefix
+# ui`, honoring the committed lockfile byte for byte) whenever `ui/
+# node_modules` is missing or its recorded lockfile hash no longer matches
+# `ui/package-lock.json`, then builds -- once per pytest session, and safe
+# against a second agent building the SAME worktree concurrently via a real
+# `flock` on `ui/.npm-ci.lock` (xdist workers are separate OS processes, and
+# so is a second agent's own pytest invocation).
+
+UI_ROOT = REPO_ROOT / "ui"
+_UI_NPM_CI_LOCK = UI_ROOT / ".npm-ci.lock"
+_UI_NPM_CI_MARKER = UI_ROOT / "node_modules" / ".package-lock-hash"
+_UI_NPM_CI_TIMEOUT = 600
+_UI_NPM_BUILD_TIMEOUT = 180
+
+
+def _ui_node_available() -> bool:
+    return shutil.which("node") is not None and shutil.which("npm") is not None
+
+
+def _ui_lockfile_hash() -> str:
+    return hashlib.sha256((UI_ROOT / "package-lock.json").read_bytes()).hexdigest()
+
+
+def _ui_node_modules_stale() -> bool:
+    if not (UI_ROOT / "node_modules").is_dir():
+        return True
+    if not _UI_NPM_CI_MARKER.is_file():
+        return True
+    try:
+        return _UI_NPM_CI_MARKER.read_text().strip() != _ui_lockfile_hash()
+    except OSError:
+        return True
+
+
+def _ui_ensure_node_modules() -> None:
+    """Installs `ui/node_modules` via `npm ci --prefix ui` iff missing or
+    stale against `ui/package-lock.json` -- under a real `flock` so
+    concurrent callers (xdist workers, or a second agent on this host) block
+    on the install rather than racing it. Never silently skips an `npm ci`
+    failure: a nonzero exit fails the test loudly with the command's own
+    tail output. Caller is responsible for skipping first when node/npm
+    itself is not installed at all (`_ui_node_available`)."""
+    UI_ROOT.mkdir(parents=True, exist_ok=True)
+    with open(_UI_NPM_CI_LOCK, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if not _ui_node_modules_stale():
+                return
+            result = subprocess.run(
+                ["npm", "ci", "--prefix", str(UI_ROOT)],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=_UI_NPM_CI_TIMEOUT)
+            if result.returncode != 0:
+                pytest.fail(
+                    f"npm ci --prefix ui failed (exit {result.returncode}):\n"
+                    f"--- stdout (tail) ---\n{result.stdout[-4000:]}\n"
+                    f"--- stderr (tail) ---\n{result.stderr[-4000:]}")
+            _UI_NPM_CI_MARKER.write_text(_ui_lockfile_hash())
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+@pytest.fixture(scope="session")
+def ui_dist_dir():
+    """Builds `ui/dist` once per pytest session (`npm --prefix ui run
+    build`), installing/repairing `ui/node_modules` first when needed. Skips
+    with a clear reason only when node/npm is not available at all; an `npm
+    ci` or `npm run build` failure fails loudly rather than skipping."""
+    if not _ui_node_available():
+        pytest.skip("node/npm not available in this environment")
+    _ui_ensure_node_modules()
+    result = subprocess.run(
+        ["npm", "--prefix", str(UI_ROOT), "run", "build"],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=_UI_NPM_BUILD_TIMEOUT)
+    if result.returncode != 0:
+        pytest.fail(f"npm --prefix ui run build failed:\n{result.stdout}\n{result.stderr}")
+    dist = UI_ROOT / "dist"
+    assert dist.is_dir(), "build did not produce ui/dist"
+    return dist
+
+
+@pytest.fixture(scope="module")
+def playwright_instance():
+    """Module-scoped, not session-scoped: `tests/test_v2_dashboard_preview.py`
+    (also `xdist_group("serial")`, so it shares a worker with every module
+    using this fixture) opens its own independent `sync_playwright()` context
+    directly rather than through this fixture. A session-scoped instance here
+    would still be open (and its event loop still current) when that other
+    module's own `with sync_playwright() as p:` ran in the same process,
+    which playwright refuses ("Sync API inside the asyncio loop") -- module
+    scope tears this one down at the end of each module, before the next
+    module in the worker's queue gets a turn."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        yield p
+
+
+@pytest.fixture(scope="module")
+def browser(playwright_instance):
+    b = playwright_instance.chromium.launch(headless=True)
+    try:
+        yield b
+    finally:
+        b.close()
 
 
 @pytest.fixture

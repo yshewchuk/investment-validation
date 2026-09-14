@@ -3,15 +3,21 @@ import type { PreviewRelease } from "../api/types";
 
 interface Props {
   /** The pinned release id — always known, even when `release` metadata is
-   * not (a deep link to a non-current release; see hooks.ts
-   * `useResolvedRelease`). */
+   * not (a deep link whose own `GET /api/v1/releases/{id}` fetch failed for
+   * a reason other than 404; see hooks.ts `useResolvedRelease`). */
   releaseId: string;
-  /** Full metadata, only available when the pin equals `current`. */
+  /** This release's own metadata — for an unpinned load, from `current`;
+   * for a deep link (P3-3c), from `GET /api/v1/releases/{id}` directly, so
+   * a non-current pin still shows its own id/as-of/coverage, not just
+   * current's. */
   release: PreviewRelease | null;
   /** False when the pin differs from `current` (deep link to an older
    * release) — P3-3b deliverable 3: "It shows a notice if it isn't
    * current, and never silently switches." */
   isCurrent: boolean;
+  /** The id `current` resolves to right now, when known — lets the "not
+   * current" notice link back to it (P3-3c deliverable 2). */
+  currentReleaseId: string | null;
   /** Set when `current` itself could not be resolved at all (distinct from
    * simply resolving to a different id). */
   currentError: ApiError | null;
@@ -30,7 +36,23 @@ interface Props {
  *   requires: "on a release mismatch, show that the release changed and
  *   offer a reload. Never mix releases silently.").
  */
-export function ReleaseBanner({ releaseId, release, isCurrent, currentError, changedReleaseId }: Props) {
+/** A real page load (never a same-document hash change, which would leave
+ * `useResolvedRelease`'s pin untouched per "R1 readers retain R1") that
+ * drops any pinned release segment from the address bar, so the fresh load
+ * resolves whatever `current` is at that moment — the same technique the
+ * `release-changed-notice` reload button below already uses. */
+export function reloadToCurrent(): void {
+  window.location.href = window.location.pathname + window.location.search;
+}
+
+export function ReleaseBanner({
+  releaseId,
+  release,
+  isCurrent,
+  currentReleaseId,
+  currentError,
+  changedReleaseId,
+}: Props) {
   const stale = (release?.stale_or_degraded_reasons.length ?? 0) > 0;
   return (
     <div className="release-banner" data-testid="release-banner">
@@ -62,23 +84,21 @@ export function ReleaseBanner({ releaseId, release, isCurrent, currentError, cha
               `pinned release ${releaseId} directly, as saved.`
             : `This is a deep link to release ${releaseId}, which is not the current release. ` +
               `Data for ${releaseId} is shown as saved; it is never silently swapped for the current one.`}
+          {currentReleaseId !== null && (
+            <>
+              {" "}
+              <button type="button" onClick={reloadToCurrent} data-testid="current-release-link">
+                Go to the current release ({currentReleaseId})
+              </button>
+            </>
+          )}
         </div>
       )}
       {changedReleaseId !== null && (
         <div className="release-changed-notice" data-testid="release-changed-notice">
           The current release changed to <code>{changedReleaseId}</code>. This page keeps
           showing the pinned release <code>{releaseId}</code>.{" "}
-          <button
-            type="button"
-            onClick={() => {
-              // A plain `location.reload()` would reload the SAME URL --
-              // which, once pinned, names THIS (now-stale) release
-              // explicitly (App.tsx's address-bar rewrite, deliverable 3).
-              // Drop the release segment first so the fresh load re-resolves
-              // whatever is current at that moment, not this pinned one.
-              window.location.href = window.location.pathname + window.location.search;
-            }}
-          >
+          <button type="button" onClick={reloadToCurrent}>
             Reload to see {changedReleaseId}
           </button>
         </div>

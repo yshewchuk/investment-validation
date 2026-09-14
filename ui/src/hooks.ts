@@ -32,19 +32,37 @@ export type ReleaseState =
       /** False when the pinned id differs from `current`, OR the pin came
        * from a deep link and `current` could not be resolved at all. */
       isCurrent: boolean;
-      /** Full metadata is only available when the pin equals `current` —
-       * there is no "get an arbitrary past release's metadata" route (§6
-       * only exposes `current`). A pinned-but-not-current view still fetches
-       * events/scores fine (those accept an explicit `release_id`); it just
-       * cannot show `resolved_as_of`/coverage for that release. */
+      /** This release's own metadata. For an unpinned load it comes from
+       * `current`; for a deep link (P3-3c) it comes from the dedicated
+       * `GET /api/v1/releases/{id}` fetch, so a pin that is NOT current
+       * still shows its own `resolved_as_of`/coverage/stale reasons — not
+       * just current's. Null only if that fetch itself failed for a
+       * reason other than "unknown release" (network/5xx); `unknown_release`
+       * below covers the 404 case explicitly. */
       release: PreviewRelease | null;
+      /** The id `current` resolves to right now, when known — lets the
+       * "not current" notice link back to it. Null when `current` itself
+       * could not be resolved. */
+      currentReleaseId: string | null;
       /** Set when `current` itself could not be resolved (e.g. 503 "no
        * current release published") but an explicit deep-link pin still
        * lets the page proceed. Null when `current` resolved normally. */
       currentError: ApiError | null;
     }
   | { status: "unauthenticated" }
+  /** A deep-linked release id that `GET /api/v1/releases/{id}` answered
+   * 404 `UNKNOWN_RELEASE` for — distinct from `unavailable` below, which is
+   * about `current`'s own pointer, not a specifically named release. */
+  | { status: "unknown_release"; releaseId: string; currentReleaseId: string | null }
   | { status: "unavailable"; error: ApiError };
+
+function toApiError(error: unknown): ApiError {
+  return error instanceof ApiError ? error : new ApiError(0, clientProblem("NETWORK_ERROR", "network error"));
+}
+
+function is401(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
 
 /**
  * Resolves the pinned release exactly once per page load (guide §6/§7:
@@ -81,47 +99,79 @@ export function useResolvedRelease(
   useEffect(() => {
     let cancelled = false;
     const pin = routePinRef.current;
-    client
-      .getRelease()
-      .then((release) => {
-        if (cancelled) return;
-        const releaseId = pin ?? release.release_id;
-        const isCurrent = releaseId === release.release_id;
-        pinnedIdRef.current = releaseId;
-        setState({
-          status: "ready",
-          releaseId,
-          isCurrent,
-          release: isCurrent ? release : null,
-          currentError: null,
+
+    if (pin === null) {
+      // No deep link: exactly the P3-3a behavior, unchanged. Pin to
+      // whatever `current` resolves to.
+      client
+        .getRelease()
+        .then((release) => {
+          if (cancelled) return;
+          pinnedIdRef.current = release.release_id;
+          setState({
+            status: "ready",
+            releaseId: release.release_id,
+            isCurrent: true,
+            release,
+            currentReleaseId: release.release_id,
+            currentError: null,
+          });
+        })
+        .catch((error: unknown) => {
+          if (cancelled || error instanceof ApiAborted) return;
+          if (is401(error)) {
+            setState({ status: "unauthenticated" });
+            return;
+          }
+          setState({ status: "unavailable", error: toApiError(error) });
         });
-      })
-      .catch((error: unknown) => {
-        if (cancelled || error instanceof ApiAborted) return;
-        if (error instanceof ApiError && error.status === 401) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // A deep link (P3-3c deliverable 2): fetch the pinned release's OWN
+    // metadata via `GET /api/v1/releases/{id}` -- never `current` -- and
+    // `current` itself independently, so the pin never depends on `current`
+    // resolving at all, and the "not current" notice can still link to
+    // whatever IS current when it does resolve. Neither promise's failure
+    // is allowed to hide the other's result.
+    Promise.allSettled([client.getReleaseById(pin), client.getRelease()]).then(
+      ([pinnedResult, currentResult]) => {
+        if (cancelled) return;
+        if (
+          (pinnedResult.status === "rejected" && is401(pinnedResult.reason)) ||
+          (currentResult.status === "rejected" && is401(currentResult.reason))
+        ) {
           setState({ status: "unauthenticated" });
           return;
         }
-        const apiError =
-          error instanceof ApiError
-            ? error
-            : new ApiError(0, clientProblem("NETWORK_ERROR", "network error"));
-        if (pin !== null) {
-          // `current` is broken, but a deep link still names a specific,
-          // presumably-still-readable release (guide §5.4: "the previous
-          // release remains readable"). Proceed pinned to it.
+        const currentReleaseId =
+          currentResult.status === "fulfilled" ? currentResult.value.release_id : null;
+        const currentErr =
+          currentResult.status === "rejected" ? toApiError(currentResult.reason) : null;
+
+        if (
+          pinnedResult.status === "rejected" &&
+          pinnedResult.reason instanceof ApiError &&
+          pinnedResult.reason.status === 404
+        ) {
           pinnedIdRef.current = pin;
-          setState({
-            status: "ready",
-            releaseId: pin,
-            isCurrent: false,
-            release: null,
-            currentError: apiError,
-          });
+          setState({ status: "unknown_release", releaseId: pin, currentReleaseId });
           return;
         }
-        setState({ status: "unavailable", error: apiError });
-      });
+
+        pinnedIdRef.current = pin;
+        setState({
+          status: "ready",
+          releaseId: pin,
+          isCurrent: currentReleaseId === pin,
+          release: pinnedResult.status === "fulfilled" ? pinnedResult.value : null,
+          currentReleaseId,
+          currentError: currentErr,
+        });
+      },
+    );
     return () => {
       cancelled = true;
     };

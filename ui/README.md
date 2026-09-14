@@ -1,20 +1,22 @@
-# `ui/` — v2 board + detail client (P3-3a, P3-3b)
+# `ui/` — v2 board + detail client (P3-3a, P3-3b, P3-3c)
 
 React + TypeScript + Vite client for the rearchitecture Phase 3 board and
 lazy event/score detail views, built against the §6 read API contract
-(`guides/rearchitecture_phase3_parity_launch.md`). The real FastAPI server
-(P3-2) is a separate, concurrent task — this slice was built and tested
-against a stdlib mock (`tests/fixtures/v2_ui_mock_api.py`) shaped verbatim
-from `engine/v2/contracts/serving.py`, so it needs no changes when P3-2
-lands with the same field names. Contract decisions confirmed against
-`engine/v2/serving/api.py` mid-P3-3b (coordinator's 2026-09-14 note, then
-verified directly in that file): `release_id` is a *required* query param on
-`GET /api/v1/scores/{id}` and `GET /api/v1/events/{id}/scores` (400
-`RELEASE_ID_REQUIRED` if missing — `engine/v2/serving/api.py::
-_require_release_id`), and every error body is the real `Problem` envelope
-(`code`, `category`, `retryable`, `message`, plus operational fields) with
-**no** `title`/`status` alias — `ApiError.status` in `client.ts` comes from
-the HTTP response itself, never the body.
+(`guides/rearchitecture_phase3_parity_launch.md`). Built and tested against
+a stdlib mock (`tests/fixtures/v2_ui_mock_api.py`) shaped verbatim from
+`engine/v2/contracts/serving.py`; P3-3c (`tests/
+test_v2_dashboard_integration.py`) then confirmed it end to end against the
+real FastAPI server (`engine/v2/serving/api.py`, P3-2) with a real synthetic
+release published through the real ops chain — no client changes were
+needed. Contract decisions confirmed against `engine/v2/serving/api.py`
+mid-P3-3b (coordinator's 2026-09-14 note, then verified directly in that
+file): `release_id` is a *required* query param on `GET /api/v1/scores/{id}`
+and `GET /api/v1/events/{id}/scores` (400 `RELEASE_ID_REQUIRED` if missing —
+`engine/v2/serving/api.py::_require_release_id`), and every error body is
+the real `Problem` envelope (`code`, `category`, `retryable`, `message`,
+plus operational fields) with **no** `title`/`status` alias —
+`ApiError.status` in `client.ts` comes from the HTTP response itself, never
+the body.
 
 ## Commands
 
@@ -25,11 +27,19 @@ npm --prefix ui run build       # tsc --noEmit && vite build -> ui/dist (no sour
 npm --prefix ui run dev         # vite dev server; proxies /api to 127.0.0.1:8765
 ```
 
-Browser tests (Playwright, headless, serial xdist group — drives a real
-browser and builds `ui/dist` via a real `npm run build`):
+Browser tests (Playwright, headless, serial xdist group — drive a real
+browser against `ui/dist`, built by a real `npm run build`). `ui/node_modules`
+does not need to exist first: the shared `ui_dist_dir` session fixture
+(`tests/conftest.py`) runs `npm ci --prefix ui` itself, under a real `flock`
+(`ui/.npm-ci.lock`) so a second concurrent pytest invocation on this worktree
+blocks on the install rather than racing it, whenever `ui/node_modules` is
+missing or stale against `ui/package-lock.json`; it skips with a clear
+reason if node/npm is not installed at all, and fails loudly (with the
+command's tail output) on a real `npm ci`/`npm run build` failure rather
+than skipping:
 
 ```bash
-python3 -m pytest -q -p no:cacheprovider tests/test_v2_dashboard_browser.py
+python3 -m pytest -q -p no:cacheprovider tests/test_v2_dashboard_browser.py tests/test_v2_dashboard_integration.py
 ```
 
 ## What is shipped
@@ -115,14 +125,17 @@ context). Every route names `release_id` explicitly.
   session (guide §9 L02: "R1 readers retain R1"; only a fresh page load —
   a real reload, not an in-app navigation — can change the pin). This is
   exactly what makes a deep link to a non-current release work.
-- **No metadata route for a specific past release** (judgement call): §6
-  only exposes `GET /api/v1/releases/current`, so when a deep-linked pin is
-  NOT `current`, the banner cannot show that release's `resolved_as_of`/
-  coverage/stale reasons — there is nothing to fetch them from. The board
-  and detail views still work fully (`listEvents`/`getEventScores`/
-  `getScore` all accept an explicit `release_id`); only the banner is
-  reduced, and a `release-not-current-notice` says so explicitly rather
-  than silently showing stale or wrong metadata.
+- **Non-current release banner** (P3-3c, closing the P3-3b gap of the same
+  name): a deep-linked pin that is NOT `current` fetches its own metadata
+  via `GET /api/v1/releases/{id}` (`client.ts` `getReleaseById`, added
+  P3-3c — the real API has always had this route; only the mock and client
+  were missing it), independently of `current`, so the banner shows that
+  release's own `resolved_as_of`/coverage/stale reasons rather than none —
+  plus a `release-not-current-notice` with a link to whatever `current`
+  actually resolves to right now. A release id the server has never heard
+  of (404 `UNKNOWN_RELEASE`) renders a dedicated `unknown-release` state
+  with the same link, rather than falling through to the generic error
+  banner.
 - **The "reload to see the new release" button** (`ReleaseBanner`,
   background-poll case) strips the pinned hash before reloading
   (`location.href = pathname + search`), not a bare `location.reload()` —
@@ -229,17 +242,16 @@ detail-fetch failure never takes down the board (§7).
   `display_record` carries them. Not a bug, a contract-shape mismatch
   between the deliverable's prose and the actual schema, recorded here
   rather than silently worked around by inventing fields.
-- **No metadata for a pinned-but-non-current release**: see the Routing
-  section above — §6 has no "get an arbitrary past release's metadata"
-  route, only `current`. The board/detail data itself is unaffected.
-- **P3-2 (real read API)** — separate, concurrent task, now confirmed
-  compatible: `release_id` required (400 `RELEASE_ID_REQUIRED`) on
-  `/scores/{id}` and `/events/{id}/scores`, and the real `Problem` envelope
-  with no `title`/`status` alias, both verified directly against
-  `engine/v2/serving/api.py` and matched in `client.ts`/the mock. Pointing
-  `createHttpDataClient()` at the real server should need no further UI
-  change; any drift found while integrating is P3-2's contract gap, not
-  this client's.
+- **P3-2 (real read API)** — closed by P3-3c: confirmed compatible and now
+  integration-tested end to end (`tests/test_v2_dashboard_integration.py`),
+  not just contract-reviewed. `release_id` required (400
+  `RELEASE_ID_REQUIRED`) on `/scores/{id}` and `/events/{id}/scores`, the
+  real `Problem` envelope with no `title`/`status` alias, and
+  `GET /api/v1/releases/{id}` (the non-current-release banner's fetch) all
+  verified directly against `engine/v2/serving/api.py` and a real
+  `uvicorn.Server` running it — no `client.ts`/component change was needed
+  beyond the `getReleaseById` addition above; the only drift found and
+  fixed was in the mock (see the mock's own `_release_by_id`).
 
 ## Allowlist
 
