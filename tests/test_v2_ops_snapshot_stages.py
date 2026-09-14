@@ -810,3 +810,22 @@ def test_planning_refusals(case):
         with pytest.raises(OpsError):
             build_legacy_job_requests(plan, tickers=("AAA",), year_start=2020, year_end=2021,
                                       **kwargs)
+
+
+def test_planning_succeeds_when_trades_spans_more_tickers_and_earlier_years(case):
+    """Real-shape regression for the heavy-run stage 9a defect: the fixture's
+    committed ``trades`` table (TRADE_ROWS) spans {AAA, BBB} x {2020, 2021} --
+    wider than a planned universe of just BBB over just 2021. Before the fix,
+    ``evidence_scope_covers_trades`` compared trades's real span against the
+    abstract evidence_scope (here {"BBB"} x {2020, 2021} -- AAA is outside
+    it) and refused with INVALID_REQUEST, exactly the real 201-ticker/
+    2023-2026 refusal the task brief reports. daily_market is whole_table by
+    construction, so planning must now succeed: trades's span is covered by
+    construction, regardless of how much narrower the planned board universe
+    is."""
+    from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
+
+    result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("BBB",), year_start=2021,
+                                 year_end=2021, expected_population=("BBB|S1|2021-02-10",),
+                                 clock=case.clock)
+    assert result["snapshot_id"] == case.snap.snapshot_id

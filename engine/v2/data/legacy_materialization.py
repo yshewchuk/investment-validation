@@ -549,14 +549,81 @@ def trades_span(repository, request: LegacyMaterializationRequest) -> dict:
     return {"tickers": tickers, "years": years}
 
 
+def _year_interval(column: str, year: int, sample: str | None) -> TimeInterval:
+    """A calendar-year ``[year, year+1)`` bound, in the SAME string kind as
+    ``sample`` (a naive timestamp or a bare date) — comparing across kinds
+    breaks the lexicographic ordering :func:`_interval_covers` relies on (a
+    naive-timestamp string sorts strictly after the bare date it is equal
+    to, e.g. ``"2020-01-01T00:00:00.000000" > "2020-01-01"``)."""
+    if sample is not None and time_formats.is_naive_timestamp(sample):
+        start = time_formats.format_naive_timestamp(datetime(year, 1, 1))
+        end = time_formats.format_naive_timestamp(datetime(year + 1, 1, 1))
+    else:
+        start, end = f"{year}-01-01", f"{year + 1}-01-01"
+    return TimeInterval(column=column, start_inclusive=start, end_exclusive=end)
+
+
+def _span_uncovered_by_query(span: dict, query: DataQuery) -> tuple[set[str], set[int]]:
+    """The pieces of ``span`` (from :func:`trades_span`) that ``query`` itself
+    does not read: tickers outside its own ``ticker in (...)`` predicate (no
+    such predicate means no ticker is excluded), and years whose full
+    calendar span is not covered by ``query.time_interval`` — checked one
+    year at a time (never a single min..max hull) so a partial miss counts
+    only the years actually missed, matching :func:`_scope_bounds`'s own
+    per-scope calendar-year interval shape for a row-scoped read."""
+    ticker_predicate = next((p for p in query.key_filter if p.column == "ticker" and p.operator == "in"),
+                            None)
+    uncovered_tickers = (span["tickers"] - set(ticker_predicate.values)
+                        if ticker_predicate is not None else set())
+    column = query.time_interval.column if query.time_interval is not None else ""
+    sample = query.time_interval.start_inclusive if query.time_interval is not None else None
+    uncovered_years = {year for year in span["years"]
+                       if query.time_interval is None
+                       or not _interval_covers(query.time_interval, _year_interval(column, year, sample))}
+    return uncovered_tickers, uncovered_years
+
+
+def _check_daily_market_covers_trades(repository, request: LegacyMaterializationRequest) -> None:
+    """Task brief decision: judge ``trades``'s real (ticker, year) span
+    against what the request's own ``daily_market`` query actually
+    materializes, never against the abstract ``evidence_scope`` — a bounded
+    board universe can never contain the real committed ``trades`` table's
+    full span, but that has nothing to do with whether
+    ``Scorer._entry_implied_move``'s own ``daily_market`` read (chunked by
+    exactly this span) will under-read.
+
+    A whole-table ``daily_market`` output — :func:`_whole_table_copy_eligible`,
+    the identical rule ``materialize_tree``'s own byte-copy path uses — excludes
+    no row, so ``trades``' span is covered by construction and no scan is
+    needed at all (today's production plan: ``daily_market`` is always
+    whole_table, so this is the common, vacuous case). Only a row-scoped
+    ``daily_market`` query needs ``trades``'s real span checked against that
+    query's own ticker predicate and time bound. A refusal names counts, never
+    values (``engine.v2.data.errors``: no row value may reach a message)."""
+    table_name = "daily_market"
+    query = request.table_queries[table_name]
+    contract = repository.table_contract(request.snapshot_ref, table_name)
+    if _whole_table_copy_eligible(repository, request.snapshot_ref, table_name, contract, query):
+        return
+    uncovered_tickers, uncovered_years = _span_uncovered_by_query(trades_span(repository, request), query)
+    if not uncovered_tickers and not uncovered_years:
+        return
+    raise errors.fail(
+        "EVIDENCE_SCOPE_INCOMPLETE",
+        "trades's real (ticker, year) span is not inside the request's own row-scoped "
+        "daily_market read; Scorer._entry_implied_move's own daily_market read would under-cover it",
+        details={"uncovered_ticker_count": len(uncovered_tickers), "uncovered_year_count": len(uncovered_years)})
+
+
 def evidence_scope_covers_trades(repository, request: LegacyMaterializationRequest) -> bool:
-    """True iff ``trades``'s real span sits inside ``evidence_scope`` — the
-    proof ``Scorer._entry_implied_move``'s own ``daily_market`` read (chunked
-    by exactly this span) will not silently under-read."""
-    span = trades_span(repository, request)
-    evidence_tickers = set(request.evidence_scope.get("tickers", ()))
-    evidence_years = {int(y) for y in request.evidence_scope.get("years", ())}
-    return span["tickers"] <= evidence_tickers and span["years"] <= evidence_years
+    """True iff the request's own ``daily_market`` read — not the abstract
+    ``evidence_scope`` — covers ``trades``'s real span. See
+    :func:`_check_daily_market_covers_trades`."""
+    try:
+        _check_daily_market_covers_trades(repository, request)
+    except errors.DataError:
+        return False
+    return True
 
 
 def read_plan_complete(request: LegacyMaterializationRequest, repository) -> bool:
@@ -624,10 +691,7 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
     ``engine.*`` symbol."""
     dest_root = Path(dest_root)
     _check_dest_root(store, dest_root)
-    if not evidence_scope_covers_trades(repository, request):
-        raise errors.fail("EVIDENCE_SCOPE_INCOMPLETE",
-                  "trades's real (ticker, year) span is not inside evidence_scope; "
-                  "Scorer._entry_implied_move's own daily_market read would under-cover it")
+    _check_daily_market_covers_trades(repository, request)
     _check_tier4_cache_refs(repository, request.snapshot_ref, request.registry_and_model_refs)
     manifest: dict[str, str] = {}
     curated_files: dict[str, dict[int, list[Path]]] = {}
