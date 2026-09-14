@@ -370,10 +370,86 @@ def _action_settlement(parameters, root):
 
 
 def _action_model_evidence(parameters, root):
-    from engine.dashboard.model_evidence import build_model_evidence
+    """P2-C08: preserve v1's degraded/stale state as data, not an exception.
 
-    result = build_model_evidence(force=bool(parameters.get("force", False)))
+    v1 (``engine/dashboard/nightly.py:1552-1575``) rebuilds the evidence
+    inline and, on a raised exception, degrades to whatever cached table is
+    already on disk and raises ``model_evidence_stale``. v2 runs this rebuild
+    and the render job in separate processes, so a raised exception here must
+    become a *field* on the artifact the render job reads back, or the
+    degraded/stale information never reaches it (render_inputs.model_evidence_stale_flag).
+    """
+    from engine.dashboard.model_evidence import build_model_evidence, load_model_evidence
+
+    try:
+        result = dict(build_model_evidence(force=bool(parameters.get("force", False))))
+        result.setdefault("degraded", False)
+    except Exception as exc:  # noqa: BLE001 -- v1 parity: stale evidence beats a dark board
+        cached = load_model_evidence() or {}
+        result = dict(cached)
+        result["degraded"] = True
+        result["degraded_reason"] = f"{type(exc).__name__}: {exc}"[:300]
     return _write_action(root, "model_evidence.json", result)
+
+
+def _panel_lag_flags(as_of):
+    """Class (a): v1's Tier-3 panel staleness check
+    (``engine/dashboard/nightly.py::_panel_staleness_flags``), called
+    directly against the resolved session -- no logic re-derived here."""
+    from engine.dashboard.nightly import _panel_staleness_flags
+    return _panel_staleness_flags(as_of)
+
+
+def _calendar_conflict_flags(tickers, as_of, horizon_days):
+    """Class (a): v1's per-event calendar-conflict flag
+    (``engine/dashboard/nightly.py::_date_conflict_flag``), called on the
+    same "upcoming" window v1 builds (``as_of`` .. ``as_of+horizon_days``,
+    this render's own tickers), read fresh from the earnings_events store.
+    """
+    import pandas as pd
+
+    from engine.dashboard.nightly import _date_conflict_flag
+    from engine.data.store import read_table
+
+    events = read_table(
+        "earnings_events",
+        columns=["event_id", "ticker", "event_date", "session", "date_conflict"])
+    events["event_date"] = pd.to_datetime(events["event_date"])
+    as_of_ts = pd.Timestamp(as_of)
+    horizon = as_of_ts + pd.Timedelta(days=int(horizon_days))
+    window = events[(events["event_date"] >= as_of_ts) & (events["event_date"] <= horizon)
+                    & events["session"].notna()]
+    if tickers:
+        window = window[window["ticker"].isin(set(tickers))]
+    flag = _date_conflict_flag(window)
+    return [flag] if flag else []
+
+
+def _render_meta_and_health(root, *, scores, scorer, as_of, requested_as_of,
+                            resolved_as_of, finality, horizon_days, alt_strikes,
+                            fill_alpha, tickers, evidence):
+    """Assemble ``build_meta``/``build_health`` plus the full P2-C08 flag set."""
+    from engine.dashboard.render import (
+        build_health,
+        build_meta,
+        freshness_summary,
+        quota_state,
+        size_model_mae_from_ledger,
+    )
+    from engine.v2.ops.render_inputs import render_flags, resolve_prior_selfcheck
+
+    meta = build_meta(scores, as_of=as_of, horizon_days=horizon_days,
+                      fill_alpha=fill_alpha, alt_strikes=alt_strikes,
+                      freshness=freshness_summary(as_of), quota=quota_state(),
+                      registry=scorer.registry)
+    meta["execution_clock"], flags = render_flags(
+        requested_as_of=requested_as_of, resolved_as_of=resolved_as_of, finality=finality,
+        panel_lag=_panel_lag_flags(as_of),
+        calendar_conflict=_calendar_conflict_flags(tickers, as_of, horizon_days),
+        model_evidence=evidence)
+    health = build_health(as_of=as_of, selfcheck_report=resolve_prior_selfcheck(root),
+                          size_mae=size_model_mae_from_ledger(panel=scorer.context.panel))
+    return meta, health, flags
 
 
 def _action_render(parameters, root):
@@ -391,21 +467,13 @@ def _action_render(parameters, root):
 
     import pandas as pd
 
-    from engine.dashboard.render import (
-        build_health,
-        build_meta,
-        freshness_summary,
-        quota_state,
-        render_bundle,
-        size_model_mae_from_ledger,
-    )
+    from engine.dashboard.render import render_bundle
     from engine.features import FeatureContext
     from engine.score import Scorer
     from engine.v2.ops.render_inputs import (
         ABSENT_STAGES,
         assemble_scores,
         bundle_content_hash,
-        execution_clock_and_flags,
         stage_ledger_generation,
         stage_model_evidence,
     )
@@ -420,6 +488,7 @@ def _action_render(parameters, root):
     evidence_path = root / "model_evidence.json"
     if not evidence_path.is_file():
         raise fail("VALIDATION_FAILED", "model evidence artifact is missing")
+    evidence = json.loads(evidence_path.read_text())
     stage_model_evidence(evidence_path, root / "legacy")
 
     ledger_tar = root / "ledger_generation.tar"
@@ -436,13 +505,10 @@ def _action_render(parameters, root):
     board = pd.DataFrame(score_document.get("rows") or [])
     fill_alpha = float(board["fill"].iloc[0]) if len(board) and "fill" in board else 0.5
 
-    meta = build_meta(scores, as_of=as_of, horizon_days=horizon_days,
-                      fill_alpha=fill_alpha, alt_strikes=alt_strikes,
-                      freshness=freshness_summary(as_of), quota=quota_state(),
-                      registry=scorer.registry)
-    meta["execution_clock"], flags = execution_clock_and_flags(requested_as_of, resolved_as_of, finality)
-    health = build_health(as_of=as_of,
-                          size_mae=size_model_mae_from_ledger(panel=scorer.context.panel))
+    meta, health, flags = _render_meta_and_health(
+        root, scores=scores, scorer=scorer, as_of=as_of, requested_as_of=requested_as_of,
+        resolved_as_of=resolved_as_of, finality=finality, horizon_days=horizon_days,
+        alt_strikes=alt_strikes, fill_alpha=fill_alpha, tickers=tickers, evidence=evidence)
     output = root / "bundle"
     result = render_bundle(scores, output, as_of=as_of, horizon_days=horizon_days,
                            fill_alpha=fill_alpha, alt_strikes=alt_strikes,

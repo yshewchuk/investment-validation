@@ -27,6 +27,7 @@ import pytest
 import engine.dashboard.render as render_module
 import engine.features as features_module
 import engine.score as score_module
+from engine.dashboard.nightly import _date_conflict_flag, _panel_staleness_flags
 from engine.dashboard.render import (
     build_health,
     build_meta,
@@ -46,7 +47,11 @@ from engine.v2.ops.render_inputs import (
     assemble_scores,
     bundle_content_hash,
     diff_bundles,
+    model_evidence_stale_flag,
+    unknown_operational_flags,
+    unknown_selfcheck_report,
 )
+from engine.v2.ops.session_resolution import walk_back_flag
 
 AS_OF = pd.Timestamp("2026-08-10")
 EVENT = pd.Timestamp("2026-08-12")
@@ -243,19 +248,65 @@ _PARAMETERS = {"session": str(AS_OF.date()), "tickers": [TICKER], "year_start": 
                "year_end": 2026, "horizon_days": 35, "alt_strikes": 1}
 
 
-def _legacy_way_bundle(out_dir, *, scores, panel, trades, registry, finality):
+def _v1_flags_for_scenario(*, requested_as_of, resolved_as_of, finality, tickers,
+                           horizon_days, evidence):
+    """P2-C08 decision 4: the full v2 render flag list, reconstructed
+    independently of ``legacy_adapter``/``render_inputs.render_flags`` -- v1's
+    own helpers (``_panel_staleness_flags``, ``_date_conflict_flag``) are
+    called directly on the SAME scenario, so a real v2 omission would show up
+    as a diff instead of being echoed by a synthetic expected side that
+    trusts the same adapter it is meant to check.
+    """
+    from engine.data import store
+
+    resolved_ts = pd.Timestamp(resolved_as_of)
+    flags = list(absent_stage_flags())
+    back = walk_back_flag(requested_as_of, resolved_as_of, finality)
+    if back is not None:
+        flags.append(back)
+    flags.extend(_panel_staleness_flags(resolved_ts))
+    events = store.read_table(
+        "earnings_events",
+        columns=["event_id", "ticker", "event_date", "session", "date_conflict"])
+    events["event_date"] = pd.to_datetime(events["event_date"])
+    horizon = resolved_ts + pd.Timedelta(days=int(horizon_days))
+    window = events[(events["event_date"] >= resolved_ts) & (events["event_date"] <= horizon)
+                    & events["session"].notna()]
+    if tickers:
+        window = window[window["ticker"].isin(set(tickers))]
+    conflict = _date_conflict_flag(window)
+    if conflict is not None:
+        flags.append(conflict)
+    stale = model_evidence_stale_flag(evidence)
+    if stale is not None:
+        flags.append(stale)
+    flags.extend(unknown_operational_flags())
+    return flags
+
+
+def _legacy_way_bundle(out_dir, *, scores, panel, trades, registry, finality,
+                       requested_as_of=AS_OF, resolved_as_of=AS_OF, tickers=(TICKER,),
+                       horizon_days=35, evidence=None, selfcheck_report=None):
     """``engine/dashboard/nightly.py:1580-1622``, called directly on the same
     scores/panel/trades/registry the v2 action used, and the same staged
     legacy tree (INVESTING_PLAN_ROOT), so it reads the same ledger generation.
+    Flags and health are rebuilt independently too (see
+    :func:`_v1_flags_for_scenario`), never by trusting v2's own adapter output.
     """
-    meta = build_meta(scores, as_of=AS_OF, horizon_days=35, fill_alpha=0.5, alt_strikes=1,
-                      freshness=freshness_summary(AS_OF), quota=quota_state(), registry=registry)
-    meta["execution_clock"] = {"requested_as_of": str(AS_OF.date()),
-                               "resolved_as_of": str(AS_OF.date()), "finality": finality}
-    health = build_health(as_of=AS_OF, size_mae=size_model_mae_from_ledger(panel=panel))
-    return render_bundle(scores, out_dir, as_of=AS_OF, horizon_days=35, fill_alpha=0.5,
-                         alt_strikes=1, panel=panel, trades=trades, meta=meta, health=health,
-                         flags=absent_stage_flags(), registry=registry)
+    resolved_ts = pd.Timestamp(resolved_as_of)
+    meta = build_meta(scores, as_of=resolved_ts, horizon_days=horizon_days, fill_alpha=0.5,
+                      alt_strikes=1, freshness=freshness_summary(resolved_ts),
+                      quota=quota_state(), registry=registry)
+    meta["execution_clock"] = {"requested_as_of": str(pd.Timestamp(requested_as_of).date()),
+                               "resolved_as_of": str(resolved_ts.date()), "finality": finality}
+    flags = _v1_flags_for_scenario(
+        requested_as_of=requested_as_of, resolved_as_of=resolved_as_of, finality=finality,
+        tickers=tickers, horizon_days=horizon_days, evidence=evidence or {})
+    health = build_health(as_of=resolved_ts, size_mae=size_model_mae_from_ledger(panel=panel),
+                          selfcheck_report=selfcheck_report or unknown_selfcheck_report())
+    return render_bundle(scores, out_dir, as_of=resolved_ts, horizon_days=horizon_days,
+                         fill_alpha=0.5, alt_strikes=1, panel=panel, trades=trades,
+                         meta=meta, health=health, flags=flags, registry=registry)
 
 
 # --------------------------------------------------------------------------
@@ -290,7 +341,8 @@ def test_d19_v2_render_matches_render_bundle_the_legacy_way(monkeypatch, tmp_pat
     finality = _finality_doc()
     bundle_legacy = tmp_path / "bundle_legacy"
     _legacy_way_bundle(bundle_legacy, scores=scores, panel=panel, trades=_trades(),
-                       registry=_FakeRegistry(), finality=finality)
+                       registry=_FakeRegistry(), finality=finality,
+                       evidence=_model_evidence_doc())
 
     diffs = diff_bundles(bundle_v2, bundle_legacy)
     assert diffs == []
@@ -440,6 +492,152 @@ def test_absent_stage_flags_list_all_five_stages():
 
 
 # --------------------------------------------------------------------------
+# P2-C08: the full render flag inventory and health's explicit unknown state
+# --------------------------------------------------------------------------
+
+
+class _FakeCalendar:
+    def shift(self, date, n):
+        return pd.Timestamp(date).normalize() + pd.Timedelta(days=int(n))
+
+
+def _conflict_events(event_date) -> pd.DataFrame:
+    return pd.DataFrame({
+        "event_id": ["evt1"], "ticker": [TICKER],
+        "event_date": [pd.Timestamp(event_date)], "session": ["AMC"],
+        "date_conflict": [True], "src_orats": [False],
+    })
+
+
+def _stale_panel() -> pd.DataFrame:
+    return pd.DataFrame({"date": pd.to_datetime(["2026-08-01", "2026-08-03"])})
+
+
+def _patch_flag_sources(monkeypatch):
+    """Everything :func:`legacy_adapter._panel_lag_flags`/
+    ``_calendar_conflict_flags`` read that this test's synthetic root does
+    not otherwise provide: a lagging panel, a deterministic calendar, and one
+    conflicted earnings_events row."""
+    import engine.calendar as calendar_module
+    import engine.data.store as store_module
+
+    monkeypatch.setattr(features_module, "load_panel", lambda *a, **k: _stale_panel())
+    monkeypatch.setattr(calendar_module, "trading_calendar", lambda *a, **k: _FakeCalendar())
+    monkeypatch.setattr(
+        store_module, "read_table",
+        lambda name, **k: _conflict_events(AS_OF) if name == "earnings_events" else pd.DataFrame())
+
+
+def test_render_flags_cover_every_class_with_nonempty_scenario(monkeypatch, tmp_path):
+    """P2-C08 acceptance: a scenario carrying a walk-back, a lagging panel, a
+    calendar-conflict row and stale model evidence produces every class (a)
+    flag at v1's own kind/detail, the class (b) absent-stage disclosures, and
+    the class (c) explicit unknowns -- none silently dropped, and the
+    resulting v2 flag list equals one built independently of the adapter
+    (:func:`_v1_flags_for_scenario`).
+    """
+    panel = _panel()
+    _patch_scorer(monkeypatch, panel)
+    _patch_flag_sources(monkeypatch)
+
+    root = _stage(tmp_path)
+    evidence = dict(_model_evidence_doc())
+    evidence["degraded"] = True
+    evidence["degraded_reason"] = "RuntimeError: rebuild boom"
+    (root / "model_evidence.json").write_text(json.dumps(evidence))
+
+    requested = AS_OF + pd.Timedelta(days=1)
+    params = dict(_PARAMETERS)
+    params["session"] = str(requested.date())
+
+    _action_render(params, root)
+    flags = json.loads((root / "bundle" / "data" / "flags.json").read_text())["flags"]
+
+    finality = _finality_doc()
+    expected = _v1_flags_for_scenario(
+        requested_as_of=str(requested.date()), resolved_as_of=str(AS_OF.date()),
+        finality=finality, tickers=(TICKER,), horizon_days=35, evidence=evidence)
+    assert flags == expected
+
+    kinds = [f["kind"] for f in flags]
+    assert kinds.count("as_of_resolved") == 1
+    assert kinds.count("panel_stale") == 1
+    assert kinds.count("calendar_date_conflict") == 1
+    assert kinds.count("model_evidence_stale") == 1
+    assert {f["stage"] for f in flags if f["kind"] == "shadow_stage_absent"} == set(ABSENT_STAGES)
+    assert {"quota_unknown", "freshness_unknown", "prior_run_state_unknown"} <= set(kinds)
+    conflict = next(f for f in flags if f["kind"] == "calendar_date_conflict")
+    assert conflict["tickers"] == {TICKER: [str(AS_OF.date())]}
+    stale = next(f for f in flags if f["kind"] == "model_evidence_stale")
+    assert "rebuild boom" in stale["detail"]
+
+
+def test_health_selfcheck_is_explicit_unknown_when_nothing_bound(monkeypatch, tmp_path):
+    panel = _panel()
+    _patch_scorer(monkeypatch, panel)
+    root = _stage(tmp_path)
+    _action_render(dict(_PARAMETERS), root)
+    health = json.loads((root / "bundle" / "data" / "health.json").read_text())
+    assert health["last_selfcheck"] == unknown_selfcheck_report()
+    assert health["last_selfcheck"]["ok"] is None
+    assert health["last_selfcheck"]["known"] is False
+
+
+def test_health_reflects_a_bound_prior_selfcheck(monkeypatch, tmp_path):
+    panel = _panel()
+    _patch_scorer(monkeypatch, panel)
+    root = _stage(tmp_path)
+    prior = {"ok": True, "n_checked": 20, "n_board_rows": 20, "mismatches": [],
+             "snapshot_ok": True, "as_of": str(AS_OF.date()), "seed": 0,
+             "elapsed_s": 1.2, "detail": ""}
+    (root / "prior_selfcheck.json").write_text(json.dumps(prior))
+    _action_render(dict(_PARAMETERS), root)
+    health = json.loads((root / "bundle" / "data" / "health.json").read_text())
+    assert health["last_selfcheck"] == prior
+
+
+def test_model_evidence_action_preserves_degraded_state_for_render(monkeypatch, tmp_path):
+    """Decision 3: a failed rebuild must degrade to the cached table AS DATA
+    on the artifact, not as a live exception -- render runs in a separate
+    process/job and can only see what the artifact carries.
+    """
+    import engine.dashboard.model_evidence as model_evidence_module
+    from engine.v2.ops.legacy_adapter import _action_model_evidence
+
+    def _boom(**kwargs):
+        raise RuntimeError("rebuild boom")
+
+    monkeypatch.setattr(model_evidence_module, "build_model_evidence", _boom)
+    monkeypatch.setattr(model_evidence_module, "load_model_evidence",
+                        lambda: {"models": {}, "generated_at": "cached-2026-08-01"})
+    root = tmp_path / "job"
+    root.mkdir()
+    _action_model_evidence({}, root)
+    doc = json.loads((root / "model_evidence.json").read_text())
+    assert doc["degraded"] is True
+    assert "rebuild boom" in doc["degraded_reason"]
+    assert doc["generated_at"] == "cached-2026-08-01"
+
+    flag = model_evidence_stale_flag(doc)
+    assert flag["kind"] == "model_evidence_stale"
+    assert "rebuild boom" in flag["detail"]
+
+
+def test_model_evidence_action_marks_a_clean_rebuild_not_degraded(monkeypatch, tmp_path):
+    import engine.dashboard.model_evidence as model_evidence_module
+    from engine.v2.ops.legacy_adapter import _action_model_evidence
+
+    monkeypatch.setattr(model_evidence_module, "build_model_evidence",
+                        lambda **k: {"generated_at": "fresh", "models": {}})
+    root = tmp_path / "job"
+    root.mkdir()
+    _action_model_evidence({}, root)
+    doc = json.loads((root / "model_evidence.json").read_text())
+    assert doc["degraded"] is False
+    assert model_evidence_stale_flag(doc) is None
+
+
+# --------------------------------------------------------------------------
 # DAG
 # --------------------------------------------------------------------------
 
@@ -480,3 +678,25 @@ def test_every_job_binding_names_a_declared_dependency():
                 if dependency not in declared:
                     violations.append((request.job.kind, name, dependency))
     assert violations == []
+
+
+def test_prior_selfcheck_ref_binds_only_when_the_caller_supplies_one():
+    """P2-C08 decision 2: the optional ``prior_selfcheck.json`` binding is
+    off by default (already proved by
+    ``test_render_job_binds_finality_score_and_model_evidence_as_job_outputs``'s
+    exact 4-key set) and, when a caller has a previous run's committed
+    selfcheck artifact, is bound as a direct artifact ref admitted into the
+    render job's own ``input_refs`` -- not a ``job_<id>#output`` reference,
+    since no job in this plan produces it.
+    """
+    plan = build_nightly_plan("/root/investing-plan", str(AS_OF.date()))
+    prior_ref = "art_prior_selfcheck_test"
+    requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026,
+                                         prior_selfcheck_ref=prior_ref)
+    render_request = next(r for r in requests if r.job.kind == "legacy_render")
+    bindings = render_request.job.parameters["input_bindings"]
+    assert bindings["prior_selfcheck.json"] == prior_ref
+    assert prior_ref in render_request.job.input_refs
+    # every other binding on this job is unaffected
+    assert set(bindings) == {"score.json", "model_evidence.json", "finality.json",
+                             "ledger_generation.tar", "prior_selfcheck.json"}

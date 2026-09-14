@@ -123,7 +123,8 @@ def _job_output(stage, keys):
     return keys[stage] + "#" + _action_for(stage)
 
 
-def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope=""):
+def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope="",
+                   prior_selfcheck_ref=None):
     params = {"expected_ids": (action,), "session": plan["session"],
               "tickers": tuple(sorted(tickers)), "year_start": year_start,
               "year_end": year_end, "input_bindings": {}, "effect_scope": effect_scope}
@@ -148,6 +149,14 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
                                      "model_evidence.json": _job_output("model_evidence", keys),
                                      "finality.json": _job_output("finality", keys),
                                      "ledger_generation.tar": _job_output("ledger_export", keys)}
+        if prior_selfcheck_ref:
+            # P2-C08: optional -- a previous run's committed selfcheck
+            # artifact, when the caller has one to offer. Bound as a direct
+            # artifact ref (never a job_<id>#output form: no job in THIS
+            # plan produces it, since this run's own selfcheck stage runs
+            # strictly after render). Absent by default, so the render job's
+            # binding set is unchanged unless a caller opts in.
+            params["input_bindings"]["prior_selfcheck.json"] = prior_selfcheck_ref
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":
@@ -271,12 +280,13 @@ def _scope_hash(tickers, year_start, year_end, expected_population, snapshot):
     return content_hash(scope)[:24]
 
 
-def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_scope, snapshot):
+def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_scope, snapshot,
+                      prior_selfcheck_ref=None):
     if stage == "materialize":
         return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
                 "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
     params = _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
-                            effect_scope=effect_scope)
+                            effect_scope=effect_scope, prior_selfcheck_ref=prior_selfcheck_ref)
     if snapshot is not None:
         # P2-C02 review fix: every stage in a snapshot-mode plan graph learns
         # which committed snapshot the plan pinned -- a barrier-only kind
@@ -329,13 +339,22 @@ def _job_spec(kind, parameters, input_refs, dependency_job_ids, implementation_r
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
                               expected_population=(), alt_strikes=1, input_refs=(),
-                              full_universe=None, input_mode="legacy", snapshot_inputs=None):
+                              full_universe=None, input_mode="legacy", snapshot_inputs=None,
+                              prior_selfcheck_ref=None):
     """Build server-allowlisted JobSpecs for the actual legacy worker DAG.
 
     ``input_mode="snapshot"`` (P2-6 §9.3) adds one ``legacy_materialize``
     stage bound to the plan's pinned SnapshotRef and request artifacts, and
     makes ``score``/``decision_replay`` read its verified root instead of the
     barrier. Every other stage, and the default ``"legacy"`` graph, is unchanged.
+
+    ``prior_selfcheck_ref`` (P2-C08): optional artifact ID of a previous
+    run's committed selfcheck output. When given, it is bound to the render
+    (``projection``) job as ``prior_selfcheck.json`` and admitted into that
+    job's ``input_refs`` so it resolves as a direct artifact ref, not a
+    ``job_<id>#output`` reference — no job in THIS plan produces it. Omitted
+    by default, so the render job's binding set is unchanged unless a caller
+    opts in.
     """
     from engine.v2.contracts import SubmitRequest
     from engine.v2.ops.fingerprints import worker_source_manifest
@@ -355,8 +374,11 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         keys[stage] = job_id_for("shadow", key)
         kind = _action_for(stage)
         parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
-                                       effect_scope, snapshot)
+                                       effect_scope, snapshot,
+                                       prior_selfcheck_ref=prior_selfcheck_ref)
         refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
+        if stage == "projection" and prior_selfcheck_ref:
+            refs = tuple(refs) + (prior_selfcheck_ref,)
         if stage != "materialize":
             parameters["expected_population"] = tuple(expected_population)
             parameters["alt_strikes"] = int(alt_strikes)
