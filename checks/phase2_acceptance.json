@@ -63,7 +63,8 @@
       "tier": 1,
       "tests": ["tests/test_v2_data_legacy_materialization.py",
                 "tests/test_v2_ops_snapshot_stages.py",
-                "tests/test_v2_data_reference_inputs.py"],
+                "tests/test_v2_data_reference_inputs.py",
+                "tests/test_checks_phase2_corpus_parity.py"],
       "evidence_fields": ["corpus_comparison_receipt_ref"]
     },
     "D15": {
