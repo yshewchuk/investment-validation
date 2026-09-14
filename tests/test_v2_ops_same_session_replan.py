@@ -85,6 +85,31 @@ POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-10"
 
 
+def _nightly_manifest_dict(note: str = "") -> dict:
+    """A minimal manifest dict that satisfies the capture-inputs plan-time
+    guard (``engine.v2.data.legacy_nightly_read_plan.manifest_problems``) --
+    this file's jobs are cancelled or never claimed, so nothing actually
+    reads these paths; they only need to be SHAPED like a real nightly
+    capture so ``cli.py``'s guard (added alongside ``capture_inputs.py``)
+    admits the plan. ``note`` varies the manifest's own content hash, which
+    is exactly what this file's ``manifest_v1``/``manifest_v2`` scenario
+    needs -- a different legacy manifest identity between generations.
+    """
+    from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
+
+    tables = ("daily_market", "option_chains", "earnings_events", "trades")
+    file_refs = [{"path": f"data/curated/{table}/year=2024/part-0000.parquet",
+                 "content_hash": "sha256:" + "0" * 64, "byte_size": 1} for table in tables]
+    file_refs.append({"path": "data/raw/fetch/orats/ab/placeholder.meta.json",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1})
+    return {"manifest_id": "m1", "note": note, "file_refs": file_refs, "table_contract_refs": [],
+            "registry_and_model_refs": ["placeholder::sha256:" + "0" * 64],
+            "calendar_ref": "placeholder::sha256:" + "0" * 64, "selected_session": SESSION,
+            "finality_receipt_refs": [], "knowledge_mode_by_table": {},
+            "availability_evidence_refs": [], "read_set_complete": True,
+            "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF}
+
+
 def _publish(store, conn, clock, value, schema_ref):
     ref = store.publish_bytes(json.dumps(value, sort_keys=True).encode(), schema_ref=schema_ref)
     with transaction(conn):
@@ -121,9 +146,9 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
     manifest_v1 = tmp_path / "manifest_v1.json"
-    manifest_v1.write_text(json.dumps({"manifest_id": "m1"}))
+    manifest_v1.write_text(json.dumps(_nightly_manifest_dict()))
     manifest_v2 = tmp_path / "manifest_v2.json"
-    manifest_v2.write_text(json.dumps({"manifest_id": "m1", "note": "post-ef7020a profile change"}))
+    manifest_v2.write_text(json.dumps(_nightly_manifest_dict("post-ef7020a profile change")))
 
     assert cli.main(["--root", str(root), "init"]) == 0
     capsys.readouterr()
@@ -192,7 +217,7 @@ def test_same_plan_different_cli_idempotency_key_is_still_a_retry(tmp_path, caps
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
     manifest_file = tmp_path / "manifest.json"
-    manifest_file.write_text(json.dumps({"manifest_id": "m1"}))
+    manifest_file.write_text(json.dumps(_nightly_manifest_dict()))
     assert cli.main(["--root", str(root), "init"]) == 0
     capsys.readouterr()
     assert cli.main(["--root", str(root), "plan", "nightly", "--as-of", SESSION,

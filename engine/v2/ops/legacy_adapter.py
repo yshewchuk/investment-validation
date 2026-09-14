@@ -12,9 +12,42 @@ from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
-           "invoke_score_calendar", "manifest_files", "run_engineering_gate",
-           "run_legacy_rebuild", "run_legacy_script", "run_security_scan",
-           "verify_export_generation"]
+           "invoke_score_calendar", "iter_raw_fetch_cache", "manifest_files",
+           "projected_trading_sessions", "run_engineering_gate", "run_legacy_rebuild",
+           "run_legacy_script", "run_security_scan", "verify_export_generation"]
+
+
+def projected_trading_sessions(start, end) -> tuple[str, ...]:
+    """``engine.calendar.projected_trading_days`` -- a PURE weekday/US-market-
+    holiday rule, no ``engine.paths`` dependency (module docstring's
+    distinction: this is safe to call without ``_rooted_import``, unlike
+    ``trading_calendar()`` itself, which resolves ``engine.paths.GSPC_DAILY``
+    off the process-global root).
+
+    2026-09-14 (capture-inputs): the real observed calendar CSV can lag
+    "today" by weeks (whatever the last successful calendar pull wrote), so
+    the finality lookback window must extend PAST the last observed date the
+    same way ``trading_calendar()`` itself does (``calendar.py``'s own
+    ``extend_days`` construction) -- an observed-only walk silently resolves
+    a stale multi-week-old window instead of the real recent sessions.
+    """
+    from engine.calendar import projected_trading_days
+    return tuple(str(d.date()) for d in projected_trading_days(start, end))
+
+
+def iter_raw_fetch_cache(root: Path | str, source: str):
+    """``engine.data.fetch.iter_cached``, rooted at an explicit directory.
+
+    2026-09-14 (capture-inputs, task brief): never ``engine.paths.RAW_FETCH``'s
+    process-global default -- ``engine.v2.ops.capture_inputs`` runs against an
+    arbitrary ``--source-root`` in a process that may already have imported
+    ``engine.paths`` (bound to this checkout's own root at first import,
+    module-level, never re-read). ``iter_cached``'s own ``root=`` parameter
+    sidesteps that entirely; this wrapper only fixes the directory shape it
+    expects (``<root>/source``, matching ``engine.paths.RAW_FETCH / source``).
+    """
+    from engine.data.fetch import iter_cached
+    return iter_cached(source, root=Path(root) / "data" / "raw" / "fetch")
 
 
 def _digest(path: Path) -> str:
