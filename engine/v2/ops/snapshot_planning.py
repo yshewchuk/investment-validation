@@ -93,7 +93,15 @@ def _build(repository, store, snapshot, pinned, scopes):
 def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
                         expected_population, clock) -> dict:
     """Resolve ``scope``'s head once and publish the request built on that ref,
-    with the reference inputs the catalog recorded for that exact snapshot."""
+    with the reference inputs the catalog recorded for that exact snapshot.
+
+    ``tickers`` (P2-C04) is the historical EVIDENCE universe (the caller's
+    ``context_tickers``, not the narrower direct watchlist) — the evidence
+    scope is built from it directly; the direct scope is derived independently
+    from ``expected_population``'s own tickers. A watchlist not fully covered
+    by the evidence universe is refused: scoring can never need analog/feature
+    context for a ticker it has no evidence plan for.
+    """
     if not tickers or not expected_population:
         raise fail("INVALID_REQUEST", "snapshot input mode needs planned tickers and population")
     # P2-C03: the resolved session is unknown at plan time — a walk-back
@@ -107,6 +115,9 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     scopes = {"direct": direct_scope_for(expected_population),
               "evidence": {"tickers": sorted(set(tickers)),
                            "years": list(range(int(year_start) - 1, int(year_end) + 1))}}
+    if not set(scopes["direct"]["tickers"]) <= set(scopes["evidence"]["tickers"]):
+        raise fail("INVALID_REQUEST",
+                   "direct scope tickers are not covered by the evidence scope tickers")
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
         snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))

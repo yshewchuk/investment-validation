@@ -126,7 +126,7 @@ def _finality_receipt(common, finality_doc, coverage_doc, session):
 
 
 def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverage_doc, *,
-          requested_session, deployment, decision_clock):
+          requested_session, deployment, decision_clock, scope="shadow"):
     """Derive ``(plan_bytes, evidence_bytes)`` for one nightly session.
 
     ``requested_session`` is the date the nightly PLAN carries (job identity
@@ -135,6 +135,15 @@ def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverag
     :func:`engine.v2.ops.session_resolution.resolve_effective_session` unless
     it is a genuine walk-back at or before ``requested_session``), recorded
     alongside ``requested_session`` so both survive into every receipt.
+
+    ``scope`` (P2-C04) is the job's own effect scope
+    (``nightly.effect_scope_for`` — ``"shadow"`` for a full-universe run,
+    ``"shadow:<hash>"`` for a ticker subset). It is stamped onto the plan so
+    ``decision_validation.validate`` and ``decision_commit`` bind every
+    downstream watermark/export/release to THIS run's own scope, never the
+    global authority namespace. It plays no part in any receipt hash or
+    identity check — only the plan document carries it — so it defaults to
+    the pre-existing constant for a caller that predates this parameter.
 
     ``score_ref``/``finality_ref`` need only ``artifact_id``/``content_hash``
     attributes (an ``ArtifactRef``, a recorded ``ResolvedBinding``, or a
@@ -155,7 +164,7 @@ def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverag
     plan = {"schema_version": "decision_plan.v1.0", "session": session,
             "requested_session": requested_session,
             "deployment": deployment, "decision_clock": decision_clock,
-            "expected_population": expected}
+            "expected_population": expected, "scope": scope}
     plan_bytes = _document_bytes(plan)
     plan_ref = artifact_reference(plan_bytes, "decision_plan.v1.0")
 

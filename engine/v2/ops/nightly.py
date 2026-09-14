@@ -124,9 +124,15 @@ def _job_output(stage, keys):
 
 
 def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope="",
-                   prior_selfcheck_ref=None):
+                   context_tickers=(), prior_selfcheck_ref=None):
+    # P2-C04: ``context_tickers`` is the historical EVIDENCE universe a
+    # scoring/replay action loads (``FeatureContext.load``); ``tickers`` stays
+    # the direct watchlist actually scored. Defaults to ``tickers`` so a
+    # caller that predates this parameter is unchanged.
+    context = tuple(sorted(context_tickers)) if context_tickers else tuple(sorted(tickers))
     params = {"expected_ids": (action,), "session": plan["session"],
-              "tickers": tuple(sorted(tickers)), "year_start": year_start,
+              "tickers": tuple(sorted(tickers)), "context_tickers": context,
+              "year_start": year_start,
               "year_end": year_end, "input_bindings": {}, "effect_scope": effect_scope}
     if action == "legacy_score":
         # P2-C03: the score stage needs the finality-resolved session, never
@@ -271,8 +277,9 @@ def _snapshot_inputs(input_mode, snapshot_inputs, include_prerequisites):
     return snapshot_inputs
 
 
-def _scope_hash(tickers, year_start, year_end, expected_population, snapshot):
-    scope = {"tickers": sorted(tickers), "year_start": year_start, "year_end": year_end,
+def _scope_hash(tickers, year_start, year_end, expected_population, snapshot, context_tickers=()):
+    scope = {"tickers": sorted(tickers), "context_tickers": sorted(context_tickers),
+             "year_start": year_start, "year_end": year_end,
              "expected_population": list(expected_population)}
     if snapshot is not None:
         scope.update(input_mode="snapshot", snapshot_ref=snapshot["snapshot_ref_artifact_id"],
@@ -281,12 +288,13 @@ def _scope_hash(tickers, year_start, year_end, expected_population, snapshot):
 
 
 def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_scope, snapshot,
-                      prior_selfcheck_ref=None):
+                      prior_selfcheck_ref=None, context_tickers=()):
     if stage == "materialize":
         return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
                 "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
     params = _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
-                            effect_scope=effect_scope, prior_selfcheck_ref=prior_selfcheck_ref)
+                            effect_scope=effect_scope, prior_selfcheck_ref=prior_selfcheck_ref,
+                            context_tickers=context_tickers)
     if snapshot is not None:
         # P2-C02 review fix: every stage in a snapshot-mode plan graph learns
         # which committed snapshot the plan pinned -- a barrier-only kind
@@ -339,7 +347,8 @@ def _job_spec(kind, parameters, input_refs, dependency_job_ids, implementation_r
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
                               expected_population=(), alt_strikes=1, input_refs=(),
-                              full_universe=None, input_mode="legacy", snapshot_inputs=None,
+                              full_universe=None, context_tickers=(),
+                              input_mode="legacy", snapshot_inputs=None,
                               prior_selfcheck_ref=None):
     """Build server-allowlisted JobSpecs for the actual legacy worker DAG.
 
@@ -355,6 +364,14 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     ``job_<id>#output`` reference — no job in THIS plan produces it. Omitted
     by default, so the render job's binding set is unchanged unless a caller
     opts in.
+
+    ``context_tickers`` (P2-C04) is the historical evidence universe; it
+    defaults to ``tickers`` (today's full-universe plans are unchanged) and
+    ``tickers`` (the direct watchlist) must be a subset of it. Unless
+    ``full_universe`` is given explicitly, it is also what
+    :func:`effect_scope_for` compares the watchlist against — a one-ticker
+    request against a wider context is therefore a subset run for effect
+    scope purposes too, exactly the property the review requires.
     """
     from engine.v2.contracts import SubmitRequest
     from engine.v2.ops.fingerprints import worker_source_manifest
@@ -364,8 +381,13 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
     requests = []
     keys = {}
-    scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot)
-    effect_scope = effect_scope_for(tickers, full_universe)
+    context_tickers = tuple(context_tickers) or tuple(tickers)
+    if not set(tickers) <= set(context_tickers):
+        raise fail("INVALID_REQUEST", "watchlist tickers must be a subset of the context tickers")
+    scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
+                             context_tickers=context_tickers)
+    effect_universe = context_tickers if full_universe is None else full_universe
+    effect_scope = effect_scope_for(tickers, effect_universe)
     stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
     if snapshot is not None:
         stages = ("materialize",) + stages
@@ -375,7 +397,8 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         kind = _action_for(stage)
         parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
                                        effect_scope, snapshot,
-                                       prior_selfcheck_ref=prior_selfcheck_ref)
+                                       prior_selfcheck_ref=prior_selfcheck_ref,
+                                       context_tickers=context_tickers)
         refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
         if stage == "projection" and prior_selfcheck_ref:
             refs = tuple(refs) + (prior_selfcheck_ref,)

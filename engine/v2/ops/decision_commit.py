@@ -9,6 +9,7 @@ from engine.v2.ledger.decisions import DecisionConflict, import_lines, insert
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.decision_validation import validate
+from engine.v2.ops.effects_graph import effect_scope as _job_effect_scope
 from engine.v2.ops.errors import fail
 from engine.v2.ops.input_bindings import recorded_bindings
 from engine.v2.ops.lifecycle import verify_fence
@@ -119,7 +120,13 @@ def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
     if not conn.in_transaction:
         raise ValueError("decision commit requires the attempt transaction")
     verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
-    if context["purpose"] != "shadow" or context["scope"] != claim.spec.output_namespace:
+    # P2-C04: the validated scope must match this JOB's own effect scope
+    # (``parameters["effect_scope"]``, set once by ``nightly.build_legacy_job_requests``
+    # for every stage of one graph) — never the output_namespace authority
+    # alone, which is always "shadow" whether this is a full or subset run.
+    # A claim with no ``effect_scope`` parameter (every job built before this
+    # field existed) falls back to ``output_namespace``, the old behaviour.
+    if context["purpose"] != "shadow" or context["scope"] != _job_effect_scope(claim):
         raise fail("VALIDATION_FAILED", "only pinned shadow authority is enabled")
     # P2-C03: the job's own ``session`` parameter is always the REQUESTED
     # date (walk-back never changes job identity) — compare it against the
@@ -183,10 +190,13 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
                                 created_at=format_timestamp(clock.now()))
     except DecisionConflict:
         raise fail("IDEMPOTENCY_CONFLICT", "settlement observation conflicts with history") from None
-    release_key = content_hash(["settlement", claim.spec.output_namespace,
-                                candidate_ref.content_hash])
+    # P2-C04: settlement uses the same effect scope decision commit and
+    # export use, never the bare output_namespace — a subset settlement run
+    # must never advance the global watermark either.
+    scope = _job_effect_scope(claim)
+    release_key = content_hash(["settlement", scope, candidate_ref.content_hash])
     enqueue(conn, "export", release_key, {"settlement_candidate": candidate_ref.content_hash})
-    watermark(conn, "nightly", claim.spec.output_namespace, "settlement",
+    watermark(conn, "nightly", scope, "settlement",
               session or claim.spec.parameters["session"], release_key, clock=clock)
     return receipts
 

@@ -576,7 +576,11 @@ def _verify_decision_evidence(conn, store, claim, refs, keepalive=_no_keepalive)
     plan_bytes, evidence_bytes = derive(
         docs["score"], recorded["score.json"], docs["finality"], recorded["finality.json"],
         docs["replay"], docs["coverage"], requested_session=params["session"],
-        deployment=params["deployment"], decision_clock=params["decision_clock"])
+        deployment=params["deployment"], decision_clock=params["decision_clock"],
+        # P2-C04: re-derive with the SAME effect scope the worker's own job
+        # parameters carry, so the coordinator's byte-for-byte check still
+        # agrees on a subset run (never a bare "shadow" default here).
+        scope=params.get("effect_scope") or "shadow")
     computed_plan = artifact_reference(plan_bytes, "decision_plan.v1.0")
     computed_evidence = artifact_reference(evidence_bytes, "decision_evidence.v1.0")
     worker_plan = _named_ref(refs, "decision_plan")

@@ -218,7 +218,15 @@ def validate(candidates, *, score, finality, plan, evidence, bindings):
     # finality document. A plan with no ``requested_session`` of its own
     # (every plan built before this field existed) is read as having
     # requested exactly its own session: no walk-back, same as today.
-    return {"purpose": "shadow", "scope": "shadow", "session": plan["session"],
+    # P2-C04: ``scope`` is read from the PLAN — ``decision_evidence.derive``
+    # stamps it from the job's own ``effect_scope`` — never a hard-coded
+    # constant; the authority namespace stays "shadow" everywhere, but the
+    # watermark/export/release scope a subset run commits under must be its
+    # OWN scope, not the global one. A plan with no ``scope`` of its own
+    # (every hand-built plan that predates this field, and every full-
+    # universe run) is read as the global "shadow" scope — the same
+    # conservative default the field replaces.
+    return {"purpose": "shadow", "scope": plan.get("scope") or "shadow", "session": plan["session"],
             "requested_session": plan.get("requested_session") or plan["session"],
             "finality_date": finality.get("date") if isinstance(finality, dict) else None,
             "deployment": plan["deployment"], "clock": plan["decision_clock"],

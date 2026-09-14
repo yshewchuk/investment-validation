@@ -107,7 +107,8 @@ def _dispatch_decision_evidence(parameters, root):
         json.loads(score_bytes), artifact_reference(score_bytes, "legacy_action.v1.0"),
         json.loads(finality_bytes), artifact_reference(finality_bytes, "legacy_action.v1.0"),
         replay, coverage, requested_session=parameters["session"],
-        deployment=parameters["deployment"], decision_clock=parameters["decision_clock"])
+        deployment=parameters["deployment"], decision_clock=parameters["decision_clock"],
+        scope=parameters.get("effect_scope") or "shadow")
     (root / "decision_plan.json").write_bytes(plan_bytes)
     (root / "decision_evidence.json").write_bytes(evidence_bytes)
     return {"outputs": [
