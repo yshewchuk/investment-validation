@@ -56,6 +56,12 @@ Implementation plans, one per migration phase of
 - [Phase 2 — Data Access](rearchitecture_phase2_data_access.md): immutable
   dataset/snapshot manifests, bounded Arrow reads, exact event/chain access,
   legacy scoring adapters, and atomic rebuild/rollback acceptance gates.
+- [Phase 3 — First dashboard with real scores](rearchitecture_phase3_parity_launch.md):
+  immediate compatibility preview, then a small read API and new board/detail
+  UI over validated Phase 2 scores. Implements the Sep-13 parity-first
+  sequencing decision: incremental ingestion and native scoring/model
+  migration do not block the initial shadow dashboard. Their full migration
+  gates remain outstanding.
 - [Rearchitecture tech debt](rearchitecture_tech_debt.md): nice-to-haves
   deferred until after Phase 6. Anything a later phase needs stays in its
   own phase instead.

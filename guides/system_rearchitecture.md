@@ -550,6 +550,15 @@ Adding an adapter stays possible and is deliberately not silent — a tracked
 line with a reason, visible in a diff. Removing the last one is the phase-8
 entry condition.
 
+Carried from Phase 2 (P2-5 task 5): `engine/v2/ops/legacy_adapter.py` also
+hosts three non-legacy subprocess helpers (`verify_export_generation`,
+`run_engineering_gate`, `run_security_scan`), because `checks/import_layers.py`
+lets only `executor.py` and `legacy_adapter.py` start subprocesses. They are
+not legacy bridges and do not appear in the adapter ledger. Before phase 8
+deletes the adapter, move them to a dedicated audited subprocess module and
+update that allowlist, or cutover deletes the export verification and the
+publication security and engineering gates along with the legacy code.
+
 **Coverage does not belong in the hook.** It requires the test suite, pytest is
 not currently installable in this environment, and a hook that takes minutes
 gets bypassed and then deleted. The coverage ratchet of §4.3 runs in the
@@ -1359,6 +1368,18 @@ from infrastructure failure, and process health does not prove causal validity.
 Run legacy/replacement paths on identical snapshots. Compare sequentially on
 this host so a parity check does not need two multi-gigabyte scorers alive.
 
+**Launch-priority update (user decision, 2026-09-13).** The table below retains
+the architectural workstreams and their full completion gates, but no longer
+requires completing incremental data, native scoring, and model migration
+before showing the initial v2 dashboard. Follow
+[Phase 3 — First dashboard with real scores](rearchitecture_phase3_parity_launch.md)
+after the Phase 2 handoff: first open its validated compatibility preview,
+then bring forward the Phase 6 read API and board/detail slice using those
+saved real scores. Defer the original Phase 3 incremental-data work and the
+remaining Phase 4–6 capabilities that do not block that launch to their own
+continuations. Preserve all full-phase gates; an initial shadow dashboard
+does not imply native scoring parity, full UI parity, or production cutover.
+
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green over the v2 skeleton with an empty adapter ledger |
@@ -1370,6 +1391,29 @@ this host so a parity check does not need two multi-gigabyte scorers alive.
 | 6. UI | Read API then one screen at a time; old UI/export adapters retained | Feature inventory, lazy-load checks, phone/offline access pass |
 | 7. Live shadow | Entitlement/schema proof, snapshots, causal live features, clock-specific experiments | Live guide gates pass; no contamination; timely publication |
 | 8. Cutover | Switch consumers; delete legacy `engine/` whole; rename `engine/v2/` to `engine/`; update recovery/operations docs | Ten consecutive completed-session runs without manual resource placement; restore and compatibility evidence pass; the legacy-adapter ledger reaches zero; the rename is proved inert on the tier-0 corpus |
+
+### 12.1 Sep-13 review follow-through
+
+The Phase 2 review at `97e2a5c` identified correctness, recovery, and later
+consumer gaps with different deadlines. The authoritative immediate work is
+[Phase 2 §12.2](rearchitecture_phase2_data_access.md#122-sep-13-review-closeout-fixes-owned-by-phase-2);
+its §12.3 records the two explicit data-access scope deferrals. Do not turn
+the items below into prerequisites for the initial saved-score preview.
+
+| Workstream | Required follow-through | Resume / acceptance boundary |
+|---|---|---|
+| Phase 3 initial dashboard | New-plan versus retry identity across nightly jobs and same-session releases; real engineering observations, unknown-night semantics, live health and stale/withheld status | [Launch guide §5.5](rearchitecture_phase3_parity_launch.md#55-review-follow-through-for-repeatable-updates-and-live-health), before P3-4 repeat-refresh and live-health acceptance; P3-0 may use an already validated candidate |
+| Original Phase 3 incremental-data continuation | Implement exact chain-query dependency explanation, explicitly binding the pinned snapshot despite `ChainQuery` not carrying one; include event/security lookup and quote fragments/columns/predicates and population bounds | Before the first chain dependency consumer. Test that advancing head cannot change an explained query, with event-based and event-free security resolution. Until then return `UNSUPPORTED_CONTRACT`; ordinary `get_chain` correctness remains Phase 2 |
+| Original Phase 3 incremental-data continuation | Migrate finality and other remaining manifest-backed read-only stages only after complete read inventories and snapshot parity; carry the per-ticker `covered_tickers` evidence and retire its legacy adapter edge when unused | As each consumer moves; never remove the cooperative barrier from unmigrated paths or certify mixed data/model generations |
+| Phase 5 models | Persist complete producer/fold/transform/residual artifacts and remove fitting/cache writes from scoring requests through the native model interface | Model migration and its zero-fitting exit gate. Phase 2 must already contain cache misses and preserve parity; a cache-hit canary is not the Phase 5 proof |
+| Remaining Phase 6 UI | Complete health/flags/model/book screen parity and the rest of the feature inventory | Before full UI parity. Decision-relevant status and truthful unknown/degraded state are required in the earlier shipped board/detail slice |
+
+Arrow-native filter pushdown and avoiding Scorer construction solely to
+render are optional optimizations tracked as TD-10/TD-11 in
+[the debt registry](rearchitecture_tech_debt.md). Correct filtering, accurate
+materialization bounds, and a measured safe resource profile are not deferred.
+If measured load makes an optimization a prerequisite of an earlier phase,
+move it into that phase rather than leaving it as post-Phase-6 debt.
 
 The UI can start against frozen projections after phase 2. Shadow collection
 can begin before model readiness once its contract/quota are defined. Cutover

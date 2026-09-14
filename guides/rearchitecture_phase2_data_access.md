@@ -435,13 +435,18 @@ Repository.resolve(snapshot_id: str) -> SnapshotRef
 Repository.scan(query: DataQuery) -> Iterator[pyarrow.RecordBatch]
 Repository.get_event(event_ref: EventRef, snapshot_ref: SnapshotRef) -> EarningsEvent
 Repository.get_chain(query: ChainQuery, snapshot_ref: SnapshotRef) -> ChainSnapshot
-Repository.explain_dependencies(query: DataQuery | ChainQuery) -> DependencyPlan
+Repository.explain_dependencies(query: DataQuery) -> DependencyPlan
 ```
 
 In Phase 2, `DependencyPlan` names the exact snapshot, dataset versions,
-fragments, columns, predicates, and estimated/maximum rows used by a data or
-chain query. Recipe dependency graphs and change invalidation are Phase 3/4 and
-must return a versioned `UNSUPPORTED_CONTRACT`, not a guessed plan.
+fragments, columns, predicates, and estimated/maximum rows used by a
+`DataQuery`. **Sep-13 scope disposition:** chain-query dependency explanation
+moves to the original Phase 3 incremental-data continuation, before its first
+chain dependency consumer; see [system design §12.1](system_rearchitecture.md#121-sep-13-review-follow-through).
+Until then, `explain_dependencies(ChainQuery)` explicitly returns
+`UNSUPPORTED_CONTRACT`. Exact `get_chain` behavior and D07 remain Phase 2
+requirements. Recipe dependency graphs and change invalidation remain Phase
+3/4 work and must also refuse unsupported contracts rather than guess a plan.
 
 ### 5.6 Import and compatibility contracts
 
@@ -650,12 +655,16 @@ Apply this order exactly:
 6. Open only the surviving immutable objects and verify object identity. Cache
    a successful byte verification only for the same process and unchanged
    `(device, inode, size, mtime_ns)` tuple; a changed tuple forces rehashing.
-7. Construct an Arrow dataset/scanner with column projection and filter
-   expression before any pandas conversion. Include hidden primary-key columns
-   needed to verify ordering, remove them before yielding when they were not
-   requested, set `use_threads=False`, and set Arrow batch size no larger than
-   `max_batch_rows`. Process fragments in manifest key-range order; never sort
-   an unbounded result in memory.
+7. Read projected Arrow batches before any pandas conversion. Include hidden
+   primary-key, key-predicate, and interval columns needed for ordering and
+   filtering; remove hidden columns before yielding. Apply every predicate
+   within the bounded scan, use a single-threaded Arrow read, and keep batch
+   size no larger than `max_batch_rows`. Process fragments in manifest
+   key-range order; never sort an unbounded result in memory. Sep-13 scope
+   disposition: Arrow-native filter pushdown is an optimization tracked as
+   [TD-10](rearchitecture_tech_debt.md); batch-local predicate evaluation is
+   acceptable only with the same results, limits, and supervised resource
+   bounds. Hidden-column filter correctness is required now, not deferred.
 8. Yield deterministic `RecordBatch` objects, checking cumulative rows before
    each yield. Exceeding `max_result_rows` fails; it never truncates and reports
    success.
@@ -947,6 +956,54 @@ Both Phase 2 inputs record the same code hash. The gate refuses stale coverage,
 missing private artifacts, a different working-tree hash, or evidence produced
 before the final implementation edit.
 
+### 12.2 Sep-13 review closeout: fixes owned by Phase 2
+
+Disposition recorded after review of `97e2a5c`. These are open implementation
+and verification tasks, not a claim that each blocks the currently running
+nightly. Conditional failures still belong here when they break a required
+Phase 2 contract or D18–D20 recovery proof. Let an already-running candidate
+finish; change resource policy between runs and generate final evidence only
+after the fixes land on one unchanged candidate commit.
+
+| ID | Fix now | Required proof before Phase 2 completion |
+|---|---|---|
+| P2-C01 | Make `checks/rearchitecture_phase2_evidence.py` require and strictly decode every required artifact, validate snapshot/code/environment and population bindings, distinguish score and render receipts, and verify actual rollback/fault evidence. The outer gate must enforce the full Phase 1 prerequisite, including coverage. | Missing refs, placeholder agreement JSON, reused score-as-render evidence, and unexplained dropped populations all fail. D14 invokes real supervised corpus scoring; D15/D16/D19 require their separate real receipts. Re-run Phase 0 replay and seeded controls as needed after code changes, then all gates from the final candidate. |
+| P2-C02 | Close the Tier-4 serving-cache miss path into the read-only scoring root. Prove the required producer/fold/panel/feature cache coverage before launch, or implement an explicitly isolated derived-cache path that preserves immutable inputs and legacy results. Measure the render profile now that it constructs a Scorer. Bind remaining manifest-backed stages to the same accepted data/model generation as snapshot scoring. | Missing, incompatible, and new-month fold caches cannot mutate pinned inputs or silently change forecasts. Real score/replay parity includes chooser rows. Record render peak memory and other running jobs; retain or change its 2 GiB reservation from evidence, not from the small synthetic tests. Never change limits beneath an active attempt. |
+| P2-C03 | Propagate the finality-resolved session through scoring, replay, expected populations, decision evidence, settlement, and render metadata; preserve requested versus resolved dates. | A request that walks back to the previous completed session produces the same decisions and clock claims as v1. Its evidence and export refer to the resolved session; a strict-date refusal remains explicit. |
+| P2-C04 | Separate direct watchlist/context scope from historical evidence coverage in `snapshot_planning.py`. Separately bind effect scope through CLI planning, decision validation/commit, settlement, export, and publication; authority namespace is not completion scope. | A current one-ticker request can retain older analogs from other tickers without widening its score population. A real subset commit followed by export succeeds under its subset scope and advances no global watermark. Test through producers, not pre-seeded scoped watermarks. |
+| P2-C05 | Include hidden predicate and time columns in repository scans. Validate whole-copy materialization against its declared projection, predicates, snapshot, and row ceilings; do not clamp a population to a smaller limit and then copy all rows. | Projection of only `event_id` with a ticker/date filter returns the same matches as the full projection. A one-row request cannot silently materialize three rows. Larger full inputs use accurate reviewed limits or explicit bounded subqueries; expected/actual counts agree. |
+| P2-C06 | Make ledger export resumable: write and fsync a complete private generation before atomically naming it as final. Complete the release-intent lifecycle when it produces a bound release, without declaring publication delivered before pointer acknowledgement. | Inject failure after one of several export files: old CURRENT remains readable and retry completes without an immutable-generation conflict. D20 verifies the correct export/release/publication effects and scoped watermarks independently. |
+| P2-C07 | Preserve the original backup key, cutoff, and payload across retries in `backup.py`/`effects_graph.py`. | Inject failure, advance the clock, and retry through a new attempt. Only backup completes; no other watermark moves. Backup remains an optional branch, but D20 retry correctness is required for Phase 2 sign-off. |
+| P2-C08 | Carry the semantic render inputs required by §9.4: finality/clock, conflict and degradation flags, model evidence, exported ledger, and available pinned health state. Do not make a synthetic expected bundle repeat adapter omissions. | Compare saved bundles with nonempty flags and prior selfcheck state where available. Missing operational history is explicitly unknown, never healthy. Current selfcheck/publication gates still apply. Live history/streak presentation belongs to the Phase 3 launch continuation below. |
+
+The review reproduced hidden-filter loss, watchlist completeness refusal,
+over-limit materialization, permissive evidence validation, global subset
+watermarks, interrupted-export retry failure, and time-dependent backup
+retry conflicts on synthetic inputs. Cache-miss behavior and render resource
+sizing were traced risks; no new full-data scoring or rebuild was run during
+the review. Passing focused unit tests is not a substitute for D14–D20.
+
+### 12.3 Explicit later owners
+
+This disposition supersedes the earlier requirement to implement chain-query
+dependency explanation and Arrow-native filter pushdown inside Phase 2.
+It does not waive score parity, bounded-read correctness, recovery tests, or
+artifact validation. All other phase exit criteria remain in force.
+
+| Concern | Owner and deadline | Boundary while deferred |
+|---|---|---|
+| A newly planned same-session run collides with old job/release identities; the nightly CLI ignores its supplied idempotency key | [Phase 3 launch §5.5](rearchitecture_phase3_parity_launch.md#55-review-follow-through-for-repeatable-updates-and-live-health), before P3-4 repeat-refresh acceptance | Retry the identical saved Phase 2 plan; do not claim arbitrary same-session replanning works or overwrite old receipts. |
+| Engineering observations do not populate `health.record_check`; live streak/history presentation is incomplete | Phase 3 launch §5.5, before live health is presented as authoritative | Keep current publication gated by its bound engineering receipt; unavailable history is unknown. |
+| Chain dependency explanation and migration of remaining manifest-backed readers/finality | Original Phase 3 incremental-data continuation, [system design §12.1](system_rearchitecture.md#121-sep-13-review-follow-through) | Chain explanation explicitly refuses; remaining readers keep the Phase 1 barrier and same-generation parity checks. |
+| Persisted complete fold artifacts and no fitting on scoring requests | Phase 5 models, system design §12.1 | The Phase 2 cache-miss containment/parity fix remains required; native model extraction is not pulled forward. |
+| Full health/flags/model/book screens | Remaining Phase 6 UI, system design §12.1 | Phase 3 board/detail must already show decision-relevant refusals and degradation from the accepted release. |
+| Arrow filter pushdown; removing unnecessary Scorer construction from render | [TD-10 / TD-11](rearchitecture_tech_debt.md), optional after Phase 6 | Correct filters, finite limits, and a measured safe render profile are required in Phase 2. Move an optimization into a phase if measurement makes it necessary for that phase. |
+
+Refresh, validate-refresh, Tier 3/4 rebuild, missed-night backfill, and
+calibration flags remain the deliberate omissions in §9.4. The original
+incremental-data continuation owns their data-refresh migration; the initial
+dashboard consumes accepted saved artifacts and does not need those services.
+
 ## 13. Implementation sequence
 
 Complete and commit milestones in this order. Do not start supervisor wiring
@@ -982,8 +1039,8 @@ or a full-data import before the synthetic repository is proven.
 
 ### P2-4 — Bounded repository reads
 
-1. Implement query validation, manifest pruning, object verification cache,
-   Arrow projection/filter pushdown, limits, ordering, and containing-job
+1. Implement query validation, manifest pruning, object verification,
+   Arrow projection/bounded predicate evaluation, limits, ordering, and containing-job
    evidence.
 2. Implement `get_event`, `get_chain`, and query-only dependency plans.
 3. Add D05–D07 and the full D09 round trip.
@@ -1058,7 +1115,8 @@ Phase 2 is complete only when all of the following are true:
    the active snapshot readable.
 5. **Reads bounded:** every public scan has explicit snapshot, projection,
    supported predicates, batch limit, result limit, and deterministic ordering;
-   Arrow filtering/projection occurs before pandas conversion.
+   Projection occurs before pandas conversion and all predicates are enforced
+   within the bounded scan before result batches are emitted (§8.2).
 6. **Fixed reader proven:** a running reader keeps one snapshot while the head
    advances, and retries use the snapshot pinned at original job submission.
 7. **Compatibility proven:** Phase 0 corpus parity and a nonempty real-data
