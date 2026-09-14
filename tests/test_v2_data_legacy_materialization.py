@@ -12,6 +12,7 @@ task's scope) would.
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import os
 import stat
@@ -24,7 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from engine.v2.contracts.data import ObjectRef  # noqa: E402
+from engine.v2.contracts.data import KeyPredicate, ObjectRef, TimeInterval  # noqa: E402
 from engine.v2.data import legacy_materialization as lm  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.legacy_adapter import materialize  # noqa: E402
@@ -621,6 +622,107 @@ def test_daily_market_is_whole_table_covering_the_tier4_cache_miss_window(tmp_pa
     assert {row["ticker"] for row in scanned} == {"AAA", "BBB"}
     assert {row["year"] for row in scanned} == {2020, 2021}
     assert lm.read_plan_complete(request, repository)
+
+
+def test_narrowed_whole_table_query_never_silently_copies_the_whole_table(tmp_path):
+    """Review P2-C05, decision 2's own proof: a one-row request (a real
+    predicate plus a time_interval matching exactly one of daily_market's
+    three manifest rows, ceiling 1) against a table the static read plan
+    classifies whole_table must materialize exactly that one row. Before
+    the fix, ``materialize_tree`` decided copy-vs-scan from the static plan
+    alone (``table_name not in _EVIDENCE_SCOPED_TABLES``), so this narrowed
+    query would still take the byte-copy path and silently write all three
+    rows, ignoring both its own predicate and its ceiling of 1."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    narrow_query = dataclasses.replace(
+        request.table_queries["daily_market"],
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
+        time_interval=TimeInterval(column="date", start_inclusive="2020-01-01",
+                                   end_exclusive="2020-01-03"),
+        max_result_rows=1, max_batch_rows=1)
+    request = dataclasses.replace(
+        request, table_queries={**request.table_queries, "daily_market": narrow_query})
+    dest_root = tmp_path / "legacy_root"
+    tree = lm.materialize_tree(repository, store, request, dest_root)
+
+    assert "daily_market" not in tree.copied_tables
+    assert tree.row_counts["daily_market"] == 1
+    (path,) = tree.curated_files["daily_market"][2020]
+    assert lm._parquet_row_count(path) == 1
+
+
+def test_ceiling_below_actual_rows_is_refused_not_clamped(tmp_path):
+    """Decision 2's second half: a request whose ceiling sits below the rows
+    its own (non-excluding) predicates would actually match is refused —
+    RESULT_LIMIT_EXCEEDED from the scan itself — never silently clamped
+    down to fewer rows than what matches."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    narrow_query = dataclasses.replace(
+        request.table_queries["daily_market"],
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
+        max_result_rows=1, max_batch_rows=1)  # AAA matches 2 rows (2020, 2021), ceiling says 1
+    request = dataclasses.replace(
+        request, table_queries={**request.table_queries, "daily_market": narrow_query})
+    dest_root = tmp_path / "legacy_root"
+    with pytest.raises(DataError) as err:
+        lm.materialize_tree(repository, store, request, dest_root)
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+
+
+def test_whole_table_copy_eligible_rejects_a_narrower_projection(tmp_path):
+    """Decision 2's "full contract column set" clause, isolated from the
+    key_filter/interval/ceiling checks: dropping even one column from an
+    otherwise-honest whole-table query refuses byte-copy eligibility."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    contract = contract_for("daily_market")
+    query = request.table_queries["daily_market"]
+    narrow_columns = dataclasses.replace(query, columns=query.columns[:-1])
+    assert not lm._whole_table_copy_eligible(repository, snap, "daily_market", contract, narrow_columns)
+    assert lm._whole_table_copy_eligible(repository, snap, "daily_market", contract, query)
+
+
+def test_whole_table_copy_eligible_rejects_a_narrower_time_interval(tmp_path):
+    """Decision 2's "no time bound narrower than the manifest bounds"
+    clause, isolated from the key_filter check: an honest (empty) key_filter
+    with only the time_interval narrowed still refuses eligibility."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    contract = contract_for("daily_market")
+    query = request.table_queries["daily_market"]
+    assert query.key_filter == ()
+    narrow_interval = dataclasses.replace(
+        query, time_interval=TimeInterval(column="date", start_inclusive="2020-06-01",
+                                          end_exclusive="2021-01-01"))
+    assert not lm._whole_table_copy_eligible(repository, snap, "daily_market", contract, narrow_interval)
+
+
+def test_interval_covers_direct_cases():
+    """Decision 2's covering rule, unit-tested for the branches an honest
+    whole-table query built by _build_table_query never exercises: no
+    manifest interval at all (a table with no observation_time_column --
+    "none of this plan's tables hit that branch today, but the rule is
+    general", per _whole_table_bounds), and a missing/mismatched query
+    interval against a real manifest one."""
+    manifest = TimeInterval(column="date", start_inclusive="2020-01-01", end_exclusive="2021-01-01")
+    assert lm._interval_covers(None, None)
+    assert not lm._interval_covers(manifest, None)
+    assert not lm._interval_covers(None, manifest)
+    assert not lm._interval_covers(
+        TimeInterval(column="other", start_inclusive="2020-01-01", end_exclusive="2021-01-01"), manifest)
+    assert lm._interval_covers(manifest, manifest)
+    assert lm._interval_covers(
+        TimeInterval(column="date", start_inclusive="2019-01-01", end_exclusive="2022-01-01"), manifest)
+    assert not lm._interval_covers(
+        TimeInterval(column="date", start_inclusive="2020-06-01", end_exclusive="2021-01-01"), manifest)
+    assert not lm._interval_covers(
+        TimeInterval(column="date", start_inclusive="2020-01-01", end_exclusive="2020-06-01"), manifest)
 
 
 # --------------------------------------------------------------------------

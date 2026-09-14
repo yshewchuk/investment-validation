@@ -24,6 +24,7 @@ from engine.v2.contracts.data import (  # noqa: E402
 )
 from engine.v2.data import objects, query as query_mod  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
+from engine.v2.data.objects import partition_logical_hash  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
@@ -41,6 +42,8 @@ _DM = contract_for("daily_market")
 _DM_REF = contract_ref_for(_DM)
 _OC = contract_for("option_chains")
 _OC_REF = contract_ref_for(_OC)
+_EE = contract_for("earnings_events")
+_EE_REF = contract_ref_for(_EE)
 
 
 def _option_chains_row(ticker: str, year: int) -> dict:
@@ -254,6 +257,54 @@ def test_hidden_primary_key_columns_dropped_when_not_projected(tmp_path):
     query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query(columns=("mcap_usd",)))
     for batch in repo.scan(query, table_name="securities"):
         assert batch.schema.names == ["mcap_usd"]
+
+
+def _event_row(event_id: str, ticker: str, year: int, day: int) -> dict:
+    from datetime import datetime
+    return dict(event_id=event_id, ticker=ticker, event_date=datetime(year, 1, day), year=year,
+               session="BMO", session_src="orats", annc_tod=None, src_orats=True, src_oquants=True,
+               src_nasdaq=False, src_yfinance=False, date_agree=True, date_conflict=False,
+               updated_at=None, event_cluster_id=None, claim_count=None, reconciliation=None)
+
+
+def test_narrow_projection_with_hidden_filter_columns_matches_full_projection(tmp_path):
+    """Review P2-C05, decision 1's own proof: projecting only ``event_id``
+    with a ticker filter plus a date interval must return exactly the same
+    ``event_id``s, in the same order, as the full projection with the same
+    filters — even though neither ``ticker`` (the predicate column) nor
+    ``event_date`` (the time_interval column) is in the narrow projection.
+    Before the fix, ``_execute_scan``'s ``needed`` tuple omitted both, so
+    ``query_mod.row_matches`` read them as absent (not merely ``None``) and
+    every row was silently excluded. A multi-fragment partition (2024 split
+    into two objects) exercises the same bug across a fragment boundary."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    frag_a = publish_and_inspect(store, _EE, _EE_REF,
+                                 [_event_row("AAA_2024-01-02", "AAA", 2024, 2)], "2024")
+    frag_b = publish_and_inspect(store, _EE, _EE_REF,
+                                 [_event_row("AAA_2024-01-09", "AAA", 2024, 9),
+                                  _event_row("BBB_2024-01-03", "BBB", 2024, 3)], "2024")
+    part_hash = partition_logical_hash(store, [frag_a.object_ref, frag_b.object_ref], _EE, _EE_REF,
+                                       "2024")
+    other_year = publish_and_inspect(store, _EE, _EE_REF, [_event_row("AAA_2025-01-02", "AAA", 2025, 2)],
+                                     "2025")
+    snap = commit_tables(conn, clock, {"earnings_events": [frag_a, frag_b, other_year]},
+                         {"earnings_events": _EE}, store=store,
+                         partition_logical_hashes={"earnings_events": {"2024": part_hash}})
+    repo = Repository(conn, store)
+    full_columns = tuple(c.name for c in _EE.columns)
+    filters = dict(
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
+        time_interval=TimeInterval(column="event_date", start_inclusive="2024-01-01",
+                                   end_exclusive="2025-01-01"))
+    narrow = DataQuery(snapshot_id=snap.snapshot_id, table_contract_ref=_EE_REF, columns=("event_id",),
+                       order_by=("event_id",), max_batch_rows=10, max_result_rows=10, **filters)
+    full = DataQuery(snapshot_id=snap.snapshot_id, table_contract_ref=_EE_REF, columns=full_columns,
+                     order_by=("event_id",), max_batch_rows=10, max_result_rows=10, **filters)
+    narrow_ids = [r["event_id"] for b in repo.scan(narrow, table_name="earnings_events")
+                 for r in b.to_pylist()]
+    full_ids = [r["event_id"] for b in repo.scan(full, table_name="earnings_events")
+               for r in b.to_pylist()]
+    assert narrow_ids == full_ids == ["AAA_2024-01-02", "AAA_2024-01-09"]
 
 
 def test_nullable_column_absent_from_an_old_fragment_is_typed_null(tmp_path):
