@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:467ec05b34280f6a2b8ed314652a65795f7c118010432a70880f8f5e5966101b",
+  "suite_version": "phase2_coverage_suite:64c61f556cca9ad65ff5cbda075cf14dd2719d56c271d62ad5f01e2f21766c7d",
   "test_files": [
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
@@ -15,6 +15,7 @@
     "tests/test_v2_data_partitions.py",
     "tests/test_v2_data_query.py",
     "tests/test_v2_data_rebuild_rollback.py",
+    "tests/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
     "tests/test_v2_ops_effects_graph.py",
@@ -23,7 +24,7 @@
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_snapshot_stages.py"
   ],
-  "source_hash": "sha256:a15a5775fb227cffe520688b19f0b1aa119f4fb21fddc3f6a88f0e8640ce414e",
+  "source_hash": "sha256:e2c512c95e7104de1fc08ca0c2af343e948b290361ed2f6b5b38a790c203f7b0",
   "packages": {
     "engine.v2.contracts": {
       "executed": 594,
@@ -53,8 +54,8 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 1910,
-      "executable": 2029,
+      "executed": 2071,
+      "executable": 2194,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -69,13 +70,15 @@
         "engine/v2/data/manifests.py",
         "engine/v2/data/objects.py",
         "engine/v2/data/query.py",
+        "engine/v2/data/reference_catalog.py",
+        "engine/v2/data/reference_inputs.py",
         "engine/v2/data/repository.py",
         "engine/v2/data/schema.py",
         "engine/v2/data/time_formats.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 94.13504189255791
+      "percentage": 94.39380127620784
     },
     "engine.v2.features": {
       "executed": 0,
@@ -201,8 +204,8 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 3185,
-      "executable": 4569,
+      "executed": 3197,
+      "executable": 4563,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -257,7 +260,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 69.7089078572992
+      "percentage": 70.0635546789393
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -1551,6 +1554,50 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_reference_input_paths_equal_their_legacy_constants",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_kind_for_path_classifies_every_declared_input",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_plan_pins_exactly_the_reference_files_and_excludes_a_stale_cache",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_missing_registry_referenced_artifact_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_missing_exact_reference_input_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_tier4_champion_without_a_cache_for_this_panel_is_stale",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_bad_registry_or_artifact_is_a_contract_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_import_records_exactly_the_expected_refs_per_receipt",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_model_only_change_reuses_the_snapshot_and_records_new_refs",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_v5_migration_is_checksummed_idempotent_and_append_only",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_reference_inputs.py::test_import_plan_submit_materializes_reference_files_byte_identical",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_data_repository.py::test_resolve_unknown_snapshot_id_not_found",
       "outcome": "passed"
     },
@@ -1912,6 +1959,14 @@
     },
     {
       "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_plan_refuses_a_snapshot_with_no_committed_reference_inputs",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_newer_reference_inputs_change_the_request_and_job_identity",
       "outcome": "passed"
     },
     {

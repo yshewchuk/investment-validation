@@ -19,6 +19,14 @@ scorer runs inside the transaction." True here exactly as it is in
 ``snapshots.commit_snapshot_for_attempt`` is ever invoked, which itself
 re-verifies everything again before opening its own transaction.
 
+Reference inputs (guide §14): the coordinator publishes every reference file
+the import manifest pinned (``reference_inputs.publish_reference_inputs``),
+outside the transaction like every other object, and ``commit_snapshot``
+inserts one ``data_import_reference_inputs`` row per file in the same
+transaction as the receipt. They are recorded per receipt, never folded into
+the snapshot: a re-import of identical data with a new model file reuses the
+snapshot and records the new refs.
+
 §7.3: "The Phase 1 attempt receipt always records a failed attempt. Once the
 coordinator regains control it also publishes a failed SnapshotImportReceipt
 artifact and inserts it in a separate short transaction." —
@@ -41,12 +49,14 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from engine.v2.contracts import SnapshotImportRequest, TableContract
+from engine.v2.contracts import LegacyInputManifest, SnapshotImportRequest, TableContract
 from engine.v2.data import documents, manifests
 from engine.v2.data.catalog import move_head, record_failed_import
 from engine.v2.data.errors import DataError
 from engine.v2.data.import_snapshot import request_hash as compute_request_hash
 from engine.v2.data.objects import FragmentInspection, partition_logical_hash, publish_legacy_file
+from engine.v2.data.reference_catalog import insert_reference_inputs
+from engine.v2.data.reference_inputs import publish_reference_inputs
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     canonical_json,
@@ -101,21 +111,22 @@ def _find_ref(refs, path):
 
 def snapshot_import_effect(conn, store, claim, refs, *, clock):
     bindings = recorded_bindings(conn, claim.attempt_id)
-    request_row = bindings.get("snapshot_import_request.json")
-    mapping_row = bindings.get("legacy_table_mapping.json")
-    if request_row is None or mapping_row is None:
+    rows = [bindings.get(name) for name in ("snapshot_import_request.json",
+                                            "legacy_table_mapping.json", "legacy_manifest.json")]
+    if None in rows:
         raise OpsError(make_problem("VALIDATION_FAILED",
-                                    "snapshot import request/mapping are not bound"))
-    request = from_document(SnapshotImportRequest, json.loads(
-        store.read_verified(artifact(conn, store, request_row.artifact_id))))
-    mapping = json.loads(store.read_verified(artifact(conn, store, mapping_row.artifact_id)))
+                                    "snapshot import request/mapping/manifest are not bound"))
+    request_doc, mapping, manifest_doc = (
+        json.loads(store.read_verified(artifact(conn, store, row.artifact_id))) for row in rows)
+    request = from_document(SnapshotImportRequest, request_doc)
+    manifest = from_document(LegacyInputManifest, manifest_doc)
     inspections = json.loads(store.read_verified(_named(refs, "snapshot_import")))
     req_hash = compute_request_hash(request)
     receipt_id = "recv_" + content_hash({"attempt_id": claim.attempt_id, "request_hash": req_hash}
                                         ).removeprefix("sha256:")[:32]
     try:
-        receipt_ref = _commit_snapshot_import(conn, store, claim, request, mapping, inspections,
-                                              req_hash, receipt_id, clock=clock)
+        receipt_ref = _commit_snapshot_import(conn, store, claim, (request, mapping, manifest),
+                                              inspections, req_hash, receipt_id, clock=clock)
         return None, (("snapshot_import_receipt", receipt_ref),)
     except (DataError, OpsError) as exc:
         record_failed_import(conn, receipt_id=receipt_id, request_hash=req_hash,
@@ -124,8 +135,11 @@ def snapshot_import_effect(conn, store, claim, refs, *, clock):
         raise OpsError(_translate(exc.problem)) from exc
 
 
-def _commit_snapshot_import(conn, store, claim, request, mapping, inspections, req_hash,
+def _commit_snapshot_import(conn, store, claim, documents_in, inspections, req_hash,
                             receipt_id, *, clock):
+    request, mapping, manifest = documents_in
+    if content_hash(to_document(manifest)) != request.source_manifest_hash:
+        raise fail("VALIDATION_FAILED", "bound legacy manifest is not the request's own manifest")
     legacy_root = store.staging_dir(claim.attempt_id) / "legacy"
     contracts = {name: documents.decode_document(TableContract, doc)
                 for name, doc in mapping["tables"].items()}
@@ -167,13 +181,15 @@ def _commit_snapshot_import(conn, store, claim, request, mapping, inspections, r
     legacy_snapshot_object_ref = publish_legacy_file(store, claim.attempt_id, legacy_root,
                                                       request.legacy_snapshot_source_ref)
     all_objects.append(legacy_snapshot_object_ref)
+    references = publish_reference_inputs(store, claim.attempt_id, legacy_root, manifest.file_refs)
 
     receipt = commit_snapshot_for_attempt(
         conn, store, scope=request.scope, request_hash=req_hash, contracts=list(contracts.values()),
         objects=all_objects, records=all_records, manifests=list(table_manifests.values()),
         snapshot=snapshot, expected_head_snapshot_id=request.expected_head_snapshot_id,
         expected_head_generation=request.expected_head_generation, receipt_id=receipt_id,
-        attempt_id=claim.attempt_id, fence=claim.fence, clock=clock)
+        attempt_id=claim.attempt_id, fence=claim.fence, clock=clock,
+        record_references=lambda c, rid: insert_reference_inputs(c, rid, references))
     receipt = dataclasses.replace(receipt, legacy_snapshot_object_ref=legacy_snapshot_object_ref)
 
     return store.publish_bytes(canonical_json(to_document(receipt)).encode("utf-8"),

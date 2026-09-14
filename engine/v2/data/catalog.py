@@ -11,10 +11,8 @@ transaction, without ever touching a head. :func:`move_head` is the one
 rollback primitive: a bare CAS to a previously committed snapshot.
 
 No file copy, Arrow scan, or hash calculation runs inside the transaction:
-:func:`commit_snapshot` re-verifies every manifest (``manifests.verify_*``,
-plus the row-sum and key-overlap invariants ``engine/v2/data/schema.py``
-cannot express in SQL) *before* opening it, over already-built, already-durable
-inputs.
+:func:`commit_snapshot` re-verifies every manifest, plus the row-sum and
+key-overlap invariants SQL cannot express, *before* opening it.
 
 This module never imports ``engine.v2.ops`` (layer 1, ``system_rearchitecture.md``
 §4.1): it cannot call ``engine.v2.ops.lifecycle.verify_fence`` or
@@ -30,11 +28,9 @@ gap (task brief, P2-3):
   ``engine.v2.ops.catalog.transaction`` — the same shape, kept local so this
   package's import fan-out never reaches ``ops``.
 
-Resolve failures use ``MANIFEST_CORRUPT`` throughout (task brief decision 1:
-§11 has no ``INTEGRITY_FAILED``). A same-``*_id`` row whose canonical payload
-differs raises ``IDENTITY_CONFLICT``. A lost head compare-and-swap — including
-the very first head for a scope, when the precheck already disagrees with the
-caller's expectation — raises ``SNAPSHOT_CONFLICT``.
+Resolve failures use ``MANIFEST_CORRUPT`` (§11 has no ``INTEGRITY_FAILED``). A
+same-``*_id`` row with a different canonical payload raises ``IDENTITY_CONFLICT``;
+a lost head compare-and-swap, including a scope's first head, ``SNAPSHOT_CONFLICT``.
 
 **Review fix (task 1 follow-up):** a dataset version's/snapshot's ``*_id``
 deliberately excludes ``parent_*_id`` — only ``manifest_hash`` covers it — so a
@@ -53,10 +49,9 @@ Required fault points (task brief decision 2), fired through one ``fault``
 hook in commit order: ``before_transaction``, ``after_contracts``,
 ``after_objects``, ``after_fragments``, ``after_dataset_versions``,
 ``after_memberships``, ``after_snapshot``, ``after_snapshot_tables``,
-``before_head_update``, ``before_commit`` — every one before the
-transaction's own ``COMMIT``, so an injected failure always rolls back to
-nothing new; the object-side fault points belong to ``objects.py`` and
-``foundation.ArtifactStore``, run before this module is ever called.
+``before_head_update``, ``before_commit`` — all before ``COMMIT``, so an
+injected failure rolls back to nothing new; object-side fault points belong to
+``objects.py`` and ``foundation.ArtifactStore``, which run before this module.
 """
 from __future__ import annotations
 
@@ -469,8 +464,9 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
                     snapshot: SnapshotRef, expected_head_snapshot_id: str | None,
                     expected_head_generation: int, receipt_id: str, attempt_id: str, fence: int,
                     fence_check: Callable[[sqlite3.Connection], None], clock: Clock,
-                    fault: FaultHook | None = None,
-                    store: ArtifactStore | None = None) -> SnapshotImportReceipt:
+                    fault: FaultHook | None = None, store: ArtifactStore | None = None,
+                    record_references: Callable[[sqlite3.Connection, str], None] | None = None,
+                    ) -> SnapshotImportReceipt:
     """§7.3 steps 1-7, over already-built, already-durable inputs.
 
     Re-verifies every manifest (identity, row-sum, key-overlap) before opening
@@ -478,6 +474,8 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
     receipt, and compare-and-swaps ``scope``'s head. Raises on any failure —
     it never returns a ``failed``/``conflict`` receipt; ``record_failed_import``
     is the caller's separate, later step for persisting evidence of that.
+    ``record_references(conn, receipt_id)`` runs right after the receipt row,
+    in the same transaction (``reference_catalog.insert_reference_inputs``).
     """
     fault = fault or (lambda point: None)
     _verify_everything(contracts, records, manifests, snapshot, store)
@@ -526,6 +524,8 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
             resulting_head_generation=resulting_generation, status="committed",
             problem=None, envelope={})
         _insert_receipt(conn, receipt, scope, now)
+        if record_references is not None:
+            record_references(conn, receipt_id)
         fault("before_head_update")
         if not already_at_head:
             # The candidate resolved (possibly by reuse) to a snapshot the

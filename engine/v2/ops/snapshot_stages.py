@@ -37,6 +37,7 @@ from engine.v2.data.legacy_materialization import (
     parse_pinned_ref,
     read_plan_complete,
 )
+from engine.v2.data.reference_inputs import LEGACY_SNAPSHOT_PATH
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.checkpoints import artifact
@@ -260,7 +261,7 @@ def _curated_copies(table, records):
 
 def _expected_layout(repository, request):
     """(exact ``{path: hash}``, required paths of unknown hash, free prefixes)."""
-    exact = {"data/features/SNAPSHOT": request.legacy_snapshot_object_ref.content_hash}
+    exact = {LEGACY_SNAPSHOT_PATH: request.legacy_snapshot_object_ref.content_hash}
     for ref in (*request.registry_and_model_refs, *request.calendar_refs):
         path, digest = parse_pinned_ref(ref)
         exact[path] = digest

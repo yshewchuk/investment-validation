@@ -29,8 +29,14 @@ from engine.v2.contracts import JobSpec, LegacyFileRef, LegacyInputManifest, Sub
 from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests
 from engine.v2.data.objects import partition_logical_hash
+from engine.v2.data.reference_catalog import (
+    ReferenceInput,
+    insert_reference_inputs,
+    reference_inputs_for_snapshot,
+)
+from engine.v2.data.reference_inputs import LEGACY_REFERENCE_INPUTS_V1
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import SystemClock, content_hash, to_document
+from engine.v2.foundation import SystemClock, content_hash, format_timestamp, to_document
 from engine.v2.ops import executor
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import cache_identity, register_artifact
@@ -53,7 +59,6 @@ from tests.test_v2_data_legacy_materialization import (
     TABLES,
     _build_request,
     _build_snapshot,
-    _pinned_refs,
     _ref,
     _snapshot_object_ref,
 )
@@ -100,6 +105,7 @@ class Case:
         self.repository = Repository(self.conn, self.store)
         self.snapshot_object = _snapshot_object_ref(self.store)
         self.request = _build_request(self.repository, self.snap, self.snapshot_object, self.store)
+        record_reference_inputs(self, self.snap.snapshot_id, "r1-references")
         self.snapshot_ref = resolve_snapshot_head(self.conn, self.store, "shadow", clock=self.clock)
         self.request_ref = self.publish(to_document(self.request), "legacy_materialization_request.v1.0")
         self.base = default_materialization_base(self.root)
@@ -198,6 +204,30 @@ class Case:
 
     def recorded(self):
         return [json.loads(path.read_text()) for path in sorted(self.records.glob("*.json"))]
+
+
+def record_reference_inputs(case, snapshot_id, receipt_id, *, registry=b'{"models": []}'):
+    """A committed import receipt for ``snapshot_id`` plus its reference rows, in one
+    transaction, as the snapshot import coordinator records them. The default bytes
+    equal ``_pinned_refs``'s, so planning rebuilds exactly ``case.request``."""
+    inputs = LEGACY_REFERENCE_INPUTS_V1["inputs"]
+    published = (("calendar", b"date\n2020-01-02\n2021-01-04\n"), ("model_registry", registry))
+    rows = []
+    for kind, data in published:
+        ref = case.store.publish_bytes(data, schema_ref="legacy_pinned_ref.v1")
+        rows.append(ReferenceInput(kind=kind, legacy_path=inputs[kind]["path"], object_id=ref.artifact_id,
+                                   content_hash=ref.content_hash, byte_size=ref.byte_size))
+    obj = case.snapshot_object
+    rows.append(ReferenceInput(kind="legacy_snapshot", legacy_path=inputs["legacy_snapshot"]["path"],
+                               object_id=obj.object_id, content_hash=obj.content_hash,
+                               byte_size=obj.byte_size))
+    with transaction(case.conn):
+        case.conn.execute(
+            "INSERT INTO data_import_receipts (receipt_id, attempt_id, fence, source_manifest_hash, "
+            "result_snapshot_id, status, registered_at, scope) VALUES (?, ?, 1, ?, ?, 'committed', ?, "
+            "'shadow')", (receipt_id, "att-" + receipt_id, fake_hash(receipt_id), snapshot_id,
+                          format_timestamp(case.clock.now())))
+        insert_reference_inputs(case.conn, receipt_id, rows)
 
 
 @pytest.fixture
@@ -436,11 +466,6 @@ def test_snapshot_checkpoint_key_covers_each_snapshot_input():
 
 
 def _plan_files(case):
-    registry_refs, calendar_refs = _pinned_refs(case.store)
-    refs = case.tmp / "materialization_refs.json"
-    refs.write_text(json.dumps({"legacy_snapshot_object_ref": to_document(case.snapshot_object),
-                                "registry_and_model_refs": list(registry_refs),
-                                "calendar_refs": list(calendar_refs)}))
     fixture = case.live_store / "unused.txt"
     fixture.write_bytes(b"barrier read set")
     from engine.v2.ops.fingerprints import file_hash
@@ -454,7 +479,7 @@ def _plan_files(case):
     population = case.tmp / "population.json"
     population.write_text(json.dumps(["AAA|S1|2020-01-15"]))
     return ["plan", "nightly", "--as-of", SESSION, "--input-mode", "snapshot",
-            "--snapshot-scope", "shadow", "--materialization-refs", str(refs),
+            "--snapshot-scope", "shadow",
             "--input-manifest", str(manifest), "--expected-population", str(population),
             "--tickers", "AAA,BBB", "--year-start", "2020", "--year-end", "2021"]
 
@@ -496,6 +521,7 @@ def _advance_head(case):
         snapshot=snap, expected_head_snapshot_id=head[0], expected_head_generation=head[1],
         receipt_id="r-advance", attempt_id="att-advance", fence=1, fence_check=lambda _c: None,
         clock=case.clock, store=case.store)
+    return snap.snapshot_id
 
 
 def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkeypatch):
@@ -510,6 +536,7 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     inputs = planned["plan"]["snapshot_inputs"]
     assert inputs["snapshot_ref_artifact_id"] == case.snapshot_ref.artifact_id
     assert inputs["snapshot_manifest_hash"] == case.snap.manifest_hash
+    assert inputs["materialization_request_hash"] == case.request.request_hash  # refs from the catalog
 
     ids, specs = _submitted_specs(case, planned["plan_ref"], "k1")
     by_kind = {spec["kind"]: (job_id, spec) for job_id, spec in specs.items()}
@@ -538,13 +565,46 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     retry_ids, _ = _submitted_specs(case, planned["plan_ref"], "k2")
     assert retry_ids == ids and calls == ["shadow"]
 
-    _advance_head(case)
+    advanced = _advance_head(case)
+    record_reference_inputs(case, advanced, "r-advance-references")
     replanned = dispatch(parser().parse_args(argv), case.root, case.conn, case.clock)
     assert calls == ["shadow", "shadow"]
     assert replanned["plan"]["snapshot_inputs"]["snapshot_ref_artifact_id"] \
         != inputs["snapshot_ref_artifact_id"]
     new_ids, _ = _submitted_specs(case, replanned["plan_ref"], "k3")
     assert set(new_ids).isdisjoint(ids)
+
+
+def test_snapshot_plan_refuses_a_snapshot_with_no_committed_reference_inputs(case):
+    from engine.v2.data.errors import DataError
+    from engine.v2.ops.errors import OpsError
+
+    with pytest.raises(DataError) as missing:
+        reference_inputs_for_snapshot(case.conn, scope="other-scope", snapshot_id=case.snap.snapshot_id)
+    assert missing.value.code == "SNAPSHOT_NOT_READY"
+    _advance_head(case)  # committed by a receipt that recorded no reference inputs
+    with pytest.raises(OpsError) as err:
+        dispatch(parser().parse_args(_plan_files(case)), case.root, case.conn, case.clock)
+    assert err.value.problem.code == "INPUT_CHANGED"
+    assert err.value.problem.details["data_code"] == "SNAPSHOT_NOT_READY"
+
+
+def test_newer_reference_inputs_change_the_request_and_job_identity(case):
+    argv = _plan_files(case)
+    first = dispatch(parser().parse_args(argv), case.root, case.conn, case.clock)
+    first_ids, first_specs = _submitted_specs(case, first["plan_ref"], "refs-1")
+    record_reference_inputs(case, case.snap.snapshot_id, "r2-references",
+                            registry=b'{"models": [], "retrained": true}')
+    second = dispatch(parser().parse_args(argv), case.root, case.conn, case.clock)
+    one, two = first["plan"]["snapshot_inputs"], second["plan"]["snapshot_inputs"]
+    assert one["snapshot_ref_artifact_id"] == two["snapshot_ref_artifact_id"]
+    assert one["materialization_request_hash"] != two["materialization_request_hash"]
+    second_ids, second_specs = _submitted_specs(case, second["plan_ref"], "refs-2")
+    snapshot_kinds = ("legacy_materialize", "legacy_score", "legacy_decision_replay")
+    first_jobs = {job for job, spec in first_specs.items() if spec["kind"] in snapshot_kinds}
+    second_jobs = {job for job, spec in second_specs.items() if spec["kind"] in snapshot_kinds}
+    assert len(first_jobs) == len(snapshot_kinds) and first_jobs.isdisjoint(second_jobs)
+    assert set(first_ids) != set(second_ids)
 
 
 _FAKE_SNAPSHOT_INPUTS = {"snapshot_ref_artifact_id": "art_snapshot",
@@ -714,39 +774,27 @@ def test_manifest_and_request_refusals(case):
 def test_planning_refusals(case):
     from engine.v2.ops.errors import OpsError
     from engine.v2.ops.plans import nightly_plan
-    from engine.v2.ops.snapshot_planning import (
-        direct_scope_for,
-        load_materialization_refs,
-        pin_snapshot_inputs,
-    )
+    from engine.v2.ops.snapshot_planning import direct_scope_for, pin_snapshot_inputs
 
     assert direct_scope_for(["AAA|S1|2020-01-15", "BBB|S2|2021-02-10"]) == {
         "tickers": ["AAA", "BBB"], "years": [2020, 2021]}
     with pytest.raises(OpsError):
         direct_scope_for(["AAA|2020-01-15"])
     with pytest.raises(OpsError):
-        load_materialization_refs(case.tmp / "missing.json")
-    malformed = case.tmp / "bad_refs.json"
-    malformed.write_text(json.dumps({"registry_and_model_refs": []}))
-    with pytest.raises(OpsError):
-        load_materialization_refs(malformed)
-    with pytest.raises(OpsError):
         pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=(), year_start=2020,
-                            year_end=2021, expected_population=(), pinned={}, clock=case.clock)
-    registry_refs, calendar_refs = _pinned_refs(case.store)
-    pinned = {"legacy_snapshot_object_ref": case.snapshot_object,
-              "registry_and_model_refs": registry_refs, "calendar_refs": calendar_refs}
+                            year_end=2021, expected_population=(), clock=case.clock)
     with pytest.raises(OpsError) as err:
         pin_snapshot_inputs(case.conn, case.store, "no-such-scope", tickers=("AAA",),
                             year_start=2020, year_end=2021,
-                            expected_population=("AAA|S1|2020-01-15",), pinned=pinned,
-                            clock=case.clock)
+                            expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
     assert err.value.problem.code == "INPUT_CHANGED"
     with pytest.raises(OpsError):  # direct years (2025) outside the evidence years
         pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
                             year_start=2020, year_end=2021,
-                            expected_population=("AAA|S1|2025-01-15",), pinned=pinned,
-                            clock=case.clock)
+                            expected_population=("AAA|S1|2025-01-15",), clock=case.clock)
+    with pytest.raises(OpsError):
+        dispatch(parser().parse_args(["plan", "nightly", "--as-of", SESSION, "--input-mode",
+                                      "snapshot"]), case.root, case.conn, case.clock)
     with pytest.raises(OpsError):
         nightly_plan(str(REPO), SESSION, input_mode="snapshot")
     plan = build_nightly_plan(str(REPO), SESSION)

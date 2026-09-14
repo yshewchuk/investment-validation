@@ -455,7 +455,40 @@ _V4 = (
     AND json_type(partition_logical_hashes_json) = 'object')""",
 )
 
+
+# --------------------------------------------------------------------------
+# v5 — reference inputs per import receipt (never edit v1-v4 above)
+# --------------------------------------------------------------------------
+#
+# Guide §14: the legacy SNAPSHOT, the model registry, champion artifacts,
+# Tier-4 serving caches, the chooser analog pool and the calendar CSV are
+# separately pinned compatibility inputs, not snapshot identity. One row per
+# pinned file, keyed by the import receipt that pinned it
+# (``engine/v2/data/reference_catalog.py``), inserted in the same transaction
+# as that receipt. A row may name only a committed receipt, and is immutable.
+_V5 = (
+    f"""CREATE TABLE data_import_reference_inputs (
+        receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        legacy_path TEXT NOT NULL CHECK (length(legacy_path) > 0),
+        kind TEXT NOT NULL CHECK (length(kind) > 0),
+        object_id TEXT NOT NULL CHECK (length(object_id) > 0),
+        content_hash TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+        CHECK ({_hash_check('content_hash')}),
+        PRIMARY KEY (receipt_id, legacy_path)
+    ) STRICT""",
+    """CREATE TRIGGER data_import_reference_inputs_committed_receipt
+    BEFORE INSERT ON data_import_reference_inputs
+    WHEN (SELECT status FROM data_import_receipts WHERE receipt_id = NEW.receipt_id)
+         IS NOT 'committed'
+    BEGIN
+        SELECT RAISE(ABORT, 'data_import_reference_inputs requires a committed import receipt');
+    END""",
+    *_immutable_triggers("data_import_reference_inputs"),
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
-             (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4))
+             (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
+             (5, "import_reference_inputs", _V5))
