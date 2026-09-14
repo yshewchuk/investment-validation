@@ -245,6 +245,29 @@ def _security_gate(store, files, binding_hash, repo_root):
     return _gate_dict(store, document)
 
 
+def _generation_ref(claim):
+    """The pinned plan identity this publication job's own parameters carry
+    (guide §5.5 item 1; ``nightly.py``'s ``_legacy_params``, action ==
+    "publication" mirrors what ``decision_evidence`` already pins).
+
+    Empty for a claim built without those fields -- pre-existing lower-level
+    tests construct a minimal ``LegacyParameters`` claim directly and never
+    set them, so they keep getting the release id's original
+    ``(scope, session)``-only form. Every REAL nightly plan
+    (``build_nightly_plan``/``plans.py::nightly_plan``) sets both
+    unconditionally, so a real publication job always takes the generation-
+    aware branch below.
+    """
+    params = claim.spec.parameters
+    deployment = params.get("deployment") or ""
+    decision_clock = params.get("decision_clock") or ""
+    manifest = (params.get("input_bindings") or {}).get("legacy_manifest.json") or ""
+    if not (deployment or decision_clock or manifest):
+        return ""
+    return content_hash({"deployment": deployment, "decision_clock": decision_clock,
+                         "manifest": manifest})
+
+
 def _bind_release_intent(conn, scope, session, release_id, *, clock):
     """Mark the ``release_intent`` outbox row this release is bound to as
     delivered (P2-C06 decision 2): "bound to a release", never "published" —
@@ -304,7 +327,15 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
         raise fail("VALIDATION_FAILED", "publication has no projection bundle bound")
     files = {"bundle.tar": artifact(conn, store, bundle_row.artifact_id)}
     target = Path(ops_root) / "releases" / scope
-    release_id = "rel" + content_hash([scope, session]).split(":")[1][:24]
+    # guide §5.5 item 1: fold the pinned plan identity into the release id so
+    # a genuinely new same-session generation (changed implementation,
+    # manifest or decision_clock) gets a DISTINCT release -- never colliding
+    # with, overwriting, or ``IDEMPOTENCY_CONFLICT``-ing against an older
+    # generation's already-staged release -- while an identical-plan retry
+    # (unchanged generation ref) reproduces the exact same release id.
+    generation_ref = _generation_ref(claim)
+    release_parts = [scope, session, generation_ref] if generation_ref else [scope, session]
+    release_id = "rel" + content_hash(release_parts).split(":")[1][:24]
     expected_current = release_current(target)
     binding_hash = content_hash({"release_id": release_id, "occurrence": session, "files": files})
     builders = (

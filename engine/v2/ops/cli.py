@@ -253,6 +253,18 @@ def dispatch(args, root, conn, clock):
         plan = json.loads(store.read_verified(ref))
         policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
         if plan.get("kind") == "nightly":
+            # guide §5.5 item 1 / rearchitecture_phase1_runbook.md
+            # "--idempotency-key semantics for nightly submission": this flag
+            # is REQUIRED by the CLI grammar (every ``submit`` needs one) but
+            # is NEVER read for a nightly plan. Nightly stage identity is
+            # fully and only determined by the plan document itself (session,
+            # scope, and the pinned plan identity -- implementation, legacy
+            # manifest, decision_clock -- nightly.py's ``_plan_identity``), so
+            # two ``submit --plan <same-plan-ref>`` calls with DIFFERENT
+            # ``--idempotency-key`` values are still the same retry and
+            # resolve to the identical jobs; the key only distinguishes
+            # submissions of a non-nightly (``artifact_check``/experiment)
+            # plan below, where it IS the job identity.
             if plan.get("blocked_prerequisites"):
                 raise fail("INVALID_REQUEST", "nightly plan has unresolved prerequisites",
                           details={"blocked_prerequisites": plan["blocked_prerequisites"]})
