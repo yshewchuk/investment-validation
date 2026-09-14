@@ -45,6 +45,35 @@ export interface Headline {
  * (`expected_return_model`/`expected_return_sim`) the same way the legacy
  * cell does, so the client shows one headline number without inventing one.
  */
+/**
+ * Generic `display_record` value formatting for the score-detail view
+ * (guide P3-3b deliverable 2). Every `display_record` field is an
+ * already-rendered legacy value of unknown shape (`Record<string,
+ * unknown>`) — this only decides how to print a value that is already
+ * there; it never combines two fields or computes a new one. Null/absent is
+ * "missing", never blank-as-zero (guide: "Nulls show as missing, never
+ * 0."); a real boolean `false` or number `0` prints as given.
+ */
+export function fmtUnknown(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export function headlineExpectedReturn(score: {
   expected_return_model: number | null;
   expected_return_sim: number | null;

@@ -134,12 +134,27 @@ export interface OperationsHealth {
   code_budgets?: { consecutive_nights?: number };
 }
 
-/** RFC-7807-flavored error envelope, §6: "Use `Problem` envelopes." */
+/**
+ * The real `Problem` envelope (`problem.v1.0`, component_contracts.md
+ * §2.4), read directly -- `engine/v2/serving/api.py` (P3-2, in review) uses
+ * exactly these field names (`_problem()`: code, category, retryable,
+ * message, stage, trace_id, dependency_refs, retry_after_seconds,
+ * diagnostic_ref, details, schema_version), with no `title`/`status`
+ * aliases on the body; the HTTP status code itself is read from the
+ * response, not this envelope (`ApiError.status` in `client.ts`).
+ */
 export interface ProblemEnvelope {
-  status: number;
+  schema_version: string;
   code: string;
-  title: string;
-  detail?: string;
+  category: string;
+  retryable: boolean;
+  message: string;
+  stage: string | null;
+  trace_id: string | null;
+  dependency_refs: string[];
+  retry_after_seconds: number | null;
+  diagnostic_ref: string | null;
+  details: Record<string, unknown>;
 }
 
 export interface EventQuery {

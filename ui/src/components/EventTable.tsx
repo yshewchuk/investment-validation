@@ -1,5 +1,6 @@
 import type { EventPageItem, EventScoreSummary } from "../api/types";
 import { compatibilityLink, fmtNumber, fmtPercent, fmtText, headlineExpectedReturn } from "../format";
+import { eventHash } from "../routes";
 
 interface Props {
   items: EventPageItem[];
@@ -27,7 +28,11 @@ function ScoreRow({
       data-testid="score-row"
       data-score-id={score.score_id}
     >
-      <td>{item.ticker}</td>
+      <td>
+        <a href={eventHash(releaseId, item.event_ref.event_id)} data-testid="open-event-link">
+          {item.ticker}
+        </a>
+      </td>
       <td>{item.event_date}</td>
       <td>{fmtText(item.session)}</td>
       <td>{score.strategy}</td>

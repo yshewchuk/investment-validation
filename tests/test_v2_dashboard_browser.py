@@ -17,9 +17,12 @@ the real read API (P3-2, in progress) shaped exactly from
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -302,6 +305,261 @@ def test_no_token_in_url_or_local_storage(browser, server):
     try:
         page.goto(base + "/")
         expect(page.get_by_test_id("release-banner")).to_be_visible()
+        assert TOKEN not in page.url
+        storage = page.evaluate(
+            "() => Object.entries(localStorage).map(([k,v]) => k + '=' + v).join(';')")
+        assert TOKEN not in storage
+    finally:
+        context.close()
+
+
+# --------------------------------------------------------------------------
+# P3-3b: event and score detail views
+# --------------------------------------------------------------------------
+
+
+def test_board_to_event_to_score_and_back_keeps_pagination(browser, server, state):
+    """Guide P3-3b deliverable 6: "board -> event -> score -> back keeps
+    pagination". Uses page 2 (a row not covered by DETAIL_OVERRIDES) so the
+    assertion is purely about navigation/state, not detail content."""
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/")
+        expect(page.get_by_test_id("event-table")).to_be_visible()
+        page.get_by_test_id("page-next").click()
+        page.wait_for_timeout(200)
+
+        first_row = page.get_by_test_id("score-row").first
+        page2_score_id = first_row.get_attribute("data-score-id")
+        assert page2_score_id is not None
+
+        first_row.get_by_test_id("open-event-link").click()
+        expect(page.get_by_test_id("event-detail")).to_be_visible()
+        expect(page.get_by_test_id("event-scores-table")).to_be_visible()
+
+        page.get_by_test_id("open-score-link").first.click()
+        expect(page.get_by_test_id("score-detail")).to_be_visible()
+        expect(page.get_by_test_id("score-detail-header")).to_be_visible()
+
+        page.get_by_test_id("back-to-board").click()
+        expect(page.get_by_test_id("event-table")).to_be_visible()
+        expect(page.get_by_test_id("score-row").first).to_have_attribute(
+            "data-score-id", page2_score_id)
+    finally:
+        context.close()
+
+
+def test_deep_link_score_on_non_current_release_shows_notice(browser, server, state):
+    """P3-3b deliverable 3/6: a deep link to a score on a release that is
+    not current still loads it, and shows the notice rather than silently
+    switching to the actually-current release (r1)."""
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r2/scores/r2-score-0-a")
+        expect(page.get_by_test_id("score-detail")).to_be_visible()
+        expect(page.get_by_test_id("score-id-value")).to_contain_text("r2-score-0-a")
+        expect(page.get_by_test_id("score-release-id-value")).to_contain_text("r2")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r2")
+        expect(page.get_by_test_id("release-not-current-notice")).to_be_visible()
+    finally:
+        context.close()
+
+
+def test_release_switch_mid_session_keeps_detail_fetches_pinned(browser, server, state):
+    """P3-3b deliverable 6: switching the release mid-session keeps detail
+    fetches on the pinned release. `r1-score-4-a` only exists under release
+    r1's fixture -- if the score fetch had drifted onto the now-current r2
+    instead of staying pinned to r1, this would 404 (`score-not-found`)."""
+    base = f"http://127.0.0.1:{server.server_port}?pollMs=250"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base)
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+
+        row = page.locator('[data-score-id="r1-score-4-a"]')
+        row.get_by_test_id("open-event-link").click()
+        expect(page.get_by_test_id("event-detail")).to_be_visible()
+        expect(page.get_by_test_id("event-scores-table")).to_be_visible()
+
+        state.set_current("r2")
+        expect(page.get_by_test_id("release-changed-notice")).to_be_visible(timeout=5000)
+
+        page.get_by_test_id("open-score-link").first.click()
+        expect(page.get_by_test_id("score-detail")).to_be_visible()
+        expect(page.get_by_test_id("score-id-value")).to_contain_text("r1-score-4-a")
+        expect(page.get_by_test_id("score-not-found")).to_have_count(0)
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+    finally:
+        context.close()
+
+
+def test_score_detail_null_shows_missing_zero_shows_zero_and_other_category(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-0-a")
+        expect(page.get_by_test_id("score-detail")).to_be_visible()
+
+        entry_cost_row = page.locator('[data-testid="field-row"][data-field="entry_cost"]')
+        expect(entry_cost_row.get_by_test_id("field-value")).to_have_text("—")
+
+        exp_pnl_row = page.locator('[data-testid="field-row"][data-field="exp_pnl_model"]')
+        expect(exp_pnl_row.get_by_test_id("field-value")).to_have_text("0")
+
+        # "note" is not in the mapping spec's category table -- falls back
+        # to the "other" category, per guide "otherwise alphabetically".
+        categories = page.get_by_test_id("field-group-category").all_inner_texts()
+        assert "other" in categories
+        note_row = page.locator('[data-testid="field-row"][data-field="note"]')
+        expect(note_row).to_be_visible()
+    finally:
+        context.close()
+
+
+def test_score_detail_refusal_shown(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-1-a")
+        expect(page.get_by_test_id("score-raw-verdict")).to_contain_text("false")
+        detail_row = page.locator('[data-testid="field-row"][data-field="detail"]')
+        expect(detail_row.get_by_test_id("field-value")).to_have_text("entry cost exceeds ceiling")
+    finally:
+        context.close()
+
+
+def test_score_detail_dynsv_choice_shown(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-2-b")
+        chosen_row = page.locator('[data-testid="field-row"][data-field="chosen_strategy"]')
+        expect(chosen_row.get_by_test_id("field-value")).to_have_text("STR-THRU")
+        margin_row = page.locator('[data-testid="field-row"][data-field="chosen_margin"]')
+        expect(margin_row.get_by_test_id("field-value")).to_have_text("0.014")
+    finally:
+        context.close()
+
+
+def test_payoff_svg_points_match_fixture_exactly(browser, server, state):
+    """P3-3b deliverable 6: "payoff SVG point count equals the fixture" --
+    and, more strongly, each point's own data matches the fixture's x/y
+    arrays exactly (no interpolation, no dropped/added point)."""
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-0-a")
+        expect(page.get_by_test_id("payoff-svg")).to_be_visible()
+        points = page.get_by_test_id("payoff-point")
+        assert points.count() == 5
+        xs = [float(points.nth(i).get_attribute("data-x") or "nan") for i in range(5)]
+        ys = [float(points.nth(i).get_attribute("data-y") or "nan") for i in range(5)]
+        assert xs == [90.0, 95.0, 100.0, 105.0, 110.0]
+        assert ys == [5.0, 5.0, 0.0, 0.0, 0.0]
+    finally:
+        context.close()
+
+
+def test_payoff_curve_empty_state_renders(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-2-a")
+        expect(page.get_by_test_id("payoff-empty")).to_be_visible()
+        expect(page.get_by_test_id("payoff-svg")).to_have_count(0)
+    finally:
+        context.close()
+
+
+def test_payoff_curve_missing_state_renders(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-1-a")
+        expect(page.get_by_test_id("payoff-missing")).to_be_visible()
+    finally:
+        context.close()
+
+
+def test_score_detail_shows_ids_and_collapsed_engine_evidence(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-0-a")
+        expect(page.get_by_test_id("score-id-value")).to_contain_text("r1-score-0-a")
+        expect(page.get_by_test_id("score-release-id-value")).to_contain_text("r1")
+
+        details = page.get_by_test_id("engine-evidence")
+        expect(details).to_be_visible()
+        assert details.get_attribute("open") is None  # collapsed by default
+        expect(page.get_by_test_id("engine-evidence-json")).to_contain_text("raw_model_state_ref")
+    finally:
+        context.close()
+
+
+def test_unknown_score_shows_not_found(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/does-not-exist")
+        expect(page.get_by_test_id("score-not-found")).to_be_visible()
+    finally:
+        context.close()
+
+
+def test_unknown_event_shows_not_found(browser, server, state):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/events/does-not-exist")
+        expect(page.get_by_test_id("event-not-found")).to_be_visible()
+    finally:
+        context.close()
+
+
+def _mock_get(server, path: str) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}{path}",
+        headers={"Authorization": "Bearer " + TOKEN})
+    try:
+        with urllib.request.urlopen(request) as response:  # noqa: S310
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def test_release_id_required_on_event_scores_and_score_routes(server, state):
+    """Coordinator's P3-2 contract decision: `release_id` is required on
+    `GET /api/v1/events/{id}/scores` and `GET /api/v1/scores/{id}`, 400
+    `RELEASE_ID_REQUIRED` if missing -- distinct from a present-but-unknown
+    release id (404 `UNKNOWN_RELEASE`). Hits the mock directly (no browser
+    needed) since this is a server-contract check, not a UI-rendering one."""
+    status, body = _mock_get(server, "/api/v1/events/evt-r1-000/scores")
+    assert status == 400
+    assert body["code"] == "RELEASE_ID_REQUIRED"
+    assert "status" not in body and "title" not in body  # real Problem shape only
+
+    status, body = _mock_get(server, "/api/v1/scores/r1-score-0-a")
+    assert status == 400
+    assert body["code"] == "RELEASE_ID_REQUIRED"
+
+    status, body = _mock_get(server, "/api/v1/events/evt-r1-000/scores?release_id=does-not-exist")
+    assert status == 404
+    assert body["code"] == "UNKNOWN_RELEASE"
+
+    status, body = _mock_get(server, "/api/v1/events/evt-r1-000/scores?release_id=r1")
+    assert status == 200
+    assert isinstance(body, list)  # bare array, no envelope
+
+
+def test_no_token_in_url_or_local_storage_on_detail_views(browser, server):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/#/release/r1/scores/r1-score-0-a")
+        expect(page.get_by_test_id("score-detail")).to_be_visible()
         assert TOKEN not in page.url
         storage = page.evaluate(
             "() => Object.entries(localStorage).map(([k,v]) => k + '=' + v).join(';')")
