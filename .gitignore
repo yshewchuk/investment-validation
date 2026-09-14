@@ -194,6 +194,11 @@ venv/
 # Config, not data or evidence — the gate reads it to know what to check.
 !/checks/phase2_acceptance.json
 
+# The Phase 3 acceptance registry (phase-3 guide §10): which Phase3Evidence
+# comparison-receipt kinds / negative-control kinds / single fields prove
+# each L01-L14 row. Config, not data or evidence.
+!/checks/phase3_acceptance.json
+
 # The reviewed legacy->v2 table-contract mapping's per-column facts (unit,
 # scale, sentinel/null policy, etc.) that engine/data/schemas.py itself does
 # not declare (phase-2 guide §5.1, §12 D02). Config/review data, not licensed
