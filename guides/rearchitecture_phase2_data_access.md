@@ -976,6 +976,26 @@ after the fixes land on one unchanged candidate commit.
 | P2-C07 | Preserve the original backup key, cutoff, and payload across retries in `backup.py`/`effects_graph.py`. | Inject failure, advance the clock, and retry through a new attempt. Only backup completes; no other watermark moves. Backup remains an optional branch, but D20 retry correctness is required for Phase 2 sign-off. |
 | P2-C08 | Carry the semantic render inputs required by §9.4: finality/clock, conflict and degradation flags, model evidence, exported ledger, and available pinned health state. Do not make a synthetic expected bundle repeat adapter omissions. | Compare saved bundles with nonempty flags and prior selfcheck state where available. Missing operational history is explicitly unknown, never healthy. Current selfcheck/publication gates still apply. Live history/streak presentation belongs to the Phase 3 launch continuation below. |
 
+**P2-C02 decision (user, 2026-09-13): refuse, don't derive.** Before a
+snapshot-backed scoring or replay stage launches, compute the Tier-4
+`(model_id, fold, panel sha256)` serving caches its planned population needs.
+Refuse with a stable code that lists every missing triple when the pinned
+reference inputs don't cover them. Do not fit on a miss in Phase 2.
+
+This works because the legacy nightly stays authoritative and runs first.
+Scoring its board fits and caches the serving models for that panel, so an
+import that follows it pins covering caches. Refusal then indicates an
+ordering or scope mismatch; it never silently changes a forecast.
+
+Revisit, most likely by adding an explicitly isolated derived-cache path,
+when:
+- shadow runs actually refuse in practice;
+- Phase 3 needs shadow scoring independent of the legacy nightly; or
+- a modeling change (for example several models trained at different
+  offsets from the event) changes the serving-model contract.
+
+The render memory measurement is still required.
+
 The review reproduced hidden-filter loss, watchlist completeness refusal,
 over-limit materialization, permissive evidence validation, global subset
 watermarks, interrupted-export retry failure, and time-dependent backup
