@@ -7,10 +7,15 @@ writes repository, import or ops behavior and never produces evidence itself
 -- it only validates a coverage measurement and (optionally) a private
 Phase2Evidence document someone else produced.
 
-Prerequisites are Phase 0 and Phase 1 as a WHOLE gate each, except Phase 1's
-own coverage row: that ratchet is tracked separately (this gate has its own,
-stricter one over the Phase 2 suite), and today's structural/engineering rows
-can be green while the Phase 1 baseline is mid-update by someone else.
+Prerequisites are Phase 0 and Phase 1 as a WHOLE gate each -- Phase 1's own
+``ok`` already folds its coverage row in (``rearchitecture_phase1_gate.py``'s
+``gate()`` computes ``ok`` over every structural AND engineering row,
+coverage included), so requiring Phase 1's ``ok`` verbatim is what "the full
+Phase 1 prerequisite, including coverage" (task P2-C01 decision 6) means:
+there is no separate coverage-excluding view of Phase 1 any more. The
+prerequisite runner measures that coverage fresh and SERIALLY (no
+``--parallel``) before judging it, matching the Phase 2 suite's own
+BASELINE_NOT_SERIAL rule against baking in parallel-run contention noise.
 """
 from __future__ import annotations
 
@@ -72,8 +77,9 @@ def default_prerequisite_runner(root=ROOT):
     """Real subprocess execution of the Phase 0 and Phase 1 gates.
 
     Phase 1 needs a fresh coverage measurement to have any chance of a green
-    ``ok``; that measurement is produced here and discarded, never committed
-    -- Phase 1's own baseline belongs to whoever owns that script.
+    ``ok``; that measurement is produced here, SERIALLY (no ``--parallel``,
+    task P2-C01 decision 6) and discarded, never committed -- Phase 1's own
+    baseline belongs to whoever owns that script.
     """
     phase0_raw = _run_json([sys.executable, PHASE0_SCRIPT, "--json"], root)
     with tempfile.TemporaryDirectory(prefix="phase2-gate-prereq-") as scratch:
@@ -87,17 +93,17 @@ def default_prerequisite_runner(root=ROOT):
             "phase1": {"ok": bool(phase1_raw and phase1_raw.get("ok")), "raw": phase1_raw}}
 
 
-def _phase1_ok_excluding_coverage(raw):
-    """Phase 1's structural + engineering rows, minus its coverage row.
+def _phase1_ok(raw):
+    """The WHOLE Phase 1 gate's own ``ok``, coverage included.
 
-    Coverage is a separately tracked, separately owned ratchet; folding it in
-    here would make this gate red for a reason this task does not own.
+    Task P2-C01 decision 6: this replaces a prior helper that recomputed
+    ``ok`` over Phase 1's structural + engineering rows with coverage
+    deliberately popped out, which let this gate stay green while Phase 1's
+    coverage ratchet was red. ``rearchitecture_phase1_gate.py::gate`` already
+    folds coverage into its own ``ok``, so reusing it directly is both the
+    fix and the simplification.
     """
-    if not isinstance(raw, dict):
-        return False
-    rows = {**raw.get("structural", {}), **raw.get("engineering", {})}
-    rows.pop("coverage", None)
-    return bool(rows) and all(isinstance(r, dict) and r.get("ok") for r in rows.values())
+    return bool(isinstance(raw, dict) and raw.get("ok"))
 
 
 def coverage_check(path, baseline_path, root, registry=None):
@@ -131,9 +137,13 @@ def _check_row(d_id, row, test_outcomes, document_ok, field_ok, phase1_raw):
         findings.append({"code": "TEST_FAILED", "d_id": d_id})
     if "missing" in statuses:
         findings.append({"code": "MISSING_EVIDENCE", "d_id": d_id})
-    if row.get("reuse_phase1_structural_engineering") and not _phase1_ok_excluding_coverage(phase1_raw):
+    if row.get("reuse_phase1_structural_engineering") and not _phase1_ok(phase1_raw):
         findings.append({"code": "MISSING_EVIDENCE", "d_id": d_id, "reason": "phase1_structural_engineering"})
-    if row.get("tier") == 2:
+    # Keyed on the PRESENCE of evidence_fields, not on tier == 2: task P2-C01
+    # decision 7 gives D14 (tier 1) its own required receipt field
+    # (corpus_comparison_receipt_ref) without reclassifying its tier, since
+    # tier is a coverage-suite concept D14 otherwise still belongs to.
+    if row.get("evidence_fields"):
         if not document_ok:
             findings.append({"code": "MISSING_EVIDENCE", "d_id": d_id, "reason": "evidence_manifest"})
         else:
@@ -160,7 +170,7 @@ def gate(root=ROOT, *, coverage_path=None, evidence_manifest_path=None,
     if not prereqs.get("phase0", {}).get("ok"):
         findings.append({"code": "PREREQUISITE_FAILED", "prerequisite": "phase0"})
     phase1_raw = prereqs.get("phase1", {}).get("raw")
-    if not _phase1_ok_excluding_coverage(phase1_raw):
+    if not _phase1_ok(phase1_raw):
         findings.append({"code": "PREREQUISITE_FAILED", "prerequisite": "phase1"})
 
     coverage_baseline = root / COVERAGE_BASELINE.relative_to(ROOT)
