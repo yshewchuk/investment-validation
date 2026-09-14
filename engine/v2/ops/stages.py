@@ -72,6 +72,53 @@ class LegacyParameters:
     #: ``backup``) use. Left "" (meaning: fall back to ``output_namespace``)
     #: by every other kind.
     effect_scope: str = ""
+    #: P2-6 §9.3: ``"legacy"`` (the Phase 1 read-set barrier, the default) or
+    #: ``"snapshot"`` (a verified, read-only materialization root). Absent from
+    #: every barrier-path job's parameters, so their identity is unchanged.
+    input_mode: str = "legacy"
+
+
+@dataclass(frozen=True)
+class MaterializeParameters:
+    """P2-6 §9.3: one ``legacy_materialize`` job writes (or re-verifies) the
+    private legacy root for its bound ``materialization_request.json``;
+    ``scratch_estimate_bytes`` is the request's pinned byte total."""
+
+    expected_ids: tuple[str, ...]
+    input_bindings: dict[str, str] | None = None
+    scratch_estimate_bytes: int = 0
+
+
+#: Kinds whose complete reads ``LEGACY_SCORE_READ_PLAN_V1`` declares
+#: (``FeatureContext.load`` + ``Scorer`` + ``score_calendar(alt_strikes=0)``).
+SNAPSHOT_BACKED_KINDS = frozenset({"legacy_score", "legacy_score_requests",
+                                   "legacy_decision_replay"})
+#: Read-only kinds guide §9.3 names that stay on the barrier: no declared read plan.
+BARRIER_ONLY_REASONS = {
+    "legacy_finality": "reads trading-calendar and finality coverage inputs that "
+                       "LEGACY_SCORE_READ_PLAN_V1 does not declare",
+    "legacy_model_evidence": "reads model-evidence and training artifacts outside "
+                             "LEGACY_SCORE_READ_PLAN_V1",
+    "legacy_selfcheck": "re-derives the rendered bundle from stores no read plan declares",
+}
+SNAPSHOT_BINDINGS = ("snapshot_ref.json", "materialization_request.json",
+                     "materialization_manifest.json")
+
+
+def input_mode_problems(job, params):
+    """Kind validator: snapshot mode only on declared kinds, with all three bindings."""
+    mode = getattr(params, "input_mode", "legacy")
+    if mode not in ("legacy", "snapshot"):
+        return ("input_mode must be legacy or snapshot",)
+    if mode == "legacy":
+        return ()
+    if job.kind not in SNAPSHOT_BACKED_KINDS:
+        return ("snapshot input mode has no declared read plan for this kind",)
+    bindings = params.input_bindings or {}
+    if "legacy_manifest.json" in bindings:
+        return ("snapshot input mode may not bind a mutable legacy manifest",)
+    missing = [name for name in SNAPSHOT_BINDINGS if name not in bindings]
+    return ("snapshot input mode is missing bindings: " + ",".join(missing),) if missing else ()
 
 
 def registry():
@@ -112,6 +159,16 @@ def registry():
             retry=RetryPolicy("bounded", 1, (30,)),
             checkpoint_contract="legacy_rebuild_candidate.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
+        # P2-6 §9.3: writes/re-verifies one private read-only legacy root per
+        # request. No store_domains: it reads only the immutable object store
+        # and a read-only catalog connection, never the mutable legacy tree.
+        JobKind(
+            name="legacy_materialize", worker="legacy_materialize",
+            parameters=MaterializeParameters,
+            resource_classes=frozenset({"legacy_rebuild"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 2, (5, 30)),
+            checkpoint_contract="legacy_materialization_manifest.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})),
     ]
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the
     # nightly job DAG (guide §9.4 item 3). Each worker is trivial (it emits a
@@ -141,6 +198,7 @@ def registry():
             effects=("staged",), retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="legacy_action.v1.0",
             namespaces=frozenset({"shadow", "smoke"}),
+            validate=input_mode_problems,
             store_domains=(("legacy_store", "read"),)))
     return KindRegistry(kinds)
 

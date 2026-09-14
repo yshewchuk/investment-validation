@@ -28,9 +28,16 @@ __all__ = ["acquire", "acquire_in", "confirm_read_set", "domains_of", "lease_rea
            "verified_write_in", "verify_files"]
 
 
-def domains_of(registry, kind_name):
-    """The declared store domains of a registered kind; () without a registry."""
+def domains_of(registry, kind_name, parameters=None):
+    """The declared store domains of a registered kind; () without a registry.
+
+    A snapshot-backed attempt (``parameters["input_mode"] == "snapshot"``,
+    P2-6 §9.3) reads a verified private materialization root, never the
+    mutable legacy store, so it takes no legacy-store lease at all.
+    """
     if registry is None:
+        return ()
+    if isinstance(parameters, dict) and parameters.get("input_mode") == "snapshot":
         return ()
     return registry.get(kind_name).store_domains
 

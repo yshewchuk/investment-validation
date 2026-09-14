@@ -51,11 +51,13 @@
     },
     "D13": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_legacy_materialization.py"]
+      "tests": ["tests/test_v2_data_legacy_materialization.py",
+                "tests/test_v2_ops_snapshot_stages.py"]
     },
     "D14": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_legacy_materialization.py"]
+      "tests": ["tests/test_v2_data_legacy_materialization.py",
+                "tests/test_v2_ops_snapshot_stages.py"]
     },
     "D15": {
       "tier": 2,

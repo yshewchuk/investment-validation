@@ -65,6 +65,12 @@ def parser():
     plan.add_argument("--tickers", default="")
     plan.add_argument("--year-start", type=int, default=2024)
     plan.add_argument("--year-end", type=int, default=2026)
+    plan.add_argument("--input-mode", default="legacy", choices=("legacy", "snapshot"),
+                      help="snapshot: pin one data snapshot head at plan time (P2-6)")
+    plan.add_argument("--snapshot-scope", default=None)
+    plan.add_argument("--materialization-refs", type=Path, default=None,
+                      help="JSON: legacy_snapshot_object_ref, registry_and_model_refs, "
+                           "calendar_refs")
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
@@ -151,13 +157,32 @@ def _read_expected_population(args):
     return tuple(payload)
 
 
+def _snapshot_inputs(args, root, conn, clock, tickers, population):
+    """``--input-mode snapshot``: resolve the scope's head exactly once, here."""
+    if args.input_mode != "snapshot":
+        return None
+    if not args.snapshot_scope or args.materialization_refs is None:
+        raise fail("INVALID_REQUEST",
+                   "snapshot input mode needs --snapshot-scope and --materialization-refs")
+    from engine.v2.ops.snapshot_planning import load_materialization_refs, pin_snapshot_inputs
+    return pin_snapshot_inputs(conn, ArtifactStore(root), args.snapshot_scope, tickers=tickers,
+                               year_start=args.year_start, year_end=args.year_end,
+                               expected_population=population,
+                               pinned=load_materialization_refs(args.materialization_refs),
+                               clock=clock)
+
+
 def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
+        tickers = tuple(filter(None, args.tickers.split(",")))
+        population = _read_expected_population(args)
         plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
-                            tickers=tuple(filter(None, args.tickers.split(","))),
-                            year_start=args.year_start, year_end=args.year_end,
-                            expected_population=_read_expected_population(args), clock=clock)
+                            tickers=tickers, year_start=args.year_start, year_end=args.year_end,
+                            expected_population=population, clock=clock,
+                            input_mode=args.input_mode,
+                            snapshot_inputs=_snapshot_inputs(args, root, conn, clock, tickers,
+                                                             population))
     else:
         from engine.v2.ops.experiments import experiment_plan
         plan = experiment_plan(args.spec, smoke=args.no_ledger)
@@ -194,7 +219,8 @@ def dispatch(args, root, conn, clock):
                 year_start=plan["year_start"], year_end=plan["year_end"],
                 input_refs=(plan["input_manifest_ref"],),
                 expected_population=tuple(plan.get("expected_population", ())),
-                include_prerequisites=False)
+                include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
+                snapshot_inputs=plan.get("snapshot_inputs"))
             receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
             return {"run_id": "run_" + plan["plan_hash"][:24],
                     "jobs": [to_document(item) for item in receipts]}

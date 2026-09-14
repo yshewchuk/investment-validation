@@ -33,12 +33,16 @@ class Running:
     failure: str | None = None
 
 
-def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds=120):
+def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds=120,
+           legacy_root=None, envelope_extra=None):
+    """``legacy_root`` (P2-6 §9.3) replaces ``staging/legacy`` as the worker's
+    only legacy root; ``envelope_extra`` carries kind-specific trusted fields."""
     staging = store.staging_dir(claim.attempt_id)
     _materialize_inputs(conn, claim, store, staging)
+    legacy = str(legacy_root) if legacy_root is not None else str(staging / "legacy")
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(code_root), "PYTHONUNBUFFERED": "1",
            "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8",
-           "INVESTING_PLAN_ROOT": str(staging / "legacy")}
+           "INVESTING_PLAN_ROOT": legacy}
     env.update({key: str(claim.resources.thread_count) for key in THREAD_VARIABLES})
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
@@ -67,7 +71,8 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
         envelope = dict(worker=kind.worker, parameters=claim.spec.parameters,
                         staging=str(staging), result_fd=write_fd, job_id=claim.job_id,
                         attempt_id=claim.attempt_id, fence=claim.fence,
-                        cpu_ids=list(claim.resources.assigned_cpu_ids))
+                        cpu_ids=list(claim.resources.assigned_cpu_ids), legacy_root=legacy,
+                        **(envelope_extra or {}))
         child.stdin.write(json.dumps(envelope).encode() + b"\n")
         child.stdin.flush()
         child.stdin.close()
