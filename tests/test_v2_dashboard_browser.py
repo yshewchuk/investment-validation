@@ -18,15 +18,12 @@ the real read API (P3-2, in progress) shaped exactly from
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
-import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import expect
 
 from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
 
@@ -37,25 +34,13 @@ UI_ROOT = REPO_ROOT / "ui"
 TOKEN = "browser-secret"
 
 
-def _node_available() -> bool:
-    return shutil.which("node") is not None and shutil.which("npm") is not None
-
-
 @pytest.fixture(scope="module")
-def dist_dir():
-    """Builds ``ui/dist`` once per module via the real ``npm run build``
-    (guide §8 P3-3 exit command), skipped with a clear reason only if node
-    is missing."""
-    if not _node_available():
-        pytest.skip("node/npm not available in this environment")
-    result = subprocess.run(
-        ["npm", "--prefix", str(UI_ROOT), "run", "build"],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180)
-    if result.returncode != 0:
-        pytest.fail(f"npm --prefix ui run build failed:\n{result.stdout}\n{result.stderr}")
-    dist = UI_ROOT / "dist"
-    assert dist.is_dir(), "build did not produce ui/dist"
-    return dist
+def dist_dir(ui_dist_dir):
+    """``ui/dist``, built (and ``ui/node_modules`` installed first if
+    needed) by the shared session-scoped ``ui_dist_dir`` fixture in
+    ``tests/conftest.py`` -- guide §8 P3-3 exit command, now fixture-safe in
+    a fresh worktree with no ``ui/node_modules`` at all."""
+    return ui_dist_dir
 
 
 @pytest.fixture
@@ -71,21 +56,6 @@ def server(state):
     finally:
         srv.shutdown()
         thread.join(timeout=2)
-
-
-@pytest.fixture(scope="module")
-def playwright_instance():
-    with sync_playwright() as p:
-        yield p
-
-
-@pytest.fixture(scope="module")
-def browser(playwright_instance):
-    b = playwright_instance.chromium.launch(headless=True)
-    try:
-        yield b
-    finally:
-        b.close()
 
 
 def _authed_page(browser, server, base):

@@ -130,6 +130,13 @@ function queryString(params: Record<string, string | number | undefined>): strin
 
 export interface DataClient {
   getRelease(signal?: AbortSignal): Promise<PreviewRelease>;
+  /** `GET /api/v1/releases/{id}` -- one specific release's own metadata,
+   * current or not. Used for a deep link that pins to a release other than
+   * `current` (P3-3c): the banner needs that release's own `resolved_as_of`/
+   * coverage/stale reasons, which `current` cannot supply once the pin has
+   * moved on. 404 `UNKNOWN_RELEASE` (surfaced as `ApiError.status === 404`)
+   * for an id the server has never heard of. */
+  getReleaseById(releaseId: string, signal?: AbortSignal): Promise<PreviewRelease>;
   listEvents(query: EventQuery, signal?: AbortSignal): Promise<EventPage>;
   getEventScores(
     eventId: string,
@@ -148,6 +155,9 @@ export function createHttpDataClient(basePath = "/api/v1"): DataClient {
   return {
     getRelease(signal) {
       return getJson<PreviewRelease>(`${basePath}/releases/current`, signal);
+    },
+    getReleaseById(releaseId, signal) {
+      return getJson<PreviewRelease>(`${basePath}/releases/${encodeURIComponent(releaseId)}`, signal);
     },
     listEvents(query, signal) {
       const { release_id, ...rest } = query;

@@ -5,7 +5,7 @@ import { EMPTY_FILTERS, EventFilters, type FilterValues } from "./components/Eve
 import { EventDetail, type EventMeta } from "./components/EventDetail";
 import { EventTable } from "./components/EventTable";
 import { Pagination } from "./components/Pagination";
-import { ReleaseBanner } from "./components/ReleaseBanner";
+import { ReleaseBanner, reloadToCurrent } from "./components/ReleaseBanner";
 import { ScoreDetail } from "./components/ScoreDetail";
 import { pollIntervalMs, useResolvedRelease, useEventPage, useHashRoute } from "./hooks";
 import { boardHash } from "./routes";
@@ -136,7 +136,25 @@ export function App({ client }: Props) {
     );
   }
 
-  const { releaseId, release, isCurrent, currentError } = releaseState;
+  if (releaseState.status === "unknown_release") {
+    return (
+      <main className="app">
+        <p data-testid="unknown-release" className="error-banner">
+          Release <code>{releaseState.releaseId}</code> was not found.
+          {releaseState.currentReleaseId !== null && (
+            <>
+              {" "}
+              <button type="button" onClick={reloadToCurrent} data-testid="current-release-link">
+                Go to the current release ({releaseState.currentReleaseId})
+              </button>
+            </>
+          )}
+        </p>
+      </main>
+    );
+  }
+
+  const { releaseId, release, isCurrent, currentReleaseId, currentError } = releaseState;
 
   return (
     <main className="app">
@@ -145,6 +163,7 @@ export function App({ client }: Props) {
         releaseId={releaseId}
         release={release}
         isCurrent={isCurrent}
+        currentReleaseId={currentReleaseId}
         currentError={currentError}
         changedReleaseId={changedReleaseId}
       />

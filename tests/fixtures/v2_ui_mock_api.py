@@ -451,6 +451,9 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
         try:
             if path == "/api/v1/releases/current":
                 return self._current(state)
+            if path.startswith("/api/v1/releases/"):
+                release_id = path[len("/api/v1/releases/"):]
+                return self._release_by_id(state, release_id)
             if path == "/api/v1/events":
                 return self._events(state, query)
             if path.startswith("/api/v1/events/") and path.endswith("/scores"):
@@ -490,6 +493,21 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
             return self._problem(HTTPStatus.SERVICE_UNAVAILABLE, "NO_CURRENT_RELEASE",
                                  "no current release is published", category="resource", retryable=True)
         fixture = state.releases[state.current_release_id]
+        self._json(HTTPStatus.OK, fixture.release, etag=fixture.release["release_id"])
+
+    def _release_by_id(self, state: MockState, release_id: str) -> None:
+        """``GET /api/v1/releases/{id}`` -- ``engine/v2/serving/api.py``
+        ``releases_by_id``: one specific release's own metadata, current or
+        not (404 ``UNKNOWN_RELEASE`` for an id this index never committed).
+        Added for P3-3c: the non-current-release banner needs a NAMED
+        release's ``resolved_as_of``/coverage/stale reasons directly, not
+        only ``current``'s -- this route did not exist on the mock before
+        (mock-vs-real shape gap, closed here)."""
+        if not self._require_auth(state):
+            return
+        fixture = state.releases.get(release_id)
+        if fixture is None:
+            return self._problem(HTTPStatus.NOT_FOUND, "UNKNOWN_RELEASE", "unknown release id")
         self._json(HTTPStatus.OK, fixture.release, etag=fixture.release["release_id"])
 
     def _events(self, state: MockState, query: dict[str, str]) -> None:
