@@ -920,7 +920,7 @@ def test_multi_fragment_feature_panel_falls_back_to_rewrite_and_skips_tier4_cach
     correctly declines (returns False) and materialize_tree falls back to
     the existing Repository-scan rewrite, which stays row-correct even
     though it is no longer byte-identical to any one source object.
-    _panel_object_ref also has no single hash to check a pinned Tier-4 cache
+    panel_object_ref also has no single hash to check a pinned Tier-4 cache
     ref's filename against here, so _check_tier4_cache_refs structurally
     skips validation (tier4_cache_refs_match_panel is vacuously True) --
     documented behavior, not a silent gap."""
@@ -974,7 +974,7 @@ def test_multi_fragment_feature_panel_falls_back_to_rewrite_and_skips_tier4_cach
     assert "feature_panel" not in tree.copied_tables
 
     assert len(repository.fragment_records(snap, "feature_panel")) == 2
-    assert lm._panel_object_ref(repository, snap) is None
+    assert lm.panel_object_ref(repository, snap) is None
     assert lm.tier4_cache_refs_match_panel(repository, request)
 
     from engine.v2.data.legacy_adapter import read_legacy_part

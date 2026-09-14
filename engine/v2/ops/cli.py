@@ -53,6 +53,11 @@ def parser():
     server = commands.add_parser("serve")
     server.add_argument("--root", default=argparse.SUPPRESS)
     server.add_argument("--once", action="store_true")
+    server.add_argument("--store-root", type=Path, default=None,
+                        help="the legacy checkout a snapshot-backed job's pinned read set and "
+                             "materialization roots resolve against; defaults to this code "
+                             "checkout (Service's own default) when omitted. Never inferred from "
+                             "a plan or manifest -- always exactly what was passed here.")
     plan = commands.add_parser("plan")
     plan.add_argument("kind", choices=("nightly", "experiment"))
     plan.add_argument("--as-of")
@@ -197,8 +202,12 @@ def dispatch(args, root, conn, clock):
             write_health(args.out, document)
         return document
     if args.command == "serve":
+        store_root = getattr(args, "store_root", None)
+        if store_root is not None and not store_root.is_dir():
+            raise fail("INVALID_REQUEST", "--store-root must be an existing directory",
+                      details={"store_root": str(store_root)})
         service = Service(conn, root, registry(), DEFAULT_POLICY, clock=clock,
-                          code_source=Path(__file__).resolve().parents[3])
+                          code_source=Path(__file__).resolve().parents[3], store_root=store_root)
         serve(service, once=args.once)
         return {"stopped": True}
     if args.command == "plan":
@@ -382,6 +391,11 @@ def main(argv=None):
     except OpsError as exc:
         print(json.dumps(to_document(exc.problem)))
         return 2
-    except (OSError, ValueError, TypeError):
-        print(json.dumps({"code": "INVALID_REQUEST", "message": "command could not read or validate its inputs"}))
+    except (OSError, ValueError, TypeError) as exc:
+        # Redacted: never the exception's own text (it may carry a value or a
+        # path), only its class name -- enough to tell a bad unpack from a
+        # missing file from a bad type without ever printing what triggered it.
+        print(json.dumps({"code": "INVALID_REQUEST",
+                          "message": "command could not read or validate its inputs",
+                          "details": {"exception_type": type(exc).__name__}}))
         return 2

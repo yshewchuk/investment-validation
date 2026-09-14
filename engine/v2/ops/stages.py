@@ -76,6 +76,18 @@ class LegacyParameters:
     #: ``"snapshot"`` (a verified, read-only materialization root). Absent from
     #: every barrier-path job's parameters, so their identity is unchanged.
     input_mode: str = "legacy"
+    #: P2-C02 review fix: non-empty only on a job built inside a snapshot-mode
+    #: plan graph (``nightly.build_legacy_job_requests(input_mode="snapshot")``).
+    #: A barrier-only kind (``legacy_finality``/``legacy_model_evidence``/
+    #: ``legacy_selfcheck``) can never itself declare ``input_mode="snapshot"``
+    #: (``input_mode_problems`` refuses it — no declared read plan), so this is
+    #: the only way it learns which committed snapshot the REST of its own
+    #: plan is scored against: the exact ``snapshot_id``/``scope`` the plan's
+    #: ``pin_snapshot_inputs`` pinned, never "whatever is newest in scope right
+    #: now" — a default legacy-mode nightly leaves both "", and the
+    #: generation-binding check is skipped entirely for it.
+    snapshot_generation_id: str = ""
+    snapshot_generation_scope: str = ""
 
 
 @dataclass(frozen=True)

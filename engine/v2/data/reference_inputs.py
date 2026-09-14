@@ -105,7 +105,9 @@ __all__ = [
     "DATA_DIR",
     "LEGACY_REFERENCE_INPUTS_V1",
     "LEGACY_SNAPSHOT_PATH",
+    "REGISTRY_PATH",
     "TIER4_SERVING_DIR",
+    "champion_entries",
     "kind_for_path",
     "manifest_pins",
     "publish_reference_inputs",
@@ -116,7 +118,11 @@ DATA_DIR = legacy_adapter.legacy_data_dir()
 LEGACY_SNAPSHOT_PATH = legacy_adapter.legacy_snapshot_path()
 TIER4_SERVING_DIR = legacy_adapter.legacy_tier4_serving_dir()
 _MODELS_DIR = legacy_adapter.legacy_models_dir()
-_REGISTRY_PATH = legacy_adapter.legacy_registry_path()
+#: Public (P2-C02): the launch-time Tier-4 coverage check reads the registry
+#: document straight from a verified materialization root and needs this same
+#: relative path rather than a second literal.
+REGISTRY_PATH = legacy_adapter.legacy_registry_path()
+_REGISTRY_PATH = REGISTRY_PATH
 
 #: kind -> where the input lives. ``exact`` entries name one path;
 #: the other two name a directory plus the rule that selects files in it.
@@ -170,7 +176,7 @@ def resolve_reference_files(root: Path, *, panel_content_hash: str,
     enumerator: it refuses a missing or symlinked file with ``INPUT_CHANGED``.
     """
     refs = {path: file_ref(root, path) for path in _EXACT}
-    champions = _champion_entries(root / _REGISTRY_PATH)
+    champions = champion_entries(root / _REGISTRY_PATH)
     for entry in champions:
         path = _artifact_path(entry)
         ref = file_ref(root, path)
@@ -183,7 +189,10 @@ def resolve_reference_files(root: Path, *, panel_content_hash: str,
     return tuple(refs[path] for path in sorted(refs))
 
 
-def _champion_entries(registry_path: Path) -> list[dict]:
+def champion_entries(registry_path: Path) -> list[dict]:
+    """Every registry model entry with ``champion: true`` (P2-C02: public so
+    ``tier4_coverage.champion_producer_models`` can filter to Tier-4
+    producers without a second registry parse)."""
     try:
         document = json.loads(registry_path.read_text())
         models = document["models"]

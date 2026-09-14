@@ -204,6 +204,7 @@ __all__ = [
     "lock_down",
     "materialize_tree",
     "narrow_query_to_year",
+    "panel_object_ref",
     "parse_pinned_ref",
     "read_plan_complete",
     "scanned_rows",
@@ -879,10 +880,12 @@ def _tier4_cache_dir() -> str:
     return reference_inputs.TIER4_SERVING_DIR
 
 
-def _panel_object_ref(repository, snapshot_ref: SnapshotRef):
+def panel_object_ref(repository, snapshot_ref: SnapshotRef):
     """The single fragment's ``ObjectRef`` behind ``feature_panel``, or
     ``None`` when it is genuinely multi-fragment (no one predictable hash to
-    check a cache ref's filename against)."""
+    check a cache ref's filename against). Public (P2-C02): the launch-time
+    Tier-4 coverage check needs this request's own panel sha256 too, and
+    reuses this rather than a second fragment lookup."""
     records = repository.fragment_records(snapshot_ref, "feature_panel")
     return records[0].object_ref if len(records) == 1 else None
 
@@ -900,10 +903,10 @@ def _tier4_cache_hash_prefix(relative_path: str) -> str | None:
 
 
 def _check_tier4_cache_refs(repository, snapshot_ref: SnapshotRef, registry_and_model_refs) -> None:
-    panel_object_ref = _panel_object_ref(repository, snapshot_ref)
-    if panel_object_ref is None:
+    panel_ref = panel_object_ref(repository, snapshot_ref)
+    if panel_ref is None:
         return
-    expected = panel_object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)[:12]
+    expected = panel_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)[:12]
     for ref in registry_and_model_refs:
         relative_path, _ = parse_pinned_ref(ref)
         prefix = _tier4_cache_hash_prefix(relative_path)

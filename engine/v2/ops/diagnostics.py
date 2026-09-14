@@ -59,7 +59,7 @@ def owned_identities(conn) -> set[tuple[str, int, int]]:
 def unmanaged_processes(conn, *, boot_id: str) -> list[dict]:
     owned = owned_identities(conn)
     rows = []
-    for identity, _, state, rss in process_table(boot_id).values():
+    for identity, _, state, rss, _ in process_table(boot_id).values():
         if (identity.boot_id, identity.pid, identity.start_ticks) in owned:
             continue
         if identity.pid in {0, 1, os.getpid()}:

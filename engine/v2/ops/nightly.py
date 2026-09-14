@@ -275,8 +275,16 @@ def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_s
     if stage == "materialize":
         return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
                 "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
-    return _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
-                          effect_scope=effect_scope)
+    params = _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
+                            effect_scope=effect_scope)
+    if snapshot is not None:
+        # P2-C02 review fix: every stage in a snapshot-mode plan graph learns
+        # which committed snapshot the plan pinned -- a barrier-only kind
+        # cannot bind to it as its own read plan (SNAPSHOT_STAGES), but the
+        # generation-binding check still needs to know it is one, and which.
+        params["snapshot_generation_id"] = snapshot.get("snapshot_id", "")
+        params["snapshot_generation_scope"] = snapshot.get("scope", "")
+    return params
 
 
 def _stage_inputs(stage, parameters, keys, input_refs, snapshot):

@@ -43,6 +43,12 @@ edges, this module imports only its own package's ``errors`` and
 cleanup-on-failure below — and ``"."``), plus ``engine.paths`` and
 ``engine.models.registry`` for the reference-input path accessors: 8, exactly
 the budget.
+
+P2-C02: :func:`legacy_serving_fold` and :func:`legacy_tier4_serving_header`
+add two exact legacy symbols (``engine.data.features.tier4.serving_fold``,
+``.read_serving_header``) but reach them through the ``engine.data.features.
+tier4`` module already on the list above, so the fan-out count above is
+unchanged — still 8, still the budget, not 9.
 """
 from __future__ import annotations
 
@@ -52,6 +58,8 @@ from engine.data.features.panel import PANEL_COLUMNS
 from engine.data.features.tier4 import COLUMNS as TIER4_COLUMNS
 from engine.data.features.tier4 import KEY_COLUMNS as TIER4_KEY_COLUMNS
 from engine.data.features.tier4 import SERVING_DIR as TIER4_SERVING_DIR
+from engine.data.features.tier4 import read_serving_header as _legacy_read_serving_header
+from engine.data.features.tier4 import serving_fold as _legacy_serving_fold
 from engine.data.schemas import SCHEMAS, SOURCE_PRIORITY
 from engine.data.schemas import coerce as _legacy_coerce
 from engine.data.store import _read_part as _legacy_read_part
@@ -67,9 +75,11 @@ __all__ = [
     "legacy_data_dir",
     "legacy_models_dir",
     "legacy_registry_path",
+    "legacy_serving_fold",
     "legacy_snapshot_path",
     "legacy_structures_path",
     "legacy_tier4_serving_dir",
+    "legacy_tier4_serving_header",
     "legacy_panel_columns",
     "legacy_source_priority",
     "legacy_table_schemas",
@@ -118,6 +128,28 @@ def read_legacy_part(path, columns):
 def coerce_legacy(frame, name: str):
     """``engine.data.schemas.coerce`` — the unchanged legacy schema coercion."""
     return _legacy_coerce(frame, name)
+
+
+def legacy_serving_fold(event_date, as_of):
+    """``engine.data.features.tier4.serving_fold`` — the scorer's own fold rule.
+
+    P2-C02: the launch-time Tier-4 coverage check reaches this instead of
+    reimplementing the ``min(event_fold, decision_fold)`` rule, so a v2 fold
+    can never drift from what ``Scorer._serving`` actually asks for.
+    """
+    return _legacy_serving_fold(event_date, as_of)
+
+
+def legacy_tier4_serving_header(path, *, expected_sha256_hex: str, max_bytes: int):
+    """``engine.data.features.tier4.read_serving_header`` — bounded, hash-verified.
+
+    P2-C02: reads a pinned Tier-4 serving-cache file's plain-data header
+    (never its estimator) for the launch-time coverage check, refusing to
+    unpickle a file larger than ``max_bytes`` or one whose bytes do not hash
+    to ``expected_sha256_hex``.
+    """
+    return _legacy_read_serving_header(path, expected_sha256_hex=expected_sha256_hex,
+                                       max_bytes=max_bytes)
 
 
 # --------------------------------------------------------------------------
