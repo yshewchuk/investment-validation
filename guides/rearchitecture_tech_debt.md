@@ -26,6 +26,14 @@ what should trigger revisiting it.
 These are scheduled Phase 2 work, recorded here so they are not lost. They
 are not deferred.
 
+- A Tier-4 serving-cache miss writes into the legacy root: `mkdir` and
+  `joblib.dump` at `engine/data/features/tier4.py:1320-1321`, reached from
+  `Scorer._serving` (`score.py:1967`). The materialized root is read-only, so
+  a miss raises `PermissionError`. Caches are pinned only for the imported
+  panel hash (currently `a67873b4eb95`). The heavy-run session must show
+  that every (model, fold) the board touches hits a pinned cache; otherwise
+  decide how shadow scoring handles a miss. A panel rebuild needs new caches
+  before import.
 - The `projection` profile reserves 2 GiB, but render loads the same panel
   context that peaked at 4.15 GiB in scoring. Measure it in the heavy-run session.
 - Real replay identity, DYN-SV chooser rows included, is unproven until the
