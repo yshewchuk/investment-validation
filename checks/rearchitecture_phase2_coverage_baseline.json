@@ -27,7 +27,7 @@
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_snapshot_stages.py"
   ],
-  "source_hash": "sha256:fd72f49b64c45f7d726f5033d3ae404a4d8f3843af52b03a8b9df0edf528a056",
+  "source_hash": "sha256:545be812b3bbe3df56d94b43371d03309d540a590264acdd25f0e9f1c5858ef9",
   "packages": {
     "engine.v2.contracts": {
       "executed": 605,
@@ -57,8 +57,8 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 2203,
-      "executable": 2352,
+      "executed": 2071,
+      "executable": 2194,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -77,12 +77,11 @@
         "engine/v2/data/reference_inputs.py",
         "engine/v2/data/repository.py",
         "engine/v2/data/schema.py",
-        "engine/v2/data/tier4_coverage.py",
         "engine/v2/data/time_formats.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 93.66496598639456
+      "percentage": 94.39380127620784
     },
     "engine.v2.features": {
       "executed": 0,
@@ -208,8 +207,8 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 3649,
-      "executable": 5030,
+      "executed": 3607,
+      "executable": 4983,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -267,7 +266,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 72.54473161033798
+      "percentage": 72.38611278346377
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -280,7 +279,7 @@
       "percentage": null
     },
     "engine.v2.diagnosis": {
-      "executed": 170,
+      "executed": 277,
       "executable": 348,
       "files": [
         "engine/v2/diagnosis/__init__.py",
@@ -292,7 +291,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 48.85057471264368
+      "percentage": 79.59770114942529
     }
   },
   "test_outcomes": [
@@ -306,6 +305,30 @@
     },
     {
       "nodeid": "tests/test_checks_phase2_fault_matrix.py::test_removing_one_point_fails_the_validator",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_identical_rows_agree_with_correct_populations",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_float_beyond_tolerance_disagrees_naming_row_and_field",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_within_tolerance_agrees",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_null_mask_difference_disagrees",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_missing_row_on_either_side_disagrees",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_checks_phase2_parity.py::test_receipt_binds_snapshot_and_passes_evidence_binding_checks",
       "outcome": "passed"
     },
     {
@@ -1981,23 +2004,7 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_parity.py::test_identical_rows_agree_with_correct_populations",
-      "outcome": "passed"
-    },
-    {
-      "nodeid": "tests/test_v2_ops_parity.py::test_float_beyond_tolerance_disagrees_naming_row_and_field",
-      "outcome": "passed"
-    },
-    {
-      "nodeid": "tests/test_v2_ops_parity.py::test_within_tolerance_agrees",
-      "outcome": "passed"
-    },
-    {
-      "nodeid": "tests/test_v2_ops_parity.py::test_null_mask_difference_disagrees",
-      "outcome": "passed"
-    },
-    {
-      "nodeid": "tests/test_v2_ops_parity.py::test_missing_row_on_either_side_disagrees",
+      "nodeid": "tests/test_v2_ops_parity.py::test_loads_both_committed_score_documents_keyed_by_row_id",
       "outcome": "passed"
     },
     {
@@ -2005,7 +2012,11 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_ops_parity.py::test_receipt_binds_snapshot_and_passes_evidence_binding_checks",
+      "nodeid": "tests/test_v2_ops_parity.py::test_resolves_snapshot_binding_when_recorded",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_parity.py::test_missing_committed_score_is_refused",
       "outcome": "passed"
     },
     {
