@@ -27,15 +27,7 @@ import pytest
 import engine.dashboard.render as render_module
 import engine.features as features_module
 import engine.score as score_module
-from engine.dashboard.nightly import _date_conflict_flag, _panel_staleness_flags
-from engine.dashboard.render import (
-    build_health,
-    build_meta,
-    freshness_summary,
-    quota_state,
-    render_bundle,
-    size_model_mae_from_ledger,
-)
+from checks.phase2_render_oracle import legacy_way_bundle, v1_flags_for_scenario
 from engine.score import ScoreResult
 from engine.v2.ledger.export import export_generation
 from engine.v2.ops.errors import OpsError
@@ -49,10 +41,8 @@ from engine.v2.ops.render_inputs import (
     bundle_content_hash,
     diff_bundles,
     model_evidence_stale_flag,
-    unknown_operational_flags,
     unknown_selfcheck_report,
 )
-from engine.v2.ops.session_resolution import walk_back_flag
 
 AS_OF = pd.Timestamp("2026-08-10")
 EVENT = pd.Timestamp("2026-08-12")
@@ -249,67 +239,6 @@ _PARAMETERS = {"session": str(AS_OF.date()), "tickers": [TICKER], "year_start": 
                "year_end": 2026, "horizon_days": 35, "alt_strikes": 1}
 
 
-def _v1_flags_for_scenario(*, requested_as_of, resolved_as_of, finality, tickers,
-                           horizon_days, evidence):
-    """P2-C08 decision 4: the full v2 render flag list, reconstructed
-    independently of ``legacy_adapter``/``render_inputs.render_flags`` -- v1's
-    own helpers (``_panel_staleness_flags``, ``_date_conflict_flag``) are
-    called directly on the SAME scenario, so a real v2 omission would show up
-    as a diff instead of being echoed by a synthetic expected side that
-    trusts the same adapter it is meant to check.
-    """
-    from engine.data import store
-
-    resolved_ts = pd.Timestamp(resolved_as_of)
-    flags = list(absent_stage_flags())
-    back = walk_back_flag(requested_as_of, resolved_as_of, finality)
-    if back is not None:
-        flags.append(back)
-    flags.extend(_panel_staleness_flags(resolved_ts))
-    events = store.read_table(
-        "earnings_events",
-        columns=["event_id", "ticker", "event_date", "session", "date_conflict"])
-    events["event_date"] = pd.to_datetime(events["event_date"])
-    horizon = resolved_ts + pd.Timedelta(days=int(horizon_days))
-    window = events[(events["event_date"] >= resolved_ts) & (events["event_date"] <= horizon)
-                    & events["session"].notna()]
-    if tickers:
-        window = window[window["ticker"].isin(set(tickers))]
-    conflict = _date_conflict_flag(window)
-    if conflict is not None:
-        flags.append(conflict)
-    stale = model_evidence_stale_flag(evidence)
-    if stale is not None:
-        flags.append(stale)
-    flags.extend(unknown_operational_flags())
-    return flags
-
-
-def _legacy_way_bundle(out_dir, *, scores, panel, trades, registry, finality,
-                       requested_as_of=AS_OF, resolved_as_of=AS_OF, tickers=(TICKER,),
-                       horizon_days=35, evidence=None, selfcheck_report=None):
-    """``engine/dashboard/nightly.py:1580-1622``, called directly on the same
-    scores/panel/trades/registry the v2 action used, and the same staged
-    legacy tree (INVESTING_PLAN_ROOT), so it reads the same ledger generation.
-    Flags and health are rebuilt independently too (see
-    :func:`_v1_flags_for_scenario`), never by trusting v2's own adapter output.
-    """
-    resolved_ts = pd.Timestamp(resolved_as_of)
-    meta = build_meta(scores, as_of=resolved_ts, horizon_days=horizon_days, fill_alpha=0.5,
-                      alt_strikes=1, freshness=freshness_summary(resolved_ts),
-                      quota=quota_state(), registry=registry)
-    meta["execution_clock"] = {"requested_as_of": str(pd.Timestamp(requested_as_of).date()),
-                               "resolved_as_of": str(resolved_ts.date()), "finality": finality}
-    flags = _v1_flags_for_scenario(
-        requested_as_of=requested_as_of, resolved_as_of=resolved_as_of, finality=finality,
-        tickers=tickers, horizon_days=horizon_days, evidence=evidence or {})
-    health = build_health(as_of=resolved_ts, size_mae=size_model_mae_from_ledger(panel=panel),
-                          selfcheck_report=selfcheck_report or unknown_selfcheck_report())
-    return render_bundle(scores, out_dir, as_of=resolved_ts, horizon_days=horizon_days,
-                         fill_alpha=0.5, alt_strikes=1, panel=panel, trades=trades,
-                         meta=meta, health=health, flags=flags, registry=registry)
-
-
 # --------------------------------------------------------------------------
 # D19
 # --------------------------------------------------------------------------
@@ -341,9 +270,10 @@ def test_d19_v2_render_matches_render_bundle_the_legacy_way(monkeypatch, tmp_pat
     scores = assemble_scores(_score_document())
     finality = _finality_doc()
     bundle_legacy = tmp_path / "bundle_legacy"
-    _legacy_way_bundle(bundle_legacy, scores=scores, panel=panel, trades=_trades(),
-                       registry=_FakeRegistry(), finality=finality,
-                       evidence=_model_evidence_doc())
+    legacy_way_bundle(bundle_legacy, scores=scores, panel=panel, trades=_trades(),
+                      registry=_FakeRegistry(), finality=finality,
+                      requested_as_of=AS_OF, resolved_as_of=AS_OF, tickers=(TICKER,),
+                      horizon_days=35, evidence=_model_evidence_doc())
 
     diffs = diff_bundles(bundle_v2, bundle_legacy)
     assert diffs == []
@@ -535,7 +465,7 @@ def test_render_flags_cover_every_class_with_nonempty_scenario(monkeypatch, tmp_
     flag at v1's own kind/detail, the class (b) absent-stage disclosures, and
     the class (c) explicit unknowns -- none silently dropped, and the
     resulting v2 flag list equals one built independently of the adapter
-    (:func:`_v1_flags_for_scenario`).
+    (:func:`v1_flags_for_scenario`).
     """
     panel = _panel()
     _patch_scorer(monkeypatch, panel)
@@ -555,7 +485,7 @@ def test_render_flags_cover_every_class_with_nonempty_scenario(monkeypatch, tmp_
     flags = json.loads((root / "bundle" / "data" / "flags.json").read_text())["flags"]
 
     finality = _finality_doc()
-    expected = _v1_flags_for_scenario(
+    expected = v1_flags_for_scenario(
         requested_as_of=str(requested.date()), resolved_as_of=str(AS_OF.date()),
         finality=finality, tickers=(TICKER,), horizon_days=35, evidence=evidence)
     assert flags == expected

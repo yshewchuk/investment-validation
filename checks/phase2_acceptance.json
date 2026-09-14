@@ -90,7 +90,11 @@
     },
     "D19": {
       "tier": 2,
-      "tests": ["tests/test_v2_ops_render_parity.py"],
+      "tests": ["tests/test_v2_ops_render_parity.py",
+                "tests/test_checks_phase2_render_parity.py",
+                "tests/test_checks_phase2_render_parity_compare.py",
+                "tests/test_checks_phase2_render_parity_bounded.py",
+                "tests/test_checks_phase2_render_memory.py"],
       "evidence_fields": ["render_comparison_receipt_ref"]
     },
     "D20": {
