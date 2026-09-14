@@ -294,13 +294,28 @@ class Repository:
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
                       query: DataQuery):
         surviving = [r for r in records if query_mod.fragment_may_match(r, contract, query)]
-        needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key)))
+        needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
         streams = [self._fragment_rows(r, contract, needed, query, batch_cap) for r in surviving]
         merged = heapq.merge(*streams, key=lambda item: item[0])
         yield from self._yield_batches(merged, contract, query, batch_cap)
         if query.deadline is not None:
             self._check_deadline(query.deadline)
+
+    def _hidden_columns(self, query: DataQuery) -> tuple:
+        """Every ``key_filter``/``time_interval`` column ``query.columns``
+        does not itself request (task brief P2-C05, decision 1): a
+        predicate the scan must apply has to be READ off every fragment
+        even when the caller never asked for that column back — otherwise
+        ``query_mod.row_matches``' ``row.get(predicate.column)`` sees a
+        column absent from ``row`` entirely (not merely ``None``) and the
+        predicate silently excludes every row instead of filtering by it.
+        ``_to_batch`` still projects only ``query.columns`` into the
+        yielded batch, so a hidden column never reaches the caller."""
+        columns = [p.column for p in query.key_filter]
+        if query.time_interval is not None:
+            columns.append(query.time_interval.column)
+        return tuple(columns)
 
     def _fragment_rows(self, record: FragmentRecord, contract: TableContract, needed: tuple,
                        query: DataQuery, batch_cap: int):

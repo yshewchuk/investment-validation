@@ -364,6 +364,51 @@ def _whole_table_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,
     return (), interval
 
 
+def _manifest_row_count(repository, snapshot_ref: SnapshotRef, table_name: str) -> int:
+    """The pinned manifest's own total row count for ``table_name`` — the
+    sum of every fragment's ``row_count``, never a scan."""
+    return sum(r.row_count for r in repository.fragment_records(snapshot_ref, table_name))
+
+
+def _interval_covers(query_interval: TimeInterval | None,
+                     manifest_interval: TimeInterval | None) -> bool:
+    """True iff ``query_interval`` is not narrower than ``manifest_interval``
+    (review P2-C05, decision 2's "no time bound narrower than the manifest
+    bounds"): both absent, or the same column with a start at or before the
+    manifest's own start and an end at or after the manifest's own end.
+    Naive-timestamp/date strings compare correctly lexicographically."""
+    if manifest_interval is None:
+        return query_interval is None
+    if query_interval is None or query_interval.column != manifest_interval.column:
+        return False
+    starts_ok = (query_interval.start_inclusive is None
+                or (manifest_interval.start_inclusive is not None
+                    and query_interval.start_inclusive <= manifest_interval.start_inclusive))
+    ends_ok = (query_interval.end_exclusive is None
+              or (manifest_interval.end_exclusive is not None
+                  and query_interval.end_exclusive >= manifest_interval.end_exclusive))
+    return starts_ok and ends_ok
+
+
+def _whole_table_copy_eligible(repository, snapshot_ref: SnapshotRef, table_name: str,
+                               contract: TableContract, query: DataQuery) -> bool:
+    """Review P2-C05, decision 2: True only if ``query`` is provably a full,
+    unfiltered read of ``table_name``'s pinned manifest — the one case a
+    verified byte-for-byte object copy may satisfy instead of a scan. A
+    request whose declared projection, predicates or ceiling cover fewer
+    rows than the whole table must take the scan-and-rewrite path (or
+    refuse), never the copy path, no matter how the static read plan
+    classifies the table."""
+    if set(query.columns) != {c.name for c in contract.columns}:
+        return False
+    manifest_filter, manifest_interval = _whole_table_bounds(repository, snapshot_ref, table_name, contract)
+    if set(query.key_filter) != set(manifest_filter):
+        return False
+    if not _interval_covers(query.time_interval, manifest_interval):
+        return False
+    return query.max_result_rows >= _manifest_row_count(repository, snapshot_ref, table_name)
+
+
 def _scope_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,
                   contract: TableContract,
                   evidence_scope: dict) -> tuple[tuple[KeyPredicate, ...], TimeInterval | None]:
@@ -409,10 +454,21 @@ def _build_table_query(repository, snapshot_ref: SnapshotRef, table_name: str,
     # Decision 2: max_result_rows is the pinned row count this exact scope
     # touches, derived from the resolved snapshot's own fragment records
     # (DependencyEntry.estimated_rows == FragmentRecord.row_count) — finite
-    # and manifest-derived, never the table's generic cap. max_batch_rows is
-    # capped to the same bound (never > max_result_rows, per §5.3's own rule).
+    # and manifest-derived, never the table's generic cap.
     row_bound = max(1, sum(entry.estimated_rows for entry in plan.dependencies))
-    max_result_rows = min(row_bound, contract.maximum_result_rows)
+    # Review fix P2-C05, decision 3: a whole_table output is never fed to
+    # Repository.scan() (materialize_tree byte-copies it — see
+    # _whole_table_copy_eligible), so the contract's scan-result cap does
+    # not bound it. Clamping it here anyway was the "clamp a population to
+    # a smaller limit and then copy all rows" bug the review named: the
+    # request claimed <= contract.maximum_result_rows while the byte-copy
+    # path silently wrote every manifest row regardless. The honest ceiling
+    # for a whole_table output is the exact pinned manifest row count.
+    # evidence_scoped outputs are always scanned, so they keep the cap.
+    if table_name in _EVIDENCE_SCOPED_TABLES:
+        max_result_rows = min(row_bound, contract.maximum_result_rows)
+    else:
+        max_result_rows = row_bound
     max_batch_rows = min(contract.maximum_batch_rows, max_result_rows)
     return dataclasses.replace(probe, max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
 
@@ -554,6 +610,10 @@ class MaterializedTree:
     curated_files: dict[str, dict[int, list[Path]]]
     single_files: dict[str, Path]
     copied_tables: frozenset[str] = frozenset()
+    #: Review P2-C05, decision 4 (accounting): the actual materialized row
+    #: count this call verified for every table it wrote, keyed by
+    #: ``table_name`` — recorded on the result, not just checked in passing.
+    row_counts: dict[str, int] = dataclasses.field(default_factory=dict)
 
 
 def materialize_tree(repository, store, request: LegacyMaterializationRequest,
@@ -572,31 +632,28 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
     curated_files: dict[str, dict[int, list[Path]]] = {}
     single_files: dict[str, Path] = {}
     copied_tables: set[str] = set()
+    row_counts: dict[str, int] = {}
     for table_name, query in request.table_queries.items():
         contract = repository.table_contract(request.snapshot_ref, table_name)
-        whole_table = table_name not in _EVIDENCE_SCOPED_TABLES
+        eligible = (table_name not in _EVIDENCE_SCOPED_TABLES
+                   and _whole_table_copy_eligible(repository, request.snapshot_ref, table_name,
+                                                  contract, query))
         if TABLE_OUTPUT_KIND[table_name] == "curated":
-            if whole_table:
-                year_paths = _copy_whole_table_curated(repository, request.snapshot_ref, table_name,
-                                                       store, dest_root)
-                copied_tables.add(table_name)
-            else:
-                year_paths = _write_curated_table(repository, query, table_name, dest_root)
+            year_paths, copied, rows = _materialize_curated(repository, store, request, table_name,
+                                                             query, eligible, dest_root)
             curated_files[table_name] = year_paths
             for paths_for_year in year_paths.values():
                 for path in paths_for_year:
                     manifest[str(path.relative_to(dest_root))] = _file_content_hash(path)
         else:
-            rel = _single_file_relative_path(table_name)
-            path = dest_root / rel
-            copied = whole_table and _copy_whole_single_file(repository, request.snapshot_ref,
-                                                              table_name, store, path)
-            if copied:
-                copied_tables.add(table_name)
-            else:
-                _write_single_file(repository, query, table_name, contract, path)
+            path = dest_root / _single_file_relative_path(table_name)
+            copied, rows = _materialize_single(repository, store, request, table_name, query,
+                                               contract, eligible, path)
             single_files[table_name] = path
-            manifest[rel] = _file_content_hash(path)
+            manifest[str(path.relative_to(dest_root))] = _file_content_hash(path)
+        row_counts[table_name] = rows
+        if copied:
+            copied_tables.add(table_name)
     from . import reference_inputs  # call-time import: see _tier4_cache_dir
 
     snapshot_rel = reference_inputs.LEGACY_SNAPSHOT_PATH
@@ -609,7 +666,53 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
         _write_pinned_bytes(store, ref_hash, path)
         manifest[rel] = _file_content_hash(path)
     return MaterializedTree(manifest=manifest, curated_files=curated_files, single_files=single_files,
-                            copied_tables=frozenset(copied_tables))
+                            copied_tables=frozenset(copied_tables), row_counts=row_counts)
+
+
+def _parquet_row_count(path: Path) -> int:
+    return pq.ParquetFile(path).metadata.num_rows
+
+
+def _verify_materialized_rows(actual: int, expected: int, ceiling: int, table_name: str) -> None:
+    """Review P2-C05, decision 2/4: the row count actually on disk must
+    equal what this output was expected to hold — the pinned manifest count
+    for a byte copy, the post-filter scan count for a rewrite — and never
+    exceed the request's own ceiling for this table. Catches both a copy
+    that silently wrote more/fewer rows than its manifest declares and a
+    clamped ceiling a copy ignored; never a clamp-and-copy-anyway."""
+    if actual != expected or actual > ceiling:
+        raise errors.fail("RESULT_LIMIT_EXCEEDED",
+                  "materialized row count does not match this table's expected population",
+                  details={"table_name": table_name, "materialized_rows": actual,
+                           "expected_rows": expected, "ceiling": ceiling})
+
+
+def _materialize_curated(repository, store, request: LegacyMaterializationRequest, table_name: str,
+                         query: DataQuery, eligible: bool, dest_root: Path):
+    if eligible:
+        year_paths = _copy_whole_table_curated(repository, request.snapshot_ref, table_name, store,
+                                               dest_root)
+        expected = _manifest_row_count(repository, request.snapshot_ref, table_name)
+        copied = True
+    else:
+        year_paths, expected = _write_curated_table(repository, query, table_name, dest_root)
+        copied = False
+    actual = sum(_parquet_row_count(p) for ps in year_paths.values() for p in ps)
+    _verify_materialized_rows(actual, expected, query.max_result_rows, table_name)
+    return year_paths, copied, actual
+
+
+def _materialize_single(repository, store, request: LegacyMaterializationRequest, table_name: str,
+                        query: DataQuery, contract: TableContract, eligible: bool, path: Path):
+    copied = eligible and _copy_whole_single_file(repository, request.snapshot_ref, table_name, store,
+                                                  path)
+    if copied:
+        expected = _manifest_row_count(repository, request.snapshot_ref, table_name)
+    else:
+        expected = _write_single_file(repository, query, table_name, contract, path)
+    actual = _parquet_row_count(path)
+    _verify_materialized_rows(actual, expected, query.max_result_rows, table_name)
+    return copied, actual
 
 
 def _single_file_relative_path(table_name: str) -> str:
@@ -641,15 +744,20 @@ def _check_dest_root(store, dest_root: Path) -> None:
 
 
 def _write_curated_table(repository, query: DataQuery, table_name: str,
-                         dest_root: Path) -> dict[int, list[Path]]:
+                         dest_root: Path) -> tuple[dict[int, list[Path]], int]:
+    """Scan-and-rewrite one curated table. Returns the written paths plus the
+    post-filter row count the scan itself produced (decision 2's "expected"
+    count for a rewrite) — a plain running total, not a re-read."""
     curated_root = dest_root / "data" / "curated" / table_name
     writers: dict[int, pq.ParquetWriter] = {}
     paths: dict[int, Path] = {}
+    scanned = 0
     for batch in repository.scan(query, table_name=table_name):
+        scanned += batch.num_rows
         _split_batch_by_year(batch, curated_root, writers, paths)
     for writer in writers.values():
         writer.close()
-    return {year: [path] for year, path in paths.items()}
+    return {year: [path] for year, path in paths.items()}, scanned
 
 
 def _split_batch_by_year(batch: pa.RecordBatch, curated_root: Path,
@@ -820,19 +928,24 @@ def tier4_cache_refs_match_panel(repository, request: LegacyMaterializationReque
 
 
 def _write_single_file(repository, query: DataQuery, table_name: str,
-                       contract: TableContract, dest_path: Path) -> None:
+                       contract: TableContract, dest_path: Path) -> int:
+    """Scan-and-rewrite one single-file table. Returns the post-filter row
+    count the scan produced (decision 2's "expected" count for a rewrite)."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     writer = None
+    scanned = 0
     try:
         for batch in repository.scan(query, table_name=table_name):
             if writer is None:
                 writer = pq.ParquetWriter(dest_path, batch.schema)
             writer.write_batch(batch)
+            scanned += batch.num_rows
     finally:
         if writer is not None:
             writer.close()
     if writer is None:
         _write_empty_table(query, contract, dest_path)
+    return scanned
 
 
 def _write_empty_table(query: DataQuery, contract: TableContract, dest_path: Path) -> None:
