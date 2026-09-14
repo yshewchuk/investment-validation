@@ -25,7 +25,7 @@ from engine.v2.ops.executor_watchdog import signal_owned
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.health import health, write_health
 from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
-from engine.v2.ops.nightly import build_legacy_job_requests
+from engine.v2.ops.nightly import build_legacy_job_requests, refuse_oversize_plan
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
 from engine.v2.ops.profiles import DEFAULT_POLICY
 from engine.v2.ops.recovery import (
@@ -282,6 +282,11 @@ def dispatch(args, root, conn, clock):
                 expected_population=tuple(plan.get("expected_population", ())),
                 include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
                 snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe)
+            # 2026-09-14: refuse before submission a plan that would only
+            # fail later at claim time (RESOURCE_LIMIT_EXCEEDED) because some
+            # job's legacy read set exceeds its resource profile's scratch
+            # budget -- see nightly.plan_scratch_problems.
+            refuse_oversize_plan(conn, store, requests)
             receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
             return {"run_id": "run_" + plan["plan_hash"][:24],
                     "jobs": [to_document(item) for item in receipts]}
