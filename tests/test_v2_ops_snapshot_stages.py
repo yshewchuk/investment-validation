@@ -359,7 +359,10 @@ def test_snapshot_backed_score_launches_on_the_materialization_root_only(case, m
     retry = case.submit_score("score-2", first + "#" + MANIFEST, deps=(first,))
     assert case.run(retry) == "succeeded", case.failure(retry)
     assert len(case.recorded()) == 1
-    assert case.output(retry, "0") == case.output(stage, "0")
+    # The stub worker declares its output as envelope["worker"] ("legacy_score"),
+    # not an enumeration index -- a reused checkpoint must record that same
+    # worker-declared name (2026-09-14 checkpoint-naming fix), not '0'.
+    assert case.output(retry, "legacy_score") == case.output(stage, "legacy_score")
 
 
 def _other_snapshot_ref(case):
