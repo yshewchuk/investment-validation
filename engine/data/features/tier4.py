@@ -93,6 +93,9 @@ __all__ = [
     "write_forecasts",
     "load_forecasts",
     "forecasts_digest",
+    "serving_fold",
+    "serving_model",
+    "read_serving_header",
 ]
 
 
@@ -1329,3 +1332,45 @@ def serving_model(
             path,
         )
     return served
+
+
+def read_serving_header(path, *, expected_sha256_hex: str, max_bytes: int) -> dict | None:
+    """The plain-data header of one serving-cache file — never its estimator.
+
+    For a caller that must decide whether a *pinned* cache file actually
+    covers a fold it did not fit itself (the v2 launch-time coverage check),
+    never trusting bytes it has not first bounded and verified:
+
+    * absent -> ``None``.
+    * larger than ``max_bytes`` -> ``None``, unpickled not at all. A serving
+      cache is normally kilobytes to low megabytes (one small estimator); a
+      file far past that is not something this reads to find out why.
+    * bytes that do not hash to ``expected_sha256_hex`` -> ``None``. This is
+      the same verify-then-trust discipline :meth:`ArtifactStore.read_verified`
+      applies to every other object this program reads back.
+
+    Only then is it unpickled, and only the four plain fields
+    :func:`serving_model`'s cache-hit branch itself compares
+    (``model_id``/``fold_start``/``tier3_snapshot``/``features``) are
+    returned — never ``estimator``, so a caller never holds a fitted model it
+    has no fold to use.
+    """
+    import hashlib
+    import io
+
+    import joblib
+
+    p = Path(path)
+    if not p.is_file() or p.stat().st_size > max_bytes:
+        return None
+    data = p.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected_sha256_hex:
+        return None
+    stored = joblib.load(io.BytesIO(data))
+    fold_start = stored.get("fold_start")
+    return {
+        "model_id": stored.get("model_id"),
+        "fold_start": str(fold_start) if fold_start is not None else None,
+        "tier3_snapshot": stored.get("tier3_snapshot"),
+        "features": tuple(stored.get("features", ())),
+    }

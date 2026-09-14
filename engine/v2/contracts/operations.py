@@ -76,6 +76,10 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "UNAUTHORIZED_NAMESPACE": ("validation", False),
     "STALE_EXPECTATION": ("validation", False),
     "INTEGRITY_FAILED": ("integrity", False),
+    # P2-C02 (Phase 2 review closeout): pinned Tier-4 serving caches do not
+    # cover the planned population of a snapshot-backed scoring/replay
+    # launch -- refused before the job starts, never fit on a miss.
+    "TIER4_CACHE_MISSING": ("validation", False),
     "CANCELLED": ("internal", False),
     "LAUNCH_FAILED": ("internal", True),
     "WORKER_FAILED": ("internal", True),

@@ -43,6 +43,7 @@ from engine.v2.ops.fingerprints import (
     snapshot_code,
     worker_source_manifest,
 )
+from engine.v2.ops.generation_binding import refuse_generation_mismatch
 from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings, resolved_inputs_hash
 from engine.v2.ops.legacy_adapter import copy_read_set
 from engine.v2.ops.lifecycle import (
@@ -74,7 +75,7 @@ from engine.v2.ops.snapshot_stages import (
     materialize_effect,
     prepare_launch,
 )
-from engine.v2.ops.stages import validate_result
+from engine.v2.ops.stages import BARRIER_ONLY_REASONS, validate_result
 from engine.v2.ops.store_barrier import (
     confirm_read_set,
     domains_of,
@@ -235,6 +236,19 @@ class Service:
             raise OpsError(make_problem("INPUT_CHANGED", "legacy read set is not declared"))
         ref = artifact(self.conn, self.store, manifest_id)
         manifest = json.loads(self.store.read_verified(ref))
+        # P2-C02: a barrier-only kind has no declared read plan and so can
+        # never run snapshot-backed -- bind it here, at the one place its
+        # legacy read set is pinned, to the same accepted data/model
+        # generation snapshot-backed scoring already ran against. Gated on
+        # the plan's own snapshot marker (nightly._stage_parameters): a
+        # default legacy-mode nightly leaves it empty, so this never fires
+        # against "whatever shadow snapshot happens to exist" -- only a
+        # barrier job that is itself part of a snapshot-mode plan graph.
+        snapshot_id = str(claim.spec.parameters.get("snapshot_generation_id") or "")
+        if claim.spec.kind in BARRIER_ONLY_REASONS and snapshot_id:
+            scope = str(claim.spec.parameters.get("snapshot_generation_scope") or "")
+            refuse_generation_mismatch(self.conn, self.store, scope=scope,
+                                       snapshot_id=snapshot_id, barrier_manifest=manifest)
         pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root)
         return manifest
 

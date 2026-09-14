@@ -46,12 +46,24 @@ exit **2** and print a `problem.v1.0` JSON envelope (`code`, `category`,
 All commands take the global `--root` (default `data/operations`); it may
 appear before or after the subcommand. Output is always JSON on stdout.
 
+`serve` additionally takes `--store-root PATH`: the legacy checkout a
+snapshot-backed job's pinned read set and materialization roots resolve
+against. Omit it and `Service` defaults to the code checkout `serve` itself
+runs from (`Path(__file__).resolve().parents[3]`) — the pre-existing
+behavior. Pass it explicitly whenever the supervisor runs from a frozen git
+worktree or any checkout that is not itself the legacy tree with `data/`:
+without it, a snapshot-backed launch refuses `INPUT_CHANGED` ("legacy input
+is missing or indirect") before it ever starts, because it resolves the
+pinned read set against a checkout with no `data/` to find it in. Validated
+as an existing directory at parse time; never inferred from a plan or a
+manifest.
+
 | Command | Purpose | Example |
 |---|---|---|
 | `init` | Create the root (0700) and open the catalog. Installs no timer, starts nothing. | `python3 -m engine.v2.ops --root data/operations init` |
 | `doctor` | Read-only host + catalog inspection: capacity sample, catalog existence, diagnostics (hook state, `unmanaged_processes`, environment, executor probe, profiles), `integrity_errors`, `schema_versions`, `activation`. Opens the catalog `mode=ro`; never starts jobs or changes quotas. | `python3 -m engine.v2.ops doctor --json` |
 | `health` | Print the `operations_health.v1.0` document (§3). | `python3 -m engine.v2.ops health --json` |
-| `serve` | Run the supervisor claim/execute loop; `--once` drains and exits when nothing is active. | `python3 -m engine.v2.ops serve --once` |
+| `serve` | Run the supervisor claim/execute loop; `--once` drains and exits when nothing is active. `--store-root PATH` points a snapshot-backed launch at the legacy checkout, when it is not the code checkout `serve` runs from (see above). | `python3 -m engine.v2.ops serve --once --store-root /path/to/legacy/checkout` |
 | `plan nightly` | Immutable shadow nightly plan. `--as-of` (ISO date, required), `--mode shadow` (only choice), `--input-manifest` (frozen legacy inputs; without it the plan carries `blocked_prerequisites` and cannot be submitted), `--tickers a,b`, `--year-start/--year-end` (default 2024/2026). | `python3 -m engine.v2.ops plan nightly --as-of 2026-09-12 --input-manifest manifest.json` |
 | `plan experiment` | Smoke plumbing plan from `--spec` JSON (must carry `experiment_id`). `--no-ledger` is required in practice: without it the plan refuses (production experiments disabled). | `python3 -m engine.v2.ops plan experiment --spec /tmp/spec.json --no-ledger` |
 | `submit` | Submit a saved plan under `--idempotency-key` (both required). Operator namespace policy admits `shadow` and `smoke` only. A blocked plan is refused with `INVALID_REQUEST`, exit 2. | `python3 -m engine.v2.ops submit --plan art_... --idempotency-key nightly-2026-09-12-01` |

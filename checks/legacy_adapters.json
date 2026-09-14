@@ -1,5 +1,5 @@
 {
-  "count": 41,
+  "count": 43,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -619,9 +619,39 @@
       "retry": "pure function; no side effects to retry",
       "output": "Tier-4 serving cache directory",
       "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.features.tier4.serving_fold",
+      "reason": "P2-C02: the launch-time Tier-4 coverage check needs the scorer's own (event_date, as_of) -> fold rule, reached instead of reimplemented so a v2 fold can never drift from what Scorer._serving actually asks for.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_serving_fold",
+      "read_set": "none; pure date arithmetic",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "one fold-start Timestamp",
+      "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.data",
+      "module": "engine.v2.data.legacy_adapter",
+      "legacy_symbol": "engine.data.features.tier4.read_serving_header",
+      "reason": "P2-C02: reads a pinned Tier-4 serving-cache file's plain-data header (model_id/fold_start/tier3_snapshot/features, never the estimator) for the launch-time coverage check, bounded by a byte cap and hash-verified before unpickling.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_tier4_serving_header",
+      "read_set": "one pinned joblib file under data/models/tier4, size-capped and hash-verified before it is opened",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "a small header dict, or None when unreadable/oversized/hash-mismatched",
+      "removal_phase": "phase-4 scoring extraction"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
   "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. P2-6 (snapshot-to-legacy materialization, D13/D14 adapter half) adds 2 more engine.v2.data symbols (engine.data.store._read_part, engine.data.schemas.coerce) so materialize() proves a written legacy file is readable by the unchanged legacy loaders before it is locked read-only; each exact legacy symbol keeps its own ledger entry per review (PANEL_COLUMNS, tier4.COLUMNS, tier4.KEY_COLUMNS stay three separate entries) even though this puts engine.v2.data.legacy_adapter's own import fan-out one over its 8-edge budget -- reported in the task report as a stop-and-decide finding, not gamed by collapsing entries. P2-7 (supervised snapshot import, D16 synthetic) adds one more engine.v2.data symbol, engine.data.schemas.SOURCE_PRIORITY, for a deterministic source_priority_version fingerprint. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled.",
-  "committed_ceiling": 41
+  "committed_ceiling": 43
 }
