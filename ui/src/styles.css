@@ -119,3 +119,83 @@ h1 {
   color: #a33;
   font-weight: 600;
 }
+
+.release-not-current-notice {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #453;
+  border-radius: 4px;
+}
+
+.detail-view {
+  max-width: 900px;
+}
+
+.breadcrumbs {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.field-group {
+  margin-bottom: 16px;
+}
+
+.field-group h3 {
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: #556;
+  margin: 0 0 4px;
+}
+
+.field-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 0;
+}
+
+.field-row {
+  display: contents;
+}
+
+.field-row dt {
+  font-weight: 600;
+  color: #333;
+}
+
+.field-row dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.badge-derived,
+.badge-unmapped {
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 4px;
+  background: #ccd;
+  color: #223;
+  border-radius: 3px;
+}
+
+.badge-unmapped {
+  background: #dcc;
+}
+
+.score-identity {
+  margin-bottom: 8px;
+}
+
+.verdict-section {
+  margin-bottom: 12px;
+}
+
+pre[data-testid="engine-evidence-json"] {
+  max-height: 400px;
+  overflow: auto;
+  background: #1c1e22;
+  color: #ddd;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}

@@ -153,12 +153,14 @@ class ReleaseFixture:
     release: dict
     items: list[dict]  # EventPageItem dicts, pre-sorted (event_date, ticker, event_id)
     scores_by_id: dict[str, dict] = field(default_factory=dict)
+    event_ref_by_score_id: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.items = sorted(self.items, key=lambda it: (it["event_date"], it["ticker"], it["event_ref"]["event_id"]))
         for item in self.items:
             for score in item["scores"]:
                 self.scores_by_id[score["score_id"]] = score
+                self.event_ref_by_score_id[score["score_id"]] = item["event_ref"]
 
 
 @dataclass
@@ -184,6 +186,93 @@ class MockState:
         if release_id is not None and release_id not in self.releases:
             raise KeyError(release_id)
         self.current_release_id = release_id
+
+
+# --------------------------------------------------------------------------
+# score-detail fixtures (P3-3b): (engine_record, display_record) pairs for
+# a handful of the summary scores above, shaped with the LEGACY board's own
+# field names (``engine/v2/serving/bridge.py::_BOARD_FIELD_NAMES``/``_UNITS``,
+# transcribed in ``ui/src/displayFieldSpec.ts``) -- not the EventScoreSummary
+# names those rows also carry. ``engine_record`` always adds one field
+# (``raw_model_state_ref``) that ``display_record`` never gets, so the two
+# sections of the score-detail view are provably separate objects, not one
+# dict shown twice.
+# --------------------------------------------------------------------------
+
+
+def _legacy_pair(score_id: str, **fields: Any) -> tuple[dict, dict]:
+    base = {
+        "row_id": score_id, "ticker": "TICK", "strategy": "STR-THRU",
+        "as_of": "legacy.entry_close.v1", "event_date": "2026-09-01", "session": "AMC",
+        "entry_date": "2026-08-31", "exit_date": None, "strike": 100.0, "expiry": "2026-09-18",
+        "quote_date": "2026-08-31", "spot": 101.25, "entry_cost": 0.62,
+        "entry_cost_pct": 0.0061, "exp_pnl_model": 0.02, "exp_pnl_analog": 0.018,
+        "exp_pnl_sim": 0.019, "win_model": 0.55, "gate_score": 0.71, "gate_threshold": 0.5,
+        "gate_pass": True, "forecast_abs_move": 0.05, "forecast_model": "driver-v3",
+        "detail": None, "scored": True, "flags": [], "model_versions": {"driver": "v3.2"},
+        "chosen_strategy": None, "chosen_margin": None, "menu_size": None,
+        "legs": [{"strike": 95.0, "qty": 1, "side": "buy", "right": "P"},
+                 {"strike": 100.0, "qty": 1, "side": "sell", "right": "P"}],
+        "payoff_curve": {
+            "x": [90.0, 95.0, 100.0, 105.0, 110.0], "y": [5.0, 5.0, 0.0, 0.0, 0.0],
+            "max": 5.0, "min": 0.0,
+            "strikes": [{"strike": 95.0, "qty": 1, "side": "buy"},
+                        {"strike": 100.0, "qty": 1, "side": "sell"}],
+            "shape": "centre",
+        },
+        "digest": "sha256:mock-" + score_id,
+    }
+    base.update(fields)
+    engine_record = {**base, "raw_model_state_ref": "state-ref-" + score_id}
+    display_record = dict(base)
+    return engine_record, display_record
+
+
+def _build_detail_overrides() -> dict[str, tuple[dict, dict]]:
+    overrides: dict[str, tuple[dict, dict]] = {}
+
+    # Null vs. zero (§9 L11) at detail granularity too, plus the one score
+    # whose payoff curve has a known, non-trivial point count (5), and one
+    # display-only field ("note") absent from the mapping spec entirely --
+    # exercises the "otherwise alphabetically" / "other" fallback category.
+    overrides["r1-score-0-a"] = _legacy_pair(
+        "r1-score-0-a", ticker="TICK0", event_date="2026-09-01",
+        entry_cost=None, entry_cost_pct=None,  # null: renders as missing
+        exp_pnl_model=0.0,  # a real zero: renders as "0"
+        note="mock-only annotation field, not in the mapping spec",
+    )
+
+    # Refusal: gate_pass False plus a "detail" reason string, no legs/curve
+    # (refused before sizing).
+    overrides["r1-score-1-a"] = _legacy_pair(
+        "r1-score-1-a", ticker="TICK1", strategy="STR-RUNUP", event_date="2026-09-02",
+        strike=None, expiry=None, entry_cost=None, entry_cost_pct=None,
+        exp_pnl_model=None, exp_pnl_analog=None, exp_pnl_sim=None, win_model=None,
+        gate_score=None, gate_pass=False, detail="entry cost exceeds ceiling",
+        scored=False, flags=["ENTRY_COST_CEILING"], legs=[], payoff_curve=None,
+    )
+
+    # Empty payoff curve: a real curve object with zero points -- distinct
+    # from "no curve at all" (r1-score-1-a, above).
+    overrides["r1-score-2-a"] = _legacy_pair(
+        "r1-score-2-a", ticker="TICK2", strategy="TWIN-P", event_date="2026-09-03",
+        payoff_curve={"x": [], "y": [], "max": 0.0, "min": 0.0, "strikes": [], "shape": "centre"},
+    )
+
+    # DYN-SV: chosen_strategy/chosen_margin/menu_size carried through, gate
+    # verdict unavailable (null), no payoff curve of its own (it wraps
+    # STR-THRU's).
+    overrides["r1-score-2-b"] = _legacy_pair(
+        "r1-score-2-b", ticker="TICK2", strategy="DYN-SV", event_date="2026-09-03",
+        gate_pass=None, gate_score=None, exp_pnl_model=None, exp_pnl_analog=None,
+        exp_pnl_sim=None, chosen_strategy="STR-THRU", chosen_margin=0.014, menu_size=4,
+        legs=[], payoff_curve=None,
+    )
+
+    return overrides
+
+
+DETAIL_OVERRIDES: dict[str, tuple[dict, dict]] = _build_detail_overrides()
 
 
 def build_default_state(dist_root: Path | None = None, *, token: str = "mock-secret") -> MockState:
@@ -399,7 +488,7 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
             return
         if state.current_release_id is None:
             return self._problem(HTTPStatus.SERVICE_UNAVAILABLE, "NO_CURRENT_RELEASE",
-                                 "no current release is published")
+                                 "no current release is published", category="resource", retryable=True)
         fixture = state.releases[state.current_release_id]
         self._json(HTTPStatus.OK, fixture.release, etag=fixture.release["release_id"])
 
@@ -408,7 +497,7 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
             return
         if state.force_events_error:
             return self._problem(HTTPStatus.INTERNAL_SERVER_ERROR, "SIMULATED_ERROR",
-                                 "simulated server error")
+                                 "simulated server error", category="internal")
         release_id = query.get("release_id")
         if not release_id:
             return self._problem(HTTPStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
@@ -446,10 +535,18 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, body)
 
     def _event_scores(self, state: MockState, event_id: str, query: dict[str, str]) -> None:
+        """§6/P3-2 review: ``release_id`` is required, not merely validated
+        when supplied -- ``score``/event identity is only unique WITHIN a
+        release (§5.4), so this route never searches across releases.
+        Missing is 400 ``RELEASE_ID_REQUIRED`` (a client error), distinct
+        from a present-but-unknown id, which is 404 ``UNKNOWN_RELEASE``
+        (`engine/v2/serving/api.py::_require_release_id`)."""
         if not self._require_auth(state):
             return
         release_id = query.get("release_id")
-        fixture = state.releases.get(release_id) if release_id else None
+        if not release_id:
+            return self._problem(HTTPStatus.BAD_REQUEST, "RELEASE_ID_REQUIRED", "release_id is required")
+        fixture = state.releases.get(release_id)
         if fixture is None:
             return self._problem(HTTPStatus.NOT_FOUND, "UNKNOWN_RELEASE", "unknown release id")
         for item in fixture.items:
@@ -458,29 +555,40 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
         self._problem(HTTPStatus.NOT_FOUND, "UNKNOWN_EVENT", "unknown event id")
 
     def _score(self, state: MockState, score_id: str, query: dict[str, str]) -> None:
+        """Same ``release_id``-required rule as ``_event_scores`` (P3-2
+        review, `_require_release_id`) -- no more searching every release
+        for a bare score id; the caller (always `ui/src/api/client.ts`
+        `getScore(scoreId, releaseId)`, non-optional) must name the release
+        it saw the score under."""
         if not self._require_auth(state):
             return
         release_id = query.get("release_id")
-        candidates = state.releases.values() if not release_id else (
-            [state.releases[release_id]] if release_id in state.releases else [])
-        for fixture in candidates:
-            score = fixture.scores_by_id.get(score_id)
-            if score is not None:
-                bridge = {
-                    "score_id": score_id,
-                    "event_ref": {"event_id": "unknown", "calendar_revision": "rev1",
-                                 "schema_version": "event_ref.v1.0"},
-                    "clock_id": "legacy.entry_close.v1", "legacy_row_id": score_id,
-                    "score_batch_ref": fixture.release["score_batch_ref"],
-                    "source_row_key": score_id, "source_record_hash": "sha256:mock",
-                    "request_provenance_refs": [], "snapshot_ref": fixture.release["snapshot_ref"],
-                    "model_registry_artifact_refs": fixture.release["model_registry_artifact_refs"],
-                    "engine_record": score, "display_record": score,
-                    "detail_refs": [], "unavailable_detail_reasons": [],
-                    "schema_version": "legacy_score_bridge.v1.0",
-                }
-                return self._json(HTTPStatus.OK, bridge)
-        self._problem(HTTPStatus.NOT_FOUND, "UNKNOWN_SCORE", "unknown score id")
+        if not release_id:
+            return self._problem(HTTPStatus.BAD_REQUEST, "RELEASE_ID_REQUIRED", "release_id is required")
+        fixture = state.releases.get(release_id)
+        if fixture is None:
+            return self._problem(HTTPStatus.NOT_FOUND, "UNKNOWN_RELEASE", "unknown release id")
+        score = fixture.scores_by_id.get(score_id)
+        if score is None:
+            return self._problem(HTTPStatus.NOT_FOUND, "UNKNOWN_SCORE", "unknown score id")
+        event_ref = fixture.event_ref_by_score_id.get(score_id) or {
+            "event_id": "unknown", "calendar_revision": "rev1",
+            "schema_version": "event_ref.v1.0",
+        }
+        engine_record, display_record = DETAIL_OVERRIDES.get(score_id, (score, score))
+        bridge = {
+            "score_id": score_id,
+            "event_ref": event_ref,
+            "clock_id": "legacy.entry_close.v1", "legacy_row_id": score_id,
+            "score_batch_ref": fixture.release["score_batch_ref"],
+            "source_row_key": score_id, "source_record_hash": "sha256:mock",
+            "request_provenance_refs": [], "snapshot_ref": fixture.release["snapshot_ref"],
+            "model_registry_artifact_refs": fixture.release["model_registry_artifact_refs"],
+            "engine_record": engine_record, "display_record": display_record,
+            "detail_refs": [], "unavailable_detail_reasons": [],
+            "schema_version": "legacy_score_bridge.v1.0",
+        }
+        self._json(HTTPStatus.OK, bridge)
 
     def _operations(self, state: MockState) -> None:
         if not self._require_auth(state):
@@ -523,8 +631,20 @@ class MockApiHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _problem(self, status, code: str, title: str) -> None:
-        self._json(status, {"status": int(status), "code": code, "title": title})
+    def _problem(self, status, code: str, message: str, *, category: str = "validation",
+                retryable: bool = False) -> None:
+        """The real ``Problem`` envelope (``problem.v1.0``,
+        `engine/v2/serving/api.py::_problem`), field for field -- NO
+        ``title``/``status`` alias (P3-2 review: the exception handler
+        returns ``exc.problem`` verbatim). ``ui/src/api/types.ts``
+        ``ProblemEnvelope`` and ``ui/src/api/client.ts`` read exactly these
+        names; the HTTP status is read from the response itself, not from
+        this body."""
+        self._json(status, {
+            "code": code, "category": category, "retryable": retryable, "message": message,
+            "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
+            "diagnostic_ref": None, "details": {}, "schema_version": "problem.v1.0",
+        })
 
     def log_message(self, format, *args):  # noqa: A002
         return

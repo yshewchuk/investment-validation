@@ -21,22 +21,48 @@ import type {
   ProblemEnvelope,
 } from "./types";
 
-export class ApiError extends Error implements ProblemEnvelope {
+/**
+ * `status` is the HTTP response's own status code -- the real `Problem`
+ * body carries no `status` alias (see `ProblemEnvelope`'s doc comment), so
+ * this is read separately from `Response.status` at every throw site, not
+ * from JSON. `message`/`code`/`category`/`retryable` come straight off the
+ * body's own field names; nothing here renames or aliases them.
+ */
+export class ApiError extends Error {
   status: number;
   code: string;
-  title: string;
-  detail?: string;
+  category: string;
+  retryable: boolean;
+  problem: ProblemEnvelope;
 
-  constructor(problem: ProblemEnvelope) {
-    super(problem.title);
+  constructor(status: number, problem: ProblemEnvelope) {
+    super(problem.message);
     this.name = "ApiError";
-    this.status = problem.status;
+    this.status = status;
     this.code = problem.code;
-    this.title = problem.title;
-    if (problem.detail !== undefined) {
-      this.detail = problem.detail;
-    }
+    this.category = problem.category;
+    this.retryable = problem.retryable;
+    this.problem = problem;
   }
+}
+
+/** A `ProblemEnvelope` for failures this client detects itself (network
+ * error, abort-adjacent edge cases) -- never sent by the server, so every
+ * optional field is its honest "nothing more is known" value. */
+export function clientProblem(code: string, message: string): ProblemEnvelope {
+  return {
+    schema_version: "problem.v1.0",
+    code,
+    category: "internal",
+    retryable: false,
+    message,
+    stage: null,
+    trace_id: null,
+    dependency_refs: [],
+    retry_after_seconds: null,
+    diagnostic_ref: null,
+    details: {},
+  };
 }
 
 /** Raised when a caller's own `AbortSignal` cancels a request in flight. */
@@ -50,14 +76,24 @@ export class ApiAborted extends Error {
 async function readProblem(response: Response): Promise<ProblemEnvelope> {
   try {
     const body = (await response.json()) as Partial<ProblemEnvelope>;
+    if (typeof body.code !== "string" || typeof body.message !== "string") {
+      return clientProblem(String(response.status), response.statusText || "request failed");
+    }
     return {
-      status: response.status,
-      code: body.code ?? String(response.status),
-      title: body.title ?? response.statusText,
-      ...(body.detail !== undefined ? { detail: body.detail } : {}),
+      schema_version: body.schema_version ?? "problem.v1.0",
+      code: body.code,
+      category: body.category ?? "internal",
+      retryable: body.retryable ?? false,
+      message: body.message,
+      stage: body.stage ?? null,
+      trace_id: body.trace_id ?? null,
+      dependency_refs: body.dependency_refs ?? [],
+      retry_after_seconds: body.retry_after_seconds ?? null,
+      diagnostic_ref: body.diagnostic_ref ?? null,
+      details: body.details ?? {},
     };
   } catch {
-    return { status: response.status, code: String(response.status), title: response.statusText };
+    return clientProblem(String(response.status), response.statusText || "request failed");
   }
 }
 
@@ -76,7 +112,7 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
     throw error;
   }
   if (!response.ok) {
-    throw new ApiError(await readProblem(response));
+    throw new ApiError(response.status, await readProblem(response));
   }
   return (await response.json()) as T;
 }
@@ -100,7 +136,10 @@ export interface DataClient {
     releaseId: string,
     signal?: AbortSignal,
   ): Promise<EventScoreSummary[]>;
-  getScore(scoreId: string, releaseId?: string, signal?: AbortSignal): Promise<LegacyScoreBridge>;
+  /** `release_id` is required (P3-2 decision, `engine/v2/serving/api.py`
+   * `_score_detail_response`: 400 if missing) -- always the pinned release,
+   * never "current". */
+  getScore(scoreId: string, releaseId: string, signal?: AbortSignal): Promise<LegacyScoreBridge>;
   getOperations(signal?: AbortSignal): Promise<OperationsHealth>;
 }
 

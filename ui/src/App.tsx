@@ -1,11 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DataClient } from "./api/client";
-import type { EventQuery } from "./api/types";
+import type { EventQuery, EventPageItem } from "./api/types";
 import { EMPTY_FILTERS, EventFilters, type FilterValues } from "./components/EventFilters";
+import { EventDetail, type EventMeta } from "./components/EventDetail";
 import { EventTable } from "./components/EventTable";
 import { Pagination } from "./components/Pagination";
 import { ReleaseBanner } from "./components/ReleaseBanner";
-import { pollIntervalMs, usePinnedRelease, useEventPage } from "./hooks";
+import { ScoreDetail } from "./components/ScoreDetail";
+import { pollIntervalMs, useResolvedRelease, useEventPage, useHashRoute } from "./hooks";
+import { boardHash } from "./routes";
 
 const DEFAULT_POLL_MS = 4000;
 const DEFAULT_LIMIT = 50;
@@ -27,17 +30,65 @@ interface Props {
 
 export function App({ client }: Props) {
   const pollMs = useMemo(() => pollIntervalMs(DEFAULT_POLL_MS), []);
-  const { state: releaseState, changedReleaseId } = usePinnedRelease(client, pollMs);
+  const route = useHashRoute();
+  // The route's release segment is only ever consulted for the FIRST pin
+  // resolution (guide §9 L02: "R1 readers retain R1") -- capture it once so
+  // a later in-app navigation to a different route shape never repins.
+  const routeReleaseIdRef = useRef(route.releaseId);
+  const { state: releaseState, changedReleaseId } = useResolvedRelease(
+    client,
+    pollMs,
+    routeReleaseIdRef.current,
+  );
+  const pinnedReleaseId = releaseState.status === "ready" ? releaseState.releaseId : null;
 
   const [filters, setFilters] = useState<FilterValues>(EMPTY_FILTERS);
   const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
   const cursor = cursorStack[cursorStack.length - 1] ?? null;
 
+  // Ticker/date/session for events seen on a loaded board page, so
+  // EventDetail can show a header without its own fetch (the dedicated
+  // per-event route, §6, returns score summaries only). Never used as a
+  // source of score values -- only display labels for an id already known.
+  const [eventMetaCache, setEventMetaCache] = useState<Record<string, EventMeta>>({});
+
+  // The board page is only fetched while actually viewing the board --
+  // deliverable 4/§7: detail views must not keep the board's own request
+  // alive, and going back to "board" re-issues the SAME (filters, cursor)
+  // query, reproducing the same page ("keeps the page and cursor state").
   const query =
-    releaseState.status === "ready"
-      ? toQuery(releaseState.release.release_id, filters, cursor)
+    pinnedReleaseId !== null && route.name === "board"
+      ? toQuery(pinnedReleaseId, filters, cursor)
       : null;
   const pageState = useEventPage(client, query);
+
+  // Once the pin resolves, name it explicitly in the address bar if the
+  // page was opened without one (bare `#/` or no hash) -- deliverable 3: "a
+  // deep link reopens the same pinned release." `replaceState` (not a hash
+  // assignment) so this does not add a spurious back-button history entry.
+  useEffect(() => {
+    if (pinnedReleaseId === null) return;
+    if (route.name === "board" && route.releaseId === null) {
+      window.history.replaceState(null, "", boardHash(pinnedReleaseId));
+    }
+  }, [pinnedReleaseId, route]);
+
+  useEffect(() => {
+    if (pageState.status !== "ready") return;
+    const items: EventPageItem[] = pageState.page.items;
+    setEventMetaCache((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const item of items) {
+        const id = item.event_ref.event_id;
+        if (next[id] === undefined) {
+          next[id] = { ticker: item.ticker, event_date: item.event_date, session: item.session };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [pageState]);
 
   function applyFilters(next: FilterValues) {
     setFilters(next);
@@ -79,39 +130,63 @@ export function App({ client }: Props) {
         <p data-testid="no-release" className="error-banner">
           {releaseState.error.status === 503
             ? "No current release is published yet."
-            : `Could not resolve the current release: ${releaseState.error.title}.`}
+            : `Could not resolve the current release: ${releaseState.error.message}.`}
         </p>
       </main>
     );
   }
 
-  const release = releaseState.release;
+  const { releaseId, release, isCurrent, currentError } = releaseState;
 
   return (
     <main className="app">
       <h1>v2 board (shadow)</h1>
-      <ReleaseBanner release={release} changedReleaseId={changedReleaseId} />
-      <EventFilters value={filters} onApply={applyFilters} />
+      <ReleaseBanner
+        releaseId={releaseId}
+        release={release}
+        isCurrent={isCurrent}
+        currentError={currentError}
+        changedReleaseId={changedReleaseId}
+      />
 
-      {pageState.status === "loading" && <p data-testid="loading-page">Loading events…</p>}
-
-      {pageState.status === "error" && (
-        <p data-testid="page-error" className="error-banner">
-          Could not load events: {pageState.error.title} ({pageState.error.code}).
-        </p>
+      {route.name === "event" && (
+        <EventDetail
+          client={client}
+          releaseId={releaseId}
+          eventId={route.eventId}
+          meta={eventMetaCache[route.eventId] ?? null}
+        />
       )}
 
-      {pageState.status === "ready" && (
+      {route.name === "score" && (
+        <ScoreDetail client={client} releaseId={releaseId} scoreId={route.scoreId} eventId={route.eventId} />
+      )}
+
+      {route.name === "board" && (
         <>
-          <EventTable items={pageState.page.items} releaseId={release.release_id} />
-          <Pagination
-            shownCount={pageState.page.items.length}
-            totalMatching={pageState.page.total_matching}
-            hasNext={pageState.page.next_cursor !== null}
-            hasPrev={cursorStack.length > 1}
-            onNext={goNext}
-            onPrev={goPrev}
-          />
+          <EventFilters value={filters} onApply={applyFilters} />
+
+          {pageState.status === "loading" && <p data-testid="loading-page">Loading events…</p>}
+
+          {pageState.status === "error" && (
+            <p data-testid="page-error" className="error-banner">
+              Could not load events: {pageState.error.message} ({pageState.error.code}).
+            </p>
+          )}
+
+          {pageState.status === "ready" && (
+            <>
+              <EventTable items={pageState.page.items} releaseId={releaseId} />
+              <Pagination
+                shownCount={pageState.page.items.length}
+                totalMatching={pageState.page.total_matching}
+                hasNext={pageState.page.next_cursor !== null}
+                hasPrev={cursorStack.length > 1}
+                onNext={goNext}
+                onPrev={goPrev}
+              />
+            </>
+          )}
         </>
       )}
     </main>
