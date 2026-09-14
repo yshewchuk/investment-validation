@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -103,6 +104,11 @@ HEARTBEAT_EVENT_SECONDS = 10.0
 #: A commit refused with one of these can never succeed under this fence:
 #: nothing more may be written under it, not even the attempt's own failure.
 _FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
+
+#: A pre-fix catalog named checkpoint outputs by their enumeration index
+#: ('0', '1', ...) instead of the worker's declared name. Such a name is
+#: purely positional and must never be reused or propagated.
+_POSITIONAL_OUTPUT_NAME = re.compile(r"^\d+$")
 
 
 class Service:
@@ -280,15 +286,27 @@ class Service:
         receipt = reuse(self.conn, self.store, cache_key)
         if receipt is None:
             return False
-        names = [row[0] for row in self.conn.execute(
-            "SELECT name FROM attempt_outputs WHERE attempt_id = ? ORDER BY name",
-            (receipt.producer_attempt_id,)).fetchall()]
-        if len(names) != len(receipt.artifact_refs):
+        # Join by artifact identity, not by sorted-index position: the
+        # producer's attempt_outputs rows are not guaranteed to sort into
+        # the same order the worker declared/published them in (B: any kind
+        # whose output order isn't alphabetical would otherwise have names
+        # silently swapped onto the wrong artifacts). A producer whose own
+        # names are purely positional (pre-fix catalogs, e.g. '0'/'1') or
+        # whose output set doesn't exactly match this receipt is refused
+        # outright rather than reused, so positional names never propagate.
+        rows = self.conn.execute(
+            "SELECT name, artifact_id FROM attempt_outputs WHERE attempt_id = ?",
+            (receipt.producer_attempt_id,)).fetchall()
+        by_artifact = {artifact_id: name for name, artifact_id in rows}
+        receipt_ids = [ref.artifact_id for ref in receipt.artifact_refs]
+        if (len(by_artifact) != len(rows)
+                or set(by_artifact) != set(receipt_ids)
+                or any(_POSITIONAL_OUTPUT_NAME.match(name) for name in by_artifact.values())):
             return False
         def effects(conn):
-            for index, ref in enumerate(receipt.artifact_refs):
+            for ref in receipt.artifact_refs:
                 conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
-                             (claim.attempt_id, names[index], ref.artifact_id))
+                             (claim.attempt_id, by_artifact[ref.artifact_id], ref.artifact_id))
         commit_attempt(self.conn, claim.attempt_id, claim.fence,
                        Outcome(True, "verified_dead", 0), clock=self.clock, effects=effects)
         return True
@@ -450,7 +468,21 @@ class Service:
                                            schema_ref=o["schema"]) for o in outputs))
         checkpoint = commit_checkpoint(self.conn, self.store, claim, candidate,
                                        clock=self.clock, inputs_hash=inputs_hash)
-        return [(str(index), ref) for index, ref in enumerate(checkpoint.artifact_refs)]
+        # commit_checkpoint publishes candidate.outputs in order (checkpoints.py
+        # builds `refs` with one store.publish_candidate() per candidate.output,
+        # in sequence) and only ever substitutes a PRIOR receipt after asserting
+        # that receipt's artifact_refs are tuple-equal -- order included -- to
+        # the freshly published refs. So checkpoint.artifact_refs is always in
+        # candidate.outputs order, which is `outputs` order, on every path. The
+        # count check below is the refusal if that ever stops holding, rather
+        # than silently pairing outputs with the wrong artifacts.
+        if len(checkpoint.artifact_refs) != len(outputs):
+            raise OpsError(make_problem(
+                "CHECKPOINT_INCOMPATIBLE",
+                "checkpoint artifact count does not match the worker's declared outputs",
+                details={"declared_outputs": len(outputs),
+                         "committed_artifacts": len(checkpoint.artifact_refs)}))
+        return [(o["name"], ref) for o, ref in zip(outputs, checkpoint.artifact_refs)]
 
     def _coordinator_effect(self, claim, refs, launch=None, keepalive=None):
         """Validate effect candidates before the short fenced commit transaction.
