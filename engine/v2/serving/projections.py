@@ -62,9 +62,9 @@ from .bridge import build_bridges
 __all__ = [
     "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
     "ServingIndexError",
-    "build_candidate", "connect", "ensure_schema",
-    "event_scores", "get_release", "get_score_detail", "list_events",
-    "resolve_event_refs",
+    "build_candidate", "connect", "ensure_schema", "event_query_hash",
+    "event_scores", "get_event", "get_release", "get_score_detail",
+    "list_events", "resolve_event_refs",
 ]
 
 _OWNER = "serving"
@@ -522,19 +522,40 @@ def _score_summary_from_row(row: sqlite3.Row) -> EventScoreSummary:
         chosen_margin=row["chosen_margin"], menu_size=row["menu_size"])
 
 
-def event_scores(conn: sqlite3.Connection, release_id: str, event_id: str) -> tuple[EventScoreSummary, ...]:
-    rows = conn.execute(
-        "SELECT * FROM serving_score_summary WHERE release_id = ? AND event_id = ? ORDER BY score_id",
-        (release_id, event_id)).fetchall()
+def event_scores(conn: sqlite3.Connection, release_id: str, event_id: str, *,
+                 strategy: str | None = None, verdict: str | None = None) -> tuple[EventScoreSummary, ...]:
+    """All main-board summaries for one event (§6's `/events/{id}/scores`
+    route wants every one, including refusals); ``strategy``/``verdict``
+    narrow it for the `/events` list's own "matching visible summaries"
+    rule (§6) -- never applied unless the caller asks."""
+    where = "release_id = ? AND event_id = ?"
+    params: list = [release_id, event_id]
+    if strategy is not None:
+        where += " AND strategy = ?"
+        params.append(strategy)
+    if verdict is not None:
+        where += " AND verdict = ?"
+        params.append(verdict)
+    rows = conn.execute(f"SELECT * FROM serving_score_summary WHERE {where} ORDER BY score_id",
+                        params).fetchall()
     return tuple(_score_summary_from_row(row) for row in rows)
 
 
-def _event_page_item(conn: sqlite3.Connection, release_id: str, row: sqlite3.Row) -> EventPageItem:
+def get_event(conn: sqlite3.Connection, release_id: str, event_id: str) -> EventPageItem | None:
+    """One event by id, with its full (unfiltered) score summaries -- the
+    read API's `/events/{id}/scores` route wraps this."""
+    row = conn.execute("SELECT * FROM serving_event_summary WHERE release_id = ? AND event_id = ?",
+                       (release_id, event_id)).fetchone()
+    return None if row is None else _event_page_item(conn, release_id, row)
+
+
+def _event_page_item(conn: sqlite3.Connection, release_id: str, row: sqlite3.Row, *,
+                     strategy: str | None = None, verdict: str | None = None) -> EventPageItem:
     return EventPageItem(
         event_ref=EventRef(event_id=row["event_id"], calendar_revision=row["calendar_revision"]),
         ticker=row["ticker"], event_date=row["event_date"], session=row["session"],
         clock_id=row["clock_id"], readiness=row["readiness"],
-        scores=event_scores(conn, release_id, row["event_id"]))
+        scores=event_scores(conn, release_id, row["event_id"], strategy=strategy, verdict=verdict))
 
 
 def _encode_cursor(row: sqlite3.Row) -> str:
@@ -552,26 +573,80 @@ def _decode_cursor(cursor: str | None) -> tuple[str, str, str] | None:
     return parts[0], parts[1], parts[2]
 
 
+def event_query_hash(release_id: str, *, event_date_from: str | None = None,
+                     event_date_to: str | None = None, ticker: str | None = None,
+                     strategy: str | None = None, verdict: str | None = None) -> str:
+    """The stable identity of one `/events` query: release plus every
+    normalized filter, deliberately excluding ``limit``/``cursor`` -- a page
+    size change or a page turn must not look like a different query. The
+    read API (P3-2) binds an opaque cursor to exactly this value so a cursor
+    replayed against a different release or filter set is detectable."""
+    return content_hash({
+        "release_id": release_id, "event_date_from": event_date_from,
+        "event_date_to": event_date_to, "ticker": ticker,
+        "strategy": strategy, "verdict": verdict,
+    })
+
+
+def _event_filters(release_id: str, event_date_from: str | None, event_date_to: str | None,
+                   ticker: str | None, strategy: str | None, verdict: str | None) -> tuple[str, list]:
+    """The WHERE clause (and its positional params) shared by the page query
+    and its unpaginated ``total_matching`` count -- §6: "counts cover the
+    complete filtered population, not the visible page." A strategy/verdict
+    filter selects EVENTS that have at least one matching score row (an
+    ``EXISTS`` against ``serving_score_summary``); which of that event's
+    rows are then shown is ``_event_page_item``'s own filtered
+    ``event_scores`` call, kept in sync by construction (both are given the
+    same ``strategy``/``verdict``, never derived independently)."""
+    where = "release_id = ?"
+    params: list = [release_id]
+    if event_date_from is not None:
+        where += " AND event_date >= ?"
+        params.append(event_date_from)
+    if event_date_to is not None:
+        where += " AND event_date <= ?"
+        params.append(event_date_to)
+    if ticker is not None:
+        where += " AND ticker = ?"
+        params.append(ticker)
+    if strategy is not None or verdict is not None:
+        clauses = ["release_id = serving_event_summary.release_id",
+                  "event_id = serving_event_summary.event_id"]
+        if strategy is not None:
+            clauses.append("strategy = ?")
+            params.append(strategy)
+        if verdict is not None:
+            clauses.append("verdict = ?")
+            params.append(verdict)
+        where += f" AND EXISTS (SELECT 1 FROM serving_score_summary WHERE {' AND '.join(clauses)})"
+    return where, params
+
+
 def list_events(conn: sqlite3.Connection, release_id: str, *,
-                limit: int = DEFAULT_PAGE_SIZE, cursor: str | None = None) -> EventPage:
+                limit: int = DEFAULT_PAGE_SIZE, cursor: str | None = None,
+                event_date_from: str | None = None, event_date_to: str | None = None,
+                ticker: str | None = None, strategy: str | None = None,
+                verdict: str | None = None) -> EventPage:
     """§6: bounded, ordered ``event_date, ticker, event_id`` paging with a
-    keyset cursor. Integrity-protecting the cursor with a server-held key is
-    P3-2 scope (the read API); this is the bounded query it will wrap."""
+    keyset cursor, and the optional date/ticker/strategy/verdict filters.
+    Integrity-protecting the cursor with a server-held key is P3-2 scope
+    (the read API); this is the bounded query it wraps."""
     limit = max(1, min(limit, MAX_PAGE_SIZE))
     after = _decode_cursor(cursor)
-    params: list = [release_id]
-    where = "release_id = ?"
+    where, params = _event_filters(release_id, event_date_from, event_date_to, ticker, strategy, verdict)
     if after is not None:
         where += " AND (event_date, ticker, event_id) > (?, ?, ?)"
-        params.extend(after)
+        params = params + list(after)
     rows = conn.execute(
         f"SELECT * FROM serving_event_summary WHERE {where} "
         "ORDER BY event_date, ticker, event_id LIMIT ?", (*params, limit + 1)).fetchall()
-    total = conn.execute("SELECT COUNT(*) FROM serving_event_summary WHERE release_id = ?",
-                         (release_id,)).fetchone()[0]
+    total_where, total_params = _event_filters(release_id, event_date_from, event_date_to, ticker, strategy, verdict)
+    total = conn.execute(f"SELECT COUNT(*) FROM serving_event_summary WHERE {total_where}",
+                         total_params).fetchone()[0]
     page, has_more = rows[:limit], len(rows) > limit
-    items = tuple(_event_page_item(conn, release_id, row) for row in page)
+    items = tuple(_event_page_item(conn, release_id, row, strategy=strategy, verdict=verdict) for row in page)
     next_cursor = _encode_cursor(page[-1]) if has_more else None
-    query_hash = content_hash({"release_id": release_id, "limit": limit, "cursor": cursor})
+    query_hash = event_query_hash(release_id, event_date_from=event_date_from, event_date_to=event_date_to,
+                                  ticker=ticker, strategy=strategy, verdict=verdict)
     return EventPage(release_id=release_id, query_hash=query_hash, items=items,
                      next_cursor=next_cursor, total_matching=total)
