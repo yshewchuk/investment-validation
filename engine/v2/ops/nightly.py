@@ -214,8 +214,13 @@ def _legacy_resource(kind):
         return "legacy_score"
     if kind == "legacy_model_evidence":
         return "model_evidence"
-    if kind in ("legacy_settlement", "legacy_materialize"):
+    if kind == "legacy_settlement":
         return "legacy_rebuild"
+    # 2026-09-14 right-sizing: legacy_materialize no longer borrows
+    # legacy_rebuild (5.5 GiB, sized for tier rebuilds) — it gets its own
+    # small "materialize" profile (2 GiB, profiles.py has the measurement).
+    if kind == "legacy_materialize":
+        return "materialize"
     if kind == "legacy_render":
         return "projection"
     if kind in ("ledger_export", "engineering_gate", "publication", "backup"):

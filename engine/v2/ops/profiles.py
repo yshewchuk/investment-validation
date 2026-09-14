@@ -22,7 +22,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-13.v2"
+POLICY_VERSION = "ops_resources.2026-09-14.v3"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -41,19 +41,50 @@ DEFAULT_POLICY = ResourcePolicy(
                         scratch_bytes=1 * GIB, heavy=False),
         ResourceProfile(name="projection", memory_bytes=2 * GIB, cpu_count=2,
                         scratch_bytes=2 * GIB, heavy=False),
-        # The serialized selfcheck builds a bounded scorer of its own. Raised
-        # to 11/2 GiB with legacy_score below: the adapted legacy scoring path
+        # The serialized selfcheck builds a bounded scorer of its own.
+        # Lowered 2026-09-14 from 11/2 GiB to 5 GiB (right-sizing pass, ops
+        # memory reservation review): the adapted legacy scoring path
         # (validation shares that code) peaked at 4.15 GiB tree RSS on the
-        # 2026-09-13 38-request canary, above the prior 4 GiB reservation.
-        ResourceProfile(name="validation", memory_bytes=11 * GIB // 2, cpu_count=4,
+        # 2026-09-13 38-request canary. 5 GiB is 0.85 GiB of margin over that
+        # measured peak; memory.high (90%, executor_cgroup.py) becomes
+        # 4.5 GiB, still above the peak. Admission needs
+        # available - 512 MiB margin >= reservation, and measured headroom on
+        # this 7.8 GiB host is 4.15-5.43 GiB while other agents run tests, so
+        # 11/2 GiB (5.5 GiB) could never be admitted concurrently with other
+        # work; 5 GiB can.
+        ResourceProfile(name="validation", memory_bytes=5 * GIB, cpu_count=4,
                         scratch_bytes=1 * GIB, heavy=True),
-        # Measured 2026-09-13: 4.15 GiB tree RSS peak on a 38-request canary,
-        # above the prior 4 GiB reservation — the watchdog was killing it.
-        ResourceProfile(name="legacy_score", memory_bytes=11 * GIB // 2, cpu_count=5,
+        # Lowered 2026-09-14 from 11/2 GiB to 5 GiB for the same reason as
+        # validation above: measured peak is 4.15 GiB tree RSS (2026-09-13
+        # 38-request canary), so 5 GiB keeps 0.85 GiB of margin while fitting
+        # the host's measured 4.15-5.43 GiB headroom under contention.
+        ResourceProfile(name="legacy_score", memory_bytes=5 * GIB, cpu_count=5,
                         scratch_bytes=2 * GIB, heavy=True),
         ResourceProfile(name="model_evidence", memory_bytes=4 * GIB, cpu_count=4,
                         scratch_bytes=1 * GIB, heavy=True),
         ResourceProfile(name="legacy_rebuild", memory_bytes=11 * GIB // 2, cpu_count=5,
+                        scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
+        # Covers the legacy_materialize worker (engine/v2/data/legacy_materialization.py
+        # ::materialize_tree): whole-table curated tables and pinned reference
+        # files are byte copies from the ArtifactStore (streamed in 1 MiB
+        # chunks — _copy_verified_object), and every other table (only
+        # option_chains is evidence_scoped) is a bounded Arrow scan written
+        # batch-by-batch via repository.scan(), capped at
+        # maximum_batch_rows=50,000 rows per batch (legacy_annotations.json)
+        # and never materializing a whole table or year partition in memory
+        # at once. There is no legacy scorer or panel model load on this
+        # path. Measurement basis: the full synthetic
+        # tests/test_v2_data_legacy_materialization.py suite (41 tests,
+        # exercising every scan/copy path against small fixtures) peaked at
+        # 293 MiB RSS for the whole pytest process under
+        # ``/usr/bin/time -v`` on 2026-09-14; static reading of every scan
+        # path above confirms real data cannot exceed a small multiple of
+        # one 50,000-row batch. 2 GiB leaves wide margin over both. Routed
+        # here from legacy_rebuild (previously 5.5 GiB, shared with the much
+        # heavier tier rebuild/legacy_settlement work) so a materialize job
+        # can be admitted without reserving tier-rebuild-sized memory it
+        # never uses.
+        ResourceProfile(name="materialize", memory_bytes=2 * GIB, cpu_count=2,
                         scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
         ResourceProfile(name="experiment_heavy", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=10 * GIB, heavy=True, disk_heavy=True),
