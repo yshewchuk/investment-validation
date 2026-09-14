@@ -42,7 +42,45 @@ ProjectionFindings)`. `LEGACY_DISPLAY_MAPPING_V1` is the checked spec of
 `dashboard/render.py` `compact_row`'s display fields. No legacy import, no
 `engine.v2.ops` import (a peer), no financial arithmetic.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges -->
+projections (P3-1b): the minimal serving index — a separate SQLite file,
+own `schema_versions` sequence (owner `"serving"`; the checksum-and-refuse-
+newer pattern of `engine.v2.ops.migrations` reimplemented locally, never
+imported — ops is a layer-7 peer). `resolve_event_refs` is the `(ticker,
+event_date) -> EventRef` resolver §5.3 point 3 asks for, built on
+`Repository.scan` (never raw parquet); a pair with zero matches is left out
+of the mapping (unmapped) and two or more distinct `event_id`s map to `None`
+(ambiguous) — neither ever invents an id. `build_candidate` runs `bridge.
+build_bridges` over the resolved refs, publishes every engine/detail payload
+(the findings receipt, the projection manifest, each score's full
+`LegacyScoreBridge`) as an immutable `ArtifactStore` object, and — only when
+`ProjectionFindings.ok` — inserts one release plus its `serving_event_summary`/
+`serving_score_summary` index rows in a single transaction, idempotent on
+content-derived `release_id`. A findings failure still publishes the receipt
+(`Problem.diagnostic_ref`) but writes no release row: no "current" pointer is
+created here, that is a later task's single published pointer. `get_release`,
+`list_events` (cursor-paginated, ordered `event_date, ticker, event_id`),
+`event_scores` and `get_score_detail` are the bounded read helpers a future
+read API (P3-2) wraps. `connect`/`ensure_schema` open and migrate the file.
+
+**Summary-field gap (review fix, `EVENT_SCORE_SUMMARY_V1` v1.1).** The
+rendered row carries no single headline "expected return" or closed
+"verdict" field, so `_score_summary_fields` never invents one:
+`expected_return` is always `None`; `expected_return_model`/`_analog`/`_sim`
+are `exp_pnl_model`/`exp_pnl_analog`/`exp_pnl_sim` copied through unchanged
+(a null model with a present analog stays two separate values, never
+promoted into `expected_return`). The real board's headline is
+`dashboard/static/assets/app.js` `pnlCell` — model, else sim, **never**
+analog — computed client-side over the raw bundle, not a field
+`dashboard/render.py` `compact_row` itself ever writes; reproducing it here
+is future work, not this index's own computation. `verdict` is the row's own
+`gate_pass`, kept as its raw JSON value (`"true"`/`"false"`/`None`), never
+translated into an invented `TRADE`/`REFUSED` word. The real board's
+decision pill (`app.js` `gatePill`) is a richer client-side tree over
+`flags`/`gate_score`/`gate_threshold` with several distinct N/A reasons
+(disabled, not sized, gate-declined, arithmetic-only) that this index does
+not reproduce — an open gap, not a promise this summary makes.
+
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE -->
 
 ## Consumers
 
@@ -65,6 +103,15 @@ Run the isolated HTTP contract tests:
 The server requires a nonempty authentication token supplied at construction.
 Credentials never belong in a release manifest, URL or status artifact.
 
+`tools/v2_dashboard_project.py` is the offline projection coordinator CLI
+(P3-1b): given a saved `score.json`, a flat per-ticker render-bundle
+directory, a Phase 2 catalog/store and a snapshot id, it builds one candidate
+against a serving root (`serving.sqlite` plus its own `objects/`) and prints
+`{"release_id": ..., "findings": {...}}` (or the refusal) as JSON. No
+scoring, no provider calls, no legacy import — it composes `engine.v2.ops.
+bootstrap.open_catalog` and this package in the one place (`tools/`) allowed
+to import both.
+
 ## Testing
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
@@ -76,3 +123,10 @@ A negative control here looks like: corrupt one field of a frozen record, run
 the comparator, and assert it names **this package's stage** and that field
 path — not that "a row is red". A check that has never failed is not known to
 work.
+
+`tests/test_v2_serving_bridge.py` (P3-1a) and `tests/test_v2_serving_
+projections.py` (P3-1b) cover the offline bridge/index over synthetic
+`score.json`/bundle pairs and a synthetic Phase 2 catalog (real
+`earnings_events` fragments, never a real panel or renderer):
+
+    python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py
