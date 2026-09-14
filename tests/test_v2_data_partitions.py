@@ -33,6 +33,8 @@ from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.objects import (  # noqa: E402
     FragmentInspection,
     inspect_fragment,
+    inspect_staged_file,
+    inspect_staged_partition,
     partition_logical_hash,
 )
 from engine.v2.data.repository import Repository  # noqa: E402
@@ -356,3 +358,53 @@ def test_bad_partition_hash_format_is_refused():
     with pytest.raises(DocumentError) as err:
         decode_document(DatasetManifest, doc)
     assert err.value.code == "BAD_HASH_FORMAT"
+
+
+# --------------------------------------------------------------------------
+# worker side: one streaming pass gives fragment AND partition hashes
+# --------------------------------------------------------------------------
+
+
+def _staged_parts(tmp_path, store, sizes):
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    files, object_refs = [], []
+    for index, chunk in enumerate(_chunks(_rows(), sizes)):
+        data = _to_bytes(_table_from_rows(_DAILY_MARKET_CONTRACT, chunk))
+        path = staged / f"part-{index:04d}.parquet"
+        path.write_bytes(data)
+        files.append((path, "sha256:" + hashlib.sha256(data).hexdigest(), len(data)))
+        object_refs.append(_publish_bytes(store, data))
+    return files, object_refs
+
+
+def test_staged_partition_single_pass_matches_the_published_audit(tmp_path):
+    """The worker's combined hash is what the coordinator's audit re-derives
+    from the published objects, and each fragment matches ``inspect_staged_file``."""
+    store = ArtifactStore(tmp_path / "store")
+    files, object_refs = _staged_parts(tmp_path, store, [7, 6, 6])
+    inspections, partition_hash = inspect_staged_partition(
+        files, _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF, _YEAR_KEY)
+    assert partition_hash == partition_logical_hash(
+        store, object_refs, _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF, _YEAR_KEY)
+    for (path, digest, size), inspection in zip(files, inspections):
+        assert inspection == inspect_staged_file(
+            path, _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF, _YEAR_KEY,
+            expected_content_hash=digest, expected_byte_size=size)
+    alone, alone_hash = inspect_staged_partition(
+        files[:1], _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF, _YEAR_KEY)
+    assert alone_hash is None and alone == inspections[:1]
+
+
+def test_staged_partition_refuses_seam_disorder_and_changed_bytes(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    files, _ = _staged_parts(tmp_path, store, [7, 6, 6])
+    with pytest.raises(DataError) as err:
+        inspect_staged_partition(list(reversed(files)), _DAILY_MARKET_CONTRACT,
+                                 _DAILY_MARKET_REF, _YEAR_KEY)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    path, _, size = files[1]
+    with pytest.raises(DataError) as err:
+        inspect_staged_partition([files[0], (path, _fake_hash("other bytes"), size)],
+                                 _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF, _YEAR_KEY)
+    assert err.value.code == "INPUT_CHANGED"

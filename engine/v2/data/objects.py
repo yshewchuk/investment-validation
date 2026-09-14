@@ -68,6 +68,7 @@ __all__ = [
     "PARQUET_FRAGMENT_SCHEMA_REF",
     "inspect_fragment",
     "inspect_staged_file",
+    "inspect_staged_partition",
     "logical_partition_hash",
     "normalize_physical_type",
     "partition_logical_hash",
@@ -317,14 +318,58 @@ def inspect_staged_file(path, contract: TableContract, contract_ref: TableContra
     :func:`publish_legacy_file` independently re-hashes and refuses a mismatch.
     """
     fault = fault or (lambda point: None)
-    actual_hash, actual_size = _hash_local_file(path)
-    if actual_size != expected_byte_size or actual_hash != expected_content_hash:
-        raise errors.fail("INPUT_CHANGED",
-                          "staged legacy file no longer matches its pinned reference")
+    _check_staged_bytes(path, expected_content_hash, expected_byte_size)
     inspection = _inspect_path(path, contract, contract_ref, partition_key, batch_rows, fault)
     placeholder = ObjectRef(kind="parquet_fragment", object_id="", content_hash=expected_content_hash,
                             byte_size=expected_byte_size)
     return dataclasses.replace(inspection, object_ref=placeholder, byte_hash=expected_content_hash)
+
+
+def inspect_staged_partition(files, contract: TableContract, contract_ref: TableContractRef,
+                             partition_key: str, *, batch_rows: int = 65536
+                             ) -> tuple[list[FragmentInspection], str | None]:
+    """One streaming pass over a partition's ordered staged files (the §7 worker).
+
+    ``files`` is ``[(path, expected_content_hash, expected_byte_size), ...]`` in
+    partition order. Each file is byte-verified as :func:`inspect_staged_file`
+    does; every decoded row then feeds both its fragment's ``logical_rows.v1``
+    digest and the partition's combined digest, so a multi-fragment partition
+    costs no second pass. Key order is enforced across fragment seams too. The
+    combined hash equals :func:`partition_logical_hash` over the same bytes once
+    published, and is ``None`` for a single fragment (its own hash is the
+    partition's).
+    """
+    combined = _logical_digest(contract, contract_ref, partition_key)
+    seam, inspections = _StreamState(), []
+    for path, expected_hash, expected_size in files:
+        _check_staged_bytes(path, expected_hash, expected_size)
+        parquet_file = _open_parquet_file(path)
+        present, missing = _match_contract_columns(contract, parquet_file.schema_arrow)
+        state, digest = _StreamState(), _logical_digest(contract, contract_ref, partition_key)
+        for row in _stream_rows(parquet_file, contract, present, missing, partition_key,
+                                batch_rows, state, lambda point: None):
+            line = b"\n" + canonical_json(row).encode("utf-8")
+            digest.update(line)
+            combined.update(line)
+        if state.key_min is not None:
+            _check_key_order(seam, state.key_min)
+            seam.previous_key = state.key_max
+        inspections.append(FragmentInspection(
+            object_ref=ObjectRef(kind="parquet_fragment", object_id="", content_hash=expected_hash,
+                                 byte_size=expected_size),
+            partition_key=partition_key, row_count=state.row_count, byte_hash=expected_hash,
+            logical_content_hash=CONTENT_HASH_PREFIX + digest.hexdigest(),
+            primary_key_min=state.key_min, primary_key_max=state.key_max,
+            time_min=state.time_min, time_max=state.time_max))
+    partition_hash = CONTENT_HASH_PREFIX + combined.hexdigest() if len(inspections) > 1 else None
+    return inspections, partition_hash
+
+
+def _check_staged_bytes(path, expected_content_hash: str, expected_byte_size: int) -> None:
+    actual_hash, actual_size = _hash_local_file(path)
+    if actual_size != expected_byte_size or actual_hash != expected_content_hash:
+        raise errors.fail("INPUT_CHANGED",
+                          "staged legacy file no longer matches its pinned reference")
 
 
 def _hash_local_file(path) -> tuple[str, int]:
@@ -509,6 +554,15 @@ def logical_partition_hash(contract: TableContract, contract_ref: TableContractR
     """Stream ``rows`` (contract-column-ordered, already NaN/timestamp-normalized
     scalars) into the ``logical_rows.v1`` hash. Never holds the partition in memory.
     """
+    digest = _logical_digest(contract, contract_ref, partition_key)
+    for row in rows:
+        digest.update(b"\n")
+        digest.update(canonical_json(row).encode("utf-8"))
+    return CONTENT_HASH_PREFIX + digest.hexdigest()
+
+
+def _logical_digest(contract: TableContract, contract_ref: TableContractRef, partition_key: str):
+    """A ``logical_rows.v1`` sha256 with its header already written."""
     header = {
         "algorithm": LOGICAL_ROWS_ALGORITHM,
         "table_contract_ref": {"contract_id": contract_ref.contract_id,
@@ -519,10 +573,7 @@ def logical_partition_hash(contract: TableContract, contract_ref: TableContractR
     }
     digest = hashlib.sha256()
     digest.update(canonical_json(header).encode("utf-8"))
-    for row in rows:
-        digest.update(b"\n")
-        digest.update(canonical_json(row).encode("utf-8"))
-    return CONTENT_HASH_PREFIX + digest.hexdigest()
+    return digest
 
 
 # --------------------------------------------------------------------------

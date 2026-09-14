@@ -159,7 +159,8 @@ def _check_no_key_overlap(records: Sequence[FragmentRecord]) -> None:
 
 
 def _verify_everything(contracts: Sequence[TableContract], records: Sequence[FragmentRecord],
-                       manifests: Sequence[DatasetManifest], snapshot: SnapshotRef, store) -> None:
+                       manifests: Sequence[DatasetManifest], snapshot: SnapshotRef, store,
+                       audit_partitions: bool) -> None:
     for contract in contracts:
         if table_contract_hash(contract) != contract.definition_hash:
             raise fail("MANIFEST_CORRUPT", "contract definition_hash does not match its content",
@@ -173,7 +174,8 @@ def _verify_everything(contracts: Sequence[TableContract], records: Sequence[Fra
         verify_dataset_manifest(manifest, matched)
         _check_no_key_overlap(matched)
         contract = contract_by_id[manifest.dataset_version_ref.table_contract_ref.contract_id]
-        verify_partition_hashes(store, manifest, matched, contract)
+        if audit_partitions:
+            verify_partition_hashes(store, manifest, matched, contract)
         by_table[_table_name_for(manifest, snapshot)] = manifest
     verify_snapshot_ref(snapshot, by_table)
 
@@ -466,10 +468,11 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
                     fence_check: Callable[[sqlite3.Connection], None], clock: Clock,
                     fault: FaultHook | None = None, store: ArtifactStore | None = None,
                     record_references: Callable[[sqlite3.Connection, str], None] | None = None,
-                    ) -> SnapshotImportReceipt:
+                    audit_partitions: bool = True) -> SnapshotImportReceipt:
     """§7.3 steps 1-7, over already-built, already-durable inputs.
 
-    Re-verifies every manifest (identity, row-sum, key-overlap) before opening
+    Re-verifies every manifest (identity, row-sum, key-overlap; the streamed
+    partition-hash audit only if ``audit_partitions``) before opening
     the transaction, then inserts everything idempotently, inserts the success
     receipt, and compare-and-swaps ``scope``'s head. Raises on any failure —
     it never returns a ``failed``/``conflict`` receipt; ``record_failed_import``
@@ -478,7 +481,7 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
     in the same transaction (``reference_catalog.insert_reference_inputs``).
     """
     fault = fault or (lambda point: None)
-    _verify_everything(contracts, records, manifests, snapshot, store)
+    _verify_everything(contracts, records, manifests, snapshot, store, audit_partitions)
     table_names = [_table_name_for(manifest, snapshot) for manifest in manifests]
     now = format_timestamp(clock.now())
     fault("before_transaction")

@@ -104,7 +104,11 @@ def parser():
         if name == "logs":
             sub.add_argument("--follow", action="store_true")
         if name == "cancel":
-            sub.add_argument("--expected-attempt", required=True)
+            sub.add_argument(
+                "--expected-attempt", default=None,
+                help="the job's active attempt id. Omit it only for a job with no active "
+                     "attempt (queued or retry_wait): omission means 'expect none', so a job "
+                     "that does have one refuses with STALE_EXPECTATION")
         if name == "resume":
             sub.add_argument("--dry-run", action="store_true")
     return result

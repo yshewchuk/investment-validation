@@ -8,12 +8,14 @@ holds their coordinator-side effects, promotion and rollback):
   process, into per-file :class:`~engine.v2.data.objects.FragmentInspection`
   candidates (:func:`worker_snapshot_import`). The worker never touches the
   catalog and never publishes an ``ArtifactStore`` object — it only proves
-  what the staged bytes measure out to. Judgement call (task brief decision
-  1): the worker's per-fragment ``logical_content_hash`` is trusted as-is by
-  the coordinator; a *multi*-fragment partition's own combined hash is still
-  recomputed there, by ``objects.partition_logical_hash`` over the freshly
-  published objects — the one check that is genuinely expensive to skip
-  (§6 invariant 6) and genuinely cheap to redo once, after publish.
+  what the staged bytes measure out to. The worker's per-fragment
+  ``logical_content_hash`` and, for a *multi*-fragment partition, its combined
+  ``partition_logical_hash`` are computed in one streaming pass
+  (``objects.inspect_staged_partition``) and trusted by the coordinator once
+  every published object's bytes match the ``content_hash`` inspected here.
+  The coordinator used to re-stream multi-fragment partitions; on the first
+  real-data import that was most of a 14-minute effect, so it is now only the
+  callable audit ``manifests.verify_partition_hashes``.
 * ``legacy_rebuild_candidate``: runs the real legacy rebuild entrypoint
   (``engine.data.rebuild.rebuild``, via ``ops.legacy_adapter.run_legacy_rebuild``)
   rooted at a private candidate directory. Its own coordinator effect
@@ -54,7 +56,7 @@ from engine.v2.contracts import JobSpec, SnapshotImportRequest, SubmitRequest, T
 from engine.v2.data import documents
 from engine.v2.data import legacy_mapping as data_legacy_mapping
 from engine.v2.data.import_snapshot import ImportPlan, request_hash
-from engine.v2.data.objects import inspect_staged_file
+from engine.v2.data.objects import inspect_staged_partition
 from engine.v2.foundation import canonical_json, content_hash, from_document, to_document
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
@@ -184,19 +186,21 @@ def _inspect_table(legacy_root: Path, table: str, contract: TableContract, contr
     partitions_out = []
     completed = []
     for partition_key, group in _group_by_partition(refs):
-        fragments = []
-        for file_ref in group:
-            inspection = inspect_staged_file(
-                legacy_root / file_ref.path, contract, contract_ref, partition_key,
-                expected_content_hash=file_ref.content_hash, expected_byte_size=file_ref.byte_size)
-            fragments.append({
-                "path": file_ref.path, "content_hash": file_ref.content_hash,
-                "byte_size": file_ref.byte_size, "row_count": inspection.row_count,
-                "logical_content_hash": inspection.logical_content_hash,
-                "primary_key_min": list(inspection.primary_key_min),
-                "primary_key_max": list(inspection.primary_key_max),
-                "time_min": inspection.time_min, "time_max": inspection.time_max})
-        partitions_out.append({"partition_key": partition_key, "fragments": fragments})
+        inspections, partition_hash = inspect_staged_partition(
+            [(legacy_root / ref.path, ref.content_hash, ref.byte_size) for ref in group],
+            contract, contract_ref, partition_key)
+        fragments = [{
+            "path": file_ref.path, "content_hash": file_ref.content_hash,
+            "byte_size": file_ref.byte_size, "row_count": inspection.row_count,
+            "logical_content_hash": inspection.logical_content_hash,
+            "primary_key_min": list(inspection.primary_key_min),
+            "primary_key_max": list(inspection.primary_key_max),
+            "time_min": inspection.time_min, "time_max": inspection.time_max}
+            for file_ref, inspection in zip(group, inspections)]
+        entry = {"partition_key": partition_key, "fragments": fragments}
+        if partition_hash is not None:
+            entry["partition_logical_hash"] = partition_hash
+        partitions_out.append(entry)
         completed.append(f"{table}:{partition_key}")
     return partitions_out, completed
 

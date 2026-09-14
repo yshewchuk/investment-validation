@@ -14,10 +14,26 @@ registered is durable by the time ``_coordinator_effect`` returns.
 
 §7.3: "No file copy, Arrow scan, hash calculation, network call, or legacy
 scorer runs inside the transaction." True here exactly as it is in
-``catalog.commit_snapshot`` itself: every ``objects.publish_legacy_file``/
-``objects.partition_logical_hash`` call below runs before
-``snapshots.commit_snapshot_for_attempt`` is ever invoked, which itself
-re-verifies everything again before opening its own transaction.
+``catalog.commit_snapshot`` itself: every ``objects.publish_legacy_file`` call
+below runs before ``snapshots.commit_snapshot_for_attempt`` is ever invoked,
+which re-verifies every manifest (cheaply, from stored hashes) before opening
+its own transaction.
+
+No Parquet is re-streamed here (fix after the first real-data import, where
+re-streaming ``daily_market``'s multi-fragment partitions row by row was most
+of a 14-minute effect). Each fragment object is byte-verified at publish
+against the exact ``content_hash`` the worker inspected, and a multi-fragment
+partition's logical hash is a deterministic function of those bytes, computed
+by the worker in the same pass as its fragment hashes
+(``objects.inspect_staged_partition``); it is accepted exactly as
+single-fragment hashes always were. ``manifests.verify_partition_hashes``
+remains a callable audit, off this commit path.
+
+Lease: the effect runs after the worker exits, so nothing else renews the
+attempt's lease. It calls ``keepalive`` (``lifecycle.Keepalive``) between
+objects, partitions and phases, and stops with ``LEASE_LOST`` when renewal is
+refused. Per-phase wall times (publish, build, commit) are recorded in the
+published receipt's ``envelope["coordinator_timings_ms"]``.
 
 Reference inputs (guide §14): the coordinator publishes every reference file
 the import manifest pinned (``reference_inputs.publish_reference_inputs``),
@@ -54,11 +70,12 @@ from engine.v2.data import documents, manifests
 from engine.v2.data.catalog import move_head, record_failed_import
 from engine.v2.data.errors import DataError
 from engine.v2.data.import_snapshot import request_hash as compute_request_hash
-from engine.v2.data.objects import FragmentInspection, partition_logical_hash, publish_legacy_file
+from engine.v2.data.objects import FragmentInspection, publish_legacy_file
 from engine.v2.data.reference_catalog import insert_reference_inputs
 from engine.v2.data.reference_inputs import publish_reference_inputs
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
+    CONTENT_HASH_PREFIX,
     canonical_json,
     content_hash,
     format_timestamp,
@@ -81,7 +98,14 @@ __all__ = ["build_comparison_receipt", "legacy_rebuild_candidate_effect", "promo
 #: ``VALIDATION_FAILED`` at the attempt level instead (this module's
 #: judgement call; the ORIGINAL code is still the one persisted into the
 #: failed ``SnapshotImportReceipt``, never lost).
-_OPS_COMPATIBLE_CODES = frozenset({"INPUT_CHANGED", "RESOURCE_LIMIT_EXCEEDED"})
+#: ``LEASE_LOST``/``CANCELLED`` must survive translation: the supervisor treats
+#: them as "this fence is gone" and must not try to commit under it.
+_OPS_COMPATIBLE_CODES = frozenset({"INPUT_CHANGED", "RESOURCE_LIMIT_EXCEEDED", "LEASE_LOST",
+                                   "CANCELLED"})
+
+
+def _no_keepalive():
+    return None
 
 
 def _named(refs, name):
@@ -109,7 +133,7 @@ def _find_ref(refs, path):
 # --------------------------------------------------------------------------
 
 
-def snapshot_import_effect(conn, store, claim, refs, *, clock):
+def snapshot_import_effect(conn, store, claim, refs, *, clock, keepalive=_no_keepalive):
     bindings = recorded_bindings(conn, claim.attempt_id)
     rows = [bindings.get(name) for name in ("snapshot_import_request.json",
                                             "legacy_table_mapping.json", "legacy_manifest.json")]
@@ -126,7 +150,8 @@ def snapshot_import_effect(conn, store, claim, refs, *, clock):
                                         ).removeprefix("sha256:")[:32]
     try:
         receipt_ref = _commit_snapshot_import(conn, store, claim, (request, mapping, manifest),
-                                              inspections, req_hash, receipt_id, clock=clock)
+                                              inspections, req_hash, receipt_id, clock=clock,
+                                              keepalive=keepalive)
         return None, (("snapshot_import_receipt", receipt_ref),)
     except (DataError, OpsError) as exc:
         record_failed_import(conn, receipt_id=receipt_id, request_hash=req_hash,
@@ -136,64 +161,118 @@ def snapshot_import_effect(conn, store, claim, refs, *, clock):
 
 
 def _commit_snapshot_import(conn, store, claim, documents_in, inspections, req_hash,
-                            receipt_id, *, clock):
+                            receipt_id, *, clock, keepalive):
     request, mapping, manifest = documents_in
     if content_hash(to_document(manifest)) != request.source_manifest_hash:
         raise fail("VALIDATION_FAILED", "bound legacy manifest is not the request's own manifest")
     legacy_root = store.staging_dir(claim.attempt_id) / "legacy"
     contracts = {name: documents.decode_document(TableContract, doc)
                 for name, doc in mapping["tables"].items()}
-    all_objects, all_records, table_manifests = [], [], {}
-    for table, partitions in inspections["tables"].items():
-        contract, contract_ref = contracts[table], request.table_contract_refs[table]
-        records, partition_hashes = [], {}
-        for entry in partitions:
-            partition_key, group_refs = entry["partition_key"], []
-            for frag in entry["fragments"]:
-                file_ref = _find_ref(request.table_sources[table], frag["path"])
-                object_ref = publish_legacy_file(store, claim.attempt_id, legacy_root, file_ref)
-                all_objects.append(object_ref)
-                group_refs.append(object_ref)
-                inspection = FragmentInspection(
-                    object_ref=object_ref, partition_key=partition_key, row_count=frag["row_count"],
-                    byte_hash=object_ref.content_hash, logical_content_hash=frag["logical_content_hash"],
-                    primary_key_min=tuple(frag["primary_key_min"]),
-                    primary_key_max=tuple(frag["primary_key_max"]),
-                    time_min=frag["time_min"], time_max=frag["time_max"])
-                records.append(manifests.fragment_record(
-                    inspection, contract_ref, input_receipt_refs=(), import_request_hash=req_hash))
-            if len(group_refs) > 1:
-                partition_hashes[partition_key] = partition_logical_hash(
-                    store, group_refs, contract, contract_ref, partition_key)
-        table_manifests[table] = manifests.dataset_manifest(
-            contract_ref, records, knowledge_mode=request.knowledge_mode_by_table[table],
-            coverage_receipt_refs=(), availability_evidence_refs=(),
-            partition_logical_hashes=partition_hashes)
-        all_records.extend(records)
+    timings, mark = {}, clock.monotonic()
 
+    published = _publish_fragments(store, claim.attempt_id, legacy_root, request, inspections,
+                                   keepalive)
+    keepalive()
+    legacy_snapshot_object_ref = publish_legacy_file(store, claim.attempt_id, legacy_root,
+                                                      request.legacy_snapshot_source_ref)
+    keepalive()
+    references = publish_reference_inputs(store, claim.attempt_id, legacy_root, manifest.file_refs,
+                                          keepalive=keepalive)
+    mark = _lap(timings, "publish", clock, mark)
+
+    table_manifests, all_records = _build_manifests(request, inspections, published, req_hash,
+                                                    keepalive)
     calendar_version = "legacy_calendar:" + table_manifests["earnings_events"].logical_content_hash
     snapshot = manifests.snapshot_ref(
         table_manifests, calendar_version=calendar_version,
         source_priority_version=request.source_priority_version,
         finality_receipt_refs=request.finality_receipt_refs,
         parent_snapshot_id=request.expected_head_snapshot_id)
+    mark = _lap(timings, "build", clock, mark)
 
-    legacy_snapshot_object_ref = publish_legacy_file(store, claim.attempt_id, legacy_root,
-                                                      request.legacy_snapshot_source_ref)
-    all_objects.append(legacy_snapshot_object_ref)
-    references = publish_reference_inputs(store, claim.attempt_id, legacy_root, manifest.file_refs)
-
+    keepalive()
     receipt = commit_snapshot_for_attempt(
         conn, store, scope=request.scope, request_hash=req_hash, contracts=list(contracts.values()),
-        objects=all_objects, records=all_records, manifests=list(table_manifests.values()),
+        objects=[*published.values(), legacy_snapshot_object_ref], records=all_records,
+        manifests=list(table_manifests.values()),
         snapshot=snapshot, expected_head_snapshot_id=request.expected_head_snapshot_id,
         expected_head_generation=request.expected_head_generation, receipt_id=receipt_id,
         attempt_id=claim.attempt_id, fence=claim.fence, clock=clock,
         record_references=lambda c, rid: insert_reference_inputs(c, rid, references))
-    receipt = dataclasses.replace(receipt, legacy_snapshot_object_ref=legacy_snapshot_object_ref)
+    _lap(timings, "commit", clock, mark)
+    receipt = dataclasses.replace(receipt, legacy_snapshot_object_ref=legacy_snapshot_object_ref,
+                                  envelope={"coordinator_timings_ms": timings})
 
     return store.publish_bytes(canonical_json(to_document(receipt)).encode("utf-8"),
                                schema_ref="snapshot_import_receipt.v1.0")
+
+
+def _lap(timings, phase, clock, mark):
+    now = clock.monotonic()
+    timings[phase] = int(round((now - mark) * 1000))
+    return now
+
+
+def _publish_fragments(store, attempt_id, legacy_root, request, inspections, keepalive):
+    """Publish every inspected fragment, keyed ``(table, path)`` in inspection order.
+
+    ``publish_legacy_file`` hashes the bytes it copies and refuses anything but
+    the planned ``content_hash``; the worker inspected bytes under that same
+    hash. Both must agree, so each object is byte-identical to what the worker
+    measured — which is what lets its logical hashes be accepted unrecomputed.
+    """
+    published = {}
+    for table, partitions in inspections["tables"].items():
+        for entry in partitions:
+            for frag in entry["fragments"]:
+                keepalive()
+                file_ref = _find_ref(request.table_sources[table], frag["path"])
+                object_ref = publish_legacy_file(store, attempt_id, legacy_root, file_ref)
+                if frag.get("content_hash") != object_ref.content_hash:
+                    raise fail("VALIDATION_FAILED", "published bytes are not the bytes the worker "
+                               "inspected", details={"path": frag["path"]})
+                published[(table, frag["path"])] = object_ref
+    return published
+
+
+def _build_manifests(request, inspections, published, req_hash, keepalive):
+    table_manifests, all_records = {}, []
+    for table, partitions in inspections["tables"].items():
+        contract_ref = request.table_contract_refs[table]
+        records, partition_hashes = [], {}
+        for entry in partitions:
+            keepalive()
+            for frag in entry["fragments"]:
+                records.append(_fragment_record(frag, entry["partition_key"],
+                                                published[(table, frag["path"])], contract_ref,
+                                                req_hash))
+            if len(entry["fragments"]) > 1:
+                partition_hashes[entry["partition_key"]] = _worker_partition_hash(entry)
+        table_manifests[table] = manifests.dataset_manifest(
+            contract_ref, records, knowledge_mode=request.knowledge_mode_by_table[table],
+            coverage_receipt_refs=(), availability_evidence_refs=(),
+            partition_logical_hashes=partition_hashes)
+        all_records.extend(records)
+    return table_manifests, all_records
+
+
+def _fragment_record(frag, partition_key, object_ref, contract_ref, req_hash):
+    inspection = FragmentInspection(
+        object_ref=object_ref, partition_key=partition_key, row_count=frag["row_count"],
+        byte_hash=object_ref.content_hash, logical_content_hash=frag["logical_content_hash"],
+        primary_key_min=tuple(frag["primary_key_min"]),
+        primary_key_max=tuple(frag["primary_key_max"]),
+        time_min=frag["time_min"], time_max=frag["time_max"])
+    return manifests.fragment_record(inspection, contract_ref, input_receipt_refs=(),
+                                     import_request_hash=req_hash)
+
+
+def _worker_partition_hash(entry):
+    value = entry.get("partition_logical_hash")
+    if not isinstance(value, str) or not value.startswith(CONTENT_HASH_PREFIX):
+        raise fail("VALIDATION_FAILED", "worker inspection has no hash for a multi-fragment "
+                   "partition", details={"partition_key": entry["partition_key"]})
+    return value
 
 
 # --------------------------------------------------------------------------
