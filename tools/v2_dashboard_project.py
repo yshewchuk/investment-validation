@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Offline projection coordinator — rearchitecture phase-3 guide §5.4 (P3-1b).
+"""Offline projection coordinator — rearchitecture phase-3 guide §5.4 (P3-1b/P3-4).
 
-Reads an already-saved ``score.json`` and a flat per-ticker render bundle
-directory, resolves their events through the pinned Phase 2 repository, and
-calls :func:`engine.v2.serving.projections.build_candidate` to publish and
-index one release. Prints ``{"release_id": ..., "findings": {...}}`` (or the
+Reads an already-saved ``score.json`` and a rendered bundle, resolves their
+events through the pinned Phase 2 repository, and calls
+:func:`engine.v2.serving.projections.build_candidate` to publish and index
+one release. Prints ``{"release_id": ..., "findings": {...}}`` (or the
 refusal ``Problem``) as one JSON document to stdout.
 
     python3 tools/v2_dashboard_project.py \\
         --preview-input preview_input.json --score-json score.json \\
-        --bundle-dir bundle/tickers --snapshot-id snap_... \\
+        --bundle-dir bundle --snapshot-id snap_... \\
         --catalog catalog.sqlite --store-root store \\
         --serving-root serving --requested-as-of 2026-01-14 \\
         --resolved-as-of 2026-01-14
@@ -20,18 +20,24 @@ this is the one place allowed to import both ``engine.v2.ops.bootstrap``
 (opening the Phase 2 catalog) and ``engine.v2.serving`` in one process; the
 serving package itself never imports ops.
 
-**Bundle-directory shape, a deliberate simplification.** The real
-``dashboard/render.py`` per-ticker file (``data/tickers/<ticker>.json``) is a
-nested, event-grouped evidence payload, not the flat ``list[dict]`` the
-bridge consumes. Parsing that real shape is real-bundle integration —
-explicitly deferred, like the rest of "real parity", to P3-4. This tool reads
-the bridge's own native shape instead: one ``<ticker>.json`` file per ticker,
-each a JSON array of ``compact_row``-shaped dicts — exactly what
-``tests/test_v2_serving_bridge.py``'s synthetic fixtures already use.
+**Bundle format (P3-4).** ``--bundle-format legacy`` (the default) reads the
+real ``engine/dashboard/render.py`` ``render_bundle`` output tree —
+``data/board.json``/``data/tickers/<ticker>.json`` (or their ``.js``
+wrappers) — through :func:`engine.v2.serving.legacy_bundle.load_legacy_bundle`.
+Every file that loader reads is hashed into a manifest; this tool folds
+``content_hash(bundle_manifest)`` into the ``PreviewInput`` it passes to
+``build_candidate`` as ``bundle_manifest_ref``, overriding whatever value the
+``--preview-input`` document carried — so the release's identity binds to the
+bundle's *actual* bytes, not a caller-declared reference. ``--bundle-format
+flat`` keeps the pre-P3-4 simplification (one ``<ticker>.json`` file per
+ticker, each a JSON array of ``compact_row``-shaped dicts) for tests that
+predate the real adapter; it leaves ``--preview-input``'s own
+``bundle_manifest_ref`` untouched.
 """
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -44,10 +50,12 @@ from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import (  # noqa: E402
     ArtifactStore,
     SystemClock,
+    content_hash,
     from_document,
     to_document,
 )
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
 
@@ -58,7 +66,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--score-json", required=True, type=Path,
                         help="saved score.json (expected_population/rows/ladder)")
     parser.add_argument("--bundle-dir", required=True, type=Path,
-                        help="directory of <ticker>.json render-bundle rows")
+                        help="'legacy' format: the rendered bundle ROOT (the directory "
+                        "holding data/board.json, data/tickers/<ticker>.json). "
+                        "'flat' format: a directory of <ticker>.json render-bundle-row "
+                        "arrays (the pre-P3-4 simplification, kept for existing tests).")
+    parser.add_argument("--bundle-format", choices=("flat", "legacy"), default="legacy",
+                        help="'legacy' (default): read the real dashboard/render.py bundle "
+                        "layout via engine.v2.serving.legacy_bundle.load_legacy_bundle, "
+                        "byte-hashed into the release's bundle_manifest_ref. "
+                        "'flat': the simplified one-array-per-ticker shape; kept only for "
+                        "tests that predate the real adapter.")
     parser.add_argument("--snapshot-id", required=True,
                         help="the pinned Phase 2 snapshot id to resolve events against")
     parser.add_argument("--catalog", required=True, type=Path,
@@ -72,11 +89,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _load_score_doc(path: Path) -> dict:
-    return json.loads(path.read_text())
-
-
-def _load_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
+def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     bundle: dict[str, list[dict]] = {}
     for path in sorted(bundle_dir.glob("*.json")):
         rows = json.loads(path.read_text())
@@ -99,8 +112,18 @@ def _result_document(result: PreviewRelease | Problem, conn) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     preview_input = from_document(PreviewInput, json.loads(args.preview_input.read_text()))
-    score_doc = _load_score_doc(args.score_json)
-    bundle_rows_by_ticker = _load_bundle(args.bundle_dir)
+    score_doc = load_score_document(args.score_json)
+
+    if args.bundle_format == "flat":
+        bundle_rows_by_ticker = _load_flat_bundle(args.bundle_dir)
+    else:
+        bundle_rows_by_ticker, bundle_manifest = load_legacy_bundle(args.bundle_dir)
+        # The release's identity binds to the bundle's actual bytes, not to
+        # whatever bundle_manifest_ref the caller's PreviewInput happened to
+        # declare — a changed byte anywhere in the bundle must change the
+        # release id (§5.3 point 8's idempotency/change-detection test).
+        preview_input = dataclasses.replace(
+            preview_input, bundle_manifest_ref=content_hash(bundle_manifest))
 
     clock = SystemClock()
     catalog_conn = open_catalog(args.catalog, clock=clock)
