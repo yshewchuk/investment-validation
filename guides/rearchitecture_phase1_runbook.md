@@ -78,7 +78,7 @@ the CLI prints JSON regardless.
 
 ### 2.1 `--idempotency-key` semantics for nightly submission
 
-(Phase 3 launch §5.5 item 1, fixed a18feffaa18a.) `submit` always
+(Phase 3 launch §5.5 item 1, fixed 56d8709.) `submit` always
 requires `--idempotency-key`, but what it MEANS depends on the plan kind:
 
 - **Non-nightly plan** (`artifact_check`, `experiment`): the key you pass IS

@@ -285,7 +285,7 @@ These tasks do not delay opening an already validated P3-0 candidate, but
 must finish before P3-4 claims repeatable updates or authoritative live health.
 
 1. **Separate a retry from a new same-session plan.** **Done**, commit
-   a18feffaa18a; see
+   56d8709; see
    `tests/test_v2_ops_same_session_replan.py`, which reproduces the Sep-14
    operator trace (plan -> submit -> cancel all -> re-plan after a code/
    manifest change -> submit) and proves it now succeeds with fresh job ids
