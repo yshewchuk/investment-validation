@@ -27,6 +27,37 @@ SCHEMA = (
     ) STRICT""",
 )
 
+#: Phase 3 guide §5.5 item 1: the first committed record for a scheduled
+#: decision occurrence stays authoritative forever; a later generation's
+#: differing content is never a silent duplicate and never a rewrite -- it is
+#: durable, append-only evidence. ``generation_ref`` on ``decisions`` is the
+#: identity of the generation that FIRST committed that row (empty/NULL for
+#: rows written before this migration, and for legacy imports, which have no
+#: generation). True superseding decisions (an operator-approved re-decision)
+#: remain ledger-phase scope; this table only records that a conflict was
+#: seen and refused, never a decision about which content should win.
+SCHEMA_V2 = (
+    "ALTER TABLE decisions ADD COLUMN generation_ref TEXT",
+    """CREATE TABLE IF NOT EXISTS decision_divergences (
+        divergence_id TEXT PRIMARY KEY,
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+        scope TEXT NOT NULL, occurrence TEXT NOT NULL,
+        existing_generation_ref TEXT, attempted_generation_ref TEXT NOT NULL,
+        existing_payload_hash TEXT NOT NULL, attempted_payload_hash TEXT NOT NULL,
+        reason TEXT NOT NULL, created_at TEXT NOT NULL
+    ) STRICT""",
+    """CREATE TRIGGER decision_divergences_no_update
+    BEFORE UPDATE ON decision_divergences
+    BEGIN
+        SELECT RAISE(ABORT, 'decision_divergences rows are immutable');
+    END""",
+    """CREATE TRIGGER decision_divergences_no_delete
+    BEFORE DELETE ON decision_divergences
+    BEGIN
+        SELECT RAISE(ABORT, 'decision_divergences rows are immutable');
+    END""",
+)
+
 
 class DecisionConflict(ValueError):
     pass
@@ -52,7 +83,7 @@ def set_authority(conn, expected_owner, owner, stamp):
 
 
 def insert(conn, *, logical_key, decision_id, payload, purpose, kind, validations, created_at,
-           supersedes=None, owner="catalog"):
+           supersedes=None, owner="catalog", generation_ref=None):
     if not conn.in_transaction:
         raise ValueError("decision insertion requires the caller transaction")
     authority = conn.execute("SELECT owner FROM decision_authority WHERE singleton=1").fetchone()
@@ -74,10 +105,40 @@ def insert(conn, *, logical_key, decision_id, payload, purpose, kind, validation
         raise DecisionConflict("supersession requires a reason")
     conn.execute(
         "INSERT INTO decisions(logical_key,decision_id,payload_hash,payload_json,purpose,kind,"
-        "validation_json,supersedes,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "validation_json,supersedes,created_at,generation_ref) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (logical_key, decision_id, digest, canonical_json(payload), purpose, kind,
-         canonical_json(validations), supersedes, created_at))
+         canonical_json(validations), supersedes, created_at, generation_ref))
     return dict(conn.execute("SELECT * FROM decisions WHERE decision_id=?", (decision_id,)).fetchone())
+
+
+def record_divergence(conn, *, decision_id, scope, occurrence, existing_generation_ref,
+                       attempted_generation_ref, existing_payload_hash, attempted_payload_hash,
+                       reason, created_at):
+    """Append-only evidence that a later generation tried to commit different
+    content for an already-decided scheduled occurrence (Phase 3 guide §5.5
+    item 1). The first committed decision (``decision_id``) is never
+    rewritten; this is a durable divergence record, not a decision. Keyed so
+    an identical retry of the same divergent attempt (same decision, same
+    attempting generation, same content) is a no-op, matching the identical-
+    retry-stays-idempotent contract every other effect in this task follows.
+    """
+    if not conn.in_transaction:
+        raise ValueError("divergence recording requires the caller transaction")
+    divergence_id = "div_" + content_hash(
+        [decision_id, attempted_generation_ref, attempted_payload_hash]).split(":")[1][:32]
+    existing = conn.execute("SELECT * FROM decision_divergences WHERE divergence_id=?",
+                            (divergence_id,)).fetchone()
+    if existing:
+        return dict(existing)
+    conn.execute(
+        "INSERT INTO decision_divergences(divergence_id,decision_id,scope,occurrence,"
+        "existing_generation_ref,attempted_generation_ref,existing_payload_hash,"
+        "attempted_payload_hash,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (divergence_id, decision_id, scope, occurrence, existing_generation_ref,
+         attempted_generation_ref, existing_payload_hash, attempted_payload_hash, reason,
+         created_at))
+    return dict(conn.execute("SELECT * FROM decision_divergences WHERE divergence_id=?",
+                             (divergence_id,)).fetchone())
 
 
 def rows(conn, *, kind=None, through=None):

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from engine.v2.data import schema as data_schema
 from engine.v2.foundation import Clock
-from engine.v2.ledger.decisions import SCHEMA
+from engine.v2.ledger.decisions import SCHEMA, SCHEMA_V2
 from engine.v2.ops import schema
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.migrations import Migration, migrate
@@ -33,7 +33,9 @@ def open_catalog(path: Path | str, *, clock: Clock) -> sqlite3.Connection:
     conn = connect(path)
     try:
         migrate(conn, schema.OWNER, schema.MIGRATIONS, clock=clock)
-        migrate(conn, "ledger", (Migration(1, "decision_authority", SCHEMA),), clock=clock)
+        migrate(conn, "ledger", (Migration(1, "decision_authority", SCHEMA),
+                                 Migration(2, "decision_generation_divergence", SCHEMA_V2)),
+               clock=clock)
         migrate(conn, data_schema.OWNER, _DATA_MIGRATIONS, clock=clock)
     except BaseException:
         conn.close()

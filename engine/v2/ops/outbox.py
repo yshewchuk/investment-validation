@@ -24,20 +24,54 @@ def enqueue(conn, kind, logical_key, payload):
     return effect_id
 
 
-def watermark(conn, pipeline, scope, stage, occurrence, receipt_ref, *, clock):
+def _watermark_row(conn, pipeline, scope, stage, generation):
+    return conn.execute(
+        "SELECT occurrence,receipt_ref FROM watermarks WHERE pipeline=? AND scope=? AND stage=? "
+        "AND generation=?", (pipeline, scope, stage, generation)).fetchone()
+
+
+def watermark_would_conflict(conn, pipeline, scope, stage, occurrence, receipt_ref, *,
+                             generation=""):
+    """Read-only precheck: would ``watermark(...)`` below refuse this exact
+    write with ``IDEMPOTENCY_CONFLICT``? Never writes.
+
+    Guide §5.4/§5.5 item 1: a caller with an irreversible side effect before
+    its own watermark call (``publication.publish_local``'s ``CURRENT``
+    pointer swap) must know about a foreseeable refusal BEFORE that side
+    effect runs, not after -- the refusal itself must never leave that side
+    effect half-done. Does not need an open transaction; it is a plain read.
+    """
+    row = _watermark_row(conn, pipeline, scope, stage, generation)
+    return bool(row) and row["occurrence"] == occurrence and row["receipt_ref"] != receipt_ref
+
+
+def watermark(conn, pipeline, scope, stage, occurrence, receipt_ref, *, clock, generation=""):
+    """Record one stage's completed occurrence; idempotent, monotone, and --
+    since guide §5.5 item 1 -- scoped per ``generation`` (default ``""``, the
+    original single-bucket behaviour every pre-existing caller keeps).
+
+    A caller that never passes ``generation`` sees EXACTLY the old contract:
+    one completed receipt per (pipeline, scope, stage), a same-occurrence
+    different-receipt write refused, an older occurrence silently ignored.
+    A caller that passes a real ``generation`` (engineering_gate,
+    ledger_export, backup, publication/delivery -- see
+    ``effects_graph._generation_ref``) gets its OWN row: a genuinely new
+    same-session generation never collides with, and never rewrites, an
+    earlier generation's already-completed receipt for the same occurrence.
+    """
     if not conn.in_transaction:
         raise ValueError("watermark advancement requires the effect transaction")
-    row = conn.execute("SELECT occurrence,receipt_ref FROM watermarks WHERE pipeline=? AND scope=? AND stage=?",
-                       (pipeline, scope, stage)).fetchone()
+    row = _watermark_row(conn, pipeline, scope, stage, generation)
     if row and row["occurrence"] > occurrence:
         return
     if row and row["occurrence"] == occurrence and row["receipt_ref"] != receipt_ref:
         raise fail("IDEMPOTENCY_CONFLICT", "completed occurrence has another receipt")
     conn.execute(
-        "INSERT INTO watermarks VALUES (?,?,?,?,?,?) ON CONFLICT(pipeline,scope,stage) "
+        "INSERT INTO watermarks(pipeline,scope,stage,generation,occurrence,receipt_ref,completed_at) "
+        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(pipeline,scope,stage,generation) "
         "DO UPDATE SET occurrence=excluded.occurrence,receipt_ref=excluded.receipt_ref,"
         "completed_at=excluded.completed_at",
-         (pipeline, scope, stage, occurrence, receipt_ref, format_timestamp(clock.now())))
+         (pipeline, scope, stage, generation, occurrence, receipt_ref, format_timestamp(clock.now())))
 
 
 def claim(conn, kind, *, owner, clock, logical_key=None, lease_seconds=300):

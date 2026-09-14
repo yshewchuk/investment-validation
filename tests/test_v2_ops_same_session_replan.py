@@ -24,13 +24,31 @@ This file tests the fix (``nightly._plan_identity``, folded into
 4. Release/publication identity distinguishes a permitted new generation;
    the first release stays readable; rollback (restaging the prior content
    under a fresh id, the only release-pointer path that exists) works.
-5. The "stop and report" finding: two generations that try to commit
-   DIFFERENT content for the SAME scheduled decision occurrence are refused
-   by the existing decisions-ledger identity (``engine.v2.ledger.decisions``)
-   and outbox watermark, never silently duplicated.
+5. Decision divergence: two generations that try to commit DIFFERENT content
+   for the SAME scheduled decision occurrence never silently duplicate --
+   the first committed prediction stays authoritative and the second is
+   recorded as a durable divergence, without failing the job.
+
+2026-09-14 follow-up (this file's second pass, still guide §5.5 item 1):
+the "stop and report" finding above item 4 used to name -- publishing or
+committing decisions for a SECOND generation of an already-run session was
+refused outright -- is now resolved. ``outbox.watermark`` (``engine/v2/ops/
+outbox.py``) is generation-scoped (a new ``generation`` column/key, default
+``""`` for every pre-existing caller), so engineering_gate/ledger_export/
+backup/publication/delivery each record one receipt PER GENERATION instead
+of one per ``(scope, session)`` -- a second generation no longer collides
+with an earlier one's already-completed receipt. ``publication.publish_local``
+also now checks (``outbox.watermark_would_conflict``) whether its own
+acknowledgement would be refused BEFORE it moves ``CURRENT``, closing the
+window where a foreseeable refusal could leave the pointer naming an
+unacknowledged release. Decisions/predictions stay generation-INDEPENDENT
+by design (item 5): the first committed record is never superseded by a
+later generation automatically; see ``engine.v2.ops.decision_commit`` and
+``engine.v2.ledger.decisions.record_divergence``.
 """
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 from pathlib import Path
@@ -45,7 +63,11 @@ from engine.v2.ops import effects_graph
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
-from engine.v2.ops.decision_commit import commit_decisions_in_transaction, validated_decision_candidate
+from engine.v2.ops.decision_commit import (
+    commit_decisions_in_transaction,
+    import_settlement_candidates_in_transaction,
+    validated_decision_candidate,
+)
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.input_bindings import record_resolved_bindings, resolve_bindings
 from engine.v2.ops.lifecycle import Outcome, commit_attempt, request_cancel
@@ -342,37 +364,20 @@ def test_second_generation_stages_a_distinct_release_without_manifest_conflict(t
     assert conn.execute("SELECT COUNT(*) FROM releases").fetchone()[0] == 2
 
 
-def test_second_generation_publish_conflicts_at_the_delivery_watermark_not_stage_release(
+def test_second_generation_publishes_current_moves_both_releases_readable_rollback_works(
         tmp_path):
-    """The "stop and report" finding this task surfaces (not fixed here,
-    guide §5.5 item 1's own "if your design hits that, stop and report"
-    clause -- read broadly across "release_intent, publication, ledger
-    export, decisions and backup idempotency", not only decisions):
+    """2026-09-14 follow-up, now resolved: a second generation for the SAME
+    (scope, session) occurrence CAN become the published release. With a
+    DISTINCT release id (previous test) AND its own generation-scoped
+    "publication"/"delivery" watermark row (``publish_local``'s new
+    ``generation=`` parameter, threaded from ``effects_graph._generation_ref``
+    the same way the release id already is), generation 2's ``_acknowledge``
+    no longer collides with generation 1's already-completed receipt.
 
-    Even with a DISTINCT release id (previous test), actually PUBLISHING a
-    second generation for the SAME (scope, session) occurrence -- flipping
-    CURRENT -- fails. ``publish_local``'s own ``_acknowledge`` advances the
-    shared ("nightly", scope, "publication"/"delivery") watermark, and
-    ``outbox.watermark`` refuses a second, DIFFERENT receipt at an occurrence
-    it already has one for (the exact mechanism that keeps ``decisions``
-    from double-recording). Unlike a genuinely older session, this is not
-    transient: retrying never succeeds, because generation 1's watermark
-    row for this occurrence never goes away.
-
-    This IS confirmed to fail safely, not silently: the SQL transaction
-    (published_at, the watermark) rolls back. But ``materialize()``/the
-    on-disk ``CURRENT`` pointer swap happens earlier in the SAME function,
-    outside that rollback's reach, so the pointer DOES move to the
-    unacknowledged release -- the exact "crash between pointer success and
-    local ack" state ``test_v2_ops_authority.py``'s O24 already models,
-    except here it is not transient: a retry hits the identical conflict
-    forever. This divergence is DETECTABLE (the ``releases`` row for the
-    now-current id has ``published_at IS NULL``, and the watermark still
-    names the earlier release), so a health check reading both signals sees
-    it -- but nothing in this codebase reconciles it automatically. This
-    needs an explicit design decision (e.g., a generation-aware publication
-    watermark, or refusing to move the pointer until the watermark call
-    would also succeed) that this task does not make on its own judgement.
+    The prior release stays on disk and readable, and rollback to it works
+    through the only release-pointer path that exists: staging its same
+    content again under a fresh release id (a third "generation" -- the
+    rollback decision itself) and publishing that.
     """
     from tests.ops_support import catalog, enqueue_claim
 
@@ -381,55 +386,118 @@ def test_second_generation_publish_conflicts_at_the_delivery_watermark_not_stage
     target = tmp_path / "public"
     scope, occurrence = "shadow", SESSION
 
-    gen1_ref = effects_graph._generation_ref(SimpleNamespace(spec=SimpleNamespace(parameters={
-        "deployment": "shadow:impl-1", "decision_clock": "2026-09-10T00:00:00.000000Z",
-        "input_bindings": {"legacy_manifest.json": "art_m1"}})))
-    gen2_ref = effects_graph._generation_ref(SimpleNamespace(spec=SimpleNamespace(parameters={
-        "deployment": "shadow:impl-2", "decision_clock": "2026-09-10T05:00:00.000000Z",
-        "input_bindings": {"legacy_manifest.json": "art_m2"}})))
+    def _ref(deployment, decision_clock, manifest):
+        return effects_graph._generation_ref(SimpleNamespace(spec=SimpleNamespace(parameters={
+            "deployment": deployment, "decision_clock": decision_clock,
+            "input_bindings": {"legacy_manifest.json": manifest}})))
+
+    gen1_ref = _ref("shadow:impl-1", "2026-09-10T00:00:00.000000Z", "art_m1")
+    gen2_ref = _ref("shadow:impl-2", "2026-09-10T05:00:00.000000Z", "art_m2")
+    gen3_ref = _ref("shadow:impl-1", "2026-09-10T09:00:00.000000Z", "art_m1")  # the rollback
     release_id_1 = "rel" + content_hash([scope, occurrence, gen1_ref]).split(":")[1][:24]
     release_id_2 = "rel" + content_hash([scope, occurrence, gen2_ref]).split(":")[1][:24]
+    rollback_id = "rel" + content_hash([scope, occurrence, gen3_ref]).split(":")[1][:24]
 
     fenced_1 = enqueue_claim(conn, clock, supervisor, key="pub-gen1")
     _publish_and_stage(conn, store, fenced_1, release_id_1, occurrence, "gen1",
                        expected_current=None, clock=clock)
-    assert publish_local(conn, fenced_1, store, target, release_id_1, scope=scope,
-                         clock=clock)["delivered"] is True
+    assert publish_local(conn, fenced_1, store, target, release_id_1, scope=scope, clock=clock,
+                         generation=gen1_ref)["delivered"] is True
     assert release_current(target) == release_id_1
 
     fenced_2 = enqueue_claim(conn, clock, supervisor, key="pub-gen2")
     _publish_and_stage(conn, store, fenced_2, release_id_2, occurrence, "gen2",
                        expected_current=release_id_1, clock=clock)
-    with pytest.raises(OpsError) as excinfo:
-        publish_local(conn, fenced_2, store, target, release_id_2, scope=scope, clock=clock)
-    assert excinfo.value.code == "IDEMPOTENCY_CONFLICT"
-
-    # The first release was never overwritten: its own directory and bytes
-    # are still exactly what generation 1 published.
-    assert (target / "releases" / release_id_1 / "board.html").read_text() == "<html>gen1</html>"
-
-    # The divergence is real (the pointer DID move) but detectable: the
-    # catalog knows release_id_2 was never acknowledged, and the watermark
-    # still names generation 1's own release.
+    assert publish_local(conn, fenced_2, store, target, release_id_2, scope=scope, clock=clock,
+                         generation=gen2_ref)["delivered"] is True
     assert release_current(target) == release_id_2
-    published_at = conn.execute("SELECT published_at FROM releases WHERE release_id=?",
-                                (release_id_2,)).fetchone()[0]
-    assert published_at is None
-    watermark_row = conn.execute(
-        "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
-        "AND stage='publication'", (scope,)).fetchone()
-    assert watermark_row["receipt_ref"] == release_id_1
 
-    # A retry of the identical publish is not transient recovery here (unlike
-    # O24's genuine crash) -- it conflicts again, every time.
+    # Both releases are on disk, byte-for-byte what each generation shipped.
+    assert (target / "releases" / release_id_1 / "board.html").read_text() == "<html>gen1</html>"
+    assert (target / "releases" / release_id_2 / "board.html").read_text() == "<html>gen2</html>"
+
+    # Each generation owns its own "publication" receipt; neither rewrote
+    # the other's.
+    gen1_wm = conn.execute(
+        "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+        "AND stage='publication' AND generation=?", (scope, gen1_ref)).fetchone()
+    gen2_wm = conn.execute(
+        "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+        "AND stage='publication' AND generation=?", (scope, gen2_ref)).fetchone()
+    assert gen1_wm["receipt_ref"] == release_id_1
+    assert gen2_wm["receipt_ref"] == release_id_2
+
+    # Rollback: restage generation 1's own content under a fresh release id
+    # (the operator's rollback decision, its own generation) and publish it.
+    _publish_and_stage(conn, store, fenced_2, rollback_id, occurrence, "gen1",
+                       expected_current=release_id_2, clock=clock)
+    assert publish_local(conn, fenced_2, store, target, rollback_id, scope=scope, clock=clock,
+                         generation=gen3_ref)["delivered"] is True
+    assert release_current(target) == rollback_id
+    assert (target / "releases" / rollback_id / "board.html").read_text() == "<html>gen1</html>"
+    # All three releases -- both real generations and the rollback -- remain
+    # on disk and readable.
+    assert conn.execute("SELECT COUNT(*) FROM releases WHERE published_at IS NOT NULL"
+                        ).fetchone()[0] == 3
+
+
+def test_publish_refusal_from_a_watermark_conflict_leaves_current_untouched(tmp_path):
+    """Guide §5.4/§5.5 item 1 ordering fix, regression-tested directly: the
+    old bug swapped ``CURRENT`` BEFORE ``_acknowledge``'s own ``watermark()``
+    call, so a foreseeable ``IDEMPOTENCY_CONFLICT`` there still left
+    ``CURRENT`` naming an unacknowledged release (``published_at IS NULL``).
+
+    This forces that exact conflict -- two DIFFERENT release ids for the
+    SAME generation at the SAME occurrence (what a bug elsewhere, or a
+    caller reusing a generation identity in error, could produce) -- and
+    proves the refusal is now known, via ``outbox.watermark_would_conflict``,
+    and raised BEFORE ``CURRENT`` ever moves.
+    """
+    from tests.ops_support import catalog, enqueue_claim
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    target = tmp_path / "public"
+    scope, occurrence = "shadow", SESSION
+    generation = "same-generation"
+
+    fenced_1 = enqueue_claim(conn, clock, supervisor, key="pub-a")
+    _publish_and_stage(conn, store, fenced_1, "rel-a", occurrence, "a",
+                       expected_current=None, clock=clock)
+    assert publish_local(conn, fenced_1, store, target, "rel-a", scope=scope, clock=clock,
+                         generation=generation)["delivered"] is True
+    assert release_current(target) == "rel-a"
+
+    fenced_2 = enqueue_claim(conn, clock, supervisor, key="pub-b")
+    _publish_and_stage(conn, store, fenced_2, "rel-b", occurrence, "b",
+                       expected_current="rel-a", clock=clock)
     with pytest.raises(OpsError) as excinfo:
-        publish_local(conn, fenced_2, store, target, release_id_2, scope=scope, clock=clock)
+        publish_local(conn, fenced_2, store, target, "rel-b", scope=scope, clock=clock,
+                      generation=generation)
     assert excinfo.value.code == "IDEMPOTENCY_CONFLICT"
+
+    # The ordering fix: CURRENT never moved -- the refusal was known before
+    # the swap, not the old bug of swapping then rolling only the SQL back
+    # while the filesystem pointer stayed changed.
+    assert release_current(target) == "rel-a"
+    assert (target / "releases" / "rel-a" / "board.html").read_text() == "<html>a</html>"
+    row = conn.execute("SELECT published_at FROM releases WHERE release_id='rel-b'").fetchone()
+    assert row["published_at"] is None
+
+    # A retry of the identical (refused) publish conflicts again, every
+    # time -- this is a genuine identity error, not a transient crash.
+    with pytest.raises(OpsError) as excinfo:
+        publish_local(conn, fenced_2, store, target, "rel-b", scope=scope, clock=clock,
+                      generation=generation)
+    assert excinfo.value.code == "IDEMPOTENCY_CONFLICT"
+    assert release_current(target) == "rel-a"
 
 
 # --------------------------------------------------------------------------
-# 5. the "stop and report" finding: conflicting same-occurrence decision
-# content across generations is REFUSED, never silently duplicated.
+# 5. conflicting same-occurrence decision content across generations is a
+# durable DIVERGENCE, never a silent duplicate and never a job failure. The
+# first committed prediction stays authoritative (guide §5.5 item 1,
+# semantic #3); true superseding decisions remain ledger-phase scope.
 # --------------------------------------------------------------------------
 
 
@@ -522,18 +590,21 @@ def _commit_one_prediction(conn, store, clock, supervisor, *, key, deployment, d
     return receipts
 
 
-def test_second_generation_conflicting_decision_content_is_refused_not_duplicated(tmp_path):
-    """Two generations of the SAME session/scope that both try to commit a
-    prediction for the SAME row (ticker/strategy/event_date/strike/expiry --
-    ``decision_replay.score_row_id``, generation-independent) under
-    DIFFERENT ``deployment``/``decision_clock`` (exactly what a genuinely new
-    plan -- new code or a new decision_clock -- pins): the second commit is
-    refused by ``engine.v2.ledger.decisions.insert``'s own identity contract
-    (stable ``decision_id`` vs. a generation-scoped ``logical_key``), not
-    silently recorded as a second row. This is the guide's "stop and report"
-    case for §5.5 item 1: a genuine re-decision needs an explicit
-    ``supersedes``/``supersede_reason``, a judgement call this task does not
-    make automatically.
+def test_second_generation_conflicting_decision_content_is_recorded_as_a_divergence(tmp_path):
+    """2026-09-14 follow-up, now resolved: two generations of the SAME
+    session/scope that both try to commit a prediction for the SAME row
+    (ticker/strategy/event_date/strike/expiry -- ``decision_replay.
+    score_row_id``, generation-independent) under DIFFERENT ``deployment``/
+    ``decision_clock`` (exactly what a genuinely new plan -- new code or a
+    new decision_clock -- pins) no longer fails the second generation's job.
+    ``engine.v2.ledger.decisions.insert`` still refuses the second INSERT
+    (its stable ``decision_id`` vs. generation-scoped ``logical_key``
+    contract, unchanged), but ``decision_commit.commit_decisions_in_transaction``
+    now catches that refusal and records a durable, append-only divergence
+    (``decision_divergences``: both payload hashes, both generation refs, a
+    reason) instead of raising. The first committed prediction stays
+    authoritative; true superseding decisions (an explicit ``supersedes``/
+    ``supersede_reason``) remain ledger-phase scope, out of this task.
     """
     from tests.ops_support import catalog
 
@@ -551,21 +622,94 @@ def test_second_generation_conflicting_decision_content_is_refused_not_duplicate
         "AND stage='decisions'").fetchone()
     assert watermark_after_gen1 is not None
 
-    with pytest.raises(OpsError) as excinfo:
-        _commit_one_prediction(
-            conn, store, clock, supervisor, key="gen2-decisions",
-            deployment="shadow:impl-2", decision_clock="2026-09-11T03:00:00.000000Z", row_id=row_id)
-    assert excinfo.value.code == "IDEMPOTENCY_CONFLICT"
+    # The job succeeds -- no OpsError -- and commits nothing new for this row.
+    receipts_2 = _commit_one_prediction(
+        conn, store, clock, supervisor, key="gen2-decisions",
+        deployment="shadow:impl-2", decision_clock="2026-09-11T03:00:00.000000Z", row_id=row_id)
+    assert receipts_2 == []
 
-    # No double-record: still exactly the one committed prediction, and the
-    # decisions watermark for this (scope, session) still names generation
-    # 1's own receipt -- a second, differently-keyed generation never
-    # silently advanced it.
+    # No double-record: still exactly the one committed prediction, and it
+    # is still generation 1's own content (downstream settlement reads this
+    # row by decision_id, so it necessarily keeps using generation 1's
+    # prediction).
     assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
-    watermark_after_gen2_attempt = conn.execute(
+    committed = conn.execute("SELECT decision_id, payload_json FROM decisions").fetchone()
+    assert committed["decision_id"] == "prediction:" + row_id
+    assert json.loads(committed["payload_json"])["decision_ts"] == "2026-09-10T21:00:00.000000Z"
+
+    # The decisions watermark for this (scope, session) still names
+    # generation 1's own receipt -- a second, differently-keyed generation
+    # never silently advanced it.
+    watermark_after_gen2 = conn.execute(
         "SELECT occurrence, receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope='shadow' "
         "AND stage='decisions'").fetchone()
-    assert tuple(watermark_after_gen2_attempt) == tuple(watermark_after_gen1)
+    assert tuple(watermark_after_gen2) == tuple(watermark_after_gen1)
+
+    # A durable divergence was recorded: both payload hashes, both
+    # generation refs and a reason.
+    divergences = conn.execute("SELECT * FROM decision_divergences").fetchall()
+    assert len(divergences) == 1
+    divergence = dict(divergences[0])
+    assert divergence["decision_id"] == "prediction:" + row_id
+    assert divergence["scope"] == "shadow" and divergence["occurrence"] == SESSION
+    assert divergence["existing_payload_hash"] != divergence["attempted_payload_hash"]
+    assert divergence["existing_generation_ref"] != divergence["attempted_generation_ref"]
+    assert divergence["reason"]
+
+    # An identical retry of generation 2's own (still-divergent) content is
+    # a no-op: no second divergence row.
+    _commit_one_prediction(
+        conn, store, clock, supervisor, key="gen2-decisions-retry",
+        deployment="shadow:impl-2", decision_clock="2026-09-11T03:00:00.000000Z", row_id=row_id)
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+
+
+def test_settlement_after_divergence_uses_generation_1s_committed_prediction(tmp_path):
+    """The literal claim in guide §5.5 item 1 semantic #3: downstream
+    settlement keeps using the first committed prediction.
+    ``import_settlement_candidates_in_transaction`` validates an incoming
+    settlement against whatever ``decisions`` holds for that decision_id
+    (``_validate_settlement``) -- which is, and after a diverging generation
+    2 stays, generation 1's row. If settlement had somehow resolved against
+    generation 2's (never-committed) content instead, there would be no
+    committed prediction to validate against and this would raise
+    ``VALIDATION_FAILED``."""
+    from tests.ops_support import catalog
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    row_id = "FAKE|TWIN-P|" + SESSION + "|100.0|2026-10-16"
+
+    _commit_one_prediction(
+        conn, store, clock, supervisor, key="gen1-decisions",
+        deployment="shadow:impl-1", decision_clock="2026-09-10T21:00:00.000000Z", row_id=row_id)
+    _commit_one_prediction(
+        conn, store, clock, supervisor, key="gen2-decisions",
+        deployment="shadow:impl-2", decision_clock="2026-09-11T03:00:00.000000Z", row_id=row_id)
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+
+    settlement_job = JobSpec(kind="legacy_settlement", implementation_ref="x", spec_hash=None,
+                             environment_ref="x",
+                             parameters={"expected_ids": ("legacy_settlement",), "session": SESSION},
+                             output_namespace="shadow", resource_class="legacy_rebuild",
+                             retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(namespace="shadow", idempotency_key="settle",
+          principal="operator", job=settlement_job), clock=clock)
+    settlement_claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                                  supervisor=supervisor, clock=clock, registry=registry())
+    assert settlement_claim is not None
+
+    row = {"row_id": row_id, "ticker": "FAKE", "strategy": "TWIN-P", "event_date": SESSION,
+           "status": "unresolvable", "resolved_at": SESSION + "T22:00:00.000000Z"}
+    captured = [{"row": row,
+                "original_b64": base64.b64encode(json.dumps(row).encode()).decode("ascii")}]
+    candidate_ref = _publish(store, conn, clock, {"rows": captured}, "legacy_action.v1.0")
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, settlement_claim, candidate_ref, captured, clock=clock)
+    assert len(receipts) == 1
+    assert receipts[0]["decision_id"].startswith("outcome:" + row_id + ":")
+    assert json.loads(receipts[0]["payload_json"])["row_id"] == row_id
 
 
 def test_second_generation_identical_retry_of_the_same_decision_is_idempotent(tmp_path):

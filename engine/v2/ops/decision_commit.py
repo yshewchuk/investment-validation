@@ -5,7 +5,7 @@ import base64
 import json
 
 from engine.v2.foundation import content_hash, format_timestamp
-from engine.v2.ledger.decisions import DecisionConflict, import_lines, insert
+from engine.v2.ledger.decisions import DecisionConflict, import_lines, insert, record_divergence
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.decision_validation import validate
@@ -115,6 +115,86 @@ def _verify_committed_bindings(conn, claim, bindings):
                        details={"binding": name})
 
 
+def _decision_generation_ref(context):
+    """The generation identity of the plan that produced this validated
+    commit (guide §5.5 item 1) -- ``context["deployment"]``/``context["clock"]``
+    are the decision plan's own pinned ``deployment``/``decision_clock``
+    (``decision_validation.validate``), the same two fields
+    ``effects_graph._generation_ref`` folds into every other generation-aware
+    receipt. A fresh ``ops plan nightly`` always re-pins ``decision_clock``,
+    so two distinct generations for the same session always compute a
+    different ref here, while a true retry of the same saved plan reproduces
+    the identical one.
+    """
+    return content_hash({"deployment": context.get("deployment") or "",
+                         "decision_clock": context.get("clock") or ""})
+
+
+def _commit_row_or_diverge(conn, context, row, generation_ref, *, clock):
+    """Insert one candidate row's decision; on a same-``decision_id`` content
+    conflict, record a divergence instead of failing (guide §5.5 item 1).
+
+    Returns the inserted receipt, or ``None`` when this row diverged from an
+    already-committed decision (nothing new was written). An ambiguous
+    conflict -- no single existing row shares this ``decision_id`` -- is a
+    real identity bug, not a cross-generation divergence, and still fails.
+    """
+    key = content_hash([context["purpose"], row["event_id"], row["strategy"],
+                        context["deployment"], context["clock"], context["session"]])
+    decision_id = "prediction:" + row["row_id"]
+    try:
+        return insert(conn, logical_key=key, decision_id=decision_id, payload=row,
+                      purpose=context["purpose"], kind="prediction",
+                      validations=context["validations"], created_at=format_timestamp(clock.now()),
+                      generation_ref=generation_ref)
+    except DecisionConflict:
+        existing = conn.execute(
+            "SELECT decision_id, generation_ref, payload_hash FROM decisions WHERE decision_id=?",
+            (decision_id,)).fetchone()
+        if existing is None:
+            raise fail("IDEMPOTENCY_CONFLICT",
+                      "decision content conflicts with its logical identity") from None
+        record_divergence(
+            conn, decision_id=decision_id, scope=context["scope"], occurrence=context["session"],
+            existing_generation_ref=existing["generation_ref"], attempted_generation_ref=generation_ref,
+            existing_payload_hash=existing["payload_hash"], attempted_payload_hash=content_hash(row),
+            reason="a later generation committed different content for an already-decided "
+                   "scheduled occurrence; the first committed prediction stays authoritative "
+                   "(guide §5.5 item 1)",
+            created_at=format_timestamp(clock.now()))
+        return None
+
+
+def _advance_decisions_watermark(conn, context, candidates, *, clock):
+    """Enqueue export/release_intent and advance the "decisions" watermark --
+    unless an earlier generation already completed this exact (scope,
+    session) with different content, in which case none of the three runs
+    (guide §5.5 item 1): a second generation's own release_key almost always
+    differs from the first's even when no individual row diverged (it is
+    derived from THIS generation's own plan/evidence artifacts), and
+    advancing anything here would either IDEMPOTENCY_CONFLICT the watermark
+    or point export at content this generation never actually committed.
+    Leaving the first generation's watermark in place is what makes it
+    authoritative.
+    """
+    validated_hash = content_hash({
+        "candidate": context.get("candidate_content_hash", content_hash(candidates)),
+        "plan": context.get("plan_artifact_id"), "evidence": context.get("evidence_artifact_id"),
+    })
+    release_key = content_hash([context["scope"], context["session"], validated_hash])
+    prior = conn.execute(
+        "SELECT occurrence, receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+        "AND stage='decisions' AND generation=''", (context["scope"],)).fetchone()
+    superseded = (prior is not None and prior["occurrence"] == context["session"]
+                 and prior["receipt_ref"] != release_key)
+    if superseded:
+        return
+    enqueue(conn, "export", release_key, {"validation": validated_hash})
+    enqueue(conn, "release_intent", release_key, {"validation": validated_hash})
+    watermark(conn, "nightly", context["scope"], "decisions", context["session"], release_key,
+             clock=clock)
+
+
 def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
     """Insert decisions plus export/release intent under an already-open attempt transaction."""
     if not conn.in_transaction:
@@ -141,25 +221,14 @@ def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
     if context.get("candidate_rows_hash") != content_hash(candidates):
         raise fail("INPUT_CHANGED", "candidate rows changed after validation")
     _verify_committed_bindings(conn, claim, context.get("bindings"))
-    receipts = []
-    for row in candidates:
-        key = content_hash([context["purpose"], row["event_id"], row["strategy"],
-                            context["deployment"], context["clock"], context["session"]])
-        try:
-            receipts.append(insert(
-                conn, logical_key=key, decision_id="prediction:" + row["row_id"],
-                payload=row, purpose=context["purpose"], kind="prediction",
-                validations=context["validations"], created_at=format_timestamp(clock.now())))
-        except DecisionConflict:
-            raise fail("IDEMPOTENCY_CONFLICT", "decision content conflicts with its logical identity") from None
-    validated_hash = content_hash({
-        "candidate": context.get("candidate_content_hash", content_hash(candidates)),
-        "plan": context.get("plan_artifact_id"), "evidence": context.get("evidence_artifact_id"),
-    })
-    release_key = content_hash([context["scope"], context["session"], validated_hash])
-    enqueue(conn, "export", release_key, {"validation": validated_hash})
-    enqueue(conn, "release_intent", release_key, {"validation": validated_hash})
-    watermark(conn, "nightly", context["scope"], "decisions", context["session"], release_key, clock=clock)
+    # guide §5.5 item 1: the first committed record for a scheduled decision
+    # occurrence stays authoritative forever; a later generation's differing
+    # content for the same row never rewrites it (see the two helpers above).
+    generation_ref = _decision_generation_ref(context)
+    receipts = [receipt for receipt in
+               (_commit_row_or_diverge(conn, context, row, generation_ref, clock=clock)
+                for row in candidates) if receipt is not None]
+    _advance_decisions_watermark(conn, context, candidates, clock=clock)
     return receipts
 
 

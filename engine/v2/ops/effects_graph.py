@@ -107,6 +107,10 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
     ``export generation differs from catalog`` conflict.
     """
     scope = effect_scope(claim)
+    # guide §5.5 item 1: this job's own pinned plan identity, so a genuinely
+    # new same-session generation records its OWN "export" watermark receipt
+    # instead of colliding with an earlier generation's.
+    generation = _generation_ref(claim)
     # P2-C03: the job's own ``session`` param is always the REQUESTED date;
     # the decisions watermark's occurrence is decision_commit's own
     # finality-RESOLVED date (context["session"], written verbatim by
@@ -147,7 +151,8 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
         _mark_export_delivered(inner_conn, release_key, receipt)
         if settlement_present:
             _mark_export_delivered(inner_conn, settlement_wm["receipt_ref"], receipt)
-        watermark(inner_conn, "nightly", scope, "export", session, tar_ref.content_hash, clock=clock)
+        watermark(inner_conn, "nightly", scope, "export", session, tar_ref.content_hash, clock=clock,
+                 generation=generation)
 
     return effect, (("ledger_export", tar_ref),)
 
@@ -171,13 +176,19 @@ def _run_engineering_gate(repo_root):
 def engineering_gate_effect(conn, store, claim, repo_root, *, clock):
     scope = effect_scope(claim)
     session = claim.spec.parameters["session"]
+    # guide §5.5 item 1: the real 2026-09-14 failure -- an earlier generation
+    # (a different code_hash) had already completed engineering_gate for this
+    # (scope, session), so this run's own gate document, differing only in
+    # code_hash, collided with it. Scoping the receipt per generation is what
+    # fixes that; a genuine retry of the SAME generation stays idempotent.
+    generation = _generation_ref(claim)
     document = _run_engineering_gate(repo_root)
     ref = store.publish_bytes(json.dumps(document, sort_keys=True, default=str).encode(),
                               schema_ref="engineering_gate.v1.0")
 
     def effect(inner_conn):
         watermark(inner_conn, "nightly", scope, "engineering_gate", session, ref.content_hash,
-                 clock=clock)
+                 clock=clock, generation=generation)
 
     return effect, (("engineering_gate", ref),)
 
@@ -354,7 +365,12 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
     if staged["eligible"]:
         _bind_release_intent(conn, scope, session, release_id, clock=clock)
     keepalive()
-    publish_local(conn, claim, store, target, release_id, scope=scope, clock=clock, fault=fault)
+    # guide §5.5 item 1: the SAME generation identity used above to form
+    # ``release_id`` also scopes the "publication"/"delivery" watermark rows
+    # ``publish_local`` writes, so a second generation's publish never
+    # collides with the first's already-acknowledged receipt.
+    publish_local(conn, claim, store, target, release_id, scope=scope, clock=clock,
+                  generation=generation_ref, fault=fault)
     return None, ()
 
 
@@ -368,12 +384,25 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     to pending (rather than waiting out its lease) so an immediate retry can
     claim it — the job's own retry policy is what makes this "retryable"."""
     scope = effect_scope(claim)
+    # guide §5.5 item 1: this job's own pinned plan identity, so a genuinely
+    # new same-session generation records its OWN "backup" watermark receipt.
+    generation = _generation_ref(claim)
     # P2-C03: key/watermark the backup by the same resolved session export
     # and decisions use, falling back to the requested one before any
     # decisions watermark exists.
     decisions_wm = _watermark_row(conn, scope, "decisions")
     session = decisions_wm["occurrence"] if decisions_wm is not None else claim.spec.parameters["session"]
-    key = "bkp" + content_hash([scope, session]).split(":")[1][:24]
+    # guide §5.5 item 1: the backup EFFECT's own enqueue key (not only its
+    # watermark) must be generation-scoped too -- unlike engineering_gate/
+    # ledger_export, ``prepare_backup`` is ALREADY idempotent by content
+    # (P2-C07: an existing row for this key is reused untouched), so a
+    # second generation reusing generation 1's key would not conflict, but
+    # ``run_backup``'s own ``claim(...)`` would find nothing pending once
+    # generation 1's backup already delivered and refuse with
+    # STALE_EXPECTATION -- generation 2 would never get its own receipt at
+    # all. Folding ``generation`` in gives it its own key, effect row and
+    # on-disk snapshot, exactly like the other three effects.
+    key = "bkp" + content_hash([scope, session, generation]).split(":")[1][:24]
     owner = claim.attempt_id
     prepare_backup(conn, key, {}, clock=clock)
     target = Path(ops_root) / "backups" / scope
@@ -391,5 +420,6 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     # "its own" watermark (D20): a retry after failure never advances any
     # OTHER stage's watermark, only this one, and only on success.
     with transaction(conn):
-        watermark(conn, "nightly", scope, "backup", session, content_hash(manifest), clock=clock)
+        watermark(conn, "nightly", scope, "backup", session, content_hash(manifest), clock=clock,
+                 generation=generation)
     return None, ()
