@@ -36,6 +36,10 @@ from tests.ops_support import (
     request,
 )
 
+#: Real-process recovery: reconcile's ownership proof scans this host's live
+#: process table, so it runs in the serial xdist group (see tests/conftest.py).
+pytestmark = pytest.mark.xdist_group("serial")
+
 ROOT = Path(__file__).resolve().parents[1]
 STEPS, STEP_SECONDS = 8, 50
 

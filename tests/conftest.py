@@ -61,6 +61,8 @@ def pytest_configure(config):
 #   step on. The file's other tests never touch a real subprocess.
 # - tests/test_v2_ops_serving_browser.py (whole file): drives a real
 #   Playwright browser.
+# - tests/test_v2_ops_coordinator_lease.py (whole file): lost-lease tests settle through
+#   the real `prove_ownership_gone` /proc scan; in parallel it quarantined the attempt.
 #
 # NOT grouped, and why: the ~30 other tests that launch a real worker
 # subprocess through `Service`/`tests.ops_support.TEST_POLICY` (in
