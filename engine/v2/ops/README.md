@@ -208,6 +208,33 @@ cache identity (`supervisor.py`, `checkpoints.commit_checkpoint`) folds the
 same resolved `(name, artifact_id)` pairs into its `inputs` hash, so a job
 whose parent output changed cannot reuse a stale checkpoint.
 
+The four effect-receipt kinds (`ledger_export`, `engineering_gate`,
+`publication`, `backup`) run a trivial pure worker (`worker.py`'s
+`_dispatch_effect_receipt`) plus a coordinator effect
+(`effects_graph.py`, called from `supervisor.Service._coordinator_effect`)
+that does the real catalog/outbox/filesystem work and may publish its own
+`extra_refs` artifact. Both land in `attempt_outputs`
+(`PRIMARY KEY(attempt_id, name)`), so the worker's receipt is always named
+`<kind>_receipt` — never the bare kind name a coordinator-published artifact
+(e.g. `ledger_export`'s tar, `engineering_gate`'s gate document) uses, which
+is also the name downstream `job_<id>#<name>` bindings expect. A duplicate
+name refuses cleanly with `VALIDATION_FAILED`
+(`supervisor._refuse_output_name_collisions`) rather than surfacing a raw
+`sqlite3.IntegrityError`. `tests/test_v2_ops_effect_receipt_collision.py`
+proves this end to end through a real `Service` with real subprocess
+workers — the gap every direct-call test of the coordinator effect functions
+leaves open — and `tests/test_v2_ops_render_parity.py`'s
+`test_every_output_binding_names_an_output_its_producer_actually_registers`
+checks every `#output_name` binding against the set its producer kind
+actually registers.
+
+Writing the global `"shadow"` effect scope (`nightly.effect_scope_for`) must
+be explicit: `ops plan nightly --full-run` records the declaration and
+refuses unless `--tickers` equals `--context-tickers`; without it, every
+plan gets a subset scope (`"shadow:" + hash(watchlist)`), even when the
+watchlist happens to equal the context — equality alone is never inferred
+as a full run. See the Phase 1 runbook's `plan nightly` row.
+
 Settlement workers capture only newly appended legacy outcome bytes.  The
 coordinator validates those observations against committed predictions and
 imports them under the active fence; settlement is not checkpoint-shortcut

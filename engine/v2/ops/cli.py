@@ -98,6 +98,12 @@ def parser():
     plan.add_argument("--context-tickers", default="",
                       help="historical evidence ticker universe: comma list or @file "
                            "(comma- or newline-separated); defaults to --tickers")
+    plan.add_argument("--full-run", action="store_true",
+                      help="declare this run as scoring its whole context: writes the global "
+                           "'shadow' effect scope instead of a subset hash. Refused unless "
+                           "--tickers equals --context-tickers exactly. Omitted (the default), "
+                           "the effect scope is always the subset scope, even when the "
+                           "watchlist happens to equal the context.")
     plan.add_argument("--year-start", type=int, default=2024)
     plan.add_argument("--year-end", type=int, default=2026)
     plan.add_argument("--input-mode", default="legacy", choices=("legacy", "snapshot"),
@@ -212,7 +218,7 @@ def _plan_command(args, root, conn, clock):
                             tickers=tickers, context_tickers=context_tickers,
                             year_start=args.year_start, year_end=args.year_end,
                             expected_population=population, clock=clock,
-                            input_mode=args.input_mode,
+                            input_mode=args.input_mode, full_run=args.full_run,
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
                                                              population))
     else:
@@ -250,14 +256,20 @@ def dispatch(args, root, conn, clock):
             if plan.get("blocked_prerequisites"):
                 raise fail("INVALID_REQUEST", "nightly plan has unresolved prerequisites",
                           details={"blocked_prerequisites": plan["blocked_prerequisites"]})
+            context_tickers = tuple(plan.get("context_tickers", ()))
+            # P2-5 collision fix / effect-scope decision: only a plan built
+            # with ``--full-run`` declares the global universe; every other
+            # plan gets a subset effect scope even when the watchlist equals
+            # the context (nightly.effect_scope_for).
+            full_universe = context_tickers if plan.get("full_run") else None
             requests = build_legacy_job_requests(
                 plan, tickers=tuple(plan.get("tickers", ())),
-                context_tickers=tuple(plan.get("context_tickers", ())),
+                context_tickers=context_tickers,
                 year_start=plan["year_start"], year_end=plan["year_end"],
                 input_refs=(plan["input_manifest_ref"],),
                 expected_population=tuple(plan.get("expected_population", ())),
                 include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
-                snapshot_inputs=plan.get("snapshot_inputs"))
+                snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe)
             receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
             return {"run_id": "run_" + plan["plan_hash"][:24],
                     "jobs": [to_document(item) for item in receipts]}

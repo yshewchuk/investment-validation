@@ -943,7 +943,12 @@ def test_backup_retry_after_clock_advance_keeps_original_cutoff(tmp_path):
 
 def test_new_stages_are_wired_with_parents_bindings_and_submit(tmp_path):
     plan = build_nightly_plan(str(REPO), SESSION)
-    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+    # This test is about DAG wiring, not effect-scope defaults (see
+    # tests/test_v2_ops_scope_separation.py for those) -- declare a full run
+    # explicitly so the "shadow" assertion below still reflects a real
+    # ``--full-run`` plan, not the (now subset-by-default) bare omission.
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+                                         full_universe=("FAKE",))
     by_kind = {r.job.kind: r for r in requests}
     for kind in ("ledger_export", "engineering_gate", "publication", "backup"):
         assert kind in by_kind

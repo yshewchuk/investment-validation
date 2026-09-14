@@ -374,6 +374,7 @@ class Service:
                 max_bytes=claim.resources.scratch_limit_bytes)) for o in outputs]
         keepalive()
         effect, extra_refs = self._coordinator_effect(claim, refs, launch, keepalive)
+        _refuse_output_name_collisions(refs, extra_refs)
         keepalive()
         def effects(conn):
             for name, ref in (*refs, *extra_refs):
@@ -536,6 +537,21 @@ def _report_stranded(claim, problem):
                       "problem": {key: to_document(problem)[key]
                                   for key in ("code", "category", "retryable", "message")}}),
           file=sys.stderr, flush=True)
+
+
+def _refuse_output_name_collisions(refs, extra_refs):
+    """A worker output and a coordinator ``extra_refs`` artifact sharing one
+    name would both try to claim the same ``(attempt_id, name)`` row in
+    ``attempt_outputs`` (its primary key) — refuse cleanly here, before the
+    commit transaction, rather than let the second INSERT surface a raw
+    ``sqlite3.IntegrityError`` out of ``commit_attempt``.
+    """
+    names = [name for name, _ in refs] + [name for name, _ in extra_refs]
+    if len(names) == len(set(names)):
+        return
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    raise OpsError(make_problem("VALIDATION_FAILED", "attempt output names collide",
+                                details={"duplicates": duplicates}))
 
 
 def _named_ref(refs, name):

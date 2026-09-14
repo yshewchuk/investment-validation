@@ -41,6 +41,7 @@ from engine.v2.ledger.export import export_generation
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.legacy_adapter import _action_render
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
+from engine.v2.ops.submission import job_id_for
 from engine.v2.ops.render_inputs import (
     ABSENT_STAGES,
     absent_stage_flags,
@@ -677,6 +678,60 @@ def test_every_job_binding_names_a_declared_dependency():
                 dependency = binding.split("#", 1)[0]
                 if dependency not in declared:
                     violations.append((request.job.kind, name, dependency))
+    assert violations == []
+
+
+#: The output names each producer kind actually registers in
+#: ``attempt_outputs``, mirroring ``worker.py``'s ``dispatch``/
+#: ``_dispatch_effect_receipt`` (worker-side) plus
+#: ``effects_graph.py``'s per-kind ``extra_refs`` (coordinator-side).
+#: ``ledger_export``/``engineering_gate`` carry both their receipt AND
+#: their coordinator-published artifact under the bare kind name; a worker
+#: output and a coordinator ``extra_refs`` output sharing one name would
+#: collide in ``attempt_outputs`` (P2-5 collision fix) -- kept explicit here
+#: so a future rename drifting out of sync with a binding is caught, not
+#: silently resolved to the wrong artifact.
+_DECLARED_OUTPUT_NAMES = {
+    "legacy_finality": frozenset({"legacy_finality", "legacy_finality_coverage"}),
+    "legacy_score": frozenset({"legacy_score"}),
+    "legacy_decisions": frozenset({"legacy_decisions"}),
+    "legacy_settlement": frozenset({"legacy_settlement"}),
+    "legacy_model_evidence": frozenset({"legacy_model_evidence"}),
+    "legacy_render": frozenset({"legacy_render"}),
+    "legacy_selfcheck": frozenset({"legacy_selfcheck"}),
+    "legacy_decision_replay": frozenset({"legacy_decision_replay"}),
+    "legacy_materialize": frozenset({"materialization_manifest"}),
+    "decision_evidence": frozenset({"decision_plan", "decision_evidence"}),
+    "ledger_export": frozenset({"ledger_export_receipt", "ledger_export"}),
+    "engineering_gate": frozenset({"engineering_gate_receipt", "engineering_gate"}),
+    "publication": frozenset({"publication_receipt"}),
+    "backup": frozenset({"backup_receipt"}),
+}
+
+
+def test_every_output_binding_names_an_output_its_producer_actually_registers():
+    """P2-5 collision-fix companion to
+    ``test_every_job_binding_names_a_declared_dependency``: that test proves
+    every ``job_<id>#name`` binding's *job* is a declared dependency; this
+    proves the ``#name`` half is one the producer's *kind* actually
+    registers, so a stale or colliding name is caught here instead of
+    resolving to whatever else happens to share the row at runtime."""
+    plan = build_nightly_plan("/root/investing-plan", str(AS_OF.date()))
+    requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026,
+                                         full_universe=(TICKER,))
+    kind_by_job_id = {job_id_for("shadow", r.idempotency_key): r.job.kind for r in requests}
+    violations = []
+    for request in requests:
+        bindings = request.job.parameters.get("input_bindings") or {}
+        for name, binding in bindings.items():
+            binding = str(binding)
+            if not binding.startswith("job_"):
+                continue
+            dependency, _, output_name = binding.partition("#")
+            producer_kind = kind_by_job_id.get(dependency)
+            declared = _DECLARED_OUTPUT_NAMES.get(producer_kind, frozenset())
+            if output_name not in declared:
+                violations.append((request.job.kind, name, producer_kind, output_name))
     assert violations == []
 
 
