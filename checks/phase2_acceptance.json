@@ -55,7 +55,9 @@
       "tier": 1,
       "tests": ["tests/test_v2_data_legacy_materialization.py",
                 "tests/test_v2_ops_snapshot_stages.py",
-                "tests/test_v2_data_reference_inputs.py"]
+                "tests/test_v2_data_reference_inputs.py",
+                "tests/test_v2_data_tier4_coverage.py",
+                "tests/test_v2_ops_tier4_coverage.py"]
     },
     "D14": {
       "tier": 1,
@@ -82,7 +84,9 @@
     },
     "D18": {
       "tier": 1,
-      "tests": ["tests/test_v2_ops_nightly_completion.py"]
+      "tests": ["tests/test_v2_ops_nightly_completion.py",
+                "tests/test_v2_ops_resolved_session.py",
+                "tests/test_v2_ops_scope_separation.py"]
     },
     "D19": {
       "tier": 2,
@@ -91,7 +95,9 @@
     },
     "D20": {
       "tier": 1,
-      "tests": ["tests/test_v2_ops_effects_graph.py"]
+      "tests": ["tests/test_v2_ops_effects_graph.py",
+                "tests/test_v2_ops_resolved_session.py",
+                "tests/test_v2_ops_scope_separation.py"]
     }
   }
 }

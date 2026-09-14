@@ -424,8 +424,14 @@ def test_query_exceeding_contract_limits_propagates_the_repository_code(tmp_path
     request = _build_request(repository, snap, _snapshot_object_ref(store), store)
     oversized = dict(request.table_queries)
     original = oversized["trades"]
+    # A narrower projection (drop one column) also breaks whole-table-copy
+    # eligibility (task brief fix: daily_market's coverage check no longer
+    # scans trades unconditionally, so trades must actually take the
+    # scan-and-rewrite path itself for Repository.scan's own contract-limit
+    # validation to run and raise QUERY_NOT_BOUNDED).
     oversized["trades"] = dataclasses.replace(
-        original, max_batch_rows=60_000, max_result_rows=3_000_000)
+        original, columns=tuple(c for c in original.columns if c != "provenance"),
+        max_batch_rows=60_000, max_result_rows=3_000_000)
     bad_request = dataclasses.replace(request, table_queries=oversized)
     root_over = tmp_path / "root_over"
     with pytest.raises(DataError) as err:
@@ -530,22 +536,29 @@ def test_whole_table_interval_has_no_sentinel_bound(tmp_path):
     assert interval.end_exclusive == "2021-02-10T00:00:00.000001"
 
 
-def test_trades_span_outside_evidence_scope_is_refused(tmp_path):
+def test_trades_span_outside_evidence_scope_is_accepted_when_daily_market_is_whole_table(tmp_path):
+    """Task brief real-data defect: ``daily_market`` is whole_table by
+    construction (LEGACY_SCORE_READ_PLAN_V1), so trades's real span is
+    covered no matter how narrow ``evidence_scope`` is -- a bounded board
+    universe (the real failure: 201 tickers, 2023-2026) can never contain the
+    real committed trades table's full span (2,724 tickers, 2018-2026), and
+    it must not have to. The old behavior -- refusing here -- was the bug;
+    this replaces the old negative control of the same name."""
     conn, store, snap = _build_snapshot(tmp_path)
     repository = Repository(conn, store)
-    # trades carries BBB (see TRADE_ROWS); an evidence_scope missing it
-    # under-covers Scorer._entry_implied_move's own daily_market read.
+    # trades carries BBB (see TRADE_ROWS); an evidence_scope missing it no
+    # longer under-covers Scorer._entry_implied_move's own daily_market read,
+    # because that read is a whole-table copy regardless of evidence_scope.
     narrow_evidence = {"tickers": ["AAA"], "years": [2020, 2021]}
     request = _build_request(repository, snap, _snapshot_object_ref(store), store,
                              direct_scope={"tickers": ["AAA"], "years": [2020]},
                              evidence_scope=narrow_evidence)
-    assert not lm.evidence_scope_covers_trades(repository, request)
-    assert not lm.read_plan_complete(request, repository)
+    assert request.table_queries["daily_market"].key_filter == ()  # whole-table: no ticker predicate
+    assert lm.evidence_scope_covers_trades(repository, request)
+    assert lm.read_plan_complete(request, repository)
     dest_root = tmp_path / "legacy_root"
-    with pytest.raises(DataError) as err:
-        materialize(repository, store, request, dest_root)
-    assert err.value.code == "EVIDENCE_SCOPE_INCOMPLETE"
-    assert not dest_root.exists()  # cleanup-on-failure: refused before any table was written
+    manifest = materialize(repository, store, request, dest_root)
+    assert manifest
 
 
 def test_trades_span_inside_evidence_scope_is_accepted(tmp_path):
@@ -554,6 +567,62 @@ def test_trades_span_inside_evidence_scope_is_accepted(tmp_path):
     request = _build_request(repository, snap, _snapshot_object_ref(store), store)
     assert lm.evidence_scope_covers_trades(repository, request)
     assert lm.trades_span(repository, request) == {"tickers": {"AAA", "BBB"}, "years": {2020, 2021}}
+
+
+def test_row_scoped_daily_market_excluding_a_trades_ticker_is_refused(tmp_path):
+    """Task brief decision, second half: when ``daily_market`` is NOT a
+    whole-table read (hypothetically -- today's plan never row-scopes it),
+    ``trades``'s real span must be checked against THAT query's own ticker
+    predicate/time bound, not the abstract evidence_scope. A synthetic ticker
+    predicate excluding a real trades ticker (BBB) must be refused, and the
+    refusal must name a COUNT, never the ticker value itself
+    (engine.v2.data.errors: no row value may reach a message)."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    whole = request.table_queries["daily_market"]
+    # Full calendar-year coverage on the time bound (matching _scope_bounds's
+    # own shape for a row-scoped read) isolates the ticker predicate as the
+    # only uncovered dimension.
+    row_scoped = dataclasses.replace(
+        whole, key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA",)),),
+        time_interval=TimeInterval(column=whole.time_interval.column,
+                                   start_inclusive="2020-01-01T00:00:00.000000",
+                                   end_exclusive="2022-01-01T00:00:00.000000"))
+    request = dataclasses.replace(request, table_queries={**request.table_queries, "daily_market": row_scoped})
+
+    assert not lm.evidence_scope_covers_trades(repository, request)
+    assert not lm.read_plan_complete(request, repository)
+    dest_root = tmp_path / "legacy_root"
+    with pytest.raises(DataError) as err:
+        materialize(repository, store, request, dest_root)
+    assert err.value.code == "EVIDENCE_SCOPE_INCOMPLETE"
+    assert not dest_root.exists()  # cleanup-on-failure: refused before any table was written
+    assert err.value.problem.details == {"uncovered_ticker_count": 1, "uncovered_year_count": 0}
+    assert "BBB" not in err.value.problem.message  # a count, never the value (§7.2 redaction)
+
+
+def test_row_scoped_daily_market_narrower_years_is_refused_by_count(tmp_path):
+    """Same decision, the time-bound half: a row-scoped ``daily_market`` query
+    whose own interval excludes a real trades year is refused with a year
+    count, independent of the ticker predicate (left wide open here)."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    whole = request.table_queries["daily_market"]
+    row_scoped = dataclasses.replace(
+        whole,
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),),
+        time_interval=TimeInterval(column=whole.time_interval.column,
+                                   start_inclusive="2020-01-01T00:00:00.000000",
+                                   end_exclusive="2021-01-01T00:00:00.000000"))
+    request = dataclasses.replace(request, table_queries={**request.table_queries, "daily_market": row_scoped})
+
+    assert not lm.evidence_scope_covers_trades(repository, request)
+    with pytest.raises(DataError) as err:
+        lm.materialize_tree(repository, store, request, tmp_path / "legacy_root2")
+    assert err.value.code == "EVIDENCE_SCOPE_INCOMPLETE"
+    assert err.value.problem.details == {"uncovered_ticker_count": 0, "uncovered_year_count": 1}
 
 
 def test_missing_pinned_ref_is_refused(tmp_path):
@@ -642,8 +711,16 @@ def test_narrowed_whole_table_query_never_silently_copies_the_whole_table(tmp_pa
         time_interval=TimeInterval(column="date", start_inclusive="2020-01-01",
                                    end_exclusive="2020-01-03"),
         max_result_rows=1, max_batch_rows=1)
+    # This narrowed daily_market read is deliberately unrelated to trades's
+    # real span (it exists only to test row-scoped write mechanics below), so
+    # trades is also narrowed to match nothing -- decoupling it from the task
+    # brief's daily_market-covers-trades gate, which this test does not exercise.
+    no_trades_match = dataclasses.replace(
+        request.table_queries["trades"],
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("ZZZ",)),))
     request = dataclasses.replace(
-        request, table_queries={**request.table_queries, "daily_market": narrow_query})
+        request, table_queries={**request.table_queries, "daily_market": narrow_query,
+                                "trades": no_trades_match})
     dest_root = tmp_path / "legacy_root"
     tree = lm.materialize_tree(repository, store, request, dest_root)
 
@@ -665,8 +742,14 @@ def test_ceiling_below_actual_rows_is_refused_not_clamped(tmp_path):
         request.table_queries["daily_market"],
         key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
         max_result_rows=1, max_batch_rows=1)  # AAA matches 2 rows (2020, 2021), ceiling says 1
+    # Decoupled from the task brief's daily_market-covers-trades gate, same
+    # as the sibling test above: this test is about the ceiling, not trades.
+    no_trades_match = dataclasses.replace(
+        request.table_queries["trades"],
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("ZZZ",)),))
     request = dataclasses.replace(
-        request, table_queries={**request.table_queries, "daily_market": narrow_query})
+        request, table_queries={**request.table_queries, "daily_market": narrow_query,
+                                "trades": no_trades_match})
     dest_root = tmp_path / "legacy_root"
     with pytest.raises(DataError) as err:
         lm.materialize_tree(repository, store, request, dest_root)
@@ -860,14 +943,14 @@ def test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale(tmp_path):
 def test_tampered_object_byte_is_refused_with_nothing_left_writable(tmp_path):
     """(e): a copied table's source object corrupted on disk after
     verification (simulated bit rot, not a bug in this module's write path)
-    is caught by _copy_verified_object's own hash check (never trades: that
-    table's real span is independently re-verified even earlier, by
-    evidence_scope_covers_trades's own repository.scan, which would raise
-    OBJECT_CORRUPT first and never exercise _copy_verified_object at all).
-    Refused as OBJECT_CORRUPT, and -- via legacy_adapter.materialize's
-    cleanup-on-failure -- leaves NOTHING behind, including earnings_events,
-    copied successfully just before daily_market in SCORE_READ_PLAN_TABLES
-    order."""
+    is caught by _copy_verified_object's own hash check. daily_market is
+    whole-table-copy-eligible here, so evidence_scope_covers_trades's own
+    check is vacuous by construction and never scans trades at all (task
+    brief decision) -- the corrupted daily_market fragment's own byte copy
+    is what raises OBJECT_CORRUPT. Refused as OBJECT_CORRUPT, and -- via
+    legacy_adapter.materialize's cleanup-on-failure -- leaves NOTHING behind,
+    including earnings_events, copied successfully just before daily_market
+    in SCORE_READ_PLAN_TABLES order."""
     from engine.v2.foundation import CONTENT_HASH_PREFIX
 
     conn, store, snap = _build_snapshot(tmp_path)

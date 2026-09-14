@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:986701953f75cd22168b0d356873a3ee5fa72ce787a2a7c814c8bb5e39ca7da4",
+  "suite_version": "phase2_coverage_suite:58c759ba1dedde202d98e2cac9a185f7379b92ae5ba92932638b276bdc142d02",
   "test_files": [
     "tests/test_checks_phase2_fault_matrix.py",
     "tests/test_checks_phase2_parity.py",
@@ -20,14 +20,18 @@
     "tests/test_v2_data_reference_inputs.py",
     "tests/test_v2_data_repository.py",
     "tests/test_v2_data_roundtrip.py",
+    "tests/test_v2_data_tier4_coverage.py",
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_nightly_completion.py",
     "tests/test_v2_ops_parity.py",
     "tests/test_v2_ops_render_parity.py",
-    "tests/test_v2_ops_snapshot_stages.py"
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_snapshot_stages.py",
+    "tests/test_v2_ops_tier4_coverage.py"
   ],
-  "source_hash": "sha256:545be812b3bbe3df56d94b43371d03309d540a590264acdd25f0e9f1c5858ef9",
+  "source_hash": "sha256:37aceda46f0ce26a4184ed34315fb4ef0b25242f81f9f848defd63c23f8a3f63",
   "packages": {
     "engine.v2.contracts": {
       "executed": 605,
@@ -57,8 +61,8 @@
       "percentage": 89.87012987012987
     },
     "engine.v2.data": {
-      "executed": 2071,
-      "executable": 2194,
+      "executed": 2261,
+      "executable": 2375,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -77,11 +81,12 @@
         "engine/v2/data/reference_inputs.py",
         "engine/v2/data/repository.py",
         "engine/v2/data/schema.py",
+        "engine/v2/data/tier4_coverage.py",
         "engine/v2/data/time_formats.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 94.39380127620784
+      "percentage": 95.2
     },
     "engine.v2.features": {
       "executed": 0,
@@ -207,8 +212,8 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 3607,
-      "executable": 4983,
+      "executed": 3702,
+      "executable": 4997,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -266,7 +271,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 72.38611278346377
+      "percentage": 74.08445067040225
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -1168,11 +1173,19 @@
       "outcome": "passed"
     },
     {
-      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_outside_evidence_scope_is_refused",
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_outside_evidence_scope_is_accepted_when_daily_market_is_whole_table",
       "outcome": "passed"
     },
     {
       "nodeid": "tests/test_v2_data_legacy_materialization.py::test_trades_span_inside_evidence_scope_is_accepted",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_row_scoped_daily_market_excluding_a_trades_ticker_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_legacy_materialization.py::test_row_scoped_daily_market_narrower_years_is_refused_by_count",
       "outcome": "passed"
     },
     {
@@ -1724,6 +1737,78 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_champion_producer_models_keeps_only_tier4_producers",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-01-15-2026-01-10]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-02-03-2026-01-28]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2026-03-01-2026-03-01]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_fold_rule_parity_with_legacy_scorer[2025-12-20-2026-01-05]",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_required_serving_triples_crosses_events_with_every_producer",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_required_serving_triples_dedupes_repeated_event_as_of_pairs",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_covered_triple_launches_clean",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_absent_when_nothing_is_pinned",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_fold_mismatch_for_a_new_month_beyond_pinned_folds",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_panel_mismatch_when_header_disagrees_with_filename",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_missing_reason_features_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_multiple_misses_are_all_listed",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_oversized_cache_file_is_never_unpickled",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_past_the_cap",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_on_hash_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_returns_none_for_a_missing_file",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_data_tier4_coverage.py::test_serving_header_accessor_reads_plain_fields_not_the_estimator",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_effects_graph.py::test_ledger_export_filters_purposes_and_binds_render",
       "outcome": "passed"
     },
@@ -2080,7 +2165,135 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_ops_render_parity.py::test_every_output_binding_names_an_output_its_producer_actually_registers",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_render_parity.py::test_prior_selfcheck_ref_binds_only_when_the_caller_supplies_one",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_resolve_effective_session_walks_back_and_passes_through_unchanged",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_resolve_effective_session_refuses_a_resolution_after_the_request",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_resolve_effective_session_refuses_when_not_final",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_walk_back_flag_matches_v1_kind_and_detail_and_is_none_without_one",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_action_finality_raises_source_not_final_when_no_session_qualifies",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_derive_resolves_the_session_and_keeps_the_requested_one",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_derive_refuses_the_same_bad_finality_shapes",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_action_score_scores_at_the_resolved_session_on_walk_back",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_action_decision_replay_rescoring_uses_the_resolved_session",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_action_settlement_scores_outcomes_through_the_resolved_session",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_action_decisions_uses_the_plan_resolved_session_for_as_of",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_action_render_execution_clock_and_walk_back_flag_match_v1",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_score_replay_settlement_and_publication_bind_and_depend_on_finality",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_walk_back_commits_with_resolved_as_of_and_advances_the_resolved_watermark",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_no_walk_back_regression_commits_exactly_as_before",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_ledger_export_watermark_and_receipt_use_the_resolved_session",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_publication_uses_the_resolved_session_on_walk_back",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_resolved_session.py::test_publication_still_refuses_a_decisions_watermark_that_disagrees_with_finality",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_build_legacy_job_requests_context_tickers_are_recorded_per_stage",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_full_run_must_be_declared_explicitly",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_build_legacy_job_requests_refuses_watchlist_outside_context",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_build_legacy_job_requests_full_run_refuses_narrower_watchlist",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_nightly_plan_refuses_watchlist_outside_context",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_nightly_plan_full_run_refuses_a_narrower_watchlist",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_pin_snapshot_inputs_refuses_a_watchlist_outside_the_context",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_pin_snapshot_inputs_widens_evidence_scope_not_direct_scope",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_action_score_loads_context_tickers_and_scores_only_the_watchlist",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_action_score_context_tickers_defaults_to_the_watchlist",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_action_decision_replay_loads_context_tickers_not_the_watchlist",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_subset_run_commits_and_exports_under_its_own_scope_through_real_producers",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_scope_separation.py::test_mixed_subset_and_full_runs_keep_independent_watermarks",
       "outcome": "passed"
     },
     {
@@ -2149,6 +2362,62 @@
     },
     {
       "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_planning_refusals",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_planning_succeeds_when_trades_spans_more_tickers_and_earlier_years",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_covered_population_launches",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_missing_cache_refuses_before_any_attempt",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_missing_cache_lists_every_reason",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_no_champions_is_a_noop",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_walked_back_finality_session_moves_the_required_fold",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_no_accepted_generation_yet_is_a_noop",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_matching_manifest_proceeds",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_overlapping_path_with_a_different_hash_refuses",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_non_overlapping_extra_paths_are_allowed",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_pin_read_set_refuses_a_snapshot_mode_barrier_kind_on_mismatch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_pin_read_set_snapshot_mode_barrier_kind_proceeds_on_a_match",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_pin_read_set_legacy_mode_barrier_job_ignores_a_mismatching_shadow_snapshot",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_tier4_coverage.py::test_pin_read_set_leaves_non_barrier_kinds_unchecked",
       "outcome": "passed"
     }
   ],
