@@ -39,6 +39,26 @@ from engine.v2.ops.submission import NamespacePolicy, get_job, submit, submit_gr
 from engine.v2.ops.supervisor import Service, serve
 
 
+def _add_ledger_commands(commands):
+    """The ``ops ledger import-history`` sub-subparser -- bootstraps a fresh
+    catalog's ``decisions``/``decision_imports`` tables from the legacy JSONL
+    ledger so ``legacy_settlement`` has a committed prediction to settle
+    against on a catalog's first shadow night (see
+    ``engine.v2.ops.ledger_history_import``)."""
+    ledger = commands.add_parser("ledger")
+    ledger.add_argument("--root", default=argparse.SUPPRESS)
+    ledger_sub = ledger.add_subparsers(dest="ledger_command", required=True)
+    import_history_p = ledger_sub.add_parser("import-history")
+    import_history_p.add_argument("--source-root", required=True, type=Path,
+                                  help="the legacy checkout to read ledger/predictions and "
+                                       "ledger/outcomes from, read-only")
+    import_history_p.add_argument("--through", default=None,
+                                  help="YYYY-MM-DD; excludes predictions/outcomes dated after "
+                                       "this session (by their own as_of/resolved_at field)")
+    import_history_p.add_argument("--dry-run", action="store_true",
+                                  help="report counts without writing anything")
+
+
 def _add_snapshot_commands(commands):
     """The ``ops snapshot plan-import|submit|promote|rollback`` sub-subparsers,
     split out of :func:`parser` to keep that function under the line budget."""
@@ -127,6 +147,7 @@ def parser():
     reconcile.add_argument("job_id")
     reconcile.add_argument("--expected-attempt", required=True)
     _add_snapshot_commands(commands)
+    _add_ledger_commands(commands)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -299,55 +320,65 @@ def dispatch(args, root, conn, clock):
     if args.command == "plan":
         return _plan_command(args, root, conn, clock)
     if args.command == "submit":
-        store = ArtifactStore(root)
-        ref = artifact(conn, store, args.plan)
-        plan = json.loads(store.read_verified(ref))
-        policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
-        if plan.get("kind") == "nightly":
-            # guide §5.5 item 1 / rearchitecture_phase1_runbook.md
-            # "--idempotency-key semantics for nightly submission": this flag
-            # is REQUIRED by the CLI grammar (every ``submit`` needs one) but
-            # is NEVER read for a nightly plan. Nightly stage identity is
-            # fully and only determined by the plan document itself (session,
-            # scope, and the pinned plan identity -- implementation, legacy
-            # manifest, decision_clock -- nightly.py's ``_plan_identity``), so
-            # two ``submit --plan <same-plan-ref>`` calls with DIFFERENT
-            # ``--idempotency-key`` values are still the same retry and
-            # resolve to the identical jobs; the key only distinguishes
-            # submissions of a non-nightly (``artifact_check``/experiment)
-            # plan below, where it IS the job identity.
-            if plan.get("blocked_prerequisites"):
-                raise fail("INVALID_REQUEST", "nightly plan has unresolved prerequisites",
-                          details={"blocked_prerequisites": plan["blocked_prerequisites"]})
-            _check_submitted_nightly_manifest(plan, conn, store)
-            context_tickers = tuple(plan.get("context_tickers", ()))
-            # P2-5 collision fix / effect-scope decision: only a plan built
-            # with ``--full-run`` declares the global universe; every other
-            # plan gets a subset effect scope even when the watchlist equals
-            # the context (nightly.effect_scope_for).
-            full_universe = context_tickers if plan.get("full_run") else None
-            requests = build_legacy_job_requests(
-                plan, tickers=tuple(plan.get("tickers", ())),
-                context_tickers=context_tickers,
-                year_start=plan["year_start"], year_end=plan["year_end"],
-                input_refs=(plan["input_manifest_ref"],),
-                expected_population=tuple(plan.get("expected_population", ())),
-                include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
-                snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe)
-            # 2026-09-14: refuse before submission a plan that would only
-            # fail later at claim time (RESOURCE_LIMIT_EXCEEDED) because some
-            # job's legacy read set exceeds its resource profile's scratch
-            # budget -- see nightly.plan_scratch_problems.
-            refuse_oversize_plan(conn, store, requests)
-            receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
-            return {"run_id": "run_" + plan["plan_hash"][:24],
-                    "jobs": [to_document(item) for item in receipts]}
-        return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
+        return _submit_command(args, root, conn, clock)
     if args.command == "reconcile":
         return reconcile_command(args, root, conn, clock)
     if args.command == "snapshot":
         return snapshot_command(args, root, conn, clock)
+    if args.command == "ledger":
+        return ledger_command(args, root, conn, clock)
     return job_command(args, conn, clock)
+
+
+def _submit_nightly(plan, conn, store, policy, clock):
+    # guide §5.5 item 1 / rearchitecture_phase1_runbook.md
+    # "--idempotency-key semantics for nightly submission": this flag
+    # is REQUIRED by the CLI grammar (every ``submit`` needs one) but
+    # is NEVER read for a nightly plan. Nightly stage identity is
+    # fully and only determined by the plan document itself (session,
+    # scope, and the pinned plan identity -- implementation, legacy
+    # manifest, decision_clock -- nightly.py's ``_plan_identity``), so
+    # two ``submit --plan <same-plan-ref>`` calls with DIFFERENT
+    # ``--idempotency-key`` values are still the same retry and
+    # resolve to the identical jobs; the key only distinguishes
+    # submissions of a non-nightly (``artifact_check``/experiment)
+    # plan below, where it IS the job identity.
+    if plan.get("blocked_prerequisites"):
+        raise fail("INVALID_REQUEST", "nightly plan has unresolved prerequisites",
+                  details={"blocked_prerequisites": plan["blocked_prerequisites"]})
+    _check_submitted_nightly_manifest(plan, conn, store)
+    context_tickers = tuple(plan.get("context_tickers", ()))
+    # P2-5 collision fix / effect-scope decision: only a plan built
+    # with ``--full-run`` declares the global universe; every other
+    # plan gets a subset effect scope even when the watchlist equals
+    # the context (nightly.effect_scope_for).
+    full_universe = context_tickers if plan.get("full_run") else None
+    requests = build_legacy_job_requests(
+        plan, tickers=tuple(plan.get("tickers", ())),
+        context_tickers=context_tickers,
+        year_start=plan["year_start"], year_end=plan["year_end"],
+        input_refs=(plan["input_manifest_ref"],),
+        expected_population=tuple(plan.get("expected_population", ())),
+        include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
+        snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe)
+    # 2026-09-14: refuse before submission a plan that would only
+    # fail later at claim time (RESOURCE_LIMIT_EXCEEDED) because some
+    # job's legacy read set exceeds its resource profile's scratch
+    # budget -- see nightly.plan_scratch_problems.
+    refuse_oversize_plan(conn, store, requests)
+    receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
+    return {"run_id": "run_" + plan["plan_hash"][:24],
+            "jobs": [to_document(item) for item in receipts]}
+
+
+def _submit_command(args, root, conn, clock):
+    store = ArtifactStore(root)
+    ref = artifact(conn, store, args.plan)
+    plan = json.loads(store.read_verified(ref))
+    policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+    if plan.get("kind") == "nightly":
+        return _submit_nightly(plan, conn, store, policy, clock)
+    return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
 
 
 # --------------------------------------------------------------------------
@@ -389,6 +420,20 @@ def snapshot_command(args, root, conn, clock):
                             expected_snapshot_id=args.expected_snapshot_id,
                             expected_generation=args.expected_generation, clock=clock)
     return {"receipt_ref": ref.artifact_id}
+
+
+def ledger_command(args, root, conn, clock):
+    """``ops ledger import-history`` -- see ``engine.v2.ops.ledger_history_import``."""
+    from datetime import date
+
+    from engine.v2.ops.ledger_history_import import import_history
+
+    through = date.fromisoformat(args.through) if args.through else None
+    if not args.source_root.is_dir():
+        raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
+                  details={"source_root": str(args.source_root)})
+    return import_history(conn, root, args.source_root, through=through,
+                          dry_run=args.dry_run, clock=clock)
 
 
 def capture_command(args):

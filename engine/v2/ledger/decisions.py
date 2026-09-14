@@ -146,8 +146,68 @@ def rows(conn, *, kind=None, through=None):
     return [dict(row) for row in conn.execute(query, (kind, kind, through, through))]
 
 
-def import_lines(conn, source_hash, lines, *, kind, created_at):
-    """Import exact legacy JSONL bytes; duplicate bytes collapse, conflicts abort."""
+def _row_conflicts(existing_row, prior_bytes, original, payload):
+    """Whether ``payload`` (as ``original`` bytes) disagrees with whatever is
+    already on file under this line's ``decision_id`` -- either a prior
+    ``decision_imports`` entry with different bytes, or a committed
+    ``decisions`` row with different canonical content."""
+    if prior_bytes and any(bytes(item[0]) != original for item in prior_bytes):
+        return True
+    return bool(existing_row) and existing_row["payload_json"] != canonical_json(payload)
+
+
+def _record_legacy_divergence(conn, *, decision_id, row_id, existing_row, original, payload,
+                              source_hash, number, created_at, provenance_label):
+    """The user's standing 2026-09-14 decision applied to the legacy ledger
+    itself: the FIRST-imported occurrence of a ``decision_id`` stays
+    authoritative; a later, differing occurrence is durable evidence
+    (``decision_divergences``), never a block and never an overwrite. Its
+    original bytes are still kept in ``decision_imports`` provenance,
+    referencing the FIRST occurrence's ``decision_id`` -- that table has no
+    per-``decision_id`` uniqueness constraint (only ``(source_hash,
+    line_number)``), so this holds without conflict.
+    """
+    record_divergence(
+        conn, decision_id=decision_id, scope="legacy_import", occurrence=row_id,
+        existing_generation_ref=existing_row["generation_ref"],
+        attempted_generation_ref=source_hash + ":" + str(number),
+        existing_payload_hash=existing_row["payload_hash"],
+        attempted_payload_hash=content_hash(payload),
+        reason="legacy_duplicate_row_id: " + (provenance_label or source_hash) + " line "
+               + str(number) + " differs from the first-imported occurrence for " + decision_id,
+        created_at=created_at)
+    conn.execute("INSERT INTO decision_imports VALUES (?,?,?,?)",
+                 (source_hash, number, existing_row["decision_id"], original))
+    return dict(existing_row)
+
+
+def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="raise",
+                 provenance_label=None):
+    """Import exact legacy JSONL bytes; duplicate bytes collapse.
+
+    ``on_conflict`` governs a decision_id that already carries DIFFERENT
+    content than the line being imported (a mismatched ``decisions.
+    payload_json``, or mismatched ``decision_imports.original_bytes``
+    recorded under an earlier line):
+
+    - ``"raise"`` (default -- every pre-existing caller, e.g.
+      ``decision_commit.import_settlement_candidates_in_transaction``):
+      refuses typed as a :class:`DecisionConflict`, unchanged from before
+      ``on_conflict`` existed.
+    - ``"diverge"`` (used only by the legacy history bootstrap importer,
+      :mod:`engine.v2.ops.ledger_history_import`): keeps the FIRST-imported
+      content authoritative and records the later, differing occurrence as a
+      durable ``decision_divergences`` row instead of raising -- see
+      :func:`_record_legacy_divergence`.
+
+    A byte-identical RE-import of the exact same ``(source_hash,
+    line_number)`` always stays a plain no-op in both modes, and a changed
+    byte at an ALREADY-imported ``(source_hash, line_number)`` -- a
+    provenance conflict -- always still refuses in both modes: the ``prior``
+    check below runs first, before ``on_conflict`` is even consulted.
+    """
+    if on_conflict not in ("raise", "diverge"):
+        raise ValueError("on_conflict must be 'raise' or 'diverge'")
     receipts = []
     for number, raw in enumerate(lines, 1):
         original = raw if isinstance(raw, bytes) else raw.encode("utf-8")
@@ -164,14 +224,18 @@ def import_lines(conn, source_hash, lines, *, kind, created_at):
             receipts.append(dict(conn.execute("SELECT * FROM decisions WHERE decision_id=?",
                                                (prior[0],)).fetchone()))
             continue
-        same = conn.execute("SELECT decision_id,payload_json FROM decisions WHERE decision_id=?",
-                            (decision_id,)).fetchone()
+        existing_row = conn.execute("SELECT * FROM decisions WHERE decision_id=?",
+                                    (decision_id,)).fetchone()
         prior_bytes = conn.execute("SELECT original_bytes FROM decision_imports WHERE decision_id=?",
                                    (decision_id,)).fetchall()
-        if prior_bytes and any(bytes(item[0]) != original for item in prior_bytes):
-            raise DecisionConflict("conflicting legacy duplicate; reconciliation required")
-        if same and same[1] != canonical_json(payload):
-            raise DecisionConflict("conflicting legacy duplicate; reconciliation required")
+        if _row_conflicts(existing_row, prior_bytes, original, payload):
+            if on_conflict == "raise":
+                raise DecisionConflict("conflicting legacy duplicate; reconciliation required")
+            receipts.append(_record_legacy_divergence(
+                conn, decision_id=decision_id, row_id=row_id, existing_row=existing_row,
+                original=original, payload=payload, source_hash=source_hash, number=number,
+                created_at=created_at, provenance_label=provenance_label))
+            continue
         receipt = insert(conn, logical_key=decision_id, decision_id=decision_id, payload=payload,
                          purpose="legacy_import", kind=kind, validations=[], created_at=created_at,
                          supersedes=kind + ":" + payload["supersedes"] if payload.get("supersedes") else None)
