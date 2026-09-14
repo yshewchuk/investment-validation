@@ -41,6 +41,7 @@ from engine.v2.ops.decision_replay import (
     score_row_id,
 )
 from engine.v2.ops.errors import fail
+from engine.v2.ops.session_resolution import resolve_effective_session
 
 __all__ = ["derive"]
 
@@ -125,25 +126,34 @@ def _finality_receipt(common, finality_doc, coverage_doc, session):
 
 
 def derive(score_doc, score_ref, finality_doc, finality_ref, replay_doc, coverage_doc, *,
-          session, deployment, decision_clock):
+          requested_session, deployment, decision_clock):
     """Derive ``(plan_bytes, evidence_bytes)`` for one nightly session.
+
+    ``requested_session`` is the date the nightly PLAN carries (job identity
+    never depends on data not yet read); the plan's own ``session`` is
+    ``finality_doc``'s resolved date (P2-C03 — refused via
+    :func:`engine.v2.ops.session_resolution.resolve_effective_session` unless
+    it is a genuine walk-back at or before ``requested_session``), recorded
+    alongside ``requested_session`` so both survive into every receipt.
 
     ``score_ref``/``finality_ref`` need only ``artifact_id``/``content_hash``
     attributes (an ``ArtifactRef``, a recorded ``ResolvedBinding``, or a
     locally recomputed :func:`artifact_reference` all satisfy this).
     ``coverage_doc`` is the parsed ``finality_coverage.json`` document (see
-    :func:`_finality_receipt`); its ``date`` must equal ``session``.
+    :func:`_finality_receipt`); its ``date`` must equal the resolved session.
 
     On a night with no decision-eligible rows, ``expected_population`` is
     simply empty; this function does not special-case it. Whether that plan
     is committable with zero decisions is ``decision_validation.validate``'s
     call, not this function's.
     """
+    session = resolve_effective_session(finality_doc, requested_session)
     score_rows = _score_rows(score_doc)
     population = decision_population(score_doc, session)
     expected = [population_key(row) for row in population]
 
     plan = {"schema_version": "decision_plan.v1.0", "session": session,
+            "requested_session": requested_session,
             "deployment": deployment, "decision_clock": decision_clock,
             "expected_population": expected}
     plan_bytes = _document_bytes(plan)

@@ -747,6 +747,7 @@ def test_decision_replay_action_scopes_context_full_and_scoring_eligible(monkeyp
                        "as_of": "2026-09-14", "session": "BMO", "fill": 0.5,
                        "strike_offset": None}
     (tmp_path / "score.json").write_text(json.dumps({"rows": [row_aaa, row_zzz_forward]}))
+    (tmp_path / "finality.json").write_text(json.dumps(_score_and_finality()[1]))
 
     calls = {}
 
@@ -792,6 +793,7 @@ def test_decision_replay_action_empty_population_skips_scoring(monkeypatch, tmp_
     row = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": "2026-09-15",
           "as_of": "2026-09-14", "session": "BMO", "fill": 0.5, "strike_offset": None}
     (tmp_path / "score.json").write_text(json.dumps({"rows": [row]}))
+    (tmp_path / "finality.json").write_text(json.dumps(_score_and_finality()[1]))
 
     def boom(*args, **kwargs):
         raise AssertionError("score_calendar must not run for an empty population")
@@ -910,7 +912,7 @@ def test_derive_and_validator_agree_on_eligible_forward_and_ladder_rows():
     deployment, decision_clock = "shadow:synthetic-impl", SESSION + "T21:00:00+00:00"
 
     plan_bytes, evidence_bytes = derive(score_doc, score_ref, finality, finality_ref, replay_doc,
-                                        coverage_doc, session=SESSION, deployment=deployment,
+                                        coverage_doc, requested_session=SESSION, deployment=deployment,
                                         decision_clock=decision_clock)
     plan = json.loads(plan_bytes)
     evidence = json.loads(evidence_bytes)
@@ -1170,7 +1172,7 @@ def _run_decisions_with_derived_evidence(tmp_path, tag, score_doc, finality, rep
         coverage_ref = _publish(store, conn, clock, coverage_doc, "finality_coverage.v1.0")
 
         plan_bytes, evidence_bytes = derive(score_doc, score_ref, finality, finality_ref, replay_doc,
-                                            coverage_doc, session=SESSION, deployment=deployment,
+                                            coverage_doc, requested_session=SESSION, deployment=deployment,
                                             decision_clock=decision_clock)
         plan_ref = store.publish_bytes(plan_bytes, schema_ref="decision_plan.v1.0")
         evidence_ref = store.publish_bytes(evidence_bytes, schema_ref="decision_evidence.v1.0")
@@ -1298,7 +1300,7 @@ def test_finality_coverage_document_for_a_different_session_is_refused():
     finality_ref = artifact_reference(b"synthetic-finality-bytes", "legacy_action.v1.0")
     with pytest.raises(OpsError, match="VALIDATION_FAILED"):
         derive(score_doc, score_ref, finality, finality_ref, replay_doc, coverage_doc,
-              session=SESSION, deployment="shadow:test-impl",
+              requested_session=SESSION, deployment="shadow:test-impl",
               decision_clock=SESSION + "T21:00:00+00:00")
 
 

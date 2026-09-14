@@ -466,7 +466,8 @@ class Service:
                 raise OpsError(make_problem("VALIDATION_FAILED",
                                             "settlement candidate artifact has no rows"))
             return (lambda conn: import_settlement_candidates_in_transaction(
-                conn, claim, candidate_ref, rows, clock=self.clock)), ()
+                conn, claim, candidate_ref, rows, clock=self.clock,
+                session=document.get("session"))), ()
         if claim.spec.kind == "decision_evidence":
             _verify_decision_evidence(self.conn, self.store, claim, refs, keepalive)
             return None, ()
@@ -560,7 +561,7 @@ def _verify_decision_evidence(conn, store, claim, refs, keepalive=_no_keepalive)
     params = claim.spec.parameters
     plan_bytes, evidence_bytes = derive(
         docs["score"], recorded["score.json"], docs["finality"], recorded["finality.json"],
-        docs["replay"], docs["coverage"], session=params["session"],
+        docs["replay"], docs["coverage"], requested_session=params["session"],
         deployment=params["deployment"], decision_clock=params["decision_clock"])
     computed_plan = artifact_reference(plan_bytes, "decision_plan.v1.0")
     computed_evidence = artifact_reference(evidence_bytes, "decision_evidence.v1.0")

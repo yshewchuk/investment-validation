@@ -212,7 +212,15 @@ def validate(candidates, *, score, finality, plan, evidence, bindings):
     if findings:
         raise fail("VALIDATION_FAILED", "candidate decisions failed validation",
                    details={"stage": "decision_validation", "findings": findings})
+    # P2-C03: ``requested_session`` is the date the plan was ASKED for;
+    # ``session`` (above, ``plan["session"]``) is finality's resolved date —
+    # ``_validate_finality`` already proved the two agree with the bound
+    # finality document. A plan with no ``requested_session`` of its own
+    # (every plan built before this field existed) is read as having
+    # requested exactly its own session: no walk-back, same as today.
     return {"purpose": "shadow", "scope": "shadow", "session": plan["session"],
+            "requested_session": plan.get("requested_session") or plan["session"],
+            "finality_date": finality.get("date") if isinstance(finality, dict) else None,
             "deployment": plan["deployment"], "clock": plan["decision_clock"],
             "input_hash": bindings["score"]["content_hash"], "validations": receipts,
             "candidate_rows_hash": content_hash(candidates), "bindings": bindings,

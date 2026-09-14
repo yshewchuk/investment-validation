@@ -96,9 +96,17 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     with the reference inputs the catalog recorded for that exact snapshot."""
     if not tickers or not expected_population:
         raise fail("INVALID_REQUEST", "snapshot input mode needs planned tickers and population")
+    # P2-C03: the resolved session is unknown at plan time — a walk-back
+    # (``engine.data.finality.resolve_final_session``, up to 15 trading
+    # sessions back) can cross a year boundary a requested-year-only range
+    # would miss (requested Jan 2, resolved Dec 31); ``year_start - 1`` gives
+    # the same one-year margin ``engine.data.finality._coverage_frame``
+    # already reads for the identical reason. Cheap and unconditional, like
+    # that margin, rather than trying to predict which requests are close
+    # enough to January to need it.
     scopes = {"direct": direct_scope_for(expected_population),
               "evidence": {"tickers": sorted(set(tickers)),
-                           "years": list(range(int(year_start), int(year_end) + 1))}}
+                           "years": list(range(int(year_start) - 1, int(year_end) + 1))}}
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
         snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))

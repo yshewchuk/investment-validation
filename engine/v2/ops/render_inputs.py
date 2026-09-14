@@ -27,6 +27,7 @@ __all__ = [
     "assemble_scores",
     "bundle_content_hash",
     "diff_bundles",
+    "execution_clock_and_flags",
     "normalized_bundle_entries",
     "stage_ledger_generation",
     "stage_model_evidence",
@@ -59,6 +60,26 @@ def absent_stage_flags() -> list[dict]:
     return [{"kind": "shadow_stage_absent", "stage": stage,
              "detail": f"{stage} does not run in the supervised shadow render"}
             for stage in ABSENT_STAGES]
+
+
+def execution_clock_and_flags(requested_as_of, resolved_as_of, finality: dict) -> tuple[dict, list]:
+    """P2-C03: v1's ``execution_clock`` meta plus the render flag list.
+
+    ``requested_as_of``/``resolved_as_of`` mirror
+    ``engine/dashboard/nightly.py:1592-1594``'s ``meta["execution_clock"]``
+    exactly; the walk-back flag (same ``as_of_resolved`` kind/detail as
+    ``engine/dashboard/nightly.py:1244``) is appended to
+    :func:`absent_stage_flags` only when the two dates differ.
+    """
+    from engine.v2.ops.session_resolution import walk_back_flag
+
+    clock = {"requested_as_of": str(pd.Timestamp(requested_as_of).date()),
+            "resolved_as_of": str(pd.Timestamp(resolved_as_of).date()), "finality": finality}
+    flags = absent_stage_flags()
+    flag = walk_back_flag(requested_as_of, resolved_as_of, finality)
+    if flag is not None:
+        flags.append(flag)
+    return clock, flags
 
 
 def assemble_scores(score_document: dict) -> pd.DataFrame:

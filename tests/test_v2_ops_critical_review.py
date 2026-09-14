@@ -174,6 +174,9 @@ def test_review_settlement_worker_captures_only_new_exact_bytes(tmp_path, monkey
     new = _raw(_outcome("resolved", "2026-09-12T00:00:00+00:00"))
     path = directory / "2026-09-12.jsonl"
     path.write_bytes(old)
+    (tmp_path / "finality.json").write_text(json.dumps({
+        "date": "2026-09-13", "is_final": True, "market_wide": True,
+        "daily_share": 1.0, "chain_share": 1.0, "covered": 1, "detail": "final"}))
 
     def fake_score_outcomes(*, through):
         assert through == "2026-09-13"
@@ -188,3 +191,5 @@ def test_review_settlement_worker_captures_only_new_exact_bytes(tmp_path, monkey
     assert len(document["rows"]) == 1
     assert base64.b64decode(document["rows"][0]["original_b64"]) == new
     assert document["rows"][0]["row"] == json.loads(new)
+    assert document["session"] == "2026-09-13"
+    assert document["requested_session"] == "2026-09-13"
