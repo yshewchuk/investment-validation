@@ -6,6 +6,14 @@ smoke test, which runs the REAL Phase 2 suite over THIS repo to prove the
 gate reports RED today for the rows that have no tests or real receipts yet,
 and not for the ones that do. The prerequisite runner is always injected:
 this file never lets the gate shell out to the real Phase 0/1 gates.
+
+Task P2-C01 (Phase 2 review closeout): every evidence artifact below is a
+REAL contract document (a real ``ComparisonReceipt`` payload, real
+``SnapshotRef``/``SnapshotImportReceipt``/``DependencyPlan``/``RollbackReceipt``
+documents), never a placeholder dict like ``{"verdict": "agree"}`` -- that
+placeholder shape is exactly what the review reproduced as a false pass, and
+is now its own negative test (``test_placeholder_agreement_json_gives_
+artifact_shape_invalid``).
 """
 from __future__ import annotations
 
@@ -16,18 +24,45 @@ import sys
 from pathlib import Path
 
 from checks import rearchitecture_phase2_coverage as p2cov
+from checks import rearchitecture_phase2_evidence as p2evidence
 from checks import rearchitecture_phase2_gate as p2gate
 from checks.layer_map import PACKAGES
 from checks.rearchitecture_phase2_coverage import REGISTRY as REAL_REGISTRY_PATH
+from engine.v2.contracts import (
+    DatasetVersionRef,
+    DependencyEntry,
+    DependencyPlan,
+    FragmentRef,
+    ObjectRef,
+    RollbackReceipt,
+    SnapshotImportReceipt,
+    SnapshotRef,
+    TableContractRef,
+)
+from engine.v2.diagnosis import AGREE, DIFFER, ComparisonReceipt, Envelope, Population
+from engine.v2.foundation import to_document
 
 ALL_D_IDS = [f"D{i:02d}" for i in range(1, 21)]
+H = "sha256:" + "0" * 64
+
+
+def _phase1_raw(*, imports_ok=True, coverage_ok=True):
+    """The shape ``rearchitecture_phase1_gate.py::gate`` really returns,
+    ``ok`` aggregated the same way it aggregates it: ``all()`` over every
+    structural AND engineering row. Building it this way (rather than hand-
+    setting a top-level ``"ok"``) makes it impossible for a test to claim a
+    green Phase 1 while quietly leaving one row red.
+    """
+    structural = {"imports": {"ok": imports_ok}, "readmes": {"ok": True}, "hygiene": {"ok": True}}
+    engineering = {"budgets": {"ok": True}, "lint": {"ok": True}, "hook": {"ok": True},
+                   "coverage": {"ok": coverage_ok}}
+    ok = all(r["ok"] for r in [*structural.values(), *engineering.values()])
+    return {"ok": ok, "structural": structural, "engineering": engineering}
+
+
 GREEN_RUNNER = lambda root: {  # noqa: E731
     "phase0": {"ok": True, "raw": {"ok": True}},
-    "phase1": {"ok": True, "raw": {
-        "structural": {"imports": {"ok": True}, "readmes": {"ok": True}, "hygiene": {"ok": True}},
-        "engineering": {"budgets": {"ok": True}, "lint": {"ok": True}, "hook": {"ok": True},
-                        "coverage": {"ok": False}},
-    }},
+    "phase1": {"ok": True, "raw": _phase1_raw()},
 }
 
 
@@ -43,6 +78,10 @@ def _ref(artifacts_dir: Path, rel: str, data: bytes) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return {"path": rel, "content_hash": "sha256:" + hashlib.sha256(data).hexdigest()}
+
+
+def _dumps(obj) -> bytes:
+    return json.dumps(to_document(obj)).encode()
 
 
 def _packages_doc(**overrides) -> dict:
@@ -95,32 +134,116 @@ def world(tmp_path, registry: dict, *, outcomes=None):
             "code_hash": code_hash}
 
 
+# --------------------------------------------------------------------------
+# real contract document builders -- task P2-C01
+# --------------------------------------------------------------------------
+
+
+def _snapshot_ref(snapshot_id="snap_current", manifest_hash=H) -> SnapshotRef:
+    tcr = TableContractRef(contract_id="tc_securities", definition_hash=H)
+    dvr = DatasetVersionRef(dataset_version_id="dv_1", table_contract_ref=tcr, manifest_hash=H)
+    return SnapshotRef(
+        snapshot_id=snapshot_id, manifest_hash=manifest_hash, table_versions={"securities": dvr},
+        calendar_version="cal.v1", source_priority_version="prio.v1",
+        finality_receipt_refs=("fin_1",), knowledge_mode_by_table={"securities": "reconstructed"})
+
+
+def _dependency_plan(snapshot_ref: SnapshotRef) -> DependencyPlan:
+    dvr = next(iter(snapshot_ref.table_versions.values()))
+    frag_ref = FragmentRef(fragment_id="frag_1", manifest_hash=H)
+    de = DependencyEntry(table_name="securities", dataset_version_ref=dvr, fragment_ref=frag_ref,
+                         columns=("ticker",), predicates=(), estimated_rows=10, maximum_rows=100)
+    return DependencyPlan(request_hash=H, snapshot_ref=snapshot_ref, dependencies=(de,))
+
+
+def _import_receipt(snapshot_id, *, receipt_id, generation, status="committed") -> SnapshotImportReceipt:
+    obj = ObjectRef(kind="parquet_fragment", object_id="obj_1", content_hash=H, byte_size=10)
+    return SnapshotImportReceipt(
+        receipt_id=receipt_id, request_hash=H, attempt_id="att_1", fence=1,
+        snapshot_ref=_snapshot_ref(snapshot_id), legacy_snapshot_object_ref=obj,
+        prior_head_snapshot_id=None, resulting_head_snapshot_id=snapshot_id,
+        resulting_head_generation=generation, status=status, problem=None, envelope={})
+
+
+def _explained_population(expected=100, supported=80, compared=50) -> Population:
+    dropped_1 = [{"key": f"k{i}", "reason": "not_supported", "stage": "expected_to_supported"}
+                for i in range(expected - supported)]
+    dropped_2 = [{"key": f"j{i}", "reason": "tolerance_excluded", "stage": "supported_to_compared"}
+                for i in range(supported - compared)]
+    return Population(expected=expected, supported=supported, compared=compared,
+                      excluded=tuple(dropped_1 + dropped_2))
+
+
+def _comparison_receipt(*, kind, code_hash, environment_hash, snapshot_ref, verdict=AGREE,
+                        population=None, receipt_id="recv_cmp") -> ComparisonReceipt:
+    envelope = Envelope(code_hash=code_hash, environment_hash=environment_hash,
+                        snapshot_id=snapshot_ref.snapshot_id,
+                        snapshot_manifest_hash=snapshot_ref.manifest_hash)
+    return ComparisonReceipt(
+        receipt_id=receipt_id, comparison_kind=kind, tier=0, left_ref="legacy", right_ref="adapter",
+        stage_plan_ref="plan.v1", tolerance_policy_ref="tol.v1", verdict=verdict,
+        population=population or _explained_population(), envelope=envelope)
+
+
+def _rollback_receipt(*, prior_id, resulting_id, prior_generation=2, resulting_generation=3
+                      ) -> RollbackReceipt:
+    return RollbackReceipt(receipt_id="recv_rollback", scope="legacy_shadow",
+                           prior_snapshot_id=prior_id, resulting_snapshot_id=resulting_id,
+                           prior_generation=prior_generation, resulting_generation=resulting_generation,
+                           at="2026-01-01T00:00:00.000000Z")
+
+
+def _fault_matrix(*, missing=()) -> list:
+    return [{"point": p, "outcome": "old_head", "verified_objects": True}
+            for p in p2evidence.FAULT_POINTS if p not in missing]
+
+
 def valid_evidence(tmp_path, root, *, populations=(100, 80, 50), authority_mode="shadow",
-                   verdict="agree", render_verdict="agree", include_render_receipt=True):
+                   verdict=AGREE, render_verdict=AGREE, include_render_receipt=True,
+                   include_corpus_receipt=True):
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.mkdir()
     env_hash, _ = p2gate.environment_hash(root)
+    code_hash = p2gate.source_hash(p2gate.source_files(root))
+    snapshot_ref = _snapshot_ref("snap_current")
+    prior = _import_receipt("snap_prior", receipt_id="recv_import_prior", generation=1)
+    current = _import_receipt("snap_current", receipt_id="recv_import_current", generation=2)
+    population = _explained_population(*populations)
+    score = _comparison_receipt(kind=p2evidence.SCORE_PARITY_KIND, code_hash=code_hash,
+                                environment_hash=env_hash, snapshot_ref=snapshot_ref,
+                                verdict=verdict, population=population, receipt_id="recv_score")
+    rollback = _rollback_receipt(prior_id="snap_current", resulting_id="snap_prior")
+
     evidence = {
         "schema_version": "phase2_evidence.v1.0",
-        "code_hash": p2gate.source_hash(p2gate.source_files(root)),
+        "code_hash": code_hash,
         "environment_hash": env_hash,
-        "snapshot_ref": _ref(artifacts_dir, "snapshot.bin", b"snapshot-bytes"),
-        "legacy_snapshot_object_ref": _ref(artifacts_dir, "legacy.bin", b"legacy-object-bytes"),
+        "snapshot_ref": _ref(artifacts_dir, "snapshot.json", _dumps(snapshot_ref)),
+        "legacy_snapshot_object_ref": _ref(artifacts_dir, "legacy.json", _dumps(
+            ObjectRef(kind="legacy_snapshot", object_id="obj_legacy", content_hash=H, byte_size=99))),
         "table_contract_mapping_hash": "sha256:" + hashlib.sha256(b"mapping").hexdigest(),
-        "import_receipt_refs": [_ref(artifacts_dir, "import1.json", b"{}"),
-                                _ref(artifacts_dir, "import2.json", b"{}")],
-        "fault_matrix_ref": _ref(artifacts_dir, "fault_matrix.json", b"{}"),
-        "dependency_plan_refs": [_ref(artifacts_dir, "dep1.json", b"{}")],
-        "comparison_receipt_ref": _ref(artifacts_dir, "comparison.json",
-                                       json.dumps({"verdict": verdict}).encode()),
-        "rollback_receipt_ref": _ref(artifacts_dir, "rollback.json", b'{"ok": true}'),
+        "import_receipt_refs": [_ref(artifacts_dir, "import_prior.json", _dumps(prior)),
+                                _ref(artifacts_dir, "import_current.json", _dumps(current))],
+        "fault_matrix_ref": _ref(artifacts_dir, "fault_matrix.json",
+                                 json.dumps(_fault_matrix()).encode()),
+        "dependency_plan_refs": [_ref(artifacts_dir, "dep1.json", _dumps(_dependency_plan(snapshot_ref)))],
+        "comparison_receipt_ref": _ref(artifacts_dir, "comparison.json", _dumps(score)),
+        "rollback_receipt_ref": _ref(artifacts_dir, "rollback.json", _dumps(rollback)),
         "expected_population": populations[0], "supported_population": populations[1],
         "compared_population": populations[2], "authority_mode": authority_mode,
     }
     if include_render_receipt:
+        render = _comparison_receipt(kind=p2evidence.RENDER_PARITY_KIND, code_hash=code_hash,
+                                     environment_hash=env_hash, snapshot_ref=snapshot_ref,
+                                     verdict=render_verdict, receipt_id="recv_render")
         evidence["render_comparison_receipt_ref"] = _ref(
-            artifacts_dir, "render_comparison.json",
-            json.dumps({"verdict": render_verdict}).encode())
+            artifacts_dir, "render_comparison.json", _dumps(render))
+    if include_corpus_receipt:
+        corpus = _comparison_receipt(kind=p2evidence.CORPUS_PARITY_KIND, code_hash=code_hash,
+                                     environment_hash=env_hash, snapshot_ref=snapshot_ref,
+                                     receipt_id="recv_corpus")
+        evidence["corpus_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "corpus_comparison.json", _dumps(corpus))
     return evidence, artifacts_dir
 
 
@@ -141,16 +264,20 @@ def test_registry_covers_exactly_d01_through_d20():
 
 # -- fully valid synthetic world: ok ------------------------------------------
 
+_FULL_REGISTRY = {
+    "D01": {"tier": 0, "tests": ["tests/d01.py"]},
+    "D14": {"tier": 1, "tests": ["tests/d14.py"],
+           "evidence_fields": ["corpus_comparison_receipt_ref"]},
+    "D17": {"tier": 0, "tests": ["tests/d17.py"], "reuse_phase1_structural_engineering": True},
+    "D15": {"tier": 2, "tests": [], "evidence_fields": [
+        "comparison_receipt_ref", "expected_population",
+        "supported_population", "compared_population"]},
+    "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
+}
+
+
 def test_fully_valid_evidence_and_passing_junit_and_green_prerequisites_is_ok(tmp_path):
-    registry = {
-        "D01": {"tier": 0, "tests": ["tests/d01.py"]},
-        "D17": {"tier": 0, "tests": ["tests/d17.py"], "reuse_phase1_structural_engineering": True},
-        "D15": {"tier": 2, "tests": [], "evidence_fields": [
-            "comparison_receipt_ref", "expected_population",
-            "supported_population", "compared_population"]},
-        "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
-    }
-    w = world(tmp_path, registry)
+    w = world(tmp_path, _FULL_REGISTRY)
     evidence, artifacts_dir = valid_evidence(tmp_path, w["root"])
     evidence_path = tmp_path / "evidence_final.json"
     evidence_path.write_text(json.dumps(evidence))
@@ -197,14 +324,28 @@ def test_phase0_prerequisite_failure_gives_prerequisite_failed_only(tmp_path):
     assert {f["prerequisite"] for f in result["findings"]} == {"phase0"}
 
 
-def test_phase1_structural_failure_excluding_coverage_gives_prerequisite_failed(tmp_path):
+def test_phase1_structural_failure_gives_prerequisite_failed(tmp_path):
     registry = {"D01": {"tier": 0, "tests": []}}
     w = world(tmp_path, registry)
+    runner = lambda root: {  # noqa: E731
+        "phase0": {"ok": True, "raw": {"ok": True}},
+        "phase1": {"ok": False, "raw": _phase1_raw(imports_ok=False)}}
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         prerequisite_runner=runner, registry_path=w["registry_path"])
+    assert codes(result) == {"PREREQUISITE_FAILED"}
+    assert {f["prerequisite"] for f in result["findings"]} == {"phase1"}
 
-    def runner(root):
-        raw = GREEN_RUNNER(root)
-        raw["phase1"]["raw"]["structural"]["imports"] = {"ok": False}
-        return raw
+
+def test_phase1_passing_except_coverage_gives_prerequisite_failed(tmp_path):
+    """Task P2-C01 decision 6: the outer gate enforces the FULL Phase 1
+    prerequisite, coverage included -- a Phase 1 gate that is green on every
+    structural/engineering row EXCEPT coverage must still fail this
+    prerequisite, not pass it the way the removed exclusion helper let it."""
+    registry = {"D01": {"tier": 0, "tests": []}}
+    w = world(tmp_path, registry)
+    runner = lambda root: {  # noqa: E731
+        "phase0": {"ok": True, "raw": {"ok": True}},
+        "phase1": {"ok": False, "raw": _phase1_raw(coverage_ok=False)}}
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          prerequisite_runner=runner, registry_path=w["registry_path"])
     assert codes(result) == {"PREREQUISITE_FAILED"}
@@ -345,10 +486,12 @@ def test_out_of_order_population_gives_population_collapsed_only(tmp_path):
 
 def test_disagreeing_verdict_gives_verdict_not_agree_only(tmp_path):
     def mutate(evidence, artifacts_dir):
-        data = json.dumps({"verdict": "differ"}).encode()
-        (artifacts_dir / "comparison.json").write_bytes(data)
-        evidence["comparison_receipt_ref"] = {
-            "path": "comparison.json", "content_hash": "sha256:" + hashlib.sha256(data).hexdigest()}
+        snapshot_ref = _snapshot_ref("snap_current")
+        differing = _comparison_receipt(
+            kind=p2evidence.SCORE_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            verdict=DIFFER, receipt_id="recv_score")
+        evidence["comparison_receipt_ref"] = _ref(artifacts_dir, "comparison.json", _dumps(differing))
     w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
     result = _gate_with_evidence(w, evidence_path, artifacts_dir)
     assert codes(result) == {"VERDICT_NOT_AGREE"}
@@ -416,7 +559,7 @@ def test_d19_refused_when_render_receipt_verdict_is_not_agree(tmp_path):
         "D19": {"tier": 2, "tests": [], "evidence_fields": ["render_comparison_receipt_ref"]},
     }
     w = world(tmp_path, registry)
-    evidence, artifacts_dir = valid_evidence(tmp_path, w["root"], render_verdict="differ")
+    evidence, artifacts_dir = valid_evidence(tmp_path, w["root"], render_verdict=DIFFER)
     evidence_path = tmp_path / "evidence_final.json"
     evidence_path.write_text(json.dumps(evidence))
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
@@ -424,6 +567,188 @@ def test_d19_refused_when_render_receipt_verdict_is_not_agree(tmp_path):
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
     assert d_ids_with(result, "MISSING_EVIDENCE") == {"D19"}
     assert "VERDICT_NOT_AGREE" in codes(result)
+
+
+def test_d14_refused_when_corpus_receipt_is_absent(tmp_path):
+    """Task P2-C01 decision 7: D14 requires a real supervised corpus-scoring
+    receipt, not just its two structural tests."""
+    registry = {"D14": {"tier": 1, "tests": [],
+                        "evidence_fields": ["corpus_comparison_receipt_ref"]}}
+    w = world(tmp_path, registry)
+    evidence, artifacts_dir = valid_evidence(tmp_path, w["root"], include_corpus_receipt=False)
+    evidence_path = tmp_path / "evidence_final.json"
+    evidence_path.write_text(json.dumps(evidence))
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+    assert d_ids_with(result, "MISSING_EVIDENCE") == {"D14"}
+
+
+# -- task P2-C01: strict decode ------------------------------------------------
+
+def test_placeholder_agreement_json_gives_artifact_shape_invalid(tmp_path):
+    """The exact shape the review reproduced: a bare ``{"verdict": "agree"}``
+    dict is not a ``ComparisonReceipt`` and must be refused, not tolerated."""
+    def mutate(evidence, artifacts_dir):
+        data = json.dumps({"verdict": "agree"}).encode()
+        evidence["comparison_receipt_ref"] = _ref(artifacts_dir, "comparison.json", data)
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"ARTIFACT_SHAPE_INVALID"}
+
+
+def test_missing_required_field_in_receipt_gives_artifact_shape_invalid(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        doc = json.loads((artifacts_dir / "rollback.json").read_bytes())
+        del doc["resulting_generation"]
+        data = json.dumps(doc).encode()
+        evidence["rollback_receipt_ref"] = _ref(artifacts_dir, "rollback.json", data)
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"ARTIFACT_SHAPE_INVALID"}
+
+
+# -- task P2-C01: score vs render receipt separation ---------------------------
+
+def test_same_artifact_for_score_and_render_gives_receipt_kind_mismatch(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        evidence["render_comparison_receipt_ref"] = dict(evidence["comparison_receipt_ref"])
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"RECEIPT_KIND_MISMATCH"}
+
+
+def test_swapped_comparison_kinds_gives_receipt_kind_mismatch(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        score_as_render = _comparison_receipt(
+            kind=p2evidence.SCORE_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            receipt_id="recv_render_swapped")
+        render_as_score = _comparison_receipt(
+            kind=p2evidence.RENDER_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            receipt_id="recv_score_swapped")
+        evidence["render_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "render_swapped.json", _dumps(score_as_render))
+        evidence["comparison_receipt_ref"] = _ref(
+            artifacts_dir, "score_swapped.json", _dumps(render_as_score))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"RECEIPT_KIND_MISMATCH"}
+
+
+# -- task P2-C01: binding to code/environment/snapshot identity ---------------
+
+def test_receipt_bound_to_wrong_code_hash_gives_code_hash_mismatch(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        stale = _comparison_receipt(
+            kind=p2evidence.SCORE_PARITY_KIND, code_hash="sha256:" + "9" * 64,
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref)
+        evidence["comparison_receipt_ref"] = _ref(artifacts_dir, "comparison.json", _dumps(stale))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"CODE_HASH_MISMATCH"}
+
+
+def test_receipt_bound_to_wrong_environment_hash_gives_environment_mismatch(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        stale = _comparison_receipt(
+            kind=p2evidence.SCORE_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash="sha256:" + "8" * 64, snapshot_ref=snapshot_ref)
+        evidence["comparison_receipt_ref"] = _ref(artifacts_dir, "comparison.json", _dumps(stale))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"ENVIRONMENT_MISMATCH"}
+
+
+def test_receipt_bound_to_wrong_snapshot_gives_snapshot_binding_mismatch(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        wrong_snapshot = _snapshot_ref("snap_other")
+        stale = _comparison_receipt(
+            kind=p2evidence.SCORE_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=wrong_snapshot)
+        evidence["comparison_receipt_ref"] = _ref(artifacts_dir, "comparison.json", _dumps(stale))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"SNAPSHOT_BINDING_MISMATCH"}
+
+
+def test_import_receipt_not_committed_gives_snapshot_binding_mismatch(tmp_path):
+    """Decision 2's last line is a conjunction -- committed AND names the
+    snapshot. This isolates the "committed" half: the id is still
+    "snap_current" (so rollback lineage, which only checks id membership,
+    is untouched), but the receipt's own status is not "committed"."""
+    def mutate(evidence, artifacts_dir):
+        failed = _import_receipt("snap_current", receipt_id="recv_import_current",
+                                 generation=2, status="failed")
+        evidence["import_receipt_refs"][1] = _ref(artifacts_dir, "import_current.json", _dumps(failed))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"SNAPSHOT_BINDING_MISMATCH"}
+
+
+# -- task P2-C01: D15 population binding + explained drops --------------------
+
+def test_receipt_population_mismatch_gives_population_collapsed(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        evidence["compared_population"] = 49  # receipt's own population.compared is 50
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"POPULATION_COLLAPSED"}
+
+
+def test_unexplained_population_drop_gives_population_unexplained(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        unexplained = _comparison_receipt(
+            kind=p2evidence.SCORE_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            population=Population(expected=100, supported=80, compared=50))
+        evidence["comparison_receipt_ref"] = _ref(
+            artifacts_dir, "comparison.json", _dumps(unexplained))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"POPULATION_UNEXPLAINED"}
+
+
+def test_explained_population_drop_has_no_population_unexplained_finding(tmp_path):
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate=None)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert "POPULATION_UNEXPLAINED" not in codes(result)
+
+
+# -- task P2-C01: rollback + fault matrix --------------------------------------
+
+def test_rollback_receipt_with_non_increasing_generation_gives_rollback_evidence_invalid(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        stale = _rollback_receipt(prior_id="snap_current", resulting_id="snap_prior",
+                                  prior_generation=2, resulting_generation=2)
+        evidence["rollback_receipt_ref"] = _ref(artifacts_dir, "rollback.json", _dumps(stale))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"ROLLBACK_EVIDENCE_INVALID"}
+
+
+def test_rollback_receipt_naming_an_unlisted_snapshot_gives_rollback_evidence_invalid(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        stale = _rollback_receipt(prior_id="snap_current", resulting_id="snap_never_imported")
+        evidence["rollback_receipt_ref"] = _ref(artifacts_dir, "rollback.json", _dumps(stale))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"ROLLBACK_EVIDENCE_INVALID"}
+
+
+def test_fault_matrix_missing_one_point_gives_fault_matrix_incomplete(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        matrix = _fault_matrix(missing=("before_commit",))
+        evidence["fault_matrix_ref"] = _ref(artifacts_dir, "fault_matrix.json",
+                                            json.dumps(matrix).encode())
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"FAULT_MATRIX_INCOMPLETE"}
 
 
 # -- real repo smoke ----------------------------------------------------------
@@ -481,3 +806,8 @@ def test_real_repo_smoke_matches_registry_against_the_real_tree():
             # passing test alone can never satisfy them, only a real receipt
             # can (checked end-to-end by the documented gate command above).
             assert row.get("evidence_fields"), d_id
+
+    # Task P2-C01 decision 7: D14 (tier 1) also carries a required evidence
+    # field now -- real supervised corpus-scoring evidence, not just its two
+    # structural tests -- without being reclassified as tier 2.
+    assert registry["D14"].get("evidence_fields") == ["corpus_comparison_receipt_ref"]

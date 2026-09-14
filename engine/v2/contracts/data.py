@@ -58,6 +58,7 @@ __all__ = [
     "KEY_PREDICATE_V1",
     "LEGACY_MATERIALIZATION_REQUEST_V1",
     "OBJECT_REF_V1",
+    "ROLLBACK_RECEIPT_V1",
     "SNAPSHOT_IMPORT_RECEIPT_V1",
     "SNAPSHOT_IMPORT_REQUEST_V1",
     "SNAPSHOT_REF_V1",
@@ -82,6 +83,7 @@ __all__ = [
     "KnowledgeMode",
     "LegacyMaterializationRequest",
     "ObjectRef",
+    "RollbackReceipt",
     "SnapshotImportReceipt",
     "SnapshotImportRequest",
     "SnapshotRef",
@@ -115,6 +117,11 @@ DEPENDENCY_PLAN_V1 = "dependency_plan.v1.0"
 SNAPSHOT_IMPORT_REQUEST_V1 = "snapshot_import_request.v1.0"
 SNAPSHOT_IMPORT_RECEIPT_V1 = "snapshot_import_receipt.v1.0"
 LEGACY_MATERIALIZATION_REQUEST_V1 = "legacy_materialization_request.v1.0"
+#: task P2-C01 (Phase 2 review closeout, decision 5): the strict, generation-
+#: bearing rollback document the evidence validator requires for D16. No
+#: durable rollback receipt CONTRACT existed before this -- see
+#: ``RollbackReceipt``'s docstring for the producer gap this leaves open.
+ROLLBACK_RECEIPT_V1 = "rollback_receipt.v1.0"
 
 #: component contracts §5.1: recorded per table, never per snapshot, because
 #: the risk it describes (availability vs. vintage) is a property of the field.
@@ -598,6 +605,41 @@ class SnapshotImportReceipt:
     problem: Problem | None = None
     envelope: dict[str, Any]
     schema_version: str = SNAPSHOT_IMPORT_RECEIPT_V1
+
+
+@dataclass(frozen=True, kw_only=True)
+class RollbackReceipt:
+    """Evidence of one real head rollback (phase-2 guide §10 point 5).
+
+    A real rollback is a compare-and-swap to a PREVIOUSLY COMMITTED snapshot
+    (``catalog.move_head``), never a delete or a manifest rewrite: this
+    receipt exists to make that provable to a reader who only has the
+    receipt, not the catalog DB -- ``prior_generation``/``resulting_generation``
+    are the catalog head's own generation counter immediately before and
+    after the compare-and-swap, and ``resulting_generation`` is always
+    STRICTLY GREATER (every head move, including a rollback to older data,
+    is itself a new catalog event). ``prior_snapshot_id``/
+    ``resulting_snapshot_id`` are cross-checked by the evidence validator
+    against ``import_receipt_refs`` (or lineage), never trusted alone.
+
+    Defined for task P2-C01 (Phase 2 review closeout, decision 5): no strict
+    rollback contract existed before this. ``engine/v2/ops/snapshot_promotion.py``
+    ``rollback()`` (out of this task's edit scope) currently publishes an
+    UNTYPED ``snapshot_update_receipt.v1.0`` dict -- ``action``, ``scope``,
+    ``from_snapshot_id``, ``to_snapshot_id``, ``at`` -- with no generation
+    numbers at all. That producer must be updated to additionally emit (or
+    extend its own document into) this shape before D16 evidence can pass
+    the validator's strict decode; noted for whoever owns that file.
+    """
+
+    receipt_id: str
+    scope: str
+    prior_snapshot_id: str
+    resulting_snapshot_id: str
+    prior_generation: int
+    resulting_generation: int
+    at: str
+    schema_version: str = ROLLBACK_RECEIPT_V1
 
 
 @dataclass(frozen=True, kw_only=True)

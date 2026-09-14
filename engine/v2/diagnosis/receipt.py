@@ -42,7 +42,12 @@ __all__ = [
     "PROBLEM_CATEGORIES",
 ]
 
-SCHEMA_VERSION = "comparison_receipt.v1.0"
+#: v1.1 (task P2-C01, Phase 2 review closeout): four nullable ``Envelope``
+#: binding fields (below) -- a nullable addition, so the minor version bumps
+#: rather than the major one, exactly like ``EARNINGS_EVENT_V1`` v1.1. A
+#: v1.0 receipt still decodes: ``foundation.typed`` only refuses a document
+#: NEWER than the reader's own declared minor.
+SCHEMA_VERSION = "comparison_receipt.v1.1"
 
 #: The three outcomes. There is no fourth, and no "mostly agrees".
 AGREE = "agree"
@@ -140,6 +145,13 @@ class Population:
     supported: int = 0
     compared: int = 0
     skipped_with_reasons: dict[str, int] = field(default_factory=dict)
+    #: task P2-C01 decision 4: every expected->supported and supported->
+    #: compared DROP, explained one dropped key at a time -- unlike
+    #: ``skipped_with_reasons`` (a reason -> COUNT rollup), this is the
+    #: itemized list the evidence validator sums back against each drop:
+    #: ``{"key": <str>, "reason": <str>, "stage": "expected_to_supported" |
+    #: "supported_to_compared"}``. Additive/nullable, default empty.
+    excluded: tuple[dict[str, Any], ...] = ()
 
     @property
     def collapsed(self) -> bool:
@@ -148,12 +160,45 @@ class Population:
 
 @dataclass(frozen=True)
 class Envelope:
-    """Operational metadata. Excluded from every content hash (contracts §2.5)."""
+    """Operational metadata. Excluded from every content hash (contracts §2.5).
+
+    ``code_hash``/``environment_hash``/``snapshot_id``/``snapshot_manifest_hash``
+    (task P2-C01, Phase 2 review closeout, decision 2): the phase-2 evidence
+    BINDING fields. ``ComparisonReceipt`` itself carries no identity field for
+    "which tree and which snapshot was this comparison run over" -- ``left_ref``/
+    ``right_ref`` name the two SIDES being compared, not the code or data they
+    ran against -- so a checker that trusts only the evidence manifest's own
+    declared ``code_hash``/``snapshot_ref`` can be handed a STALE receipt
+    alongside a manifest edited to claim it is fresh. These four fields let
+    ``checks/rearchitecture_phase2_evidence.py`` bind the two independently:
+    the receipt's OWN envelope must match the manifest's declared values, not
+    merely exist alongside them.
+
+    A producer building a phase-2 evidence receipt sets these via
+    ``dataclasses.replace`` on the ``Envelope`` (they are never set by
+    ``compare_records``/``merge_receipts`` themselves, which have no code/
+    environment/snapshot context to fill them with)::
+
+        receipt = compare_records(...)
+        receipt = dataclasses.replace(receipt, envelope=dataclasses.replace(
+            receipt.envelope, code_hash=code_hash, environment_hash=env_hash,
+            snapshot_id=snapshot_ref.snapshot_id,
+            snapshot_manifest_hash=snapshot_ref.manifest_hash))
+
+    Excluded from every content hash like the rest of ``Envelope`` (contracts
+    §2.5): a receipt's identity is what it found, not what tree produced it,
+    and the ARTIFACT hash the evidence validator checks (the whole published
+    file's bytes) still catches any post-hoc tampering with these fields.
+    """
 
     started_at: str | None = None
     duration_seconds: float | None = None
     worker_ref: str | None = None
     diagnostic_ref: str | None = None
+    code_hash: str | None = None
+    environment_hash: str | None = None
+    snapshot_id: str | None = None
+    snapshot_manifest_hash: str | None = None
 
     @classmethod
     def since(cls, started_monotonic: float) -> "Envelope":
