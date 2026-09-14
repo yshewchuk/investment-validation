@@ -23,14 +23,20 @@ from engine.v2.ops.errors import fail
 __all__ = [
     "ABSENT_STAGES",
     "EXECUTION_METADATA_FIELDS",
+    "RENDER_FLAG_SOURCES_V1",
     "absent_stage_flags",
     "assemble_scores",
     "bundle_content_hash",
     "diff_bundles",
     "execution_clock_and_flags",
+    "model_evidence_stale_flag",
     "normalized_bundle_entries",
+    "render_flags",
+    "resolve_prior_selfcheck",
     "stage_ledger_generation",
     "stage_model_evidence",
+    "unknown_operational_flags",
+    "unknown_selfcheck_report",
 ]
 
 #: guides/rearchitecture_phase2_data_access.md §9.4: "Stages not carried:
@@ -79,6 +85,172 @@ def execution_clock_and_flags(requested_as_of, resolved_as_of, finality: dict) -
     flag = walk_back_flag(requested_as_of, resolved_as_of, finality)
     if flag is not None:
         flags.append(flag)
+    return clock, flags
+
+
+#: P2-C08 (guide §9.4 item 2, review "the review's requirement"): every v1
+#: ``report.flags`` kind found in ``engine/dashboard/nightly.py``, classified:
+#:
+#: * ``"a"`` -- derivable from artifacts this render job binds or can read
+#:   (score, finality, model evidence, ledger generation, the pinned
+#:   earnings/panel store) -- carried at v1's own kind/detail via a direct
+#:   call to the legacy helper that built it in v1, never a re-derivation.
+#: * ``"b"`` -- only ever produced by a stage v2 deliberately does not run in
+#:   the shadow render (refresh/validate_refresh/tier34_rebuild/backfill/
+#:   calibration_flags, already declared by :data:`ABSENT_STAGES`), or by a
+#:   stage that runs as a hard pass/fail v2 job rather than a soft degrade
+#:   (settlement, selfcheck, publication, backup) -- never a render input in
+#:   either version.
+#: * ``"c"`` -- sourced from mutable host state or a previous run's persisted
+#:   board that this render job does not own -- rendered as an explicit
+#:   unknown (:func:`unknown_operational_flags`), never silently omitted and
+#:   never implied healthy.
+RENDER_FLAG_SOURCES_V1 = (
+    {"kind": "as_of_resolved", "v1_ref": "engine/dashboard/nightly.py:1239-1244",
+     "class": "a", "v2_source": "session_resolution.walk_back_flag, called from "
+     "execution_clock_and_flags on the bound finality artifact"},
+    {"kind": "panel_stale", "v1_ref": "engine/dashboard/nightly.py:756-767",
+     "class": "a", "v2_source": "legacy_adapter._panel_lag_flags calls "
+     "engine.dashboard.nightly._panel_staleness_flags directly on the "
+     "resolved session; no logic re-derived"},
+    {"kind": "panel_missing_prints", "v1_ref": "engine/dashboard/nightly.py:769-780",
+     "class": "a", "v2_source": "same call as panel_stale -- one legacy "
+     "helper returns both kinds"},
+    {"kind": "panel_coverage_unknown", "v1_ref": "engine/dashboard/nightly.py:743-745",
+     "class": "a", "v2_source": "same call as panel_stale"},
+    {"kind": "calendar_date_conflict", "v1_ref": "engine/dashboard/nightly.py:1027-1046,1532-1534",
+     "class": "a", "v2_source": "legacy_adapter._calendar_conflict_flags reads "
+     "earnings_events for this render's own tickers/window and calls "
+     "engine.dashboard.nightly._date_conflict_flag directly"},
+    {"kind": "model_evidence_stale", "v1_ref": "engine/dashboard/nightly.py:1552-1575",
+     "class": "a", "v2_source": "model_evidence_stale_flag reads the "
+     "'degraded'/'degraded_reason' fields legacy_adapter._action_model_evidence "
+     "now preserves on a failed rebuild, in place of catching a live "
+     "exception in this process"},
+    {"kind": "no_upcoming_events", "v1_ref": "engine/dashboard/nightly.py:1178-1180",
+     "class": "b", "v2_source": "absent_stage_flags['refresh']"},
+    {"kind": "refresh_degraded", "v1_ref": "engine/dashboard/nightly.py:1210-1212",
+     "class": "b", "v2_source": "absent_stage_flags['refresh']"},
+    {"kind": "session_not_final", "v1_ref": "engine/dashboard/nightly.py:1223-1232",
+     "class": "b", "v2_source": "superseded, not carried: legacy_finality "
+     "refuses with SOURCE_NOT_FINAL instead (P2-C03); render never runs on a "
+     "session that failed finality"},
+    {"kind": "validation_red", "v1_ref": "engine/dashboard/nightly.py:1258-1264",
+     "class": "b", "v2_source": "absent_stage_flags['validate_refresh']"},
+    {"kind": "moves_degraded", "v1_ref": "engine/dashboard/nightly.py:1324-1330",
+     "class": "b", "v2_source": "absent_stage_flags['tier34_rebuild']"},
+    {"kind": "tiers_degraded", "v1_ref": "engine/dashboard/nightly.py:1340-1349",
+     "class": "b", "v2_source": "absent_stage_flags['tier34_rebuild']"},
+    {"kind": "backfill_skipped_closed", "v1_ref": "engine/dashboard/nightly.py:1502-1507",
+     "class": "b", "v2_source": "absent_stage_flags['backfill']"},
+    {"kind": "backfill_gap", "v1_ref": "engine/dashboard/nightly.py:1508-1512",
+     "class": "b", "v2_source": "absent_stage_flags['backfill']"},
+    {"kind": "late_backfill", "v1_ref": "engine/dashboard/nightly.py:1513-1518",
+     "class": "b", "v2_source": "absent_stage_flags['backfill']"},
+    {"kind": "calibration_drift", "v1_ref": "engine/dashboard/nightly.py:979-998,1541",
+     "class": "b", "v2_source": "absent_stage_flags['calibration_flags']"},
+    {"kind": "settle_failed", "v1_ref": "engine/dashboard/nightly.py:1443-1452",
+     "class": "b", "v2_source": "settlement runs as its own v2 job "
+     "(legacy_settlement); a failure fails that job rather than degrading "
+     "into a soft render flag, so render carries no equivalent"},
+    {"kind": "selfcheck_red", "v1_ref": "engine/dashboard/nightly.py:1631-1632",
+     "class": "b", "v2_source": "selfcheck runs as its own v2 job "
+     "(legacy_selfcheck), strictly after render, and refuses "
+     "(VALIDATION_FAILED) on a mismatch rather than degrading; not a render "
+     "input in either version"},
+    {"kind": "publish_failed", "v1_ref": "engine/dashboard/nightly.py:1656",
+     "class": "b", "v2_source": "publication runs as its own stage after "
+     "render (P2-5/Task5); not a render input"},
+    {"kind": "backup_failed", "v1_ref": "engine/dashboard/nightly.py:1698-1716",
+     "class": "b", "v2_source": "backup runs as its own optional stage after "
+     "render; not a render input"},
+    {"kind": "earnings_date_changed", "v1_ref": "engine/dashboard/nightly.py:1004-1023,1365-1368",
+     "class": "c", "v2_source": "needs a previous nightly's persisted "
+     "'calendar' state, which this render job does not bind; folded into "
+     "the 'prior_run_state_unknown' explicit-unknown flag"},
+    {"kind": "new_gate_triggers", "v1_ref": "engine/dashboard/nightly.py:1521-1530",
+     "class": "c", "v2_source": "needs a previous nightly's persisted "
+     "'gate_triggers' state; folded into 'prior_run_state_unknown'"},
+    {"kind": "quota_below_reserve", "v1_ref": "engine/dashboard/nightly.py:963-975,1536-1538",
+     "class": "c", "v2_source": "reads the live ORATS quota ledger, mutable "
+     "host state the refresh stage owns; rendered as the explicit "
+     "'quota_unknown' flag, never omitted and never implied healthy"},
+)
+
+
+def model_evidence_stale_flag(evidence: dict) -> dict | None:
+    """Class (a): v1's ``model_evidence_stale`` kind/detail
+    (``engine/dashboard/nightly.py:1568-1574``), derived from the bound
+    model-evidence artifact's own ``degraded``/``degraded_reason`` fields
+    (``legacy_adapter._action_model_evidence`` sets them on a failed
+    rebuild) rather than a live exception in this process -- the shadow
+    render's model-evidence rebuild and its render run in separate jobs.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("degraded"):
+        return None
+    reason = evidence.get("degraded_reason", "")
+    detail = ("evidence rebuild failed; the bundle carries the cached table, "
+             f"which may predate the current champions — {reason}")[:300]
+    return {"kind": "model_evidence_stale", "detail": detail}
+
+
+def unknown_operational_flags() -> list[dict]:
+    """Class (c): v1 flags sourced from mutable host state or a previous
+    run's persisted board that this render job does not own. Never silently
+    dropped -- each renders as an explicit unknown, distinct from both "flag
+    absent" (nothing wrong) and a declared absent stage.
+    """
+    return [
+        {"kind": "quota_unknown", "detail": "ORATS quota is tracked by the "
+         "refresh stage (an absent stage here); headroom cannot be "
+         "evaluated in this render"},
+        {"kind": "freshness_unknown", "detail": "source freshness is "
+         "measured against the refresh clock (an absent stage here)"},
+        {"kind": "prior_run_state_unknown", "detail": "no prior nightly "
+         "state is bound to this render; earnings-date-change and "
+         "new-gate-trigger detection need last night's persisted board"},
+    ]
+
+
+def unknown_selfcheck_report() -> dict:
+    """Class (c): no prior selfcheck bound to this render. ``build_health``
+    would otherwise serialize a bare ``None`` into ``last_selfcheck`` --
+    indistinguishable from "never checked, assume fine" -- so this is passed
+    instead: an explicit unknown state ``build_health`` cannot mistake for
+    healthy.
+    """
+    return {"ok": None, "known": False,
+            "detail": "no prior selfcheck bound to this render"}
+
+
+def resolve_prior_selfcheck(root: Path) -> dict:
+    """The bound ``prior_selfcheck.json`` (a previous run's committed
+    selfcheck artifact) when the plan supplied one, else the explicit
+    unknown state -- never a bare ``None``.
+    """
+    path = Path(root) / "prior_selfcheck.json"
+    if not path.is_file():
+        return unknown_selfcheck_report()
+    return json.loads(path.read_text())
+
+
+def render_flags(*, requested_as_of, resolved_as_of, finality, panel_lag,
+                 calendar_conflict, model_evidence) -> tuple[dict, list]:
+    """The full v2 render flag list (:data:`RENDER_FLAG_SOURCES_V1`): the
+    execution clock, the absent-stage disclosures and walk-back flag, every
+    class (a) flag derived from a bound artifact, and the class (c) explicit
+    unknowns. ``panel_lag`` and ``calendar_conflict`` are precomputed by
+    ``legacy_adapter`` (both call a legacy helper this module may not
+    import, per this module's own docstring); ``model_evidence`` is the
+    already-loaded model-evidence document.
+    """
+    clock, flags = execution_clock_and_flags(requested_as_of, resolved_as_of, finality)
+    flags.extend(panel_lag)
+    flags.extend(calendar_conflict)
+    stale = model_evidence_stale_flag(model_evidence)
+    if stale is not None:
+        flags.append(stale)
+    flags.extend(unknown_operational_flags())
     return clock, flags
 
 

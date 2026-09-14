@@ -1,5 +1,5 @@
 {
-  "count": 43,
+  "count": 47,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -649,9 +649,69 @@
       "retry": "pure function; no side effects to retry",
       "output": "a small header dict, or None when unreadable/oversized/hash-mismatched",
       "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.nightly._panel_staleness_flags",
+      "reason": "P2-C08: class (a) render flag -- v1's Tier-3 panel lag check, called directly on the resolved session, never re-derived.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "declared legacy input manifest",
+      "write_set": "attempt-local artifacts only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "render flag list",
+      "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.nightly._date_conflict_flag",
+      "reason": "P2-C08: class (a) render flag -- v1's per-event calendar-conflict check, called on the render job's own tickers/window, never re-derived.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "declared legacy input manifest",
+      "write_set": "attempt-local artifacts only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "render flag list",
+      "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.store.read_table",
+      "reason": "P2-C08: reads the earnings_events table for the calendar-conflict render flag.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_render",
+      "read_set": "declared legacy input manifest",
+      "write_set": "attempt-local artifacts only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "render flag list",
+      "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.dashboard.model_evidence.load_model_evidence",
+      "reason": "P2-C08: on a failed rebuild, falls back to the cached model-evidence table and marks it degraded, mirroring v1's degrade-to-cache behavior as data instead of a live exception.",
+      "declared_on": "2026-09-13",
+      "runtime": "legacy_model_evidence",
+      "read_set": "declared legacy input manifest",
+      "write_set": "attempt-local artifacts only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "model evidence artifact",
+      "removal_phase": "phase-4 scoring extraction"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
   "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. P2-6 (snapshot-to-legacy materialization, D13/D14 adapter half) adds 2 more engine.v2.data symbols (engine.data.store._read_part, engine.data.schemas.coerce) so materialize() proves a written legacy file is readable by the unchanged legacy loaders before it is locked read-only; each exact legacy symbol keeps its own ledger entry per review (PANEL_COLUMNS, tier4.COLUMNS, tier4.KEY_COLUMNS stay three separate entries) even though this puts engine.v2.data.legacy_adapter's own import fan-out one over its 8-edge budget -- reported in the task report as a stop-and-decide finding, not gamed by collapsing entries. P2-7 (supervised snapshot import, D16 synthetic) adds one more engine.v2.data symbol, engine.data.schemas.SOURCE_PRIORITY, for a deterministic source_priority_version fingerprint. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled.",
-  "committed_ceiling": 43
+  "committed_ceiling": 47
 }

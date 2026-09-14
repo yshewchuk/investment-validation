@@ -326,7 +326,7 @@ def test_action_render_execution_clock_and_walk_back_flag_match_v1(monkeypatch, 
         captured["build_meta_as_of"] = as_of
         return {}
 
-    def fake_build_health(*, as_of, size_mae):
+    def fake_build_health(*, as_of, size_mae, selfcheck_report=None):
         return {}
 
     def fake_render_bundle(scores, out, *, as_of, horizon_days, fill_alpha, alt_strikes, panel,
