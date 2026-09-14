@@ -17,6 +17,10 @@ Replaces (§4.4): `the data half of dashboard/render.py`, `dashboard/earnings_ap
   `{"release_id": ...}` for a client (the shell, the launcher) to pin and
   reuse, instead of re-following `/release/current`'s redirect on every
   navigation. `/release/current/...` keeps working for direct requests.
+- The read-only v2 dashboard API (`api.py`, P3-2): authenticated, paginated,
+  ETag'd JSON over `projections`' bounded read helpers — `/api/v1/releases/
+  current`, `/api/v1/releases/{id}`, `/api/v1/events`, `/api/v1/events/{id}/
+  scores`, `/api/v1/scores/{id}`, `/api/v1/operations`.
 
 ## Non-responsibilities
 
@@ -80,7 +84,141 @@ decision pill (`app.js` `gatePill`) is a richer client-side tree over
 (disabled, not sized, gate-declined, arithmetic-only) that this index does
 not reproduce — an open gap, not a promise this summary makes.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE -->
+`projections` also carries the two additions P3-2 needed to serve §6's
+filtered `/events` route without a route ever touching a table directly:
+`event_query_hash` is the stable identity of one `/events` query (release
+plus every normalized filter, deliberately excluding `limit`/`cursor` — a
+page-size change or a page turn is not a different query), and `get_event`
+is the single-event lookup `/events/{id}/scores` wraps. `list_events`/
+`event_scores` grew optional `event_date_from`/`event_date_to`/`ticker`/
+`strategy`/`verdict` filters, backward compatible with every existing call
+(all new parameters default to `None`, unfiltered): a strategy/verdict
+filter selects EVENTS with at least one matching score row (an `EXISTS`
+against `serving_score_summary`) and, on the SAME call, narrows that event's
+own attached `scores` to the matching ones — §6's "selects matching events
+and their matching visible summaries consistently" — by construction, not by
+two independently-written filters that could drift apart.
+
+api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
+resolver=None) -> FastAPI` wires §6's six routes over `projections`' bounded
+read helpers only — no route or app-startup path imports or initiates
+scoring, a provider, `engine.v2.ops` or legacy `engine.*` (`tests/
+test_v2_serving_api.py` proves this with a real subprocess and two
+`sys.modules` snapshots). Auth is bearer-or-cookie, mirroring
+`operations.py`'s own rule (reimplemented here, not imported — a peer
+module this task does not touch); the token never appears in an error body.
+Errors are one `Problem`-shaped envelope everywhere — see "Problem field
+reference" below for the exact JSON — built as a plain dict rather than
+importing the `engine.v2.contracts.Problem` dataclass — this module has no
+other use for a contracts import, and the fan-out budget (8 distinct
+modules, §4.3) is otherwise exactly spent on `fastapi`, `engine.v2.
+foundation`, this package's own `projections`, and `hmac`/`os`/`json`/
+`argparse`/`uvicorn`. Pagination cursors are opaque and HMAC-signed with a
+key derived from the token (never the token itself): bound to `release_id`
+plus `event_query_hash` (computed over `ticker`/`strategy`/`verdict`/
+`date_from`/`date_to` — the wire names `ui/src/api/client.ts`'s
+`EventQuery` uses, mapped to `projections`' own `event_date_from`/
+`event_date_to` only at this boundary), so a cursor replayed against a
+different release or filter set — or simply edited — fails closed as
+`CURSOR_MISMATCH` (409).
+
+### Problem field reference
+
+Every non-2xx response is exactly this shape (`_problem`, `ApiError`) —
+nothing added, nothing renamed for any one client:
+
+```json
+{
+  "code": "UNKNOWN_RELEASE",
+  "category": "validation",
+  "retryable": false,
+  "message": "unknown release id",
+  "stage": null,
+  "trace_id": null,
+  "dependency_refs": [],
+  "retry_after_seconds": null,
+  "diagnostic_ref": null,
+  "details": {},
+  "schema_version": "problem.v1.0"
+}
+```
+
+`code`/`category`/`retryable`/`message` are the fields a caller actually
+needs; the rest are the operational envelope every other v2 `Problem`
+carries (`engine.v2.contracts.operations.Problem`) — present for shape
+consistency, always `null`/empty here since this module never has stage,
+tracing or dependency information to report. `message` is the
+human-readable string; there is no separate `title`. `status` is not a body
+field — it is the HTTP status code the response was sent with. Codes this
+module raises: `UNAUTHORIZED` (401), `RELEASE_ID_REQUIRED` (400, §5.4:
+score/event-scope routes require one — never search across releases),
+`INVALID_REQUEST` (422, bad `limit`/date format/`clock_id`),
+`CURSOR_MISMATCH` (409), `NO_CURRENT_RELEASE` (503), `UNKNOWN_RELEASE`/
+`UNKNOWN_EVENT`/`UNKNOWN_SCORE` (404), `OPERATIONS_UNAVAILABLE` (503).
+
+**Current-release resolution (§5.4) is one injected seam.** `create_app`'s
+`resolver` parameter is any zero-argument `Callable[[], str | None]`; the
+default (`_default_resolver`) reads a plain `CURRENT` file directly under
+`serving_root`, refusing a symlinked pointer or one whose content is not a
+single clean path segment — the same check `operations.py`'s own
+`_resolve_current_id` applies, reimplemented rather than imported. A pointer
+naming a release with no committed projection is `NO_CURRENT_RELEASE` (503),
+never a silent fallback to "latest". The publisher that will OWN this
+pointer is a later task; this seam is what it plugs into. `/releases/current`
+stays `Cache-Control: no-store` (its resolution can change between requests)
+but now also carries a strong ETag and answers `If-None-Match` with 304 —
+`no-store` and ETag/304 are not mutually exclusive: the first says a cache
+must not reuse the response unasked, the second makes asking again cheap.
+This keeps `ui/src/hooks.ts` `usePinnedRelease`'s ~4s background poll cheap
+without ever letting a stale release get cached and reused.
+
+**UI-alignment fixes (mid-task, after `ui/` P3-3a landed at `bc6da8d`),
+reconciled against `tests/fixtures/v2_ui_mock_api.py` per the rule "if §6 and
+the mock disagree, §6 wins":**
+
+- `date_from`/`date_to` (not `event_date_from`/`event_date_to`) are the
+  `/events` query param names — taken from `ui/src/api/client.ts`'s
+  `EventQuery`, matched by both the mock and this API's own routes.
+- `GET /events/{id}/scores` returns a **bare JSON array**, not
+  `{release_id, event_id, scores}` — §6 names no envelope beyond "strategy
+  score summaries", and both the mock and the TS `DataClient` (`Promise<
+  EventScoreSummary[]>`) agree on an array, so there was no reason to keep
+  the wrapper.
+- **Judgement call: `CURSOR_MISMATCH` is HTTP 409, matching component_
+  contracts.md §13.2 and the mock's `HTTPStatus.CONFLICT`.** An earlier
+  version of this module used 400 per this task's own original brief text
+  (which stated it twice); the coordinator's later UI-alignment instruction
+  settled the question in the guide/mock's favor, and this implementation
+  now follows that.
+- **Reviewed and reversed: `/scores/{id}` and `/events/{id}/scores` require
+  `release_id`; neither searches across releases.** An earlier version of
+  this module let `/scores/{id}` omit `release_id` and search every release
+  for the id (matching the mock's own all-releases scan and `ui/src/api/
+  client.ts`'s optional `releaseId?`), reasoning that a shared score id
+  necessarily shares content. Review (P3-2) corrected this: §5.4 states
+  "event/score IDs are unique within a release" — scoped, not global — so a
+  route keyed by one must always be given the release, never search for it.
+  A missing `release_id` on either route is now `RELEASE_ID_REQUIRED` (400),
+  distinct from the `UNKNOWN_RELEASE`/`UNKNOWN_EVENT`/`UNKNOWN_SCORE` (404)
+  an unknown-but-present one or id gets.
+  `test_score_detail_scopes_a_shared_score_id_to_the_requested_release`
+  covers the case that motivated the original design (two releases sharing
+  one content-addressed score id) without a cross-release search: fetching
+  it under either release's own explicit id succeeds, and
+  `test_score_detail_membership_validated_when_release_supplied` (a score
+  minted under one release only, requested under the other) proves no
+  fallback ever occurs.
+  `ui/src/api/client.ts`'s optional `releaseId?` on `getScore`/its mock's
+  all-releases scan is accordingly a UI-side gap flagged for the
+  coordinator (who owns reconciling `ui/` for this review), not fixed here.
+- Auth was already cookie-and-bearer (`_authorized` checks both
+  independently); `tests/test_v2_serving_api.py`'s
+  `test_cookie_only_auth_works_on_every_route` now pins that a
+  cookie-only request (no `Authorization` header at all, exactly what `ui/
+  src/api/client.ts` sends) succeeds on every route, not just proves the
+  logic exists.
+
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError -->
 
 ## Consumers
 
@@ -91,6 +229,11 @@ failure rather than a stale sentence.
 `engine.v2.dashboard` imports `operations.create_server` — the compatibility
 preview launcher (`engine/v2/dashboard/preview.py`) composes only this
 surface, per its layer-8 "7 only" import rule.
+
+`api.py` is launched directly (`python3 -m engine.v2.serving.api`) and read
+by `tests/test_v2_serving_api.py`; neither is a v2 package import, so
+neither appears in this directive (`checks/package_readmes.py` only tracks
+`engine/v2/**` packages as consumers). No v2 package imports `api` yet.
 
 <!-- consumers: engine.v2.dashboard -->
 
@@ -112,6 +255,14 @@ scoring, no provider calls, no legacy import — it composes `engine.v2.ops.
 bootstrap.open_catalog` and this package in the one place (`tools/`) allowed
 to import both.
 
+`python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-db
+serving/serving.sqlite --store-root serving/objects --serving-root serving`
+starts the read API under uvicorn. The token comes from the `V2_DASHBOARD_
+TOKEN` environment variable — the launcher refuses to start without one, and
+refuses a non-loopback `--host` without `--allow-non-loopback`, exactly the
+two refusals `engine/v2/dashboard/preview.py`'s launcher already makes for
+the compatibility surface.
+
 ## Testing
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
@@ -130,3 +281,15 @@ projections.py` (P3-1b) cover the offline bridge/index over synthetic
 `earnings_events` fragments, never a real panel or renderer):
 
     python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py
+
+`tests/test_v2_serving_api.py` (P3-2) builds a real `serving.sqlite` the
+same way and serves it over REAL HTTP — a real `uvicorn.Server` bound to an
+ephemeral loopback port in a background thread (`TestClient` alone is not
+enough for the release-switch-mid-request and real-socket cases this needs).
+Auth, pagination, cursor tampering/reuse, ETag/304, release-switch-mid-
+pagination-and-mid-detail, typed errors, and the no-scoring/provider guard
+(a real subprocess, two `sys.modules` snapshots) are all covered; the
+launcher's own refusals run as real `python3 -m engine.v2.serving.api`
+subprocesses:
+
+    python3 -m pytest -q tests/test_v2_serving_api.py
