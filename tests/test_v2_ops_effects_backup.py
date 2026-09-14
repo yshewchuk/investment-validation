@@ -61,6 +61,26 @@ def test_manifest_success_before_ack_is_idempotent_and_keys_are_safe(tmp_path):
     assert conn.execute("SELECT state FROM outbox WHERE logical_key='b3'").fetchone()[0] == "delivered"
 
 
+def test_prepare_backup_retry_returns_same_effect_without_rebuilding_payload(tmp_path):
+    """P2-C07: ``prepare_backup`` called again for a key that already has a
+    pending/running ``backup`` effect must return that SAME effect, not
+    build a new payload -- a new payload (fresh ``cutoff``) for the same
+    logical key would make ``outbox.enqueue`` raise ``IDEMPOTENCY_CONFLICT``."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    first_id = prepare_backup(conn, "b6", {"evidence.bin": ref}, clock=clock)
+    original = conn.execute("SELECT payload_json FROM outbox WHERE effect_id=?", (first_id,)).fetchone()[0]
+
+    clock.advance(3600)
+    second_id = prepare_backup(conn, "b6", {"evidence.bin": ref}, clock=clock)
+    assert second_id == first_id
+    assert conn.execute("SELECT payload_json FROM outbox WHERE effect_id=?",
+                        (first_id,)).fetchone()[0] == original
+    assert conn.execute("SELECT COUNT(*) FROM outbox WHERE kind='backup' AND logical_key='b6'"
+                        ).fetchone()[0] == 1
+
+
 def test_backup_rejects_symlink_target_before_writing(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")

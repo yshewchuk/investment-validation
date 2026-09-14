@@ -32,6 +32,7 @@ import pytest
 from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
 from engine.v2.ledger.decisions import insert, set_authority
+from engine.v2.ledger.export import export_generation
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
@@ -331,6 +332,110 @@ def test_ledger_export_scope_subset_leaves_full_scope_untouched(tmp_path):
         conn.close()
 
 
+def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tmp_path):
+    """P2-C06: a fault after one of three export files leaves the old
+    ``CURRENT`` readable, and a retry through a new attempt completes with
+    no "export generation differs from catalog" conflict and no partial
+    directory ever exposed via ``CURRENT``."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        pred1 = _row("evt-1", "pred")
+        pred1["resolved_at"] = "2026-09-10T21:00:00+00:00"
+        pred2 = _row("evt-2", "pred")
+        pred2["resolved_at"] = "2026-09-11T21:00:00+00:00"
+        out1 = _row("evt-3", "out")  # keeps the default SESSION resolved_at
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[pred1, pred2], outcomes=[out1])
+        release_key = conn.execute(
+            "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='decisions'", (scope,)).fetchone()[0]
+
+        export_root = root / "exports" / scope
+        prior_key = content_hash(["prior-generation"]).split(":")[1][:24]
+        export_generation(conn, export_root, generation=prior_key, purposes=EXPORT_PURPOSES)
+        current_before = (export_root / "CURRENT").read_text()
+        assert current_before.strip() == prior_key
+
+        seen = []
+
+        def fault(name):
+            seen.append(name)
+            if len(seen) == 1:
+                raise RuntimeError("synthetic export interruption")
+
+        first = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="export-1",
+                                  parameters=_params("ledger_export", SESSION, scope))
+        with pytest.raises(RuntimeError, match="synthetic export interruption"):
+            ledger_export_effect(conn, store, first, root, REPO, clock=clock, fault=fault)
+        assert len(seen) == 1
+
+        # Old CURRENT is completely untouched and still resolves.
+        assert (export_root / "CURRENT").read_text() == current_before
+        assert not (export_root / release_key).exists()
+        partials = [p for p in export_root.iterdir()
+                   if p.name.startswith("." + release_key + ".partial-")]
+        assert len(partials) == 1
+        # the outbox export/release_intent rows are untouched by the crash
+        assert conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
+                            (release_key,)).fetchone()["state"] == "pending"
+
+        second = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="export-2",
+                                   parameters=_params("ledger_export", SESSION, scope))
+        result = ledger_export_effect(conn, store, second, root, REPO, clock=clock)
+        _commit(conn, clock, second, result)
+
+        assert (export_root / release_key).is_dir()
+        assert (export_root / "CURRENT").read_text().strip() == release_key
+        # the stale partial directory is swept away on the successful retry
+        assert not [p for p in export_root.iterdir()
+                    if p.name.startswith("." + release_key + ".partial-")]
+        assert conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
+                            (release_key,)).fetchone()["state"] == "delivered"
+
+        # bytes match a clean export of the identical catalog state
+        clean_dir = export_generation(conn, tmp_path / "clean", generation=release_key,
+                                      purposes=EXPORT_PURPOSES)
+        produced = export_root / release_key
+        for path in sorted(produced.rglob("*.jsonl")):
+            twin = clean_dir / path.relative_to(produced)
+            assert twin.read_bytes() == path.read_bytes()
+    finally:
+        conn.close()
+
+
+def test_ledger_export_retry_after_crash_before_current_switch(tmp_path):
+    """A crash injected AFTER every file is durable but the retry path still
+    goes through ``_write_generation`` once more (no generation directory
+    exists yet) -- the second call must still succeed cleanly, proving the
+    partial scheme tolerates a fault at the very last file too."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        release_key = conn.execute(
+            "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='decisions'", (scope,)).fetchone()[0]
+
+        def fault(_name):
+            raise RuntimeError("crash on the only file")
+
+        first = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="export-1",
+                                  parameters=_params("ledger_export", SESSION, scope))
+        with pytest.raises(RuntimeError):
+            ledger_export_effect(conn, store, first, root, REPO, clock=clock, fault=fault)
+        export_root = root / "exports" / scope
+        assert not (export_root / "CURRENT").exists()
+        assert not (export_root / release_key).exists()
+
+        second = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="export-2",
+                                   parameters=_params("ledger_export", SESSION, scope))
+        result = ledger_export_effect(conn, store, second, root, REPO, clock=clock)
+        _commit(conn, clock, second, result)
+        assert (export_root / "CURRENT").read_text().strip() == release_key
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # engineering_gate
 # --------------------------------------------------------------------------
@@ -573,6 +678,156 @@ def test_publication_passes_on_a_no_entry_night(tmp_path):
         conn.close()
 
 
+def _decisions_release_key(conn, scope):
+    return conn.execute(
+        "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+        "AND stage='decisions'", (scope,)).fetchone()[0]
+
+
+def test_publication_binds_and_delivers_release_intent(tmp_path):
+    """P2-C06 decision 2: a successful publication delivers ``release_intent``
+    with a receipt naming the release it is bound to, and the publication/
+    delivery watermarks advance the same as before."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
+        release_key = _decisions_release_key(conn, scope)
+        release_id = "rel" + content_hash([scope, SESSION]).split(":")[1][:24]
+
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                       clock=clock)
+
+        row = conn.execute("SELECT state, receipt_json FROM outbox WHERE kind='release_intent' "
+                           "AND logical_key=?", (release_key,)).fetchone()
+        assert row["state"] == "delivered"
+        receipt = json.loads(row["receipt_json"])
+        assert receipt["release_id"] == release_id
+        assert "bound_at" in receipt
+
+        publication_wm = conn.execute(
+            "SELECT occurrence FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='publication'", (scope,)).fetchone()
+        delivery_wm = conn.execute(
+            "SELECT occurrence FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='delivery'", (scope,)).fetchone()
+        assert publication_wm["occurrence"] == SESSION
+        assert delivery_wm["occurrence"] == SESSION
+        assert result == (None, ())
+    finally:
+        conn.close()
+
+
+def test_publication_failure_leaves_release_intent_bound_and_retry_delivers_once(tmp_path):
+    """A publication that fails AFTER staging (fault at ``pointer_before_ack``,
+    inside ``publish_local``'s own transaction) still leaves ``release_intent``
+    bound -- ``_bind_release_intent`` ran and committed before ``publish_local``
+    was ever called -- while ``publication``/``delivery`` stay undelivered. A
+    retry (no fault) re-uses the SAME binding (no conflict, no re-bind) and
+    delivers the publication exactly once."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
+        release_key = _decisions_release_key(conn, scope)
+        release_id = "rel" + content_hash([scope, SESSION]).split(":")[1][:24]
+
+        def crash(point):
+            if point == "pointer_before_ack":
+                raise RuntimeError("ack lost")
+
+        with pytest.raises(RuntimeError, match="ack lost"):
+            publication_effect(conn, store, claim, root, REPO, clock=clock, fault=crash)
+
+        intent_row = conn.execute("SELECT state, receipt_json FROM outbox WHERE kind='release_intent' "
+                                  "AND logical_key=?", (release_key,)).fetchone()
+        assert intent_row["state"] == "delivered"
+        first_receipt = json.loads(intent_row["receipt_json"])
+        assert first_receipt["release_id"] == release_id
+
+        pub_row = conn.execute("SELECT state FROM outbox WHERE kind='publication' AND logical_key=?",
+                               (release_id,)).fetchone()
+        assert pub_row is not None and pub_row["state"] == "pending"
+        assert conn.execute("SELECT 1 FROM watermarks WHERE pipeline='nightly' AND scope=? "
+                            "AND stage='publication'", (scope,)).fetchone() is None
+
+        # Retry: same claim, no fault this time.
+        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                       clock=clock)
+
+        intent_rows = conn.execute("SELECT state, receipt_json FROM outbox WHERE kind='release_intent' "
+                                   "AND logical_key=?", (release_key,)).fetchall()
+        assert len(intent_rows) == 1
+        assert intent_rows[0]["state"] == "delivered"
+        assert json.loads(intent_rows[0]["receipt_json"]) == first_receipt  # not re-bound
+
+        pub_rows = conn.execute("SELECT state FROM outbox WHERE kind='publication' AND logical_key=?",
+                                (release_id,)).fetchall()
+        assert [r["state"] for r in pub_rows] == ["delivered"]
+        publication_wm = conn.execute(
+            "SELECT occurrence FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='publication'", (scope,)).fetchone()
+        assert publication_wm["occurrence"] == SESSION
+    finally:
+        conn.close()
+
+
+def test_export_release_intent_publication_backup_independently_verifiable(tmp_path):
+    """D20: export, release_intent, publication and backup each check out
+    against their own outbox row and their own scoped watermark -- none of
+    the four is inferred from another."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
+        release_key = _decisions_release_key(conn, scope)
+        release_id = "rel" + content_hash([scope, SESSION]).split(":")[1][:24]
+
+        export_claim = _submit_and_claim(conn, clock, supervisor, kind="ledger_export",
+                                         key="d20-export",
+                                         parameters=_params("ledger_export", SESSION, scope))
+        export_result = ledger_export_effect(conn, store, export_claim, root, REPO, clock=clock)
+        _commit(conn, clock, export_claim, export_result)
+
+        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                       clock=clock)
+
+        backup_claim = _submit_and_claim(conn, clock, supervisor, kind="backup", key="d20-backup",
+                                         parameters=_params("backup", SESSION, scope))
+        backup_result = backup_effect(conn, store, backup_claim, root, clock=clock)
+        _commit(conn, clock, backup_claim, backup_result)
+
+        export_row = conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
+                                  (release_key,)).fetchone()
+        assert export_row["state"] == "delivered"
+        export_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
+                                 "AND scope=? AND stage='export'", (scope,)).fetchone()
+        assert export_wm["occurrence"] == SESSION
+
+        intent_row = conn.execute("SELECT state, receipt_json FROM outbox WHERE kind='release_intent' "
+                                  "AND logical_key=?", (release_key,)).fetchone()
+        assert intent_row["state"] == "delivered"
+        assert json.loads(intent_row["receipt_json"])["release_id"] == release_id
+
+        pub_row = conn.execute("SELECT state FROM outbox WHERE kind='publication' AND logical_key=?",
+                               (release_id,)).fetchone()
+        assert pub_row["state"] == "delivered"
+        pub_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
+                              "AND scope=? AND stage='publication'", (scope,)).fetchone()
+        assert pub_wm["occurrence"] == SESSION
+
+        backup_row = conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()
+        assert backup_row["state"] == "delivered"
+        backup_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
+                                 "AND scope=? AND stage='backup'", (scope,)).fetchone()
+        assert backup_wm["occurrence"] == SESSION
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # backup
 # --------------------------------------------------------------------------
@@ -622,6 +877,61 @@ def test_backup_failure_retries_alone_other_watermarks_unchanged(tmp_path):
             "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
             "AND stage='decisions'", (scope,)).fetchone()["receipt_ref"]
         assert decisions_final == decisions_before
+    finally:
+        conn.close()
+
+
+def test_backup_retry_after_clock_advance_keeps_original_cutoff(tmp_path):
+    """P2-C07: ``backup_effect`` calls ``prepare_backup`` on EVERY attempt,
+    including a retry. Before the fix, a retry after the clock moved built a
+    payload with a NEW cutoff for the SAME logical key and ``outbox.enqueue``
+    raised ``IDEMPOTENCY_CONFLICT``. With the fix, the second ``prepare_backup``
+    call returns the first attempt's own effect untouched, so the retry
+    completes with the ORIGINAL cutoff and no conflict; only the backup
+    effect and the backup watermark change."""
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        decisions_before = conn.execute(
+            "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='decisions'", (scope,)).fetchone()["receipt_ref"]
+
+        def fault(point):
+            if point == "after_manifest_before_ack":
+                raise RuntimeError("synthetic backup failure")
+
+        first = _submit_and_claim(conn, clock, supervisor, kind="backup", key="backup-a",
+                                  parameters=_params("backup", SESSION, scope))
+        with pytest.raises(RuntimeError, match="synthetic backup failure"):
+            backup_effect(conn, store, first, root, clock=clock, fault=fault)
+
+        original_payload = json.loads(
+            conn.execute("SELECT payload_json FROM outbox WHERE kind='backup'").fetchone()[0])
+        original_cutoff = original_payload["cutoff"]
+        assert conn.execute("SELECT state FROM outbox WHERE kind='backup'").fetchone()["state"] == "pending"
+
+        clock.advance(3600)  # a new attempt, an hour later than the first
+
+        second = _submit_and_claim(conn, clock, supervisor, kind="backup", key="backup-b",
+                                   parameters=_params("backup", SESSION, scope))
+        result = backup_effect(conn, store, second, root, clock=clock)
+        assert result == (None, ())
+        _commit(conn, clock, second, result)
+
+        rows = conn.execute("SELECT state, payload_json, receipt_json FROM outbox "
+                            "WHERE kind='backup'").fetchall()
+        assert [r["state"] for r in rows] == ["delivered"]
+        assert json.loads(rows[0]["payload_json"])["cutoff"] == original_cutoff
+        assert json.loads(rows[0]["receipt_json"])["cutoff"] == original_cutoff
+
+        backup_wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' "
+                                 "AND scope=? AND stage='backup'", (scope,)).fetchone()
+        assert backup_wm["occurrence"] == SESSION
+        decisions_after = conn.execute(
+            "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
+            "AND stage='decisions'", (scope,)).fetchone()["receipt_ref"]
+        assert decisions_after == decisions_before
     finally:
         conn.close()
 

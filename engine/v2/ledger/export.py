@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
 from engine.v2.foundation import canonical_json, fsync_directory
 
 
-def export_generation(conn, root: Path | str, *, generation: str, purposes=None) -> Path:
+def _no_fault(_name):
+    return None
+
+
+def export_generation(conn, root: Path | str, *, generation: str, purposes=None,
+                      fault=None) -> Path:
     """Write all prediction rows through a durable generation and switch CURRENT atomically.
 
     ``purposes``, when given, restricts the export to ``decisions`` rows whose
@@ -18,12 +25,36 @@ def export_generation(conn, root: Path | str, *, generation: str, purposes=None)
     ``research_reconstruction`` row is never a legacy row and must never
     appear). Left ``None``, every row is exported — the pre-existing,
     unfiltered behaviour every caller before D20 still relies on.
+
+    Resumable (P2-C06): every file is written into a private sibling
+    ``root/.<generation>.partial-<attempt>/`` first, fsynced file-by-file and
+    directory-by-directory, then atomically ``os.rename``d onto
+    ``root/<generation>`` -- only THEN does ``CURRENT`` ever move. A crash or
+    injected fault partway through a partial directory never touches
+    ``root/<generation>`` or ``CURRENT`` at all: the old ``CURRENT`` (if any)
+    stays exactly as it was, still readable by legacy readers, and a retry
+    starts a brand-new partial directory (a fresh ``uuid4`` attempt id) that
+    the stale one never blocks. ``root/<generation>`` itself, once it exists,
+    is a complete, previously-renamed generation and is never written into
+    again -- only verified byte-for-byte against the catalog (the pre-D06
+    behaviour, preserved for the already-durable case) or left as-is.
     """
     if "/" in generation or generation in ("", ".", ".."):
         raise ValueError("unsafe export generation")
+    fault = fault or _no_fault
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     destination = root / generation
+    grouped = _grouped_lines(conn, purposes)
+    if destination.exists():
+        _verify_complete(destination, grouped)
+    else:
+        _write_generation(root, destination, generation, grouped, fault)
+    _switch_current(root, generation)
+    return destination
+
+
+def _grouped_lines(conn, purposes):
     if purposes is None:
         rows = conn.execute("SELECT kind,payload_json FROM decisions ORDER BY sequence").fetchall()
     else:
@@ -38,27 +69,54 @@ def export_generation(conn, root: Path | str, *, generation: str, purposes=None)
         date = str(date)[:10] if date else "unknown"
         bucket = "predictions" if row[0] == "prediction" else "outcomes"
         grouped[(bucket, date)].append(canonical_json(payload).encode("utf-8") + b"\n")
-    if destination.exists():
-        for (bucket, date), lines in grouped.items():
-            path = destination / bucket / (date + ".jsonl")
-            if not path.is_file() or path.read_bytes() != b"".join(lines):
-                raise ValueError("export generation differs from catalog")
-    else:
-        destination.mkdir()
-        for (bucket, date), lines in grouped.items():
-            path = destination / bucket / (date + ".jsonl")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"".join(lines))
-            with path.open("rb") as stream:
-                os.fsync(stream.fileno())
-        fsync_directory(destination)
+    return grouped
+
+
+def _verify_complete(destination, grouped):
+    for (bucket, date), lines in grouped.items():
+        path = destination / bucket / (date + ".jsonl")
+        if not path.is_file() or path.read_bytes() != b"".join(lines):
+            raise ValueError("export generation differs from catalog")
+
+
+def _write_generation(root, destination, generation, grouped, fault):
+    partial = root / (".{}.partial-{}".format(generation, uuid.uuid4().hex))
+    partial.mkdir()
+    for (bucket, date), lines in sorted(grouped.items()):
+        name = bucket + "/" + date + ".jsonl"
+        path = partial / bucket / (date + ".jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"".join(lines))
+        with path.open("rb") as stream:
+            os.fsync(stream.fileno())
+        fault(name)
+    for directory in sorted({p.parent for p in partial.rglob("*") if p.is_file()}, reverse=True):
+        fsync_directory(directory)
+    fsync_directory(partial)
+    # Never renamed onto ``destination`` until every file above is durable:
+    # a fault raised mid-loop leaves this whole ``partial`` directory
+    # orphaned beside ``root/<generation>`` (which was never created) and
+    # ``CURRENT`` (never touched) -- exactly the resumable-crash state.
+    os.rename(partial, destination)
+    fsync_directory(root)
+    _sweep_stale_partials(root, generation, destination)
+
+
+def _sweep_stale_partials(root, generation, destination):
+    prefix = "." + generation + ".partial-"
+    for child in root.iterdir():
+        if child.name.startswith(prefix) and child != destination:
+            shutil.rmtree(child, ignore_errors=True)
+    fsync_directory(root)
+
+
+def _switch_current(root, generation):
     pointer = root / ("CURRENT." + generation)
     pointer.write_text(generation + "\n")
     with pointer.open("rb") as stream:
         os.fsync(stream.fileno())
     os.replace(pointer, root / "CURRENT")
     fsync_directory(root)
-    return destination
 
 
 def _partition_date(payload):
