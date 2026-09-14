@@ -620,20 +620,131 @@ def test_score_detail_scopes_a_shared_score_id_to_the_requested_release(live):
 # --------------------------------------------------------------------------
 
 
-def test_operations_route_unavailable_without_health_document(live):
+#: A minimal but realistic ``operations_status.v1.0`` document -- the shape
+#: ``engine.v2.ops.effects_graph.publication_effect`` actually writes
+#: (``engine.v2.contracts.OperationsStatus``); constructed here rather than
+#: run through a real publication so these tests stay serving-only (real
+#: production of one is `tests/test_v2_ops_engineering_history.py`'s job).
+def _operations_status_document(**overrides) -> dict:
+    document = {
+        "schema_version": "operations_status.v1.0", "scope": "shadow",
+        "release_id": "rel-a", "attempted_release_id": "rel-a", "generated_at": "t1",
+        "requested_session": "2026-09-12", "resolved_session": "2026-09-11",
+        "engineering_history": [
+            {"occurrence": "2026-09-10", "status": "pass", "retry_count": 0, "detail": None,
+             "schema_version": "engineering_night.v1.0"},
+            {"occurrence": "2026-09-11", "status": "unknown", "retry_count": 0, "detail": None,
+             "schema_version": "engineering_night.v1.0"}],
+        "engineering_streak": {"ok": True, "consecutive_nights": 0},
+        "conflicts": [{"kind": "calendar_date_conflict", "detail": "AAA has two sessions"}],
+        "degraded_model_evidence": [{"kind": "model_evidence_stale", "detail": "rebuild failed"}],
+        "selfcheck": {"ok": True}, "stale": False, "stale_reason": None,
+        "withheld": False, "withheld_reason": None,
+        "failed_update": False, "failed_update_reason": None,
+    }
+    document.update(overrides)
+    return document
+
+
+def _write_operations_status(serving_root: Path, **overrides) -> None:
+    publication_root = serving_root / "_publication"
+    publication_root.mkdir(parents=True, exist_ok=True)
+    (publication_root / "operations_status.json").write_text(
+        json.dumps(_operations_status_document(**overrides)))
+
+
+def test_operations_route_unavailable_without_status_document(live):
     base, _, _, _ = live
     code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
     assert code == 503
     assert json.loads(body)["code"] == "OPERATIONS_UNAVAILABLE"
 
 
-def test_operations_route_serves_a_valid_health_document(live):
+def test_operations_route_serves_a_valid_status_document(live):
     base, serving_root, _, _ = live
-    (serving_root / "health.json").write_text(json.dumps(
-        {"schema_version": "operations_health.v1.0", "generated_at": "t1", "withheld_release": None}))
+    _write_operations_status(serving_root)
     code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
     assert code == 200
     assert json.loads(body)["generated_at"] == "t1"
+
+
+def test_operations_route_unknown_history_is_not_green(live):
+    """§5.5 item 3: a release whose history has never been observed reads
+    back as ``unknown``, never a silent green default -- the API forwards
+    ops's own per-night status verbatim, it never invents one."""
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root, engineering_history=[
+        {"occurrence": "2026-09-11", "status": "unknown", "retry_count": 0, "detail": None,
+         "schema_version": "engineering_night.v1.0"}])
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
+    assert code == 200
+    nights = json.loads(body)["engineering_history"]
+    assert nights == [{"occurrence": "2026-09-11", "status": "unknown", "retry_count": 0,
+                       "detail": None, "schema_version": "engineering_night.v1.0"}]
+
+
+def test_operations_route_requested_and_resolved_session_are_surfaced_verbatim(live):
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root, requested_session="2026-09-12", resolved_session="2026-09-10")
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
+    document = json.loads(body)
+    assert document["requested_session"] == "2026-09-12"
+    assert document["resolved_session"] == "2026-09-10"
+
+
+def test_operations_route_conflicts_and_degraded_evidence_are_carried_not_recomputed(live):
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root)
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
+    document = json.loads(body)
+    assert document["conflicts"] == [{"kind": "calendar_date_conflict", "detail": "AAA has two sessions"}]
+    assert document["degraded_model_evidence"] == [
+        {"kind": "model_evidence_stale", "detail": "rebuild failed"}]
+
+
+def test_operations_route_failed_update_reason_is_surfaced(live):
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root, attempted_release_id="rel-b", stale=True,
+                             stale_reason="PUBLICATION_REFUSED: release gates are not all valid",
+                             failed_update=True,
+                             failed_update_reason="PUBLICATION_REFUSED: release gates are not all valid")
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
+    document = json.loads(body)
+    assert document["release_id"] == "rel-a"
+    assert document["attempted_release_id"] == "rel-b"
+    assert document["failed_update"] is True
+    assert document["failed_update_reason"] == "PUBLICATION_REFUSED: release gates are not all valid"
+
+
+def test_operations_route_release_id_param_absent_is_unchanged(live):
+    """2026-09-14 review fix, item 2: omitting ``?release_id=`` keeps the
+    pre-existing behavior -- the scope's current status, unconditionally."""
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root)
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
+    assert code == 200
+    assert json.loads(body)["release_id"] == "rel-a"
+
+
+def test_operations_route_release_id_param_matching_document_succeeds(live):
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root)
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN, params={"release_id": "rel-a"})
+    assert code == 200
+    assert json.loads(body)["release_id"] == "rel-a"
+
+
+def test_operations_route_release_id_param_mismatch_is_a_typed_conflict(live):
+    """A client pinned to an earlier release must never silently be handed a
+    DIFFERENT release's status once a newer publication attempt has run."""
+    base, serving_root, _, _ = live
+    _write_operations_status(serving_root)
+    code, body, _ = _get(base, "/api/v1/operations", token=TOKEN, params={"release_id": "rel-z"})
+    assert code == 409
+    document = json.loads(body)
+    assert document["code"] == "OPERATIONS_STATUS_NOT_FOR_RELEASE"
+    assert document["details"]["requested_release_id"] == "rel-z"
+    assert document["details"]["status_release_id"] == "rel-a"
 
 
 # --------------------------------------------------------------------------
@@ -850,9 +961,11 @@ def test_date_from_bad_format_is_422(live):
     assert json.loads(body)["code"] == "INVALID_REQUEST"
 
 
-def test_operations_route_unavailable_on_malformed_health_json(live):
+def test_operations_route_unavailable_on_malformed_status_json(live):
     base, serving_root, _, _ = live
-    (serving_root / "health.json").write_text("{not json")
+    publication_root = serving_root / "_publication"
+    publication_root.mkdir(parents=True, exist_ok=True)
+    (publication_root / "operations_status.json").write_text("{not json")
     code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
     assert code == 503
     assert json.loads(body)["code"] == "OPERATIONS_UNAVAILABLE"
@@ -860,7 +973,10 @@ def test_operations_route_unavailable_on_malformed_health_json(live):
 
 def test_operations_route_unavailable_on_wrong_schema_version(live):
     base, serving_root, _, _ = live
-    (serving_root / "health.json").write_text(json.dumps({"schema_version": "not_the_right.v1.0"}))
+    publication_root = serving_root / "_publication"
+    publication_root.mkdir(parents=True, exist_ok=True)
+    (publication_root / "operations_status.json").write_text(
+        json.dumps({"schema_version": "not_the_right.v1.0"}))
     code, body, _ = _get(base, "/api/v1/operations", token=TOKEN)
     assert code == 503
     assert json.loads(body)["code"] == "OPERATIONS_UNAVAILABLE"

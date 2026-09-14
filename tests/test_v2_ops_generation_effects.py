@@ -15,8 +15,10 @@ complete engineering_gate/ledger_export/backup, each recording its OWN
 watermark receipt without touching the other's; an identical retry of either
 generation stays idempotent; and a same-generation content change still
 conflicts (the invariant this fix must not weaken). It also proves the
-health/streak hook (§5.5 item 2, not implemented) cannot double-count a
-night just because two generations both observed it.
+health/streak hook (§5.5 item 2, now implemented in
+``engineering_gate_effect`` via ``health.record_check`` -- see
+``tests/test_v2_ops_engineering_history.py``) cannot double-count a night
+just because two generations both observed it.
 """
 from __future__ import annotations
 
@@ -194,9 +196,10 @@ def test_backup_two_generations_each_deliver_their_own_effect(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# health/streak hook: §5.5 item 2 is not implemented (engineering_gate_effect
-# does not call health.record_check yet), but the table it will write into
-# already counts by occurrence, never by generation or retry.
+# health/streak hook: §5.5 item 2 is now implemented (engineering_gate_effect
+# calls health.record_check -- tests/test_v2_ops_engineering_history.py
+# exercises the effect itself); this test stays here as the underlying-table
+# proof that recording counts by occurrence, never by generation or retry.
 # --------------------------------------------------------------------------
 
 
@@ -204,9 +207,8 @@ def test_health_streak_counts_one_occurrence_per_night_not_per_generation(tmp_pa
     """``health_observations`` is keyed ``PRIMARY KEY(occurrence, kind)`` --
     recording an engineering observation for the SAME night under two
     different generations still counts as one scheduled occurrence, never
-    two. This is the hook guide §5.5 item 2 ("populate live engineering
-    health from real observations") writes into; item 2 itself stays out of
-    scope here."""
+    two. ``tests/test_v2_ops_engineering_history.py`` proves the real
+    ``engineering_gate_effect`` wiring on top of this table."""
     from engine.v2.ops.health import budget_streak, record_check
 
     conn, clock, _ = catalog(tmp_path)

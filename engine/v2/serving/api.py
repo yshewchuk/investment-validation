@@ -88,7 +88,7 @@ from . import projections
 __all__ = ["ApiError", "create_app", "main"]
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
-_HEALTH_SCHEMA = "operations_health.v1.0"
+_OPERATIONS_STATUS_SCHEMA = "operations_status.v1.0"
 _IMMUTABLE_CACHE = "private, max-age=31536000, immutable"
 
 
@@ -330,12 +330,17 @@ def _validate_date(value: str | None, field_name: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# operations health -- §6: "mirror /health.json read-only"
+# operations status -- §6/§5.5 items 2-3: the sidecar ``publication_effect``
+# writes into the publisher's scope root, read like ``_read_projection_
+# binding`` (files only, never an ``engine.v2.ops`` import), as a plain
+# untyped document (no ``engine.v2.contracts`` import; budget already spent).
 # --------------------------------------------------------------------------
 
 
-def _read_health(serving_root) -> dict | None:
-    path = os.path.join(str(serving_root), "health.json")
+def _read_operations_status(publication_root) -> dict | None:
+    if not publication_root:
+        return None
+    path = os.path.join(str(publication_root), "operations_status.json")
     if os.path.islink(path) or not os.path.isfile(path):
         return None
     try:
@@ -343,7 +348,7 @@ def _read_health(serving_root) -> dict | None:
             document = json.loads(handle.read())
     except (OSError, ValueError):
         return None
-    if not isinstance(document, dict) or document.get("schema_version") != _HEALTH_SCHEMA:
+    if not isinstance(document, dict) or document.get("schema_version") != _OPERATIONS_STATUS_SCHEMA:
         return None
     return document
 
@@ -471,11 +476,30 @@ def _score_detail_response(serving_db, store, response: Response, request: Reque
     return _immutable_response(request, response, detail.score_id, document)
 
 
-def _operations_response(serving_root, response: Response) -> dict:
-    document = _read_health(serving_root)
+def _operations_response(publication_root, response: Response, *, release_id: str | None = None) -> dict:
+    """§6 sidecar; missing history is the same typed refusal as a malformed
+    document -- never a silent green default (§5.5 item 3).
+
+    2026-09-14 review fix: the sidecar always describes the SCOPE's current
+    state, not any one release -- a client that pinned an earlier
+    ``release_id`` (from a prior response's own field, or from
+    ``/api/v1/releases/current``) and polls this route later can otherwise
+    be handed a DIFFERENT release's status without noticing, once a newer
+    publication attempt has run. ``release_id``, given, is checked against
+    the document's own field; a mismatch is a typed, non-retryable refusal
+    (the caller asked for a pinned release this document no longer
+    describes) rather than silently substituting another release's status.
+    """
+    document = _read_operations_status(publication_root)
     if document is None:
         raise ApiError(503, _problem("OPERATIONS_UNAVAILABLE", "resource",
-                                     "no operations health recorded", retryable=True))
+                                     "no operations status recorded", retryable=True))
+    if release_id is not None and document.get("release_id") != release_id:
+        raise ApiError(409, _problem(
+            "OPERATIONS_STATUS_NOT_FOR_RELEASE", "validation",
+            "operations status describes a different release than requested",
+            details={"requested_release_id": release_id,
+                     "status_release_id": document.get("release_id")}))
     response.headers["Cache-Control"] = "no-store"
     return document
 
@@ -554,8 +578,8 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
                                       score_id=score_id, release_id=release_id)
 
     @app.get("/api/v1/operations", dependencies=auth)
-    def operations_route(response: Response):
-        return _operations_response(serving_root, response)
+    def operations_route(response: Response, release_id: str | None = None):
+        return _operations_response(publication_root, response, release_id=release_id)
 
     return app
 

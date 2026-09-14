@@ -604,11 +604,12 @@ def test_attempt_input_bindings_migration_applies_once_and_checksums_hold(tmp_pa
     path = tmp_path / "ops.sqlite"
     conn = open_catalog(path, clock=SystemClock())
     applied = applied_versions(conn, schema.OWNER)
-    # guide §5.5 item 1 (generation-aware watermarks) added migration 8; this
-    # tracks whichever migration is actually latest rather than a hardcoded
-    # version, so the NEXT schema change updates only the migration table.
+    # guide §5.5 item 2 (engineering observation retry counts) added
+    # migration 9; this tracks whichever migration is actually latest rather
+    # than a hardcoded version, so the NEXT schema change updates only the
+    # migration table.
     assert applied.get(schema.MIGRATIONS[-1].version) == checksum(schema.MIGRATIONS[-1])
-    assert schema.MIGRATIONS[-1].version == 8
+    assert schema.MIGRATIONS[-1].version == 9
     conn.close()
     # Re-opening the same catalog re-applies no migration and does not raise.
     conn2 = open_catalog(path, clock=SystemClock())

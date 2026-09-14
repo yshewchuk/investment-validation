@@ -112,7 +112,7 @@ def test_o19_atomic_effects(tmp_path):
     conn, clock, supervisor = catalog(tmp_path)
     claim = enqueue_claim(conn, clock, supervisor)
     def broken(db):
-        db.execute("INSERT INTO health_observations VALUES ('night','test',1,'{}')")
+        db.execute("INSERT INTO health_observations VALUES ('night','test',1,'{}',0)")
         raise RuntimeError("crash")
     with pytest.raises(RuntimeError):
         commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "exited"),

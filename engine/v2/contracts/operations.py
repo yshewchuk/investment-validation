@@ -17,15 +17,20 @@ from typing import Any, Literal
 
 __all__ = [
     "CAPACITY_SAMPLE_V1",
+    "ENGINEERING_NIGHT_V1",
     "FAILURE_CODES",
+    "OPERATIONS_STATUS_V1",
     "PROBLEM_V1",
     "PROGRESS_EVENT_V1",
     "RESOLVED_RESOURCES_V1",
     "RESOURCE_POLICY_V1",
     "CapacitySample",
     "Containment",
+    "EngineeringNight",
+    "EngineeringStatus",
     "ExecutorMode",
     "LiveWindow",
+    "OperationsStatus",
     "Problem",
     "ProblemCategory",
     "ProcessIdentity",
@@ -42,6 +47,10 @@ PROGRESS_EVENT_V1 = "progress_event.v1.0"
 RESOLVED_RESOURCES_V1 = "resolved_resources.v1.0"
 RESOURCE_POLICY_V1 = "resource_policy.v1.0"
 CAPACITY_SAMPLE_V1 = "capacity_sample.v1.0"
+ENGINEERING_NIGHT_V1 = "engineering_night.v1.0"
+OPERATIONS_STATUS_V1 = "operations_status.v1.0"
+
+EngineeringStatus = Literal["pass", "fail", "unknown"]
 
 ProblemCategory = Literal["validation", "dependency", "source", "resource", "integrity", "internal"]
 #: ``fake`` exists for synthetic tests only; production accepts cgroup or watchdog.
@@ -221,6 +230,77 @@ class ResolvedResources:
     provider_leases: tuple[str, ...]
     resource_profile_version: str
     schema_version: str = RESOLVED_RESOURCES_V1
+
+
+@dataclass(frozen=True, kw_only=True)
+class EngineeringNight:
+    """One scheduled occurrence's engineering-gate history (guide §5.5 item
+    2), as :func:`engine.v2.ops.health.engineering_history` builds it.
+
+    ``status`` is ``"unknown"`` for a scheduled night with no recorded
+    observation at all -- never rendered as green. ``retry_count`` counts
+    additional observations recorded for this SAME occurrence (a retry, or a
+    later same-night generation) -- never a count of nights.
+    """
+
+    occurrence: str
+    status: EngineeringStatus
+    retry_count: int
+    detail: Any = None
+    schema_version: str = ENGINEERING_NIGHT_V1
+
+
+@dataclass(frozen=True, kw_only=True)
+class OperationsStatus:
+    """The versioned operations status document, guide §5.5 items 2-3 and
+    §6's ``/api/v1/operations``.
+
+    Written by ops (``engine.v2.ops.effects_graph.publication_effect``) at
+    publication/effect time, as a plain file sidecar under the fenced
+    publisher's own scope root -- never inside a specific release's own
+    immutable file set, since a FAILED update (a new generation that never
+    reaches ``CURRENT``) must still be able to update this document to show
+    its own failure reason while the old release stays current. ``engine.v2.
+    serving.api`` reads the resulting JSON as a plain, untyped document (a
+    peer package may not import ``engine.v2.ops``'s producer, and this
+    module's own ``from_document``/``to_document`` machinery needs no
+    registry to do so) -- this dataclass exists so the OPS side that
+    constructs one cannot drift from its own declared shape.
+
+    ``release_id`` is the release actually current after this write (the
+    newly published one on success; the unchanged prior one, or ``None`` if
+    none has ever published, on a failed update). ``attempted_release_id``
+    is always this attempt's own candidate id, whether or not it became
+    current -- the two differ exactly when ``failed_update`` is true, and
+    that mismatch is also this module's own definition of ``stale``.
+
+    ``conflicts``/``degraded_model_evidence`` are carried, never
+    reconstructed: the same ``calendar_date_conflict``/``model_evidence_
+    stale`` render flags (``engine.v2.ops.render_inputs``) the render job
+    already computed once, read back out of the bound render bundle.
+    ``selfcheck`` is this publication's own bound ``selfcheck.json``
+    (``legacy_selfcheck``, the job that already validated the just-rendered
+    bundle) verbatim, or an explicit unknown state if none is bound.
+    """
+
+    scope: str
+    release_id: str | None
+    attempted_release_id: str | None
+    generated_at: str
+    requested_session: str
+    resolved_session: str
+    engineering_history: tuple[EngineeringNight, ...]
+    engineering_streak: dict[str, Any]
+    conflicts: tuple[Any, ...]
+    degraded_model_evidence: tuple[Any, ...]
+    selfcheck: Any
+    stale: bool
+    stale_reason: str | None = None
+    withheld: bool = False
+    withheld_reason: str | None = None
+    failed_update: bool = False
+    failed_update_reason: str | None = None
+    schema_version: str = OPERATIONS_STATUS_V1
 
 
 @dataclass(frozen=True, kw_only=True)

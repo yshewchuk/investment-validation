@@ -425,20 +425,142 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    health/streak hook counting one occurrence per night). True superseding
    decisions (an operator-approved `supersedes`/`supersede_reason`) remain
    ledger-phase scope, unchanged.
-2. **Populate live engineering health from real observations.**
-   `engineering_gate_effect` records a watermark but does not populate
-   `health.record_check`. Wire scheduled occurrences to durable engineering
-   observations so the streak counts nights, not retries; unobserved nights
-   remain unknown. Bind status to the current candidate/published release and
-   show stale, withheld, and failed-update reasons through the sidecar.
-   Current publication already needs its bound engineering receipt in Phase
-   2; this task adds trustworthy history and display, not a replacement gate.
-3. **Consume semantic status without reconstructing it.** Carry the pinned
-   requested/resolved session, conflicts, degraded model evidence, and current
-   selfcheck/publication state from the accepted Phase 2 handoff. Test a prior
-   selfcheck observation and a failed update while the old release stays
-   usable. Missing history must not render as a green check. Dedicated full
-   health/flags screens remain Phase 6 work.
+2. **Populate live engineering health from real observations.** **Done
+   (2026-09-14).** `engineering_gate_effect` now calls `health.record_check`
+   for `(session, "engineering")` on every attempt, in addition to (not
+   instead of) its existing generation-aware watermark: `record_check`'s own
+   `PRIMARY KEY(occurrence, kind)` (migration 9,
+   `engine/v2/ops/schema.py`, adding a per-row `attempts` counter) collapses
+   a retry or a later same-night generation onto that occurrence's one row,
+   bumping `attempts` rather than adding a night. `health.trailing_occurrences`
+   /`health.engineering_history` build the guide's per-night window
+   (`{occurrence, status, retry_count, detail}`, `status` one of
+   `pass`/`fail`/`unknown`) over the last N SCHEDULED TRADING sessions ending
+   at the resolved session (2026-09-14 review fix: an earlier pass used
+   calendar days, so every weekend/holiday read back as a fabricated
+   `unknown` night, diluting the streak; `trailing_occurrences` now calls
+   `engine.v2.ops.legacy_adapter.projected_trading_sessions` — pure weekday/
+   US-market-holiday rule, no repo root needed — and REFUSES
+   (`VALIDATION_FAILED`) rather than silently falling back to calendar days
+   if the calendar cannot be resolved or does not yield enough sessions); a
+   scheduled trading night with no recorded observation reads back as
+   `unknown`, never a fabricated `pass`. `budget_streak` (unchanged) still
+   feeds `/health.json`'s `code_budgets` from the same table, UNBOUNDED
+   (every occurrence ever recorded); `OperationsStatus.engineering_streak`
+   instead uses the new `health.engineering_streak_from_history`, derived
+   ONLY from the same windowed `engineering_history` the document already
+   carries, so the two fields of one document can never disagree — the
+   review found `budget_streak`'s unbounded scan could report more
+   consecutive failures than the visible window ever shows.
+   `tests/test_v2_ops_engineering_history.py::test_engineering_streak_is_
+   windowed_not_budget_streaks_unbounded_scan` asserts the two intentionally
+   disagree on a fixture built to show it. See also
+   `tests/test_v2_ops_engineering_history.py` (three nights: pass,
+   retry-then-pass, unobserved; two generations in one night count as one
+   night; trading-session window excludes weekends/holidays; a broken
+   calendar refuses) and `tests/test_v2_ops_generation_effects.py`'s own
+   health/streak hook test.
+3. **Consume semantic status without reconstructing it.** **Done
+   (2026-09-14).** `publication_effect` now writes a versioned
+   `operations_status.json` sidecar
+   (`engine.v2.contracts.OperationsStatus`/`OPERATIONS_STATUS_V1`,
+   `engine/v2/contracts/operations.py`) into the fenced publisher's own scope
+   root (a sibling of `CURRENT`, not inside any one release's immutable file
+   set) on every attempt, success or failure — `_stage_and_publish` writes it
+   both on success and from the `OpsError` except branch, so a FAILED update
+   (a new generation that fails before publication) still leaves the prior
+   release current and readable while the sidecar records this attempt's own
+   `failed_update`/`failed_update_reason`. It carries, never recomputes: the
+   pinned `requested_session`/`resolved_session`
+   (`snapshot_stages.resolve_effective_session`'s own output), `conflicts`/
+   `degraded_model_evidence` read back out of the already-rendered bundle's
+   own `data/flags.json` (P2-C08), the bound `selfcheck.json` verbatim (or an
+   explicit unknown state if none is bound), the engineering history window
+   from item 2, and `stale`/`withheld` banners derived from the served
+   release versus this attempt's candidate. `engine/v2/serving/api.py`'s
+   `/api/v1/operations` reads this file directly off `publication_root`
+   (files only, no `engine.v2.ops` import — the existing no-ops-import guard
+   still holds) and returns a typed `OPERATIONS_UNAVAILABLE` Problem when it
+   is missing or malformed; missing engineering history renders as
+   `unknown`, never green. `/health.json` (`engine/v2/serving/operations.py`)
+   is untouched and keeps its existing `operations_health.v1.0` fields. See
+   `tests/test_v2_ops_engineering_history.py` (conflicts/degraded evidence/
+   selfcheck carried; requested vs. resolved session; failed update keeps the
+   old release and shows the reason; an unobserved window renders as
+   `unknown` throughout) and `tests/test_v2_serving_api.py` (the route
+   itself, including the no-history-is-not-green case). Response fields are
+   documented for a future health/flags screen in `ui/README.md`; the
+   dedicated screen itself remains Phase 6 work, unchanged.
+
+   **2026-09-14 review fix.** The first pass only wrote the sidecar from
+   inside `publication_effect`, so the REAL observed failure shape — an
+   upstream dependency (`engineering_gate`, `legacy_finality`) fails or the
+   run is cancelled, `lifecycle.block_descendants` blocks the dependent
+   `publication` job BEFORE it is ever claimed — left `publication_effect`,
+   and therefore the sidecar, never running at all; the old release kept
+   being reported `failed_update=False`, exactly the silent-green outcome
+   this item forbids. Fixed with a SECOND writer,
+   `effects_graph.write_publication_terminal_status`, sharing the same
+   `OperationsStatus`/`_write_status_document` construction (never
+   duplicated) but built from the job row alone — `attempted_release_id`
+   null (no attempt ever formed one), `failed_update_reason` naming the
+   first failed/cancelled job's kind and code (`block_descendants`'s
+   recursive CTE stamps every transitive descendant's `DEPENDENCY_FAILED`
+   `Problem` with the SAME root job id, so one lookup names it). Called from
+   `effects_graph.reconcile_publication_status`, hooked into
+   `supervisor.Service.tick()` (`Service._reconcile_publication_status`,
+   guarded against crashing the tick) rather than threaded through
+   `lifecycle.py`'s kind-agnostic transition functions; idempotent and
+   self-healing via a strict `generated_at > updated_at` comparison against
+   the existing sidecar, so it can run every tick without ever clobbering a
+   LATER successful publish's own fresher document. See
+   `tests/test_v2_ops_engineering_history.py`
+   (`test_upstream_engineering_gate_failure_blocks_publication_and_status_
+   shows_it`, `test_cancelled_upstream_job_blocks_publication_and_status_
+   shows_it`, `test_reconcile_does_not_clobber_a_later_successful_publish`),
+   all driven through a real `supervisor.Service.tick()` with the
+   failing/cancelled attempt committed directly (no live subprocess).
+
+   Also: `/api/v1/operations` now takes an optional `?release_id=` query
+   param — given and it disagrees with the sidecar's own `release_id`, a
+   typed 409 `OPERATIONS_STATUS_NOT_FOR_RELEASE` (`details.
+   requested_release_id`/`details.status_release_id`) replaces the 200,
+   since the sidecar always describes the SCOPE's current state and a
+   client that pinned an earlier release must never silently be handed a
+   different one's status; omitted, behavior is unchanged. See
+   `tests/test_v2_serving_api.py`'s `test_operations_route_release_id_
+   param_*` (match/mismatch/absent). Documented in `ui/README.md`; `ui/src`
+   untouched.
+
+   **2026-09-14 SECOND review fix (ordering defect).** Reviewed against a
+   real ops root (`/root/phase2-shadow-ops`, several historical blocked
+   publications, several attempts, no sidecar yet): the first pass's
+   `reconcile_publication_status` scanned every blocked/failed/cancelled
+   `publication` row UNORDERED and wrote whichever one SQLite returned
+   first, relying only on the `generated_at > updated_at` skip -- once that
+   ONE row got a fresh sidecar, its `generated_at` outranked every OTHER
+   (older) row's `updated_at`, so the actual LATEST failure was skipped
+   forever; it also never considered a NEWER already-succeeded publication
+   in the same scope unless that publish happened to write its own
+   sidecar. Fixed by looking only at each scope's SINGLE latest
+   `publication` job (any state) at all, in one grouped SQL query
+   (`_LATEST_PUBLICATION_PER_SCOPE_SQL`: a `json_extract`-computed `scope`
+   column — the same `effect_scope`-or-`output_namespace` fallback
+   `effect_scope(claim)` uses — partitioned with `ROW_NUMBER() OVER
+   (PARTITION BY scope ORDER BY updated_at DESC, job_id DESC)`, keeping only
+   rank 1) rather than a scan plus per-row reads; a scope's latest job that
+   already succeeded, or is still queued/running, gets no sidecar write at
+   all. See `tests/test_v2_ops_engineering_history.py`'s
+   `test_reconcile_names_the_newest_of_several_blocked_jobs_in_one_scope`
+   (three blocked jobs, insertion order deliberately different from time
+   order), `test_reconcile_skips_an_older_blocked_job_behind_a_newer_
+   success` (both insertion orders), and
+   `test_reconcile_handles_two_scopes_independently`. Minor, same pass: the
+   `Service.tick()` failure print now fires only when the reconciliation
+   problem's (code, message) changes from the last one actually printed
+   (`Service._last_publication_status_problem`), not on every ~1s tick —
+   `test_publication_status_reconcile_failure_prints_once_while_
+   persisting`.
 
 Extend the existing update/rollback and operations-health acceptance cases
 with these controls. Consume saved synthetic/real artifacts sequentially;
