@@ -34,7 +34,15 @@ operations.create_server starts the authenticated read-only health/release
 surface. It reads operations_health.v1.0 documents and immutable legacy bundles,
 and embeds the existing views beneath the current health banner.
 
-<!-- public-interface: operations, create_server -->
+bridge (P3-1a): offline mapping of a verified `score.json` and a verified
+rendered bundle to `LegacyScoreBridge` rows, over `engine.v2.contracts.serving`
+shapes. `build_bridges` takes the caller's already-resolved Phase 2
+event/calendar mapping (`event_refs`) and returns `(list[LegacyScoreBridge],
+ProjectionFindings)`. `LEGACY_DISPLAY_MAPPING_V1` is the checked spec of
+`dashboard/render.py` `compact_row`'s display fields. No legacy import, no
+`engine.v2.ops` import (a peer), no financial arithmetic.
+
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges -->
 
 ## Consumers
 
