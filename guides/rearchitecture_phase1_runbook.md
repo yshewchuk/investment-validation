@@ -57,7 +57,7 @@ appear before or after the subcommand. Output is always JSON on stdout.
 | `submit` | Submit a saved plan under `--idempotency-key` (both required). Operator namespace policy admits `shadow` and `smoke` only. A blocked plan is refused with `INVALID_REQUEST`, exit 2. | `python3 -m engine.v2.ops submit --plan art_... --idempotency-key nightly-2026-09-12-01` |
 | `get` | Job document + attempt receipts. | `python3 -m engine.v2.ops get job_... --json` |
 | `logs` | Progress events; `--follow` re-polls every 2s until the job reaches a terminal state. | `python3 -m engine.v2.ops logs job_... --follow` |
-| `cancel` | Fenced cancellation; `--expected-attempt` is **required** — the fence is invalidated first, and the job completes as cancelled only once nothing is running. | `python3 -m engine.v2.ops cancel job_... --expected-attempt att_...` |
+| `cancel` | Fenced cancellation; pass `--expected-attempt` with the job's active attempt — the fence is invalidated first, and the job completes as cancelled only once nothing is running. Omit it only for a job with no active attempt (queued, never started, or `retry_wait`): omission means "expect none", so a job that does have an active attempt still refuses (`conflict`, `STALE_EXPECTATION`). | `python3 -m engine.v2.ops cancel job_... --expected-attempt att_...` |
 | `resume` | Recovery inspection. `--dry-run` only: without it the command refuses ("use the saved immutable plan to submit a changed run"). Reports implementation/environment invalidation, checkpoint reuse, `new_effects_authorized: false`. | `python3 -m engine.v2.ops resume job_... --dry-run` |
 | `explain` | State, `queue_reason` and `failure` for one job — the first stop for a stuck job (§8). | `python3 -m engine.v2.ops explain job_...` |
 

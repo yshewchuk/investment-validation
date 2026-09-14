@@ -15,6 +15,7 @@ Parquet tree matching every REAL ``build_legacy_mapping()`` contract exactly
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -44,8 +45,8 @@ from engine.v2.ops.checkpoints import artifact as load_artifact  # noqa: E402
 from engine.v2.ops.snapshot_import import save_import_plan, submit_import  # noqa: E402
 from engine.v2.ops.stages import registry  # noqa: E402
 from engine.v2.ops.submission import NamespacePolicy  # noqa: E402
-from engine.v2.ops.supervisor import Service  # noqa: E402
-from tests.ops_support import TEST_POLICY  # noqa: E402
+from engine.v2.ops.supervisor import LEASE_SECONDS, Service  # noqa: E402
+from tests.ops_support import TEST_POLICY, FakeClock  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
 MAPPING = data_legacy_mapping.build_legacy_mapping()
@@ -263,13 +264,14 @@ def test_plan_import_refuses_bad_snapshot_shape(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _run_until_terminal(service, conn, job_id, timeout=60):
+def _run_until_terminal(service, conn, job_id, timeout=60,
+                        states=("succeeded", "failed", "blocked", "cancelled")):
     deadline = time.monotonic() + timeout
     state = "queued"
     while time.monotonic() < deadline:
         service.tick()
         state = conn.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
-        if state in ("succeeded", "failed", "blocked", "cancelled"):
+        if state in states:
             return state
         time.sleep(0.05)
     return state
@@ -460,5 +462,163 @@ def test_coordinator_fault_then_clean_retry_reuses_objects(tmp_path, monkeypatch
         objects_count = conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0]
         table_files = sum(len(refs) for refs in plan.snapshot_import_request.table_sources.values())
         assert objects_count == table_files + 1  # tables + legacy SNAPSHOT; references are per receipt
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# heavy-run stage 9a: lease keepalive, lost lease, no coordinator re-stream
+# --------------------------------------------------------------------------
+
+
+def _job_failure(conn, job_id):
+    return conn.execute("SELECT failure_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
+
+
+def _daily_market_audit_inputs(conn, store):
+    head = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope=?",
+                        (SCOPE,)).fetchone()[0]
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head)
+    manifest = repository._manifest(conn, snapshot.table_versions["daily_market"].dataset_version_id)
+    records = list(repository.fragment_records(snapshot, "daily_market"))
+    return manifest, records, repository.table_contract(snapshot, "daily_market")
+
+
+def test_import_keeps_its_lease_per_object_and_never_restreams(tmp_path, monkeypatch):
+    """100 s of clock per published object; the coordinator streams no Parquet row."""
+    import engine.v2.data.objects as objects_mod
+    import engine.v2.ops.snapshot_promotion as sp_mod
+    from engine.v2.data.manifests import verify_partition_hashes
+
+    root, store_root = tmp_path / "ops", tmp_path / "legacy_store"
+    root.mkdir()
+    store_root.mkdir()
+    build_legacy_store(store_root, daily_market_parts=3, rows_per_part=2)
+    clock = FakeClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    published, streamed = [], []
+    real_publish, real_stream = sp_mod.publish_legacy_file, objects_mod._stream_rows
+
+    def slow_publish(*args, **kwargs):
+        clock.advance(100)
+        published.append(args[3].path)
+        return real_publish(*args, **kwargs)
+
+    def counting_stream(*args, **kwargs):
+        streamed.append(1)
+        return real_stream(*args, **kwargs)
+
+    monkeypatch.setattr(sp_mod, "publish_legacy_file", slow_publish)
+    monkeypatch.setattr(objects_mod, "_stream_rows", counting_stream)
+    try:
+        receipt, state, _ = _submit_and_run(root, store_root, conn, clock, idempotency_key="slow-1")
+        assert state == "succeeded", _job_failure(conn, receipt.job_id)
+        assert 100 * len(published) > 3 * LEASE_SECONDS
+        assert streamed == [], "the commit path must not re-stream any partition"
+
+        store = ArtifactStore(root)
+        attempt_id = conn.execute("SELECT attempt_id FROM attempts WHERE job_id=?",
+                                  (receipt.job_id,)).fetchone()[0]
+        output = conn.execute("SELECT artifact_id FROM attempt_outputs WHERE attempt_id=? AND "
+                              "name='snapshot_import_receipt'", (attempt_id,)).fetchone()[0]
+        envelope = json.loads(store.read_verified(load_artifact(conn, store, output)))["envelope"]
+        timings = envelope["coordinator_timings_ms"]
+        assert set(timings) == {"publish", "build", "commit"}
+        assert timings["publish"] >= 100_000 * len(published)
+
+        # The audit is still callable: it agrees with the worker's partition
+        # hash, and it catches a wrong one.
+        manifest, records, contract = _daily_market_audit_inputs(conn, store)
+        assert manifest.partition_logical_hashes, "3-part year needs a stored partition hash"
+        verify_partition_hashes(store, manifest, records, contract)
+        wrong = dataclasses.replace(manifest, partition_logical_hashes={
+            key: CONTENT_HASH_PREFIX + "0" * 64 for key in manifest.partition_logical_hashes})
+        with pytest.raises(DataError) as err:
+            verify_partition_hashes(store, wrong, records, contract)
+        assert err.value.code == "MANIFEST_CORRUPT"
+    finally:
+        conn.close()
+
+
+def test_tampered_bytes_are_still_refused_at_publish(tmp_path, monkeypatch):
+    import engine.v2.ops.snapshot_promotion as sp_mod
+
+    root, store_root = tmp_path / "ops", tmp_path / "legacy_store"
+    root.mkdir()
+    store_root.mkdir()
+    build_legacy_store(store_root, daily_market_parts=3)
+    clock = FakeClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    real_publish = sp_mod.publish_legacy_file
+
+    def tampering_publish(store, attempt_id, legacy_root, file_ref, **kwargs):
+        if file_ref.path.endswith("curated/daily_market/year=2024/part-0001.parquet"):
+            staged = Path(legacy_root) / file_ref.path
+            staged.chmod(0o600)
+            staged.write_bytes(staged.read_bytes() + b"tampered after inspection")
+        return real_publish(store, attempt_id, legacy_root, file_ref, **kwargs)
+
+    monkeypatch.setattr(sp_mod, "publish_legacy_file", tampering_publish)
+    try:
+        receipt, state, _ = _submit_and_run(root, store_root, conn, clock, idempotency_key="tamper")
+        assert state == "failed"
+        assert "INPUT_CHANGED" in _job_failure(conn, receipt.job_id)
+        assert conn.execute("SELECT COUNT(*) FROM data_snapshot_heads").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_import_that_loses_its_lease_recovers_and_resubmits_cleanly(tmp_path, monkeypatch):
+    import engine.v2.ops.snapshot_promotion as sp_mod
+    from engine.v2.ops.lifecycle import request_cancel
+
+    root, store_root = tmp_path / "ops", tmp_path / "legacy_store"
+    root.mkdir()
+    store_root.mkdir()
+    build_legacy_store(store_root, daily_market_parts=3)
+    clock = FakeClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    real_publish = sp_mod.publish_legacy_file
+
+    def stalled_publish(*args, **kwargs):
+        clock.advance(LEASE_SECONDS + 30)  # one object outlasts the whole lease
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(sp_mod, "publish_legacy_file", stalled_publish)
+    try:
+        store = ArtifactStore(root)
+        plan = plan_import(store_root, scope=SCOPE, expected_head_snapshot_id=None,
+                           expected_head_generation=0)
+        plan_ref = save_import_plan(conn, store, plan, clock=clock)
+        first = submit_import(conn, store, plan_ref.artifact_id, registry=registry(), policy=POLICY,
+                              clock=clock, idempotency_key="stalled-1", repo_root=ROOT)
+        service = Service(conn, root, registry(), TEST_POLICY, clock=clock, code_source=ROOT,
+                          store_root=store_root)
+        try:
+            service.start()
+            state = _run_until_terminal(service, conn, first.job_id,
+                                        states=("retry_wait", "failed", "succeeded"))
+        finally:
+            service.close()
+        assert state == "retry_wait", _job_failure(conn, first.job_id)
+        attempt = conn.execute("SELECT state, process_state, failure_json FROM attempts "
+                               "WHERE job_id=?", (first.job_id,)).fetchone()
+        assert (attempt["state"], attempt["process_state"]) == ("failed", "verified_dead")
+        assert json.loads(attempt["failure_json"])["code"] == "LEASE_LOST"
+        assert conn.execute("SELECT COUNT(*) FROM data_import_receipts "
+                            "WHERE status='failed'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0] == 0
+
+        monkeypatch.setattr(sp_mod, "publish_legacy_file", real_publish)
+        assert request_cancel(conn, first.job_id, None, clock=clock).state == "cancelled"
+        second, state2, _ = _submit_and_run(root, store_root, conn, clock,
+                                            idempotency_key="stalled-2")
+        assert state2 == "succeeded", _job_failure(conn, second.job_id)
+        table_files = sum(len(refs) for refs in plan.snapshot_import_request.table_sources.values())
+        objects = conn.execute("SELECT COUNT(*), COUNT(DISTINCT content_hash) "
+                               "FROM data_objects").fetchone()
+        assert tuple(objects) == (table_files + 1, table_files + 1)
     finally:
         conn.close()

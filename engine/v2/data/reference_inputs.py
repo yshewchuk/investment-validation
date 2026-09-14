@@ -246,18 +246,21 @@ def manifest_pins(refs) -> tuple[tuple[str, ...], str | None]:
 # --------------------------------------------------------------------------
 
 
-def publish_reference_inputs(store, attempt_id: str, legacy_root,
-                             file_refs) -> tuple[catalog_rows.ReferenceInput, ...]:
+def publish_reference_inputs(store, attempt_id: str, legacy_root, file_refs, *,
+                             keepalive=None) -> tuple[catalog_rows.ReferenceInput, ...]:
     """Publish every reference file in ``file_refs`` from the staged legacy root.
 
     Refuses with ``CONTRACT_MISMATCH`` if any ``exact`` input is absent: a
     manifest that was not built by :func:`resolve_reference_files`.
+    ``keepalive``, when given, is called before each file is published.
     """
+    keepalive = keepalive or (lambda: None)
     published = []
     for ref in file_refs:
         kind = kind_for_path(ref.path)
         if kind is None:
             continue
+        keepalive()
         obj = objects.publish_legacy_file(store, attempt_id, legacy_root, ref)
         published.append(catalog_rows.ReferenceInput(
             kind=kind, legacy_path=ref.path, object_id=obj.object_id,

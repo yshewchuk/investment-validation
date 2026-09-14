@@ -28,7 +28,11 @@ def prepare_backup(conn, key, artifacts, *, clock):
         return enqueue(conn, "backup", key, payload)
 
 
-def run_backup(conn, *, key, owner, target, clock, store, fault=None):
+def _no_keepalive():
+    return None
+
+
+def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
         raise fail("STALE_EXPECTATION", "backup effect is not pending")
@@ -48,6 +52,7 @@ def run_backup(conn, *, key, owner, target, clock, store, fault=None):
         probe.close()
     copied = {}
     for name, document in payload.get("artifacts", {}).items():
+        keepalive()
         ref = from_document(ArtifactRef, document)
         if "/" in name or name in ("", ".", ".."):
             raise fail("INVALID_REQUEST", "unsafe backup artifact name")

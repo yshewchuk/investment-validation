@@ -298,7 +298,7 @@ def _named(refs, name):
     raise fail("VALIDATION_FAILED", "required effect artifact is missing")
 
 
-def materialize_effect(conn, store, claim, refs, launch):
+def materialize_effect(conn, store, claim, refs, launch, *, keepalive=None):
     """Admit a ``legacy_materialize`` manifest only once every byte is re-verified."""
     if launch is None or launch.mode != "materialize":
         raise fail("VALIDATION_FAILED", "materialization launch was not verified")
@@ -308,7 +308,7 @@ def materialize_effect(conn, store, claim, refs, launch):
     prior = committed_manifest_ids(conn, launch.request_artifact_id)
     if prior and prior != [manifest_ref.artifact_id]:
         raise fail("INPUT_CHANGED", "materialization root no longer matches its committed manifest")
-    verify_root(launch.root, files)
+    verify_root(launch.root, files, keepalive=keepalive)
     wrong = request_mismatches(Repository(conn, store), request, files)
     if wrong:
         raise fail("VALIDATION_FAILED", "materialization manifest does not match its request",

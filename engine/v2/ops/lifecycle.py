@@ -42,6 +42,7 @@ from engine.v2.ops.submission import RetryPolicy
 
 __all__ = [
     "RELEASABLE_PROCESS_STATES",
+    "Keepalive",
     "Outcome",
     "advance_job",
     "attempt_receipts",
@@ -49,6 +50,7 @@ __all__ = [
     "commit_attempt",
     "complete_cancel",
     "end_attempt",
+    "fence_held",
     "heartbeat",
     "record_launch",
     "record_measurement",
@@ -130,6 +132,50 @@ def heartbeat(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: C
                      (format_timestamp(now),
                       format_timestamp(now + timedelta(seconds=lease_seconds)), attempt_id))
     return True
+
+
+def fence_held(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: Clock) -> bool:
+    """Read-only: may this attempt still commit right now? No write either way."""
+    with transaction(conn):
+        try:
+            verify_fence(conn, attempt_id, fence, clock.now())
+        except Exception:  # noqa: BLE001 - any refusal means the fence is gone
+            return False
+    return True
+
+
+class Keepalive:
+    """Explicit lease renewal for coordinator work after the worker has exited.
+
+    ``Service._poll`` renews the lease only while a worker is alive; a long
+    coordinator effect (import publish, export, backup, materialization
+    verification) runs after that, single-threaded. The effect calls this
+    between objects, partitions and phases. It renews through
+    :func:`heartbeat` at most once per ``lease_seconds / 4`` of monotonic
+    time, and raises ``LEASE_LOST`` as soon as renewal is refused, so the
+    work stops instead of reaching a commit that would fail. No background
+    thread: the catalog connection is not shared across threads, and an
+    explicit call is testable.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: Clock,
+                 lease_seconds: int) -> None:
+        self.conn, self.attempt_id, self.fence, self.clock = conn, attempt_id, fence, clock
+        self.lease_seconds = lease_seconds
+        self.interval = lease_seconds / 4
+        self.renewed_at: float | None = None
+        self.renewals = 0
+
+    def __call__(self) -> None:
+        now = self.clock.monotonic()
+        if self.renewed_at is not None and now - self.renewed_at < self.interval:
+            return
+        if not heartbeat(self.conn, self.attempt_id, self.fence, clock=self.clock,
+                         lease_seconds=self.lease_seconds):
+            raise fail("LEASE_LOST", "the attempt lost its lease during coordinator work",
+                       details={"attempt_id": self.attempt_id, "fence": self.fence})
+        self.renewed_at = now
+        self.renewals += 1
 
 
 def renew_after_resume(conn: sqlite3.Connection, attempt_id: str, fence: int, *, clock: Clock,

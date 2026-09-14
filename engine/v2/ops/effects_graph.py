@@ -86,7 +86,12 @@ def _mark_export_delivered(conn, logical_key, receipt):
                  (dumps(receipt), logical_key))
 
 
-def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock):
+def _no_keepalive():
+    return None
+
+
+def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
+                         keepalive=_no_keepalive):
     """Build, verify and publish one export generation; deliver its outbox effects.
 
     Settlement is read from its own watermark, never as a scheduler
@@ -106,13 +111,16 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock):
 
     root = Path(ops_root) / "exports" / scope
     generation_dir = export_generation(conn, root, generation=release_key, purposes=EXPORT_PURPOSES)
+    keepalive()
     catalog_counts = _catalog_counts(conn, EXPORT_PURPOSES)
     verified_counts = _verify_generation(generation_dir, repo_root)
+    keepalive()
     if verified_counts != catalog_counts:
         raise fail("INTEGRITY_FAILED", "exported generation disagrees with the catalog",
                    details={"catalog": catalog_counts, "verified": verified_counts})
 
     tar_ref = store.publish_bytes(_tar_bytes(generation_dir), schema_ref="ledger_generation.v1.0")
+    keepalive()
     receipt = {"schema_version": "ledger_export_receipt.v1.0", "scope": scope, "session": session,
                "generation": release_key, "counts": verified_counts,
                "settlement": {"present": settlement_present,
@@ -221,7 +229,8 @@ def _security_gate(store, files, binding_hash, repo_root):
     return _gate_dict(store, document)
 
 
-def publication_effect(conn, store, claim, ops_root, repo_root, *, clock):
+def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
+                       keepalive=_no_keepalive):
     """Build the four gate receipts, stage the release, then publish it.
 
     ``stage_release``/``publish_local`` manage their own short transactions
@@ -241,14 +250,20 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock):
     release_id = "rel" + content_hash([scope, session]).split(":")[1][:24]
     expected_current = release_current(target)
     binding_hash = content_hash({"release_id": release_id, "occurrence": session, "files": files})
-    gates = {
-        "decision": _decision_gate(conn, store, scope, session, binding_hash),
-        "projection": _projection_gate(conn, store, bindings, binding_hash),
-        "security": _security_gate(store, files, binding_hash, repo_root),
-        "engineering": _engineering_receipt_gate(conn, store, bindings, binding_hash),
-    }
+    builders = (
+        ("decision", lambda: _decision_gate(conn, store, scope, session, binding_hash)),
+        ("projection", lambda: _projection_gate(conn, store, bindings, binding_hash)),
+        ("security", lambda: _security_gate(store, files, binding_hash, repo_root)),
+        ("engineering", lambda: _engineering_receipt_gate(conn, store, bindings, binding_hash)),
+    )
+    gates = {}
+    for name, build in builders:
+        keepalive()
+        gates[name] = build()
+    keepalive()
     stage_release(conn, store, release_id, session, files, expected_current=expected_current,
                  gates=gates, clock=clock, claim=claim)
+    keepalive()
     publish_local(conn, claim, store, target, release_id, scope=scope, clock=clock)
     return None, ()
 
@@ -258,7 +273,7 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock):
 # --------------------------------------------------------------------------
 
 
-def backup_effect(conn, store, claim, ops_root, *, clock, fault=None):
+def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=_no_keepalive):
     """Prepare then run one backup; a failure releases its outbox effect back
     to pending (rather than waiting out its lease) so an immediate retry can
     claim it — the job's own retry policy is what makes this "retryable"."""
@@ -270,7 +285,7 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None):
     target = Path(ops_root) / "backups" / scope
     try:
         manifest = run_backup(conn, key=key, owner=owner, target=target, clock=clock, store=store,
-                              fault=fault)
+                              fault=fault, keepalive=keepalive)
     except Exception:
         row = conn.execute(
             "SELECT effect_id, claim_token FROM outbox WHERE kind='backup' AND logical_key=? "

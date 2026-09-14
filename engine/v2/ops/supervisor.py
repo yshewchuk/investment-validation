@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
 from engine.v2.contracts import CheckpointCandidate, OutputCandidate, ProgressEvent
-from engine.v2.foundation import ArtifactStore, artifact_reference, content_hash, format_timestamp
+from engine.v2.foundation import (
+    ArtifactStore,
+    artifact_reference,
+    content_hash,
+    format_timestamp,
+    to_document,
+)
 from engine.v2.ops import executor
 from engine.v2.ops.checkpoints import (
     artifact,
@@ -39,9 +46,11 @@ from engine.v2.ops.fingerprints import (
 from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings, resolved_inputs_hash
 from engine.v2.ops.legacy_adapter import copy_read_set
 from engine.v2.ops.lifecycle import (
+    Keepalive,
     Outcome,
     commit_attempt,
     complete_cancel,
+    fence_held,
     heartbeat,
     record_measurement,
     record_progress,
@@ -82,6 +91,18 @@ _COORDINATOR_EFFECT_KINDS = frozenset({
     "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
     "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize"})
 
+#: The attempt lease every heartbeat, resume renewal and keepalive extends to.
+LEASE_SECONDS = 120
+
+#: A heartbeat ``progress_events`` row and memory sample are written at most
+#: once per this many seconds per attempt, plus on every observed state change
+#: (stopping, exited). Lease renewal still runs on every poll (D).
+HEARTBEAT_EVENT_SECONDS = 10.0
+
+#: A commit refused with one of these can never succeed under this fence:
+#: nothing more may be written under it, not even the attempt's own failure.
+_FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
+
 
 class Service:
     def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None,
@@ -95,6 +116,8 @@ class Service:
                                      else default_materialization_base(self.root))
         self.running = {}
         self.launches = {}
+        #: attempt_id -> (monotonic time, observed state) of its last heartbeat row.
+        self.observed = {}
         self.boot = read_boot_id()
         self.lock = SupervisorLock(self.root / "supervisor.lock")
         self.identity = None
@@ -127,6 +150,7 @@ class Service:
             if self._poll(running):
                 os.close(running.result_fd)
                 del self.running[attempt_id]
+                self.observed.pop(attempt_id, None)
         claim = claim_next(self.conn, policy=self.policy, sample=sample_capacity(self.root, clock=self.clock),
                            supervisor=self.identity, clock=self.clock, registry=self.registry)
         if claim:
@@ -154,7 +178,7 @@ class Service:
             identity = running.identities[0] if running.identities else None
             if identity is not None and is_alive(identity, self.boot):
                 renew_after_resume(self.conn, attempt_id, running.claim.fence,
-                                   clock=self.clock, lease_seconds=120)
+                                   clock=self.clock, lease_seconds=LEASE_SECONDS)
 
     def _launch(self, claim):
         try:
@@ -261,12 +285,13 @@ class Service:
         row = self.conn.execute("SELECT state FROM jobs WHERE job_id = ?", (claim.job_id,)).fetchone()
         cancelled = row[0] == "cancelling"
         if cancelled or not heartbeat(self.conn, claim.attempt_id, claim.fence,
-                                      clock=self.clock, lease_seconds=120):
+                                      clock=self.clock, lease_seconds=LEASE_SECONDS):
             running.failure = "CANCELLED" if cancelled else "LEASE_LOST"
             executor.stop(running, boot_id=self.boot, clock=self.clock)
-        record_measurement(self.conn, claim.attempt_id, current_bytes=status["memory"],
-                           peak_bytes=running.peak, clock=self.clock)
-        self._progress(running, status)
+        if self._observation_due(running, status):
+            record_measurement(self.conn, claim.attempt_id, current_bytes=status["memory"],
+                               peak_bytes=running.peak, clock=self.clock)
+            self._progress(running, status)
         if not status["done"]:
             return False
         if cancelled:
@@ -275,59 +300,114 @@ class Service:
             self._finish(running, status)
         return True
 
+    def _observation_due(self, running, status):
+        """D: one heartbeat row per ``HEARTBEAT_EVENT_SECONDS``, or on a state change."""
+        attempt_id, now = running.claim.attempt_id, self.clock.monotonic()
+        state = (bool(status["done"]), running.failure)
+        last = self.observed.get(attempt_id)
+        if last is not None and last[1] == state and now - last[0] < HEARTBEAT_EVENT_SECONDS:
+            return False
+        self.observed[attempt_id] = (now, state)
+        return True
+
     def _progress(self, running, status):
         sequence = self.conn.execute("SELECT COALESCE(MAX(sequence),-1)+1 FROM progress_events "
                                      "WHERE attempt_id = ?", (running.claim.attempt_id,)).fetchone()[0]
+        message = ("worker exited" if status["done"] else
+                   f"worker stopping: {running.failure}" if running.failure else "worker observed")
         event = ProgressEvent(
             job_id=running.claim.job_id, attempt_id=running.claim.attempt_id,
             stage_id=running.claim.spec.kind, sequence=sequence,
             recorded_at=format_timestamp(self.clock.now()), kind="heartbeat",
-            elapsed_seconds=self.clock.monotonic() - running.started, message="worker observed",
+            elapsed_seconds=self.clock.monotonic() - running.started, message=message,
             memory_current_bytes=status["memory"], memory_peak_bytes=running.peak)
         record_progress(self.conn, event)
 
     def _finish(self, running, status):
         claim = running.claim
-        code = running.failure
         launch = self.launches.pop(claim.attempt_id, None)
-        if status["exit_code"] != 0:
-            code = code or ("UNKNOWN_KILL" if status["exit_code"] < 0 else "WORKER_FAILED")
+        keepalive = Keepalive(self.conn, claim.attempt_id, claim.fence, clock=self.clock,
+                              lease_seconds=LEASE_SECONDS)
         try:
-            if code:
-                raise OpsError(make_problem(code, "worker did not complete its contract"))
-            result = json.loads(running.data)
-            outputs = validate_result(claim, result)
-            confirm_read_set(self.conn, claim.attempt_id, self.store_root)
-            # P2-6 §9.3 item 4: the same verified snapshot binding before any output.
-            confirm_attempt(self.conn, self.store, claim, launch)
-            running.peak = max(running.peak, int(result.get("self_peak_bytes", 0)))
-            record_measurement(self.conn, claim.attempt_id, current_bytes=0,
-                               peak_bytes=running.peak, clock=self.clock)
-            if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
-                    and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
-                refs = self._checkpoint_refs(claim, outputs, launch)
-            else:
-                refs = [(o["name"], self.store.publish_candidate(
-                    claim.attempt_id, o["path"], schema_ref=o["schema"],
-                    max_bytes=claim.resources.scratch_limit_bytes)) for o in outputs]
-            effect, extra_refs = self._coordinator_effect(claim, refs, launch)
-            def effects(conn):
-                for name, ref in (*refs, *extra_refs):
-                    register_artifact(conn, ref, claim.attempt_id, self.clock)
-                    conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
-                                 (claim.attempt_id, name, ref.artifact_id))
-                if effect is not None:
-                    effect(conn)
-                for domain, mode in self._store_domains(claim):
-                    if mode == "write":
-                        verified_write_in(conn, claim.attempt_id, domain)
-            commit_attempt(self.conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
-                           clock=self.clock, effects=effects)
+            self._commit_success(running, status, launch, keepalive)
         except Exception as exc:
             problem = exc.problem if isinstance(exc, OpsError) else make_problem(
                 "VALIDATION_FAILED", "worker output failed validation")
-            commit_attempt(self.conn, claim.attempt_id, claim.fence,
-                           Outcome(False, "verified_dead", status["exit_code"], problem), clock=self.clock)
+            self._commit_failure(claim, status, problem)
+
+    def _commit_success(self, running, status, launch, keepalive):
+        claim = running.claim
+        code = running.failure
+        if status["exit_code"] != 0:
+            code = code or ("UNKNOWN_KILL" if status["exit_code"] < 0 else "WORKER_FAILED")
+        if code:
+            raise OpsError(make_problem(code, "worker did not complete its contract"))
+        result = json.loads(running.data)
+        outputs = validate_result(claim, result)
+        confirm_read_set(self.conn, claim.attempt_id, self.store_root)
+        keepalive()
+        # P2-6 §9.3 item 4: the same verified snapshot binding before any output.
+        confirm_attempt(self.conn, self.store, claim, launch)
+        running.peak = max(running.peak, int(result.get("self_peak_bytes", 0)))
+        record_measurement(self.conn, claim.attempt_id, current_bytes=0,
+                           peak_bytes=running.peak, clock=self.clock)
+        if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
+                and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
+            refs = self._checkpoint_refs(claim, outputs, launch)
+        else:
+            refs = [(o["name"], self.store.publish_candidate(
+                claim.attempt_id, o["path"], schema_ref=o["schema"],
+                max_bytes=claim.resources.scratch_limit_bytes)) for o in outputs]
+        keepalive()
+        effect, extra_refs = self._coordinator_effect(claim, refs, launch, keepalive)
+        keepalive()
+        def effects(conn):
+            for name, ref in (*refs, *extra_refs):
+                register_artifact(conn, ref, claim.attempt_id, self.clock)
+                conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                             (claim.attempt_id, name, ref.artifact_id))
+            if effect is not None:
+                effect(conn)
+            for domain, mode in self._store_domains(claim):
+                if mode == "write":
+                    verified_write_in(conn, claim.attempt_id, domain)
+        commit_attempt(self.conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
+                       clock=self.clock, effects=effects)
+
+    def _commit_failure(self, claim, status, problem):
+        """Record the failure under the fence — only while the fence is still held (B)."""
+        outcome = Outcome(False, "verified_dead", status["exit_code"], problem)
+        if fence_held(self.conn, claim.attempt_id, claim.fence, clock=self.clock):
+            try:
+                commit_attempt(self.conn, claim.attempt_id, claim.fence, outcome, clock=self.clock)
+                return
+            except OpsError as exc:
+                if exc.code not in _FENCE_LOST_CODES:
+                    raise
+                problem = exc.problem
+        self._strand(claim, problem)
+
+    def _strand(self, claim, problem):
+        """Hand an attempt whose fence is gone to the existing recovery state machine.
+
+        Nothing is committed under the stale fence. A job being cancelled
+        completes its cancellation (the worker has already exited). Anything
+        else is fenced off exactly as a lease expiry would do it
+        (``recovery.expire_leases``: attempt ``recovery_pending``, job fence
+        bumped, reservations held); ``reconcile`` then settles it on a later
+        tick, on supervisor restart, or through ``ops reconcile``. An attempt
+        already fenced by someone else is already ``recovery_pending``.
+        """
+        _report_stranded(claim, problem)
+        job = self.conn.execute("SELECT state, active_attempt_id FROM jobs WHERE job_id = ?",
+                                (claim.job_id,)).fetchone()
+        attempt = self.conn.execute("SELECT state FROM attempts WHERE attempt_id = ?",
+                                    (claim.attempt_id,)).fetchone()
+        if (job["state"] == "cancelling" and job["active_attempt_id"] == claim.attempt_id
+                and attempt["state"] == "cancelling"):
+            complete_cancel(self.conn, claim.job_id, process_state="verified_dead", clock=self.clock)
+            return
+        expire_leases(self.conn, clock=self.clock)
 
     def _checkpoint_refs(self, claim, outputs, launch):
         schema = outputs[0]["schema"]
@@ -357,7 +437,7 @@ class Service:
                                        clock=self.clock, inputs_hash=inputs_hash)
         return [(str(index), ref) for index, ref in enumerate(checkpoint.artifact_refs)]
 
-    def _coordinator_effect(self, claim, refs, launch=None):
+    def _coordinator_effect(self, claim, refs, launch=None, keepalive=None):
         """Validate effect candidates before the short fenced commit transaction.
 
         Returns ``(effect_fn_or_None, extra_refs)``: ``effect_fn`` runs inside
@@ -366,9 +446,12 @@ class Service:
         outputs the coordinator itself produced — beyond the worker's own
         ``refs`` — to register and record as this attempt's outputs (P2-5/
         Task5: ``ledger_export``'s tar, ``engineering_gate``'s rows).
+        ``keepalive`` renews the lease between the effect's own long steps.
         """
+        keepalive = keepalive or _no_keepalive
         if claim.spec.kind == "legacy_materialize":
-            return materialize_effect(self.conn, self.store, claim, refs, launch)
+            return materialize_effect(self.conn, self.store, claim, refs, launch,
+                                      keepalive=keepalive)
         if claim.spec.kind == "legacy_decisions":
             candidate_ref = _named_ref(refs, "legacy_decisions")
             candidates, context = validated_decision_candidate(
@@ -385,21 +468,23 @@ class Service:
             return (lambda conn: import_settlement_candidates_in_transaction(
                 conn, claim, candidate_ref, rows, clock=self.clock)), ()
         if claim.spec.kind == "decision_evidence":
-            _verify_decision_evidence(self.conn, self.store, claim, refs)
+            _verify_decision_evidence(self.conn, self.store, claim, refs, keepalive)
             return None, ()
         if claim.spec.kind == "ledger_export":
             return ledger_export_effect(self.conn, self.store, claim, self.root, self.code_source,
-                                        clock=self.clock)
+                                        clock=self.clock, keepalive=keepalive)
         if claim.spec.kind == "engineering_gate":
             return engineering_gate_effect(self.conn, self.store, claim, self.code_source,
                                            clock=self.clock)
         if claim.spec.kind == "publication":
             return publication_effect(self.conn, self.store, claim, self.root, self.code_source,
-                                      clock=self.clock)
+                                      clock=self.clock, keepalive=keepalive)
         if claim.spec.kind == "backup":
-            return backup_effect(self.conn, self.store, claim, self.root, clock=self.clock)
+            return backup_effect(self.conn, self.store, claim, self.root, clock=self.clock,
+                                 keepalive=keepalive)
         if claim.spec.kind == "snapshot_import":
-            return snapshot_import_effect(self.conn, self.store, claim, refs, clock=self.clock)
+            return snapshot_import_effect(self.conn, self.store, claim, refs, clock=self.clock,
+                                          keepalive=keepalive)
         if claim.spec.kind == "legacy_rebuild_candidate":
             return legacy_rebuild_candidate_effect(self.conn, self.store, claim, refs, clock=self.clock)
         return None, ()
@@ -425,6 +510,19 @@ def serve(service, *, once=False):
         service.close()
 
 
+def _no_keepalive():
+    return None
+
+
+def _report_stranded(claim, problem):
+    """One redacted stderr line: stable fields only, never ``details`` (§5.2)."""
+    print(json.dumps({"event": "attempt_left_for_recovery", "job_id": claim.job_id,
+                      "attempt_id": claim.attempt_id,
+                      "problem": {key: to_document(problem)[key]
+                                  for key in ("code", "category", "retryable", "message")}}),
+          file=sys.stderr, flush=True)
+
+
 def _named_ref(refs, name):
     for candidate_name, ref in refs:
         if candidate_name == name:
@@ -436,7 +534,7 @@ _DECISION_EVIDENCE_BINDINGS = {"score": "score.json", "finality": "finality.json
                                "replay": "replay.json", "coverage": "finality_coverage.json"}
 
 
-def _verify_decision_evidence(conn, store, claim, refs):
+def _verify_decision_evidence(conn, store, claim, refs, keepalive=_no_keepalive):
     """Re-derive the decision plan/evidence pair from recorded bindings and
     require byte equality with what the worker published (P2-5/B1c).
 
@@ -455,8 +553,10 @@ def _verify_decision_evidence(conn, store, claim, refs):
                                     details={"missing_bindings": missing}))
     docs = {}
     for key, name in _DECISION_EVIDENCE_BINDINGS.items():
+        keepalive()
         ref = artifact(conn, store, recorded[name].artifact_id)
         docs[key] = json.loads(store.read_verified(ref))
+    keepalive()
     params = claim.spec.parameters
     plan_bytes, evidence_bytes = derive(
         docs["score"], recorded["score.json"], docs["finality"], recorded["finality.json"],

@@ -97,12 +97,14 @@ def hash_tree(root) -> dict:
     return {rel: file_hash(root / rel) for rel, _ in sorted(_walk(root))}
 
 
-def verify_root(root, files: dict) -> dict:
+def verify_root(root, files: dict, *, keepalive=None) -> dict:
     """Refuse ``INPUT_CHANGED`` unless ``root`` holds exactly ``files``, byte for byte.
 
     Returns the tree's :func:`stat_fingerprint`, taken around the hashing pass,
     so a later cheap re-check can detect a replaced or rewritten file.
+    ``keepalive``, when given, is called before each file is hashed.
     """
+    keepalive = keepalive or (lambda: None)
     root = Path(root)
     fingerprint = stat_fingerprint(root)
     if set(fingerprint) != set(files):
@@ -110,6 +112,7 @@ def verify_root(root, files: dict) -> dict:
                    details={"missing": sorted(set(files) - set(fingerprint))[:5],
                             "undeclared": sorted(set(fingerprint) - set(files))[:5]})
     for rel in sorted(files):
+        keepalive()
         if file_hash(root / rel) != files[rel]:
             raise fail("INPUT_CHANGED", "materialization file changed", details={"path": rel})
     if stat_fingerprint(root) != fingerprint:

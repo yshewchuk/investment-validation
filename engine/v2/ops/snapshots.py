@@ -68,11 +68,14 @@ def commit_snapshot_for_attempt(conn: sqlite3.Connection, store: ArtifactStore, 
                                 receipt_id: str, attempt_id: str, fence: int, clock: Clock,
                                 fault: Callable[[str], None] | None = None,
                                 record_references: Callable[[sqlite3.Connection, str], None]
-                                | None = None):
+                                | None = None, audit_partitions: bool = False):
     """``commit_snapshot`` under the real Phase 1 fence, not a test double.
 
-    ``store`` lets pre-transaction verification re-stream a multi-fragment
-    partition's objects (``manifests.verify_partition_hashes``).
+    The partition-hash audit (``manifests.verify_partition_hashes``, which
+    re-streams every multi-fragment partition from ``store``) is off by
+    default here: an import's objects are already byte-verified against the
+    exact bytes its worker hashed (``snapshot_promotion``). Pass
+    ``audit_partitions=True`` to run it before the transaction.
     ``record_references`` inserts the import's reference inputs inside the
     commit transaction (``engine.v2.data.reference_catalog``).
     """
@@ -83,4 +86,5 @@ def commit_snapshot_for_attempt(conn: sqlite3.Connection, store: ArtifactStore, 
         expected_head_generation=expected_head_generation, receipt_id=receipt_id,
         attempt_id=attempt_id, fence=fence,
         fence_check=lambda c: verify_fence(c, attempt_id, fence, clock.now()), clock=clock,
-        fault=fault, store=store, record_references=record_references)
+        fault=fault, store=store, record_references=record_references,
+        audit_partitions=audit_partitions)
