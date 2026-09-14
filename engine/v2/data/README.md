@@ -59,7 +59,13 @@ apply the data-owner catalog schema after the ops/ledger owners (phase-2 guide
 in `ops/snapshots.py` to supply the real Phase 1 fence and to publish a
 resolved head as a pinned artifact (phase-2 guide §7.3, §8.1).
 
-<!-- consumers: engine.v2.ops -->
+`engine.v2.serving` imports `repository.Repository` (P3-1b,
+`serving/projections.py`) — layer 1 is below serving's own layer 7, so this
+is an ordinary downward import, never the reverse. The serving-side
+`(ticker, event_date) -> EventRef` resolver is built entirely on
+`Repository.scan`, never a raw parquet read.
+
+<!-- consumers: engine.v2.ops, engine.v2.serving -->
 
 ## Usage
 

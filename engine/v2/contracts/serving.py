@@ -61,7 +61,7 @@ PREVIEW_RELEASE_V1 = "preview_release.v1.0"
 LEGACY_SCORE_BRIDGE_V1 = "legacy_score_bridge.v1.0"
 EVENT_PAGE_V1 = "event_page.v1.0"
 EVENT_PAGE_ITEM_V1 = "event_page_item.v1.0"
-EVENT_SCORE_SUMMARY_V1 = "event_score_summary.v1.0"
+EVENT_SCORE_SUMMARY_V1 = "event_score_summary.v1.1"
 PROJECTION_FINDINGS_V1 = "projection_findings.v1.0"
 ROW_IDENTITY_V1 = "row_identity.v1.0"
 FINDING_V1 = "finding.v1.0"
@@ -181,10 +181,23 @@ class EventScoreSummary:
     """One main-board strategy summary carried on an event page row (§6).
 
     The exact fields §7's board table names: verdict/refusal, driver
-    forecast, market implied move, entry premium, an available expected-
-    return figure, and the DYN-SV choice. Copied from an already-built
+    forecast, market implied move, entry premium, "available expected-return
+    fields" (§7's own plural — the legacy board carries three: model,
+    analog, sim; a v1.1 addition, nullable, so an older reader still decodes
+    a v1.0 document) and the DYN-SV choice. Copied from an already-built
     ``LegacyScoreBridge.display_record`` by the read API layer; nothing here
     computes any of them.
+
+    ``expected_return`` is never populated (v1.1, review fix): the rendered
+    row carries no single merged headline field for it — ``compact_row``
+    emits ``exp_pnl_model``/``exp_pnl_analog``/``exp_pnl_sim`` separately,
+    and the board's own "pick model, else sim, never analog" headline
+    (``dashboard/static/assets/app.js`` ``pnlCell``) is JS logic over two of
+    those three raw fields, not a value ``compact_row`` itself ever writes.
+    Choosing between them here would be exactly the "recompute or choose
+    between rendered values" the guide (§5.2/§5.3) refuses. The field stays
+    for a future reader that reproduces ``pnlCell`` faithfully; until then
+    ``expected_return_model``/``_analog``/``_sim`` are the honest read.
     """
 
     score_id: str
@@ -195,6 +208,9 @@ class EventScoreSummary:
     market_implied_move: float | None = None
     entry_premium: float | None = None
     expected_return: float | None = None
+    expected_return_model: float | None = None
+    expected_return_analog: float | None = None
+    expected_return_sim: float | None = None
     chosen_strategy: str | None = None
     chosen_margin: float | None = None
     menu_size: int | None = None
