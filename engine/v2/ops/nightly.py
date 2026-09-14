@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from engine.v2.foundation import content_hash
+from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.legacy_adapter import copy_read_set
@@ -504,3 +505,80 @@ def run_shadow_nightly(source_root: Path | str, private_root: Path | str,
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(document, indent=2, sort_keys=True))
     return document
+
+
+# --------------------------------------------------------------------------
+# 2026-09-14: plan-time scratch admission (A1 follow-up). A job whose legacy
+# read set exceeds its resource profile's scratch budget must be refused
+# HERE, before ``submission.submit_graph`` ever creates it -- not only
+# discovered later, after materialize/upstream jobs already ran, when
+# ``supervisor.Service._populate_legacy_staging`` (barrier path) or
+# ``snapshot_stages._check_scratch`` (``legacy_materialize``) claims it.
+# Both of those still run too (defence in depth); this is the plan-time half.
+# --------------------------------------------------------------------------
+
+
+def plan_scratch_problems(conn, store, requests, *, policy=DEFAULT_POLICY, kind_registry=None):
+    """Per-job scratch admission problems for an already-built request graph.
+
+    Only a request whose kind actually stages something is checked, mirrored
+    exactly from the two claim-time checks this runs ahead of:
+
+    * a kind with a declared ``legacy_store`` read domain
+      (``store_barrier.domains_of``, the same test
+      ``supervisor.Service._store_domains``/``_pin_read_set`` use) is checked
+      against its bound ``legacy_manifest.json`` manifest's ``file_refs`` byte
+      total -- exactly what ``_populate_legacy_staging`` sums before it
+      copies anything. A ``SNAPSHOT_BACKED_KINDS`` kind running IN snapshot
+      mode declares no read domain (``domains_of``: snapshot ``input_mode``
+      takes no legacy-store lease) and so is never checked here -- P2-6 §9.3,
+      it reads the already-verified materialization root, staging nothing
+      new of its own.
+    * ``legacy_materialize`` is checked against its own
+      ``scratch_estimate_bytes`` parameter -- exactly what
+      ``snapshot_stages._check_scratch`` reads.
+    * every other kind (``decision_evidence``, the effects-graph coordinator
+      kinds) stages nothing and is skipped, even though it may carry the same
+      ``legacy_manifest.json`` binding every stage in a legacy-mode plan does.
+
+    Returns a list of problem dicts (empty means every job fits); never
+    raises on its own.
+    """
+    from engine.v2.ops.stages import registry as default_registry
+    from engine.v2.ops.store_barrier import domains_of
+
+    reg = kind_registry or default_registry()
+    manifest_totals: dict[str, int] = {}
+    problems = []
+    for request in requests:
+        kind = request.job.kind
+        parameters = request.job.parameters or {}
+        if kind == "legacy_materialize":
+            needed = int(parameters.get("scratch_estimate_bytes", 0))
+        else:
+            reads = any(mode == "read" for _, mode in domains_of(reg, kind, parameters))
+            if not reads:
+                continue
+            manifest_id = (parameters.get("input_bindings") or {}).get("legacy_manifest.json")
+            if not manifest_id or str(manifest_id).startswith("job_"):
+                continue
+            if manifest_id not in manifest_totals:
+                manifest = json.loads(store.read_verified(artifact(conn, store, manifest_id)))
+                manifest_totals[manifest_id] = sum(
+                    int(item["byte_size"]) for item in manifest.get("file_refs", []))
+            needed = manifest_totals[manifest_id]
+        profile = profile_named(policy, _legacy_resource(kind))
+        if needed > profile.scratch_bytes:
+            problems.append({"kind": kind, "profile": profile.name,
+                             "needed_bytes": needed, "scratch_bytes": profile.scratch_bytes})
+    return problems
+
+
+def refuse_oversize_plan(conn, store, requests, *, policy=DEFAULT_POLICY):
+    """Raise before submission if any job in ``requests`` would be refused at
+    claim time for exceeding its profile's scratch budget (A1 follow-up)."""
+    problems = plan_scratch_problems(conn, store, requests, policy=policy)
+    if problems:
+        raise fail("RESOURCE_LIMIT_EXCEEDED",
+                   "plan stages a legacy read set larger than its profile's scratch budget",
+                   details={"jobs": problems})

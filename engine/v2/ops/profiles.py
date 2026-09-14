@@ -11,6 +11,21 @@ exclusive of other heavy work until a reviewed measurement changes it.
 Profiles change **between runs, in a new policy version**, never automatically
 after one cheap cache-hit run, and never by lowering a reservation until a
 stage fits on paper (§8.1).
+
+v4 (2026-09-14) right-sizes ``scratch_bytes`` for every profile a kind that
+goes through ``supervisor.Service._pin_read_set`` /
+``_populate_legacy_staging`` can carry (``stages.registry()``'s
+``legacy_finality``/``legacy_score``/``legacy_decisions``/``legacy_settlement``/
+``legacy_model_evidence``/``legacy_render``/``legacy_selfcheck``/
+``legacy_score_requests``/``legacy_decision_replay``/``snapshot_import``).
+Basis: the real 2026-09-14 4-ticker snapshot-mode nightly staged a
+``legacy_finality`` read set of ``needed_bytes=1796916876`` (~1.67 GiB)
+against the ``validation`` profile's old 1 GiB scratch limit and was refused
+at claim time (``RESOURCE_LIMIT_EXCEEDED``). 4 GiB is ~2.4x that measured
+read set -- headroom for a larger watchlist, not a value chosen to clear one
+run by the smallest margin; disk free on this host is ~900 GiB, so nothing
+here is disk-constrained. ``legacy_rebuild`` (20 GiB) and ``materialize``
+(20 GiB) already clear this basis and are unchanged.
 """
 from __future__ import annotations
 
@@ -22,7 +37,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-14.v3"
+POLICY_VERSION = "ops_resources.2026-09-14.v4"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -39,8 +54,11 @@ DEFAULT_POLICY = ResourcePolicy(
                         scratch_bytes=2 * GIB, heavy=False),
         ResourceProfile(name="delivery", memory_bytes=256 * MIB, cpu_count=1,
                         scratch_bytes=1 * GIB, heavy=False),
+        # legacy_render (store_domains read) stages the legacy read set
+        # through the same barrier as validation/legacy_score below --
+        # scratch bumped to the v4 basis (1.67 GiB measured + headroom).
         ResourceProfile(name="projection", memory_bytes=2 * GIB, cpu_count=2,
-                        scratch_bytes=2 * GIB, heavy=False),
+                        scratch_bytes=4 * GIB, heavy=False),
         # The serialized selfcheck builds a bounded scorer of its own.
         # Lowered 2026-09-14 from 11/2 GiB to 5 GiB (right-sizing pass, ops
         # memory reservation review): the adapted legacy scoring path
@@ -51,17 +69,28 @@ DEFAULT_POLICY = ResourcePolicy(
         # available - 512 MiB margin >= reservation, and measured headroom on
         # this 7.8 GiB host is 4.15-5.43 GiB while other agents run tests, so
         # 11/2 GiB (5.5 GiB) could never be admitted concurrently with other
-        # work; 5 GiB can.
+        # work; 5 GiB can. Scratch bumped 2026-09-14 (v4) from 1 GiB: this
+        # profile carries legacy_finality/legacy_decisions/legacy_selfcheck,
+        # whose barrier-path read set measured 1.67 GiB on a real 4-ticker
+        # snapshot nightly (see module docstring) -- 4 GiB is that plus
+        # headroom, never a value chosen to make one run pass on paper.
         ResourceProfile(name="validation", memory_bytes=5 * GIB, cpu_count=4,
-                        scratch_bytes=1 * GIB, heavy=True),
+                        scratch_bytes=4 * GIB, heavy=True),
         # Lowered 2026-09-14 from 11/2 GiB to 5 GiB for the same reason as
         # validation above: measured peak is 4.15 GiB tree RSS (2026-09-13
         # 38-request canary), so 5 GiB keeps 0.85 GiB of margin while fitting
         # the host's measured 4.15-5.43 GiB headroom under contention.
+        # Scratch bumped 2026-09-14 (v4) from 2 GiB to the same 1.67 GiB +
+        # headroom basis as validation above -- this profile also carries
+        # legacy_score/legacy_score_requests/legacy_decision_replay's own
+        # barrier-path read set outside snapshot mode.
         ResourceProfile(name="legacy_score", memory_bytes=5 * GIB, cpu_count=5,
-                        scratch_bytes=2 * GIB, heavy=True),
+                        scratch_bytes=4 * GIB, heavy=True),
+        # legacy_model_evidence (store_domains read) stages the legacy read
+        # set through the same barrier -- scratch bumped 2026-09-14 (v4) from
+        # 1 GiB to the 1.67 GiB + headroom basis above.
         ResourceProfile(name="model_evidence", memory_bytes=4 * GIB, cpu_count=4,
-                        scratch_bytes=1 * GIB, heavy=True),
+                        scratch_bytes=4 * GIB, heavy=True),
         ResourceProfile(name="legacy_rebuild", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
         # Covers the legacy_materialize worker (engine/v2/data/legacy_materialization.py

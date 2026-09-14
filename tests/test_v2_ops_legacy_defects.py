@@ -21,7 +21,7 @@ from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.legacy_adapter import _action_score, _load_finality
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.plans import nightly_plan
-from engine.v2.ops.profiles import DEFAULT_POLICY, POLICY_VERSION, profile_named
+from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, POLICY_VERSION, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 
@@ -203,6 +203,36 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 
 
 # --------------------------------------------------------------------------
+# 2026-09-14 (v4): every profile a read-set-staging kind can carry admits the
+# real 1.67 GiB read set a 4-ticker snapshot nightly measured
+# (``needed_bytes=1796916876`` against the old 1 GiB ``validation`` scratch
+# limit -- see ``profiles.py``'s module docstring).
+# --------------------------------------------------------------------------
+
+#: The exact real failure's needed_bytes (2026-09-14 4-ticker snapshot nightly).
+MEASURED_READ_SET_BYTES = 1796916876
+
+
+def test_policy_version_is_v4():
+    assert POLICY_VERSION == "ops_resources.2026-09-14.v4"
+    assert POLICY_VERSION == DEFAULT_POLICY.version
+
+
+def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
+    """Deliverable 1: finality/decisions/selfcheck (``validation``),
+    legacy_score/legacy_decision_replay (``legacy_score``),
+    legacy_model_evidence (``model_evidence``) and legacy_render
+    (``projection``) all now admit the measured 1.67 GiB read set with
+    margin, and memory is untouched from v3."""
+    for name, old_memory_gib in (("validation", 5), ("legacy_score", 5),
+                                 ("model_evidence", 4), ("projection", 2)):
+        profile = profile_named(DEFAULT_POLICY, name)
+        assert profile.scratch_bytes >= MEASURED_READ_SET_BYTES
+        assert profile.scratch_bytes == 4 * GIB
+        assert profile.memory_bytes == old_memory_gib * GIB  # unchanged by v4
+
+
+# --------------------------------------------------------------------------
 # 2026-09-14 right-sizing: legacy_materialize gets its own small profile,
 # and DEFAULT_POLICY stays structurally valid.
 # --------------------------------------------------------------------------
@@ -282,3 +312,115 @@ def test_canary_adapter_builds_a_kind_registered_request_accepted_by_submit(tmp_
         assert receipt.state == "queued"
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# 2026-09-14 (A1 follow-up): a plan-time scratch check, so a job whose legacy
+# read set exceeds its resource profile's scratch budget is refused before
+# submission, never only discovered later at claim time.
+# --------------------------------------------------------------------------
+
+
+def _manifest_ref(store, conn, clock, byte_sizes):
+    """Publish and register a ``legacy_input_manifest.v1.0`` whose
+    ``file_refs`` sum to exactly ``sum(byte_sizes)`` -- the same total
+    ``_populate_legacy_staging``/``plan_scratch_problems`` compute."""
+    from engine.v2.ops.catalog import transaction
+    from engine.v2.ops.checkpoints import register_artifact
+
+    document = {"schema_version": "legacy_input_manifest.v1.0", "manifest_id": "m1",
+               "file_refs": [{"path": f"f{i}.bin", "content_hash": "sha256:" + str(i) * 64,
+                              "byte_size": size} for i, size in enumerate(byte_sizes)],
+               "table_contract_refs": [], "registry_and_model_refs": [], "calendar_ref": None,
+               "selected_session": "2026-09-14", "finality_receipt_refs": [],
+               "knowledge_mode_by_table": {}, "availability_evidence_refs": [],
+               "read_set_complete": True, "capture_implementation_ref": "test.v1"}
+    ref = store.publish_bytes(json.dumps(document, sort_keys=True).encode(),
+                              schema_ref="legacy_input_manifest.v1.0")
+    with transaction(conn):
+        register_artifact(conn, ref, None, clock)
+    return ref
+
+
+def test_plan_scratch_problems_admits_the_measured_1_7gib_read_set(tmp_path):
+    """Deliverable 3 (part 2): the current v4 profiles admit exactly the real
+    1.67 GiB read set for every kind that stages it -- finality, decisions,
+    selfcheck, score, decision_replay, model_evidence and render alike."""
+    from engine.v2.ops.nightly import plan_scratch_problems
+
+    (tmp_path / "catalog").mkdir()
+    store = ArtifactStore(tmp_path / "catalog")
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "catalog" / "ops.sqlite", clock=clock)
+    try:
+        manifest_ref = _manifest_ref(store, conn, clock, [MEASURED_READ_SET_BYTES])
+        plan = build_nightly_plan(str(REPO), "2026-09-14")
+        requests = build_legacy_job_requests(
+            plan, tickers=("AAA", "BBB", "CCC", "DDD"), year_start=2025, year_end=2026,
+            input_refs=(manifest_ref.artifact_id,))
+        by_kind = {r.job.kind for r in requests}
+        assert {"legacy_finality", "legacy_decisions", "legacy_selfcheck", "legacy_score",
+               "legacy_decision_replay", "legacy_model_evidence", "legacy_render"} <= by_kind
+        assert plan_scratch_problems(conn, store, requests) == []
+    finally:
+        conn.close()
+
+
+def test_refuse_oversize_plan_blocks_submission_with_details(tmp_path):
+    """Deliverable 2: a plan whose declared read set exceeds a profile's
+    scratch is refused at plan time, with the offending kind/profile/needed/
+    limit -- never only discovered later at claim time."""
+    from engine.v2.ops.nightly import refuse_oversize_plan
+
+    (tmp_path / "catalog").mkdir()
+    store = ArtifactStore(tmp_path / "catalog")
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "catalog" / "ops.sqlite", clock=clock)
+    try:
+        oversize = profile_named(DEFAULT_POLICY, "validation").scratch_bytes + 1
+        manifest_ref = _manifest_ref(store, conn, clock, [oversize])
+        plan = build_nightly_plan(str(REPO), "2026-09-14")
+        requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+                                             input_refs=(manifest_ref.artifact_id,))
+        with pytest.raises(OpsError) as err:
+            refuse_oversize_plan(conn, store, requests)
+        assert err.value.code == "RESOURCE_LIMIT_EXCEEDED"
+        jobs = {job["kind"]: job for job in err.value.problem.details["jobs"]}
+        assert jobs["legacy_finality"] == {
+            "kind": "legacy_finality", "profile": "validation",
+            "needed_bytes": oversize,
+            "scratch_bytes": profile_named(DEFAULT_POLICY, "validation").scratch_bytes}
+        # A kind whose profile (legacy_rebuild, 20 GiB) already clears this
+        # oversize manifest is never reported.
+        assert "legacy_settlement" not in jobs
+    finally:
+        conn.close()
+
+
+def test_populate_legacy_staging_still_refuses_an_oversize_read_set_at_claim_time():
+    """Deliverable 3 (part 3, defence in depth): even with the plan-time
+    check above, the original claim-time guard in
+    ``supervisor.Service._populate_legacy_staging`` still refuses on its
+    own -- a plan-time bypass or a stale plan built before a profile shrank
+    must not let an oversize read set reach staging."""
+    from engine.v2.contracts import JobSpec
+    from engine.v2.contracts.operations import ResolvedResources
+    from engine.v2.ops.scheduler import Claim
+    from engine.v2.ops.supervisor import Service
+
+    spec = JobSpec(kind="legacy_finality", implementation_ref="x", spec_hash=None,
+                   environment_ref="x", parameters={}, output_namespace="shadow",
+                   resource_class="validation", retry_policy_ref="bounded",
+                   checkpoint_contract_ref="legacy_action.v1.0")
+    resources = ResolvedResources(effective_host_budget_bytes=1, reserved_memory_bytes=1,
+                                  assigned_cpu_ids=(), thread_count=1, scratch_limit_bytes=1,
+                                  executor_mode="fake", containment="none", provider_leases=(),
+                                  resource_profile_version="v1")
+    claim = Claim(job_id="job_test", attempt_id="att_test", attempt_number=1, fence=1, spec=spec,
+                 resources=resources, lease_expires_at="2026-09-14T00:00:00.000000Z")
+    manifest = {"file_refs": [{"path": "f.bin", "byte_size": 2}]}  # 2 bytes > scratch_limit_bytes=1
+    service = Service.__new__(Service)  # no real conn/store setup needed: this raises first
+    with pytest.raises(OpsError) as err:
+        Service._populate_legacy_staging(service, claim, manifest)
+    assert err.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert err.value.problem.details == {"needed_bytes": 2, "scratch_limit_bytes": 1}
