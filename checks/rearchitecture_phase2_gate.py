@@ -157,7 +157,8 @@ def _check_row(d_id, row, test_outcomes, document_ok, field_ok, phase1_raw):
 
 
 def gate(root=ROOT, *, coverage_path=None, evidence_manifest_path=None,
-         artifact_root=None, prerequisite_runner=None, registry_path=REGISTRY):
+         artifact_root=None, prerequisite_runner=None, registry_path=REGISTRY,
+         corpus_root=None):
     started = time.monotonic()
     registry = load_registry(registry_path)
     files = source_files(root)
@@ -187,7 +188,7 @@ def gate(root=ROOT, *, coverage_path=None, evidence_manifest_path=None,
         if evidence is not None:
             resolved_root = Path(artifact_root) if artifact_root else root
             evidence_findings, field_ok, document_ok = validate_evidence(
-                evidence, artifact_root=resolved_root,
+                evidence, artifact_root=resolved_root, corpus_root=corpus_root,
                 code_hash=code_hash, environment_hash=env_hash)
             findings.extend(evidence_findings)
 

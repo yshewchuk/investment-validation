@@ -383,7 +383,7 @@ def _check_release_bindings(evidence: dict, artifact_root: Path, findings: list,
             field_ok[field] = False
 
 
-def _check_phase2(evidence: dict, artifact_root: Path, findings: list,
+def _check_phase2(evidence: dict, artifact_root: Path, corpus_root: Path | None, findings: list,
                   field_ok: dict[str, bool]) -> None:
     field = "phase2_acceptance_ref"
     data = _resolve(evidence.get(field), artifact_root, findings, field)
@@ -401,7 +401,7 @@ def _check_phase2(evidence: dict, artifact_root: Path, findings: list,
         field_ok[field] = False
         return
     p2_findings, p2_field_ok, p2_document_ok = validate_phase2_evidence(
-        phase2_doc, artifact_root=artifact_root,
+        phase2_doc, artifact_root=artifact_root, corpus_root=corpus_root,
         code_hash=evidence.get("source_code_hash"), environment_hash=evidence.get("source_environment_hash"))
     if not p2_document_ok or p2_findings or not all(p2_field_ok.values()):
         findings.append({"code": "PREREQUISITE_FAILED", "prerequisite": "phase2",
@@ -410,7 +410,8 @@ def _check_phase2(evidence: dict, artifact_root: Path, findings: list,
 
 
 def validate_evidence(evidence: dict, *, artifact_root: Path,
-                      implementation_code_hash: str, environment_hash: str
+                      implementation_code_hash: str, environment_hash: str,
+                      corpus_root: Path | None = None,
                       ) -> tuple[list[dict], dict[str, bool], bool, dict[tuple[str, str], bool]]:
     """Every finding the strict ``phase3_evidence.v1.0`` document can produce.
 
@@ -420,6 +421,10 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     bound to, per guide §10 ("Phase 3 tests/projection evidence binds to the
     final implementation"). They are deliberately NOT what
     ``phase2_acceptance_ref`` is checked against -- see the module docstring.
+    ``corpus_root``: forwarded to ``validate_phase2_evidence`` for D14's
+    corpus-snapshot binding check (default ``checks.tier0_corpus.
+    DEFAULT_CORPUS``) -- a caller validating a Phase 2 acceptance built
+    against a different (e.g. synthetic test) corpus passes its own.
 
     Returns ``(findings, field_ok, document_ok, kind_ok)``: the first three
     match Phase 2's own validator contract exactly. ``kind_ok`` additionally
@@ -522,7 +527,7 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     _check_raw_list(resolved.get("deferred_work_ref"), findings, field_ok,
                     "deferred_work_ref", ("item", "owner"))
 
-    _check_phase2(evidence, artifact_root, findings, field_ok)
+    _check_phase2(evidence, artifact_root, corpus_root, findings, field_ok)
 
     kind_ok = _check_verdicts_and_bindings(
         decoded_lists, findings, field_ok, code_hash=implementation_code_hash,

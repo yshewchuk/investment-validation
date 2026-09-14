@@ -89,7 +89,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.rearchitecture_phase1_gate import source_files, source_hash  # noqa: E402
-from checks.rearchitecture_phase2_evidence import CORPUS_PARITY_KIND  # noqa: E402
+from checks.rearchitecture_phase2_evidence import (  # noqa: E402
+    CORPUS_PARITY_KIND,
+    CORPUS_SNAPSHOT_BINDING_V1,
+)
 from checks.rearchitecture_phase2_gate import environment_hash as _environment_hash  # noqa: E402
 from checks.tier0_corpus import DEFAULT_CORPUS, Corpus, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import load as load_corpus  # noqa: E402
@@ -126,7 +129,8 @@ from engine.v2.ops.submission import NamespacePolicy, submit  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
 
 __all__ = ["corpus_population", "legacy_store_snapshot_hash", "import_corpus", "run_corpus",
-           "build_receipt", "control_localized_to_analogs", "publish", "main"]
+           "build_receipt", "control_localized_to_analogs", "publish",
+           "publish_corpus_snapshot_binding", "main"]
 
 DEFAULT_SCOPE = "corpus"
 _TERMINAL = ("succeeded", "failed", "blocked", "cancelled")
@@ -444,35 +448,68 @@ def _request_findings(canary_id: str, expected: dict, actual: dict) -> list[Find
     return [_redact(f, canary_id) for f in receipt.findings]
 
 
-def _snapshot_diagnostic_ref(corpus, run_result: dict, *, control_drop_ticker: str | None) -> str | None:
-    """Binds the legacy SNAPSHOT hash the run actually scored against into
-    the receipt's ``envelope.diagnostic_ref`` (task review: "the evidence
-    must show that the corpus hash equals the imported source hash"). A
-    control run's filtered copy only rewrites ``trades`` rows -- the
-    SNAPSHOT compatibility object itself is hard-linked, unperturbed, so its
-    hash cannot itself reveal the perturbation; ``control_drop_ticker``
-    records that fact explicitly rather than leaving a matching hash to
-    imply nothing changed."""
-    legacy_hash = run_result.get("legacy_snapshot_hash")
-    if legacy_hash is None:
-        return None
-    matches = legacy_hash == corpus.index.get("snapshot")
-    parts = [f"legacy_snapshot_hash={legacy_hash}", f"matches_corpus_snapshot={str(matches).lower()}"]
-    if control_drop_ticker is not None:
-        parts.append(f"control_drop_ticker={control_drop_ticker}")
-        parts.append("control_note=trades-only perturbation; SNAPSHOT identity unaffected")
-    return ";".join(parts)
+def _corpus_version_name(corpus_root: Path, resolved: Path) -> str:
+    """The identifier :func:`_corpus_index_snapshot` (the evidence validator's
+    own mirror) can re-derive an INDEX.json path from: empty for the bare/
+    unversioned layout (``corpus_root/INDEX.json`` IS the corpus -- every
+    fixture this module's own tests build), otherwise the published version
+    directory's own name, exactly what ``CURRENT`` names it
+    (:func:`checks.tier0_corpus.resolve_corpus`'s other case)."""
+    return "" if Path(resolved) == Path(corpus_root).resolve() else Path(resolved).name
+
+
+def _corpus_snapshot_binding(corpus, corpus_root: Path, run_result: dict, *,
+                             control_drop_ticker: str | None) -> dict:
+    """The ``corpus_snapshot_binding.v1.0`` document (task D14 review): binds
+    the legacy SNAPSHOT hash the run actually scored against to the corpus's
+    own frozen ``snapshot`` id, machine-checkably -- the structured
+    replacement for the old free-text ``diagnostic_ref`` stuffing. A control
+    run's filtered copy only rewrites ``trades`` rows -- the SNAPSHOT
+    compatibility object itself is hard-linked, unperturbed, so its hash
+    cannot itself reveal the perturbation; ``control``/``control_drop_ticker``
+    record that fact explicitly rather than leaving a matching hash to imply
+    nothing changed, and the evidence validator refuses a control receipt
+    offered in D14's own place outright."""
+    resolved = resolve_corpus(Path(corpus_root))
+    return {
+        "schema_version": CORPUS_SNAPSHOT_BINDING_V1,
+        "corpus_version": _corpus_version_name(corpus_root, resolved),
+        "corpus_snapshot_hash": corpus.index.get("snapshot"),
+        "source_snapshot_hash": run_result.get("legacy_snapshot_hash"),
+        "control": control_drop_ticker is not None,
+        "control_drop_ticker": control_drop_ticker,
+    }
+
+
+def publish_corpus_snapshot_binding(binding: dict, artifact_root: Path) -> dict:
+    """Publish the binding document next to the receipt, content-addressed
+    the same way :func:`publish` addresses the receipt itself. Returns the
+    reference dict (``{"path": ..., "content_hash": ...}``) the receipt's
+    ``envelope.diagnostic_ref`` is set to (JSON-encoded, since ``diagnostic_ref``
+    is a plain ``str`` field -- see :class:`engine.v2.diagnosis.receipt.Envelope`)."""
+    artifact_root = Path(artifact_root)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(binding, indent=2, sort_keys=True).encode()
+    digest = hashlib.sha256(data).hexdigest()
+    path = artifact_root / f"corpus_snapshot_binding_{digest[:16]}.json"
+    path.write_bytes(data)
+    return {"path": path.name, "content_hash": "sha256:" + digest}
 
 
 def build_receipt(corpus_root: Path, run_result: dict, *, code_hash: str,
-                  environment_hash: str, control_drop_ticker: str | None = None) -> ComparisonReceipt:
+                  environment_hash: str, control_drop_ticker: str | None = None,
+                  artifact_root: Path | None = None) -> ComparisonReceipt:
     """One receipt over the whole corpus: ``expected`` = every constituent
     request the 20 declared pairs imply; ``supported`` = what
     ``legacy_score_requests`` can reach; ``compared`` = what it actually
     returned a row for. Every drop between them is itemized (task P2-C01
     decision 4) rather than folded into a count. ``control_drop_ticker``:
     set only by ``run_control_missing_analogs``, see
-    :func:`_snapshot_diagnostic_ref`."""
+    :func:`_corpus_snapshot_binding`. ``artifact_root``: when given, the
+    corpus-snapshot binding is published there (next to where the caller
+    will ``publish()`` this receipt) and ``envelope.diagnostic_ref`` is set
+    to point at it; ``None`` leaves ``diagnostic_ref`` unset (a receipt built
+    only to inspect population/findings, not for evidence submission)."""
     corpus = load_corpus(resolve_corpus(Path(corpus_root)))
     supported, excluded = corpus_population(corpus)
     actual_by_id = {row["request_id"]: row["record"] for row in run_result["rows"]
@@ -489,11 +526,16 @@ def build_receipt(corpus_root: Path, run_result: dict, *, code_hash: str,
         findings.extend(_request_findings(cid, expected_record, actual_by_id[cid]))
     population = Population(expected=len(supported) + len(excluded), supported=len(supported),
                             compared=len(compared_ids), excluded=tuple(drops))
+    diagnostic_ref = None
+    if artifact_root is not None:
+        binding = _corpus_snapshot_binding(corpus, corpus_root, run_result,
+                                           control_drop_ticker=control_drop_ticker)
+        ref = publish_corpus_snapshot_binding(binding, artifact_root)
+        diagnostic_ref = json.dumps(ref, sort_keys=True)
     envelope = Envelope(code_hash=code_hash, environment_hash=environment_hash,
                         snapshot_id=run_result.get("snapshot_id"),
                         snapshot_manifest_hash=run_result.get("snapshot_manifest_hash"),
-                        diagnostic_ref=_snapshot_diagnostic_ref(
-                            corpus, run_result, control_drop_ticker=control_drop_ticker))
+                        diagnostic_ref=diagnostic_ref)
     verdict = (INCOMPARABLE
               if population.expected <= 0 or population.supported <= 0 or population.compared <= 0
               else DIFFER if findings else AGREE)
@@ -580,7 +622,7 @@ def run_control_missing_analogs(args, policy) -> tuple[ComparisonReceipt, bool, 
     run_result = run_corpus(args.root, args.store_root, args.scope, args.corpus, policy=policy)
     code, environment = code_and_environment_hash()
     receipt = build_receipt(args.corpus, run_result, code_hash=code, environment_hash=environment,
-                            control_drop_ticker=args.drop_ticker)
+                            control_drop_ticker=args.drop_ticker, artifact_root=args.artifact_root)
     ok, problems = control_localized_to_analogs(receipt)
     return receipt, ok, problems
 
@@ -658,7 +700,8 @@ def _dispatch(args, policy) -> int:
     if args.command == "compare":
         run_result = json.loads(args.rows.read_text())
         code, environment = code_and_environment_hash()
-        receipt = build_receipt(args.corpus, run_result, code_hash=code, environment_hash=environment)
+        receipt = build_receipt(args.corpus, run_result, code_hash=code, environment_hash=environment,
+                                artifact_root=args.artifact_root)
         ref = publish(receipt, args.artifact_root)
         print(json.dumps({**ref, "verdict": receipt.verdict}, indent=2))
         return 0 if receipt.verdict == AGREE else 1

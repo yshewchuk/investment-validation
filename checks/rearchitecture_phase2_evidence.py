@@ -66,6 +66,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from checks.tier0_corpus import DEFAULT_CORPUS
 from engine.v2.contracts.data import (
     DependencyPlan,
     ObjectRef,
@@ -87,6 +88,15 @@ RENDER_PARITY_KIND = "render_bundle_parity"
 #: D14 (task P2-C01 decision 7): supervised scoring of the Tier-0 corpus,
 #: a THIRD kind distinct from both D15 (adapter parity) and D19 (render).
 CORPUS_PARITY_KIND = "corpus_score_parity"
+
+#: D14 corpus-snapshot binding (task D14 review): the machine-checkable
+#: artifact ``checks/rearchitecture_phase2_corpus_parity.py``'s ``compare``/
+#: ``control-missing-analogs`` publish next to the corpus receipt and point
+#: the receipt's own ``envelope.diagnostic_ref`` at, replacing the free-text
+#: stuffing this schema version supersedes. No contract type in
+#: ``engine/v2/contracts`` (bare hand-validated JSON, like ``fault_matrix_ref``
+#: below) -- the receipt schema and ``engine/v2/diagnosis`` are unchanged.
+CORPUS_SNAPSHOT_BINDING_V1 = "corpus_snapshot_binding.v1.0"
 
 #: Single-artifact reference fields whose bytes decode to a known contract.
 #: Excludes ``fault_matrix_ref`` (no contract type -- checked directly against
@@ -302,6 +312,117 @@ def _check_receipt_kinds(evidence: dict, decoded: dict[str, Any], findings: list
             field_ok[field] = False
 
 
+def _load_corpus_binding(receipt: Any, artifact_root: Path, findings: list,
+                         field_ok: dict[str, bool]) -> dict | None:
+    """Strictly resolve and decode the ``corpus_snapshot_binding.v1.0``
+    artifact D14's ``envelope.diagnostic_ref`` points at -- the structured
+    replacement for the free-text ``legacy_snapshot_hash=...;matches_corpus_
+    snapshot=...`` stuffing. ``diagnostic_ref`` carries the reference dict
+    itself, JSON-encoded (the field is a plain ``str`` on ``Envelope``, which
+    this module does not touch): ``{"path": ..., "content_hash": ...}``, the
+    SAME reference shape every other evidence field uses.
+
+    Any failure -- missing/unparseable ``diagnostic_ref``, an unresolvable or
+    hash-mismatched artifact, or a malformed/legacy-free-text document --
+    marks ``corpus_comparison_receipt_ref`` not-ok and returns ``None``.
+    """
+    field = "corpus_comparison_receipt_ref"
+    diagnostic_ref = receipt.envelope.diagnostic_ref
+    ref = None
+    if isinstance(diagnostic_ref, str):
+        try:
+            candidate = json.loads(diagnostic_ref)
+        except ValueError:
+            candidate = None
+        if (isinstance(candidate, dict) and isinstance(candidate.get("path"), str)
+                and isinstance(candidate.get("content_hash"), str)):
+            ref = candidate
+    if ref is None:
+        # Covers both an absent diagnostic_ref AND the pre-D14-review
+        # free-text form (``legacy_snapshot_hash=...;...``), which is not
+        # valid JSON and so never becomes a dict here.
+        findings.append({"code": "CORPUS_BINDING_MISSING", "field": field})
+        field_ok[field] = False
+        return None
+    path = (artifact_root / ref["path"]).resolve()
+    try:
+        path.relative_to(artifact_root.resolve())
+        exists = path.is_file()
+    except ValueError:
+        exists = False
+    if not exists:
+        findings.append({"code": "CORPUS_BINDING_MISSING", "field": field})
+        field_ok[field] = False
+        return None
+    data = path.read_bytes()
+    actual = "sha256:" + hashlib.sha256(data).hexdigest()
+    if actual != ref["content_hash"]:
+        findings.append({"code": "CORPUS_BINDING_HASH_MISMATCH", "field": field})
+        field_ok[field] = False
+        return None
+    try:
+        doc = json.loads(data)
+    except ValueError:
+        doc = None
+    valid = (
+        isinstance(doc, dict) and doc.get("schema_version") == CORPUS_SNAPSHOT_BINDING_V1
+        and isinstance(doc.get("corpus_version"), str)
+        and (doc.get("corpus_snapshot_hash") is None or isinstance(doc.get("corpus_snapshot_hash"), str))
+        and (doc.get("source_snapshot_hash") is None or isinstance(doc.get("source_snapshot_hash"), str))
+        and isinstance(doc.get("control"), bool)
+        and (doc.get("control_drop_ticker") is None or isinstance(doc.get("control_drop_ticker"), str))
+    )
+    if not valid:
+        findings.append({"code": "CORPUS_BINDING_SHAPE_INVALID", "field": field})
+        field_ok[field] = False
+        return None
+    return doc
+
+
+def _corpus_index_snapshot(corpus_root: Path, corpus_version: str) -> str | None:
+    """The named corpus version's OWN declared ``INDEX.json`` ``snapshot`` --
+    re-derived here, never trusted from the binding, so a forged binding
+    cannot claim agreement with a corpus it does not match. ``corpus_version
+    == ""`` is the bare/unversioned layout (``corpus_root/INDEX.json`` IS the
+    corpus -- ``checks.tier0_corpus.resolve_corpus``'s own other case)."""
+    base = corpus_root if not corpus_version else corpus_root / corpus_version
+    try:
+        return json.loads((base / "INDEX.json").read_text()).get("snapshot")
+    except (ValueError, OSError):
+        return None
+
+
+def _check_corpus_binding(decoded: dict[str, Any], artifact_root: Path, corpus_root: Path,
+                          findings: list, field_ok: dict[str, bool]) -> None:
+    """D14 (task D14 review): the corpus receipt's diagnostic_ref must bind a
+    real, matching corpus-snapshot binding -- refusing a corpus parity
+    receipt scored against a legacy store that had since moved from the
+    frozen corpus, a receipt that never declares the binding at all, and a
+    control receipt (a SEPARATE piece of evidence, D14's own control) offered
+    in D14's place.
+    """
+    field = "corpus_comparison_receipt_ref"
+    receipt = decoded.get(field)
+    if receipt is None:
+        return
+    binding = _load_corpus_binding(receipt, artifact_root, findings, field_ok)
+    if binding is None:
+        return
+    if binding.get("control"):
+        findings.append({"code": "CORPUS_BINDING_IS_CONTROL", "field": field})
+        field_ok[field] = False
+        return
+    corpus_hash = binding.get("corpus_snapshot_hash")
+    source_hash = binding.get("source_snapshot_hash")
+    if corpus_hash != source_hash:
+        findings.append({"code": "CORPUS_BINDING_SOURCE_MISMATCH", "field": field})
+        field_ok[field] = False
+    index_snapshot = _corpus_index_snapshot(Path(corpus_root), binding.get("corpus_version") or "")
+    if corpus_hash != index_snapshot:
+        findings.append({"code": "CORPUS_BINDING_INDEX_MISMATCH", "field": field})
+        field_ok[field] = False
+
+
 def _check_bindings(decoded: dict[str, Any], snapshot_ref_obj: Any, findings: list,
                     field_ok: dict[str, bool], *, code_hash: str, environment_hash: str) -> None:
     """Every comparison receipt binds ITSELF to the evidence's own code,
@@ -392,7 +513,8 @@ def _check_rollback(receipt: Any, import_receipts: list[Any], findings: list,
 
 
 def validate_evidence(evidence: dict, *, artifact_root: Path,
-                      code_hash: str, environment_hash: str
+                      code_hash: str, environment_hash: str,
+                      corpus_root: Path | None = None,
                       ) -> tuple[list[dict], dict[str, bool], bool]:
     """Every finding the strict ``phase2_evidence.v1.0`` document can produce.
 
@@ -400,8 +522,12 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     for what each covers. ``code_hash``/``environment_hash`` are the CURRENT
     tree's values, computed the same way the gate computes them; a mismatch
     means the evidence was produced against a different working tree or
-    interpreter/library set.
+    interpreter/library set. ``corpus_root``: the base directory D14's
+    ``corpus_comparison_receipt_ref`` binding is checked against (default
+    ``checks.tier0_corpus.DEFAULT_CORPUS``) -- a caller validating evidence
+    built against a different (e.g. synthetic test) corpus passes its own.
     """
+    corpus_root = Path(corpus_root) if corpus_root is not None else DEFAULT_CORPUS
     findings: list[dict] = []
     if not isinstance(evidence, dict) or evidence.get("schema_version") != PHASE2_EVIDENCE_V1:
         findings.append({"code": "CODE_HASH_MISMATCH", "field": "schema_version"})
@@ -427,6 +553,7 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     _check_populations(evidence, findings, field_ok)
     _check_verdicts(decoded, findings, field_ok)
     _check_receipt_kinds(evidence, decoded, findings, field_ok)
+    _check_corpus_binding(decoded, artifact_root, corpus_root, findings, field_ok)
     _check_bindings(decoded, snapshot_ref_obj, findings, field_ok,
                     code_hash=code_hash, environment_hash=environment_hash)
     _check_import_receipts(imports, snapshot_ref_obj, findings, field_ok)

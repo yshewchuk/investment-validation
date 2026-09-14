@@ -128,11 +128,18 @@ def _explained_population(expected=100, supported=80, compared=50) -> Population
                       excluded=tuple(dropped_1 + dropped_2))
 
 
+#: D14 review: the corpus receipt's ``diagnostic_ref`` must bind a real,
+#: matching ``corpus_snapshot_binding.v1.0`` artifact -- see
+#: ``tests/test_checks_phase2_gate.py``'s identical fixture.
+_CORPUS_SNAPSHOT = "sha256:" + "c" * 64
+
+
 def _p2_receipt(*, kind, code_hash, environment_hash, snapshot_ref, verdict=AGREE,
-                population=None, receipt_id) -> ComparisonReceipt:
+                population=None, receipt_id, diagnostic_ref=None) -> ComparisonReceipt:
     envelope = Envelope(code_hash=code_hash, environment_hash=environment_hash,
                         snapshot_id=snapshot_ref.snapshot_id,
-                        snapshot_manifest_hash=snapshot_ref.manifest_hash)
+                        snapshot_manifest_hash=snapshot_ref.manifest_hash,
+                        diagnostic_ref=diagnostic_ref)
     return ComparisonReceipt(
         receipt_id=receipt_id, comparison_kind=kind, tier=0, left_ref="legacy", right_ref="adapter",
         stage_plan_ref="plan.v1", tolerance_policy_ref="tol.v1", verdict=verdict,
@@ -163,10 +170,25 @@ def valid_phase2_evidence(artifact_root: Path, root: Path) -> dict:
                         snapshot_ref=snapshot_ref, receipt_id="recv_score")
     render = _p2_receipt(kind=p2evidence.RENDER_PARITY_KIND, code_hash=code_hash, environment_hash=env_hash,
                          snapshot_ref=snapshot_ref, receipt_id="recv_render")
-    corpus = _p2_receipt(kind=p2evidence.CORPUS_PARITY_KIND, code_hash=code_hash, environment_hash=env_hash,
-                         snapshot_ref=snapshot_ref, receipt_id="recv_corpus")
-    rollback = _p2_rollback(prior_id="snap_current", resulting_id="snap_prior")
     p = lambda rel, data: _ref(artifact_root, f"phase2/{rel}", data)  # noqa: E731
+    # D14 review: the corpus receipt's diagnostic_ref must bind a real,
+    # matching corpus_snapshot_binding.v1.0 artifact. The synthetic corpus
+    # dir lives at artifact_root.parent / "corpus" -- the SAME path
+    # ``corpus_root=`` below points the validator at (mirrors
+    # tests/test_checks_phase2_gate.py's _gate_with_evidence convention).
+    corpus_root = artifact_root.parent / "corpus"
+    corpus_root.mkdir(exist_ok=True)
+    (corpus_root / "INDEX.json").write_text(json.dumps({"snapshot": _CORPUS_SNAPSHOT}))
+    binding = {
+        "schema_version": p2evidence.CORPUS_SNAPSHOT_BINDING_V1, "corpus_version": "",
+        "corpus_snapshot_hash": _CORPUS_SNAPSHOT, "source_snapshot_hash": _CORPUS_SNAPSHOT,
+        "control": False, "control_drop_ticker": None,
+    }
+    binding_ref = p("corpus_binding.json", json.dumps(binding, sort_keys=True).encode())
+    corpus = _p2_receipt(kind=p2evidence.CORPUS_PARITY_KIND, code_hash=code_hash, environment_hash=env_hash,
+                         snapshot_ref=snapshot_ref, receipt_id="recv_corpus",
+                         diagnostic_ref=json.dumps(binding_ref, sort_keys=True))
+    rollback = _p2_rollback(prior_id="snap_current", resulting_id="snap_prior")
     return {
         "schema_version": p2evidence.PHASE2_EVIDENCE_V1, "code_hash": code_hash,
         "environment_hash": env_hash, "authority_mode": "shadow",
@@ -306,7 +328,7 @@ def _gate(evidence, artifact_root, root, registry_path=REAL_REGISTRY_PATH):
     evidence_path = artifact_root / "evidence_final.json"
     evidence_path.write_text(json.dumps(evidence))
     return p3gate.gate(root=root, evidence_manifest_path=evidence_path, artifact_root=artifact_root,
-                       registry_path=registry_path)
+                       corpus_root=artifact_root.parent / "corpus", registry_path=registry_path)
 
 
 # -- registry shape -----------------------------------------------------------

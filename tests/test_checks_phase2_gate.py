@@ -175,14 +175,41 @@ def _explained_population(expected=100, supported=80, compared=50) -> Population
 
 
 def _comparison_receipt(*, kind, code_hash, environment_hash, snapshot_ref, verdict=AGREE,
-                        population=None, receipt_id="recv_cmp") -> ComparisonReceipt:
+                        population=None, receipt_id="recv_cmp", diagnostic_ref=None) -> ComparisonReceipt:
     envelope = Envelope(code_hash=code_hash, environment_hash=environment_hash,
                         snapshot_id=snapshot_ref.snapshot_id,
-                        snapshot_manifest_hash=snapshot_ref.manifest_hash)
+                        snapshot_manifest_hash=snapshot_ref.manifest_hash,
+                        diagnostic_ref=diagnostic_ref)
     return ComparisonReceipt(
         receipt_id=receipt_id, comparison_kind=kind, tier=0, left_ref="legacy", right_ref="adapter",
         stage_plan_ref="plan.v1", tolerance_policy_ref="tol.v1", verdict=verdict,
         population=population or _explained_population(), envelope=envelope)
+
+
+#: D14 review: the corpus receipt's ``diagnostic_ref`` must bind a real,
+#: matching ``corpus_snapshot_binding.v1.0`` artifact. ``valid_evidence``
+#: below builds a tiny synthetic corpus dir at ``tmp_path / "corpus"`` (the
+#: bare/unversioned ``INDEX.json``-at-root layout -- ``corpus_version: ""``)
+#: whenever it includes a corpus receipt; ``_gate_with_evidence`` derives the
+#: SAME path from ``artifacts_dir.parent`` (== the same ``tmp_path``) so
+#: every existing caller picks it up with no signature change.
+_CORPUS_SNAPSHOT = "sha256:" + "c" * 64
+
+
+def _write_synthetic_corpus_index(tmp_path) -> Path:
+    corpus_root = tmp_path / "corpus"
+    corpus_root.mkdir(exist_ok=True)
+    (corpus_root / "INDEX.json").write_text(json.dumps({"snapshot": _CORPUS_SNAPSHOT}))
+    return corpus_root
+
+
+def _corpus_binding_ref(artifacts_dir: Path, *, control=False) -> dict:
+    binding = {
+        "schema_version": p2evidence.CORPUS_SNAPSHOT_BINDING_V1, "corpus_version": "",
+        "corpus_snapshot_hash": _CORPUS_SNAPSHOT, "source_snapshot_hash": _CORPUS_SNAPSHOT,
+        "control": control, "control_drop_ticker": None,
+    }
+    return _ref(artifacts_dir, "corpus_binding.json", json.dumps(binding, sort_keys=True).encode())
 
 
 def _rollback_receipt(*, prior_id, resulting_id, prior_generation=2, resulting_generation=3
@@ -239,9 +266,12 @@ def valid_evidence(tmp_path, root, *, populations=(100, 80, 50), authority_mode=
         evidence["render_comparison_receipt_ref"] = _ref(
             artifacts_dir, "render_comparison.json", _dumps(render))
     if include_corpus_receipt:
+        _write_synthetic_corpus_index(tmp_path)
+        binding_ref = _corpus_binding_ref(artifacts_dir)
         corpus = _comparison_receipt(kind=p2evidence.CORPUS_PARITY_KIND, code_hash=code_hash,
                                      environment_hash=env_hash, snapshot_ref=snapshot_ref,
-                                     receipt_id="recv_corpus")
+                                     receipt_id="recv_corpus",
+                                     diagnostic_ref=json.dumps(binding_ref, sort_keys=True))
         evidence["corpus_comparison_receipt_ref"] = _ref(
             artifacts_dir, "corpus_comparison.json", _dumps(corpus))
     return evidence, artifacts_dir
@@ -283,7 +313,8 @@ def test_fully_valid_evidence_and_passing_junit_and_green_prerequisites_is_ok(tm
     evidence_path.write_text(json.dumps(evidence))
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          evidence_manifest_path=evidence_path,
-                         artifact_root=artifacts_dir, prerequisite_runner=GREEN_RUNNER,
+                         artifact_root=artifacts_dir, corpus_root=artifacts_dir.parent / "corpus",
+                         prerequisite_runner=GREEN_RUNNER,
                          registry_path=w["registry_path"])
     assert result["ok"] is True, result["findings"]
     assert result["findings"] == []
@@ -441,6 +472,7 @@ def _evidence_world(tmp_path, mutate=None):
 def _gate_with_evidence(w, evidence_path, artifacts_dir):
     return p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                        evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                       corpus_root=artifacts_dir.parent / "corpus",
                        prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
 
 
@@ -526,6 +558,7 @@ def test_wrong_authority_mode_invalidates_every_tier2_row(tmp_path):
     evidence_path.write_text(json.dumps(evidence))
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         corpus_root=artifacts_dir.parent / "corpus",
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
     assert d_ids_with(result, "MISSING_EVIDENCE") == {"D15", "D19"}
     assert "AUTHORITY_NOT_SHADOW" in codes(result)
@@ -547,6 +580,7 @@ def test_d19_refused_when_only_the_score_receipt_is_present(tmp_path):
     evidence_path.write_text(json.dumps(evidence))
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         corpus_root=artifacts_dir.parent / "corpus",
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
     assert d_ids_with(result, "MISSING_EVIDENCE") == {"D19"}
 
@@ -564,6 +598,7 @@ def test_d19_refused_when_render_receipt_verdict_is_not_agree(tmp_path):
     evidence_path.write_text(json.dumps(evidence))
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         corpus_root=artifacts_dir.parent / "corpus",
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
     assert d_ids_with(result, "MISSING_EVIDENCE") == {"D19"}
     assert "VERDICT_NOT_AGREE" in codes(result)
@@ -580,6 +615,7 @@ def test_d14_refused_when_corpus_receipt_is_absent(tmp_path):
     evidence_path.write_text(json.dumps(evidence))
     result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
                          evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         corpus_root=artifacts_dir.parent / "corpus",
                          prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
     assert d_ids_with(result, "MISSING_EVIDENCE") == {"D14"}
 

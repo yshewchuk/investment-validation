@@ -13,6 +13,7 @@ docstring records.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -30,11 +31,13 @@ from checks.rearchitecture_phase2_corpus_parity import (  # noqa: E402
     import_corpus,
     legacy_store_snapshot_hash,
     publish,
+    publish_corpus_snapshot_binding,
     run_corpus,
 )
 from checks.rearchitecture_phase2_evidence import (  # noqa: E402
     AUTHORITY_MODE,
     CORPUS_PARITY_KIND,
+    CORPUS_SNAPSHOT_BINDING_V1,
     PHASE2_EVIDENCE_V1,
     validate_evidence,
 )
@@ -211,10 +214,11 @@ def test_identical_results_agree(tmp_path, monkeypatch):
     assert len(population.excluded) == 2
     assert {e["stage"] for e in population.excluded} == {"expected_to_supported"}
     assert {e["key"] for e in population.excluded} == {"r1", "d1"}
-    # Review item 1: compare binds the legacy SNAPSHOT hash the run actually
-    # scored against, and shows it equals the corpus's own declared hash.
-    assert receipt.envelope.diagnostic_ref == (
-        f"legacy_snapshot_hash={SNAPSHOT_HASH};matches_corpus_snapshot=true")
+    # D14 review: with no ``artifact_root``, no binding is published and
+    # ``diagnostic_ref`` stays unset -- see
+    # test_compare_publishes_a_structured_corpus_snapshot_binding below for
+    # the bound (``artifact_root=``) case.
+    assert receipt.envelope.diagnostic_ref is None
 
 
 def test_planted_field_difference_is_localized_and_redacted(tmp_path, monkeypatch):
@@ -236,19 +240,26 @@ def test_missing_analog_slice_control_localizes_to_analogs(tmp_path, monkeypatch
     corpus_root, run_result = _setup_and_run(
         tmp_path, canned, monkeypatch, scope="corpus-control", key="control",
         drop_ticker="nonexistent_ticker")
+    artifact_root = tmp_path / "evidence"
     receipt = build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1",
-                            control_drop_ticker="nonexistent_ticker")
+                            control_drop_ticker="nonexistent_ticker", artifact_root=artifact_root)
     ok, problems = control_localized_to_analogs(receipt)
     assert ok, problems
     assert receipt.verdict == DIFFER
     stages = {f.first_differing_stage for f in receipt.findings}
     assert stages == {"analogs"}
-    # Review item 1: the control's filtered copy only rewrites trades rows,
-    # so the SNAPSHOT hash alone would show a (misleading) match -- the
-    # receipt must record the deliberate divergence explicitly instead.
-    diagnostic = receipt.envelope.diagnostic_ref or ""
-    assert f"legacy_snapshot_hash={SNAPSHOT_HASH}" in diagnostic
-    assert "control_drop_ticker=nonexistent_ticker" in diagnostic
+    # D14 review: the control's filtered copy only rewrites trades rows, so
+    # the SNAPSHOT hash alone would show a (misleading) match -- the
+    # published binding records the deliberate divergence explicitly instead
+    # of a free-text note, and the evidence validator refuses a control
+    # receipt (``control: true``) offered as D14's own evidence outright
+    # (see test_control_receipt_is_refused_as_d14_evidence below).
+    ref = json.loads(receipt.envelope.diagnostic_ref)
+    binding = json.loads((artifact_root / ref["path"]).read_bytes())
+    assert binding["schema_version"] == CORPUS_SNAPSHOT_BINDING_V1
+    assert binding["source_snapshot_hash"] == SNAPSHOT_HASH
+    assert binding["control"] is True
+    assert binding["control_drop_ticker"] == "nonexistent_ticker"
 
 
 def test_missing_analog_control_fails_when_findings_are_not_localized(tmp_path, monkeypatch):
@@ -266,10 +277,13 @@ def test_missing_analog_control_fails_when_findings_are_not_localized(tmp_path, 
 
 
 def test_receipt_passes_evidence_validator_corpus_kind_and_binding(tmp_path, monkeypatch):
+    """A good binding (D14 review): a receipt whose ``diagnostic_ref`` points
+    at a real, matching ``corpus_snapshot_binding.v1.0`` artifact passes the
+    validator's D14-specific checks with no findings on that field."""
     corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="valid")
-    receipt = build_receipt(corpus_root, run_result, code_hash="deadbeef",
-                            environment_hash="cafef00d")
     artifact_root = tmp_path / "evidence"
+    receipt = build_receipt(corpus_root, run_result, code_hash="deadbeef",
+                            environment_hash="cafef00d", artifact_root=artifact_root)
     ref = publish(receipt, artifact_root)
     population = receipt.population
     evidence = {
@@ -280,10 +294,152 @@ def test_receipt_passes_evidence_validator_corpus_kind_and_binding(tmp_path, mon
         "compared_population": population.compared,
     }
     findings, field_ok, _document_ok = validate_evidence(
-        evidence, artifact_root=artifact_root, code_hash="deadbeef", environment_hash="cafef00d")
+        evidence, artifact_root=artifact_root, corpus_root=corpus_root,
+        code_hash="deadbeef", environment_hash="cafef00d")
     corpus_findings = [f for f in findings if f.get("field") == "corpus_comparison_receipt_ref"]
     assert not corpus_findings, findings
     assert field_ok.get("corpus_comparison_receipt_ref") is True
+
+
+# --------------------------------------------------------------------------
+# D14 review: the corpus-snapshot binding, enforced by the evidence validator
+# --------------------------------------------------------------------------
+
+
+def _bound_receipt(tmp_path, corpus_root, run_result, *, binding_overrides=None,
+                   diagnostic_ref=None, verdict=AGREE) -> tuple:
+    """A real corpus_score_parity ``ComparisonReceipt`` for direct validator
+    tests, with a published (possibly deliberately broken) binding. Returns
+    ``(receipt, artifact_root)``. ``diagnostic_ref``, when given, OVERRIDES
+    the published binding's own ref (for the "missing"/"legacy free text"
+    cases, where no valid ref should exist at all)."""
+    artifact_root = tmp_path / "evidence"
+    receipt = build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1",
+                            artifact_root=artifact_root)
+    if binding_overrides is not None:
+        ref = json.loads(receipt.envelope.diagnostic_ref)
+        binding = json.loads((artifact_root / ref["path"]).read_bytes())
+        binding.update(binding_overrides)
+        ref = publish_corpus_snapshot_binding(binding, artifact_root)
+        diagnostic_ref = json.dumps(ref, sort_keys=True)
+    if diagnostic_ref is not None:
+        receipt = dataclasses.replace(
+            receipt, envelope=dataclasses.replace(receipt.envelope, diagnostic_ref=diagnostic_ref))
+    if verdict != AGREE:
+        receipt = dataclasses.replace(receipt, verdict=verdict)
+    return receipt, artifact_root
+
+
+def _corpus_findings(tmp_path, corpus_root, receipt, artifact_root) -> tuple[list, dict]:
+    ref = publish(receipt, artifact_root)
+    population = receipt.population
+    evidence = {
+        "schema_version": PHASE2_EVIDENCE_V1, "code_hash": "c1", "environment_hash": "e1",
+        "authority_mode": AUTHORITY_MODE, "corpus_comparison_receipt_ref": ref,
+        "expected_population": population.expected or 1,
+        "supported_population": population.supported or 1,
+        "compared_population": population.compared or 1,
+    }
+    findings, field_ok, _document_ok = validate_evidence(
+        evidence, artifact_root=artifact_root, corpus_root=corpus_root,
+        code_hash="c1", environment_hash="e1")
+    return findings, field_ok
+
+
+def _codes_for_field(findings, field="corpus_comparison_receipt_ref") -> set:
+    return {f["code"] for f in findings if f.get("field") == field}
+
+
+def test_missing_diagnostic_ref_gives_corpus_binding_missing(tmp_path, monkeypatch):
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="missing")
+    receipt, artifact_root = _bound_receipt(tmp_path, corpus_root, run_result)
+    receipt = dataclasses.replace(receipt, envelope=dataclasses.replace(
+        receipt.envelope, diagnostic_ref=None))
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert _codes_for_field(findings) == {"CORPUS_BINDING_MISSING"}
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_legacy_free_text_diagnostic_ref_gives_corpus_binding_missing(tmp_path, monkeypatch):
+    """A receipt whose ``diagnostic_ref`` is the OLD pre-review free-text
+    format (``legacy_snapshot_hash=...;matches_corpus_snapshot=...``) is not
+    valid JSON, so it fails exactly like a missing one."""
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="freetxt")
+    legacy_text = f"legacy_snapshot_hash={SNAPSHOT_HASH};matches_corpus_snapshot=true"
+    receipt, artifact_root = _bound_receipt(tmp_path, corpus_root, run_result,
+                                            diagnostic_ref=legacy_text)
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert _codes_for_field(findings) == {"CORPUS_BINDING_MISSING"}
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_tampered_binding_bytes_give_corpus_binding_hash_mismatch(tmp_path, monkeypatch):
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="tamper")
+    receipt, artifact_root = _bound_receipt(tmp_path, corpus_root, run_result)
+    ref = json.loads(receipt.envelope.diagnostic_ref)
+    (artifact_root / ref["path"]).write_bytes(b'{"tampered": true}')
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert _codes_for_field(findings) == {"CORPUS_BINDING_HASH_MISMATCH"}
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_malformed_binding_shape_gives_corpus_binding_shape_invalid(tmp_path, monkeypatch):
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="shape")
+    receipt, artifact_root = _bound_receipt(
+        tmp_path, corpus_root, run_result,
+        binding_overrides={"control": "not-a-bool"})  # wrong type -> strict decode fails
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert _codes_for_field(findings) == {"CORPUS_BINDING_SHAPE_INVALID"}
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_corpus_hash_not_equal_source_hash_gives_source_mismatch(tmp_path, monkeypatch):
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="srcmm")
+    receipt, artifact_root = _bound_receipt(
+        tmp_path, corpus_root, run_result,
+        binding_overrides={"source_snapshot_hash": "sha256:different-store"})
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert "CORPUS_BINDING_SOURCE_MISMATCH" in _codes_for_field(findings)
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_corpus_hash_not_equal_index_snapshot_gives_index_mismatch(tmp_path, monkeypatch):
+    """The validator re-derives the named corpus version's OWN INDEX.json
+    ``snapshot`` and refuses a binding that claims agreement with a corpus it
+    does not match -- even when ``corpus_snapshot_hash`` and
+    ``source_snapshot_hash`` agree WITH EACH OTHER, isolating this case from
+    ``CORPUS_BINDING_SOURCE_MISMATCH``."""
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="idxmm")
+    forged = "sha256:forged-does-not-match-index"
+    receipt, artifact_root = _bound_receipt(
+        tmp_path, corpus_root, run_result,
+        binding_overrides={"corpus_snapshot_hash": forged, "source_snapshot_hash": forged})
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert _codes_for_field(findings) == {"CORPUS_BINDING_INDEX_MISMATCH"}
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_control_receipt_is_refused_as_d14_evidence(tmp_path, monkeypatch):
+    """The control run is separate evidence (``control-missing-analogs``'s
+    own receipt) and must never stand in for D14's real corpus-parity
+    receipt: a binding with ``control: true`` is refused outright, even
+    though it is otherwise well-formed and consistent."""
+    corpus_root, run_result = _setup_and_run(
+        tmp_path, expected_canned(), monkeypatch, key="ctrlsub", drop_ticker="nonexistent_ticker")
+    artifact_root = tmp_path / "evidence"
+    receipt = build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1",
+                            control_drop_ticker="nonexistent_ticker", artifact_root=artifact_root)
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert _codes_for_field(findings) == {"CORPUS_BINDING_IS_CONTROL"}
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
+
+
+def test_corpus_receipt_verdict_not_agree_is_refused(tmp_path, monkeypatch):
+    corpus_root, run_result = _setup_and_run(tmp_path, expected_canned(), monkeypatch, key="verdict")
+    receipt, artifact_root = _bound_receipt(tmp_path, corpus_root, run_result, verdict=DIFFER)
+    findings, field_ok = _corpus_findings(tmp_path, corpus_root, receipt, artifact_root)
+    assert "VERDICT_NOT_AGREE" in _codes_for_field(findings)
+    assert field_ok.get("corpus_comparison_receipt_ref") is False
 
 
 def _jobs_count(ops_root: Path) -> int:

@@ -71,7 +71,8 @@ def _row_findings(l_id: str, row: dict, field_ok: dict, kind_ok: dict) -> list[d
     return findings
 
 
-def gate(root=ROOT, *, evidence_manifest_path=None, artifact_root=None, registry_path=REGISTRY):
+def gate(root=ROOT, *, evidence_manifest_path=None, artifact_root=None, registry_path=REGISTRY,
+         corpus_root=None):
     started = time.monotonic()
     registry = load_registry(registry_path)
     files = source_files(root)
@@ -90,7 +91,7 @@ def gate(root=ROOT, *, evidence_manifest_path=None, artifact_root=None, registry
         if evidence is not None:
             resolved_root = Path(artifact_root) if artifact_root else root
             evidence_findings, field_ok, _document_ok, kind_ok = validate_evidence(
-                evidence, artifact_root=resolved_root,
+                evidence, artifact_root=resolved_root, corpus_root=corpus_root,
                 implementation_code_hash=code_hash, environment_hash=env_hash)
             findings.extend(evidence_findings)
     if evidence is None:
