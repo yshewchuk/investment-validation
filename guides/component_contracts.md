@@ -860,6 +860,30 @@ catalog transaction. Compatibility JSONL exports use ledger sequence numbers
 and are recoverable projections; they are not a second authoritative writer.
 During migration choose one authority explicitly and reconcile exports.
 
+**Divergence record (added Phase 3 guide §5.5 item 1, 2026-09-14).** A
+re-planned generation of an already-decided scheduled occurrence commits
+under a different `deployment`/`clock_context_ref` than the first. That is
+not a supersession (no operator-approved `supersedes_decision_id` /
+`supersession_reason`), so `commit` never rewrites the first committed
+`ValidatedDecision` and never fails the caller. Instead it appends a
+`DecisionDivergence`:
+
+```text
+DecisionDivergence:
+  decision_id, scope, occurrence
+  existing_generation_ref, attempted_generation_ref
+  existing_payload_hash, attempted_payload_hash
+  reason, created_at
+```
+
+Append-only, keyed so an identical retry of the same divergent attempt is a
+no-op. It does not block export, publication or settlement, which keep
+reading the first committed record; it surfaces only as a count on the
+committing job's own receipt, for an operator to notice and decide whether a
+true superseding record (still ledger-phase scope) is warranted. Reference
+implementation: `engine.v2.ledger.decisions.record_divergence`,
+`engine.v2.ops.decision_commit.commit_decisions_in_transaction`.
+
 ### 12.2 Position lifecycle
 
 ```text

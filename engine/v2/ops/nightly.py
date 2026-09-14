@@ -124,6 +124,29 @@ def _job_output(stage, keys):
     return keys[stage] + "#" + _action_for(stage)
 
 
+def _generation_pin(plan):
+    """The pinned plan identity every generation-aware stage carries (guide
+    §5.5 item 1): the code state and decision clock a genuinely new ``ops
+    plan nightly`` call always changes, and a retry of the same saved plan
+    always reproduces unchanged. ``effects_graph._generation_ref`` folds
+    this (plus the stage's own ``legacy_manifest.json`` binding) into a
+    per-generation watermark/release identity.
+    """
+    return {"deployment": "shadow:" + plan["implementation_ref"],
+            "decision_clock": plan["decision_clock"]}
+
+
+def _publication_bindings(keys):
+    return {"bundle.tar": _job_output("projection", keys),
+            "selfcheck.json": _job_output("selfcheck", keys),
+            "engineering_gate.json": _job_output("engineering_gate", keys),
+            # P2-C03: the independent anchor for "which session does this
+            # release speak for" — never trust the decisions watermark's own
+            # occurrence alone (a stale one for the wrong session must still
+            # refuse the decision gate; see effects_graph.publication_effect).
+            "finality.json": _job_output("finality", keys)}
+
+
 def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope="",
                    context_tickers=(), prior_selfcheck_ref=None):
     # P2-C04: ``context_tickers`` is the historical EVIDENCE universe a
@@ -135,12 +158,9 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
               "tickers": tuple(sorted(tickers)), "context_tickers": context,
               "year_start": year_start,
               "year_end": year_end, "input_bindings": {}, "effect_scope": effect_scope}
-    if action == "legacy_score":
-        # P2-C03: the score stage needs the finality-resolved session, never
-        # the requested one, so it binds the finality job's own output.
-        params["input_bindings"] = {"finality.json": _job_output("finality", keys)}
-    if action == "legacy_settlement":
-        # P2-C03: settlement's ``through`` must be the resolved session too.
+    if action in ("legacy_score", "legacy_settlement"):
+        # P2-C03: score/settlement need the finality-RESOLVED session, never
+        # the requested one, so both bind the finality job's own output.
         params["input_bindings"] = {"finality.json": _job_output("finality", keys)}
     if action == "legacy_decisions":
         params["input_bindings"] = {
@@ -158,11 +178,10 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
                                      "ledger_generation.tar": _job_output("ledger_export", keys)}
         if prior_selfcheck_ref:
             # P2-C08: optional -- a previous run's committed selfcheck
-            # artifact, when the caller has one to offer. Bound as a direct
-            # artifact ref (never a job_<id>#output form: no job in THIS
-            # plan produces it, since this run's own selfcheck stage runs
-            # strictly after render). Absent by default, so the render job's
-            # binding set is unchanged unless a caller opts in.
+            # artifact, bound as a direct ref (no job in this plan produces
+            # it: this run's own selfcheck stage runs strictly after render).
+            # Absent by default, so render's binding set is unchanged unless
+            # a caller opts in.
             params["input_bindings"]["prior_selfcheck.json"] = prior_selfcheck_ref
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
@@ -173,29 +192,24 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
     if action == "decision_evidence":
         # B1c: pinned once by ``ops plan nightly`` (``plans.py::nightly_plan``)
         # and carried unchanged on every retry/resubmission of this same plan.
-        params["deployment"] = "shadow:" + plan["implementation_ref"]
-        params["decision_clock"] = plan["decision_clock"]
+        params.update(_generation_pin(plan))
         params["input_bindings"] = {
             "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
             "replay.json": _job_output("decision_replay", keys),
             "finality_coverage.json": keys["finality"] + "#legacy_finality_coverage"}
+    if action in ("ledger_export", "engineering_gate", "backup"):
+        # guide §5.5 item 1: the same pinned plan identity ``decision_evidence``
+        # and ``publication`` carry, so ``effects_graph._generation_ref`` can
+        # scope these effects' own watermark receipts per generation -- the
+        # real 2026-09-14 failure was exactly this field's absence on
+        # ``engineering_gate``, colliding with an earlier generation's receipt.
+        params.update(_generation_pin(plan))
     if action == "publication":
-        params["input_bindings"] = {
-            "bundle.tar": _job_output("projection", keys),
-            "selfcheck.json": _job_output("selfcheck", keys),
-            "engineering_gate.json": _job_output("engineering_gate", keys),
-            # P2-C03: the independent anchor for "which session does this
-            # release speak for" — never trust the decisions watermark's own
-            # occurrence alone (a stale one for the wrong session must still
-            # refuse the decision gate; see effects_graph.publication_effect).
-            "finality.json": _job_output("finality", keys)}
-        # guide §5.5 item 1: the SAME pinned plan identity ``decision_evidence``
-        # carries, so ``effects_graph.publication_effect`` can bind a release
-        # identity that distinguishes a genuinely new same-session generation
-        # (new implementation/manifest/decision_clock) from a retry of this
-        # exact saved plan (unchanged, so it reproduces the same release id).
-        params["deployment"] = "shadow:" + plan["implementation_ref"]
-        params["decision_clock"] = plan["decision_clock"]
+        # guide §5.5 item 1: the SAME pinned plan identity distinguishes a
+        # genuinely new same-session generation's release from a retry of
+        # this exact saved plan (see effects_graph.publication_effect).
+        params.update(_generation_pin(plan))
+        params["input_bindings"] = _publication_bindings(keys)
     return params
 
 

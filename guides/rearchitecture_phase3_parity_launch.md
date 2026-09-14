@@ -306,29 +306,60 @@ must finish before P3-4 claims repeatable updates or authoritative live health.
    manifest changed") for a genuinely new generation's bundle, and an old
    release's own row/manifest/files are never touched.
 
-   **Not done, and not attempted here — a stop-and-report finding**: even
-   with a distinct release id, actually PUBLISHING a second same-session
-   generation (moving `CURRENT`) or committing its decisions still conflicts.
-   `outbox.watermark`'s one-receipt-per-occurrence rule — the same mechanism
-   that correctly keeps `decisions` from silently double-recording a changed
-   prediction under a new `deployment`/`decision_clock` — also fires inside
+   **Done (2026-09-14, second pass — the item above's own "stop and
+   report" finding, now resolved).** The gap left open by the first pass:
+   even with a distinct release id, actually PUBLISHING a second
+   same-session generation (moving `CURRENT`) or committing its decisions
+   still conflicted. `outbox.watermark`'s one-receipt-per-occurrence rule —
+   keyed on `(pipeline, scope, stage)` alone — fired inside
    `publish_local`'s own `_acknowledge` for the `publication`/`delivery`
-   watermarks, and it is not transient (retrying does not help; generation
-   1's watermark row for that occurrence never clears). It fails safely (the
-   SQL transaction rolls back; no double record), but the on-disk `CURRENT`
-   pointer swap happens earlier in the same function and is not covered by
-   that rollback, so a caller that hits this is left with `CURRENT` naming
-   an unacknowledged release (`releases.published_at IS NULL`) — detectable
-   (the watermark still names the prior release) but not self-healing.
-   Resolving this needs an explicit design decision (a generation-aware
-   publication watermark, or refusing the pointer swap until the watermark
-   write would also succeed, or requiring explicit decision supersession)
-   that this task does not make on its own judgement. Until that lands, an
-   operator must not attempt to publish or re-commit decisions for a second
-   generation of an already-published same-session run — only the FIRST
-   generation to reach `publication`/`decision_commit` for a given
-   (scope, session) may do so; a superseding generation needs its own
-   decision.
+   watermarks (and, separately, inside `engineering_gate_effect`/
+   `ledger_export_effect`/`backup_effect`, which never carried a plan
+   identity at all — the ACTUAL 2026-09-14 real-run failure,
+   `run_sha256:4541ca27acdbeb04d`: `engineering_gate` FAILED with
+   `IDEMPOTENCY_CONFLICT` because an earlier generation's receipt, keyed
+   only by `(scope, session)`, was still there). Resolved with a
+   generation-aware watermark: `watermarks` now keys on
+   `(pipeline, scope, stage, generation)` (migration 8,
+   `engine/v2/ops/schema.py`), `generation` defaulting to `""` for every
+   caller that predates this (identical old behaviour). Engineering gate,
+   ledger export and backup each pass their own `_generation_ref(claim)`
+   (`nightly.py::_legacy_params` now pins `deployment`/`decision_clock` on
+   all three, mirroring `decision_evidence`/`publication`); a genuine retry
+   of the same generation stays idempotent, a same-generation content
+   change still `IDEMPOTENCY_CONFLICT`s, and a new generation records its
+   own receipt without touching an earlier one's (`backup`'s own enqueue
+   key needed the same generation fold — see `effects_graph.backup_effect`
+   — since `prepare_backup` is already content-idempotent but
+   `run_backup`'s `claim()` finds nothing once an earlier generation's row
+   already delivered).
+
+   Publication ordering was also fixed: `publish_local` now checks
+   `outbox.watermark_would_conflict` for both `publication` and `delivery`
+   BEFORE the `CURRENT` pointer swap, so a foreseeable refusal never leaves
+   `CURRENT` naming an unacknowledged release. A REAL crash between the
+   swap and the acknowledgement (the `fault` hook) is a separate,
+   unavoidable window; the existing O24 recoverable-on-retry design is
+   unchanged (`tests/test_v2_ops_authority.py`). A newer generation may now
+   become the published release; the prior release stays on disk and
+   readable, and rollback is the same restage-under-a-fresh-id path proven
+   in `tests/test_v2_ops_same_session_replan.py`.
+
+   Decisions/predictions stay intentionally generation-INDEPENDENT: the
+   first committed record for a scheduled occurrence is authoritative
+   forever, and a later generation's differing content is recorded as a
+   durable `DecisionDivergence` (component contracts §12.1) rather than
+   failing the job or silently duplicating. See
+   `engine.v2.ledger.decisions.record_divergence`,
+   `engine.v2.ops.decision_commit.commit_decisions_in_transaction`, and
+   `tests/test_v2_ops_same_session_replan.py`/
+   `tests/test_v2_ops_generation_effects.py` for the full test coverage
+   (two generations of engineering_gate/ledger_export/backup/publication;
+   identical-retry idempotency; same-generation conflict; divergence
+   recording; settlement reading generation 1's prediction; the
+   health/streak hook counting one occurrence per night). True superseding
+   decisions (an operator-approved `supersedes`/`supersede_reason`) remain
+   ledger-phase scope, unchanged.
 2. **Populate live engineering health from real observations.**
    `engineering_gate_effect` records a watermark but does not populate
    `health.record_check`. Wire scheduled occurrences to durable engineering

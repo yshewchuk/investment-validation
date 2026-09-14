@@ -471,8 +471,30 @@ class Service:
             candidate_ref = _named_ref(refs, "legacy_decisions")
             candidates, context = validated_decision_candidate(
                 self.conn, self.store, claim, candidate_ref)
-            return (lambda conn: commit_decisions_in_transaction(
-                conn, claim, candidates, context, clock=self.clock)), ()
+
+            def _commit(conn):
+                commit_decisions_in_transaction(conn, claim, candidates, context, clock=self.clock)
+                # guide §5.5 item 1: surface any divergence this commit
+                # recorded (a later generation's differing content for an
+                # already-decided occurrence) on the job's own output, so an
+                # operator sees it without reading the ledger directly. Only
+                # written when at least one divergence exists, so the normal
+                # (non-diverging) commit's outputs are unchanged.
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM decision_divergences WHERE scope=? AND occurrence=?",
+                    (context["scope"], context["session"])).fetchone()[0]
+                if count:
+                    document = {"schema_version": "decision_commit_receipt.v1.0",
+                               "scope": context["scope"], "session": context["session"],
+                               "divergence_count": count}
+                    ref = self.store.publish_bytes(
+                        json.dumps(document, sort_keys=True).encode(),
+                        schema_ref="decision_commit_receipt.v1.0")
+                    register_artifact(conn, ref, claim.attempt_id, self.clock)
+                    conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                                (claim.attempt_id, "decision_commit_receipt", ref.artifact_id))
+
+            return _commit, ()
         if claim.spec.kind == "legacy_settlement":
             candidate_ref = _named_ref(refs, "legacy_settlement")
             document = json.loads(self.store.read_verified(candidate_ref))

@@ -21,7 +21,7 @@ from engine.v2.ops.catalog import dumps, transaction
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import file_hash
 from engine.v2.ops.lifecycle import verify_fence
-from engine.v2.ops.outbox import enqueue, watermark
+from engine.v2.ops.outbox import enqueue, watermark, watermark_would_conflict
 
 
 def stage_release(conn, store, release_id, occurrence, files, *, expected_current, gates, clock,
@@ -135,7 +135,8 @@ def _safe_target(target):
         raise fail("INTEGRITY_FAILED", "release root is a symlink")
 
 
-def publish_local(conn, claim, store, target, release_id, *, scope, clock, fault=None):
+def publish_local(conn, claim, store, target, release_id, *, scope, clock, generation="",
+                  fault=None):
     row = conn.execute("SELECT * FROM releases WHERE release_id=?", (release_id,)).fetchone()
     if row is None or not row["eligible"]:
         raise fail("PUBLICATION_REFUSED", "release gates are not all valid")
@@ -152,6 +153,21 @@ def publish_local(conn, claim, store, target, release_id, *, scope, clock, fault
         newest = conn.execute("SELECT MAX(occurrence) FROM releases WHERE published_at IS NOT NULL").fetchone()[0]
         if newest and newest > row["occurrence"]:
             raise fail("STALE_EXPECTATION", "an older release cannot replace a newer release")
+        # guide §5.4/§5.5 item 1: every FORESEEABLE refusal -- watermark
+        # conflict included -- must be known before CURRENT ever moves. This
+        # is a pure precheck of the exact writes ``_acknowledge`` below will
+        # make; it never itself writes. Without it, the old bug was that the
+        # pointer swap ran first and ``_acknowledge``'s own watermark() call
+        # could still raise afterwards, leaving CURRENT naming a release the
+        # catalog never acknowledged. An actual crash between the swap and
+        # the acknowledgement (the ``fault`` hook below) is a separate,
+        # unavoidable window this precheck cannot close -- that is the
+        # existing O24 recoverable-on-retry design, unchanged.
+        for stage in ("publication", "delivery"):
+            if watermark_would_conflict(conn, "nightly", scope, stage, row["occurrence"],
+                                        release_id, generation=generation):
+                raise fail("IDEMPOTENCY_CONFLICT",
+                          "a different release already completed this occurrence")
         if observed != release_id:
             pointer = Path(target) / ("CURRENT." + uuid.uuid4().hex)
             pointer.write_text(release_id + "\n")
@@ -161,11 +177,11 @@ def publish_local(conn, claim, store, target, release_id, *, scope, clock, fault
             fsync_directory(Path(target))
         if fault:
             fault("pointer_before_ack")
-        _acknowledge(conn, row, scope, clock)
+        _acknowledge(conn, row, scope, clock, generation=generation)
     return {"release_id": release_id, "delivered": current(target) == release_id}
 
 
-def _acknowledge(conn, row, scope, clock):
+def _acknowledge(conn, row, scope, clock, *, generation=""):
     from engine.v2.foundation import format_timestamp
     stamp = format_timestamp(clock.now())
     conn.execute("UPDATE releases SET published_at=?,delivered_at=? WHERE release_id=?",
@@ -174,4 +190,5 @@ def _acknowledge(conn, row, scope, clock):
                  "WHERE kind='publication' AND logical_key=?",
                  (dumps({"release_id": row["release_id"], "verified_at": stamp}), row["release_id"]))
     for stage in ("publication", "delivery"):
-        watermark(conn, "nightly", scope, stage, row["occurrence"], row["release_id"], clock=clock)
+        watermark(conn, "nightly", scope, stage, row["occurrence"], row["release_id"], clock=clock,
+                 generation=generation)

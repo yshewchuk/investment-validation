@@ -177,4 +177,27 @@ MIGRATIONS = (
             SELECT RAISE(ABORT, 'attempt_input_bindings rows are immutable');
         END""",
     )),
+    # Phase 3 guide §5.5 item 1 ("make nightly effects generation-aware"):
+    # ``watermarks`` was keyed on (pipeline, scope, stage) alone, so a second
+    # same-session generation's engineering_gate/ledger_export/backup/
+    # publication/delivery receipt collided with an earlier generation's
+    # already-completed one (IDEMPOTENCY_CONFLICT: "completed occurrence has
+    # another receipt" -- the 2026-09-14 real-run failure). SQLite cannot
+    # ALTER a PRIMARY KEY in place, so this rebuilds the table with
+    # ``generation`` folded into the key; every existing row is carried
+    # forward under ``generation=''`` (the old, still-default, bucket), so
+    # every caller that never passes ``generation=`` keeps its exact old
+    # behaviour and existing rows keep their exact old identity.
+    Migration(version=8, name="generation_aware_watermarks", statements=(
+        """CREATE TABLE watermarks_v2 (
+            pipeline TEXT NOT NULL, scope TEXT NOT NULL, stage TEXT NOT NULL,
+            generation TEXT NOT NULL DEFAULT '',
+            occurrence TEXT NOT NULL, receipt_ref TEXT NOT NULL, completed_at TEXT NOT NULL,
+            PRIMARY KEY(pipeline, scope, stage, generation)
+        ) STRICT""",
+        "INSERT INTO watermarks_v2(pipeline,scope,stage,generation,occurrence,receipt_ref,completed_at) "
+        "SELECT pipeline,scope,stage,'',occurrence,receipt_ref,completed_at FROM watermarks",
+        "DROP TABLE watermarks",
+        "ALTER TABLE watermarks_v2 RENAME TO watermarks",
+    )),
 )
