@@ -112,6 +112,16 @@ def parser():
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
+    capture = commands.add_parser("capture-inputs")
+    capture.add_argument("--as-of", required=True)
+    capture.add_argument("--tickers", default="")
+    capture.add_argument("--context-tickers", default="",
+                         help="historical evidence ticker universe: comma list or @file; "
+                              "defaults to --tickers")
+    capture.add_argument("--year-start", type=int, required=True)
+    capture.add_argument("--year-end", type=int, required=True)
+    capture.add_argument("--source-root", required=True, type=Path)
+    capture.add_argument("--output", required=True, type=Path)
     reconcile = commands.add_parser("reconcile")
     reconcile.add_argument("--root", default=argparse.SUPPRESS)
     reconcile.add_argument("job_id")
@@ -154,13 +164,54 @@ def doctor(root, clock):
     return result
 
 
+def _check_nightly_manifest(raw_bytes: bytes) -> None:
+    """Plan-time guard (task brief deliverable 3): refuse a manifest that is
+    not a nightly capture, or that lacks a family a barrier kind requires --
+    the exact operator mistake behind the real 2026-09-14 failure
+    (a ``snapshot_import_plan.v1`` manifest passed as ``--input-manifest`` to
+    a barrier-mode nightly, which failed ``legacy_finality`` with
+    ``SOURCE_NOT_FINAL`` because it declared no ``data/raw/fetch/orats``).
+    Every barrier-only kind (``legacy_finality``/``legacy_decisions``/
+    ``legacy_settlement``/``legacy_model_evidence``/``legacy_render``/
+    ``legacy_selfcheck``) always reads this same manifest, in EVERY nightly
+    plan regardless of ``--input-mode`` (``nightly.py``'s
+    ``SNAPSHOT_STAGES = {"score", "decision_replay"}`` -- "every other stage
+    keeps the Phase 1 barrier"), so this check applies unconditionally
+    whenever ``--input-manifest`` is given for a nightly plan.
+    """
+    from engine.v2.data.legacy_nightly_read_plan import manifest_problems
+
+    try:
+        document = json.loads(raw_bytes)
+    except ValueError as exc:
+        raise fail("INPUT_CHANGED", "input manifest is not valid JSON") from exc
+    problems = manifest_problems(document)
+    if problems:
+        raise fail("INPUT_CHANGED",
+                  "input manifest is not a complete nightly capture for the barrier kinds",
+                  details={"problems": problems})
+
+
+def _check_submitted_nightly_manifest(plan, conn, store):
+    """Deliverable 3 defence in depth: re-check the bound manifest at submit
+    time too, not only at plan time -- a plan artifact can be built and
+    saved by a caller other than this CLI's own ``plan nightly`` (a test, a
+    future planner), and submit is the last gate before jobs are created.
+    """
+    if not plan.get("input_manifest_ref"):
+        return
+    _check_nightly_manifest(store.read_verified(artifact(conn, store, plan["input_manifest_ref"])))
+
+
 def _read_input_manifest_ref(args, root, conn, clock):
     if not args.input_manifest:
         return None
     if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
         raise fail("INPUT_CHANGED", "input manifest is missing")
+    raw_bytes = args.input_manifest.read_bytes()
+    _check_nightly_manifest(raw_bytes)
     manifest = ArtifactStore(root).publish_bytes(
-        args.input_manifest.read_bytes(), schema_ref="legacy_input_manifest.v1.0")
+        raw_bytes, schema_ref="legacy_input_manifest.v1.0")
     from engine.v2.ops.checkpoints import register_artifact
     with transaction(conn):
         register_artifact(conn, manifest, None, clock)
@@ -268,6 +319,7 @@ def dispatch(args, root, conn, clock):
             if plan.get("blocked_prerequisites"):
                 raise fail("INVALID_REQUEST", "nightly plan has unresolved prerequisites",
                           details={"blocked_prerequisites": plan["blocked_prerequisites"]})
+            _check_submitted_nightly_manifest(plan, conn, store)
             context_tickers = tuple(plan.get("context_tickers", ()))
             # P2-5 collision fix / effect-scope decision: only a plan built
             # with ``--full-run`` declares the global universe; every other
@@ -337,6 +389,26 @@ def snapshot_command(args, root, conn, clock):
                             expected_snapshot_id=args.expected_snapshot_id,
                             expected_generation=args.expected_generation, clock=clock)
     return {"receipt_ref": ref.artifact_id}
+
+
+def capture_command(args):
+    """``ops capture-inputs`` (task brief deliverable 2): the supported
+    capture for the shadow nightly's ``--input-manifest``. Pure filesystem
+    work under ``--source-root`` -- no operations catalog, no clock, no
+    network -- so it is dispatched before ``main()`` opens one, exactly like
+    ``doctor``.
+    """
+    from engine.v2.ops.capture_inputs import capture, write_manifest
+
+    tickers = _ticker_list(args.tickers)
+    context_tickers = _ticker_list(args.context_tickers) or tickers
+    manifest = capture(args.source_root, as_of=args.as_of, tickers=tickers,
+                       context_tickers=context_tickers, year_start=args.year_start,
+                       year_end=args.year_end)
+    write_manifest(manifest, args.output)
+    return {"schema_version": "capture_inputs_report.v1.0", "output": str(args.output),
+            "manifest_id": manifest.manifest_id, "file_count": len(manifest.file_refs),
+            "total_bytes": sum(ref.byte_size for ref in manifest.file_refs)}
 
 
 def reconcile_command(args, root, conn, clock):
@@ -434,6 +506,8 @@ def main(argv=None):
     try:
         if args.command == "doctor":
             document = doctor(root, clock)
+        elif args.command == "capture-inputs":
+            document = capture_command(args)
         else:
             if args.command == "init":
                 ensure_directory(root)

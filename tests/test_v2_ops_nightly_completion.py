@@ -1567,7 +1567,22 @@ def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(tmp_path, c
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
     manifest_file = tmp_path / "manifest.json"
-    manifest_file.write_text(json.dumps({"manifest_id": "m1"}))
+    from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
+    manifest_file.write_text(json.dumps({
+        "manifest_id": "m1",
+        "file_refs": [{"path": "data/curated/daily_market/year=2024/part-0000.parquet",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                     {"path": "data/curated/option_chains/year=2024/part-0000.parquet",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                     {"path": "data/curated/earnings_events/year=2024/part-0000.parquet",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                     {"path": "data/curated/trades/year=2024/part-0000.parquet",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                     {"path": "data/raw/fetch/orats/ab/placeholder.meta.json",
+                      "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
+        "registry_and_model_refs": ["placeholder::sha256:" + "0" * 64],
+        "calendar_ref": "placeholder::sha256:" + "0" * 64,
+        "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF}))
     assert cli.main(["--root", str(root), "init"]) == 0
     capsys.readouterr()
     assert cli.main(["--root", str(root), "plan", "nightly", "--as-of", SESSION,

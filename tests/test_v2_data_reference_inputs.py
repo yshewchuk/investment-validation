@@ -302,15 +302,34 @@ def _plan_argv(tmp_path, store_root):
     tickers = sorted(set(pq.read_table(next((store_root / ri.DATA_DIR / "curated" / "trades").rglob(
         "*.parquet")), columns=["ticker"]).column("ticker").to_pylist()))
     fixture = store_root / INPUTS["structure_champions"]["path"]
+    from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
     from engine.v2.ops.fingerprints import file_hash
     manifest = tmp_path / "legacy_manifest.json"
+    # This plan's own barrier-only kinds (legacy_finality/decisions/...) are
+    # all cancelled below before they ever run -- only legacy_materialize's
+    # own snapshot_ref/materialization_request bindings matter to this test
+    # (nightly.py:_stage_inputs never binds materialize to legacy_manifest.json
+    # at all). The plan-time guard (engine.v2.data.legacy_nightly_read_plan,
+    # capture_inputs deliverable) still runs at plan time regardless, so these
+    # entries are placeholder PATHS satisfying its presence check, not files
+    # this test's materialize worker ever reads.
+    placeholder_refs = tuple(
+        LegacyFileRef(path=f"{ri.DATA_DIR}/curated/{table}/year=2024/part-0000.parquet",
+                      content_hash=file_hash(fixture), byte_size=fixture.stat().st_size)
+        for table in ("daily_market", "option_chains", "earnings_events", "trades")
+    ) + (
+        LegacyFileRef(path="data/raw/fetch/orats/ab/placeholder.meta.json",
+                      content_hash=file_hash(fixture), byte_size=fixture.stat().st_size),
+        LegacyFileRef(path=INPUTS["structure_champions"]["path"], content_hash=file_hash(fixture),
+                      byte_size=fixture.stat().st_size),
+    )
     manifest.write_text(json.dumps(to_document(LegacyInputManifest(
-        manifest_id="m1", file_refs=(LegacyFileRef(path=INPUTS["structure_champions"]["path"],
-                                                   content_hash=file_hash(fixture),
-                                                   byte_size=fixture.stat().st_size),),
-        table_contract_refs=(), registry_and_model_refs=(), calendar_ref=None,
+        manifest_id="m1", file_refs=placeholder_refs,
+        table_contract_refs=(), registry_and_model_refs=("placeholder::sha256:" + "0" * 64,),
+        calendar_ref="placeholder::sha256:" + "0" * 64,
         selected_session="2026-09-12", finality_receipt_refs=(), knowledge_mode_by_table={},
-        availability_evidence_refs=(), read_set_complete=True, capture_implementation_ref="t"))))
+        availability_evidence_refs=(), read_set_complete=True,
+        capture_implementation_ref=NIGHTLY_CAPTURE_IMPLEMENTATION_REF))))
     population = tmp_path / "population.json"
     population.write_text(json.dumps([f"{tickers[0]}|S1|2024-01-15"]))
     return ["plan", "nightly", "--as-of", "2026-09-12", "--input-mode", "snapshot",

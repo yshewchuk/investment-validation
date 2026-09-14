@@ -466,16 +466,33 @@ def test_snapshot_checkpoint_key_covers_each_snapshot_input():
 
 
 def _plan_files(case):
+    from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
+    from engine.v2.ops.fingerprints import file_hash
+
     fixture = case.live_store / "unused.txt"
     fixture.write_bytes(b"barrier read set")
-    from engine.v2.ops.fingerprints import file_hash
     manifest = case.tmp / "legacy_manifest.json"
+    # These barrier-only-kind jobs (legacy_finality/decisions/...) are
+    # produced by the plan but never run in this file's tests (only
+    # legacy_materialize runs, or nothing runs at all) -- the file_refs
+    # below are placeholder PATHS satisfying the capture-inputs plan-time
+    # guard's presence check, not files any worker here actually reads.
+    tables = ("daily_market", "option_chains", "earnings_events", "trades")
+    file_refs = tuple(
+        LegacyFileRef(path=f"data/curated/{table}/year=2024/part-0000.parquet",
+                      content_hash=file_hash(fixture), byte_size=fixture.stat().st_size)
+        for table in tables
+    ) + (LegacyFileRef(path="data/raw/fetch/orats/ab/placeholder.meta.json",
+                       content_hash=file_hash(fixture), byte_size=fixture.stat().st_size),
+        LegacyFileRef(path="unused.txt", content_hash=file_hash(fixture),
+                      byte_size=fixture.stat().st_size))
     manifest.write_text(json.dumps(to_document(LegacyInputManifest(
-        manifest_id="m1", file_refs=(LegacyFileRef(path="unused.txt", content_hash=file_hash(fixture),
-                                                   byte_size=fixture.stat().st_size),),
-        table_contract_refs=(), registry_and_model_refs=(), calendar_ref=None,
+        manifest_id="m1", file_refs=file_refs,
+        table_contract_refs=(), registry_and_model_refs=("placeholder::sha256:" + "0" * 64,),
+        calendar_ref="placeholder::sha256:" + "0" * 64,
         selected_session=SESSION, finality_receipt_refs=(), knowledge_mode_by_table={},
-        availability_evidence_refs=(), read_set_complete=True, capture_implementation_ref="t"))))
+        availability_evidence_refs=(), read_set_complete=True,
+        capture_implementation_ref=NIGHTLY_CAPTURE_IMPLEMENTATION_REF))))
     population = case.tmp / "population.json"
     population.write_text(json.dumps(["AAA|S1|2020-01-15"]))
     return ["plan", "nightly", "--as-of", SESSION, "--input-mode", "snapshot",
