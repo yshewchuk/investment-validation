@@ -266,8 +266,12 @@ def test_missing_legacy_read_set_member_fails_input_changed_and_releases(tmp_pat
 
 
 def test_worker_crash_writes_private_diagnostics_and_leaks_no_exception_text(tmp_path):
-    """A7: the subprocess crashes for real (no ``score.json`` binding), and its
-    traceback must land only in the private per-attempt diagnostics file."""
+    """A7: the subprocess crashes for real (no ``score.json`` binding) by
+    raising a typed ``OpsError`` (``legacy_adapter._load_action_frame``'s
+    ``INPUT_CHANGED``). The worker's own problem now surfaces (real nightly
+    attempt 9 fix) — code and message, never the raw traceback — while the
+    traceback itself still lands only in the private per-attempt diagnostics
+    file."""
     root = tmp_path / "case3"
     root.mkdir()
     store_root = root / "prod"
@@ -306,8 +310,12 @@ def test_worker_crash_writes_private_diagnostics_and_leaks_no_exception_text(tmp
         row = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
                            (receipt.job_id,)).fetchone()
         assert state == "failed"
-        assert "WORKER_FAILED" in row["failure_json"]
-        assert "score artifact is missing" not in row["failure_json"]
+        failure = json.loads(row["failure_json"])
+        # The worker's own INPUT_CHANGED (not a generic WORKER_FAILED) surfaces,
+        # with its operator-facing message -- but no exception text or traceback.
+        assert failure["code"] == "INPUT_CHANGED"
+        assert failure["message"] == "score artifact is missing"
+        assert failure["details"] == {}
 
         attempt_id = conn.execute("SELECT attempt_id FROM attempts WHERE job_id=?",
                                   (receipt.job_id,)).fetchone()[0]
