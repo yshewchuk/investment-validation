@@ -68,9 +68,6 @@ def parser():
     plan.add_argument("--input-mode", default="legacy", choices=("legacy", "snapshot"),
                       help="snapshot: pin one data snapshot head at plan time (P2-6)")
     plan.add_argument("--snapshot-scope", default=None)
-    plan.add_argument("--materialization-refs", type=Path, default=None,
-                      help="JSON: legacy_snapshot_object_ref, registry_and_model_refs, "
-                           "calendar_refs")
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
@@ -161,15 +158,12 @@ def _snapshot_inputs(args, root, conn, clock, tickers, population):
     """``--input-mode snapshot``: resolve the scope's head exactly once, here."""
     if args.input_mode != "snapshot":
         return None
-    if not args.snapshot_scope or args.materialization_refs is None:
-        raise fail("INVALID_REQUEST",
-                   "snapshot input mode needs --snapshot-scope and --materialization-refs")
-    from engine.v2.ops.snapshot_planning import load_materialization_refs, pin_snapshot_inputs
+    if not args.snapshot_scope:
+        raise fail("INVALID_REQUEST", "snapshot input mode needs --snapshot-scope")
+    from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
     return pin_snapshot_inputs(conn, ArtifactStore(root), args.snapshot_scope, tickers=tickers,
                                year_start=args.year_start, year_end=args.year_end,
-                               expected_population=population,
-                               pinned=load_materialization_refs(args.materialization_refs),
-                               clock=clock)
+                               expected_population=population, clock=clock)
 
 
 def _plan_command(args, root, conn, clock):

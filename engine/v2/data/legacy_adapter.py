@@ -40,8 +40,9 @@ edges, this module imports only its own package's ``errors`` and
 ``engine.v2.ops``. §4.3 fan-out: 6 distinct modules (``engine.data.schemas``,
 ``engine.data.features.panel``, ``engine.data.features.tier4``,
 ``engine.data.store``, ``shutil`` — review round 4, the ``materialize()``
-cleanup-on-failure below — and ``"."``) — comfortably under the budget of 8
-that ``build_legacy_mapping``'s old presence here used to exhaust.
+cleanup-on-failure below — and ``"."``), plus ``engine.paths`` and
+``engine.models.registry`` for the reference-input path accessors: 8, exactly
+the budget.
 """
 from __future__ import annotations
 
@@ -50,14 +51,25 @@ import shutil
 from engine.data.features.panel import PANEL_COLUMNS
 from engine.data.features.tier4 import COLUMNS as TIER4_COLUMNS
 from engine.data.features.tier4 import KEY_COLUMNS as TIER4_KEY_COLUMNS
+from engine.data.features.tier4 import SERVING_DIR as TIER4_SERVING_DIR
 from engine.data.schemas import SCHEMAS, SOURCE_PRIORITY
 from engine.data.schemas import coerce as _legacy_coerce
 from engine.data.store import _read_part as _legacy_read_part
+from engine.models.registry import ARTIFACT_DIR, REGISTRY_PATH
+from engine.paths import DATA, FEATURES, GSPC_DAILY, ROOT, SNAPSHOT_FILE
 
 from . import errors, legacy_materialization
 
 __all__ = [
     "coerce_legacy",
+    "legacy_calendar_path",
+    "legacy_chooser_pool_path",
+    "legacy_data_dir",
+    "legacy_models_dir",
+    "legacy_registry_path",
+    "legacy_snapshot_path",
+    "legacy_structures_path",
+    "legacy_tier4_serving_dir",
     "legacy_panel_columns",
     "legacy_source_priority",
     "legacy_table_schemas",
@@ -106,6 +118,64 @@ def read_legacy_part(path, columns):
 def coerce_legacy(frame, name: str):
     """``engine.data.schemas.coerce`` — the unchanged legacy schema coercion."""
     return _legacy_coerce(frame, name)
+
+
+# --------------------------------------------------------------------------
+# reference-input paths — each relative to engine.paths.ROOT, POSIX form
+# --------------------------------------------------------------------------
+#
+# ``engine/v2/data/reference_inputs.py`` builds ``LEGACY_REFERENCE_INPUTS_V1``
+# from these and nothing else. Two leaf names are not exported by any module
+# this adapter can import within its fan-out budget of 8: ``structures.json``
+# (``engine.structure_registry.CHAMPIONS_PATH``) and
+# ``chooser_analog_pool.parquet`` (``engine.score.CHOOSER_ANALOG_POOL``).
+# Both sit beside a constant that is imported here, and a tier-0 test in
+# ``tests/test_v2_data_reference_inputs.py`` pins each one to its real legacy
+# constant.
+
+
+def _root_relative(path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def legacy_calendar_path() -> str:
+    """``engine.paths.GSPC_DAILY`` — ``engine.calendar.trading_calendar``'s input."""
+    return _root_relative(GSPC_DAILY)
+
+
+def legacy_registry_path() -> str:
+    """``engine.models.registry.REGISTRY_PATH`` — ``Scorer.__init__``'s ``load_registry()``."""
+    return _root_relative(REGISTRY_PATH)
+
+
+def legacy_structures_path() -> str:
+    """``engine.structure_registry.CHAMPIONS_PATH``: ``structures.json`` next to the registry."""
+    return _root_relative(REGISTRY_PATH.parent / "structures.json")
+
+
+def legacy_models_dir() -> str:
+    """``engine.models.registry.ARTIFACT_DIR`` — where champion joblib artifacts live."""
+    return _root_relative(ARTIFACT_DIR)
+
+
+def legacy_tier4_serving_dir() -> str:
+    """``engine.data.features.tier4.SERVING_DIR`` — the Tier-4 serving-model cache."""
+    return _root_relative(TIER4_SERVING_DIR)
+
+
+def legacy_chooser_pool_path() -> str:
+    """``engine.paths.FEATURES / engine.score.CHOOSER_ANALOG_POOL``."""
+    return _root_relative(FEATURES / "chooser_analog_pool.parquet")
+
+
+def legacy_snapshot_path() -> str:
+    """``engine.paths.SNAPSHOT_FILE`` — the legacy Tier-3 SNAPSHOT JSON."""
+    return _root_relative(SNAPSHOT_FILE)
+
+
+def legacy_data_dir() -> str:
+    """``engine.paths.DATA`` — the root of the curated store and feature files."""
+    return _root_relative(DATA)
 
 
 # --------------------------------------------------------------------------

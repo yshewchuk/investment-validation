@@ -95,7 +95,7 @@ def test_candidate_writes_stay_under_its_own_root(tmp_path, monkeypatch):
          "tables": (), "sample": None},
         worker_root)
     assert result["completed_ids"] == ["legacy_rebuild_candidate"]
-    assert (candidate_root / "features" / "SNAPSHOT").is_file()
+    assert (candidate_root / "data" / "features" / "SNAPSHOT").is_file()
 
     claim = _claim(candidate_root, protected, before_hash)
     effect, extra = legacy_rebuild_candidate_effect(None, None, claim, (), clock=SystemClock())

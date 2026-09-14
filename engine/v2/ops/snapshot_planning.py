@@ -13,21 +13,28 @@ Scopes: evidence = the full planned ticker set over the planned years; direct
 time, so a population outside the evidence years is refused here, not at launch.
 
 The non-dataset inputs a request pins (legacy SNAPSHOT object, registry/model
-refs, calendar refs) are supplied by the operator as a JSON document: no
-Phase 2 job publishes them yet.
+refs, calendar refs) come from the data catalog: the reference inputs recorded
+by the most recent committed import receipt in ``scope`` whose resulting
+snapshot is the pinned one (``engine.v2.data.reference_catalog``). No such
+receipt, or one that pinned no reference inputs, refuses the plan
+(``INPUT_CHANGED`` with ``data_code`` ``SNAPSHOT_NOT_READY``).
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from engine.v2.contracts import ObjectRef, SnapshotRef
+from engine.v2.contracts import SnapshotRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.legacy_materialization import (
     SCORE_READ_PLAN_TABLES,
     build_materialization_request,
     parse_pinned_ref,
     read_plan_complete,
+)
+from engine.v2.data.reference_catalog import (
+    pinned_materialization_refs,
+    reference_inputs_for_snapshot,
 )
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import from_document, to_document
@@ -36,29 +43,9 @@ from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.snapshots import resolve_snapshot_head
 
-__all__ = ["REQUEST_SCHEMA_REF", "direct_scope_for", "load_materialization_refs",
-           "pin_snapshot_inputs", "scratch_estimate"]
+__all__ = ["REQUEST_SCHEMA_REF", "direct_scope_for", "pin_snapshot_inputs", "scratch_estimate"]
 
 REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
-
-
-def load_materialization_refs(path) -> dict:
-    """``{"legacy_snapshot_object_ref": ObjectRef, "registry_and_model_refs": [...],
-    "calendar_refs": [...]}`` from an operator-supplied JSON file."""
-    path = Path(path)
-    if not path.is_file() or path.is_symlink():
-        raise fail("INPUT_CHANGED", "materialization refs file is missing")
-    try:
-        document = json.loads(path.read_text())
-        snapshot_object = from_document(ObjectRef, document["legacy_snapshot_object_ref"])
-        registry_refs = tuple(str(ref) for ref in document["registry_and_model_refs"])
-        calendar_refs = tuple(str(ref) for ref in document["calendar_refs"])
-        for ref in (*registry_refs, *calendar_refs):
-            parse_pinned_ref(ref)
-    except Exception:
-        raise fail("INVALID_REQUEST", "materialization refs file is malformed") from None
-    return {"legacy_snapshot_object_ref": snapshot_object,
-            "registry_and_model_refs": registry_refs, "calendar_refs": calendar_refs}
 
 
 def direct_scope_for(expected_population) -> dict:
@@ -104,8 +91,9 @@ def _build(repository, store, snapshot, pinned, scopes):
 
 
 def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
-                        expected_population, pinned, clock) -> dict:
-    """Resolve ``scope``'s head once and publish the request built on that ref."""
+                        expected_population, clock) -> dict:
+    """Resolve ``scope``'s head once and publish the request built on that ref,
+    with the reference inputs the catalog recorded for that exact snapshot."""
     if not tickers or not expected_population:
         raise fail("INVALID_REQUEST", "snapshot input mode needs planned tickers and population")
     scopes = {"direct": direct_scope_for(expected_population),
@@ -114,6 +102,8 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
         snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+        pinned = pinned_materialization_refs(
+            reference_inputs_for_snapshot(conn, scope=scope, snapshot_id=snapshot.snapshot_id))
         repository = Repository(conn, store)
         request = _build(repository, store, snapshot, pinned, scopes)
         estimate = scratch_estimate(repository, store, request)

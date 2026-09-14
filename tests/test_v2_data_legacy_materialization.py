@@ -29,6 +29,7 @@ from engine.v2.data import legacy_materialization as lm  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.legacy_adapter import materialize  # noqa: E402
 from engine.v2.data.objects import partition_logical_hash  # noqa: E402
+from engine.v2.data.reference_inputs import LEGACY_REFERENCE_INPUTS_V1, TIER4_SERVING_DIR  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
@@ -146,12 +147,15 @@ def _snapshot_object_ref(store) -> ObjectRef:
     return publish_bytes(store, b'{"schema_version": "legacy_snapshot.v1", "tickers": ["AAA", "BBB"]}')
 
 
+CALENDAR_PATH = LEGACY_REFERENCE_INPUTS_V1["inputs"]["calendar"]["path"]
+
+
 def _pinned_refs(store):
     registry_hash = store.publish_bytes(b'{"models": []}', schema_ref="legacy_pinned_ref.v1").content_hash
     calendar_hash = store.publish_bytes(b"date\n2020-01-02\n2021-01-04\n",
                                         schema_ref="legacy_pinned_ref.v1").content_hash
     registry_refs = (lm.format_pinned_ref("engine/models/registry.json", registry_hash),)
-    calendar_refs = (lm.format_pinned_ref("data/raw/polygon/gspc_daily.csv", calendar_hash),)
+    calendar_refs = (lm.format_pinned_ref(CALENDAR_PATH, calendar_hash),)
     return registry_refs, calendar_refs
 
 
@@ -286,7 +290,7 @@ def test_changing_scope_or_refs_changes_request_hash(tmp_path):
         registry_and_model_refs=other_registry, calendar_refs=calendar_refs, expected_population={})
     assert changed_model_ref.request_hash != base.request_hash
 
-    other_calendar = (lm.format_pinned_ref("data/raw/polygon/gspc_daily.csv",
+    other_calendar = (lm.format_pinned_ref(CALENDAR_PATH,
                                            store.publish_bytes(b"date\n2099-01-01\n",
                                                               schema_ref="legacy_pinned_ref.v1").content_hash),)
     changed_calendar_ref = lm.build_materialization_request(
@@ -713,7 +717,7 @@ def test_tier4_cache_ref_naming_an_unpublished_object_is_refused(tmp_path):
     panel_prefix = _fragment_hash(panel_record)[:12]
     never_published_hash = "sha256:" + "cd" * 32
     missing_cache_ref = lm.format_pinned_ref(
-        f"{lm.TIER4_CACHE_DIR}/size_202001_{panel_prefix}.joblib", never_published_hash)
+        f"{TIER4_SERVING_DIR}/size_202001_{panel_prefix}.joblib", never_published_hash)
 
     with pytest.raises(DataError) as err:
         lm.build_materialization_request(
@@ -735,7 +739,7 @@ def test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale(tmp_path):
     registry_refs, calendar_refs = _pinned_refs(store)
     dummy_hash = store.publish_bytes(b"not a real joblib file",
                                      schema_ref="legacy_pinned_ref.v1").content_hash
-    stale_ref = lm.format_pinned_ref(f"{lm.TIER4_CACHE_DIR}/size_202001_deadbeef0000.joblib", dummy_hash)
+    stale_ref = lm.format_pinned_ref(f"{TIER4_SERVING_DIR}/size_202001_deadbeef0000.joblib", dummy_hash)
 
     request = lm.build_materialization_request(
         repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
@@ -908,11 +912,11 @@ def test_pinned_ref_object_corrupted_between_build_and_materialize_is_refused(tm
 def test_tier4_cache_hash_prefix_ignores_a_malformed_filename():
     """_tier4_cache_hash_prefix (the filename parser _check_tier4_cache_refs
     relies on) returns None -- "not shaped like one" -- for a path that
-    lives in TIER4_CACHE_DIR and ends in .joblib but has no '_' separator to
+    lives in TIER4_SERVING_DIR and ends in .joblib but has no '_' separator to
     carry a model_id/fold/hash-prefix triple, rather than raising or
     guessing. Such a ref is therefore never flagged TIER4_CACHE_STALE no
     matter its actual hash prefix -- it is simply not recognized as a
     Tier-4 cache ref at all."""
-    assert lm._tier4_cache_hash_prefix(f"{lm.TIER4_CACHE_DIR}/nounderscore.joblib") is None
-    assert lm._tier4_cache_hash_prefix(f"{lm.TIER4_CACHE_DIR}/model_fold_abc123.joblib") == "abc123"
+    assert lm._tier4_cache_hash_prefix(f"{TIER4_SERVING_DIR}/nounderscore.joblib") is None
+    assert lm._tier4_cache_hash_prefix(f"{TIER4_SERVING_DIR}/model_fold_abc123.joblib") == "abc123"
     assert lm._tier4_cache_hash_prefix("engine/models/registry.json") is None

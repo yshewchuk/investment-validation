@@ -256,8 +256,12 @@ and the legacy-store lease, and hands the worker that root as its only legacy
 root. At finish it re-confirms the recorded bindings, the request hash and the
 root's stat fingerprint. The checkpoint `inputs` fold in the snapshot manifest
 hash, the request hash and the manifest artifact hash.
-`ops plan nightly --input-mode snapshot --snapshot-scope <scope>
---materialization-refs <json>` resolves the head once (`snapshot_planning.py`);
+`ops plan nightly --input-mode snapshot --snapshot-scope <scope>` resolves the
+head once (`snapshot_planning.py`) and takes the request's pinned reference
+inputs (legacy SNAPSHOT, registry, structures, champion artifacts, Tier-4
+serving caches, chooser analog pool, calendar) from the newest committed import
+receipt for that snapshot (`engine.v2.data.reference_catalog`), refusing when
+there is none;
 the default `--input-mode legacy` graph is byte-identical to before. Tested in
 `tests/test_v2_ops_snapshot_stages.py`.
 

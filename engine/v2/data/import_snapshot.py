@@ -17,11 +17,19 @@ It enumerates *exactly* the known paths the facts section names:
 * ``data/curated/{table}/year=YYYY/part-NNNN.parquet`` for the six Tier-2
   tables — one part per year, except ``daily_market`` (several sorted,
   non-overlapping parts);
-* ``features/panel.parquet``, ``features/tier4_forecasts.parquet`` (one file
-  each, no ``year=`` partitioning — task brief's "one declared logical
-  partition", key ``"all"``, mirroring ``objects.py``'s own partition-key
-  convention);
-* ``features/SNAPSHOT`` (JSON compatibility object, never inspected as Parquet).
+* ``data/features/panel.parquet``, ``data/features/tier4_forecasts.parquet``
+  (one file each, no ``year=`` partitioning — task brief's "one declared
+  logical partition", key ``"all"``, mirroring ``objects.py``'s own
+  partition-key convention);
+* every reference input ``reference_inputs.resolve_reference_files`` names,
+  including ``data/features/SNAPSHOT`` (JSON compatibility object, never
+  inspected as Parquet).
+
+Every path is relative to ``engine.paths.ROOT``, so ``source_root`` is a legacy
+repo root. ``legacy_mapping``'s ``*_RELATIVE_PATH`` literals are relative to
+``engine.paths.DATA`` and are joined under ``reference_inputs.DATA_DIR`` here.
+Before this, feature files were enumerated at ``features/...`` beside
+``data/curated/...``, a layout no real legacy root has.
 
 Refusals (task brief decision 2), everywhere named ``CONTRACT_MISMATCH`` for a
 declared-shape violation and ``INPUT_CHANGED`` for a missing or indirect path:
@@ -51,7 +59,7 @@ placeholder never reaches anything that treats it as fact. See
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 ``engine.v2.contracts``, ``engine.v2.foundation``, and this package's own
-``errors``/``legacy_mapping`` (for ``build_legacy_mapping``,
+``errors``/``reference_inputs``/``legacy_mapping`` (for ``build_legacy_mapping``,
 ``SOURCE_PRIORITY_VERSION`` and the three reviewed ``*_RELATIVE_PATH``
 literals — moved here from ``legacy_adapter.py`` in review round 3, item 1)
 — never ``engine.v2.ops`` or legacy ``engine.*`` directly (that one import
@@ -71,7 +79,7 @@ from engine.v2.contracts import (
     SnapshotImportRequest,
     TableContractRef,
 )
-from engine.v2.data import errors, legacy_mapping
+from engine.v2.data import errors, legacy_mapping, reference_inputs
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
 
 __all__ = [
@@ -111,7 +119,12 @@ def request_hash(request: SnapshotImportRequest) -> str:
     Excludes ``expected_head_snapshot_id``/``expected_head_generation``: they
     are the CAS/fencing envelope a caller expects to hold at commit time, not
     part of what was imported (the same judgement ``DataQuery.deadline``
-    already makes: "execution metadata ... does not enter... identity"). A
+    already makes: "execution metadata ... does not enter... identity"). It
+    also excludes ``source_manifest_ref``/``source_manifest_hash``: the
+    manifest additionally pins the reference inputs (models, registry,
+    calendar, Tier-4 caches), which are recorded per import receipt and are
+    not snapshot identity. Every data-bearing file is still covered, through
+    ``table_sources`` and ``legacy_snapshot_source_ref``. A
     later, otherwise-identical import submitted against a since-advanced head
     must still be able to reuse every already-published row by this same
     hash — excluding these two fields is what makes that possible.
@@ -119,6 +132,8 @@ def request_hash(request: SnapshotImportRequest) -> str:
     payload = to_document(request)
     payload.pop("expected_head_snapshot_id", None)
     payload.pop("expected_head_generation", None)
+    payload.pop("source_manifest_ref", None)
+    payload.pop("source_manifest_hash", None)
     return content_hash(payload)
 
 
@@ -145,18 +160,21 @@ def plan_import(source_root, *, scope: str, expected_head_snapshot_id: str | Non
         table_contract_refs[name] = _contract_ref(tables[name])
         all_refs.extend(refs)
 
-    for name, relative in ((
+    for name, data_relative in ((
             "feature_panel", legacy_mapping.PANEL_RELATIVE_PATH),
             ("tier4_forecasts", legacy_mapping.TIER4_RELATIVE_PATH)):
+        relative = f"{reference_inputs.DATA_DIR}/{data_relative}"
         ref = _single_file_ref(root, relative)
         table_sources[name] = (ref,)
         partition_layout[name] = (("all", (relative,)),)
         table_contract_refs[name] = _contract_ref(tables[name])
         all_refs.append(ref)
 
-    snapshot_ref = _single_file_ref(root, legacy_mapping.SNAPSHOT_RELATIVE_PATH)
+    references = reference_inputs.resolve_reference_files(
+        root, panel_content_hash=table_sources["feature_panel"][0].content_hash, file_ref=_file_ref)
+    (snapshot_ref,) = (ref for ref in references if ref.path == reference_inputs.LEGACY_SNAPSHOT_PATH)
     _check_snapshot_shape(root, snapshot_ref, mapping["legacy_snapshot_metadata"])
-    all_refs.append(snapshot_ref)
+    all_refs.extend(references)
 
     knowledge_mode = dict(mapping["knowledge_mode_by_table"])
     manifest = _build_manifest(scope, all_refs, table_contract_refs, knowledge_mode)
@@ -179,11 +197,13 @@ def _contract_ref(doc: dict) -> TableContractRef:
 
 def _build_manifest(scope: str, refs: list[LegacyFileRef], contract_refs: dict[str, TableContractRef],
                     knowledge_mode: dict[str, str]) -> LegacyInputManifest:
+    registry_and_model_refs, calendar_ref = reference_inputs.manifest_pins(refs)
     fields = dict(
         file_refs=tuple(refs),
         table_contract_refs=tuple(f"{name}@{ref.contract_id}@{ref.definition_hash}"
                                   for name, ref in sorted(contract_refs.items())),
-        registry_and_model_refs=(), calendar_ref=None, selected_session="",
+        registry_and_model_refs=registry_and_model_refs, calendar_ref=calendar_ref,
+        selected_session="",
         finality_receipt_refs=(), knowledge_mode_by_table=knowledge_mode,
         availability_evidence_refs=(), read_set_complete=True,
         capture_implementation_ref="snapshot_import_plan.v1")
@@ -227,7 +247,7 @@ def _single_file_ref(root: Path, relative: str) -> LegacyFileRef:
 
 def _enumerate_curated_table(root: Path, table: str) -> tuple[tuple[LegacyFileRef, ...],
                                                                tuple[tuple[str, tuple[str, ...]], ...]]:
-    table_dir = root / "data" / "curated" / table
+    table_dir = root / reference_inputs.DATA_DIR / "curated" / table
     if table_dir.is_symlink():
         raise errors.fail("INPUT_CHANGED", "curated table directory is a symlink",
                   details={"table": table})
@@ -253,7 +273,7 @@ def _enumerate_curated_table(root: Path, table: str) -> tuple[tuple[LegacyFileRe
             if not _PART_RE.match(part_entry.name) or not part_entry.is_file():
                 raise errors.fail("CONTRACT_MISMATCH", "undeclared file inside a curated table year directory",
                           details={"table": table, "path": f"year={year}/{part_entry.name}"})
-            relative = f"data/curated/{table}/year={year}/{part_entry.name}"
+            relative = f"{reference_inputs.DATA_DIR}/curated/{table}/year={year}/{part_entry.name}"
             refs.append(_file_ref(root, relative))
             year_refs.append(relative)
         layout.append((year, tuple(year_refs)))

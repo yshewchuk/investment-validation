@@ -15,6 +15,7 @@ Parquet tree matching every REAL ``build_legacy_mapping()`` contract exactly
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
@@ -31,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import ArtifactRef  # noqa: E402
 from engine.v2.data import legacy_mapping as data_legacy_mapping  # noqa: E402
+from engine.v2.data import reference_inputs  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.errors import fail as fail_data  # noqa: E402
 from engine.v2.data.import_snapshot import plan_import  # noqa: E402
@@ -89,7 +91,9 @@ def _fixed(column: dict, year: int):
 def _synthetic_rows(contract_doc: dict, n: int, *, year: int, start: int = 0) -> list[dict]:
     """Type-correct, generic synthetic rows for any real ``TableContract`` doc.
 
-    Every non-varying column gets a fixed, type-appropriate placeholder; the
+    Every non-varying column gets a fixed, type-appropriate placeholder (the
+    observation-time column always does, even when nullable, so a whole-table
+    materialization read can derive its time bound from fragment records); the
     table's own LAST primary-key column increases strictly with the row
     index, so ``objects.inspect_staged_file``'s key-order check passes
     regardless of how many primary-key columns a table declares (this
@@ -112,7 +116,8 @@ def _synthetic_rows(contract_doc: dict, n: int, *, year: int, start: int = 0) ->
             name = column["name"]
             if name == last_pk:
                 row[name] = _increasing(column, i, year)
-            elif name in other_pk or name in partition_columns or not column["nullable"]:
+            elif (name in other_pk or name in partition_columns or not column["nullable"]
+                  or name == contract_doc.get("observation_time_column")):
                 row[name] = _fixed(column, year)
             else:
                 row[name] = None
@@ -135,22 +140,66 @@ def _write_parquet(path: Path, table: pa.Table) -> None:
 
 def build_legacy_store(root: Path, *, year: int = 2024, daily_market_parts: int = 1,
                        rows_per_part: int = 2) -> None:
+    """A synthetic legacy repo root: tables, feature files, SNAPSHOT and reference inputs."""
+    data = root / reference_inputs.DATA_DIR
     for name in data_legacy_mapping.TIER2_DATASETS:
         contract_doc = MAPPING["tables"][name]
         parts = daily_market_parts if name == "daily_market" else 1
         for part in range(parts):
             rows = _synthetic_rows(contract_doc, rows_per_part, year=year, start=part * rows_per_part)
-            path = root / "data" / "curated" / name / f"year={year}" / f"part-{part:04d}.parquet"
+            path = data / "curated" / name / f"year={year}" / f"part-{part:04d}.parquet"
             _write_parquet(path, _table_from_rows(contract_doc, rows))
     for name, relative in (("feature_panel", data_legacy_mapping.PANEL_RELATIVE_PATH),
                            ("tier4_forecasts", data_legacy_mapping.TIER4_RELATIVE_PATH)):
         contract_doc = MAPPING["tables"][name]
         rows = _synthetic_rows(contract_doc, rows_per_part, year=year)
-        _write_parquet(root / relative, _table_from_rows(contract_doc, rows))
+        _write_parquet(data / relative, _table_from_rows(contract_doc, rows))
     keys = MAPPING["legacy_snapshot_metadata"]["expected_top_level_keys"]
-    snapshot_path = root / data_legacy_mapping.SNAPSHOT_RELATIVE_PATH
+    snapshot_path = root / reference_inputs.LEGACY_SNAPSHOT_PATH
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(json.dumps({key: None for key in keys}))
+    write_reference_inputs(root, fold=f"{year}01")
+
+
+#: The one champion Tier-4 feature model the synthetic registry declares.
+REFERENCE_MODEL_ID = "size_v9"
+_INPUTS = reference_inputs.LEGACY_REFERENCE_INPUTS_V1["inputs"]
+
+
+def _put(root: Path, relative: str, data: bytes) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def reference_artifact_path() -> str:
+    return f"{_INPUTS['champion_artifact']['directory']}/{REFERENCE_MODEL_ID}.joblib"
+
+
+def reference_cache_path(root: Path, fold: str = "202401") -> str:
+    panel = root / reference_inputs.DATA_DIR / data_legacy_mapping.PANEL_RELATIVE_PATH
+    digest = hashlib.sha256(panel.read_bytes()).hexdigest()[:12]
+    return f"{reference_inputs.TIER4_SERVING_DIR}/{REFERENCE_MODEL_ID}_{fold}_{digest}.joblib"
+
+
+def write_reference_inputs(root: Path, *, model_bytes: bytes = b"synthetic size model v1",
+                           fold: str = "202401") -> None:
+    """Calendar, registry naming one champion artifact, structures, chooser pool and
+    one Tier-4 serving cache for the panel already written under ``root``."""
+    _put(root, _INPUTS["calendar"]["path"], b"Price,Close\nTicker,^GSPC\nDate,\n2024-01-02,4742.83\n")
+    _put(root, _INPUTS["structure_champions"]["path"], b"{}\n")
+    _put(root, _INPUTS["chooser_analog_pool"]["path"], b"synthetic chooser analog pool")
+    _put(root, reference_artifact_path(), model_bytes)
+    registry = {"version": 1, "models": [
+        {"id": REFERENCE_MODEL_ID, "champion": True, "produces": "pred_abs_move",
+         "artifact": reference_artifact_path(),
+         "artifact_sha256": hashlib.sha256(model_bytes).hexdigest()},
+        {"id": "retired_v0", "champion": False, "produces": None,
+         "artifact": f"{_INPUTS['champion_artifact']['directory']}/retired_v0.joblib",
+         "artifact_sha256": "0" * 64},
+    ]}
+    _put(root, _INPUTS["model_registry"]["path"], json.dumps(registry).encode())
+    _put(root, reference_cache_path(root, fold), b"synthetic serving cache")
 
 
 # --------------------------------------------------------------------------
@@ -167,9 +216,12 @@ def test_plan_import_enumerates_declared_files(tmp_path):
     for name in data_legacy_mapping.TIER2_DATASETS:
         if name != "daily_market":
             assert len(request.table_sources[name]) == 1, name
-    assert request.legacy_snapshot_source_ref.path == "features/SNAPSHOT"
-    assert len(plan.legacy_input_manifest.file_refs) == sum(
-        len(v) for v in request.table_sources.values()) + 1
+    assert request.legacy_snapshot_source_ref.path == "data/features/SNAPSHOT"
+    table_paths = {ref.path for refs in request.table_sources.values() for ref in refs}
+    reference_paths = {ref.path for ref in plan.legacy_input_manifest.file_refs} - table_paths
+    assert reference_paths == {*(spec["path"] for spec in _INPUTS.values() if "path" in spec),
+                               reference_artifact_path(), reference_cache_path(tmp_path)}
+    assert len(plan.legacy_input_manifest.file_refs) == len(table_paths) + len(reference_paths)
 
 
 def test_plan_import_refuses_stray_file(tmp_path):
@@ -200,7 +252,7 @@ def test_plan_import_refuses_missing_table(tmp_path):
 
 def test_plan_import_refuses_bad_snapshot_shape(tmp_path):
     build_legacy_store(tmp_path)
-    (tmp_path / "features" / "SNAPSHOT").write_text(json.dumps({"only_one_key": True}))
+    (tmp_path / reference_inputs.LEGACY_SNAPSHOT_PATH).write_text(json.dumps({"only_one_key": True}))
     with pytest.raises(DataError) as excinfo:
         plan_import(tmp_path, scope=SCOPE, expected_head_snapshot_id=None, expected_head_generation=0)
     assert excinfo.value.code == "CONTRACT_MISMATCH"
@@ -282,7 +334,7 @@ def test_snapshot_import_end_to_end(tmp_path):
         receipt_doc = json.loads(store.read_verified(
             load_artifact(conn, store, outputs["snapshot_import_receipt"])))
         legacy_bytes = _object_bytes(store, receipt_doc["legacy_snapshot_object_ref"])
-        assert legacy_bytes == (store_root / "features" / "SNAPSHOT").read_bytes()
+        assert legacy_bytes == (store_root / reference_inputs.LEGACY_SNAPSHOT_PATH).read_bytes()
 
         objects_before = conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0]
         fragments_before = conn.execute("SELECT COUNT(*) FROM data_fragments").fetchone()[0]
@@ -406,6 +458,7 @@ def test_coordinator_fault_then_clean_retry_reuses_objects(tmp_path, monkeypatch
                             (SCOPE,)).fetchone()
         assert head["generation"] == 1
         objects_count = conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0]
-        assert objects_count == len(plan.legacy_input_manifest.file_refs)
+        table_files = sum(len(refs) for refs in plan.snapshot_import_request.table_sources.values())
+        assert objects_count == table_files + 1  # tables + legacy SNAPSHOT; references are per receipt
     finally:
         conn.close()

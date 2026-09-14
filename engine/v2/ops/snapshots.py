@@ -66,11 +66,15 @@ def commit_snapshot_for_attempt(conn: sqlite3.Connection, store: ArtifactStore, 
                                 manifests: Sequence[DatasetManifest], snapshot: SnapshotRef,
                                 expected_head_snapshot_id: str | None, expected_head_generation: int,
                                 receipt_id: str, attempt_id: str, fence: int, clock: Clock,
-                                fault: Callable[[str], None] | None = None):
+                                fault: Callable[[str], None] | None = None,
+                                record_references: Callable[[sqlite3.Connection, str], None]
+                                | None = None):
     """``commit_snapshot`` under the real Phase 1 fence, not a test double.
 
     ``store`` lets pre-transaction verification re-stream a multi-fragment
     partition's objects (``manifests.verify_partition_hashes``).
+    ``record_references`` inserts the import's reference inputs inside the
+    commit transaction (``engine.v2.data.reference_catalog``).
     """
     return commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=contracts, objects=objects,
@@ -79,4 +83,4 @@ def commit_snapshot_for_attempt(conn: sqlite3.Connection, store: ArtifactStore, 
         expected_head_generation=expected_head_generation, receipt_id=receipt_id,
         attempt_id=attempt_id, fence=fence,
         fence_check=lambda c: verify_fence(c, attempt_id, fence, clock.now()), clock=clock,
-        fault=fault, store=store)
+        fault=fault, store=store, record_references=record_references)

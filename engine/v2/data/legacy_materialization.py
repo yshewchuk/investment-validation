@@ -150,22 +150,15 @@ DIFFERENT estimator than production's committed one (a real parity risk on
 their own), just not the ``daily_market`` scope question.
 
 **Registry/model/calendar inputs** are plain pinned files, never
-Repository-scanned tables — not expressible as a bounded ``DataQuery``, so
-they travel as ``"path::content_hash"`` pinned refs instead (judgement call
-2 below), each now verified to actually resolve in the store before the
-request is built (decision 5, review round 2):
-``engine/models/registry.json`` (``engine.models.registry.REGISTRY_PATH``,
-read unconditionally by ``Scorer.__init__``'s ``load_registry()``),
-``engine/models/structures.json`` (``engine.structure_registry.
-CHAMPIONS_PATH`` — optional in legacy code, pinned here for exact
-structure-champion parity), ``data/features/chooser_analog_pool.parquet``
-(``engine.score.Scorer._chooser_analog_pool``, also optional in legacy code
-— a bare ``try/except Exception: return None`` silently degrades chooser
-features to NaN if absent — pinned for the same parity reasoning), each
-champion's joblib artifact (``RegistryEntry.artifact``/``.artifact_sha256``,
-under ``data/models/...``), and ``data/raw/polygon/gspc_daily.csv``
-(``engine.paths.GSPC_DAILY``, ``engine.calendar.trading_calendar``'s sole
-input).
+Repository-scanned tables. They are not expressible as a bounded ``DataQuery``,
+so they travel as ``"path::content_hash"`` pinned refs instead (judgement call
+2 below). Each ref is verified to resolve in the store before the request is
+built (decision 5, review round 2). Which files they are, and their legacy
+paths, is ``engine.v2.data.reference_inputs.LEGACY_REFERENCE_INPUTS_V1``:
+every path there comes from the legacy constant that defines it. The snapshot
+import pins and publishes them per import receipt
+(``engine.v2.data.reference_catalog``), and snapshot planning reads them back
+from there.
 
 No STOP finding. Every read this audit found is either a boundable
 ``DataQuery`` or a nameable pinned file. ``daily_market`` moving to
@@ -203,7 +196,6 @@ __all__ = [
     "LEGACY_SCORE_READ_PLAN_V1",
     "SCORE_READ_PLAN_TABLES",
     "TABLE_OUTPUT_KIND",
-    "TIER4_CACHE_DIR",
     "MaterializedTree",
     "assert_rows_match",
     "build_materialization_request",
@@ -288,20 +280,10 @@ LEGACY_SCORE_READ_PLAN_V1: dict[str, object] = {
     "excluded_tables": ("securities", "option_daily"),
     "excluded_reason": "re-verified review round 2: zero occurrences of either literal table name as a "
                         "store.read_table/iter_table argument anywhere under engine/ (excluding v2)",
-    "registry_and_model_refs": {
-        "engine/models/registry.json": "engine.models.registry.REGISTRY_PATH, load_registry() default",
-        "engine/models/structures.json": "engine.structure_registry.CHAMPIONS_PATH (optional in legacy "
-                                          "code; pinned here for exact structure-champion parity)",
-        "data/features/chooser_analog_pool.parquet": "engine.score.Scorer._chooser_analog_pool "
-                                          "(optional in legacy code, silently degrades chooser features "
-                                          "if absent; pinned here for the same parity reasoning)",
-        "data/models/...": "each champion's joblib artifact named by RegistryEntry.artifact/"
-                            ".artifact_sha256 inside registry.json",
-    },
-    "calendar_refs": {
-        "data/raw/polygon/gspc_daily.csv": "engine.paths.GSPC_DAILY, engine.calendar.trading_calendar's "
-                                            "sole input",
-    },
+    "reference_inputs": "engine.v2.data.reference_inputs.LEGACY_REFERENCE_INPUTS_V1: the model "
+                        "registry, structure champions, champion artifacts, Tier-4 serving caches, "
+                        "chooser analog pool, calendar CSV and legacy SNAPSHOT, pinned per import "
+                        "receipt and carried here as registry_and_model_refs/calendar_refs",
 }
 
 SCORE_READ_PLAN_TABLES: tuple[str, ...] = tuple(LEGACY_SCORE_READ_PLAN_V1["tables"])
@@ -615,7 +597,9 @@ def materialize_tree(repository, store, request: LegacyMaterializationRequest,
                 _write_single_file(repository, query, table_name, contract, path)
             single_files[table_name] = path
             manifest[rel] = _file_content_hash(path)
-    snapshot_rel = "data/features/SNAPSHOT"
+    from . import reference_inputs  # call-time import: see _tier4_cache_dir
+
+    snapshot_rel = reference_inputs.LEGACY_SNAPSHOT_PATH
     snapshot_path = dest_root / snapshot_rel
     _write_pinned_bytes(store, request.legacy_snapshot_object_ref.content_hash, snapshot_path)
     manifest[snapshot_rel] = _file_content_hash(snapshot_path)
@@ -762,23 +746,29 @@ def _copy_whole_single_file(repository, snapshot_ref: SnapshotRef, table_name: s
 #
 # engine.data.features.tier4._serving_path(model_id, fold, snapshot) names
 # SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib", where
-# SERVING_DIR = paths.DATA / "models" / "tier4" and snapshot =
-# store.file_sha256(paths.PANEL) — the legacy-relative path pattern a pinned
-# ref for one of these files must use is therefore:
+# snapshot = store.file_sha256(paths.PANEL). The directory's legacy-relative
+# path is reference_inputs.TIER4_SERVING_DIR, so a pinned cache ref reads
 #
-#     data/models/tier4/<model_id>_<fold:%Y%m>_<panel_sha256[:12]>.joblib
+#     <TIER4_SERVING_DIR>/<model_id>_<fold:%Y%m>_<panel_sha256[:12]>.joblib
 #
-# This module cannot enumerate which exact (model_id, fold) pairs a future
-# score_calendar board will touch (that depends on as_of/horizon_days/which
-# events land in the window, none of which this request carries) — the
-# caller that DOES know the board is responsible for naming the exact refs
-# it needs, the same way it already names registry.json/structures.json.
-# What this module CAN and does check, structurally: every pinned ref that
-# looks like one of these cache files must carry the CORRECT panel-hash
-# prefix for THIS request's own panel object -- a stale ref copied from a
-# different snapshot is refused before it is ever trusted, exactly like a
-# missing one already is via _verify_pinned_ref_exists.
-TIER4_CACHE_DIR = "data/models/tier4"
+# The snapshot import pins every cache file whose name carries the panel hash
+# it imported (reference_inputs.resolve_reference_files). What this module
+# checks, structurally: every pinned ref that looks like one of these cache
+# files carries the CORRECT panel-hash prefix for THIS request's own panel
+# object. A stale ref copied from a different snapshot is refused before it is
+# ever trusted, exactly like a missing one already is via
+# _verify_pinned_ref_exists.
+
+
+def _tier4_cache_dir() -> str:
+    """``reference_inputs.TIER4_SERVING_DIR``, imported at call time.
+
+    ``reference_inputs`` imports ``legacy_adapter``, which imports this
+    module, so a module-level import here would be an import cycle.
+    """
+    from . import reference_inputs
+
+    return reference_inputs.TIER4_SERVING_DIR
 
 
 def _panel_object_ref(repository, snapshot_ref: SnapshotRef):
@@ -790,9 +780,9 @@ def _panel_object_ref(repository, snapshot_ref: SnapshotRef):
 
 
 def _tier4_cache_hash_prefix(relative_path: str) -> str | None:
-    """The ``<panel_sha256[:12]>`` segment of a ``TIER4_CACHE_DIR`` ref's
+    """The ``<panel_sha256[:12]>`` segment of a Tier-4 serving-cache ref's
     filename, or ``None`` if ``relative_path`` is not shaped like one."""
-    prefix = f"{TIER4_CACHE_DIR}/"
+    prefix = f"{_tier4_cache_dir()}/"
     if not relative_path.startswith(prefix) or not relative_path.endswith(".joblib"):
         return None
     stem = relative_path[len(prefix):-len(".joblib")]
@@ -818,7 +808,7 @@ def _check_tier4_cache_refs(repository, snapshot_ref: SnapshotRef, registry_and_
 
 def tier4_cache_refs_match_panel(repository, request: LegacyMaterializationRequest) -> bool:
     """True iff every pinned Tier-4 cache ref (if any) carries this request's
-    own panel-hash prefix — see :data:`TIER4_CACHE_DIR` above."""
+    own panel-hash prefix — see :func:`_tier4_cache_dir` above."""
     try:
         _check_tier4_cache_refs(repository, request.snapshot_ref, request.registry_and_model_refs)
     except errors.DataError:
