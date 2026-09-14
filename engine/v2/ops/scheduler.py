@@ -126,7 +126,7 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
         heavy_held = False
         for row in conn.execute(_READY, {"now": stamp}).fetchall():
             profile, reason = _profile_or_reason(policy, row)
-            domains = domains_of(registry, row["kind"]) if reason is None else ()
+            domains = domains_of(registry, row["kind"], _parameters(row)) if reason is None else ()
             if reason is None:
                 reason = lease_reason(conn, domains)
             if reason is None:
@@ -145,6 +145,10 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
             conn.execute("UPDATE jobs SET queue_reason_json = ? WHERE job_id = ?",
                          (dumps(reason), row["job_id"]))
     return None
+
+
+def _parameters(row):
+    return load_json(JobSpec, row["spec_json"]).parameters
 
 
 def _provider_reason(conn, row, now_stamp):

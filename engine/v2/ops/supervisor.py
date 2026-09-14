@@ -58,9 +58,17 @@ from engine.v2.ops.recovery import (
 )
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.snapshot_promotion import legacy_rebuild_candidate_effect, snapshot_import_effect
+from engine.v2.ops.snapshot_roots import default_materialization_base
+from engine.v2.ops.snapshot_stages import (
+    cache_inputs,
+    confirm_attempt,
+    materialize_effect,
+    prepare_launch,
+)
 from engine.v2.ops.stages import validate_result
 from engine.v2.ops.store_barrier import (
     confirm_read_set,
+    domains_of,
     pin_read_set,
     read_set_complete,
     verified_write_in,
@@ -72,16 +80,21 @@ from engine.v2.ops.store_barrier import (
 _COORDINATOR_EFFECT_KINDS = frozenset({
     "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
     "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
-    "snapshot_import", "legacy_rebuild_candidate"})
+    "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize"})
 
 
 class Service:
-    def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None):
+    def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None,
+                 materialization_base=None):
         self.conn, self.root, self.registry, self.policy = conn, Path(root), registry, policy
         self.clock, self.code_source = clock, Path(code_source)
         self.store_root = Path(store_root) if store_root is not None else self.code_source
         self.store = ArtifactStore(self.root)
+        #: P2-6 §9.3: private read-only legacy roots, one per materialization request.
+        self.materialization_base = (Path(materialization_base) if materialization_base
+                                     else default_materialization_base(self.root))
         self.running = {}
+        self.launches = {}
         self.boot = read_boot_id()
         self.lock = SupervisorLock(self.root / "supervisor.lock")
         self.identity = None
@@ -151,18 +164,26 @@ class Service:
             if claim.spec.environment_ref != content_hash(
                     environment_identity(claim.resources.thread_count)):
                 raise OpsError(make_problem("INPUT_CHANGED", "planned worker environment changed"))
-            legacy_manifest = self._pin_read_set(claim)
-            if legacy_manifest is not None:
-                self._populate_legacy_staging(claim, legacy_manifest)
+            # P2-6 §9.3: a snapshot-backed stage validates its SnapshotRef, request
+            # and root instead of pinning or copying mutable legacy data.
+            launch = prepare_launch(self.conn, self.store, claim, base=self.materialization_base)
+            if launch is None:
+                legacy_manifest = self._pin_read_set(claim)
+                if legacy_manifest is not None:
+                    self._populate_legacy_staging(claim, legacy_manifest)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
-                cached = self._reuse_staged_checkpoint(claim)
+                cached = self._reuse_staged_checkpoint(claim, launch)
                 if cached:
                     return
             code = self.root / "code" / content_hash(manifest).split(":")[1]
             snapshot_code(self.code_source, code, manifest)
-            running = executor.launch(self.conn, claim, self.registry.get(claim.spec.kind), self.store,
-                                      code, clock=self.clock, boot_id=self.boot)
+            running = executor.launch(
+                self.conn, claim, self.registry.get(claim.spec.kind), self.store, code,
+                clock=self.clock, boot_id=self.boot,
+                legacy_root=launch.worker_legacy_root if launch else None,
+                envelope_extra=launch.envelope_extra if launch else None)
+            self.launches[claim.attempt_id] = launch
             self.running[claim.attempt_id] = running
         except Exception as exc:
             problem = exc.problem if isinstance(exc, OpsError) else make_problem(
@@ -173,7 +194,7 @@ class Service:
     def _store_domains(self, claim):
         if claim.spec.kind not in self.registry.names():
             return ()
-        return self.registry.get(claim.spec.kind).store_domains
+        return domains_of(self.registry, claim.spec.kind, claim.spec.parameters)
 
     def _cache_allowed(self, claim):
         """An undeclared or incomplete read set disables cross-run cache reuse (§9.2)."""
@@ -205,14 +226,14 @@ class Service:
         staging = self.store.staging_dir(claim.attempt_id)
         copy_read_set(self.store_root, staging / "legacy", [ref["path"] for ref in refs])
 
-    def _reuse_staged_checkpoint(self, claim):
+    def _reuse_staged_checkpoint(self, claim, launch=None):
         schema = "receipt.v1.0" if claim.spec.kind == "artifact_check" else "legacy_action.v1.0"
         # Resolve without materializing (B1a): a cache hit here never launches
         # the worker, so nothing is staged or recorded for this attempt.
         resolved = resolve_bindings(self.conn, self.store, claim.spec)
         cache_key = cache_identity(
             kind=claim.spec.kind,
-            inputs=resolved_inputs_hash(claim.spec, resolved),
+            inputs=cache_inputs(resolved_inputs_hash(claim.spec, resolved), launch),
             implementation=claim.spec.implementation_ref,
             parameters=content_hash(claim.spec.parameters),
             environment=claim.spec.environment_ref,
@@ -268,6 +289,7 @@ class Service:
     def _finish(self, running, status):
         claim = running.claim
         code = running.failure
+        launch = self.launches.pop(claim.attempt_id, None)
         if status["exit_code"] != 0:
             code = code or ("UNKNOWN_KILL" if status["exit_code"] < 0 else "WORKER_FAILED")
         try:
@@ -276,40 +298,19 @@ class Service:
             result = json.loads(running.data)
             outputs = validate_result(claim, result)
             confirm_read_set(self.conn, claim.attempt_id, self.store_root)
+            # P2-6 §9.3 item 4: the same verified snapshot binding before any output.
+            confirm_attempt(self.conn, self.store, claim, launch)
             running.peak = max(running.peak, int(result.get("self_peak_bytes", 0)))
             record_measurement(self.conn, claim.attempt_id, current_bytes=0,
                                peak_bytes=running.peak, clock=self.clock)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
-                schema = outputs[0]["schema"]
-                # The attempt already staged from these exact resolved bindings
-                # (recorded at launch); the checkpoint's identity must match.
-                inputs_hash = resolved_inputs_hash(
-                    claim.spec, recorded_bindings(self.conn, claim.attempt_id))
-                candidate = CheckpointCandidate(
-                    shard_key="default",
-                    cache_key=cache_identity(
-                        kind=claim.spec.kind,
-                        inputs=inputs_hash,
-                        implementation=claim.spec.implementation_ref,
-                        parameters=content_hash(claim.spec.parameters),
-                        environment=claim.spec.environment_ref,
-                        schema=schema, shard="default"),
-                    input_hash=inputs_hash,
-                    implementation_hash=claim.spec.implementation_ref,
-                    parameter_hash=content_hash(claim.spec.parameters),
-                    environment_hash=claim.spec.environment_ref,
-                    output_schema_ref=outputs[0]["schema"],
-                    outputs=tuple(OutputCandidate(name=o["name"], staged_path=o["path"],
-                                                   schema_ref=o["schema"]) for o in outputs))
-                checkpoint = commit_checkpoint(self.conn, self.store, claim, candidate,
-                                               clock=self.clock, inputs_hash=inputs_hash)
-                refs = [(str(index), ref) for index, ref in enumerate(checkpoint.artifact_refs)]
+                refs = self._checkpoint_refs(claim, outputs, launch)
             else:
                 refs = [(o["name"], self.store.publish_candidate(
                     claim.attempt_id, o["path"], schema_ref=o["schema"],
                     max_bytes=claim.resources.scratch_limit_bytes)) for o in outputs]
-            effect, extra_refs = self._coordinator_effect(claim, refs)
+            effect, extra_refs = self._coordinator_effect(claim, refs, launch)
             def effects(conn):
                 for name, ref in (*refs, *extra_refs):
                     register_artifact(conn, ref, claim.attempt_id, self.clock)
@@ -328,7 +329,35 @@ class Service:
             commit_attempt(self.conn, claim.attempt_id, claim.fence,
                            Outcome(False, "verified_dead", status["exit_code"], problem), clock=self.clock)
 
-    def _coordinator_effect(self, claim, refs):
+    def _checkpoint_refs(self, claim, outputs, launch):
+        schema = outputs[0]["schema"]
+        # The attempt already staged from these exact resolved bindings
+        # (recorded at launch); the checkpoint's identity must match. A
+        # snapshot-backed stage also folds in its snapshot manifest hash,
+        # materialization request hash and manifest artifact hash (§9.3 item 5).
+        inputs_hash = cache_inputs(resolved_inputs_hash(
+            claim.spec, recorded_bindings(self.conn, claim.attempt_id)), launch)
+        candidate = CheckpointCandidate(
+            shard_key="default",
+            cache_key=cache_identity(
+                kind=claim.spec.kind,
+                inputs=inputs_hash,
+                implementation=claim.spec.implementation_ref,
+                parameters=content_hash(claim.spec.parameters),
+                environment=claim.spec.environment_ref,
+                schema=schema, shard="default"),
+            input_hash=inputs_hash,
+            implementation_hash=claim.spec.implementation_ref,
+            parameter_hash=content_hash(claim.spec.parameters),
+            environment_hash=claim.spec.environment_ref,
+            output_schema_ref=schema,
+            outputs=tuple(OutputCandidate(name=o["name"], staged_path=o["path"],
+                                           schema_ref=o["schema"]) for o in outputs))
+        checkpoint = commit_checkpoint(self.conn, self.store, claim, candidate,
+                                       clock=self.clock, inputs_hash=inputs_hash)
+        return [(str(index), ref) for index, ref in enumerate(checkpoint.artifact_refs)]
+
+    def _coordinator_effect(self, claim, refs, launch=None):
         """Validate effect candidates before the short fenced commit transaction.
 
         Returns ``(effect_fn_or_None, extra_refs)``: ``effect_fn`` runs inside
@@ -338,6 +367,8 @@ class Service:
         ``refs`` — to register and record as this attempt's outputs (P2-5/
         Task5: ``ledger_export``'s tar, ``engineering_gate``'s rows).
         """
+        if claim.spec.kind == "legacy_materialize":
+            return materialize_effect(self.conn, self.store, claim, refs, launch)
         if claim.spec.kind == "legacy_decisions":
             candidate_ref = _named_ref(refs, "legacy_decisions")
             candidates, context = validated_decision_candidate(

@@ -1,6 +1,6 @@
 {
   "schema_version": "phase2_coverage.v1.0",
-  "suite_version": "phase2_coverage_suite:a041f012434ff510c47f6308a17e10856a5223b85e91f506de0541f319df46dc",
+  "suite_version": "phase2_coverage_suite:467ec05b34280f6a2b8ed314652a65795f7c118010432a70880f8f5e5966101b",
   "test_files": [
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
@@ -20,9 +20,10 @@
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
     "tests/test_v2_ops_nightly_completion.py",
-    "tests/test_v2_ops_render_parity.py"
+    "tests/test_v2_ops_render_parity.py",
+    "tests/test_v2_ops_snapshot_stages.py"
   ],
-  "source_hash": "sha256:806c0f1dc6120282e543def8e042c99d10376af28c01384343f3b65216ecfac0",
+  "source_hash": "sha256:a15a5775fb227cffe520688b19f0b1aa119f4fb21fddc3f6a88f0e8640ce414e",
   "packages": {
     "engine.v2.contracts": {
       "executed": 594,
@@ -200,8 +201,8 @@
       "percentage": 0.0
     },
     "engine.v2.ops": {
-      "executed": 2707,
-      "executable": 4083,
+      "executed": 3185,
+      "executable": 4569,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
@@ -228,6 +229,7 @@
         "engine/v2/ops/legacy_actions.py",
         "engine/v2/ops/legacy_adapter.py",
         "engine/v2/ops/lifecycle.py",
+        "engine/v2/ops/materialization_worker.py",
         "engine/v2/ops/migrations.py",
         "engine/v2/ops/nightly.py",
         "engine/v2/ops/outbox.py",
@@ -242,7 +244,10 @@
         "engine/v2/ops/schema.py",
         "engine/v2/ops/schema_runtime.py",
         "engine/v2/ops/snapshot_import.py",
+        "engine/v2/ops/snapshot_planning.py",
         "engine/v2/ops/snapshot_promotion.py",
+        "engine/v2/ops/snapshot_roots.py",
+        "engine/v2/ops/snapshot_stages.py",
         "engine/v2/ops/snapshots.py",
         "engine/v2/ops/stages.py",
         "engine/v2/ops/store_barrier.py",
@@ -252,7 +257,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 66.2992897379378
+      "percentage": 69.7089078572992
     },
     "engine.v2.dashboard": {
       "executed": 0,
@@ -1662,6 +1667,18 @@
       "outcome": "passed"
     },
     {
+      "nodeid": "tests/test_v2_ops_engineering.py::test_parallel_mode_baseline_is_refused",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_engineering.py::test_parallel_measurement_against_serial_baseline_has_no_mode_finding",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_engineering.py::test_baseline_missing_mode_for_todays_suite_version_is_refused",
+      "outcome": "passed"
+    },
+    {
       "nodeid": "tests/test_v2_ops_engineering.py::test_ratchet_does_not_round_away_a_small_regression",
       "outcome": "passed"
     },
@@ -1859,6 +1876,66 @@
     },
     {
       "nodeid": "tests/test_v2_ops_render_parity.py::test_every_job_binding_names_a_declared_dependency",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_materialize_job_writes_read_only_root_and_reuse_never_rewrites",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_tampered_root_refuses_next_stage_launch_and_rematerialization",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_backed_score_launches_on_the_materialization_root_only",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_request_built_for_another_snapshot_is_refused_before_launch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_incomplete_read_plan_is_refused_before_launch",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_uncommitted_manifest_is_refused_even_when_the_root_matches",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_input_mode_is_refused_for_kinds_without_a_read_plan",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_checkpoint_key_covers_each_snapshot_input",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_default_legacy_graph_is_unchanged_by_the_input_mode_flag",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_snapshot_graph_binds_only_declared_dependencies",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_materialize_worker_writes_once_reuses_and_discards_a_losing_partial",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_verify_root_refuses_links_extras_writable_entries_and_absence",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_manifest_and_request_refusals",
+      "outcome": "passed"
+    },
+    {
+      "nodeid": "tests/test_v2_ops_snapshot_stages.py::test_planning_refusals",
       "outcome": "passed"
     }
   ],

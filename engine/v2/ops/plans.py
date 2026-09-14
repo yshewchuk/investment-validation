@@ -33,7 +33,7 @@ def check_plan(source_root, expected_ids):
 
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                  tickers=(), year_start=2024, year_end=2026, expected_population=(),
-                 clock=None):
+                 clock=None, input_mode="legacy", snapshot_inputs=None):
     from datetime import date
 
     from engine.v2.foundation import SystemClock, format_timestamp
@@ -46,12 +46,19 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
     if not population:
         blocked.append("planned_population")
     clock = clock or SystemClock()
+    identity = {"session": session, "manifest": manifest_ref, "tickers": list(tickers),
+                "year_start": year_start, "year_end": year_end,
+                "expected_population": list(population),
+                "implementation": plan["implementation_ref"]}
+    if input_mode != "legacy":
+        # P2-6 §9.3/§8.1: the head was resolved once by the caller; the plan
+        # carries those exact refs, so a new head needs a new plan.
+        if input_mode != "snapshot" or not snapshot_inputs:
+            raise fail("INVALID_REQUEST", "snapshot input mode needs pinned snapshot inputs")
+        identity.update(input_mode=input_mode, snapshot_inputs=snapshot_inputs)
+        plan.update(input_mode=input_mode, snapshot_inputs=dict(snapshot_inputs))
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
-                plan_hash=content_hash({"session": session, "manifest": manifest_ref,
-                                         "tickers": list(tickers), "year_start": year_start,
-                                         "year_end": year_end,
-                                         "expected_population": list(population),
-                                         "implementation": plan["implementation_ref"]}),
+                plan_hash=content_hash(identity),
                 input_manifest_ref=manifest_ref, tickers=list(tickers),
                 year_start=year_start, year_end=year_end,
                 expected_population=list(population),

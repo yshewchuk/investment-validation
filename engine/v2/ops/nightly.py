@@ -181,7 +181,7 @@ def _legacy_resource(kind):
         return "legacy_score"
     if kind == "legacy_model_evidence":
         return "model_evidence"
-    if kind == "legacy_settlement":
+    if kind in ("legacy_settlement", "legacy_materialize"):
         return "legacy_rebuild"
     if kind == "legacy_render":
         return "projection"
@@ -196,75 +196,152 @@ def _thread_count(kind):
     return profile.thread_count or profile.cpu_count
 
 
+#: The legacy worker DAG's stages when prerequisites are not included.
+_DAG_STAGES = ("finality", "score", "decision_replay", "decision_evidence", "decision_commit",
+               "settlement", "model_evidence", "ledger_export", "engineering_gate",
+               "projection", "selfcheck", "publication", "backup")
+# P2-5/Task5: ``ledger_export`` and ``backup`` name ``decision_commit`` as
+# their only hard scheduler dependency, never ``settlement`` — a failed
+# settlement job would otherwise cascade through ``block_descendants``
+# and permanently block both (guide: "settlement failure must not block
+# export"). Each coordinator instead reads the settlement *watermark*
+# (present or absent) directly, independent of scheduling.
+_DAG_PARENTS = {"finality": (), "score": ("finality",),
+                "decision_replay": ("score",),
+                "decision_evidence": ("score", "finality", "decision_replay"),
+                "decision_commit": ("decision_evidence", "score", "finality"),
+                "settlement": ("finality",),
+                "model_evidence": ("score",),
+                "ledger_export": ("decision_commit",),
+                "engineering_gate": (),
+                "projection": ("ledger_export", "model_evidence", "finality", "score"),
+                "selfcheck": ("projection",),
+                "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit"),
+                "backup": ("decision_commit",)}
+#: P2-6 §9.3: DAG stages whose kinds read a verified snapshot materialization
+#: in snapshot input mode. Every other stage keeps the Phase 1 barrier.
+SNAPSHOT_STAGES = frozenset({"score", "decision_replay"})
+_SNAPSHOT_REQUIRED = ("snapshot_ref_artifact_id", "materialization_request_ref",
+                      "scratch_estimate_bytes")
+
+
+def _checkpoint_contract(kind):
+    if kind == "decision_evidence":
+        return "decision_evidence_pair.v1.0"
+    if kind in ("ledger_export", "engineering_gate", "publication", "backup"):
+        return "effect_receipt.v1.0"
+    if kind == "legacy_materialize":
+        return "legacy_materialization_manifest.v1.0"
+    return "legacy_action.v1.0"
+
+
+def _snapshot_inputs(input_mode, snapshot_inputs, include_prerequisites):
+    if input_mode == "legacy":
+        return None
+    if input_mode != "snapshot":
+        raise fail("INVALID_REQUEST", "input_mode must be legacy or snapshot")
+    if include_prerequisites or not isinstance(snapshot_inputs, dict) or any(
+            key not in snapshot_inputs for key in _SNAPSHOT_REQUIRED):
+        raise fail("INVALID_REQUEST",
+                   "snapshot input mode needs pinned snapshot inputs and the legacy worker DAG")
+    return snapshot_inputs
+
+
+def _scope_hash(tickers, year_start, year_end, expected_population, snapshot):
+    scope = {"tickers": sorted(tickers), "year_start": year_start, "year_end": year_end,
+             "expected_population": list(expected_population)}
+    if snapshot is not None:
+        scope.update(input_mode="snapshot", snapshot_ref=snapshot["snapshot_ref_artifact_id"],
+                     materialization_request=snapshot["materialization_request_ref"])
+    return content_hash(scope)[:24]
+
+
+def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_scope, snapshot):
+    if stage == "materialize":
+        return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
+                "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
+    return _legacy_params(_action_for(stage), plan, tickers, year_start, year_end, keys,
+                          effect_scope=effect_scope)
+
+
+def _stage_inputs(stage, parameters, keys, input_refs, snapshot):
+    """Bind one stage's inputs for the plan's input mode; returns its ``input_refs``."""
+    bindings = parameters["input_bindings"]
+    if snapshot is None or stage not in SNAPSHOT_STAGES | {"materialize"}:
+        if input_refs:
+            bindings["legacy_manifest.json"] = input_refs[0]
+        return tuple(input_refs)
+    bindings["snapshot_ref.json"] = snapshot["snapshot_ref_artifact_id"]
+    bindings["materialization_request.json"] = snapshot["materialization_request_ref"]
+    if stage != "materialize":
+        parameters["input_mode"] = "snapshot"
+        bindings["materialization_manifest.json"] = keys["materialize"] + "#materialization_manifest"
+    return (snapshot["snapshot_ref_artifact_id"], snapshot["materialization_request_ref"])
+
+
+def _stage_parents(stage, include_prerequisites, snapshot):
+    if include_prerequisites:
+        return GRAPH[stage]
+    if stage == "materialize":
+        return ()
+    if snapshot is not None and stage in SNAPSHOT_STAGES:
+        return _DAG_PARENTS[stage] + ("materialize",)
+    return _DAG_PARENTS[stage]
+
+
+def _job_spec(kind, parameters, input_refs, dependency_job_ids, implementation_ref,
+              environment_ref):
+    from engine.v2.contracts import JobSpec
+    from engine.v2.ops.fingerprints import environment_identity
+
+    return JobSpec(kind=kind, implementation_ref=implementation_ref, spec_hash=None,
+                   environment_ref=(environment_ref or content_hash(
+                       environment_identity(_thread_count(kind)))),
+                   parameters=parameters, input_refs=tuple(input_refs),
+                   dependency_job_ids=dependency_job_ids, output_namespace="shadow",
+                   resource_class=_legacy_resource(kind), retry_policy_ref="bounded",
+                   checkpoint_contract_ref=_checkpoint_contract(kind))
+
+
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
                               expected_population=(), alt_strikes=1, input_refs=(),
-                              full_universe=None):
-    """Build server-allowlisted JobSpecs for the actual legacy worker DAG."""
-    from engine.v2.contracts import JobSpec, SubmitRequest
-    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+                              full_universe=None, input_mode="legacy", snapshot_inputs=None):
+    """Build server-allowlisted JobSpecs for the actual legacy worker DAG.
+
+    ``input_mode="snapshot"`` (P2-6 §9.3) adds one ``legacy_materialize``
+    stage bound to the plan's pinned SnapshotRef and request artifacts, and
+    makes ``score``/``decision_replay`` read its verified root instead of the
+    barrier. Every other stage, and the default ``"legacy"`` graph, is unchanged.
+    """
+    from engine.v2.contracts import SubmitRequest
+    from engine.v2.ops.fingerprints import worker_source_manifest
     from engine.v2.ops.submission import job_id_for
 
-    provided_environment_ref = environment_ref
-
+    snapshot = _snapshot_inputs(input_mode, snapshot_inputs, include_prerequisites)
     implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
     requests = []
     keys = {}
-    scope_hash = content_hash({"tickers": sorted(tickers), "year_start": year_start,
-                               "year_end": year_end,
-                               "expected_population": list(expected_population)})[:24]
+    scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot)
     effect_scope = effect_scope_for(tickers, full_universe)
-    stages = (tuple(plan["order"]) if include_prerequisites else
-              ("finality", "score", "decision_replay", "decision_evidence", "decision_commit",
-               "settlement", "model_evidence", "ledger_export", "engineering_gate",
-               "projection", "selfcheck", "publication", "backup"))
-    # P2-5/Task5: ``ledger_export`` and ``backup`` name ``decision_commit`` as
-    # their only hard scheduler dependency, never ``settlement`` — a failed
-    # settlement job would otherwise cascade through ``block_descendants``
-    # and permanently block both (guide: "settlement failure must not block
-    # export"). Each coordinator instead reads the settlement *watermark*
-    # (present or absent) directly, independent of scheduling.
-    parent_map = {"finality": (), "score": ("finality",),
-                  "decision_replay": ("score",),
-                  "decision_evidence": ("score", "finality", "decision_replay"),
-                  "decision_commit": ("decision_evidence", "score", "finality"),
-                  "settlement": ("finality",),
-                  "model_evidence": ("score",),
-                  "ledger_export": ("decision_commit",),
-                  "engineering_gate": (),
-                  "projection": ("ledger_export", "model_evidence", "finality", "score"),
-                  "selfcheck": ("projection",),
-                  "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit"),
-                  "backup": ("decision_commit",)}
+    stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
+    if snapshot is not None:
+        stages = ("materialize",) + stages
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
-        action = _action_for(stage)
-        kind = action
-        parameters = _legacy_params(action, plan, tickers, year_start, year_end, keys,
-                                    effect_scope=effect_scope)
-        if input_refs:
-            parameters["input_bindings"]["legacy_manifest.json"] = input_refs[0]
-        parameters["expected_population"] = tuple(expected_population)
-        parameters["alt_strikes"] = int(alt_strikes)
-        parents = (GRAPH[stage] if include_prerequisites else parent_map[stage])
+        kind = _action_for(stage)
+        parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
+                                       effect_scope, snapshot)
+        refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
+        if stage != "materialize":
+            parameters["expected_population"] = tuple(expected_population)
+            parameters["alt_strikes"] = int(alt_strikes)
+        parents = _stage_parents(stage, include_prerequisites, snapshot)
         requests.append(SubmitRequest(
             namespace="shadow", idempotency_key=key, principal="operator",
-            job=JobSpec(kind=kind, implementation_ref=implementation_ref,
-                        spec_hash=None, environment_ref=(
-                            provided_environment_ref or content_hash(
-                                environment_identity(_thread_count(kind)))),
-                        parameters=parameters,
-                        input_refs=tuple(input_refs),
-                        dependency_job_ids=tuple(keys[parent] for parent in parents),
-                        output_namespace="shadow",
-                        resource_class=_legacy_resource(kind),
-                        retry_policy_ref="bounded",
-                        checkpoint_contract_ref=(
-                            "decision_evidence_pair.v1.0" if kind == "decision_evidence"
-                            else "effect_receipt.v1.0" if kind in (
-                                "ledger_export", "engineering_gate", "publication", "backup")
-                            else "legacy_action.v1.0"))))
+            job=_job_spec(kind, parameters, refs, tuple(keys[parent] for parent in parents),
+                          implementation_ref, environment_ref)))
     return tuple(requests)
 
 

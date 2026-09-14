@@ -233,6 +233,34 @@ and `tests/test_v2_data_repository.py` rather than by an ops-local test file,
 since every fault point and concurrency case they prove belongs to the data
 catalog's own commit/resolve contract.
 
+Snapshot-backed legacy stages (P2-6, phase-2 guide §9.3) replace the
+mutable-store read-set barrier for exactly the kinds whose complete reads
+`engine.v2.data.legacy_materialization.LEGACY_SCORE_READ_PLAN_V1` declares:
+`legacy_score`, `legacy_score_requests` and `legacy_decision_replay`
+(`stages.SNAPSHOT_BACKED_KINDS`). They are an input mode on the same kinds
+(`parameters.input_mode == "snapshot"`), not new kind names; the kind validator
+refuses the mode anywhere else. `legacy_finality`, `legacy_model_evidence` and
+`legacy_selfcheck` stay on the barrier (`stages.BARRIER_ONLY_REASONS`), as do
+decisions, settlement and render. One `legacy_materialize` job
+(`materialization_worker.py`) writes a request's private read-only root once,
+under `<ops_root>.materializations/<request hex>` — beside the operations root,
+because `materialize` refuses any destination under the artifact store root —
+and every later job for the same request re-hashes it and never rewrites it.
+`snapshot_stages.py` is the supervisor side: before launch it validates the
+bound `SnapshotRef`/request pair (request built for that snapshot, snapshot
+still resolves, hash covers content, `read_plan_complete`), requires the bound
+manifest to be one a `legacy_materialize` attempt committed for that request,
+and re-verifies the root against it (`snapshot_roots.verify_root`: exact file
+set, hashes, 0444/0555, no links). It skips `_pin_read_set`, the staging copy
+and the legacy-store lease, and hands the worker that root as its only legacy
+root. At finish it re-confirms the recorded bindings, the request hash and the
+root's stat fingerprint. The checkpoint `inputs` fold in the snapshot manifest
+hash, the request hash and the manifest artifact hash.
+`ops plan nightly --input-mode snapshot --snapshot-scope <scope>
+--materialization-refs <json>` resolves the head once (`snapshot_planning.py`);
+the default `--input-mode legacy` graph is byte-identical to before. Tested in
+`tests/test_v2_ops_snapshot_stages.py`.
+
 The phase-1 engineering gate needs a coverage measurement passed in; run bare
 it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing
 check is never green). The green-path command is:

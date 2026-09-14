@@ -28,10 +28,10 @@ def main():
     envelope = json.loads(sys.stdin.buffer.readline())
     os.sched_setaffinity(0, envelope["cpu_ids"])
     root = Path(envelope["staging"])
-    os.environ["INVESTING_PLAN_ROOT"] = str(root / "legacy")
+    os.environ["INVESTING_PLAN_ROOT"] = str(envelope.get("legacy_root") or root / "legacy")
     fd = int(envelope["result_fd"])
     try:
-        result = dispatch(envelope["worker"], envelope["parameters"], root)
+        result = dispatch(envelope["worker"], envelope["parameters"], root, envelope=envelope)
         result.update(schema_version="worker_result.v1.0", job_id=envelope["job_id"],
                       attempt_id=envelope["attempt_id"], fence=envelope["fence"])
         result["self_peak_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
@@ -47,11 +47,15 @@ def main():
     return int("failure" in result)
 
 
-def dispatch(worker, parameters, root):
+def dispatch(worker, parameters, root, *, envelope=None):
+    envelope = envelope or {}
+    if worker == "legacy_materialize":
+        from engine.v2.ops.materialization_worker import run_materialize
+        return run_materialize(parameters, root, envelope)
     if worker.startswith("legacy_"):
         from engine.v2.ops.legacy_actions import run_action
         values = parameters if isinstance(parameters, dict) else vars(parameters)
-        output = run_action(worker, values, root)
+        output = run_action(worker, values, root, legacy_root=envelope.get("legacy_root"))
         outputs = [{"name": worker, "path": output["path"], "schema": "legacy_action.v1.0"}]
         # A legacy action may publish additional named outputs alongside its
         # primary one (e.g. legacy_finality's finality_coverage.json) — see

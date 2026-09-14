@@ -99,10 +99,13 @@ def _write_action(root, name, value):
     return {"path": str(path.relative_to(root)), "hash": content_hash(value)}
 
 
-def legacy_action(action, parameters, staging):
-    """Execute one registered legacy stage inside a fresh worker process."""
+def legacy_action(action, parameters, staging, legacy_root=None):
+    """Execute one registered legacy stage inside a fresh worker process.
+
+    ``legacy_root``: a snapshot-backed stage's verified materialization root
+    (P2-6 §9.3); ``None`` keeps the barrier path's ``staging/legacy``."""
     root = Path(staging).resolve()
-    _rooted_import(root / "legacy")
+    _rooted_import(Path(legacy_root) if legacy_root else root / "legacy")
     actions = {
         "legacy_finality": _action_finality,
         "legacy_score": _action_score,
