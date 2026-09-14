@@ -465,6 +465,7 @@ def test_cli_runs_end_to_end_on_tmp_dirs(tmp_path, capsys):
         "--preview-input", str(preview_input_path),
         "--score-json", str(score_path),
         "--bundle-dir", str(bundle_dir),
+        "--bundle-format", "flat",
         "--snapshot-id", snap.snapshot_id,
         "--catalog", str(tmp_path / "phase2" / "catalog.sqlite"),
         "--store-root", str(tmp_path / "phase2" / "store"),

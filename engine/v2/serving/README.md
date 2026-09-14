@@ -84,6 +84,31 @@ decision pill (`app.js` `gatePill`) is a richer client-side tree over
 (disabled, not sized, gate-declined, arithmetic-only) that this index does
 not reproduce — an open gap, not a promise this summary makes.
 
+legacy_bundle (P3-4): the real legacy render-bundle adapter. `load_legacy_
+bundle(bundle_root)` reads the actual `dashboard/render.py` `render_bundle`
+output tree — `data/board.json`/`data/tickers/<ticker>.json`, accepting
+either that JSON form or (only when the JSON is absent) its `.js` wrapper —
+and returns `(bundle_rows_by_ticker, bundle_manifest)`: every ticker's rows
+flattened out of its `events[].rows` (main-board and ladder rows together,
+told apart only by `strike_offset`, exactly as `bridge.build_bridges`
+already expects them), and a `{relative_path: "sha256:<hex>"}` manifest of
+every file actually read, so a projection binds to exact bytes. When BOTH a
+`.json` and its `.js` sibling exist, both are read, both hashed into the
+manifest, and their parsed payloads compared: the legacy dashboard and the
+compatibility preview load the `.js` wrapper in the browser, so what this
+loader projects must equal what a user actually sees, and a disagreement
+between the two forms is refused (`BUNDLE_FORM_MISMATCH`) rather than
+silently trusting whichever form was read first. Strict and never a silent
+skip otherwise: a symlink anywhere in a read path, a ticker string that
+would escape the bundle root, an unrecognized top-level shape, two ticker
+files claiming the same ticker, a malformed `.js` wrapper, or a ticker the
+board references with no rendered file each raise a typed
+`LegacyBundleError` (`.code`) rather than being coerced or dropped.
+`load_score_document(path)` reads `score.json` with the same strictness:
+`rows`/`ladder`/`expected_population` required as lists, no unrecognized
+top-level key, no symlink. No legacy `engine.*` import, no `engine.v2.ops`
+import — only bytes in, parsed JSON out.
+
 `projections` also carries the two additions P3-2 needed to serve §6's
 filtered `/events` route without a route ever touching a table directly:
 `event_query_hash` is the stable identity of one `/events` query (release
@@ -218,7 +243,7 @@ the mock disagree, §6 wins":**
   src/api/client.ts` sends) succeeds on every route, not just proves the
   logic exists.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError -->
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError -->
 
 ## Consumers
 
@@ -247,13 +272,18 @@ The server requires a nonempty authentication token supplied at construction.
 Credentials never belong in a release manifest, URL or status artifact.
 
 `tools/v2_dashboard_project.py` is the offline projection coordinator CLI
-(P3-1b): given a saved `score.json`, a flat per-ticker render-bundle
-directory, a Phase 2 catalog/store and a snapshot id, it builds one candidate
-against a serving root (`serving.sqlite` plus its own `objects/`) and prints
-`{"release_id": ..., "findings": {...}}` (or the refusal) as JSON. No
-scoring, no provider calls, no legacy import — it composes `engine.v2.ops.
-bootstrap.open_catalog` and this package in the one place (`tools/`) allowed
-to import both.
+(P3-1b/P3-4): given a saved `score.json`, a rendered bundle, a Phase 2
+catalog/store and a snapshot id, it builds one candidate against a serving
+root (`serving.sqlite` plus its own `objects/`) and prints `{"release_id":
+..., "findings": {...}}` (or the refusal) as JSON. `--bundle-format legacy`
+(the default) reads a real `render_bundle` output tree through
+`legacy_bundle.load_legacy_bundle` and folds `content_hash(bundle_manifest)`
+into the release's `bundle_manifest_ref`, overriding whatever the
+`--preview-input` document declared; `--bundle-format flat` keeps the
+pre-P3-4 simplified one-array-per-ticker shape for tests that predate the
+real adapter. No scoring, no provider calls, no legacy import — it composes
+`engine.v2.ops.bootstrap.open_catalog` and this package in the one place
+(`tools/`) allowed to import both.
 
 `python3 -m engine.v2.serving.api --host 127.0.0.1 --port 8766 --serving-db
 serving/serving.sqlite --store-root serving/objects --serving-root serving`
@@ -278,9 +308,16 @@ work.
 `tests/test_v2_serving_bridge.py` (P3-1a) and `tests/test_v2_serving_
 projections.py` (P3-1b) cover the offline bridge/index over synthetic
 `score.json`/bundle pairs and a synthetic Phase 2 catalog (real
-`earnings_events` fragments, never a real panel or renderer):
+`earnings_events` fragments, never a real panel or renderer).
+`tests/test_v2_serving_legacy_bundle.py` (P3-4) covers the real adapter: a
+small real-shaped bundle rendered once via the actual
+`engine.dashboard.render.render_bundle` (never a real panel), round-tripped
+through `load_legacy_bundle` into `build_bridges`; a byte changed in one
+ticker file changing the manifest hash and the CLI's `release_id`; and every
+refusal (symlink, traversal, a ticker the board references with no file,
+duplicate ticker, malformed `.js` wrapper):
 
-    python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py
+    python3 -m pytest -q tests/test_v2_serving_bridge.py tests/test_v2_serving_projections.py tests/test_v2_serving_legacy_bundle.py
 
 `tests/test_v2_serving_api.py` (P3-2) builds a real `serving.sqlite` the
 same way and serves it over REAL HTTP — a real `uvicorn.Server` bound to an
