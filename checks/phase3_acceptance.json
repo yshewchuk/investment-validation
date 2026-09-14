@@ -1,0 +1,102 @@
+{
+  "schema_version": "phase3_acceptance.v1.0",
+  "rows": {
+    "L01": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "preview_open_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "preview_auth_negative_control"}
+      ]
+    },
+    "L02": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "current_switch_parity"}
+      ]
+    },
+    "L03": {
+      "tier": 0,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "bridge_identity_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "bridge_malformed_ref_negative_control"}
+      ]
+    },
+    "L04": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "bridge_mapping_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "bridge_mapping_negative_control"}
+      ]
+    },
+    "L05": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "bridge_value_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "bridge_value_negative_control"}
+      ]
+    },
+    "L06": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "publish_idempotency_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "publish_corruption_negative_control"}
+      ]
+    },
+    "L07": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "api_pagination_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "api_cursor_negative_control"}
+      ]
+    },
+    "L08": {
+      "tier": 1,
+      "requires": [
+        {"list": "negative_control_receipt_refs", "kind": "api_auth_traversal_negative_control"}
+      ]
+    },
+    "L09": {
+      "tier": 1,
+      "requires": [
+        {"list": "negative_control_receipt_refs", "kind": "no_scoring_startup_negative_control"}
+      ]
+    },
+    "L10": {
+      "tier": 1,
+      "requires": [
+        {"field": "browser_receipt_ref"},
+        {"list": "comparison_receipt_refs", "kind": "browser_initial_load_parity"}
+      ]
+    },
+    "L11": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "ui_state_parity"},
+        {"field": "engineering_receipt_ref"}
+      ]
+    },
+    "L12": {
+      "tier": 1,
+      "requires": [
+        {"list": "comparison_receipt_refs", "kind": "full_population_parity"},
+        {"field": "browser_receipt_ref"}
+      ]
+    },
+    "L13": {
+      "tier": 1,
+      "requires": [
+        {"field": "refresh_rollback_receipt_ref"},
+        {"list": "negative_control_receipt_refs", "kind": "publish_failure_negative_control"}
+      ]
+    },
+    "L14": {
+      "tier": 2,
+      "requires": [
+        {"field": "coverage_receipt_ref"},
+        {"field": "performance_receipt_ref"},
+        {"list": "comparison_receipt_refs", "kind": "ui_build_typecheck_parity"},
+        {"list": "negative_control_receipt_refs", "kind": "secret_scan_negative_control"}
+      ]
+    }
+  }
+}
