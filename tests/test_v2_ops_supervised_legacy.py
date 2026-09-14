@@ -117,11 +117,14 @@ def _run_until_terminal(service, conn, job_id, timeout=18):
 
 def test_default_policy_reservations_unchanged_and_test_policy_is_smaller():
     """The host-memory-flake fix must never touch DEFAULT_POLICY: production
-    admission still reserves the full measured peak (profiles.py). TEST_POLICY
-    (tests/ops_support.py) exists only so a real ``Service`` admits its job
-    without racing whatever else happens to be using host memory."""
+    admission still reserves margin over the measured peak (profiles.py:
+    5 GiB, 0.85 GiB over the 4.15 GiB 2026-09-13 canary peak, right-sized
+    2026-09-14 so it can be admitted alongside other work on this 7.8 GiB
+    host). TEST_POLICY (tests/ops_support.py) exists only so a real
+    ``Service`` admits its job without racing whatever else happens to be
+    using host memory."""
     for name in ("validation", "legacy_score"):
-        assert profile_named(DEFAULT_POLICY, name).memory_bytes == 11 * GIB // 2
+        assert profile_named(DEFAULT_POLICY, name).memory_bytes == 5 * GIB
         assert profile_named(TEST_POLICY, name).memory_bytes <= 512 * MIB
 
 

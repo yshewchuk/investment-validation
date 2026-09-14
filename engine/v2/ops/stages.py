@@ -182,7 +182,7 @@ def registry():
         JobKind(
             name="legacy_materialize", worker="legacy_materialize",
             parameters=MaterializeParameters,
-            resource_classes=frozenset({"legacy_rebuild"}), effects=("staged",),
+            resource_classes=frozenset({"materialize"}), effects=("staged",),
             retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="legacy_materialization_manifest.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),

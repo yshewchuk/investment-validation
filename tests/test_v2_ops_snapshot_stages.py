@@ -174,7 +174,7 @@ class Case:
                            {"expected_ids": ["legacy_materialize"], "input_bindings": bindings,
                             "scratch_estimate_bytes": 1 << 20},
                            (self.snapshot_ref.artifact_id, request_ref.artifact_id), key,
-                           "legacy_rebuild", "legacy_materialization_manifest.v1.0")
+                           "materialize", "legacy_materialization_manifest.v1.0")
 
     def submit_score(self, key, manifest_binding, deps=(), snapshot_ref=None, request_ref=None,
                      extra_refs=()):

@@ -199,7 +199,36 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
     assert POLICY_VERSION == DEFAULT_POLICY.version
-    assert "2026-09-13" in POLICY_VERSION
+    assert "2026-09-14" in POLICY_VERSION
+
+
+# --------------------------------------------------------------------------
+# 2026-09-14 right-sizing: legacy_materialize gets its own small profile,
+# and DEFAULT_POLICY stays structurally valid.
+# --------------------------------------------------------------------------
+
+
+_MATERIALIZE_SNAPSHOT_INPUTS = {"snapshot_ref_artifact_id": "art_snapshot",
+                                "materialization_request_ref": "art_request",
+                                "scratch_estimate_bytes": 1024}
+
+
+def test_planned_legacy_materialize_job_gets_the_materialize_resource_class():
+    plan = build_nightly_plan(str(REPO), "2026-09-14")
+    requests = build_legacy_job_requests(plan, tickers=("AAA",), year_start=2025, year_end=2026,
+                                         input_refs=("art_m",), input_mode="snapshot",
+                                         snapshot_inputs=_MATERIALIZE_SNAPSHOT_INPUTS)
+    by_kind = {r.job.kind: r for r in requests}
+    assert by_kind["legacy_materialize"].job.resource_class == "materialize"
+    # And the profile itself resolves and is small relative to legacy_rebuild.
+    profile = profile_named(DEFAULT_POLICY, "materialize")
+    assert profile.memory_bytes == 2 * (1 << 30)
+    assert profile.memory_bytes < profile_named(DEFAULT_POLICY, "legacy_rebuild").memory_bytes
+
+
+def test_default_policy_has_no_structural_problems():
+    from engine.v2.ops.profiles import policy_problems
+    assert policy_problems(DEFAULT_POLICY) == []
 
 
 # --------------------------------------------------------------------------
