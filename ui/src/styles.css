@@ -1,0 +1,121 @@
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  color: #1a1a1a;
+  background: #f7f7f8;
+}
+
+.app {
+  padding: 16px 24px 48px;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 12px;
+}
+
+.release-banner {
+  background: #20252b;
+  color: #eee;
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+
+.release-banner-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.release-coverage {
+  margin-top: 4px;
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #bbb;
+}
+
+.release-changed-notice {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #634;
+  border-radius: 4px;
+}
+
+.badge {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.badge-producer {
+  background: #345;
+}
+
+.badge-stale {
+  background: #a63;
+}
+
+.badge-sim {
+  background: #999;
+  color: #fff;
+  margin-left: 4px;
+}
+
+.badge-refusal {
+  background: #a33;
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.event-filters {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.event-filters label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 2px;
+}
+
+.event-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.event-table th,
+.event-table td {
+  border: 1px solid #ddd;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.event-table thead {
+  background: #eee;
+}
+
+.score-row-refusal {
+  background: #fdecea;
+}
+
+.pagination {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.error-banner {
+  color: #a33;
+  font-weight: 600;
+}

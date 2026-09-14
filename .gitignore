@@ -35,6 +35,25 @@
 !/tests/*.md
 !/tools/*.md
 
+# ── ui/ (React/TypeScript client): narrow explicit allowlist ─────────────
+# TypeScript and JSON are not allowed globally above (only py/yaml/toml/
+# js/css/html/...) — Phase 3 guide §7: "Add exact source/config/lockfile
+# allowlist rules for ui/ before existing hard blocks. Do not allow JSON or
+# TypeScript globally." Listed by exact path/extension under ui/ only, so a
+# stray .ts or .json anywhere else in the repo stays blocked by the
+# default-deny, and nothing under ui/ rides in on a directory wildcard.
+!/ui/package.json
+!/ui/package-lock.json
+!/ui/tsconfig.json
+!/ui/tsconfig.*.json
+!/ui/vite.config.ts
+!/ui/index.html
+!/ui/README.md
+!/ui/.gitignore
+!/ui/src/**/*.ts
+!/ui/src/**/*.tsx
+!/ui/src/**/*.css
+
 # ── HARD BLOCKS (last rule wins — these override every allow above) ──────
 
 # credentials
@@ -86,6 +105,14 @@
 .venv/
 venv/
 .pytest_cache/
+
+# ui/ dependencies and build output: large, generated, reproducible from
+# ui/package.json + ui/package-lock.json. Must be a HARD block, not just an
+# absence from the allow list above: node_modules/dist are full of .js/.css
+# files, which ARE allowed globally by the extension rules above, so without
+# this the directory-wildcard `!*/` plus `!*.js` would let them back in.
+/ui/node_modules/
+/ui/dist/
 
 # data + artifact file types (defence in depth behind the extension allowlist)
 *.csv
