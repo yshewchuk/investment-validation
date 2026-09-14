@@ -200,4 +200,15 @@ MIGRATIONS = (
         "DROP TABLE watermarks",
         "ALTER TABLE watermarks_v2 RENAME TO watermarks",
     )),
+    # Phase 3 guide §5.5 item 2 ("populate live engineering health from real
+    # observations"): a retry or a later generation observing the SAME
+    # scheduled night must update that night's own record without ever
+    # counting as a second night (health_observations' existing
+    # PRIMARY KEY(occurrence, kind) already collapses them onto one row) --
+    # but the engineering history window still needs to show a retry count
+    # per night. Every existing row starts at 0 (observed exactly once so
+    # far, the true count for every row this migration finds).
+    Migration(version=9, name="health_observation_retries", statements=(
+        "ALTER TABLE health_observations ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    )),
 )

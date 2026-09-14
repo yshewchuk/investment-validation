@@ -36,6 +36,7 @@ from engine.v2.ops.effects_graph import (
     engineering_gate_effect,
     ledger_export_effect,
     publication_effect,
+    reconcile_publication_status,
 )
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.executor_watchdog import is_alive, signal_owned
@@ -130,6 +131,10 @@ class Service:
         self.identity = None
         self.last_wall = clock.now()
         self.last_mono = clock.monotonic()
+        #: (code, message) of the last publication-status-reconciliation
+        #: problem actually printed, so a persisting problem prints once
+        #: rather than on every ~1s tick (2026-09-14 second review fix).
+        self._last_publication_status_problem = None
 
     def start(self):
         if not self.lock.acquire():
@@ -162,7 +167,45 @@ class Service:
                            supervisor=self.identity, clock=self.clock, registry=self.registry)
         if claim:
             self._launch(claim)
+        self._reconcile_publication_status()
         return bool(self.running or claim)
+
+    def _reconcile_publication_status(self):
+        """2026-09-14 review fix, item 1: the one place, across the whole
+        service loop, that observes every job's state after every possible
+        transition this tick (``reconcile()``'s cancel-completions,
+        ``_poll``/``_finish``'s failures, ``_launch``'s own launch
+        failures) -- so it is also the one place that can reliably notice a
+        ``publication`` job newly ``blocked``/``failed``/``cancelled`` and
+        keep its scope's status sidecar honest, without threading
+        ``store``/``root`` down into ``lifecycle.py``'s kind-agnostic
+        transition functions. A failure here (a malformed row, a disk
+        error) must never stop job scheduling itself -- this is a reporting
+        sidecar, not the pipeline -- so it is caught and reported the same
+        redacted way a stranded attempt is (``_report_stranded``), never
+        left to crash the tick.
+
+        2026-09-14 second review fix: ``tick()`` runs roughly every second,
+        so a PERSISTING problem (a genuinely broken calendar, a wedged
+        disk) printed one line per tick forever. Printed only when the
+        (code, message) pair differs from the last one this instance
+        actually printed -- reset to ``None`` on a clean pass, so a problem
+        that resolves and later recurs (even with the identical code/
+        message) still prints again.
+        """
+        try:
+            reconcile_publication_status(self.conn, self.store, self.root, clock=self.clock)
+            self._last_publication_status_problem = None
+        except Exception as exc:
+            problem = exc.problem if isinstance(exc, OpsError) else make_problem(
+                "VALIDATION_FAILED", "publication status reconciliation failed")
+            problem_key = (problem.code, problem.message)
+            if problem_key == self._last_publication_status_problem:
+                return
+            self._last_publication_status_problem = problem_key
+            print(json.dumps({"event": "publication_status_reconcile_failed",
+                              "problem": {field: to_document(problem)[field]
+                                          for field in ("code", "category", "retryable", "message")}}))
 
     def _clock_check(self):
         wall, mono = self.clock.now(), self.clock.monotonic()

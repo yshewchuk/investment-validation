@@ -233,7 +233,26 @@ detail-fetch failure never takes down the board (§7).
 - **Health/flags screens**: `GET /api/v1/operations` is implemented in the
   typed client (`DataClient.getOperations`) but still not surfaced in any
   view — the guide assigns a "dedicated full health/flags screen" to Phase
-  6 (§5.5 point 3). Unchanged from P3-3a.
+  6 (§5.5 point 3). Unchanged from P3-3a, except the response shape itself
+  (guide §5.5 items 2-3, `engine.v2.contracts.OperationsStatus`,
+  `operations_status.v1.0`): `release_id`/`attempted_release_id` (the
+  currently-served release versus the latest attempt, which differ exactly
+  when `failed_update` is true), `requested_session`/`resolved_session`
+  (verbatim, no re-derivation), `engineering_history` (per scheduled night:
+  `occurrence`/`status` — `pass`/`fail`/`unknown`, never a fabricated
+  green — /`retry_count`/`detail`) and `engineering_streak`, `conflicts`/
+  `degraded_model_evidence` (read back out of the render bundle's own
+  flags, carried not recomputed), `selfcheck`, and
+  `stale`/`stale_reason`/`withheld`/`withheld_reason`/`failed_update`/
+  `failed_update_reason`. A future health/flags screen (Phase 6) can read
+  these directly; no new field, no re-derivation. The route also now takes
+  an optional `?release_id=` query param (2026-09-14 review fix): given, it
+  is checked against the document's own `release_id`, and a mismatch is a
+  typed 409 `OPERATIONS_STATUS_NOT_FOR_RELEASE` (`requested_release_id`/
+  `status_release_id` in `details`) rather than silently substituting a
+  different release's status — useful once a screen has pinned a release
+  and polls this route later. Omitted, behavior is unchanged. `ui/src` is
+  not touched by this note; the typed client does not pass the param yet.
 - **Sort control, portfolio/book aggregates, models/explorer/derivation/
   flags screens, job submission, live refresh** — Phase 6 (guide §3.2);
   unshipped screens link to the compatibility surface, not to a stub.
