@@ -32,14 +32,20 @@ def check_plan(source_root, expected_ids):
 
 
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
-                 tickers=(), year_start=2024, year_end=2026, expected_population=(),
-                 clock=None, input_mode="legacy", snapshot_inputs=None):
+                 tickers=(), context_tickers=(), year_start=2024, year_end=2026,
+                 expected_population=(), clock=None, input_mode="legacy", snapshot_inputs=None):
     from datetime import date
 
     from engine.v2.foundation import SystemClock, format_timestamp
     date.fromisoformat(session)
     if mode != "shadow":
         raise fail("INVALID_REQUEST", "production cutover has not been activated")
+    # P2-C04: the historical evidence universe defaults to the direct
+    # watchlist (today's full-universe plans are unchanged); the watchlist
+    # must always be covered by it.
+    context_tickers = tuple(context_tickers) or tuple(tickers)
+    if not set(tickers) <= set(context_tickers):
+        raise fail("INVALID_REQUEST", "watchlist tickers must be a subset of the context tickers")
     plan = check_plan(source_root, [])
     population = tuple(expected_population)
     blocked = [] if manifest_ref else ["frozen_legacy_input_manifest", "adapter_parity_receipt"]
@@ -47,6 +53,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
         blocked.append("planned_population")
     clock = clock or SystemClock()
     identity = {"session": session, "manifest": manifest_ref, "tickers": list(tickers),
+                "context_tickers": list(context_tickers),
                 "year_start": year_start, "year_end": year_end,
                 "expected_population": list(population),
                 "implementation": plan["implementation_ref"]}
@@ -60,6 +67,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
                 plan_hash=content_hash(identity),
                 input_manifest_ref=manifest_ref, tickers=list(tickers),
+                context_tickers=list(context_tickers),
                 year_start=year_start, year_end=year_end,
                 expected_population=list(population),
                 # P2-5/B1c: pinned once, here, at planning time. The saved

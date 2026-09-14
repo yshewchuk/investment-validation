@@ -52,6 +52,11 @@ class LegacyParameters:
     expected_ids: tuple[str, ...]
     session: str = ""
     tickers: tuple[str, ...] = ()
+    #: P2-C04: the historical EVIDENCE universe ``_action_score``/
+    #: ``_action_decision_replay`` load ``FeatureContext`` with — separate
+    #: from ``tickers``, the direct watchlist actually scored. Left ``()``
+    #: (meaning: fall back to ``tickers``) by every kind that predates it.
+    context_tickers: tuple[str, ...] = ()
     year_start: int = 0
     year_end: int = 0
     horizon_days: int = 35

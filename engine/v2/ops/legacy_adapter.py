@@ -157,8 +157,13 @@ def _action_score(parameters, root):
 
     session = resolve_effective_session(_load_finality(root), parameters["session"])
     tickers = sorted(set(parameters["tickers"]))
+    # P2-C04: the historical EVIDENCE universe (analog pools, registered
+    # champions) is ``context_tickers``, never the direct watchlist — a
+    # narrow watchlist must not shrink the context it is scored against.
+    # Defaults to ``tickers`` for a caller that predates this parameter.
+    context_tickers = sorted(set(parameters.get("context_tickers") or parameters["tickers"]))
     years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
-    scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+    scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
     frame = score_calendar(pd.Timestamp(session),
                           horizon_days=int(parameters.get("horizon_days", 35)),
                           alt_strikes=0, scorer=scorer, tickers=tickers,
@@ -183,7 +188,8 @@ def _action_score(parameters, root):
     return _write_action(root, "score.json", {
         "rows": rows, "expected_population": list(expected),
         "observed_population": sorted(observed_keys), "ladder": json_safe(ladder, round_to=None),
-        "tickers": tickers, "analog_entry_coverage": scorer.analog_entry_coverage,
+        "tickers": tickers, "context_tickers": context_tickers,
+        "analog_entry_coverage": scorer.analog_entry_coverage,
         "session": session, "requested_session": parameters["session"]})
 
 
@@ -277,9 +283,11 @@ def _action_decision_replay(parameters, root):
     faithful replay is re-running ``score_calendar`` itself and letting the
     chooser rank the menu again.
 
-    ``FeatureContext`` loads the score job's FULL ticker set — analog pools
-    and the registered gate/chooser champions are read off that context, not
-    off ``score_calendar``'s own ``tickers`` argument, so a narrower context
+    ``FeatureContext`` loads ``context_tickers`` (P2-C04) — the historical
+    EVIDENCE universe, defaulting to ``parameters["tickers"]`` for a caller
+    that predates this parameter — analog pools and the registered
+    gate/chooser champions are read off that context, not off
+    ``score_calendar``'s own ``tickers`` argument, so a narrower context
     would be a different computation. ``score_calendar``'s own ``tickers``
     argument, by contrast, only restricts which events are enumerated and
     which chains are pre-loaded (read ``engine.score.score_calendar``: the
@@ -303,9 +311,9 @@ def _action_decision_replay(parameters, root):
     from engine.features import FeatureContext
     from engine.score import Scorer, score_calendar
 
-    tickers = sorted(set(parameters["tickers"]))
+    context_tickers = sorted(set(parameters.get("context_tickers") or parameters["tickers"]))
     years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
-    scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+    scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
     eligible_tickers = sorted({str(row["ticker"]) for row in population})
     frame = score_calendar(pd.Timestamp(session),
                           horizon_days=int(parameters.get("horizon_days", 35)),
