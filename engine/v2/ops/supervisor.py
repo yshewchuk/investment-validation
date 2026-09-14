@@ -1,6 +1,7 @@
 """Small polling coordinator; computation lives in bounded fresh subprocesses."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops import executor
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import (
     artifact,
     cache_identity,
@@ -413,10 +415,19 @@ class Service:
     def _commit_success(self, running, status, launch, keepalive):
         claim = running.claim
         code = running.failure
+        # The worker's own reported failure ("failure" in its result makes it
+        # exit non-zero, worker.py ``main``) is the only case with a result
+        # payload worth trusting: any executor-level ``running.failure``
+        # (LEASE_LOST, RESOURCE_LIMIT_EXCEEDED, an over-cap VALIDATION_FAILED)
+        # or a signal kill means the data is not the worker's own report.
+        worker_reported = code is None and status["exit_code"] > 0
         if status["exit_code"] != 0:
             code = code or ("UNKNOWN_KILL" if status["exit_code"] < 0 else "WORKER_FAILED")
         if code:
-            raise OpsError(make_problem(code, "worker did not complete its contract"))
+            problem = make_problem(code, "worker did not complete its contract")
+            if worker_reported:
+                problem = self._worker_typed_problem(claim, running) or problem
+            raise OpsError(problem)
         result = json.loads(running.data)
         outputs = validate_result(claim, result)
         confirm_read_set(self.conn, claim.attempt_id, self.store_root)
@@ -449,6 +460,45 @@ class Service:
                     verified_write_in(conn, claim.attempt_id, domain)
         commit_attempt(self.conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
                        clock=self.clock, effects=effects)
+
+    def _worker_typed_problem(self, claim, running):
+        """Recover the ``Problem`` a worker's caught ``OpsError`` carried,
+        instead of the generic retryable WORKER_FAILED (real nightly attempt
+        9: a deterministic ``VALIDATION_FAILED`` was flattened and wasted a
+        retry). ``None`` — the generic problem stays — for anything not a
+        well-formed, registered failure code: an unknown code, a missing or
+        mistyped field, or result bytes that will not even parse (including a
+        result the executor's 1 MiB cap truncated). A malformed or lying
+        worker must never crash the tick.
+
+        ``details`` never reaches here — worker.py already routed it to a
+        private ``staging/diagnostics/failure_details.json``, which this
+        publishes as a verified artifact and references, never inlines
+        (§5.2: ``details`` must stay out of ``failure_json``).
+        """
+        try:
+            result = json.loads(bytes(running.data))
+            doc = result.get("problem") if isinstance(result, dict) else None
+            if not isinstance(doc, dict):
+                return None
+            code, message = doc.get("code"), doc.get("message")
+            category, retryable = doc.get("category"), doc.get("retryable")
+            if not (isinstance(code, str) and isinstance(message, str)
+                    and isinstance(category, str) and isinstance(retryable, bool)):
+                return None
+            problem = make_problem(code, message)
+        except (ValueError, TypeError, AttributeError):
+            return None
+        details_path = (self.store.staging_dir(claim.attempt_id)
+                        / "diagnostics" / "failure_details.json")
+        if details_path.is_file():
+            ref = self.store.publish_candidate(
+                claim.attempt_id, "diagnostics/failure_details.json",
+                schema_ref="failure_diagnostic.v1.0", max_bytes=claim.resources.scratch_limit_bytes)
+            with transaction(self.conn):
+                register_artifact(self.conn, ref, claim.attempt_id, self.clock)
+            problem = dataclasses.replace(problem, diagnostic_ref=ref.artifact_id)
+        return problem
 
     def _commit_failure(self, claim, status, problem):
         """Record the failure under the fence — only while the fence is still held (B)."""

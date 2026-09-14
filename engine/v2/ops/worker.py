@@ -12,6 +12,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from engine.v2.ops.errors import OpsError
+
 
 def _write_diagnostics(root: Path) -> None:
     """A7: the traceback goes to a private file, never the result pipe."""
@@ -20,6 +22,21 @@ def _write_diagnostics(root: Path) -> None:
     fd = os.open(directory / "worker.stderr", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(fd, traceback.format_exc().encode())
+    finally:
+        os.close(fd)
+
+
+def _write_failure_details(root: Path, details: dict) -> None:
+    """A typed failure's ``details`` go to a private staging file, never the
+    small result pipe: the supervisor publishes this file as a verified
+    artifact and stamps the problem's ``diagnostic_ref`` with it (real
+    nightly attempt 9: a ``VALIDATION_FAILED``'s ``missing``/``unplanned``
+    keys were only ever visible in private ``worker.stderr``)."""
+    directory = root / "diagnostics"
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(directory / "failure_details.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps(details, allow_nan=False).encode())
     finally:
         os.close(fd)
 
@@ -35,12 +52,22 @@ def main():
         result.update(schema_version="worker_result.v1.0", job_id=envelope["job_id"],
                       attempt_id=envelope["attempt_id"], fence=envelope["fence"])
         result["self_peak_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-    except BaseException:
+    except BaseException as exc:
         try:
             _write_diagnostics(root)
         except OSError:
             pass
-        result = {"schema_version": "worker_result.v1.0", "failure": "WORKER_FAILED"}
+        problem = exc.problem if isinstance(exc, OpsError) else None
+        if problem is None:
+            result = {"schema_version": "worker_result.v1.0", "failure": "WORKER_FAILED"}
+        else:
+            try:
+                _write_failure_details(root, problem.details)
+            except OSError:
+                pass
+            result = {"schema_version": "worker_result.v1.0", "failure": problem.code,
+                      "problem": {"code": problem.code, "category": problem.category,
+                                 "retryable": problem.retryable, "message": problem.message}}
     data = json.dumps(result, allow_nan=False).encode()
     os.write(fd, data + b"\n")
     os.close(fd)
