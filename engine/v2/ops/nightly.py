@@ -194,13 +194,17 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
 def effect_scope_for(tickers, full_universe=None):
     """The outbox/watermark scope for the effects-graph coordinator stages.
 
-    ``"shadow"`` only when ``tickers`` is exactly the full planned universe;
-    otherwise ``"shadow:" + <hash of the ticker subset>``, so a subset shadow
-    run can never advance the same watermark row a full run does (guide
-    §9.4 item 3). ``full_universe=None`` (no universe declared) is treated as
-    "always the full run" — the pre-existing, single-scope behaviour.
+    Writing the global ``"shadow"`` scope must be explicit: it is returned
+    ONLY when ``full_universe`` is given AND equals ``tickers`` exactly —
+    the caller's declaration that this run is a ``--full-run`` scoring its
+    whole context. ``full_universe=None`` (no full run declared) always
+    returns the subset scope ``"shadow:" + <hash of the ticker subset>``,
+    even when ``tickers`` happens to equal whatever context loaded alongside
+    it — equality alone is never inferred as a full run (guide §9.4 item 3;
+    tightened so a small debugging run can no longer silently advance the
+    global watermark).
     """
-    if full_universe is None or sorted(tickers) == sorted(full_universe):
+    if full_universe is not None and sorted(tickers) == sorted(full_universe):
         return "shadow"
     return "shadow:" + content_hash(sorted(tickers)).split(":")[1][:16]
 
@@ -367,11 +371,16 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
 
     ``context_tickers`` (P2-C04) is the historical evidence universe; it
     defaults to ``tickers`` (today's full-universe plans are unchanged) and
-    ``tickers`` (the direct watchlist) must be a subset of it. Unless
-    ``full_universe`` is given explicitly, it is also what
-    :func:`effect_scope_for` compares the watchlist against — a one-ticker
-    request against a wider context is therefore a subset run for effect
-    scope purposes too, exactly the property the review requires.
+    ``tickers`` (the direct watchlist) must be a subset of it.
+
+    ``full_universe`` (only ever passed by a ``--full-run`` plan) is the
+    caller's explicit declaration that this run scores its whole context —
+    writing the global ``"shadow"`` effect scope requires it; see
+    :func:`effect_scope_for`. Omitted (the default), the effect scope is
+    always the subset hash, even when ``tickers`` happens to equal
+    ``context_tickers`` — equality is never inferred as a full run. Given, a
+    watchlist narrower than the context is refused: a full run must score
+    its whole context, never a slice of it.
     """
     from engine.v2.contracts import SubmitRequest
     from engine.v2.ops.fingerprints import worker_source_manifest
@@ -384,10 +393,12 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     context_tickers = tuple(context_tickers) or tuple(tickers)
     if not set(tickers) <= set(context_tickers):
         raise fail("INVALID_REQUEST", "watchlist tickers must be a subset of the context tickers")
+    if full_universe is not None and sorted(tickers) != sorted(context_tickers):
+        raise fail("INVALID_REQUEST", "a full run must score its whole context",
+                  details={"tickers": sorted(tickers), "context_tickers": sorted(context_tickers)})
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers)
-    effect_universe = context_tickers if full_universe is None else full_universe
-    effect_scope = effect_scope_for(tickers, effect_universe)
+    effect_scope = effect_scope_for(tickers, full_universe)
     stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
     if snapshot is not None:
         stages = ("materialize",) + stages

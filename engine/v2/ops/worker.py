@@ -141,11 +141,20 @@ def _dispatch_effect_receipt(worker, parameters, root):
     (``engine.v2.ops.effects_graph``), after this attempt's tiny receipt is
     validated, inside the same fenced finish path every other coordinator
     effect uses. This worker only proves the attempt ran.
+
+    The output is named ``<kind>_receipt``, never the bare kind name: the
+    coordinator effect for ``ledger_export``/``engineering_gate`` publishes
+    its OWN artifact under the bare kind name (the name downstream
+    ``job_<id>#<name>`` bindings expect, e.g. ``#ledger_export``), and both
+    this worker's output and the coordinator's ``extra_refs`` land in the
+    same ``attempt_outputs`` row set keyed ``(attempt_id, name)`` — a shared
+    name collides there. See ``supervisor.Service._commit_success``.
     """
     receipt = {"schema_version": "effect_receipt.v1.0", "kind": worker,
                "expected_ids": list(parameters["expected_ids"])}
     (root / "receipt.json").write_text(json.dumps(receipt))
-    return {"outputs": [{"name": worker, "path": "receipt.json", "schema": "effect_receipt.v1.0"}],
+    name = worker + "_receipt"
+    return {"outputs": [{"name": name, "path": "receipt.json", "schema": "effect_receipt.v1.0"}],
             "completed_ids": list(parameters["expected_ids"]),
             "no_work": not parameters["expected_ids"]}
 

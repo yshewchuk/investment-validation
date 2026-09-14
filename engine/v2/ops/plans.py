@@ -33,7 +33,15 @@ def check_plan(source_root, expected_ids):
 
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                  tickers=(), context_tickers=(), year_start=2024, year_end=2026,
-                 expected_population=(), clock=None, input_mode="legacy", snapshot_inputs=None):
+                 expected_population=(), clock=None, input_mode="legacy", snapshot_inputs=None,
+                 full_run=False):
+    """``full_run`` (``--full-run``, decision: writing the global ``"shadow"``
+    effect scope must be explicit) records this plan's universe declaration.
+    Without it, ``build_legacy_job_requests`` always uses a subset effect
+    scope, even when ``tickers`` equals ``context_tickers``. With it, planning
+    refuses unless the watchlist equals the context exactly — a full run
+    scores its whole context, never a slice of it.
+    """
     from datetime import date
 
     from engine.v2.foundation import SystemClock, format_timestamp
@@ -46,6 +54,9 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
     context_tickers = tuple(context_tickers) or tuple(tickers)
     if not set(tickers) <= set(context_tickers):
         raise fail("INVALID_REQUEST", "watchlist tickers must be a subset of the context tickers")
+    if full_run and sorted(tickers) != sorted(context_tickers):
+        raise fail("INVALID_REQUEST", "a full run must score its whole context",
+                  details={"tickers": sorted(tickers), "context_tickers": sorted(context_tickers)})
     plan = check_plan(source_root, [])
     population = tuple(expected_population)
     blocked = [] if manifest_ref else ["frozen_legacy_input_manifest", "adapter_parity_receipt"]
@@ -53,7 +64,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
         blocked.append("planned_population")
     clock = clock or SystemClock()
     identity = {"session": session, "manifest": manifest_ref, "tickers": list(tickers),
-                "context_tickers": list(context_tickers),
+                "context_tickers": list(context_tickers), "full_run": bool(full_run),
                 "year_start": year_start, "year_end": year_end,
                 "expected_population": list(population),
                 "implementation": plan["implementation_ref"]}
@@ -67,7 +78,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
                 plan_hash=content_hash(identity),
                 input_manifest_ref=manifest_ref, tickers=list(tickers),
-                context_tickers=list(context_tickers),
+                context_tickers=list(context_tickers), full_run=bool(full_run),
                 year_start=year_start, year_end=year_end,
                 expected_population=list(population),
                 # P2-5/B1c: pinned once, here, at planning time. The saved

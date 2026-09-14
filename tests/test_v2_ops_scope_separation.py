@@ -58,23 +58,43 @@ SESSION = "2026-09-12"
 # --------------------------------------------------------------------------
 
 
-def test_build_legacy_job_requests_context_tickers_drive_effect_scope():
+def test_build_legacy_job_requests_context_tickers_are_recorded_per_stage():
+    """``context_tickers`` is recorded on every stage's parameters (the
+    historical evidence universe), independent of the effect scope --
+    see ``test_full_run_must_be_declared_explicitly`` below for the scope."""
     plan = build_nightly_plan(str(REPO), SESSION)
-    full = build_legacy_job_requests(plan, tickers=("A", "B"), context_tickers=("A", "B"),
-                                     year_start=2025, year_end=2026)
     subset = build_legacy_job_requests(plan, tickers=("A",), context_tickers=("A", "B"),
                                        year_start=2025, year_end=2026)
-    by_kind_full = {r.job.kind: r for r in full}
     by_kind_subset = {r.job.kind: r for r in subset}
-    assert by_kind_full["legacy_score"].job.parameters["effect_scope"] == "shadow"
-    subset_scope = by_kind_subset["legacy_score"].job.parameters["effect_scope"]
-    assert subset_scope.startswith("shadow:") and subset_scope != "shadow"
-    # context_tickers is recorded on every stage's parameters, defaulting to
-    # the watchlist when absent.
     assert by_kind_subset["legacy_score"].job.parameters["context_tickers"] == ("A", "B")
     no_context = build_legacy_job_requests(plan, tickers=("A",), year_start=2025, year_end=2026)
     assert {r.job.kind: r for r in no_context}["legacy_score"].job.parameters[
         "context_tickers"] == ("A",)
+
+
+def test_full_run_must_be_declared_explicitly():
+    """P2-5 effect-scope decision: writing the global "shadow" scope
+    requires an explicit ``full_universe`` (``--full-run``) declaration.
+    A watchlist that merely equals its context, with no such declaration,
+    still gets a subset scope -- equality alone is never inferred as a full
+    run (this is the exact bug: a small debugging run with no context would
+    otherwise silently advance the global watermark)."""
+    plan = build_nightly_plan(str(REPO), SESSION)
+    common = dict(context_tickers=("A", "B"), year_start=2025, year_end=2026)
+    declared_full = build_legacy_job_requests(plan, tickers=("A", "B"), full_universe=("A", "B"),
+                                              **common)
+    equal_no_declaration = build_legacy_job_requests(plan, tickers=("A", "B"), **common)
+    subset = build_legacy_job_requests(plan, tickers=("A",), **common)
+
+    def scope(requests):
+        return {r.job.kind: r for r in requests}["legacy_score"].job.parameters["effect_scope"]
+
+    assert scope(declared_full) == "shadow"
+    equal_scope = scope(equal_no_declaration)
+    subset_scope = scope(subset)
+    assert equal_scope.startswith("shadow:") and equal_scope != "shadow"
+    assert subset_scope.startswith("shadow:") and subset_scope != "shadow"
+    assert equal_scope != subset_scope  # the hash still covers the actual watchlist
 
 
 def test_build_legacy_job_requests_refuses_watchlist_outside_context():
@@ -82,6 +102,18 @@ def test_build_legacy_job_requests_refuses_watchlist_outside_context():
     with pytest.raises(OpsError) as err:
         build_legacy_job_requests(plan, tickers=("A", "Z"), context_tickers=("A", "B"),
                                   year_start=2025, year_end=2026)
+    assert err.value.problem.code == "INVALID_REQUEST"
+
+
+def test_build_legacy_job_requests_full_run_refuses_narrower_watchlist():
+    """A full run must score its whole context (the plan carries this as
+    ``full_universe``, only ever set from a ``--full-run`` plan's own
+    ``context_tickers``); refused here too, not only in ``nightly_plan``,
+    as defense in depth for a caller that builds requests directly."""
+    plan = build_nightly_plan(str(REPO), SESSION)
+    with pytest.raises(OpsError) as err:
+        build_legacy_job_requests(plan, tickers=("A",), context_tickers=("A", "B"),
+                                  full_universe=("A", "B"), year_start=2025, year_end=2026)
     assert err.value.problem.code == "INVALID_REQUEST"
 
 
@@ -93,6 +125,19 @@ def test_nightly_plan_refuses_watchlist_outside_context():
     plan = nightly_plan(str(REPO), SESSION, manifest_ref="art_x", tickers=("A",),
                         context_tickers=("A", "B"), expected_population=("A|S1|2026-09-12",))
     assert plan["tickers"] == ["A"] and plan["context_tickers"] == ["A", "B"]
+    assert plan["full_run"] is False
+
+
+def test_nightly_plan_full_run_refuses_a_narrower_watchlist():
+    with pytest.raises(OpsError) as err:
+        nightly_plan(str(REPO), SESSION, manifest_ref="art_x", tickers=("A",),
+                    context_tickers=("A", "B"), expected_population=("A|S1|2026-09-12",),
+                    full_run=True)
+    assert err.value.problem.code == "INVALID_REQUEST"
+    plan = nightly_plan(str(REPO), SESSION, manifest_ref="art_x", tickers=("A", "B"),
+                        context_tickers=("A", "B"), expected_population=("A|S1|2026-09-12",),
+                        full_run=True)
+    assert plan["full_run"] is True
 
 
 # --------------------------------------------------------------------------
