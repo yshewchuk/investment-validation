@@ -12,6 +12,7 @@ commit, comparison, promotion, rollback — is the real production code.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,12 +22,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.contracts import RollbackReceipt  # noqa: E402
+from engine.v2.data.documents import decode_document  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.errors import fail as fail_data  # noqa: E402
 from engine.v2.data.import_snapshot import plan_import  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactStore, SystemClock  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.ops.checkpoints import artifact as artifact_ref  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.snapshot_import import (  # noqa: E402
     protected_paths_hash,
@@ -253,6 +257,17 @@ def test_candidate_promotion_and_rollback(tmp_path, monkeypatch):
             "SELECT update_receipt_ref FROM data_snapshot_heads WHERE scope='legacy_primary'").fetchone()[0]
         assert rollback_receipt is not None
         assert _immutable_row_counts(conn) == pre_rollback_counts
+
+        # 8. rollback() now produces a strictly decodable RollbackReceipt
+        #    (task P2-C01/P2-C07) naming the real prior/resulting snapshots
+        #    and generations, with the generation strictly increasing.
+        receipt_bytes = store.read_verified(artifact_ref(conn, store, rollback_receipt))
+        receipt = decode_document(RollbackReceipt, json.loads(receipt_bytes))
+        assert receipt.prior_snapshot_id == promoted_snapshot_id
+        assert receipt.resulting_snapshot_id == original_snapshot_id
+        assert receipt.prior_generation == promoted_generation
+        assert receipt.resulting_generation == rolled_back_generation
+        assert receipt.resulting_generation == receipt.prior_generation + 1
     finally:
         conn.close()
 

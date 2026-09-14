@@ -23,7 +23,7 @@ import json
 import tarfile
 from pathlib import Path
 
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import content_hash, format_timestamp, to_document
 from engine.v2.ledger.export import export_generation
 from engine.v2.ops.backup import prepare_backup, run_backup
 from engine.v2.ops.catalog import dumps, transaction
@@ -92,13 +92,19 @@ def _no_keepalive():
 
 
 def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
-                         keepalive=_no_keepalive):
+                         keepalive=_no_keepalive, fault=None):
     """Build, verify and publish one export generation; deliver its outbox effects.
 
     Settlement is read from its own watermark, never as a scheduler
     dependency (nightly.py's ``parent_map``): a failed or not-yet-run
     settlement leaves that watermark absent, and export still proceeds,
     recording settlement as absent in its receipt.
+
+    ``fault`` (P2-C06, test-only) is threaded straight into
+    ``export_generation`` so a test can interrupt the write of one export
+    file among several; the old ``CURRENT`` stays readable and a retry
+    (a fresh call with no ``fault``) resumes and completes without an
+    ``export generation differs from catalog`` conflict.
     """
     scope = effect_scope(claim)
     # P2-C03: the job's own ``session`` param is always the REQUESTED date;
@@ -118,7 +124,8 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
     settlement_present = settlement_wm is not None and settlement_wm["occurrence"] == session
 
     root = Path(ops_root) / "exports" / scope
-    generation_dir = export_generation(conn, root, generation=release_key, purposes=EXPORT_PURPOSES)
+    generation_dir = export_generation(conn, root, generation=release_key, purposes=EXPORT_PURPOSES,
+                                       fault=fault)
     keepalive()
     catalog_counts = _catalog_counts(conn, EXPORT_PURPOSES)
     verified_counts = _verify_generation(generation_dir, repo_root)
@@ -238,8 +245,32 @@ def _security_gate(store, files, binding_hash, repo_root):
     return _gate_dict(store, document)
 
 
+def _bind_release_intent(conn, scope, session, release_id, *, clock):
+    """Mark the ``release_intent`` outbox row this release is bound to as
+    delivered (P2-C06 decision 2): "bound to a release", never "published" —
+    that stays with ``publish_local``'s own pointer acknowledgement.
+
+    The matching row is found the same way ``_decision_gate`` verified
+    eligibility: the ``decisions`` watermark's own ``receipt_ref`` IS the
+    ``release_key`` ``commit_decisions_in_transaction`` enqueued both
+    ``export`` and ``release_intent`` under. Idempotent by construction (the
+    ``state IN (...)`` guard is a no-op once already delivered), so a retried
+    ``publication_effect`` call after a failed ``publish_local`` re-uses the
+    same binding without conflict.
+    """
+    row = _watermark_row(conn, scope, "decisions")
+    if row is None or row["occurrence"] != session:
+        return
+    receipt = {"release_id": release_id, "bound_at": format_timestamp(clock.now())}
+    with transaction(conn):
+        conn.execute(
+            "UPDATE outbox SET state='delivered', attempts=attempts+1, receipt_json=? "
+            "WHERE kind='release_intent' AND logical_key=? AND state IN ('pending','running')",
+            (dumps(receipt), row["receipt_ref"]))
+
+
 def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
-                       keepalive=_no_keepalive):
+                       keepalive=_no_keepalive, fault=None):
     """Build the four gate receipts, stage the release, then publish it.
 
     ``stage_release``/``publish_local`` manage their own short transactions
@@ -247,6 +278,14 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
     supervisor's own commit_attempt transaction — everything it commits is
     already durable by the time it returns, so the effect closure returned
     to the caller is a no-op.
+
+    P2-C06: once ``stage_release`` produces an ELIGIBLE release (all four
+    gates bound, including the decision gate), the release-intent lifecycle
+    completes here — ``_bind_release_intent`` — before ``publish_local`` is
+    even attempted, so a release that is staged but never successfully
+    published still leaves ``release_intent`` bound (never re-pending) while
+    ``publication``/``delivery`` stay exactly where a failed attempt left
+    them. ``fault`` (test-only) is threaded straight into ``publish_local``.
     """
     scope = effect_scope(claim)
     bindings = recorded_bindings(conn, claim.attempt_id)
@@ -279,10 +318,12 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
         keepalive()
         gates[name] = build()
     keepalive()
-    stage_release(conn, store, release_id, session, files, expected_current=expected_current,
-                 gates=gates, clock=clock, claim=claim)
+    staged = stage_release(conn, store, release_id, session, files, expected_current=expected_current,
+                           gates=gates, clock=clock, claim=claim)
+    if staged["eligible"]:
+        _bind_release_intent(conn, scope, session, release_id, clock=clock)
     keepalive()
-    publish_local(conn, claim, store, target, release_id, scope=scope, clock=clock)
+    publish_local(conn, claim, store, target, release_id, scope=scope, clock=clock, fault=fault)
     return None, ()
 
 

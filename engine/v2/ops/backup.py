@@ -20,11 +20,25 @@ from engine.v2.ops.outbox import claim, complete, enqueue
 
 
 def prepare_backup(conn, key, artifacts, *, clock):
+    """Enqueue one ``backup`` effect for ``key``, idempotent across attempts.
+
+    A retry (after ``fail_effect`` returns the effect to pending) must call
+    this again before re-running ``run_backup``, but the effect already
+    fixed its own ``cutoff`` and artifact list on the FIRST attempt — a
+    retry that rebuilt the payload with the clock's current time would hand
+    ``outbox.enqueue`` a different payload hash for the same logical key and
+    fail with ``IDEMPOTENCY_CONFLICT`` (P2-C07). So an existing ``backup``
+    effect for this key is returned as-is, with no new payload built at all.
+    """
     if len(safe_relative_path(key)) != 1:
         raise fail("INVALID_REQUEST", "unsafe backup key")
-    payload = {"backup_key": key, "artifacts": artifacts,
-               "cutoff": format_timestamp(clock.now()), "schema_version": "catalog_backup.v1.0"}
     with transaction(conn):
+        existing = conn.execute("SELECT effect_id FROM outbox WHERE kind='backup' AND logical_key=?",
+                                (key,)).fetchone()
+        if existing is not None:
+            return existing["effect_id"]
+        payload = {"backup_key": key, "artifacts": artifacts,
+                   "cutoff": format_timestamp(clock.now()), "schema_version": "catalog_backup.v1.0"}
         return enqueue(conn, "backup", key, payload)
 
 

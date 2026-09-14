@@ -65,7 +65,12 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from engine.v2.contracts import LegacyInputManifest, SnapshotImportRequest, TableContract
+from engine.v2.contracts import (
+    LegacyInputManifest,
+    RollbackReceipt,
+    SnapshotImportRequest,
+    TableContract,
+)
 from engine.v2.data import documents, manifests
 from engine.v2.data.catalog import move_head, record_failed_import
 from engine.v2.data.errors import DataError
@@ -322,7 +327,7 @@ def _table_summary(conn, dvr):
 
 def _publish_receipt(store, conn, document, *, clock):
     ref = store.publish_bytes(canonical_json(document).encode("utf-8"),
-                              schema_ref="snapshot_update_receipt.v1.0")
+                              schema_ref=document["schema_version"])
     with transaction(conn):
         register_artifact(conn, ref, None, clock)
     return ref
@@ -402,12 +407,35 @@ def rollback(conn, store, *, scope, to_snapshot_id, expected_snapshot_id, expect
     proves ``to_snapshot_id`` is still a genuine, resolvable committed
     snapshot before the swap, and ``catalog.move_head`` itself never mints
     or removes a row — both stay resolvable afterward.
+
+    Publishes a typed :class:`~engine.v2.contracts.data.RollbackReceipt`
+    (``rollback_receipt.v1.0``, task P2-C01/P2-C07). ``prior_snapshot_id``/
+    ``prior_generation`` are read off the head row immediately before the
+    swap — never merely echoed from this call's own ``expected_*``
+    arguments, so a caller cannot make a stale expectation masquerade as the
+    real prior state (a genuine mismatch there is refused by
+    ``move_head``'s own compare-and-swap before any receipt is durable).
+    ``resulting_snapshot_id``/``resulting_generation`` are exactly the pair
+    ``move_head`` itself moves the head to on success (``to_snapshot_id``,
+    ``expected_generation + 1``) -- the same arithmetic it performs
+    internally, not re-derived from a second read. This is what the Phase 2
+    evidence validator's ``rollback_receipt_ref`` strictly decodes; any
+    pre-existing ``snapshot_update_receipt.v1.0`` artifact already published
+    by an earlier rollback or by :func:`promote` is left exactly as it was
+    written.
     """
     Repository(conn).resolve(to_snapshot_id)
-    receipt_ref = _publish_receipt(store, conn, {
-        "schema_version": "snapshot_update_receipt.v1.0", "action": "rollback", "scope": scope,
-        "from_snapshot_id": expected_snapshot_id, "to_snapshot_id": to_snapshot_id,
-        "at": format_timestamp(clock.now())}, clock=clock)
+    prior_snapshot_id, prior_generation = _scope_head(conn, scope)
+    receipt_id = "rbk_" + content_hash(
+        {"scope": scope, "from_snapshot_id": expected_snapshot_id, "to_snapshot_id": to_snapshot_id,
+         "expected_generation": expected_generation}).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    receipt = RollbackReceipt(receipt_id=receipt_id, scope=scope,
+                              prior_snapshot_id=prior_snapshot_id,
+                              resulting_snapshot_id=to_snapshot_id,
+                              prior_generation=prior_generation,
+                              resulting_generation=expected_generation + 1,
+                              at=format_timestamp(clock.now()))
+    receipt_ref = _publish_receipt(store, conn, to_document(receipt), clock=clock)
     move_head(conn, scope=scope, to_snapshot_id=to_snapshot_id, expected_snapshot_id=expected_snapshot_id,
              expected_generation=expected_generation, receipt_ref=receipt_ref.artifact_id, clock=clock)
     return receipt_ref
