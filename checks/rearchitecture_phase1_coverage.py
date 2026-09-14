@@ -3,8 +3,8 @@
 
 Fixed command: coverage run --source=engine/v2 -m pytest
 tests/test_v2_ops_*.py tests/test_v2_data_*.py tests/test_v2_dashboard_*.py
-tests/test_diagnosis_comparator.py. The exact sorted test-file list is
-recorded in every measurement.
+tests/test_v2_serving_*.py tests/test_diagnosis_comparator.py. The exact
+sorted test-file list is recorded in every measurement.
 
 ``SUITE_VERSION`` bumped to v2 (P2-5/B1c review fix #3): the fixed suite
 covered only ``tests/test_v2_ops_*.py`` plus one diagnosis file, so every
@@ -15,11 +15,19 @@ the suite is a real behavior change (the measured numbers move), which is
 exactly why the version is part of ``compare``'s drift check: a v1 baseline
 can never be compared against a v2 measurement by accident.
 
-Bumped again to v3 (P3-0): ``engine/v2/dashboard`` gained its first
-production code (the compatibility preview launcher), so it stopped being
-the ``empty: true`` package the v2 baseline recorded and needed its own
-fixed test file counted here for the same reason ``data`` did above --
-``tests/test_v2_dashboard_*.py`` was added to the glob for exactly this.
+Bumped again to v3 by two independent same-day changes, merged together:
+
+* (P3-0) ``engine/v2/dashboard`` gained its first production code (the
+  compatibility preview launcher), so it stopped being the ``empty: true``
+  package the v2 baseline recorded and needed its own fixed test file counted
+  here for the same reason ``data`` did above -- ``tests/test_v2_dashboard_*.py``
+  was added to the glob for exactly this.
+* (P3-1a) the first real production module under ``engine/v2/serving``
+  (``bridge.py``, plus its ``contracts/serving.py`` schemas) lands with its
+  own ``tests/test_v2_serving_bridge.py`` -- named for the *layer*
+  (``serving``), not the ops adapter, so it matched neither existing glob and
+  would otherwise merge as permanently-uncovered ``engine.v2.serving`` source.
+  ``suite()`` now also picks up ``tests/test_v2_serving_*.py``.
 """
 from __future__ import annotations
 
@@ -45,6 +53,7 @@ def suite(root=ROOT):
     return sorted([p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_ops_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_data_*.py")]
                   + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_dashboard_*.py")]
+                  + [p.relative_to(root).as_posix() for p in (root / "tests").glob("test_v2_serving_*.py")]
                   + ["tests/test_diagnosis_comparator.py"])
 
 
