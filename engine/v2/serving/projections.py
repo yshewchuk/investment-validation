@@ -60,11 +60,11 @@ from engine.v2.foundation import (
 from .bridge import build_bridges
 
 __all__ = [
-    "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
+    "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", "PROJECTION_BINDING_V1",
     "ServingIndexError",
     "build_candidate", "connect", "ensure_schema", "event_query_hash",
     "event_scores", "get_event", "get_release", "get_score_detail",
-    "list_events", "resolve_event_refs",
+    "list_events", "projection_binding", "resolve_event_refs", "verify_projection_binding",
 ]
 
 _OWNER = "serving"
@@ -487,6 +487,87 @@ def get_release(conn: sqlite3.Connection, release_id: str) -> PreviewRelease | N
     row = conn.execute("SELECT document_json FROM serving_release WHERE release_id = ?",
                        (release_id,)).fetchone()
     return None if row is None else from_document(PreviewRelease, json.loads(row["document_json"]))
+
+
+# --------------------------------------------------------------------------
+# projection binding — §5.4/P3-1c: the document the fenced ops publisher
+# binds its release to, and what the read API's current-resolver later
+# reverifies. Lives here (not in ``engine.v2.ops``) because it is derived
+# purely from this index's own committed rows; ops never needs to read a
+# serving.sqlite row shape to produce or check it, and serving never needs
+# to know anything about ops — both sides only ever pass the plain dict this
+# function returns.
+# --------------------------------------------------------------------------
+
+PROJECTION_BINDING_V1 = "projection_binding.v1.0"
+
+
+def projection_binding(conn: sqlite3.Connection, release_id: str) -> dict | None:
+    """The projection-binding document for one committed candidate.
+
+    ``projection_manifest_hash`` restates the manifest object's own content
+    hash (already trusted at publish time, via ``store.publish_bytes``).
+    ``serving_index_identity`` additionally fingerprints the release's own
+    index row exactly as committed (its document plus findings), so a direct
+    edit to that row — not only a swapped manifest object — is caught too.
+    ``comparison_receipt_refs`` carries the release's own parity evidence
+    (score/render comparison receipts plus the findings receipt); security
+    evidence lives on the ops side (the security gate's own receipt), so it
+    is not duplicated here — the ops release manifest already binds it to
+    the same candidate (guide §5.4: "adding files changes the publication
+    binding").
+
+    ``bundle_manifest_ref`` restates the release's own byte-bound render-
+    bundle identity (P3-4's ``tools/v2_dashboard_project.py --bundle-format
+    legacy``: ``content_hash(bundle_manifest)`` over the real render-bundle
+    bytes the legacy adapter loaded, folded into ``PreviewInput.bundle_
+    manifest_ref`` before ``build_candidate`` ever ran) — so the binding
+    names the exact rendered bytes this candidate was built from, not only
+    the projection this index computed from them.
+
+    Returns ``None`` for an unknown or not-yet-committed release id — never
+    raises; an uncommitted candidate is a normal state, not a corruption.
+    """
+    row = conn.execute("SELECT document_json, findings_json FROM serving_release WHERE release_id = ?",
+                       (release_id,)).fetchone()
+    if row is None:
+        return None
+    release = from_document(PreviewRelease, json.loads(row["document_json"]))
+    manifest_ref = _load_ref(conn, release.projection_manifest_ref)
+    index_identity = content_hash({
+        "release_id": release_id, "document": json.loads(row["document_json"]),
+        "findings": json.loads(row["findings_json"]),
+    })
+    return {
+        "schema_version": PROJECTION_BINDING_V1,
+        "projection_release_id": release_id,
+        "source_release_id": release.source_release_id,
+        "projection_manifest_ref": release.projection_manifest_ref,
+        "projection_manifest_hash": manifest_ref.content_hash,
+        "bundle_manifest_ref": release.bundle_manifest_ref,
+        "serving_index_identity": index_identity,
+        "comparison_receipt_refs": list(release.comparison_receipt_refs),
+        "requested_as_of": release.requested_as_of,
+        "resolved_as_of": release.resolved_as_of,
+    }
+
+
+def verify_projection_binding(conn: sqlite3.Connection, binding: dict) -> bool:
+    """``True`` iff ``binding`` (as :func:`projection_binding` built it)
+    still matches this index's LIVE committed state for its own release id —
+    the read API current-resolver's check before it trusts a published
+    pointer (guide §5.4: "refuse ... if the projection isn't fully committed
+    in serving.sqlite or its manifest hash mismatches"). ``False`` for
+    anything malformed, an uncommitted release, a tampered binding document,
+    or an index whose own row content moved — never raises; the caller
+    decides how to turn a ``False`` into a refusal."""
+    release_id = binding.get("projection_release_id") if isinstance(binding, dict) else None
+    if not isinstance(release_id, str):
+        return False
+    live = projection_binding(conn, release_id)
+    return (live is not None
+            and live["projection_manifest_hash"] == binding.get("projection_manifest_hash")
+            and live["serving_index_identity"] == binding.get("serving_index_identity"))
 
 
 def _load_ref(conn: sqlite3.Connection, artifact_id: str) -> ArtifactRef:

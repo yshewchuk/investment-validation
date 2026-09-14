@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import Problem  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.foundation import ArtifactStore  # noqa: E402
+from engine.v2.foundation import ArtifactStore, content_hash  # noqa: E402
 from engine.v2.serving import api as api_module  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import create_app  # noqa: E402
@@ -141,13 +141,48 @@ def _two_release_app(tmp_path):
         requested_as_of="2024-01-05", resolved_as_of="2024-01-05")
     serving_conn.close()
 
+    # §5.4/P3-1c: the one authoritative pointer this API resolves "current"
+    # through is the existing fenced ops publisher's own CURRENT, never a
+    # bare file directly under serving_root -- nested under serving_root
+    # only so `live`'s 4-tuple shape (every existing call site already
+    # destructures it) does not need to grow a fifth element for this.
+    publication_root = serving_root / "_publication"
     app = create_app(serving_db=str(serving_root / "serving.sqlite"),
-                     store_root=str(serving_root / "objects"), serving_root=str(serving_root), token=TOKEN)
+                     store_root=str(serving_root / "objects"), serving_root=str(serving_root),
+                     publication_root=str(publication_root), token=TOKEN)
     return app, serving_root, release_a, release_b
 
 
+def _write_publication(serving_root: Path, ops_release_id: str, binding: dict | None) -> None:
+    """Materialize a minimal fenced-publisher release directory carrying
+    just a ``projection_binding.json`` (mirroring what ``publication_
+    effect`` binds -- §5.4/P3-1c) and move the ops ``CURRENT`` pointer to
+    it. Real gate/staging machinery is ops-side coverage
+    (``tests/test_v2_ops_effects_graph.py``,
+    ``tests/test_v2_serving_publication_binding.py``); this helper only
+    reproduces the on-disk SHAPE the API's own resolver reads. ``binding``
+    of ``None`` writes an ops release with no bound projection at all (the
+    plain P3-0 compatibility-preview case)."""
+    publication_root = serving_root / "_publication"
+    release_dir = publication_root / "releases" / ops_release_id
+    release_dir.mkdir(parents=True, exist_ok=True)
+    if binding is not None:
+        (release_dir / "projection_binding.json").write_text(json.dumps(binding))
+    (publication_root / "CURRENT").write_text(ops_release_id)
+
+
+def _ops_release_id(release_id: str) -> str:
+    return "ops" + content_hash({"ops_release_for": release_id}).split(":")[1][:24]
+
+
 def _set_current(serving_root: Path, release_id: str) -> None:
-    (serving_root / "CURRENT").write_text(release_id)
+    conn = projections.connect(str(serving_root / "serving.sqlite"))
+    try:
+        binding = projections.projection_binding(conn, release_id)
+    finally:
+        conn.close()
+    assert binding is not None, f"{release_id} is not a committed candidate"
+    _write_publication(serving_root, _ops_release_id(release_id), binding)
 
 
 @pytest.fixture
@@ -215,12 +250,52 @@ def test_no_current_release_returns_503(live):
     assert json.loads(body)["code"] == "NO_CURRENT_RELEASE"
 
 
-def test_current_pointer_names_unknown_release_returns_typed_error(live):
+def test_published_release_with_no_bound_projection_is_no_current_release(live):
+    """The plain P3-0 compatibility-preview case (an ops release published
+    with a bundle but no bound projection candidate at all) is the ordinary
+    "not configured yet" 503 -- never the distinct binding-integrity
+    refusal, which is reserved for a binding that names a release id and
+    then fails to verify."""
     base, serving_root, _, _ = live
-    _set_current(serving_root, "not_a_real_release_id")
+    _write_publication(serving_root, "ops-bundle-only", binding=None)
     code, body, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
     assert code == 503
     assert json.loads(body)["code"] == "NO_CURRENT_RELEASE"
+
+
+def test_current_pointer_names_an_uncommitted_projection_is_a_typed_integrity_refusal(live):
+    """§5.4/P3-1c: "refuse ... if the projection isn't fully committed in
+    serving.sqlite" -- a bound projection_binding.json naming a release id
+    the index never actually committed is CURRENT_BINDING_INVALID, distinct
+    from NO_CURRENT_RELEASE (`test_no_current_release_returns_503`)."""
+    base, serving_root, _, _ = live
+    _write_publication(serving_root, "ops-bogus", {
+        "schema_version": "projection_binding.v1.0",
+        "projection_release_id": "not_a_real_release_id",
+        "source_release_id": "src", "projection_manifest_ref": "art_x",
+        "projection_manifest_hash": "sha256:" + "0" * 64,
+        "serving_index_identity": "sha256:" + "0" * 64,
+        "comparison_receipt_refs": [], "requested_as_of": "2024-01-01", "resolved_as_of": "2024-01-01"})
+    code, body, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
+    assert code == 500
+    assert json.loads(body)["code"] == "CURRENT_BINDING_INVALID"
+
+
+def test_current_pointer_binding_manifest_hash_mismatch_is_a_typed_integrity_refusal(live):
+    """§5.4/P3-1c: a real, committed candidate whose bound
+    projection_manifest_hash has been tampered (or drifted from the index)
+    still refuses closed, never silently trusting a stale/edited hash."""
+    base, serving_root, release_a, _ = live
+    conn = projections.connect(str(serving_root / "serving.sqlite"))
+    try:
+        binding = dict(projections.projection_binding(conn, release_a.release_id))
+    finally:
+        conn.close()
+    binding["projection_manifest_hash"] = "sha256:" + "f" * 64
+    _write_publication(serving_root, _ops_release_id(release_a.release_id), binding)
+    code, body, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
+    assert code == 500
+    assert json.loads(body)["code"] == "CURRENT_BINDING_INVALID"
 
 
 def test_release_current_resolves_and_matches_explicit_lookup(live):
@@ -675,22 +750,64 @@ def test_authorized_is_false_without_a_token_before_touching_the_request():
     assert api_module._authorized(None, "") is False
 
 
-def test_default_resolver_refuses_a_symlinked_current_pointer(tmp_path):
+def test_read_ops_current_refuses_a_symlinked_current_pointer(tmp_path):
     real = tmp_path / "real"
     real.write_text("some-release")
     link = tmp_path / "CURRENT"
     link.symlink_to(real)
-    assert api_module._default_resolver(tmp_path)() is None
+    assert api_module._read_ops_current(tmp_path) is None
 
 
-def test_default_resolver_refuses_traversal_content(tmp_path):
+def test_read_ops_current_refuses_traversal_content(tmp_path):
     (tmp_path / "CURRENT").write_text("../escape")
-    assert api_module._default_resolver(tmp_path)() is None
+    assert api_module._read_ops_current(tmp_path) is None
 
 
-def test_default_resolver_refuses_multi_segment_content(tmp_path):
+def test_read_ops_current_refuses_multi_segment_content(tmp_path):
     (tmp_path / "CURRENT").write_text("a/b")
-    assert api_module._default_resolver(tmp_path)() is None
+    assert api_module._read_ops_current(tmp_path) is None
+
+
+def test_read_ops_current_missing_pointer_is_none(tmp_path):
+    assert api_module._read_ops_current(tmp_path) is None
+
+
+def test_read_projection_binding_refuses_a_symlinked_binding_file(tmp_path):
+    release_dir = tmp_path / "releases" / "rel1"
+    release_dir.mkdir(parents=True)
+    real = tmp_path / "real_binding.json"
+    real.write_text(json.dumps({"projection_release_id": "x"}))
+    (release_dir / "projection_binding.json").symlink_to(real)
+    assert api_module._read_projection_binding(tmp_path, "rel1") is None
+
+
+def test_read_projection_binding_refuses_an_unsafe_release_id(tmp_path):
+    assert api_module._read_projection_binding(tmp_path, "../escape") is None
+    assert api_module._read_projection_binding(tmp_path, "a/b") is None
+
+
+def test_read_projection_binding_missing_file_is_none(tmp_path):
+    (tmp_path / "releases" / "rel1").mkdir(parents=True)
+    assert api_module._read_projection_binding(tmp_path, "rel1") is None
+
+
+def test_read_projection_binding_malformed_json_is_none(tmp_path):
+    release_dir = tmp_path / "releases" / "rel1"
+    release_dir.mkdir(parents=True)
+    (release_dir / "projection_binding.json").write_text("{not json")
+    assert api_module._read_projection_binding(tmp_path, "rel1") is None
+
+
+def test_publication_resolver_with_no_publication_root_or_resolver_is_no_current_release(tmp_path):
+    app = create_app(serving_db=str(tmp_path / "s.sqlite"), store_root=str(tmp_path / "o"),
+                     serving_root=str(tmp_path), token=TOKEN)
+    server, thread, base = _start(app)
+    try:
+        code, body, _ = _get(base, "/api/v1/releases/current", token=TOKEN)
+        assert code == 503
+        assert json.loads(body)["code"] == "NO_CURRENT_RELEASE"
+    finally:
+        _stop(server, thread)
 
 
 def test_unpack_cursor_without_a_dot_separator_is_malformed():

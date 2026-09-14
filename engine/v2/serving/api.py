@@ -7,21 +7,27 @@ connection, or touches ``engine.v2.ops``/legacy ``engine.*`` -- every value
 served here was already computed and indexed by the offline projection
 coordinator (``tools/v2_dashboard_project.py``).
 
-**Current-release rule (§5.4).** There is one authoritative published
-pointer, and API "current" must name a fully committed projection -- never a
-fallback to "latest". The default resolver (``_default_resolver``) reads a
-plain ``CURRENT`` file directly under ``serving_root``, refusing a symlinked
-pointer file or a pointer whose content is not one clean path segment,
-exactly the check ``engine/v2/serving/operations.py``'s own
-``_resolve_current_id`` applies (this module does not import that file --
-serving/operations.py is untouched by this task -- so the check is
-reimplemented, minimally, the same judgement call
-``projections.ensure_schema``'s docstring already records for the
-checksum-and-refuse-newer pattern). The publisher that will OWN this pointer
-is a later task; ``create_app``'s ``resolver`` parameter is the seam it
-plugs into -- any zero-argument ``Callable[[], str | None]`` naming the
-current ``release_id`` (or ``None`` when none is configured) may be passed
-in its place.
+**Current-release rule (§5.4/P3-1c).** One authoritative published pointer:
+the existing fenced ops publisher's own ``CURRENT`` under its release root
+(``engine/v2/ops/publication.py``). API "current" follows it one more hop
+-- that release's bound ``projection_binding.json`` names the projection
+``release_id`` -- never a second, independently-advancing "UI latest"
+pointer. The default resolver (``_publication_resolver``) reads both files
+directly (the same symlink/one-segment safety ``operations.py``'s
+``_resolve_current_id`` applies, reimplemented since serving may not
+import ops), then reverifies the named release against the LIVE
+``serving.sqlite`` index (``projections.verify_projection_binding``): a
+binding that does not (yet, or any longer) match is a typed, non-retryable
+``CURRENT_BINDING_INVALID``, never a silent "latest" fallback and never the
+plain "no current release configured" (503) a release with no bound
+projection at all (the P3-0 compatibility preview) still gets.
+
+``create_app``'s ``resolver`` parameter remains the seam: any zero-argument
+``Callable[[], str | None]`` (may also raise ``ApiError``) may replace it,
+as tests do. Without an explicit ``resolver``, ``publication_root`` selects
+``_publication_resolver``; with neither, "current" always resolves to
+``None`` -- the temporary ``serving_root/CURRENT`` default this module used
+before P3-1c is retired, not replaced by a new fallback.
 
 **Errors are one ``Problem``-shaped envelope everywhere** (§6): ``code``,
 ``category``, ``retryable``, ``message``, plus the operational fields the
@@ -119,26 +125,93 @@ def _authorized(request: Request, token: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# the default CURRENT resolver -- §5.4
+# the default CURRENT resolver -- §5.4/P3-1c: published ops release ->
+# its bound projection_binding.json -> the projection release_id, reverified
+# against the live serving index
 # --------------------------------------------------------------------------
 
 
-def _default_resolver(serving_root):
-    root = str(serving_root)
+def _one_segment_pointer(raw: str) -> str | None:
+    """A pointer file's content, accepted only as one clean path segment --
+    the same safety rule ``engine/v2/ops/publication.py::current`` and
+    ``engine/v2/serving/operations.py::_resolve_current_id`` both apply,
+    reimplemented here (serving may not import ops; operations.py is an
+    untouched peer)."""
+    try:
+        parts = safe_relative_path(raw)
+    except ArtifactError:
+        return None
+    return raw if len(parts) == 1 else None
+
+
+def _read_pointer_file(path: str) -> str | None:
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return _one_segment_pointer(handle.read().strip())
+
+
+def _read_ops_current(release_root) -> str | None:
+    """File-only re-read of the fenced ops publisher's own ``CURRENT`` --
+    never an ``engine.v2.ops`` import."""
+    return _read_pointer_file(os.path.join(str(release_root), "CURRENT"))
+
+
+def _read_projection_binding(release_root, ops_release_id: str) -> dict | None:
+    """Read ``<release_root>/releases/<id>/projection_binding.json`` -- the
+    file ``publication_effect`` binds when the operator supplies one (§5.4/
+    P3-1c). ``None`` for a missing/symlinked/malformed file or unsafe id --
+    an unbound release is normal, not a corruption."""
+    if _one_segment_pointer(ops_release_id) != ops_release_id:
+        return None
+    path = os.path.join(str(release_root), "releases", ops_release_id, "projection_binding.json")
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.loads(handle.read())
+    except (OSError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _publication_resolver(release_root, serving_db):
+    """The one pointer chain (§5.4/P3-1c): ops ``CURRENT`` -> that
+    release's bound ``projection_binding.json`` -> the projection
+    ``release_id`` it names, reverified against the LIVE serving index.
+    Files (plus one bounded ``serving.sqlite`` connection) only -- keeps
+    serving/ops layering intact. ``None`` when there is genuinely no
+    publication yet (absent/malformed pointer or binding -- ordinary "no
+    current release" 503). Raises :class:`ApiError` -- typed, non-
+    retryable, distinct from "no current release" -- only when a binding
+    names a release id that fails to verify: not committed, or its
+    manifest/index hash no longer matches (a tampered doc or changed
+    index row)."""
 
     def resolve() -> str | None:
-        pointer = os.path.join(root, "CURRENT")
-        if os.path.islink(pointer) or not os.path.isfile(pointer):
+        ops_release_id = _read_ops_current(release_root)
+        if ops_release_id is None:
             return None
-        with open(pointer, encoding="utf-8") as handle:
-            name = handle.read().strip()
+        binding = _read_projection_binding(release_root, ops_release_id)
+        if binding is None:
+            return None
+        conn = projections.connect(str(serving_db))
         try:
-            parts = safe_relative_path(name)
-        except ArtifactError:
-            return None
-        return name if len(parts) == 1 else None
+            if not projections.verify_projection_binding(conn, binding):
+                raise ApiError(500, _problem(
+                    "CURRENT_BINDING_INVALID", "integrity",
+                    "the published pointer's projection binding does not match the "
+                    "live serving index", details={"ops_release_id": ops_release_id}))
+            release_id = binding.get("projection_release_id")
+        finally:
+            conn.close()
+        return release_id if isinstance(release_id, str) else None
 
     return resolve
+
+
+def _no_publication_configured() -> str | None:
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -412,16 +485,26 @@ def _operations_response(serving_root, response: Response) -> dict:
 # --------------------------------------------------------------------------
 
 
-def create_app(*, serving_db, store_root, serving_root, token: str, resolver=None) -> FastAPI:
-    """Build the read-only API. ``resolver``, when given, replaces the
-    default ``CURRENT``-file reader with any zero-argument
-    ``Callable[[], str | None]`` -- the seam the future publisher binding
-    plugs a live pointer into, and tests use to pin a release without
-    touching the filesystem."""
+def create_app(*, serving_db, store_root, serving_root, token: str, resolver=None,
+              publication_root=None) -> FastAPI:
+    """Build the read-only API. ``resolver``, given, replaces the default
+    current-release resolution with any zero-argument ``Callable[[], str |
+    None]`` (may also raise ``ApiError``) -- tests use this to pin a
+    release without touching the filesystem. Without one, ``publication_
+    root`` -- the fenced ops publisher's own release root for this shadow
+    scope (``<ops_root>/releases/<scope>``) -- selects the real chain
+    (§5.4/P3-1c): its ``CURRENT``, that release's bound ``projection_
+    binding.json``, reverified against ``serving_db``. With neither,
+    "current" always resolves to ``None``."""
     if not token:
         raise ValueError("a nonempty token is required")
     store = ArtifactStore(store_root)
-    resolve_current = resolver or _default_resolver(serving_root)
+    if resolver is not None:
+        resolve_current = resolver
+    elif publication_root is not None:
+        resolve_current = _publication_resolver(publication_root, serving_db)
+    else:
+        resolve_current = _no_publication_configured
     cursor_key = _cursor_key(token)
     app = FastAPI(title="v2 serving read API", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -489,6 +572,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--serving-db", required=True)
     parser.add_argument("--store-root", required=True)
     parser.add_argument("--serving-root", required=True)
+    parser.add_argument("--publication-root", default=None,
+                        help="the fenced ops publisher's release root for this shadow scope "
+                             "(<ops_root>/releases/<scope>); omit for no configured pointer")
     parser.add_argument("--allow-non-loopback", action="store_true")
     return parser.parse_args(argv)
 
@@ -503,7 +589,8 @@ def main(argv: list[str] | None = None) -> int:
         print("refusing a non-loopback host without --allow-non-loopback")
         return 2
     app = create_app(serving_db=args.serving_db, store_root=args.store_root,
-                     serving_root=args.serving_root, token=token)
+                     serving_root=args.serving_root, token=token,
+                     publication_root=args.publication_root)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
