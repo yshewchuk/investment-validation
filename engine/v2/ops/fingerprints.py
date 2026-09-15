@@ -8,6 +8,9 @@ import platform
 import shutil
 from pathlib import Path
 
+import joblib.numpy_pickle as _joblib_numpy_pickle
+from joblib.numpy_pickle_utils import _validate_fileobject_and_memmap
+
 from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.errors import fail
 
@@ -37,12 +40,74 @@ def source_closure(root, entries):
     return dict(sorted(found.items()))
 
 
+#: Every ``engine.*`` module a champion model artifact's pickle is known to
+#: reference but that no ``.py`` file statically imports (real evidence: the
+#: DYN-SV chooser champion's pickle GLOBALs ``engine.models.ensemble``, which
+#: nothing imports — the registry only imports :mod:`engine.models.registry`,
+#: and the pickle bytes carry the rest; ``engine.models.training.common``/
+#: ``.runup_move`` are reached the same way by ``size_v1_4``/
+#: ``runup_move_d14_v1_gbm``, though today they also happen to be reachable
+#: through ``engine.models.training.train_all``'s own static imports).
+#:
+#: Declared here, checked into source control, rather than discovered by
+#: scanning ``data/models/*.joblib`` under the CODE root: a real nightly
+#: plans and snapshots its code from a frozen worktree (e.g.
+#: ``/root/phase2-heavy-<commit>``) that never carries ``data/`` — only the
+#: live host passed as ``--source-root`` to ``capture-inputs`` does. Scanning
+#: the code root made ``worker_source_manifest`` a silent no-op in the real
+#: flow and ``implementation_ref`` depend on whether ``data/`` happened to
+#: sit next to the code. :func:`verify_pinned_model_modules` (called from
+#: ``engine.v2.ops.capture_inputs``, against that live host) keeps this set
+#: honest by refusing when a pinned artifact needs a module NOT in it.
+MODEL_PICKLE_MODULES = (
+    "engine.models.ensemble",
+    "engine.models.registry",
+    "engine.models.training.common",
+    "engine.models.training.runup_move",
+)
+
+
 def worker_source_manifest(root):
-    """Include package initializers imported before the fixed worker module."""
-    return source_closure(root, [
+    """Package initializers imported before the fixed worker module, plus
+    :data:`MODEL_PICKLE_MODULES` and their own import closure — unconditional,
+    independent of whether ``data/`` exists under ``root``."""
+    root = Path(root)
+    entries = [
         "engine/__init__.py", "engine/v2/__init__.py",
         "engine/v2/ops/__init__.py", "engine/v2/ops/worker.py",
-    ])
+    ]
+    entries += _declared_module_entries(root, MODEL_PICKLE_MODULES)
+    return source_closure(root, entries)
+
+
+def _declared_module_entries(root, modules):
+    """Entries for every module in ``modules``, refusing (``INPUT_CHANGED``)
+    if one is missing from the source tree — unlike :func:`_module_files`,
+    which silently omits what it cannot find (right for a *discovered*
+    static import, wrong for a *declared* dependency this function's caller
+    cannot ship without)."""
+    entries = []
+    for module in modules:
+        files = _module_files(root, module)
+        leaf = module.replace(".", "/")
+        if not any(f in (leaf + ".py", leaf + "/__init__.py") for f in files):
+            raise fail("INPUT_CHANGED", "a declared model-pickle module is missing from the "
+                      "source tree", details={"module": module})
+        entries.extend(files)
+    return entries
+
+
+def _module_files(root, name):
+    """``a/b/c.py``/``a/b/__init__.py`` candidates existing under ``root``
+    for every prefix of a dotted module name, longest prefix last."""
+    parts = name.split(".")
+    found = []
+    for index in range(1, len(parts) + 1):
+        stem = "/".join(parts[:index])
+        for candidate in (stem + ".py", stem + "/__init__.py"):
+            if (root / candidate).is_file():
+                found.append(candidate)
+    return found
 
 
 def _imports(root, rel, source):
@@ -57,13 +122,129 @@ def _imports(root, rel, source):
             names.extend([base, *(base + "." + alias.name for alias in node.names)])
     paths = set()
     for name in names:
-        parts = name.split(".")
-        for index in range(1, len(parts) + 1):
-            stem = "/".join(parts[:index])
-            for candidate in (stem + ".py", stem + "/__init__.py"):
-                if (root / candidate).is_file():
-                    paths.add(candidate)
+        paths.update(_module_files(root, name))
     return sorted(paths)
+
+
+# --------------------------------------------------------------------------
+# model artifacts: what a pinned pickle needs that no import statement shows
+# --------------------------------------------------------------------------
+#
+# joblib writes raw ndarray bytes directly into the pickle stream, outside
+# normal opcodes (``NumpyArrayWrapper.write_array``/``.read_array`` in
+# ``joblib/numpy_pickle.py``) — a plain ``pickletools.genops`` walk desyncs
+# the instant it reaches one. Correctly skipping those bytes needs the
+# wrapper's own (trusted, side-effect-free) length/alignment logic, so this
+# reuses joblib's ``NumpyUnpickler`` for the walk, but overrides
+# ``find_class`` to never resolve or construct anything the pickle names
+# except numpy's own types and joblib's own array wrapper — the same narrow
+# trust boundary ``joblib.load`` itself relies on for array reconstruction.
+# Every other class/function (the artifact's real payload: sklearn/lightgbm
+# estimators, this repo's ``engine.*`` wrapper classes) is replaced by
+# :class:`_Inert` before it is ever called, so no artifact-controlled code
+# executes — only its *names* are recorded. This is not ``pickle.load``.
+
+#: Modules :class:`_ScanningUnpickler` resolves for real, because their own
+#: reconstruction (allocate an array, build a dtype) is trusted and — for the
+#: joblib pair — is what lets the walk skip past embedded raw array bytes.
+_TRUSTED_PICKLE_MODULES = ("numpy", "joblib.numpy_pickle")
+
+
+class _Inert:
+    """Stands in for every pickled class outside ``_TRUSTED_PICKLE_MODULES``.
+    Constructing, calling or setting state on it never runs artifact code."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __call__(self, *args, **kwargs):
+        return _Inert()
+
+    def __setstate__(self, state):
+        pass
+
+    def __reduce__(self):
+        return (_Inert, ())
+
+
+def _pickle_trusted(module):
+    return any(module == m or module.startswith(m + ".") for m in _TRUSTED_PICKLE_MODULES)
+
+
+class _ScanningUnpickler(_joblib_numpy_pickle.NumpyUnpickler):
+    """Records every module a joblib artifact's pickle stream GLOBAL/
+    STACK_GLOBAL-references; resolves (and therefore executes) only
+    :data:`_TRUSTED_PICKLE_MODULES`."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.referenced_modules: set[str] = set()
+
+    def find_class(self, module, name):
+        self.referenced_modules.add(module)
+        if _pickle_trusted(module):
+            return super().find_class(module, name)
+        return _Inert
+
+    def load_build(self):
+        top = self.stack[-1] if self.stack else None
+        if (isinstance(top, _joblib_numpy_pickle.NumpyArrayWrapper)
+                and top.dtype is not None and top.dtype.hasobject):
+            # The real path here recurses into a second, fully-trusting
+            # pickle.load(unpickler.file_handle) — refuse instead of ever
+            # calling that on artifact-controlled bytes.
+            raise ValueError("object-dtype array: cannot scan without a nested pickle.load")
+        super().load_build()
+
+
+def _pickled_modules(path):
+    """Every module a joblib artifact at ``path`` references, scanned
+    without executing any of its own classes (see the section docstring)."""
+    with path.open("rb") as fh, _validate_fileobject_and_memmap(fh, str(path), None) as (fobj, _mode):
+        unpickler = _ScanningUnpickler(str(path), fobj, True)
+        try:
+            unpickler.load()
+        except Exception as exc:
+            raise fail("INPUT_CHANGED", "pinned model artifact could not be scanned for its "
+                      "module references", details={"path": str(path), "error": str(exc)}) from exc
+    return unpickler.referenced_modules
+
+
+def verify_pinned_model_modules(root):
+    """Refuse (``INPUT_CHANGED``) unless every champion model artifact's
+    pickle references only ``engine.*`` modules already in
+    :data:`MODEL_PICKLE_MODULES`.
+
+    Called from ``engine.v2.ops.capture_inputs`` where the plan already
+    resolves pinned legacy reference inputs, against the live data host
+    (``--source-root``, e.g. ``/root/investing-plan``) — never against the
+    frozen code-snapshot root ``worker_source_manifest`` builds from, which
+    never carries ``data/models/*.joblib``. Keeps the declared set honest: a
+    newly promoted champion that needs an undeclared module refuses here
+    instead of reaching a worker as ``ModuleNotFoundError``.
+
+    A pinned champion artifact this refuses to find or read is a refusal
+    too — no silent skip: unlike :func:`worker_source_manifest`'s callers,
+    this function only ever runs where ``data/`` is expected to exist.
+    """
+    from engine.v2.data.reference_inputs import REGISTRY_PATH, champion_artifact_paths
+
+    root = Path(root)
+    registry_path = root / REGISTRY_PATH
+    if not registry_path.is_file():
+        raise fail("INPUT_CHANGED", "model registry is missing", details={"path": REGISTRY_PATH})
+    declared = set(MODEL_PICKLE_MODULES)
+    for rel in champion_artifact_paths(registry_path):
+        path = root / rel
+        if not path.is_file():
+            raise fail("INPUT_CHANGED", "a pinned champion artifact is missing",
+                      details={"artifact": rel})
+        found = {m for m in _pickled_modules(path) if m == "engine" or m.startswith("engine.")}
+        missing = found - declared
+        if missing:
+            raise fail("INPUT_CHANGED", "a pinned model artifact references an engine module "
+                      "outside the declared model-pickle closure",
+                      details={"artifact": rel, "modules": sorted(missing)})
 
 
 def environment_identity(thread_count=1):

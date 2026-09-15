@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import shutil
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import joblib
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -177,6 +180,22 @@ REFERENCE_MODEL_ID = "size_v9"
 _INPUTS = reference_inputs.LEGACY_REFERENCE_INPUTS_V1["inputs"]
 
 
+def _synthetic_model_bytes() -> bytes:
+    """A REAL joblib artifact (plain-dict payload, no GLOBAL opcode --
+    nothing outside builtins is referenced), not literal placeholder bytes.
+    ``capture_inputs.capture()`` now opcode-scans every pinned champion
+    artifact (``fingerprints.verify_pinned_model_modules``), which needs a
+    genuinely parseable joblib file even for a synthetic fixture."""
+    buffer = io.BytesIO()
+    joblib.dump({"kind": "synthetic_test_fixture"}, buffer, compress=3)
+    return buffer.getvalue()
+
+
+#: Built once at import time: real joblib bytes, deterministic, no engine.*
+#: reference for :func:`write_reference_inputs`'s default ``model_bytes``.
+_SYNTHETIC_MODEL_BYTES = _synthetic_model_bytes()
+
+
 def _put(root: Path, relative: str, data: bytes) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +212,7 @@ def reference_cache_path(root: Path, fold: str = "202401") -> str:
     return f"{reference_inputs.TIER4_SERVING_DIR}/{REFERENCE_MODEL_ID}_{fold}_{digest}.joblib"
 
 
-def write_reference_inputs(root: Path, *, model_bytes: bytes = b"synthetic size model v1",
+def write_reference_inputs(root: Path, *, model_bytes: bytes = _SYNTHETIC_MODEL_BYTES,
                            fold: str = "202401") -> None:
     """Calendar, registry naming one champion artifact, structures, chooser pool,
     one Tier-4 serving cache and the two Tier-4-derived model outputs (task

@@ -107,6 +107,7 @@ __all__ = [
     "LEGACY_SNAPSHOT_PATH",
     "REGISTRY_PATH",
     "TIER4_SERVING_DIR",
+    "champion_artifact_paths",
     "champion_entries",
     "kind_for_path",
     "manifest_pins",
@@ -211,6 +212,16 @@ def champion_entries(registry_path: Path) -> list[dict]:
         raise errors.fail("CONTRACT_MISMATCH", "legacy model registry is not the reviewed shape",
                           details={"path": _REGISTRY_PATH}) from exc
     return [entry for entry in models if entry.get("champion") is True]
+
+
+def champion_artifact_paths(registry_path: Path) -> tuple[str, ...]:
+    """Root-relative paths of every champion artifact, validated the same
+    way ``resolve_reference_files`` validates them (well-formed, inside the
+    models directory) but without a panel hash or a bytes-vs-registry-sha256
+    check. ``engine.v2.ops.fingerprints`` needs these at plan time, before a
+    panel exists, to scan pinned artifacts for the ``engine.*`` modules their
+    pickles reference."""
+    return tuple(sorted({_artifact_path(entry) for entry in champion_entries(registry_path)}))
 
 
 def _artifact_path(entry: dict) -> str:
