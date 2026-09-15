@@ -140,8 +140,16 @@ def _write_parquet(path: Path, table: pa.Table) -> None:
 
 
 def build_legacy_store(root: Path, *, year: int = 2024, daily_market_parts: int = 1,
-                       rows_per_part: int = 2) -> None:
-    """A synthetic legacy repo root: tables, feature files, SNAPSHOT and reference inputs."""
+                       rows_per_part: int = 2, generated_at: str | None = None) -> None:
+    """A synthetic legacy repo root: tables, feature files, SNAPSHOT and reference inputs.
+
+    ``generated_at`` (task brief 2026-09-14 SEND-BACK): the SNAPSHOT's own
+    ``generated_at`` date, which ``plan_import`` now reads as the manifest's
+    ``selected_session`` (``import_snapshot.py::_check_snapshot_shape``) —
+    defaults to a date tied to ``year``, never ``None``, since a real
+    ``engine.data.manifest.write_snapshot`` payload always has one and
+    ``_check_snapshot_shape`` now refuses a non-date value.
+    """
     data = root / reference_inputs.DATA_DIR
     for name in data_legacy_mapping.TIER2_DATASETS:
         contract_doc = MAPPING["tables"][name]
@@ -158,7 +166,9 @@ def build_legacy_store(root: Path, *, year: int = 2024, daily_market_parts: int 
     keys = MAPPING["legacy_snapshot_metadata"]["expected_top_level_keys"]
     snapshot_path = root / reference_inputs.LEGACY_SNAPSHOT_PATH
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(json.dumps({key: None for key in keys}))
+    payload = {key: None for key in keys}
+    payload["generated_at"] = generated_at or f"{year}-01-15T00:00:00+00:00"
+    snapshot_path.write_text(json.dumps(payload))
     write_reference_inputs(root, fold=f"{year}01")
 
 
@@ -185,11 +195,15 @@ def reference_cache_path(root: Path, fold: str = "202401") -> str:
 
 def write_reference_inputs(root: Path, *, model_bytes: bytes = b"synthetic size model v1",
                            fold: str = "202401") -> None:
-    """Calendar, registry naming one champion artifact, structures, chooser pool and
-    one Tier-4 serving cache for the panel already written under ``root``."""
+    """Calendar, registry naming one champion artifact, structures, chooser pool,
+    one Tier-4 serving cache and the two Tier-4-derived model outputs (task
+    brief 2026-09-14: pnl_sim_history/recalibration_pairs) for the panel
+    already written under ``root``."""
     _put(root, _INPUTS["calendar"]["path"], b"Price,Close\nTicker,^GSPC\nDate,\n2024-01-02,4742.83\n")
     _put(root, _INPUTS["structure_champions"]["path"], b"{}\n")
     _put(root, _INPUTS["chooser_analog_pool"]["path"], b"synthetic chooser analog pool")
+    _put(root, _INPUTS["pnl_sim_history"]["path"], b"synthetic pnl_sim_history parquet bytes")
+    _put(root, _INPUTS["recalibration_pairs"]["path"], b"synthetic recalibration_pairs parquet bytes")
     _put(root, reference_artifact_path(), model_bytes)
     registry = {"version": 1, "models": [
         {"id": REFERENCE_MODEL_ID, "champion": True, "produces": "pred_abs_move",

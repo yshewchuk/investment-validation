@@ -181,8 +181,16 @@ def _commit_snapshot_import(conn, store, claim, documents_in, inspections, req_h
     legacy_snapshot_object_ref = publish_legacy_file(store, claim.attempt_id, legacy_root,
                                                       request.legacy_snapshot_source_ref)
     keepalive()
+    # as_of=manifest.selected_session: the pinned SNAPSHOT's own decision
+    # session (import_snapshot.py's _check_snapshot_shape -- the SNAPSHOT's
+    # generated_at date), NOT clock.now() (task brief 2026-09-14 SEND-BACK: a
+    # clock read here made the Tier-4 fold pnl_sim_history/recalibration_pairs
+    # are stamped with depend on WHEN the import happened to run, not what the
+    # snapshot's data reflects). ``or None`` maps an empty session (an older
+    # manifest built before this field was populated) to the same "missing"
+    # refusal a genuinely absent session gets, rather than parsing "".
     references = publish_reference_inputs(store, claim.attempt_id, legacy_root, manifest.file_refs,
-                                          keepalive=keepalive)
+                                          as_of=manifest.selected_session or None, keepalive=keepalive)
     mark = _lap(timings, "publish", clock, mark)
 
     table_manifests, all_records = _build_manifests(request, inspections, published, req_hash,
