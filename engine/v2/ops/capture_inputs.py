@@ -69,6 +69,7 @@ from engine.v2.data.legacy_nightly_read_plan import (
 )
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
 from engine.v2.ops.errors import fail
+from engine.v2.ops.fingerprints import verify_pinned_model_modules
 from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache, manifest_files
 
 __all__ = ["capture", "write_manifest"]
@@ -352,8 +353,15 @@ def _resolve_reference_bundle(root: Path, families: list[str], panel_hash: str |
         panel_hash = (manifest_files(root, [panel_relative])[panel_relative]["content_hash"]
                      if _single_file(root, panel_relative) is not None
                      else CONTENT_HASH_PREFIX + "0" * 64)
-    return reference_inputs.resolve_reference_files(
+    refs = reference_inputs.resolve_reference_files(
         root, panel_content_hash=panel_hash, file_ref=_file_ref_for(root))
+    # The code snapshot's MODEL_PICKLE_MODULES is declared, not discovered
+    # from data under the code root (a real nightly plans/snapshots code
+    # from a frozen worktree that never carries data/) -- verify it against
+    # the champion artifacts actually pinned here, where data/ genuinely
+    # exists, instead of trusting the declared list blindly.
+    verify_pinned_model_modules(root)
+    return refs
 
 
 def _build_manifest(file_refs, registry_and_model_refs, calendar_ref,

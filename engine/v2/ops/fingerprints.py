@@ -40,25 +40,61 @@ def source_closure(root, entries):
     return dict(sorted(found.items()))
 
 
+#: Every ``engine.*`` module a champion model artifact's pickle is known to
+#: reference but that no ``.py`` file statically imports (real evidence: the
+#: DYN-SV chooser champion's pickle GLOBALs ``engine.models.ensemble``, which
+#: nothing imports — the registry only imports :mod:`engine.models.registry`,
+#: and the pickle bytes carry the rest; ``engine.models.training.common``/
+#: ``.runup_move`` are reached the same way by ``size_v1_4``/
+#: ``runup_move_d14_v1_gbm``, though today they also happen to be reachable
+#: through ``engine.models.training.train_all``'s own static imports).
+#:
+#: Declared here, checked into source control, rather than discovered by
+#: scanning ``data/models/*.joblib`` under the CODE root: a real nightly
+#: plans and snapshots its code from a frozen worktree (e.g.
+#: ``/root/phase2-heavy-<commit>``) that never carries ``data/`` — only the
+#: live host passed as ``--source-root`` to ``capture-inputs`` does. Scanning
+#: the code root made ``worker_source_manifest`` a silent no-op in the real
+#: flow and ``implementation_ref`` depend on whether ``data/`` happened to
+#: sit next to the code. :func:`verify_pinned_model_modules` (called from
+#: ``engine.v2.ops.capture_inputs``, against that live host) keeps this set
+#: honest by refusing when a pinned artifact needs a module NOT in it.
+MODEL_PICKLE_MODULES = (
+    "engine.models.ensemble",
+    "engine.models.registry",
+    "engine.models.training.common",
+    "engine.models.training.runup_move",
+)
+
+
 def worker_source_manifest(root):
     """Package initializers imported before the fixed worker module, plus
-    every ``engine.*`` module a currently-materialized champion model
-    artifact's pickle references but no ``.py`` file statically imports.
-
-    A static AST closure (below) only sees code reachable by ``import``. A
-    joblib-pickled model artifact can reference a class (e.g. a custom
-    ensemble wrapper) that nothing ever imports by name — the model registry
-    only imports :mod:`engine.models.registry`, and the pickle bytes carry
-    the rest. Real evidence: the DYN-SV chooser champion's pickle GLOBALs
-    ``engine.models.ensemble``, which no ``.py`` file in this tree imports.
-    """
+    :data:`MODEL_PICKLE_MODULES` and their own import closure — unconditional,
+    independent of whether ``data/`` exists under ``root``."""
     root = Path(root)
     entries = [
         "engine/__init__.py", "engine/v2/__init__.py",
         "engine/v2/ops/__init__.py", "engine/v2/ops/worker.py",
     ]
-    entries += _model_module_entries(root)
+    entries += _declared_module_entries(root, MODEL_PICKLE_MODULES)
     return source_closure(root, entries)
+
+
+def _declared_module_entries(root, modules):
+    """Entries for every module in ``modules``, refusing (``INPUT_CHANGED``)
+    if one is missing from the source tree — unlike :func:`_module_files`,
+    which silently omits what it cannot find (right for a *discovered*
+    static import, wrong for a *declared* dependency this function's caller
+    cannot ship without)."""
+    entries = []
+    for module in modules:
+        files = _module_files(root, module)
+        leaf = module.replace(".", "/")
+        if not any(f in (leaf + ".py", leaf + "/__init__.py") for f in files):
+            raise fail("INPUT_CHANGED", "a declared model-pickle module is missing from the "
+                      "source tree", details={"module": module})
+        entries.extend(files)
+    return entries
 
 
 def _module_files(root, name):
@@ -174,43 +210,41 @@ def _pickled_modules(path):
     return unpickler.referenced_modules
 
 
-def _pinned_champion_artifacts(root):
-    """Root-relative paths of champion artifacts that are actually present
-    under ``root`` right now. A champion the registry declares but whose
-    bytes are not materialized here (every non-production worktree: ``data/``
-    is gitignored) is not this function's concern — a missing artifact is
-    refused separately, where something actually needs to read it
-    (``Registry.load``, ``reference_inputs.resolve_reference_files``). This
-    only adds source modules for artifacts it can actually open."""
+def verify_pinned_model_modules(root):
+    """Refuse (``INPUT_CHANGED``) unless every champion model artifact's
+    pickle references only ``engine.*`` modules already in
+    :data:`MODEL_PICKLE_MODULES`.
+
+    Called from ``engine.v2.ops.capture_inputs`` where the plan already
+    resolves pinned legacy reference inputs, against the live data host
+    (``--source-root``, e.g. ``/root/investing-plan``) — never against the
+    frozen code-snapshot root ``worker_source_manifest`` builds from, which
+    never carries ``data/models/*.joblib``. Keeps the declared set honest: a
+    newly promoted champion that needs an undeclared module refuses here
+    instead of reaching a worker as ``ModuleNotFoundError``.
+
+    A pinned champion artifact this refuses to find or read is a refusal
+    too — no silent skip: unlike :func:`worker_source_manifest`'s callers,
+    this function only ever runs where ``data/`` is expected to exist.
+    """
     from engine.v2.data.reference_inputs import REGISTRY_PATH, champion_artifact_paths
 
+    root = Path(root)
     registry_path = root / REGISTRY_PATH
     if not registry_path.is_file():
-        return ()
-    return tuple(rel for rel in champion_artifact_paths(registry_path) if (root / rel).is_file())
-
-
-def _model_module_entries(root):
-    """Extra :func:`source_closure` entries for every ``engine.*`` module a
-    pinned, materialized champion artifact's pickle references. Refuses
-    (``INPUT_CHANGED``) when a referenced module does not exist anywhere in
-    the source tree — a plan must not silently ship a code snapshot its own
-    pinned models cannot load."""
-    modules = set()
-    for rel in _pinned_champion_artifacts(root):
-        modules |= {m for m in _pickled_modules(root / rel)
-                   if m == "engine" or m.startswith("engine.")}
-    entries = set()
-    for module in sorted(modules):
-        files = _module_files(root, module)
-        leaf = module.replace(".", "/")
-        if not any(f in (leaf + ".py", leaf + "/__init__.py") for f in files):
+        raise fail("INPUT_CHANGED", "model registry is missing", details={"path": REGISTRY_PATH})
+    declared = set(MODEL_PICKLE_MODULES)
+    for rel in champion_artifact_paths(registry_path):
+        path = root / rel
+        if not path.is_file():
+            raise fail("INPUT_CHANGED", "a pinned champion artifact is missing",
+                      details={"artifact": rel})
+        found = {m for m in _pickled_modules(path) if m == "engine" or m.startswith("engine.")}
+        missing = found - declared
+        if missing:
             raise fail("INPUT_CHANGED", "a pinned model artifact references an engine module "
-                      "absent from the source tree", details={"module": module,
-                                                               "artifact_paths": list(
-                                                                   _pinned_champion_artifacts(root))})
-        entries.update(files)
-    return sorted(entries)
+                      "outside the declared model-pickle closure",
+                      details={"artifact": rel, "modules": sorted(missing)})
 
 
 def environment_identity(thread_count=1):
