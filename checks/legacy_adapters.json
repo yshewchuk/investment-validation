@@ -1,5 +1,5 @@
 {
-  "count": 49,
+  "count": 55,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -739,9 +739,99 @@
       "retry": "none -- pure computation",
       "output": "projected trading-session dates for the nightly capture manifest",
       "removal_phase": "phase-4 scoring extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.pulls.price_refresh.load_events",
+      "reason": "ops price-refresh's read-only Tier-2 earnings_events loader for the scheduled full-history yfinance price re-downloader.",
+      "declared_on": "2026-09-14",
+      "runtime": "invoke_price_refresh",
+      "read_set": "Tier-2 earnings_events (curated)",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "none",
+      "output": "confirmed-events frame (ticker, event_date)",
+      "removal_phase": "phase-4 data extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.pulls.price_refresh.load_price_universe",
+      "reason": "ops price-refresh's read-only price-universe loader (the grandfathered px tree plus every ticker already in the Tier-1 fetch store).",
+      "declared_on": "2026-09-14",
+      "runtime": "invoke_price_refresh",
+      "read_set": "engine.paths.RAW_YF (read-only) + Tier-1 fetch store",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "none",
+      "output": "set of tickers",
+      "removal_phase": "phase-4 data extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.pulls.price_refresh.load_fetch_history",
+      "reason": "ops price-refresh's read-only Tier-1 dated-fetch history loader, for daily/monthly resumability.",
+      "declared_on": "2026-09-14",
+      "runtime": "invoke_price_refresh",
+      "read_set": "Tier-1 fetch store (yfinance history metadata)",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "none",
+      "output": "{ticker: [date, ...]}",
+      "removal_phase": "phase-4 data extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.pulls.price_refresh.plan_refresh",
+      "reason": "ops price-refresh's pure daily/monthly selection planner.",
+      "declared_on": "2026-09-14",
+      "runtime": "invoke_price_refresh",
+      "read_set": "none (pure function; inputs already loaded)",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "none",
+      "output": "plan document (daily/monthly/skipped ticker lists)",
+      "removal_phase": "phase-4 data extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.pulls.price_refresh.run_refresh",
+      "reason": "ops price-refresh's per-ticker fetch runner; never aborts on a single ticker's failure.",
+      "declared_on": "2026-09-14",
+      "runtime": "invoke_price_refresh",
+      "read_set": "none beyond the injected plan",
+      "write_set": "Tier-1 fetch store, via the passed Fetcher",
+      "credentials": "none (yfinance is unmetered/keyless)",
+      "hidden_subprocesses": "none",
+      "retry": "per-source throttle/backoff inside engine.data.fetch.Fetcher",
+      "output": "run report (counts, fetched, failed)",
+      "removal_phase": "phase-4 data extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.fetch.Fetcher",
+      "reason": "ops price-refresh's real run constructs the same cache-first Tier-1 fetch wrapper every other pull in this codebase uses, rooted at the default (non-grandfathered) engine.paths.RAW_FETCH.",
+      "declared_on": "2026-09-14",
+      "runtime": "invoke_price_refresh",
+      "read_set": "none beyond what run_refresh/Fetcher.fetch requests",
+      "write_set": "Tier-1 fetch store (data/raw/fetch/yfinance/**)",
+      "credentials": "none (yfinance is unmetered/keyless)",
+      "hidden_subprocesses": "none",
+      "retry": "per-source throttle/backoff, engine/data/throttle.py",
+      "output": "dated Tier-1 body + meta per ticker",
+      "removal_phase": "phase-4 data extraction"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
-  "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. P2-6 (snapshot-to-legacy materialization, D13/D14 adapter half) adds 2 more engine.v2.data symbols (engine.data.store._read_part, engine.data.schemas.coerce) so materialize() proves a written legacy file is readable by the unchanged legacy loaders before it is locked read-only; each exact legacy symbol keeps its own ledger entry per review (PANEL_COLUMNS, tier4.COLUMNS, tier4.KEY_COLUMNS stay three separate entries) even though this puts engine.v2.data.legacy_adapter's own import fan-out one over its 8-edge budget -- reported in the task report as a stop-and-decide finding, not gamed by collapsing entries. P2-7 (supervised snapshot import, D16 synthetic) adds one more engine.v2.data symbol, engine.data.schemas.SOURCE_PRIORITY, for a deterministic source_priority_version fingerprint. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled. capture-inputs (2026-09-14, this task) adds two more engine.v2.ops symbols, engine.data.fetch.iter_cached and engine.calendar.projected_trading_days, for the nightly barrier read-set capture tool's raw-fetch enumeration and stale-calendar-safe session walk -- see engine/v2/ops/capture_inputs.py and engine/v2/data/legacy_nightly_read_plan.py.",
-  "committed_ceiling": 49
+  "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. P2-6 (snapshot-to-legacy materialization, D13/D14 adapter half) adds 2 more engine.v2.data symbols (engine.data.store._read_part, engine.data.schemas.coerce) so materialize() proves a written legacy file is readable by the unchanged legacy loaders before it is locked read-only; each exact legacy symbol keeps its own ledger entry per review (PANEL_COLUMNS, tier4.COLUMNS, tier4.KEY_COLUMNS stay three separate entries) even though this puts engine.v2.data.legacy_adapter's own import fan-out one over its 8-edge budget -- reported in the task report as a stop-and-decide finding, not gamed by collapsing entries. P2-7 (supervised snapshot import, D16 synthetic) adds one more engine.v2.data symbol, engine.data.schemas.SOURCE_PRIORITY, for a deterministic source_priority_version fingerprint. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled. capture-inputs (2026-09-14, this task) adds two more engine.v2.ops symbols, engine.data.fetch.iter_cached and engine.calendar.projected_trading_days, for the nightly barrier read-set capture tool's raw-fetch enumeration and stale-calendar-safe session walk -- see engine/v2/ops/capture_inputs.py and engine/v2/data/legacy_nightly_read_plan.py. ops price-refresh (2026-09-14, this task) adds six more engine.v2.ops symbols -- the five engine.data.pulls.price_refresh entry points (load_events, load_price_universe, load_fetch_history, plan_refresh, run_refresh) plus engine.data.fetch.Fetcher -- so the scheduled full-history yfinance price re-downloader crosses the v2/legacy boundary through legacy_adapter.invoke_price_refresh instead of engine.v2.ops.cli importing engine.data.* directly. See engine/data/pulls/price_refresh.py and engine/v2/ops/legacy_adapter.py.",
+  "committed_ceiling": 55
 }
