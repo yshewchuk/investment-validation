@@ -108,6 +108,36 @@ rule at all, see :func:`engine.v2.data.price_history.resolve_pool`), never a
 capture rule: :func:`capture` now merges the px entry (if any) with EVERY
 Tier-1 entry into one ascending-``retrieved_at`` capture order per ticker,
 with anti-backdating across all of them (see :func:`_capture_ticker`).
+
+**Contract bump on the first real capture's parsing defect (2026-09-15).**
+``price_history_table.PRICE_HISTORY_CONTRACT.contract_id`` moved
+``price_history.v1`` -> ``price_history.v2`` alongside the
+``read_tier1_body`` fix (see ``engine.v2.data.price_download_sources``'s
+module docstring for the defect itself). ``Repository.latest_dataset_version``
+is already keyed by ``contract_id`` (``repository.py``), so a bumped contract
+gives every ticker a fresh dataset-version chain for free: :func:`_capture`'s
+``prior_by_ticker`` resolves empty under the new contract_id, and every
+retrieval is captured as ``added`` rather than a no-op, with no separate
+"re-capture" code path. That alone was not enough, though: the no-op/
+anti-backdating check (:func:`_prior_attempts`) reads ``data_price_captures``
+by ``ticker`` only, unscoped by contract -- and a retrieval's ``source_hash``
+is a hash of its raw bytes, unaffected by a PARSER change, so an unscoped
+check would see the OLD contract's ``added``/``duplicate_source_hash`` rows
+for the identical bytes and refuse to recapture under the fix. Schema v9
+adds a ``contract_id`` column to ``data_price_captures`` (default
+``'price_history.v1'`` for pre-migration rows, the literal true value they
+were captured under); :func:`_prior_attempts`/:func:`_insert_price_captures`
+read/write it as ``PRICE_HISTORY_CONTRACT.contract_id`` (the current
+constant), so no-op/anti-backdating history is scoped to the active
+contract's own chain, per-ticker. ``_commit_generation`` needed no change:
+its "replace whatever `price_history` manifest the head snapshot carries"
+step (keyed by TABLE NAME) and its "carry every OTHER contract's records
+forward unchanged" step (keyed by contract_id, so it also, harmlessly and
+idempotently, re-inserts the OLD contract's already-catalogued price_history
+fragment rows alongside the new ones -- never referenced by the new dataset
+version's own manifest) already compose correctly for a table whose contract
+changed between generations. The OLD snapshot is never touched: it still
+resolves through its own, unchanged ``price_history.v1`` dataset version.
 """
 from __future__ import annotations
 
@@ -227,27 +257,68 @@ def _tier1_meta_bytes(entry) -> bytes:
 def _parse_tier1(entry: dict) -> tuple[pd.DataFrame, bytes, str]:
     body = entry["entry"].body()
     meta_bytes = _tier1_meta_bytes(entry["entry"])
+    # ``read_tier1_body`` now parses real close_raw/high_raw values (Close/
+    # High) alongside close_adj (Adj Close) -- fixed 2026-09-15; this used to
+    # force both to NaN here, which was itself part of the defect (see
+    # ``price_download_sources``'s module docstring).
     frame = sources.read_tier1_body(body)
-    frame = frame.assign(close_raw=float("nan"), high_raw=float("nan"))
     frame = _stringify_dates(frame)
     retrieved_at = entry["fetched_at"]
     combined = body + b"\x00" + meta_bytes
     return frame, combined, retrieved_at
 
 
-def _overlap_disagreement(px_entry: dict, tier1_entry: dict) -> int:
-    """Count of dates where the px and Tier-1 series disagree on
-    ``close_adj`` (only column both sources carry), for the dry-run report.
+_OVERLAP_COLUMNS = ("close_adj", "close_raw", "high_raw")
+
+
+def _column_overlap(px_values: pd.Series, tier1_values: pd.Series) -> dict:
+    """Row-aligned, already-merged, already-dropna'd pair of series for one
+    column: count of dates where they differ (more than float noise, an
+    epsilon well under the 2e-6 relative float-representation slack measured
+    on real data) and the max relative difference, magnitudes only -- never
+    the values themselves (see the module's real-data dry-run notes).
     """
-    px_frame = sources.read_legacy_px_csv(px_entry["path"])
-    tier1_frame = sources.read_tier1_body(tier1_entry["entry"].body())
-    left = px_frame[["date", "close_adj"]].dropna()
-    right = tier1_frame[["date", "close_adj"]].dropna()
-    merged = left.merge(right, on="date", suffixes=("_px", "_tier1"))
-    if merged.empty:
-        return 0
-    differs = (merged["close_adj_px"] - merged["close_adj_tier1"]).abs() > 1e-6
-    return int(differs.sum())
+    diff = (px_values - tier1_values).abs()
+    denom = px_values.abs().where(px_values.abs() > 0, tier1_values.abs())
+    denom = denom.where(denom > 0, 1.0)
+    relative = diff / denom
+    differing = relative > 1e-9
+    return {"differing_dates": int(differing.sum()),
+           "max_relative_diff": float(relative.max()) if len(relative) else 0.0}
+
+
+def _overlap_disagreement(px_entry: dict, tier1_entry: dict) -> dict:
+    """Per-column disagreement between the px series and the LATEST Tier-1
+    retrieval, for the dry-run report: for each of close_adj/close_raw/
+    high_raw, the count of differing dates and the max relative difference
+    (2026-09-15 fix -- the prior version only ever compared close_adj, and
+    did so against a Tier-1 frame whose close_raw/high_raw were always NaN,
+    so ``overlapping_tickers_with_disagreement`` silently reported 0 for
+    columns it never actually compared).
+
+    Both frames are re-dated through :func:`_stringify_dates` before the
+    merge, the same normalization every stored row goes through: real Tier-1
+    bodies carry a tz-aware midnight (``yfinance``'s own exchange-local
+    timestamp), and ``read_tier1_body``'s ``utc=True`` conversion shifts that
+    to a non-midnight UTC time-of-day (e.g. ``05:00:00`` for EST) that never
+    equals px's plain calendar date on a raw ``date``-column merge -- a merge
+    on the un-normalized columns silently finds ZERO overlapping dates for
+    every ticker (caught on the real-data dry run, 2026-09-15: every column
+    reported 0/0 across 2,814 overlapping tickers, which is what a broken
+    join looks like, not what "the fix worked" looks like).
+    """
+    px_frame = _stringify_dates(sources.read_legacy_px_csv(px_entry["path"]))
+    tier1_frame = _stringify_dates(sources.read_tier1_body(tier1_entry["entry"].body()))
+    out = {}
+    for column in _OVERLAP_COLUMNS:
+        left = px_frame[["date", column]].dropna()
+        right = tier1_frame[["date", column]].dropna()
+        merged = left.merge(right, on="date", suffixes=("_px", "_tier1"))
+        if merged.empty:
+            out[column] = {"differing_dates": 0, "max_relative_diff": 0.0}
+            continue
+        out[column] = _column_overlap(merged[f"{column}_px"], merged[f"{column}_tier1"])
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -296,9 +367,19 @@ def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: pd.DataFrame
 
 
 def _prior_attempts(conn: sqlite3.Connection, ticker: str) -> list[dict]:
+    """Every past capture attempt for ``ticker``, scoped to the CURRENT
+    ``PRICE_HISTORY_CONTRACT.contract_id`` (schema v9 ``contract_id`` column,
+    2026-09-15). A contract bump therefore starts every ticker's no-op/
+    anti-backdating history fresh: without this scope, a fixed parser could
+    never recapture a ticker whose retrieval bytes (and so ``source_hash``)
+    are unchanged from an earlier, wrongly-parsed contract version -- exactly
+    the defect that motivated the bump (see ``price_history_table.py``'s
+    module docstring).
+    """
     rows = conn.execute(
         "SELECT source_hash, retrieved_at, outcome FROM data_price_captures WHERE ticker = ? "
-        "ORDER BY created_at", (ticker,)).fetchall()
+        "AND contract_id = ? ORDER BY created_at",
+        (ticker, PRICE_HISTORY_CONTRACT.contract_id)).fetchall()
     return [{"source_hash": r["source_hash"], "retrieved_at": r["retrieved_at"],
             "outcome": r["outcome"]} for r in rows]
 
@@ -460,11 +541,11 @@ def _insert_price_captures(conn: sqlite3.Connection, receipt_id: str, attempts: 
         audit_id = _audit_capture_id(receipt_id, a["capture_id"], a["outcome"])
         conn.execute(
             "INSERT INTO data_price_captures (capture_id, receipt_id, ticker, source_kind, "
-            "source_hash, retrieved_at, outcome, rows_added, rows_tombstoned, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_hash, retrieved_at, outcome, rows_added, rows_tombstoned, created_at, "
+            "contract_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (audit_id, receipt_id, a["ticker"], a["source_kind"], a["source_hash"],
              a["retrieved_at"], a["outcome"], a["rows_added"], a["rows_tombstoned"],
-             a["created_at"]))
+             a["created_at"], PRICE_HISTORY_CONTRACT.contract_id))
 
 
 def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: str, *,
@@ -587,7 +668,7 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
 
     results: list[dict] = []
     all_attempts: list[dict] = []
-    disagreements: dict[str, int] = {}
+    disagreements: dict[str, dict] = {}
 
     for ticker in tickers:
         entries: list[tuple[str, dict]] = []
@@ -619,6 +700,21 @@ def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, 
     return report
 
 
+def _aggregate_overlap(disagreements: dict) -> dict:
+    """Per-column totals across every overlapping ticker: differing-date
+    count summed, max relative difference taken as the max of maxes --
+    magnitudes only, never a price value (2026-09-15 fix, see
+    :func:`_overlap_disagreement`)."""
+    out = {}
+    for column in _OVERLAP_COLUMNS:
+        per_ticker = [v[column] for v in disagreements.values()]
+        out[column] = {
+            "differing_dates": sum(p["differing_dates"] for p in per_ticker),
+            "max_relative_diff": max((p["max_relative_diff"] for p in per_ticker), default=0.0),
+        }
+    return out
+
+
 def _summarize(results: list[dict], disagreements: dict, *, dry_run: bool) -> dict:
     by_outcome: dict[str, int] = {}
     tickers_seen = set()
@@ -633,5 +729,4 @@ def _summarize(results: list[dict], disagreements: dict, *, dry_run: bool) -> di
            "tickers_seen": len(tickers_seen), "by_outcome": by_outcome, "rows_added": rows_added,
            "rows_tombstoned": rows_tombstoned, "estimated_compressed_bytes": estimated_bytes,
            "overlapping_tickers": len(disagreements),
-           "overlapping_tickers_with_disagreement": sum(1 for v in disagreements.values() if v > 0),
-           "disagreeing_dates_total": sum(disagreements.values())}
+           "overlap_by_column": _aggregate_overlap(disagreements)}

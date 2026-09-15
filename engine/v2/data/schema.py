@@ -601,9 +601,37 @@ _V8 = (
     *_immutable_triggers("data_receipt_lineage"),
 )
 
+# --------------------------------------------------------------------------
+# v9 — scope the no-op/anti-backdating capture log to a price_history
+# contract chain (never edit v1-v8 above)
+# --------------------------------------------------------------------------
+#
+# The gap this closes: ``data_price_captures.source_hash`` is a hash of a
+# retrieval's raw bytes, unaffected by a PARSER change -- so when
+# ``price_history_table.PRICE_HISTORY_CONTRACT.contract_id`` bumped
+# ``price_history.v1`` -> ``price_history.v2`` on the 2026-09-15 Tier-1
+# parsing fix, a ticker's identical retrieval bytes still hashed to the SAME
+# ``source_hash`` already recorded (as ``added``) under v1. Without a
+# contract scope, ``price_history_store._prior_attempts`` would see that row
+# and refuse to recapture under the fix as ``duplicate_source_hash``, even
+# though the new contract's own dataset-version chain (keyed by contract_id,
+# ``Repository.latest_dataset_version``) starts genuinely empty.
+#
+# ``DEFAULT 'price_history.v1'`` is not an arbitrary placeholder: every row
+# already in this table when this migration runs was, in fact, captured
+# under that contract_id (the only one that has ever existed before this
+# migration) -- so the backfilled value is the true historical fact, not a
+# sentinel.
+_V9 = (
+    """ALTER TABLE data_price_captures ADD COLUMN contract_id TEXT NOT NULL
+    DEFAULT 'price_history.v1'""",
+    "CREATE INDEX data_price_captures_contract ON data_price_captures(contract_id, ticker)",
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
              (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
              (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6),
-             (7, "price_captures", _V7), (8, "receipt_lineage", _V8))
+             (7, "price_captures", _V7), (8, "receipt_lineage", _V8),
+             (9, "price_captures_contract_scope", _V9))

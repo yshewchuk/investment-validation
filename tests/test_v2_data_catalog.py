@@ -188,6 +188,7 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
         ("data", 3, "import_receipt_scope"), ("data", 4, "dataset_version_partition_hashes"),
         ("data", 5, "import_reference_inputs"), ("data", 6, "import_reference_input_fold"),
         ("data", 7, "price_captures"), ("data", 8, "receipt_lineage"),
+        ("data", 9, "price_captures_contract_scope"),
     ]
     ops_versions = {r[0] for r in conn.execute(
         "SELECT version FROM schema_versions WHERE owner = 'ops'")}

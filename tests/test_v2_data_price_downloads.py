@@ -9,8 +9,10 @@ the same resolution rule at the row-version grain; its stability property
 test is ``test_as_of_view_property_full_history_equals_own_retrieval_and_is_stable``
 below, migrated from ``price_downloads``'s own
 ``test_resolve_at_cutoff_property_appending_later_never_changes_earlier_cutoffs``),
-``engine.v2.data.price_download_sources`` (read-only legacy parsing, with
-parse equality pinned against the real ``panel._yf_history_from_tier1``), and
+``engine.v2.data.price_download_sources`` (read-only legacy parsing; Tier-1
+``close_raw`` is anchored against the real ``panel._yf_history_from_tier1``'s
+``close_adj`` -- the same ``Close`` column, read for a different purpose --
+see ``test_tier1_close_column_matches_legacy_panels_close_adj``), and
 ``engine.v2.data.price_history_query``/``Repository.get_price_series``/
 ``get_close`` (``Repository.scan(DataQuery)`` over a real, synthetic,
 committed ``price_history`` snapshot -- no network, no legacy writes).
@@ -267,24 +269,62 @@ def test_normalize_px_csv_reshapes_and_fills_missing_columns(tmp_path):
     assert pd.isna(normalized.iloc[0]["close_raw"])
 
 
-def _yfinance_csv_bytes(rows):
-    lines = ["Date,Open,High,Low,Close,Volume"]
+def _yfinance_csv_bytes(rows, *, header="Date,Open,High,Low,Close,Adj Close,Volume", adj=None):
+    """``rows``: ``[(date, close), ...]`` -- used for Open/High/Low/Close (so
+    ``close_raw``/``high_raw`` both come out equal to ``close``). ``adj``,
+    when given, is a parallel ``{date: adj_close}`` map so ``Adj Close`` (->
+    ``close_adj``) can differ from ``Close`` -- real Tier-1 bodies always
+    have both (2026-09-15 fix; see ``price_download_sources``'s module
+    docstring)."""
+    lines = [header]
     for d, close in rows:
-        lines.append(f"{d},{close},{close},{close},{close},1000")
+        adj_close = adj[d] if adj else close
+        lines.append(f"{d},{close},{close},{close},{close},{adj_close},1000")
     return ("\n".join(lines) + "\n").encode()
 
 
-def test_read_tier1_body_parses_close_as_close_adj():
-    body = _yfinance_csv_bytes([("2024-01-01", 10.0), ("2024-01-02", 11.0)])
+def test_read_tier1_body_parses_all_three_columns_correctly():
+    """A real 7-column Tier-1 body: close_adj = Adj Close (dividend-adjusted),
+    close_raw = Close, high_raw = High -- distinct values on each, so a
+    column-swap bug would fail this (2026-09-15 fix)."""
+    body = _yfinance_csv_bytes([("2024-01-01", 10.0), ("2024-01-02", 11.0)],
+                               adj={"2024-01-01": 9.5, "2024-01-02": 10.6})
     frame = sources.read_tier1_body(body)
-    assert list(frame["close_adj"]) == [10.0, 11.0]
+    assert list(frame["close_adj"]) == [9.5, 10.6]
+    assert list(frame["close_raw"]) == [10.0, 11.0]
+    assert list(frame["high_raw"]) == [10.0, 11.0]
 
 
-def test_tier1_parse_equality_against_real_panel_function(tmp_path, monkeypatch):
-    """Byte-for-byte parse equality against the real ``panel._yf_history_from_tier1``,
-    per the module docstring's judgement call: the real function is not
-    root-parametrized, so ``engine.paths.RAW_FETCH`` is monkeypatched at a
-    fixture rather than this module reimplementing legacy path resolution.
+def test_read_tier1_body_refuses_when_adj_close_column_is_missing():
+    body = _yfinance_csv_bytes([("2024-01-01", 10.0)],
+                               header="Date,Open,High,Low,Close,Volume")
+    with pytest.raises(DataError) as exc:
+        sources.read_tier1_body(body)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def test_read_tier1_body_refuses_when_a_column_parses_entirely_nan():
+    lines = ["Date,Open,High,Low,Close,Adj Close,Volume",
+            "2024-01-01,10.0,10.0,10.0,10.0,not-a-number,1000",
+            "2024-01-02,11.0,11.0,11.0,11.0,also-not-a-number,1000"]
+    body = ("\n".join(lines) + "\n").encode()
+    with pytest.raises(DataError) as exc:
+        sources.read_tier1_body(body)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details["all_nan_columns"] == ["close_adj"]
+
+
+def test_tier1_close_column_matches_legacy_panels_close_adj(tmp_path, monkeypatch):
+    """Legacy's own ``_yf_history_from_tier1`` (panel.py:444-474) maps Tier-1
+    ``Close`` to ITS ``close_adj`` -- a different semantic (split-adjusted
+    only, for run-up features; that function's own docstring says dividends
+    are never adjusted there). This module's ``close_raw`` reads the SAME
+    ``Close`` column, so it should match legacy's ``close_adj`` output even
+    though this module's OWN ``close_adj`` (from ``Adj Close``) legitimately
+    differs -- a lighter anchor than the byte-for-byte parity this test used
+    to assert, retired 2026-09-15 because the two functions now compute
+    genuinely different columns on purpose (see the module docstring's
+    "Tier-1 fallback" section: parity with legacy is not the goal here).
     """
     from engine.data.features import panel
     from engine.data.fetch import cache_key
@@ -294,7 +334,8 @@ def test_tier1_parse_equality_against_real_panel_function(tmp_path, monkeypatch)
     key = cache_key("yfinance", "history", {"ticker": ticker, "period": "max"})
     sub = fetch_root / "yfinance" / key[:2]
     sub.mkdir(parents=True)
-    body = _yfinance_csv_bytes([("2024-01-01", 10.0), ("2024-01-02", 11.5), ("2024-01-03", 12.25)])
+    body = _yfinance_csv_bytes([("2024-01-01", 10.0), ("2024-01-02", 11.5), ("2024-01-03", 12.25)],
+                               adj={"2024-01-01": 9.9, "2024-01-02": 11.4, "2024-01-03": 12.1})
     (sub / f"{key}.body.gz").write_bytes(gzip.compress(body, mtime=0))
     (sub / f"{key}.meta.json").write_text(json.dumps({
         "source": "yfinance", "endpoint": "history", "key": key,
@@ -307,7 +348,8 @@ def test_tier1_parse_equality_against_real_panel_function(tmp_path, monkeypatch)
     real = panel._yf_history_from_tier1(ticker)
     ours = sources.read_tier1_body(body)
 
-    assert list(real["close_adj"]) == list(ours["close_adj"])
+    assert list(real["close_adj"]) == list(ours["close_raw"])
+    assert list(ours["close_adj"]) == [9.9, 11.4, 12.1]
     assert [str(d)[:10] for d in real["date"]] == [str(d)[:10] for d in ours["date"]]
 
 

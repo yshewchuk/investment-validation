@@ -1,6 +1,22 @@
 """The ``price_history`` ``TableContract`` (design confirmed 2026-09-14
 SEND-BACK: "the user explicitly asked for Tier 2").
 
+**Bumped to ``price_history.v2`` (2026-09-15).** The first real shadow
+capture found that ``close_raw``/``high_raw`` parsed all-NaN for every
+Tier-1-sourced ticker and ``close_adj`` silently carried a split-adjusted
+(not dividend-adjusted) value -- ``engine.v2.data.price_download_sources``'s
+module docstring has the defect. Fixing the parser changes ``close_raw``'s/
+``high_raw``'s ``null_policy``/``adjustment_basis`` (Tier-1 now supplies real
+values, not a source-kind-conditioned NaN) -- exactly the "changed... null
+policy... requires a new major contract_id" case the schema evolution policy
+below names, so ``contract_id``/``semantic_version`` both bumped rather than
+editing ``price_history.v1`` in place. See
+``engine.v2.ops.price_history_store``'s module docstring, "Contract bump on
+the first real capture's parsing defect", for how a capture run recaptures
+cleanly under the new id (a fresh per-contract dataset-version chain, plus a
+schema v9 ``contract_id`` scope on the no-op/anti-backdating capture log) and
+why the OLD, ``price_history.v1``-pinned snapshot is never touched.
+
 Not built by ``legacy_mapping.py``: that module's ``build_legacy_mapping``
 exists to map a *legacy-scanned* table's own ``engine.data.schemas`` symbol
 plus a reviewed ``legacy_annotations.json`` entry onto a ``TableContract``
@@ -59,13 +75,16 @@ _COLUMNS = (
                    unit="price_per_share", adjustment_basis="legacy_px_csv/tier1_fetch as read",
                    null_policy="null on a tombstone row (deleted=true)"),
     ColumnContract(name="close_raw", physical_type="float64", nullable=True,
-                   unit="price_per_share", adjustment_basis="unadjusted, when the source carries it",
-                   null_policy="null on a tombstone row, or when the source (Tier-1) has no "
-                              "unadjusted series at all"),
+                   unit="price_per_share", adjustment_basis="unadjusted (px: Close; Tier-1: the "
+                                                             "yfinance history CSV's own Close, "
+                                                             "split-adjusted only)",
+                   null_policy="null on a tombstone row only -- both sources carry this column "
+                              "as of price_history.v2"),
     ColumnContract(name="high_raw", physical_type="float64", nullable=True,
-                   unit="price_per_share", adjustment_basis="unadjusted, when the source carries it",
-                   null_policy="null on a tombstone row, or when the source (Tier-1) has no "
-                              "unadjusted series at all"),
+                   unit="price_per_share", adjustment_basis="unadjusted (px: High; Tier-1: the "
+                                                             "yfinance history CSV's own High)",
+                   null_policy="null on a tombstone row only -- both sources carry this column "
+                              "as of price_history.v2"),
     ColumnContract(name="retrieved_at", physical_type="string", nullable=False,
                    timezone="UTC", observation_time_semantics="when this row's value was captured "
                                                                "-- the bitemporal 'as of' dimension"),
@@ -80,9 +99,9 @@ _COLUMNS = (
 
 def _build() -> TableContract:
     fields = dict(
-        contract_id="price_history.v1",
+        contract_id="price_history.v2",
         table_name=PRICE_HISTORY_TABLE_NAME,
-        semantic_version="1.0.0",
+        semantic_version="2.0.0",
         columns=_COLUMNS,
         primary_key=("ticker", "date", "retrieved_at"),
         duplicate_policy="none_by_construction -- diff_retrieval never emits two rows for the "
