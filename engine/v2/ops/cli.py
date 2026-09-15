@@ -34,6 +34,7 @@ from engine.v2.ops.recovery import (
     read_boot_id,
     reconcile_attempt,
 )
+from engine.v2.ops.session_backfill import backfill_outcome_sessions
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, get_job, submit, submit_graph
 from engine.v2.ops.supervisor import Service, serve
@@ -223,6 +224,23 @@ def doctor(root, clock):
             result["integrity_errors"] = integrity_errors(conn)
             result["schema_versions"] = [list(row) for row in conn.execute(
                 "SELECT owner,version,checksum FROM schema_versions")]
+            # 2026-09-15: a NULL generation_ref outcome row can never dedupe
+            # a same-session legacy_settlement rerun (decision_commit.
+            # _match_same_session matches only a recorded generation_ref).
+            # backfill_outcome_sessions (engine.v2.ops.session_backfill)
+            # runs automatically on every write-opened catalog (cli.main's
+            # _ensure_outcome_sessions_backfilled), so a nonzero count here
+            # means either the backfill has not yet had a chance to run
+            # against this root (a fresh copy nobody has "ops serve"d or
+            # "ops ledger import-history"d yet) or those specific rows were
+            # underivable and are staying NULL by design -- surfaced,
+            # never hidden, so an operator can tell the two apart.
+            applied = any(row[0] == "outcome_session_backfill" for row in result["schema_versions"])
+            result["outcome_sessions"] = {
+                "backfill_applied": applied,
+                "undetermined": conn.execute(
+                    "SELECT COUNT(*) FROM decisions WHERE kind='outcome' "
+                    "AND generation_ref IS NULL").fetchone()[0]}
         finally:
             conn.close()
     return result
@@ -342,6 +360,41 @@ def _plan_command(args, root, conn, clock):
         plan = experiment_plan(args.spec, smoke=args.no_ledger)
     ref = save_plan(conn, root, plan, clock=clock)
     return {"plan_ref": ref.artifact_id, "plan": plan}
+
+
+def _ensure_outcome_sessions_backfilled(conn, root, clock):
+    """Run the outcome-session data migration exactly once per catalog,
+    before the first ``legacy_settlement`` commit in this process can see a
+    ``generation_ref IS NULL`` outcome row (``engine.v2.ops.session_backfill``;
+    2026-09-15: without a recorded ``generation_ref``,
+    ``decision_commit._match_same_session`` can never dedupe a same-session
+    rerun against that row).
+
+    Called from ``main()`` right after ``open_catalog`` returns -- the one
+    place in the CLI a production catalog connection AND its artifact store
+    are both already in hand (``ArtifactStore(root)``, byte-identical to the
+    store every command below constructs and to ``supervisor.Service``'s own
+    ``self.store``), and ahead of every real writer of a ``kind="outcome"``
+    decision: ``ops serve`` (the nightly's ``legacy_settlement`` action) and
+    ``ops ledger import-history`` both dispatch from here. ``ops init``
+    reaches this too -- a no-op on the empty catalog it just created, but it
+    marks the one-shot ``schema_versions`` bookkeeping applied immediately,
+    so the very first real command afterwards costs only that marker's
+    SELECT, never an artifact scan.
+
+    Idempotent and check-first by construction (not by anything added here):
+    ``backfill_outcome_sessions`` itself reads the marker before touching
+    any artifact or row, so a catalog that already has it applied is one
+    SELECT, never a rescan. It runs the whole recovery -- reading every
+    nightly candidate artifact this catalog still holds, and updating every
+    NULL row -- inside ONE transaction (``engine.v2.ops.catalog.transaction``);
+    a crash or error partway through rolls the entire attempt back rather
+    than leaving some rows stamped and others not, so the marker is never
+    written on a partial pass and the next process attempts the complete
+    backfill again from scratch (safe and cheap: it only ever touches
+    ``generation_ref IS NULL`` rows and reads artifacts read-only).
+    """
+    return backfill_outcome_sessions(conn, ArtifactStore(root), clock=clock)
 
 
 def dispatch(args, root, conn, clock):
@@ -654,6 +707,7 @@ def main(argv=None):
                 raise fail("INVALID_REQUEST", "operations root must be initialized first")
             conn = open_catalog(root / "catalog.sqlite", clock=clock)
             try:
+                _ensure_outcome_sessions_backfilled(conn, root, clock)
                 document = dispatch(args, root, conn, clock)
             finally:
                 conn.close()
