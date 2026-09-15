@@ -701,7 +701,7 @@ def _action_render(parameters, root):
 def _action_selfcheck(parameters, root):
     import tarfile
 
-    from engine.dashboard.selfcheck import selfcheck
+    from engine.dashboard.selfcheck import DEFAULT_N, selfcheck
     from engine.features import FeatureContext
     from engine.score import Scorer
 
@@ -711,7 +711,14 @@ def _action_selfcheck(parameters, root):
     if archive.is_file() and not (root / "bundle").is_dir():
         with tarfile.open(archive) as stream:
             stream.extractall(root)
-    result = selfcheck(root / "bundle", n=int(parameters.get("sample", 10)),
+    # v1 parity: no plan builder threads a "sample" parameter (grep confirms
+    # engine/v2/ops/nightly.py never sets it), so every real selfcheck job
+    # fell through to a hard-coded 10 here -- half of legacy nightly.py's own
+    # `selfcheck(bundle_dir, scorer=engine)` call, which defaults to the
+    # guide's DEFAULT_N=20 (engine/dashboard/selfcheck.py). Match it, so the
+    # supervised job checks the same number of rows the in-process nightly
+    # would.
+    result = selfcheck(root / "bundle", n=int(parameters.get("sample", DEFAULT_N)),
                        scorer=scorer)
     value = result.as_dict() if hasattr(result, "as_dict") else vars(result)
     if not value.get("ok"):
