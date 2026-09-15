@@ -182,6 +182,120 @@ def test_manifest_problems_empty_for_a_complete_capture(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# pure: manifest_problems' ledger session bound (2026-09-10 attempt 11)
+# --------------------------------------------------------------------------
+
+
+def test_manifest_problems_flags_session_own_predictions():
+    """The real defect: a manifest carrying session S's own predictions
+    file. v2 must produce and commit those itself; reading them
+    pre-computed from the staged legacy ledger is what let
+    ``legacy_settlement`` try to commit outcomes for predictions never
+    committed in the catalog."""
+    document = {
+        "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF,
+        "selected_session": SESSION,
+        "file_refs": [{"path": f"ledger/predictions/{SESSION}.jsonl",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
+    }
+    problems = manifest_problems(document, kinds=())
+    assert len(problems) == 1
+    assert problems[0]["kind"] is None and problems[0]["family"] == "ledger_predictions"
+    assert SESSION in problems[0]["reason"]
+
+
+def test_manifest_problems_flags_session_own_outcomes():
+    """Send-back on 7d235f8: ``ledger/outcomes/S.jsonl`` is S's own nightly
+    settlement output (legacy writes it same-day, by ``resolved_at``), not
+    only a file dated strictly after S -- staging it lets legacy's own
+    ``_unresolved`` treat those rows as already settled and skip them, so
+    v2 never produces or commits them itself."""
+    document = {
+        "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF,
+        "selected_session": SESSION,
+        "file_refs": [{"path": f"ledger/outcomes/{SESSION}.jsonl",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
+    }
+    problems = manifest_problems(document, kinds=())
+    assert len(problems) == 1
+    assert problems[0]["kind"] is None and problems[0]["family"] == "ledger_outcomes"
+    assert SESSION in problems[0]["reason"]
+
+
+def test_manifest_problems_flags_future_outcomes():
+    """Outcomes dated strictly after the session are future data too
+    (a superset of the session-own-outcomes bound above)."""
+    import pandas as pd
+
+    future = str((pd.Timestamp(SESSION) + pd.Timedelta(days=1)).date())
+    document = {
+        "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF,
+        "selected_session": SESSION,
+        "file_refs": [{"path": f"ledger/outcomes/{future}.jsonl",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
+    }
+    problems = manifest_problems(document, kinds=())
+    assert len(problems) == 1
+    assert problems[0]["kind"] is None and problems[0]["family"] == "ledger_outcomes"
+    assert future in problems[0]["reason"]
+
+
+def test_manifest_problems_allows_prior_predictions_and_prior_outcomes():
+    """The in-bounds case: predictions and outcomes strictly before S are
+    both legitimate and must not be flagged."""
+    import pandas as pd
+
+    prior = str((pd.Timestamp(SESSION) - pd.Timedelta(days=1)).date())
+    document = {
+        "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF,
+        "selected_session": SESSION,
+        "file_refs": [{"path": f"ledger/predictions/{prior}.jsonl",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1},
+                      {"path": f"ledger/outcomes/{prior}.jsonl",
+                       "content_hash": "sha256:" + "0" * 64, "byte_size": 1}],
+    }
+    assert manifest_problems(document, kinds=()) == []
+
+
+# --------------------------------------------------------------------------
+# capture(): ledger glob bounded to the session (2026-09-10 attempt 11)
+# --------------------------------------------------------------------------
+
+
+def test_capture_bounds_ledger_predictions_and_outcomes_to_the_session(tmp_path):
+    """End-to-end proof of the same real defect at the capture layer: a
+    fixture with a ledger predictions/outcomes file for the day before,
+    on, and after SESSION must only carry the day-before prediction and
+    the day-before outcome in the captured manifest -- never SESSION's own
+    predictions or outcomes (send-back on 7d235f8: same-day outcomes are
+    S's own nightly settlement output, not v2's), nor anything after it.
+    """
+    import pandas as pd
+
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    _build_fixture(fixture)
+    prior = str((pd.Timestamp(SESSION) - pd.Timedelta(days=1)).date())
+    future = str((pd.Timestamp(SESSION) + pd.Timedelta(days=1)).date())
+    for date_str in (prior, SESSION, future):
+        (fixture / "ledger" / "predictions" / f"{date_str}.jsonl").write_text('{"row_id": "x"}\n')
+        (fixture / "ledger" / "outcomes" / f"{date_str}.jsonl").write_text('{"row_id": "x"}\n')
+
+    manifest = capture(fixture, as_of=SESSION, tickers=[TICKER], year_start=2024, year_end=2024)
+    paths = {ref.path for ref in manifest.file_refs}
+
+    assert f"ledger/predictions/{prior}.jsonl" in paths
+    assert f"ledger/predictions/{SESSION}.jsonl" not in paths
+    assert f"ledger/predictions/{future}.jsonl" not in paths
+
+    assert f"ledger/outcomes/{prior}.jsonl" in paths
+    assert f"ledger/outcomes/{SESSION}.jsonl" not in paths
+    assert f"ledger/outcomes/{future}.jsonl" not in paths
+
+    assert manifest_problems(to_document(manifest)) == []
+
+
+# --------------------------------------------------------------------------
 # capture(): refusal on a missing required family
 # --------------------------------------------------------------------------
 
