@@ -843,6 +843,75 @@ class TestTheServingBand:
         assert np.isfinite(served.predict(_prepare(panel).head(1))).all()
 
 
+class TestTheServingCacheCarriesItsPool:
+    """2026-09-15 memory fix: a serving-cache HIT must not re-derive the pool.
+
+    `_pool_before` was previously called unconditionally on every
+    `serving_model()` invocation, cache hit or miss -- `model.prepare(panel)`
+    re-reads `daily_market` and rebuilds the whole trainable frame every time
+    (~2-2.4 GiB measured on a real shadow-nightly attempt). Since the pool is
+    a pure function of (fold, model, panel) -- already the exact key a cache
+    hit verifies -- a cache file that also stores the pool can serve it
+    verbatim.
+    """
+
+    @pytest.fixture
+    def wired(self, panel, built, tmp_path, monkeypatch):
+        from engine import paths
+
+        panel_path = tmp_path / "panel.parquet"
+        panel.to_parquet(panel_path, index=False)
+        monkeypatch.setattr(paths, "PANEL", panel_path)
+        monkeypatch.setattr(paths, "TIER4", tmp_path / "tier4_forecasts.parquet")
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path / "serving")
+        write_forecasts(built)
+        return built
+
+    def _fold(self, stored):
+        return stored.loc[stored["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
+
+    def test_a_cache_hit_never_calls_pool_before(self, panel, wired, monkeypatch):
+        fold = self._fold(wired)
+        reference = tier4._pool_before(fold, MODEL, panel)  # ground truth, pre-fix path
+
+        # Cold: writes the cache file, embedding the pool this fix adds.
+        first = tier4.serving_model(fold, panel=panel, model=MODEL, cache=True)
+        assert np.array_equal(first.pool_pred, reference[0])
+        assert np.array_equal(first.pool_res, reference[1])
+
+        def _forbidden(*_a, **_k):
+            raise AssertionError("_pool_before must not run on a cache hit")
+
+        monkeypatch.setattr(tier4, "_pool_before", _forbidden)
+
+        # Warm: a second process/call would hit the same cache file. Must
+        # return the identical pool without calling the (now forbidden)
+        # _pool_before.
+        second = tier4.serving_model(fold, panel=panel, model=MODEL, cache=True)
+        assert np.array_equal(second.pool_pred, reference[0])
+        assert np.array_equal(second.pool_res, reference[1])
+
+    def test_an_old_format_cache_file_without_pool_arrays_still_works(
+        self, panel, wired, monkeypatch
+    ):
+        import joblib
+
+        fold = self._fold(wired)
+        reference = tier4._pool_before(fold, MODEL, panel)
+
+        served = tier4.serving_model(fold, panel=panel, model=MODEL, cache=True)
+        path = tier4._serving_path(MODEL.model_id, fold, served.tier3_snapshot)
+        stored = joblib.load(path)
+        # Simulate a cache file written before this fix: no pool arrays.
+        stored.pop("pool_pred", None)
+        stored.pop("pool_res", None)
+        joblib.dump(stored, path)
+
+        again = tier4.serving_model(fold, panel=panel, model=MODEL, cache=True)
+        assert np.array_equal(again.pool_pred, reference[0])
+        assert np.array_equal(again.pool_res, reference[1])
+
+
 class TestThePnLGateSimulator:
     """`engine.pnl_sim` — the machinery the TWIN-P5 gate turns on."""
 

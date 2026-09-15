@@ -1290,9 +1290,33 @@ def serving_model(
             and stored.get("tier3_snapshot") == snapshot
             and tuple(stored.get("features", ())) == tuple(model.features)
         ):
-            pool_pred, pool_res = _pool_before(
-                fold, model, load_panel() if panel is None else panel
-            )
+            # 2026-09-15 memory fix: `_pool_before` is a pure function of
+            # (fold, model, panel) and nothing else (its own docstring; see
+            # also AGENTS.md's "Residual pool depends on loaded tickers" note,
+            # which is explicit that THIS pool -- unlike Scorer._residual_pool
+            # -- carries no scorer-context dependence). Every field checked
+            # above (model_id/fold_start/tier3_snapshot/features) already
+            # pins those three inputs, so a cache file that carries its own
+            # `_pool_before` result can serve it verbatim instead of
+            # recomputing -- recomputing was previously UNCONDITIONAL here,
+            # regardless of the estimator cache hit/miss
+            # (engine/v2/data/legacy_materialization.py's own round-4
+            # finding: model.prepare(panel) re-reads daily_market and rebuilds
+            # the whole trainable frame on every serving_model() call), and
+            # measured as the dominant peak-memory driver of a snapshot-backed
+            # legacy_score/legacy_decision_replay attempt (~2-2.4 GiB per
+            # distinct producer touched, shadow nightly attempt 16).
+            if "pool_pred" in stored and "pool_res" in stored:
+                pool_pred = np.asarray(stored["pool_pred"], dtype=float)
+                pool_res = np.asarray(stored["pool_res"], dtype=float)
+            else:
+                # Backward compatible: every cache file pinned/produced
+                # before this fix carries no pool arrays -- fall back to the
+                # exact prior behaviour so an old cache file is still served
+                # correctly (never a hard requirement to rebuild Tier 4).
+                pool_pred, pool_res = _pool_before(
+                    fold, model, load_panel() if panel is None else panel
+                )
             return ServingModel(
                 estimator=stored["estimator"],
                 model_id=model.model_id,
@@ -1328,6 +1352,11 @@ def serving_model(
                 "fold_start": str(fold.date()),
                 "tier3_snapshot": snapshot,
                 "features": list(served.features),
+                # Embedded so a future cache HIT (this process or another)
+                # never has to recompute _pool_before's model.prepare(panel)
+                # pass -- see the cache-hit branch above.
+                "pool_pred": served.pool_pred,
+                "pool_res": served.pool_res,
             },
             path,
         )

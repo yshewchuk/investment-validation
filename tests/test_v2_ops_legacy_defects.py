@@ -199,7 +199,7 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
         assert profile.memory_bytes >= measured_peak_bytes
         assert profile.measured is False
     assert POLICY_VERSION == DEFAULT_POLICY.version
-    assert "2026-09-14" in POLICY_VERSION
+    assert "2026-09-15" in POLICY_VERSION
 
 
 # --------------------------------------------------------------------------
@@ -213,8 +213,8 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 MEASURED_READ_SET_BYTES = 1796916876
 
 
-def test_policy_version_is_v4():
-    assert POLICY_VERSION == "ops_resources.2026-09-14.v4"
+def test_policy_version_is_v5():
+    assert POLICY_VERSION == "ops_resources.2026-09-15.v5"
     assert POLICY_VERSION == DEFAULT_POLICY.version
 
 
@@ -223,13 +223,16 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
     legacy_score/legacy_decision_replay (``legacy_score``),
     legacy_model_evidence (``model_evidence``) and legacy_render
     (``projection``) all now admit the measured 1.67 GiB read set with
-    margin, and memory is untouched from v3."""
-    for name, old_memory_gib in (("validation", 5), ("legacy_score", 5),
+    margin, and scratch is untouched from v4. ``legacy_score``'s
+    ``memory_bytes`` is v5's own change (5 GiB -> 6 GiB, real attempt-16
+    peaks -- see profiles.py's module docstring); every other profile's
+    memory is unchanged by v5."""
+    for name, old_memory_gib in (("validation", 5), ("legacy_score", 6),
                                  ("model_evidence", 4), ("projection", 2)):
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.scratch_bytes >= MEASURED_READ_SET_BYTES
         assert profile.scratch_bytes == 4 * GIB
-        assert profile.memory_bytes == old_memory_gib * GIB  # unchanged by v4
+        assert profile.memory_bytes == old_memory_gib * GIB
 
 
 # --------------------------------------------------------------------------
