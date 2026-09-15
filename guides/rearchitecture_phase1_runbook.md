@@ -78,6 +78,13 @@ manifest.
 The `--json` flag on `init`/`doctor`/`health`/`get` is accepted but cosmetic:
 the CLI prints JSON regardless.
 
+`ops snapshot plan-import`/`submit` also pin two derived model artifacts the
+legacy scorer reads (`data/features/pnl_sim_history.parquet`,
+`data/features/recalibration_pairs.parquet`) as reference inputs, each
+recording its sha256 and the Tier-4 monthly fold (`YYYYMM`) of the import's
+session, and a snapshot-mode `legacy_score` plan refuses if either is missing
+from the pinned set (2026-09-14).
+
 ### 2.1 `--idempotency-key` semantics for nightly submission
 
 (Phase 3 launch §5.5 item 1, fixed 56d8709.) `submit` always

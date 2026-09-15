@@ -487,8 +487,25 @@ _V5 = (
     *_immutable_triggers("data_import_reference_inputs"),
 )
 
+
+# --------------------------------------------------------------------------
+# v6 — data_import_reference_inputs.fold (never edit v1-v5 above)
+# --------------------------------------------------------------------------
+#
+# Task brief 2026-09-14: two of the pinned reference inputs
+# (``pnl_sim_history``, ``recalibration_pairs`` — model OUTPUT downstream of
+# Tier 4) are pinned per Tier-4 monthly fold, not per snapshot identity. Every
+# other kind's fold is meaningless, so ``DEFAULT ''`` (matching v2/v3/v4's own
+# convention for a column most existing rows do not use) is the explicit
+# sentinel for "not fold-bound", and the check accepts only that sentinel or a
+# 6-digit ``YYYYMM``.
+_V6 = (
+    """ALTER TABLE data_import_reference_inputs ADD COLUMN fold TEXT NOT NULL DEFAULT ''
+    CHECK (fold = '' OR (length(fold) = 6 AND fold GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'))""",
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
              (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
-             (5, "import_reference_inputs", _V5))
+             (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6))

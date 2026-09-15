@@ -49,7 +49,12 @@ LEGACY_SNAPSHOT_KIND = "legacy_snapshot"
 REFERENCE_KINDS: tuple[str, ...] = (
     CALENDAR_KIND, "model_registry", "structure_champions", "chooser_analog_pool",
     LEGACY_SNAPSHOT_KIND, "champion_artifact", "tier4_serving_cache",
+    "pnl_sim_history", "recalibration_pairs",
 )
+#: Task brief 2026-09-14: model-output kinds a snapshot-mode launch must have
+#: pinned before ``legacy_score`` can run against it — see
+#: :func:`pinned_materialization_refs`.
+_REQUIRED_MODEL_OUTPUT_KINDS = frozenset({"pnl_sim_history", "recalibration_pairs"})
 #: ``objects.publish_legacy_file`` labels every object it publishes this way,
 #: whatever the file format; a ref rebuilt from a row must carry the same kind.
 REFERENCE_OBJECT_KIND = "parquet_fragment"
@@ -57,13 +62,19 @@ REFERENCE_OBJECT_KIND = "parquet_fragment"
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ReferenceInput:
-    """One pinned reference file: its legacy path relative to ``engine.paths.ROOT``."""
+    """One pinned reference file: its legacy path relative to ``engine.paths.ROOT``.
+
+    ``fold``: the Tier-4 monthly fold (``YYYYMM``) current at import time,
+    recorded only for :data:`_REQUIRED_MODEL_OUTPUT_KINDS` (task brief
+    2026-09-14) — ``""`` for every other kind, which is not tied to a fold.
+    """
 
     kind: str
     legacy_path: str
     object_id: str
     content_hash: str
     byte_size: int
+    fold: str = ""
 
     def object_ref(self) -> ObjectRef:
         return ObjectRef(kind=REFERENCE_OBJECT_KIND, object_id=self.object_id,
@@ -79,9 +90,9 @@ def insert_reference_inputs(conn: sqlite3.Connection, receipt_id: str,
                               details={"kind": item.kind, "path": item.legacy_path})
         conn.execute(
             "INSERT INTO data_import_reference_inputs (receipt_id, legacy_path, kind, object_id, "
-            "content_hash, byte_size) VALUES (?, ?, ?, ?, ?, ?)",
+            "content_hash, byte_size, fold) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (receipt_id, item.legacy_path, item.kind, item.object_id, item.content_hash,
-             item.byte_size))
+             item.byte_size, item.fold))
 
 
 def reference_inputs_for_snapshot(conn: sqlite3.Connection, *, scope: str,
@@ -95,24 +106,34 @@ def reference_inputs_for_snapshot(conn: sqlite3.Connection, *, scope: str,
         raise errors.fail("SNAPSHOT_NOT_READY", "no committed import receipt for this snapshot",
                           details={"scope": scope, "snapshot_id": snapshot_id})
     rows = conn.execute(
-        "SELECT kind, legacy_path, object_id, content_hash, byte_size FROM "
+        "SELECT kind, legacy_path, object_id, content_hash, byte_size, fold FROM "
         "data_import_reference_inputs WHERE receipt_id = ? ORDER BY legacy_path",
         (receipt[0],)).fetchall()
     if not rows:
         raise errors.fail("SNAPSHOT_NOT_READY", "the snapshot's newest import receipt pinned no "
                           "reference inputs", details={"receipt_id": receipt[0]})
     return tuple(ReferenceInput(kind=r[0], legacy_path=r[1], object_id=r[2], content_hash=r[3],
-                                byte_size=r[4]) for r in rows)
+                                byte_size=r[4], fold=r[5]) for r in rows)
 
 
 def pinned_materialization_refs(inputs: Sequence[ReferenceInput]) -> dict:
-    """``{"legacy_snapshot_object_ref", "registry_and_model_refs", "calendar_refs"}``."""
+    """``{"legacy_snapshot_object_ref", "registry_and_model_refs", "calendar_refs"}``.
+
+    Refuses ``SNAPSHOT_NOT_READY`` (task brief 2026-09-14) when the pinned set
+    lacks the legacy SNAPSHOT, the calendar, or either
+    :data:`_REQUIRED_MODEL_OUTPUT_KINDS` file — the plan-time guard for
+    ``legacy_score`` in snapshot mode: an older snapshot imported before these
+    two kinds existed has no such rows, and must refuse rather than launch
+    silently without them.
+    """
     snapshots = [item for item in inputs if item.kind == LEGACY_SNAPSHOT_KIND]
     calendar = tuple(format_pinned_ref(item.legacy_path, item.content_hash)
                      for item in inputs if item.kind == CALENDAR_KIND)
-    if len(snapshots) != 1 or not calendar:
-        raise errors.fail("SNAPSHOT_NOT_READY", "reference inputs lack the legacy SNAPSHOT or "
-                          "the calendar", details={"kinds": sorted({i.kind for i in inputs})})
+    kinds = {item.kind for item in inputs}
+    if len(snapshots) != 1 or not calendar or not _REQUIRED_MODEL_OUTPUT_KINDS <= kinds:
+        raise errors.fail("SNAPSHOT_NOT_READY", "reference inputs lack the legacy SNAPSHOT, the "
+                          "calendar, or a required Tier-4-derived model output",
+                          details={"kinds": sorted(kinds)})
     registry = tuple(format_pinned_ref(item.legacy_path, item.content_hash)
                      for item in sorted(inputs, key=lambda i: i.legacy_path)
                      if item.kind not in (CALENDAR_KIND, LEGACY_SNAPSHOT_KIND))

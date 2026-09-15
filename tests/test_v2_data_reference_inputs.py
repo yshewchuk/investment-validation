@@ -79,7 +79,7 @@ def _expected_paths(root: Path) -> set[str]:
 
 
 def test_reference_input_paths_equal_their_legacy_constants():
-    from engine import paths, score, structure_registry
+    from engine import paths, pnl_sim, recalibrate, score, structure_registry
     from engine.data.features import tier4
     from engine.models import registry as model_registry
 
@@ -98,6 +98,9 @@ def test_reference_input_paths_equal_their_legacy_constants():
     assert INPUTS["chooser_analog_pool"]["path"] == rel(
         score, score.paths.FEATURES / score.CHOOSER_ANALOG_POOL)
     assert INPUTS["legacy_snapshot"]["path"] == rel(score, score.paths.SNAPSHOT_FILE)
+    assert INPUTS["pnl_sim_history"]["path"] == pnl_sim.HISTORY_PATH
+    assert INPUTS["pnl_sim_history"]["path"] == "data/features/pnl_sim_history.parquet"
+    assert INPUTS["recalibration_pairs"]["path"] == rel(recalibrate, recalibrate.PAIRS_PATH)
     assert ri.DATA_DIR == rel(score, score.paths.DATA)
     for data_relative, constant in ((legacy_mapping.PANEL_RELATIVE_PATH, score.paths.PANEL),
                                     (legacy_mapping.TIER4_RELATIVE_PATH, score.paths.TIER4),
@@ -145,6 +148,15 @@ def test_missing_exact_reference_input_is_refused(tmp_path):
     assert _refused(tmp_path) == "INPUT_CHANGED"
 
 
+@pytest.mark.parametrize("kind", ["pnl_sim_history", "recalibration_pairs"])
+def test_missing_model_output_reference_input_is_refused(tmp_path, kind):
+    """Task brief 2026-09-14: the import must refuse typed, not silently pin
+    without them, when either Tier-4-derived model output is absent."""
+    build_legacy_store(tmp_path)
+    (tmp_path / INPUTS[kind]["path"]).unlink()
+    assert _refused(tmp_path) == "INPUT_CHANGED"
+
+
 def test_tier4_champion_without_a_cache_for_this_panel_is_stale(tmp_path):
     build_legacy_store(tmp_path)
     (tmp_path / reference_cache_path(tmp_path)).rename(
@@ -184,7 +196,8 @@ def _import(tmp_path, store_root, conn, clock, key, head=None, generation=0):
 
 def _rows(conn):
     return {row[0]: tuple(row[1:]) for row in conn.execute(
-        "SELECT legacy_path, receipt_id, kind, content_hash, byte_size FROM data_import_reference_inputs")}
+        "SELECT legacy_path, receipt_id, kind, content_hash, byte_size, fold "
+        "FROM data_import_reference_inputs")}
 
 
 def _head(conn):
@@ -221,10 +234,79 @@ def test_import_records_exactly_the_expected_refs_per_receipt(imported):
     status, snapshot_id = conn.execute("SELECT status, result_snapshot_id FROM data_import_receipts "
                                        "WHERE receipt_id=?", (receipt_id,)).fetchone()
     assert status == "committed" and snapshot_id == _head(conn)[0]
-    for path, (_, kind, content_hash, byte_size) in rows.items():
+    for path, (_, kind, content_hash, byte_size, fold) in rows.items():
         source = (store_root / path).read_bytes()
         assert kind == ri.kind_for_path(path) and byte_size == len(source)
         assert _store_bytes(tmp_path, content_hash) == source
+        if kind in ("pnl_sim_history", "recalibration_pairs"):
+            assert len(fold) == 6 and fold.isdigit(), (path, fold)
+        else:
+            assert fold == "", (path, fold)
+
+
+def test_fold_is_the_snapshot_data_session_not_the_import_clock(tmp_path):
+    """SEND-BACK on 1c04cf8: the fold must come from the snapshot's own data
+    (its ``generated_at`` decision session, read by ``import_snapshot._check_
+    snapshot_shape`` into ``LegacyInputManifest.selected_session``), never
+    from ``clock.now()`` at import time. Data session 2026-08-31, import
+    clock 2026-09-14 (today) -- a clock-derived fold would read "202609";
+    the correct fold, ``legacy_serving_fold("2026-08-31", "2026-08-31")``,
+    is "202608"."""
+    from engine.v2.data import legacy_adapter
+
+    root, store_root = tmp_path / "ops", tmp_path / "legacy_store"
+    root.mkdir()
+    store_root.mkdir()
+    build_legacy_store(store_root, generated_at="2026-08-31T00:00:00+00:00")
+
+    clock = SystemClock()  # real now() -- 2026-09-14, a different month than the data session
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+    try:
+        _import(tmp_path, store_root, conn, clock, "fold-cross-month")
+        rows = _rows(conn)
+        expected = f"{legacy_adapter.legacy_serving_fold('2026-08-31', '2026-08-31'):%Y%m}"
+        assert expected == "202608"
+        for path, (_, kind, _hash, _size, fold) in rows.items():
+            if kind in ("pnl_sim_history", "recalibration_pairs"):
+                assert fold == expected, (path, fold)
+    finally:
+        conn.close()
+
+
+def test_fold_is_identical_across_reimports_with_different_clocks(tmp_path):
+    """SEND-BACK on 1c04cf8, second required test: re-importing the SAME
+    snapshot data with a different wall-clock time must record the SAME
+    fold -- the fold is a property of the snapshot's data, not of when the
+    import happened to run."""
+    from tests.ops_support import FakeClock
+
+    root_a, store_a = tmp_path / "ops_a", tmp_path / "legacy_store_a"
+    root_b, store_b = tmp_path / "ops_b", tmp_path / "legacy_store_b"
+    for root, store in ((root_a, store_a), (root_b, store_b)):
+        root.mkdir()
+        store.mkdir()
+        build_legacy_store(store, generated_at="2026-08-31T00:00:00+00:00")
+
+    early_clock = FakeClock()  # .value == 2026-09-12
+    late_clock = FakeClock()
+    late_clock.advance(60 * 60 * 24 * 45)  # +45 days -- a different month, and a different clock class
+
+    conn_a = open_catalog(root_a / "ops.sqlite", clock=early_clock)
+    conn_b = open_catalog(root_b / "ops.sqlite", clock=late_clock)
+    try:
+        receipt_a, state_a, _ = _submit_and_run(root_a, store_a, conn_a, early_clock,
+                                                idempotency_key="fold-early", scope=SCOPE)
+        receipt_b, state_b, _ = _submit_and_run(root_b, store_b, conn_b, late_clock,
+                                                idempotency_key="fold-late", scope=SCOPE)
+        assert state_a == "succeeded" and state_b == "succeeded"
+        folds_a = {kind: fold for _, kind, _, _, fold in _rows(conn_a).values()
+                  if kind in ("pnl_sim_history", "recalibration_pairs")}
+        folds_b = {kind: fold for _, kind, _, _, fold in _rows(conn_b).values()
+                  if kind in ("pnl_sim_history", "recalibration_pairs")}
+        assert folds_a and folds_a == folds_b
+    finally:
+        conn_a.close()
+        conn_b.close()
 
 
 def test_model_only_change_reuses_the_snapshot_and_records_new_refs(imported):
@@ -259,13 +341,16 @@ def _reference(path="engine/models/registry.json", kind="model_registry"):
                           content_hash="sha256:" + "ab" * 32, byte_size=3)
 
 
-def test_v5_migration_is_checksummed_idempotent_and_append_only(tmp_path):
+def test_v5_v6_migrations_are_checksummed_idempotent_and_append_only(tmp_path):
     conn, clock = catalog(tmp_path)
     versions = conn.execute("SELECT version, name, checksum FROM schema_versions WHERE owner='data' "
                             "ORDER BY version").fetchall()
-    assert tuple(versions[-1])[:2] == (5, "import_reference_inputs")
+    assert tuple(versions[-1])[:2] == (6, "import_reference_input_fold")
     ids = build_chain(conn, clock)
     insert_reference_inputs(conn, ids["receipt_id"], [_reference()])
+    row = conn.execute("SELECT fold FROM data_import_reference_inputs WHERE receipt_id=?",
+                       (ids["receipt_id"],)).fetchone()
+    assert row[0] == ""  # v6's DEFAULT '' -- unfolded kinds never set one
     _assert_immutable(conn, "data_import_reference_inputs", f"receipt_id = '{ids['receipt_id']}'",
                       "byte_size = 4")
     with pytest.raises(sqlite3.IntegrityError):
@@ -282,8 +367,8 @@ def test_v5_migration_is_checksummed_idempotent_and_append_only(tmp_path):
                             "ORDER BY version").fetchall() == versions
     reopened.close()
     edited = [Migration(v, n, s) for v, n, s in data_schema.MIGRATIONS]
-    version, name, statements = data_schema.MIGRATIONS[4]
-    edited[4] = Migration(version, name, statements + ("SELECT 1",))
+    version, name, statements = data_schema.MIGRATIONS[5]
+    edited[5] = Migration(version, name, statements + ("SELECT 1",))
     raw = sqlite3.connect(str(tmp_path / "catalog.sqlite"), isolation_level=None)
     try:
         with pytest.raises(OpsError) as err:
@@ -291,6 +376,100 @@ def test_v5_migration_is_checksummed_idempotent_and_append_only(tmp_path):
         assert err.value.problem.details["reason"] == "checksum_mismatch"
     finally:
         raw.close()
+
+
+# --------------------------------------------------------------------------
+# plan-time guard: legacy_score in snapshot mode needs both model outputs pinned
+# --------------------------------------------------------------------------
+
+
+def _full_reference_set():
+    """One ``ReferenceInput`` per declared kind — a minimal, complete pinned set."""
+    return [_reference(path=f"p/{kind}", kind=kind) for kind in REFERENCE_KINDS]
+
+
+def test_pinned_materialization_refs_accepts_a_complete_set():
+    from engine.v2.data.reference_catalog import pinned_materialization_refs
+
+    pinned = pinned_materialization_refs(_full_reference_set())
+    paths = {ref.split("::")[0] for ref in pinned["registry_and_model_refs"]}
+    assert {"p/pnl_sim_history", "p/recalibration_pairs"} <= paths
+
+
+@pytest.mark.parametrize("missing_kind", ["pnl_sim_history", "recalibration_pairs"])
+def test_pinned_materialization_refs_refuses_without_either_model_output(missing_kind):
+    """Task brief 2026-09-14: ``legacy_score`` in snapshot mode must refuse (at
+    plan time -- this is the function ``ops.snapshot_planning.pin_snapshot_inputs``
+    calls) when the pinned set lacks either Tier-4-derived model output, e.g. a
+    snapshot imported before this pin existed."""
+    from engine.v2.data.reference_catalog import pinned_materialization_refs
+
+    incomplete = [item for item in _full_reference_set() if item.kind != missing_kind]
+    with pytest.raises(DataError) as err:
+        pinned_materialization_refs(incomplete)
+    assert err.value.code == "SNAPSHOT_NOT_READY"
+
+
+# --------------------------------------------------------------------------
+# causality check (read-only): trailing_cutoff / fit_recalibration
+# --------------------------------------------------------------------------
+
+
+def test_pnl_sim_trailing_cutoff_ignores_rows_on_or_after_as_of():
+    """``engine.pnl_sim.trailing_cutoff`` (engine/pnl_sim.py:240-259): the
+    window is ``[as_of - window_months, as_of)`` -- strictly before, so a row
+    dated exactly ``as_of`` must never enter the trailing bar. Proven by the
+    ``min_window`` threshold rather than a quantile shift: 99 genuinely prior
+    rows plus one row dated exactly ``as_of`` must read as 99 (UNDETERMINED,
+    below ``min_window=100``); only moving that same row to one day earlier
+    crosses the threshold and yields a real bar."""
+    import pandas as pd
+
+    from engine import pnl_sim
+
+    as_of = pd.Timestamp("2026-06-01")
+    prior_dates = [as_of - pd.Timedelta(days=d) for d in range(1, 100)]  # 99 dates, all < as_of
+    history = pd.DataFrame({
+        "event_date": prior_dates + [as_of],
+        "exp_pnl_sim": [0.0] * 99 + [999.0],
+    })
+    assert pnl_sim.trailing_cutoff(history, as_of, min_window=100) is None
+
+    included = history.copy()
+    included.loc[included.index[-1], "event_date"] = as_of - pd.Timedelta(days=100)
+    assert pnl_sim.trailing_cutoff(included, as_of, min_window=100) is not None
+
+
+def test_fit_recalibration_restricts_pairs_to_events_closed_before_the_decision_date():
+    """``engine.recalibrate.fit_recalibration`` (engine/recalibrate.py:99-131)
+    DOES restrict: ``stamp = pd.Timestamp(before).normalize()`` (:118) then
+    ``rows = rows[pd.to_datetime(rows["exit_date"]) < stamp]`` (:124) -- a
+    pair whose event closed on or after the decision date is excluded, never
+    fit into the map that scores that same decision. Called from
+    ``engine.score.Scorer.recalibration`` (engine/score.py:903) with
+    ``before=stamp`` = the decision timestamp, so ``before`` really is "the
+    decision date", not an unrelated cutoff. Read-only: no engine code
+    touched, per the causality-check deliverable."""
+    import pandas as pd
+
+    from engine import recalibrate
+
+    before = pd.Timestamp("2026-06-01")
+    pairs = pd.DataFrame({
+        "strategy": ["S1"] * 130,
+        "fill_alpha": [0.5] * 130,
+        # 129 pairs closed strictly before `before` (raw_win == outcome, a
+        # trivial identity map) plus one poisoned pair closed exactly ON
+        # `before` whose outcome disagrees -- if it leaked in, the fitted map
+        # would stop being the identity at that raw_win value.
+        "exit_date": list(pd.date_range(before - pd.Timedelta(days=200), periods=129, freq="D")) + [before],
+        "raw_win": [i / 129 for i in range(129)] + [0.999],
+        "outcome": [i / 129 for i in range(129)] + [0.0],
+    })
+    fitted = recalibrate.fit_recalibration("S1", 0.5, before=before, pairs=pairs, min_pairs=100)
+    assert fitted is not None and fitted.n == 129  # the same-day pair never entered the fit
+    calibrated = fitted.transform([0.999])[0]
+    assert calibrated > 0.9  # the poisoned 0.0 outcome at raw_win=0.999 did not pull this down
 
 
 # --------------------------------------------------------------------------

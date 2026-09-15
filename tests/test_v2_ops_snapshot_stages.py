@@ -28,6 +28,7 @@ import pytest
 from engine.v2.contracts import JobSpec, LegacyFileRef, LegacyInputManifest, SubmitRequest
 from engine.v2.data import catalog as data_catalog
 from engine.v2.data import manifests
+from engine.v2.data.legacy_materialization import format_pinned_ref
 from engine.v2.data.objects import partition_logical_hash
 from engine.v2.data.reference_catalog import (
     ReferenceInput,
@@ -104,7 +105,8 @@ class Case:
         self.clock = SystemClock()
         self.repository = Repository(self.conn, self.store)
         self.snapshot_object = _snapshot_object_ref(self.store)
-        self.request = _build_request(self.repository, self.snap, self.snapshot_object, self.store)
+        self.request = _build_request(self.repository, self.snap, self.snapshot_object, self.store,
+                                      extra_registry_refs=_model_output_refs(self.store))
         record_reference_inputs(self, self.snap.snapshot_id, "r1-references")
         self.snapshot_ref = resolve_snapshot_head(self.conn, self.store, "shadow", clock=self.clock)
         self.request_ref = self.publish(to_document(self.request), "legacy_materialization_request.v1.0")
@@ -206,17 +208,45 @@ class Case:
         return [json.loads(path.read_text()) for path in sorted(self.records.glob("*.json"))]
 
 
+#: task brief 2026-09-14: shared with :func:`_model_output_refs` so the DB
+#: rows :func:`record_reference_inputs` writes and the refs baked into
+#: ``case.request`` (``Case.__init__``) hash identically -- the same
+#: "planning rebuilds exactly case.request" invariant this module's
+#: docstring below already relies on, now covering the two new kinds too.
+_PNL_SIM_HISTORY_BYTES = b"synthetic pnl_sim_history parquet bytes"
+_RECALIBRATION_PAIRS_BYTES = b"synthetic recalibration_pairs parquet bytes"
+
+
+def _model_output_refs(store):
+    """``registry_and_model_refs`` entries for pnl_sim_history/recalibration_pairs,
+    for building a request by hand (``Case.request``) with the exact bytes
+    :func:`record_reference_inputs` also publishes for those two kinds."""
+    inputs = LEGACY_REFERENCE_INPUTS_V1["inputs"]
+    pnl_sim_hash = store.publish_bytes(_PNL_SIM_HISTORY_BYTES, schema_ref="legacy_pinned_ref.v1").content_hash
+    recal_hash = store.publish_bytes(_RECALIBRATION_PAIRS_BYTES,
+                                     schema_ref="legacy_pinned_ref.v1").content_hash
+    return (format_pinned_ref(inputs["pnl_sim_history"]["path"], pnl_sim_hash),
+           format_pinned_ref(inputs["recalibration_pairs"]["path"], recal_hash))
+
+
 def record_reference_inputs(case, snapshot_id, receipt_id, *, registry=b'{"models": []}'):
     """A committed import receipt for ``snapshot_id`` plus its reference rows, in one
     transaction, as the snapshot import coordinator records them. The default bytes
     equal ``_pinned_refs``'s, so planning rebuilds exactly ``case.request``."""
     inputs = LEGACY_REFERENCE_INPUTS_V1["inputs"]
-    published = (("calendar", b"date\n2020-01-02\n2021-01-04\n"), ("model_registry", registry))
+    # pnl_sim_history/recalibration_pairs (task brief 2026-09-14): required
+    # kinds `pinned_materialization_refs` now refuses a plan without --
+    # fold="202401" mirrors the value every other synthetic-fixture writer in
+    # this repo uses (tests/test_v2_data_import.py::write_reference_inputs).
+    published = (("calendar", b"date\n2020-01-02\n2021-01-04\n"), ("model_registry", registry),
+                ("pnl_sim_history", _PNL_SIM_HISTORY_BYTES),
+                ("recalibration_pairs", _RECALIBRATION_PAIRS_BYTES))
     rows = []
     for kind, data in published:
         ref = case.store.publish_bytes(data, schema_ref="legacy_pinned_ref.v1")
+        fold = "202401" if kind in ("pnl_sim_history", "recalibration_pairs") else ""
         rows.append(ReferenceInput(kind=kind, legacy_path=inputs[kind]["path"], object_id=ref.artifact_id,
-                                   content_hash=ref.content_hash, byte_size=ref.byte_size))
+                                   content_hash=ref.content_hash, byte_size=ref.byte_size, fold=fold))
     obj = case.snapshot_object
     rows.append(ReferenceInput(kind="legacy_snapshot", legacy_path=inputs["legacy_snapshot"]["path"],
                                object_id=obj.object_id, content_hash=obj.content_hash,
@@ -561,7 +591,8 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     # alone would miss) -- case.request was built with the un-widened
     # EVIDENCE_SCOPE, so the comparison request here must widen the same way.
     widened = _build_request(case.repository, case.snap, case.snapshot_object, case.store,
-                             evidence_scope={"tickers": ["AAA", "BBB"], "years": [2019, 2020, 2021]})
+                             evidence_scope={"tickers": ["AAA", "BBB"], "years": [2019, 2020, 2021]},
+                             extra_registry_refs=_model_output_refs(case.store))
     assert inputs["materialization_request_hash"] == widened.request_hash  # refs from the catalog
 
     ids, specs = _submitted_specs(case, planned["plan_ref"], "k1")

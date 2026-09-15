@@ -40,7 +40,18 @@ declared-shape violation and ``INPUT_CHANGED`` for a missing or indirect path:
   file, ``SNAPSHOT``) — ``INPUT_CHANGED``;
 * a missing required file or table directory — ``INPUT_CHANGED``;
 * the legacy ``SNAPSHOT`` JSON missing one of its reviewed
-  ``expected_top_level_keys`` — ``CONTRACT_MISMATCH``.
+  ``expected_top_level_keys`` — ``CONTRACT_MISMATCH``;
+* a ``generated_at`` value that is not a parseable ``YYYY-MM-DD...`` date —
+  ``CONTRACT_MISMATCH`` (task brief 2026-09-14 SEND-BACK).
+
+``LegacyInputManifest.selected_session`` (task brief 2026-09-14 SEND-BACK,
+fixing a defect the same task first shipped): the pinned SNAPSHOT's own
+``generated_at`` date (:func:`_check_snapshot_shape`), NOT a clock read —
+``plan_import`` stays pure. It is the deterministic "as of" the snapshot's
+DATA reflects, used downstream (``engine.v2.ops.snapshot_promotion``) as the
+Tier-4 fold ``pnl_sim_history``/``recalibration_pairs`` are pinned to, so
+re-planning the identical source root at a later wall-clock time pins the
+identical fold.
 
 A year's parts out of *name* order is impossible by construction (this module
 sorts by filename before building the declared list); out of *key* order is
@@ -94,6 +105,7 @@ PENDING_CALENDAR_VERSION = "legacy_calendar:pending"
 
 _PART_RE = re.compile(r"^part-(\d{4})\.parquet$")
 _YEAR_RE = re.compile(r"^year=(\d{4})$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _CHUNK = 1 << 20
 
 
@@ -173,11 +185,11 @@ def plan_import(source_root, *, scope: str, expected_head_snapshot_id: str | Non
     references = reference_inputs.resolve_reference_files(
         root, panel_content_hash=table_sources["feature_panel"][0].content_hash, file_ref=_file_ref)
     (snapshot_ref,) = (ref for ref in references if ref.path == reference_inputs.LEGACY_SNAPSHOT_PATH)
-    _check_snapshot_shape(root, snapshot_ref, mapping["legacy_snapshot_metadata"])
+    session = _check_snapshot_shape(root, snapshot_ref, mapping["legacy_snapshot_metadata"])
     all_refs.extend(references)
 
     knowledge_mode = dict(mapping["knowledge_mode_by_table"])
-    manifest = _build_manifest(scope, all_refs, table_contract_refs, knowledge_mode)
+    manifest = _build_manifest(scope, all_refs, table_contract_refs, knowledge_mode, session)
     request = SnapshotImportRequest(
         scope=scope, source_manifest_ref=manifest.manifest_id,
         source_manifest_hash=content_hash(to_document(manifest)),
@@ -196,14 +208,14 @@ def _contract_ref(doc: dict) -> TableContractRef:
 
 
 def _build_manifest(scope: str, refs: list[LegacyFileRef], contract_refs: dict[str, TableContractRef],
-                    knowledge_mode: dict[str, str]) -> LegacyInputManifest:
+                    knowledge_mode: dict[str, str], session: str) -> LegacyInputManifest:
     registry_and_model_refs, calendar_ref = reference_inputs.manifest_pins(refs)
     fields = dict(
         file_refs=tuple(refs),
         table_contract_refs=tuple(f"{name}@{ref.contract_id}@{ref.definition_hash}"
                                   for name, ref in sorted(contract_refs.items())),
         registry_and_model_refs=registry_and_model_refs, calendar_ref=calendar_ref,
-        selected_session="",
+        selected_session=session,
         finality_receipt_refs=(), knowledge_mode_by_table=knowledge_mode,
         availability_evidence_refs=(), read_set_complete=True,
         capture_implementation_ref="snapshot_import_plan.v1")
@@ -280,7 +292,16 @@ def _enumerate_curated_table(root: Path, table: str) -> tuple[tuple[LegacyFileRe
     return tuple(refs), tuple(layout)
 
 
-def _check_snapshot_shape(root: Path, ref: LegacyFileRef, metadata: dict) -> None:
+def _check_snapshot_shape(root: Path, ref: LegacyFileRef, metadata: dict) -> str:
+    """Also returns the manifest's ``selected_session`` (task brief 2026-09-14
+    SEND-BACK): the pinned SNAPSHOT's own ``generated_at`` date, a property of
+    the SNAPSHOT bytes ``resolve_reference_files`` already pinned -- never a
+    clock read, so re-planning the identical source root at a later wall-clock
+    time yields the identical session and, downstream, the identical Tier-4
+    fold. ``generated_at`` (``engine.data.manifest.write_snapshot``) is one of
+    the reviewed ``expected_top_level_keys`` already checked above, so this
+    only adds a format check on its value, not a new required key.
+    """
     import json
 
     payload = json.loads((root / ref.path).read_text())
@@ -290,3 +311,8 @@ def _check_snapshot_shape(root: Path, ref: LegacyFileRef, metadata: dict) -> Non
     if set(payload) != expected:
         raise errors.fail("CONTRACT_MISMATCH", "legacy SNAPSHOT top-level keys do not match the reviewed shape",
                   details={"expected": sorted(expected), "actual": sorted(payload)})
+    generated_at = payload.get("generated_at")
+    if not isinstance(generated_at, str) or not _ISO_DATE_RE.match(generated_at):
+        raise errors.fail("CONTRACT_MISMATCH", "legacy SNAPSHOT generated_at is not a parseable date",
+                  details={"generated_at": generated_at})
+    return generated_at[:10]

@@ -33,7 +33,14 @@ def _synthetic_ops_root(root):
     refs = [ReferenceInput(kind="legacy_snapshot", legacy_path="legacy/snap.parquet",
                            object_id="obj_legacy", content_hash=H, byte_size=10),
            ReferenceInput(kind="calendar", legacy_path="legacy/calendar.csv",
-                          object_id="obj_cal", content_hash=H, byte_size=5)]
+                          object_id="obj_cal", content_hash=H, byte_size=5),
+           # pnl_sim_history/recalibration_pairs (task brief 2026-09-14):
+           # pinned_materialization_refs now requires both kinds present.
+           ReferenceInput(kind="pnl_sim_history", legacy_path="data/features/pnl_sim_history.parquet",
+                          object_id="obj_pnl_sim", content_hash=H, byte_size=6, fold="202401"),
+           ReferenceInput(kind="recalibration_pairs",
+                          legacy_path="data/features/recalibration_pairs.parquet",
+                          object_id="obj_recal", content_hash=H, byte_size=7, fold="202401")]
     commit_snapshot(
         conn, scope="shadow", request_hash=_hash("req-a"), contracts=[_SEC_CONTRACT],
         objects=[record.object_ref], records=[record], manifests=[manifest], snapshot=snap,

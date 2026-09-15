@@ -149,6 +149,8 @@ def _snapshot_object_ref(store) -> ObjectRef:
 
 
 CALENDAR_PATH = LEGACY_REFERENCE_INPUTS_V1["inputs"]["calendar"]["path"]
+PNL_SIM_HISTORY_PATH = LEGACY_REFERENCE_INPUTS_V1["inputs"]["pnl_sim_history"]["path"]
+RECALIBRATION_PAIRS_PATH = LEGACY_REFERENCE_INPUTS_V1["inputs"]["recalibration_pairs"]["path"]
 
 
 def _pinned_refs(store):
@@ -160,12 +162,23 @@ def _pinned_refs(store):
     return registry_refs, calendar_refs
 
 
-def _build_request(repository, snap, snapshot_object_ref, store, *, direct_scope=None, evidence_scope=None):
+def _build_request(repository, snap, snapshot_object_ref, store, *, direct_scope=None, evidence_scope=None,
+                   extra_registry_refs=()):
+    """``extra_registry_refs`` (task brief 2026-09-14): callers outside this
+    module that need the pnl_sim_history/recalibration_pairs refs too (e.g.
+    ``tests/test_v2_ops_snapshot_stages.py::Case``, whose ``pin_snapshot_inputs``
+    now requires them pinned) pass them here rather than duplicating this
+    function's whole body."""
     registry_refs, calendar_refs = _pinned_refs(store)
+    # Sorted by path, matching reference_catalog.pinned_materialization_refs's
+    # own sort -- request_hash is order-sensitive (build_materialization_request
+    # stores registry_and_model_refs verbatim, no internal sort).
+    combined = tuple(sorted(registry_refs + tuple(extra_registry_refs),
+                            key=lambda ref: lm.parse_pinned_ref(ref)[0]))
     return lm.build_materialization_request(
         repository, store, snap, snapshot_object_ref,
         direct_scope=direct_scope or DIRECT_SCOPE, evidence_scope=evidence_scope or EVIDENCE_SCOPE,
-        registry_and_model_refs=registry_refs, calendar_refs=calendar_refs,
+        registry_and_model_refs=combined, calendar_refs=calendar_refs,
         expected_population={"earnings_events": 2, "daily_market": 3, "trades": 2,
                              "option_chains": 2, "feature_panel": 2, "tier4_forecasts": 2})
 
@@ -266,6 +279,40 @@ def test_identical_request_yields_identical_hash_and_manifest(tmp_path):
     manifest_a = materialize(repository, store, request_a, tmp_path / "root_a")
     manifest_b = materialize(repository, store, request_b, tmp_path / "root_b")
     assert manifest_a == manifest_b
+
+
+def test_model_output_reference_inputs_materialize_at_their_legacy_paths(tmp_path):
+    """Task brief 2026-09-14: pnl_sim_history.parquet/recalibration_pairs.parquet
+    pin and materialize exactly like every other ``registry_and_model_refs``
+    entry -- through the SAME generic copy loop
+    ``legacy_materialization.materialize_tree`` already uses (the
+    ``for ref in (*request.registry_and_model_refs, *request.calendar_refs)``
+    write, unmodified for this task), so pinning them as two more entries is
+    enough; no new materialize-time code is needed."""
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    registry_refs, calendar_refs = _pinned_refs(store)
+    pnl_sim_bytes = b"synthetic pnl_sim_history parquet bytes"
+    recal_bytes = b"synthetic recalibration_pairs parquet bytes"
+    pnl_sim_hash = store.publish_bytes(pnl_sim_bytes, schema_ref="legacy_pinned_ref.v1").content_hash
+    recal_hash = store.publish_bytes(recal_bytes, schema_ref="legacy_pinned_ref.v1").content_hash
+    model_output_refs = (
+        lm.format_pinned_ref(PNL_SIM_HISTORY_PATH, pnl_sim_hash),
+        lm.format_pinned_ref(RECALIBRATION_PAIRS_PATH, recal_hash),
+    )
+    request = lm.build_materialization_request(
+        repository, store, snap, _snapshot_object_ref(store),
+        direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
+        registry_and_model_refs=registry_refs + model_output_refs, calendar_refs=calendar_refs,
+        expected_population={})
+
+    dest_root = tmp_path / "legacy_root"
+    manifest = materialize(repository, store, request, dest_root)
+
+    assert manifest[PNL_SIM_HISTORY_PATH] == pnl_sim_hash
+    assert manifest[RECALIBRATION_PAIRS_PATH] == recal_hash
+    assert (dest_root / PNL_SIM_HISTORY_PATH).read_bytes() == pnl_sim_bytes
+    assert (dest_root / RECALIBRATION_PAIRS_PATH).read_bytes() == recal_bytes
 
 
 def test_changing_scope_or_refs_changes_request_hash(tmp_path):

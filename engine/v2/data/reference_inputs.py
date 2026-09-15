@@ -143,6 +143,15 @@ LEGACY_REFERENCE_INPUTS_V1: dict[str, object] = {
         "tier4_serving_cache": {
             "resolution": "panel_hash_suffix", "directory": TIER4_SERVING_DIR,
             "pattern": "<model_id>_<fold:%Y%m>_<sha256(panel.parquet)[:12]>.joblib"},
+        #: Task brief 2026-09-14: the two derived model artifacts the legacy
+        #: scorer reads (``engine.pnl_sim.load_history``, ``engine.recalibrate.
+        #: load_pairs``) — model OUTPUT downstream of Tier 4, pinned monthly to
+        #: the Tier-4 fold (:data:`publish_reference_inputs`'s ``session``
+        #: argument), not to snapshot identity like the raw Tier-2/3 tables.
+        "pnl_sim_history": {
+            "resolution": "exact", "path": legacy_adapter.legacy_pnl_sim_history_path()},
+        "recalibration_pairs": {
+            "resolution": "exact", "path": legacy_adapter.legacy_recalibration_pairs_path()},
     },
 }
 
@@ -255,13 +264,51 @@ def manifest_pins(refs) -> tuple[tuple[str, ...], str | None]:
 # --------------------------------------------------------------------------
 
 
+#: Kinds whose pin also records the Tier-4 monthly fold current at the
+#: snapshot's own decision session (task brief 2026-09-14, SEND-BACK on the
+#: first version of this pin): both are model OUTPUT downstream of Tier 4,
+#: not raw data, so "current" is a property of the DATA's own session, not
+#: the wall-clock moment the import happened to run.
+_FOLD_KINDS = frozenset({"pnl_sim_history", "recalibration_pairs"})
+
+
+def _fold_for(as_of) -> str:
+    """``YYYYMM`` for the fold :meth:`Scorer._serving` would ask for at
+    ``as_of`` (``engine/score.py:1967``), via ``legacy_adapter.legacy_serving_fold``
+    — the SAME ``tier4.serving_fold`` rule the live scorer uses, so this pin
+    can never define "current fold" differently than serving does. Adds no
+    new legacy symbol or fan-out edge: ``legacy_serving_fold`` already wraps
+    ``engine.data.features.tier4.serving_fold`` (``legacy_adapter.py:135``,
+    declared in ``checks/legacy_adapters.json``).
+
+    ``legacy_serving_fold(event_date, as_of)`` returns
+    ``min(fold_start_of(event_date), fold_start_of(as_of))`` — the SERVED
+    fold for an event decided at ``as_of``, never later than ``as_of``'s own
+    fold. Called here as ``legacy_serving_fold(as_of, as_of)``: this pin is
+    not for one event, so there is no ``event_date``; passing ``as_of`` for
+    both collapses the ``min`` to ``fold_start_of(as_of)`` — the freshest
+    fold servable for ANY event decided at this session (a real event's own
+    fold can only push the served fold EARLIER, never later), which is
+    exactly the fold a model-output artifact "current as of this session"
+    means.
+    """
+    return f"{legacy_adapter.legacy_serving_fold(as_of, as_of):%Y%m}"
+
+
 def publish_reference_inputs(store, attempt_id: str, legacy_root, file_refs, *,
-                             keepalive=None) -> tuple[catalog_rows.ReferenceInput, ...]:
+                             as_of=None, keepalive=None) -> tuple[catalog_rows.ReferenceInput, ...]:
     """Publish every reference file in ``file_refs`` from the staged legacy root.
 
     Refuses with ``CONTRACT_MISMATCH`` if any ``exact`` input is absent: a
-    manifest that was not built by :func:`resolve_reference_files`.
-    ``keepalive``, when given, is called before each file is published.
+    manifest that was not built by :func:`resolve_reference_files`. Also
+    refuses ``CONTRACT_MISMATCH`` if a :data:`_FOLD_KINDS` file is being
+    pinned and ``as_of`` is ``None`` — a missing Tier-4 fold must never be
+    silent, the same discipline the missing-file check already applies.
+    ``as_of``: the snapshot's own decision session (``LegacyInputManifest.
+    selected_session``, ``import_snapshot.py``'s ``_check_snapshot_shape`` —
+    the pinned SNAPSHOT's ``generated_at`` date), never a clock read — see
+    :func:`_fold_for`. ``keepalive``, when given, is called before each file
+    is published.
     """
     keepalive = keepalive or (lambda: None)
     published = []
@@ -271,11 +318,17 @@ def publish_reference_inputs(store, attempt_id: str, legacy_root, file_refs, *,
             continue
         keepalive()
         obj = objects.publish_legacy_file(store, attempt_id, legacy_root, ref)
+        fold = _fold_for(as_of) if kind in _FOLD_KINDS and as_of is not None else ""
         published.append(catalog_rows.ReferenceInput(
             kind=kind, legacy_path=ref.path, object_id=obj.object_id,
-            content_hash=obj.content_hash, byte_size=obj.byte_size))
+            content_hash=obj.content_hash, byte_size=obj.byte_size, fold=fold))
     missing = sorted(set(_EXACT) - {item.legacy_path for item in published})
     if missing:
         raise errors.fail("CONTRACT_MISMATCH", "import manifest lacks required reference inputs",
                           details={"paths": missing})
+    unfolded = sorted(item.legacy_path for item in published
+                      if item.kind in _FOLD_KINDS and not item.fold)
+    if unfolded:
+        raise errors.fail("CONTRACT_MISMATCH", "a Tier-4-derived reference input was pinned with no "
+                          "snapshot decision session (as_of) to bind its fold", details={"paths": unfolded})
     return tuple(published)

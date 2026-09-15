@@ -74,6 +74,8 @@ __all__ = [
     "legacy_chooser_pool_path",
     "legacy_data_dir",
     "legacy_models_dir",
+    "legacy_pnl_sim_history_path",
+    "legacy_recalibration_pairs_path",
     "legacy_registry_path",
     "legacy_serving_fold",
     "legacy_snapshot_path",
@@ -157,13 +159,18 @@ def legacy_tier4_serving_header(path, *, expected_sha256_hex: str, max_bytes: in
 # --------------------------------------------------------------------------
 #
 # ``engine/v2/data/reference_inputs.py`` builds ``LEGACY_REFERENCE_INPUTS_V1``
-# from these and nothing else. Two leaf names are not exported by any module
+# from these and nothing else. Four leaf names are not exported by any module
 # this adapter can import within its fan-out budget of 8: ``structures.json``
-# (``engine.structure_registry.CHAMPIONS_PATH``) and
-# ``chooser_analog_pool.parquet`` (``engine.score.CHOOSER_ANALOG_POOL``).
-# Both sit beside a constant that is imported here, and a tier-0 test in
-# ``tests/test_v2_data_reference_inputs.py`` pins each one to its real legacy
-# constant.
+# (``engine.structure_registry.CHAMPIONS_PATH``),
+# ``chooser_analog_pool.parquet`` (``engine.score.CHOOSER_ANALOG_POOL``),
+# ``pnl_sim_history.parquet`` (``engine.pnl_sim.HISTORY_PATH`` — task brief
+# 2026-09-14, pinning the two derived model artifacts the legacy scorer reads)
+# and ``recalibration_pairs.parquet`` (``engine.recalibrate.PAIRS_PATH``, same
+# task). All four sit beside a constant that is imported here (or, for
+# ``pnl_sim_history.parquet``, are typed verbatim — ``HISTORY_PATH`` is
+# already the exact root-relative POSIX string, not a ``Path`` built from an
+# imported root), and a tier-0 test in ``tests/test_v2_data_reference_inputs.py``
+# pins each one to its real legacy constant.
 
 
 def _root_relative(path) -> str:
@@ -208,6 +215,31 @@ def legacy_snapshot_path() -> str:
 def legacy_data_dir() -> str:
     """``engine.paths.DATA`` — the root of the curated store and feature files."""
     return _root_relative(DATA)
+
+
+def legacy_pnl_sim_history_path() -> str:
+    """``engine.pnl_sim.HISTORY_PATH`` — the gate's trailing-cutoff history.
+
+    Model OUTPUT downstream of Tier 4, sized beside the panel rather than
+    inside it (``engine.pnl_sim``'s own docstring note above ``HISTORY_PATH``).
+    Typed verbatim rather than imported: ``engine.pnl_sim`` would be a ninth
+    distinct module on this adapter's reviewed 8-edge fan-out budget (see the
+    comment above). ``HISTORY_PATH`` is already the exact root-relative POSIX
+    string (``"data/features/pnl_sim_history.parquet"``), so no ``Path``
+    join is needed the way ``legacy_chooser_pool_path`` needs one.
+    """
+    return "data/features/pnl_sim_history.parquet"
+
+
+def legacy_recalibration_pairs_path() -> str:
+    """``engine.recalibrate.PAIRS_PATH`` — the win-rate recalibration pairs cache.
+
+    Model OUTPUT downstream of Tier 4, same reasoning as
+    :func:`legacy_pnl_sim_history_path`. Built from ``FEATURES`` (already
+    imported here) rather than importing ``engine.recalibrate``, for the same
+    fan-out-budget reason.
+    """
+    return _root_relative(FEATURES / "recalibration_pairs.parquet")
 
 
 # --------------------------------------------------------------------------
