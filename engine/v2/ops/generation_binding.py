@@ -48,8 +48,33 @@ that one receipt, the same document ``snapshot_import_effect`` verified
 against ``SnapshotImportRequest.source_manifest_hash`` before ever
 committing, via the plain ``attempt_input_bindings`` row the import job's own
 launch already recorded for ``legacy_manifest.json``
-(``input_bindings.record_resolved_bindings``); no new binding, table or
-coordinator flow.
+(``input_bindings.record_resolved_bindings``) — OR, when that receipt's own
+attempt carries no such binding, by following ``data_receipt_lineage`` (v8)
+to its base receipt and repeating there (see "Receipt lineage" below). No
+new binding, table (beyond v8) or coordinator flow.
+
+**Receipt lineage (v8).** A ``price_history`` capture
+(``engine.v2.ops.price_history_store``) commits its generation under its own
+honest, non-scheduler ``attempt_id`` — never a real job attempt — so it never
+gains an ``attempt_input_bindings`` row for ``legacy_manifest.json``. A
+capture never changes the legacy input manifest: it only adds
+``price_history`` and carries every other table's dataset version forward
+unchanged, so its accepted legacy read-set is exactly its BASE receipt's
+(the committed receipt of the head it captured onto), recorded once, in the
+capture's own commit transaction, as a ``data_receipt_lineage`` row
+(:func:`record_price_history_lineage`). :func:`accepted_generation_refs`
+walks that row when a receipt's own attempt has no manifest binding: resolve
+``base_receipt_id``, check IT for a binding, and if it also has none, follow
+ITS lineage row, and so on — first ancestor with its own binding wins. The
+walk is bounded (64 hops) and cycle-safe (a repeated receipt_id stops it
+early); a chain that ends without ever finding a binding, or whose next hop
+does not resolve to a currently-committed receipt (the same
+``_COMMITTED_RECEIPT_ATTEMPT`` query every hop re-runs), returns ``None`` —
+:func:`refuse_generation_mismatch` turns that into the same typed
+``INPUT_CHANGED``/``generation_receipt_missing`` refusal an unresolvable
+receipt_id has always produced. A receipt with its own binding is returned
+directly, exactly as before v8 — the lineage table is never consulted for
+one.
 
 :func:`refuse_generation_mismatch` is the launch-time check: any path both
 manifests pin, pinned to a DIFFERENT content hash, refuses ``INPUT_CHANGED``
@@ -75,7 +100,7 @@ import json
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import fail
 
-__all__ = ["accepted_generation_refs", "refuse_generation_mismatch"]
+__all__ = ["accepted_generation_refs", "record_price_history_lineage", "refuse_generation_mismatch"]
 
 _COMMITTED_RECEIPT_ATTEMPT = """
 SELECT attempt_id FROM data_import_receipts
@@ -87,22 +112,62 @@ SELECT artifact_id FROM attempt_input_bindings
 WHERE attempt_id = ? AND name = 'legacy_manifest.json'
 """
 
+_LINEAGE_BASE = """
+SELECT base_receipt_id FROM data_receipt_lineage WHERE receipt_id = ?
+"""
+
+#: "Bound the walk (depth <= 64, cycle-safe)" — task brief. A real chain is
+#: one or two hops (price_history_store never captures onto another
+#: capture's OWN receipt more than the task's "two successive captures"
+#: scenario describes); 64 is headroom, not an expected depth.
+_MAX_LINEAGE_DEPTH = 64
+
+_PRICE_HISTORY_CAPTURE_LINEAGE = "price_history_capture"
+
 
 def accepted_generation_refs(conn, store, *, receipt_id: str) -> dict[str, str] | None:
     """``{path: content_hash}`` of ONE SPECIFIC committed import receipt's own
-    pinned ``LegacyInputManifest`` — never "whatever is newest right now".
-    ``None`` when ``receipt_id`` is empty, was never committed, or pinned no
-    manifest — nothing accepted to bind a barrier stage to."""
+    pinned ``LegacyInputManifest`` — never "whatever is newest right now" —
+    following ``data_receipt_lineage`` to a base receipt when this one's own
+    attempt carries no manifest binding (see the module docstring's "Receipt
+    lineage" section). ``None`` when ``receipt_id`` is empty, the chain
+    starting there ends without ever finding a committed receipt with its
+    own pinned manifest, a hop resolves to a receipt that is no longer
+    committed, or the walk exceeds :data:`_MAX_LINEAGE_DEPTH` — nothing
+    accepted to bind a barrier stage to."""
     if not receipt_id:
         return None
-    receipt = conn.execute(_COMMITTED_RECEIPT_ATTEMPT, (receipt_id,)).fetchone()
-    if receipt is None:
-        return None
-    binding = conn.execute(_MANIFEST_BINDING, (receipt[0],)).fetchone()
-    if binding is None:
-        return None
-    document = json.loads(store.read_verified(artifact(conn, store, binding[0])))
-    return {ref["path"]: ref["content_hash"] for ref in document.get("file_refs", [])}
+    current = receipt_id
+    seen: set[str] = set()
+    for _ in range(_MAX_LINEAGE_DEPTH):
+        if current in seen:
+            return None  # cycle
+        seen.add(current)
+        receipt = conn.execute(_COMMITTED_RECEIPT_ATTEMPT, (current,)).fetchone()
+        if receipt is None:
+            return None
+        binding = conn.execute(_MANIFEST_BINDING, (receipt[0],)).fetchone()
+        if binding is not None:
+            document = json.loads(store.read_verified(artifact(conn, store, binding[0])))
+            return {ref["path"]: ref["content_hash"] for ref in document.get("file_refs", [])}
+        lineage = conn.execute(_LINEAGE_BASE, (current,)).fetchone()
+        if lineage is None:
+            return None
+        current = lineage[0]
+    return None  # depth exceeded
+
+
+def record_price_history_lineage(conn, *, receipt_id: str, base_receipt_id: str) -> None:
+    """Record that ``receipt_id`` (a price_history-only capture generation's
+    own receipt) inherits its accepted legacy read-set from
+    ``base_receipt_id`` (the committed receipt of the head it captured
+    onto) — see the module docstring's "Receipt lineage" section. Called
+    from inside the capture's own commit transaction
+    (``price_history_store._commit_generation``'s ``record_references``
+    callback), so the row is all-or-nothing with the receipt it names."""
+    conn.execute(
+        "INSERT INTO data_receipt_lineage (receipt_id, base_receipt_id, kind) VALUES (?, ?, ?)",
+        (receipt_id, base_receipt_id, _PRICE_HISTORY_CAPTURE_LINEAGE))
 
 
 def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict) -> None:
