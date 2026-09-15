@@ -963,3 +963,174 @@ class TestThePnLGateSimulator:
 
         assert pnl_sim.WINDOW_MONTHS == 6
         assert pnl_sim.QUANTILE == 0.20
+
+
+class TestServingIsProcessDeterministic:
+    """2026-09-15 investigation: v2's legacy_render/legacy_selfcheck build a
+    FRESH ``Scorer``/``tier4.serving_model`` in separate worker processes,
+    unlike legacy nightly.py's single shared ``Scorer``. A real reproduction
+    (attempt-14 inputs) found 8-10 digest mismatches between a rendered
+    board and a fresh selfcheck re-score.
+
+    Root-caused: NOT process nondeterminism in ``tier4``/``Scorer``. The
+    board's frozen ``score.json`` was a real production artifact computed
+    under a different code version (``implementation_ref`` a content hash of
+    the worker source tree) than the reproduction worktree's HEAD --
+    confirmed by comparing ``content_hash(worker_source_manifest(...))``
+    directly against the real job's recorded ``implementation_ref``: they
+    differ. A controlled, single-code-version reproduction --
+    ``legacy_score`` -> ``legacy_render`` -> ``legacy_selfcheck`` run as
+    three SEPARATE PROCESSES against one pinned legacy read-set -- came back
+    clean: 20/88 rows re-scored, 0 mismatches; a second independent full
+    ``score_calendar`` (88 rows, every producer/fold the board touches) also
+    reproduced every row's digest bit-for-bit against the first. A synthetic
+    MLPRegressor determinism check (the champion size model's real
+    architecture) also found predictions bit-identical whether BLAS was
+    pinned to 1 thread or 8.
+
+    This test is therefore a REGRESSION GUARD, not a fix demonstration: it
+    already passes on the code that produced these findings. It exists so a
+    future change to ``serving_model``/``fit_fold``/``_pool_before`` that
+    reintroduces process-order sensitivity (unsorted iteration, a hash-order
+    dependent join, etc.) is caught here instead of by a 3am selfcheck run.
+    """
+
+    @pytest.fixture
+    def wired_dir(self, panel, built, tmp_path):
+        panel_path = tmp_path / "panel.parquet"
+        panel.to_parquet(panel_path, index=False)
+        tier4_path = tmp_path / "tier4_forecasts.parquet"
+        # Explicit `path=` so this writes ONLY the tmp-path file, never the
+        # real `paths.TIER4` — this fixture is not monkeypatching the main
+        # test process's globals (the subprocess script below sets its OWN
+        # `paths.TIER4`/`tier4.SERVING_DIR` before ever reading them).
+        write_forecasts(built, path=tier4_path)
+        serving_dir = tmp_path / "serving"
+        serving_dir.mkdir()
+        return {"panel": panel_path, "tier4": tier4_path, "serving": serving_dir}
+
+    def _fold(self, built):
+        return built.loc[built["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
+
+    def _run_subprocess(self, wired_dir, script_path, panel_path, serving_dir, out_path, fold):
+        import subprocess
+        import sys
+
+        subprocess.run(
+            [sys.executable, str(script_path), str(panel_path), str(serving_dir), str(out_path),
+             fold.isoformat()],
+            check=True, capture_output=True, text=True, timeout=120,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+
+    def _write_probe_script(self, wired_dir):
+        import textwrap
+
+        script = textwrap.dedent(f"""
+            import sys, json, hashlib
+            sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+            sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+            import numpy as np
+            import pandas as pd
+            from engine import paths
+            from engine.data.features import tier4
+            from test_tier4 import MODEL
+
+            from pathlib import Path as _Path
+            panel_path, serving_dir, out_path, fold_iso = sys.argv[1:5]
+            paths.PANEL = _Path(panel_path)
+            paths.TIER4 = _Path({str(wired_dir["tier4"])!r})
+            tier4.SERVING_DIR = _Path(serving_dir)
+
+            panel = pd.read_parquet(panel_path)
+            served = tier4.serving_model(fold_iso, panel=panel, model=MODEL, cache=True)
+            # Select the SAME five (ticker, date) rows regardless of the
+            # panel's own on-disk order -- a positional .head(5) would pick
+            # different underlying events once the panel is shuffled, which
+            # is a test bug, not evidence of a row-order dependency.
+            probe_rows = panel[panel["ticker"].isin(["T000", "T001"]) & (panel["k"] < 3)]
+            probe_rows = probe_rows.sort_values(["ticker", "date"]).reset_index(drop=True)
+            preds = np.asarray(served.predict(probe_rows), dtype=float)
+            payload = {{
+                "pred_rounded": [None if not np.isfinite(v) else round(float(v), 6) for v in preds],
+                "pred_hash": hashlib.sha256(preds.tobytes()).hexdigest(),
+                "pool_pred_hash": hashlib.sha256(np.asarray(served.pool_pred, dtype=float).tobytes()).hexdigest(),
+                "pool_res_hash": hashlib.sha256(np.asarray(served.pool_res, dtype=float).tobytes()).hexdigest(),
+                "pool_n": int(served.pool_pred.size),
+            }}
+            with open(out_path, "w") as fh:
+                json.dump(payload, fh)
+        """)
+        script_path = wired_dir["serving"].parent / "probe.py"
+        script_path.write_text(script)
+        return script_path
+
+    def test_two_subprocesses_with_no_pre_existing_cache_fit_bit_identically(
+        self, panel, built, wired_dir
+    ):
+        """Two SEPARATE python processes, each given its OWN empty cache
+        directory (so BOTH independently reach a cache MISS -> ``fit_fold``
+        -> write, the exact scenario legacy_render and legacy_selfcheck are
+        in when a fold's model was not already pinned), on the SAME panel
+        bytes. This is the direct analogue of legacy nightly.py's single
+        shared ``Scorer`` (one fit, reused) versus v2's per-process fresh
+        ``Scorer`` (independent fits) -- proven here to agree bit-for-bit.
+        """
+        import json as _json
+
+        fold = self._fold(built)
+        script_path = self._write_probe_script(wired_dir)
+
+        serving_a = wired_dir["serving"].parent / "serving_a"
+        serving_b = wired_dir["serving"].parent / "serving_b"
+        serving_a.mkdir()
+        serving_b.mkdir()
+        out_a = wired_dir["serving"].parent / "out_a.json"
+        out_b = wired_dir["serving"].parent / "out_b.json"
+
+        self._run_subprocess(wired_dir, script_path, wired_dir["panel"], serving_a, out_a, fold)
+        self._run_subprocess(wired_dir, script_path, wired_dir["panel"], serving_b, out_b, fold)
+
+        result_a = _json.loads(out_a.read_text())
+        result_b = _json.loads(out_b.read_text())
+        assert result_a == result_b, (
+            "serving_model()'s independently-fit estimator/pool diverged "
+            "between two separate processes on byte-identical inputs -- "
+            "the render-vs-selfcheck symptom"
+        )
+
+    def test_serving_is_insensitive_to_the_panel_rows_own_order(self, panel, built, wired_dir):
+        """A determinism test that feeds two processes the SAME frame in the
+        SAME order proves nothing about order (AGENTS.md's self-check
+        section: 'shuffle the input'). Compared at the board's own six-place
+        precision (``_norm`` in ``engine/dashboard/selfcheck.py``), not by
+        exact bytes -- a linear fit's normal equations are allowed a few ULP
+        of summation-order noise; a real order BUG moves the sixth decimal,
+        not the sixteenth.
+        """
+        import json as _json
+
+        fold = self._fold(built)
+        script_path = self._write_probe_script(wired_dir)
+
+        shuffled = panel.sample(frac=1.0, random_state=7).reset_index(drop=True)
+        shuffled_path = wired_dir["panel"].with_name("panel_shuffled.parquet")
+        shuffled.to_parquet(shuffled_path, index=False)
+
+        serving_a = wired_dir["serving"].parent / "serving_order_a"
+        serving_b = wired_dir["serving"].parent / "serving_order_b"
+        serving_a.mkdir()
+        serving_b.mkdir()
+        out_a = wired_dir["serving"].parent / "out_order_a.json"
+        out_b = wired_dir["serving"].parent / "out_order_b.json"
+
+        self._run_subprocess(wired_dir, script_path, wired_dir["panel"], serving_a, out_a, fold)
+        self._run_subprocess(wired_dir, script_path, shuffled_path, serving_b, out_b, fold)
+
+        result_a = _json.loads(out_a.read_text())
+        result_b = _json.loads(out_b.read_text())
+        assert result_a["pred_rounded"] == result_b["pred_rounded"], (
+            "serving_model()'s prediction moved past six decimal places "
+            "when the panel's own row order changed -- a row-order "
+            "dependency the board's own digest precision would catch"
+        )
