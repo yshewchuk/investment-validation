@@ -2,10 +2,10 @@
 P2-C02 (Phase 2 review closeout, §12.2): "Bind remaining manifest-backed
 stages to the same accepted data/model generation as snapshot scoring."
 
-A barrier-only kind (``legacy_finality``/``legacy_model_evidence``,
-``stages.BARRIER_ONLY_REASONS`` -- ``legacy_selfcheck`` moved off the
-barrier in the attempt-19 fix, see ``stages.SNAPSHOT_BACKED_KINDS``) has no
-declared read
+A barrier-only kind (``legacy_finality`` -- the sole remaining entry in
+``stages.BARRIER_ONLY_REASONS``; ``legacy_selfcheck`` moved off the barrier
+in the attempt-19 fix and ``legacy_model_evidence`` in the read-set gap fix
+below, see ``stages.SNAPSHOT_BACKED_KINDS``) has no declared read
 plan, so it can never run snapshot-backed: it always launches through
 ``supervisor.Service._pin_read_set``, reading a pinned ``LegacyInputManifest``
 copied from the LIVE legacy store at that moment. Nothing before this task
@@ -16,7 +16,8 @@ older) legacy tree than the one snapshot-backed scoring just ran against.
 **Gated on snapshot input mode (review fix).** The check must never fire for
 a default ``--input-mode legacy`` nightly: the legacy store moves ahead of
 whatever a shadow snapshot happened to pin, so comparing against "the newest
-committed import in scope" refused finality/model_evidence/selfcheck on
+committed import in scope" refused finality (and, before their own fixes
+moved them off the barrier, model_evidence/selfcheck too) on
 every ordinary data refresh the moment any shadow snapshot existed —
 unrelated to whether THIS run reads snapshot-backed at all. A barrier-only
 kind can never declare ``input_mode="snapshot"`` itself (``stages.
@@ -197,32 +198,42 @@ def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest
                    details={"reason": "generation_mismatch", "paths": differing})
 
 
-#: Considered and NOT implemented (attempt-19 fix, task Do §2): a second
-#: cross-check comparing a barrier-only stage's pinned manifest (finality,
-#: model_evidence -- the two remaining kinds in ``stages.BARRIER_ONLY_
-#: REASONS`` now that ``legacy_render``/``legacy_selfcheck`` are snapshot-
-#: backed, see ``stages.SNAPSHOT_BACKED_KINDS``) against THIS run's own
-#: committed ``legacy_materialize`` manifest, byte for byte, refusing on any
-#: difference. Measured directly on the real attempt-19 nightly
-#: (``/root/phase2-shadow-ops``, plan snapshot ``snap_6ae7348848e4d27486823eb0a9baceff``):
-#: the barrier manifest every one of finality/model_evidence/the-old-
-#: selfcheck shared (``art_c7b886a159cc8b41b2df2b9968a8a3d7``, 548 files) and
-#: the run's own materialization manifest for the SAME score job's request
-#: (637 files) overlap on 492 paths, of which 3 already differ --
-#: ``data/curated/option_chains/year={2024,2025,2026}/part-0000.parquet``,
-#: the same files ``legacy_render``/``legacy_selfcheck`` used to disagree on
-#: with the un-pinned live tree -- plus 145 present only in the
-#: materialization and 56 present only in the barrier capture. A strict
-#: byte-identical check over that overlap would have refused this real run,
-#: not a synthetic one, and would refuse most real runs going forward: the
-#: barrier path reads the LIVE tree at whatever moment its own job launches,
-#: while the materialization is frozen at plan/materialize time, so some
-#: drift between them across a run's own wall-clock is the normal case, not
-#: a bug. Finality/model_evidence's actual outputs (session resolution,
-#: coverage, evidence quality) do not depend on ``option_chains`` at all, so
-#: this measured drift does not currently reach them -- but the check as
-#: specified would still fire on it. Reported per the task brief rather than
-#: enforced; re-measure before reconsidering, and if enforcement is revisited
-#: scope it to the tables a barrier stage's OWN action actually reads
-#: (``_action_finality``/``_action_model_evidence``), not the whole shared
-#: manifest.
+#: UPDATE (last read-set gap fix, 2026-09-15): the byte-for-byte cross-check
+#: below was considered and rejected after the attempt-19 measurement (kept
+#: verbatim in git history); this is what replaced it once the two remaining
+#: ``stages.BARRIER_ONLY_REASONS`` kinds were investigated individually.
+#: ``legacy_model_evidence`` needed no cross-check at all: its full read
+#: surface (``engine.dashboard.model_evidence.build_model_evidence`` --
+#: registry, panel, trades, a per-role daily_market subset, earnings_events,
+#: never ``option_chains``) turned out to already be exactly
+#: ``LEGACY_SCORE_READ_PLAN_V1``, so it simply moved into
+#: ``stages.SNAPSHOT_BACKED_KINDS`` (overlay-mounted, like ``legacy_render``,
+#: since ``build_model_evidence`` itself writes ``data/features/
+#: model_evidence.json`` at its legacy path). ``legacy_finality`` could not
+#: move (its raw ORATS fetch-cache/calendar reads are not declarable), so it
+#: kept the barrier and gained a CONTENT-level cross-check instead of a byte
+#: one -- the attempt-19 measurement's own conclusion, re-investigated with
+#: attempt 20's real inputs: the 3 differing
+#: ``data/curated/option_chains/year={2024,2025,2026}/part-0000.parquet``
+#: files are NOT drift -- the materialization projects ``option_chains`` per
+#: ``LEGACY_SCORE_READ_PLAN_V1`` to the run's scoped tickers/columns, and the
+#: KEPT rows and columns are content-identical to the live tree; a raw byte
+#: diff was comparing two different projections of the same data, not two
+#: different answers. ``legacy_adapter._cross_check_finality_against_
+#: materialization`` compares CONTENT instead, within finality's own declared
+#: projection (``ticker``+``date``/``obs_date``, the columns
+#: ``engine.data.finality._coverage_frame`` actually reads): it recomputes
+#: ``engine.data.finality.session_finality`` for the barrier-resolved date and
+#: tickers, sourced from this run's own committed materialization instead of
+#: the live tree, and refuses (``SOURCE_NOT_FINAL``/``finality_snapshot_
+#: drift``) only when the materialization does not ALSO call that session
+#: final -- a projection-only difference (the 3 files above) can never trip
+#: this, since both sides are read down to the identical two columns first,
+#: and a changed in-scope row (a ticker covered at the resolved date on one
+#: side and not the other) always does. Wired read-only, never switching
+#: ``legacy_finality``'s own ``input_mode`` off ``"legacy"``: ``nightly.
+#: CROSS_CHECK_STAGES`` binds the three snapshot artifacts onto its job
+#: alongside its ordinary ``legacy_manifest.json``, and
+#: ``snapshot_stages``'s ``"finality_check"`` launch mode verifies and hands
+#: the worker the materialization root via ``envelope_extra`` without ever
+#: rooting the worker there (``worker_legacy_root`` stays the barrier tree).

@@ -134,6 +134,141 @@ def test_action_finality_raises_source_not_final_when_no_session_qualifies(monke
 
 
 # --------------------------------------------------------------------------
+# last read-set gap fix (2026-09-15): legacy_finality's content cross-check
+# against this run's own materialization (task decision (b))
+# --------------------------------------------------------------------------
+
+
+class _MarketWideEntry:
+    """``engine.data.fetch.CachedEntry``'s two fields ``_market_wide_complete``
+    reads, matching ``tests/test_finality.py``'s own fixture shape."""
+
+    def __init__(self, endpoint, day):
+        self.endpoint = endpoint
+        self.params = {"tradeDate": day}
+        self.meta = {"status": 200}
+
+
+def _write_curated_parquet(root, table, column, year, ticker_dates, extra_columns=None):
+    frame = pd.DataFrame({"ticker": [t for t, _ in ticker_dates],
+                          column: [d for _, d in ticker_dates],
+                          **(extra_columns or {})})
+    directory = root / "data" / "curated" / table / f"year={year}"
+    directory.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(directory / "part-0000.parquet")
+
+
+def _patch_resolved_session(monkeypatch, date, tickers):
+    """Pin the BARRIER's own resolved session (``resolve_final_session``) to
+    a fixed, already-final result, so only the cross-check's own logic is
+    under test -- same monkeypatch shape
+    ``test_action_finality_raises_source_not_final_when_no_session_qualifies``
+    already uses."""
+    import engine.calendar as calendar_module
+    import engine.data.finality as finality_module
+    from engine.data.finality import SessionFinality
+
+    resolved = SessionFinality(date=date, market_wide=True, daily_share=1.0, chain_share=1.0,
+                               is_final=True, detail="final", tickers=len(tickers),
+                               covered=len(tickers))
+    monkeypatch.setattr(finality_module, "resolve_final_session",
+                        lambda requested, tickers, *, calendar, max_sessions=15: resolved)
+    monkeypatch.setattr(finality_module, "covered_tickers", lambda date, tickers: list(tickers))
+    monkeypatch.setattr(calendar_module, "trading_calendar", lambda extend_days=400: object())
+
+
+def _install_market_wide(monkeypatch, day):
+    import engine.data.finality as finality_module
+
+    monkeypatch.setattr(finality_module.fetch, "iter_cached",
+                        lambda source: [_MarketWideEntry("hist/summaries", day),
+                                        _MarketWideEntry("hist/cores", day)])
+
+
+def test_finality_cross_check_passes_when_materialization_independently_confirms(
+        monkeypatch, tmp_path):
+    date = "2026-09-11"
+    tickers = ("AAA", "BBB")
+    _patch_resolved_session(monkeypatch, date, tickers)
+    _install_market_wide(monkeypatch, date)
+
+    root = tmp_path / "materialization"
+    _write_curated_parquet(root, "daily_market", "date", 2026, [("AAA", date), ("BBB", date)])
+    _write_curated_parquet(root, "option_chains", "obs_date", 2026, [("AAA", date), ("BBB", date)])
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _action_finality({"session": REQUESTED, "tickers": tickers}, staging,
+                     cross_check={"materialization_root": str(root)})
+    assert (staging / "finality.json").is_file()
+    assert json.loads((staging / "finality.json").read_text())["date"] == date
+
+
+def test_finality_cross_check_refuses_when_materialization_lacks_the_resolved_session(
+        monkeypatch, tmp_path):
+    """The real risk the task names: the live tree grows daily, so the
+    barrier can resolve a session (``date``) the pinned materialization has
+    no rows for -- here it only carries an older session, ``2026-09-08``."""
+    date = "2026-09-11"
+    tickers = ("AAA", "BBB")
+    _patch_resolved_session(monkeypatch, date, tickers)
+    _install_market_wide(monkeypatch, date)
+
+    root = tmp_path / "materialization"
+    _write_curated_parquet(root, "daily_market", "date", 2026,
+                           [("AAA", "2026-09-08"), ("BBB", "2026-09-08")])
+    _write_curated_parquet(root, "option_chains", "obs_date", 2026,
+                           [("AAA", "2026-09-08"), ("BBB", "2026-09-08")])
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    with pytest.raises(OpsError) as err:
+        _action_finality({"session": REQUESTED, "tickers": tickers}, staging,
+                         cross_check={"materialization_root": str(root)})
+    assert err.value.problem.code == "SOURCE_NOT_FINAL"
+    assert err.value.problem.details["reason"] == "finality_snapshot_drift"
+    assert not (staging / "finality.json").is_file()
+
+
+def test_finality_cross_check_is_skipped_without_a_materialization_root(monkeypatch, tmp_path):
+    """A plain legacy-mode nightly's ``cross_check`` is always ``None`` --
+    unaffected, exactly as before this fix: no materialization root is ever
+    consulted and nothing new can refuse it."""
+    date = "2026-09-11"
+    tickers = ("AAA",)
+    _patch_resolved_session(monkeypatch, date, tickers)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _action_finality({"session": REQUESTED, "tickers": tickers}, staging)
+    assert (staging / "finality.json").is_file()
+
+
+def test_finality_cross_check_ignores_a_projection_only_difference(monkeypatch, tmp_path):
+    """Task fact: the 3 differing real-world ``option_chains`` parquet files
+    are a projection artifact (extra columns the materialization drops), not
+    drift. A column finality's own projection never reads (here, an extra
+    ``close`` column on ``daily_market``) must never trip the check -- only
+    ``ticker``+``date``/``obs_date`` are compared."""
+    date = "2026-09-11"
+    tickers = ("AAA",)
+    _patch_resolved_session(monkeypatch, date, tickers)
+    _install_market_wide(monkeypatch, date)
+
+    root = tmp_path / "materialization"
+    _write_curated_parquet(root, "daily_market", "date", 2026, [("AAA", date)],
+                           extra_columns={"close": [123.45]})
+    _write_curated_parquet(root, "option_chains", "obs_date", 2026, [("AAA", date)],
+                           extra_columns={"bid": [1.1], "ask": [1.3]})
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    _action_finality({"session": REQUESTED, "tickers": tickers}, staging,
+                     cross_check={"materialization_root": str(root)})
+    assert (staging / "finality.json").is_file()
+
+
+# --------------------------------------------------------------------------
 # derive(): resolved session, requested_session, and the same refusals
 # --------------------------------------------------------------------------
 

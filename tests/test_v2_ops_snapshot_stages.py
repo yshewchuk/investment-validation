@@ -458,8 +458,8 @@ def test_uncommitted_manifest_is_refused_even_when_the_root_matches(case, monkey
 def test_snapshot_input_mode_is_refused_for_kinds_without_a_read_plan(case):
     assert SNAPSHOT_BACKED_KINDS == {"legacy_score", "legacy_score_requests",
                                      "legacy_decision_replay", "legacy_render",
-                                     "legacy_selfcheck"}
-    assert set(BARRIER_ONLY_REASONS) == {"legacy_finality", "legacy_model_evidence"}
+                                     "legacy_selfcheck", "legacy_model_evidence"}
+    assert set(BARRIER_ONLY_REASONS) == {"legacy_finality"}
     bindings = {"snapshot_ref.json": case.snapshot_ref.artifact_id,
                 "materialization_request.json": case.request_ref.artifact_id,
                 "materialization_manifest.json": case.request_ref.artifact_id}
@@ -604,8 +604,10 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
                                                                 "materialization_request.json"}
     # Attempt-19 fix (2026-09-15): legacy_render/legacy_selfcheck are now
     # snapshot-backed too, bound to the SAME materialization legacy_score
-    # is -- never their own live-tree legacy_manifest.json.
-    for kind in ("legacy_score", "legacy_decision_replay", "legacy_render", "legacy_selfcheck"):
+    # is -- never their own live-tree legacy_manifest.json. Last read-set
+    # gap fix (2026-09-15): legacy_model_evidence joined them.
+    for kind in ("legacy_score", "legacy_decision_replay", "legacy_render", "legacy_selfcheck",
+                "legacy_model_evidence"):
         _, spec = by_kind[kind]
         bindings = spec["parameters"]["input_bindings"]
         assert spec["parameters"]["input_mode"] == "snapshot"
@@ -614,10 +616,23 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
         assert bindings["materialization_manifest.json"] == materialize_id + "#" + MANIFEST
         assert "legacy_manifest.json" not in bindings
         assert materialize_id in spec["dependency_job_ids"]
+    # legacy_finality (last read-set gap fix, 2026-09-15): stays plain
+    # "legacy" input_mode and keeps its ordinary legacy_manifest.json, but
+    # now ALSO carries the same three snapshot bindings read-only, for its
+    # own content cross-check -- and so also depends on legacy_materialize.
+    _, finality_spec = by_kind["legacy_finality"]
+    finality_bindings = finality_spec["parameters"]["input_bindings"]
+    assert "input_mode" not in finality_spec["parameters"]
+    assert finality_bindings["snapshot_ref.json"] == inputs["snapshot_ref_artifact_id"]
+    assert finality_bindings["materialization_request.json"] == \
+        inputs["materialization_request_ref"]
+    assert finality_bindings["materialization_manifest.json"] == materialize_id + "#" + MANIFEST
+    assert finality_bindings["legacy_manifest.json"] == planned["plan"]["input_manifest_ref"]
+    assert materialize_id in finality_spec["dependency_job_ids"]
     for kind, (_, spec) in by_kind.items():
         bindings = spec["parameters"]["input_bindings"]
         if kind not in ("legacy_score", "legacy_decision_replay", "legacy_render",
-                        "legacy_selfcheck", "legacy_materialize"):
+                        "legacy_selfcheck", "legacy_model_evidence", "legacy_materialize"):
             assert "input_mode" not in spec["parameters"]
             assert bindings["legacy_manifest.json"] == planned["plan"]["input_manifest_ref"]
         for binding in bindings.values():
@@ -708,6 +723,131 @@ def test_snapshot_graph_binds_only_declared_dependencies():
         assert not errors or not errors(request.job, __import__(
             "engine.v2.foundation", fromlist=["from_document"]).from_document(
                 registry().get(request.job.kind).parameters, request.job.parameters))
+
+
+# --------------------------------------------------------------------------
+# last read-set gap fix (2026-09-15): legacy_finality's cross-check bindings
+# and legacy_model_evidence's move into SNAPSHOT_BACKED_KINDS
+# --------------------------------------------------------------------------
+
+
+def test_model_evidence_is_snapshot_backed_and_finality_stays_barrier_with_cross_check_bindings():
+    plan = build_nightly_plan(str(REPO), SESSION)
+    common = dict(tickers=("AAA",), year_start=2025, year_end=2026, input_refs=("art_m",),
+                 expected_population=("AAA|S1|2025-01-15",))
+
+    default = {r.job.kind: r for r in build_legacy_job_requests(plan, **common)}
+    # Unchanged in a plain legacy-mode plan: both stay dual-mode-ready but
+    # neither declares input_mode, and both keep the ordinary barrier binding.
+    for kind in ("legacy_finality", "legacy_model_evidence"):
+        assert "input_mode" not in default[kind].job.parameters
+        assert default[kind].job.parameters["input_bindings"]["legacy_manifest.json"] == "art_m"
+
+    snapshot = {r.job.kind: r for r in build_legacy_job_requests(
+        plan, input_mode="snapshot", snapshot_inputs=_FAKE_SNAPSHOT_INPUTS, **common)}
+
+    # legacy_model_evidence: now genuinely snapshot-backed, exactly like
+    # legacy_score/legacy_render -- input_mode flips, no legacy_manifest.json,
+    # and it depends on the materialize job.
+    me = snapshot["legacy_model_evidence"]
+    assert me.job.parameters["input_mode"] == "snapshot"
+    me_bindings = me.job.parameters["input_bindings"]
+    assert "legacy_manifest.json" not in me_bindings
+    assert me_bindings["snapshot_ref.json"] == _FAKE_SNAPSHOT_INPUTS["snapshot_ref_artifact_id"]
+    me_materialize_job = me_bindings["materialization_manifest.json"].split("#", 1)[0]
+    assert me_materialize_job in me.job.dependency_job_ids
+
+    # legacy_finality: stays plain "legacy" input_mode (never snapshot-backed
+    # -- BARRIER_ONLY_REASONS), but now ALSO carries the three snapshot
+    # bindings read-only, alongside its ordinary legacy_manifest.json, and
+    # depends on the same materialize job.
+    fin = snapshot["legacy_finality"]
+    assert "input_mode" not in fin.job.parameters
+    fin_bindings = fin.job.parameters["input_bindings"]
+    assert fin_bindings["legacy_manifest.json"] == "art_m"
+    assert fin_bindings["snapshot_ref.json"] == _FAKE_SNAPSHOT_INPUTS["snapshot_ref_artifact_id"]
+    assert fin_bindings["materialization_request.json"] == \
+        _FAKE_SNAPSHOT_INPUTS["materialization_request_ref"]
+    fin_materialize_job = fin_bindings["materialization_manifest.json"].split("#", 1)[0]
+    assert fin_materialize_job == me_materialize_job
+    assert fin_materialize_job in fin.job.dependency_job_ids
+
+    # Both are admitted by their own kind's validator (input_mode_problems),
+    # same generic check test_snapshot_graph_binds_only_declared_dependencies
+    # already runs across the whole graph.
+    from engine.v2.foundation import from_document
+    for request in (fin, me):
+        errors = registry().get(request.job.kind).validate
+        assert not errors or not errors(
+            request.job, from_document(registry().get(request.job.kind).parameters,
+                                       request.job.parameters))
+
+
+def test_launch_mode_is_finality_check_only_with_all_three_bindings_present():
+    from types import SimpleNamespace
+
+    from engine.v2.ops.snapshot_stages import launch_mode
+
+    complete = SimpleNamespace(kind="legacy_finality", parameters={"input_bindings": {
+        "legacy_manifest.json": "art_m", "snapshot_ref.json": "art_s",
+        "materialization_request.json": "art_r",
+        "materialization_manifest.json": "job_x#materialization_manifest"}})
+    assert launch_mode(complete) == "finality_check"
+
+    partial = SimpleNamespace(kind="legacy_finality",
+                              parameters={"input_bindings": {"legacy_manifest.json": "art_m"}})
+    assert launch_mode(partial) == "legacy"
+
+    no_bindings = SimpleNamespace(kind="legacy_finality", parameters={})
+    assert launch_mode(no_bindings) == "legacy"
+
+    # Only legacy_finality reaches "finality_check" this way -- every other
+    # kind still needs a real input_mode="snapshot" declaration.
+    other_kind = SimpleNamespace(kind="legacy_score", parameters={"input_bindings": {
+        "snapshot_ref.json": "art_s", "materialization_request.json": "art_r",
+        "materialization_manifest.json": "job_x#materialization_manifest"}})
+    assert launch_mode(other_kind) == "legacy"
+
+
+class _SpecClaim:
+    def __init__(self, spec):
+        self.spec = spec
+        self.attempt_id = "att_finality_check"
+
+
+def test_prepare_launch_finality_check_verifies_and_exposes_materialization_root(case):
+    from engine.v2.ops.snapshot_stages import cache_inputs, prepare_launch, snapshot_cache_inputs
+
+    materialize_job = case.submit_materialize("mat-finality-check")
+    assert case.run(materialize_job) == "succeeded", case.failure(materialize_job)
+    manifest_id = case.output(materialize_job, MANIFEST)
+
+    bindings = {"snapshot_ref.json": case.snapshot_ref.artifact_id,
+                "materialization_request.json": case.request_ref.artifact_id,
+                "materialization_manifest.json": materialize_job + "#" + MANIFEST}
+    spec = JobSpec(kind="legacy_finality", implementation_ref="i", spec_hash=None,
+                   environment_ref="e",
+                   parameters={"expected_ids": ["legacy_finality"], "input_bindings": bindings},
+                   input_refs=(case.snapshot_ref.artifact_id, case.request_ref.artifact_id),
+                   dependency_job_ids=(materialize_job,),
+                   output_namespace="shadow", resource_class="legacy_finality",
+                   retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
+    root = materialization_root(case.base, case.request.request_hash)
+
+    launch = prepare_launch(case.conn, case.store, _SpecClaim(spec), base=case.base)
+
+    assert launch.mode == "finality_check"
+    assert launch.root == root
+    assert launch.worker_legacy_root is None  # the worker's OWN root stays the barrier tree
+    assert launch.envelope_extra == {"finality_cross_check": {"materialization_root": str(root)}}
+    assert launch.manifest_artifact_id == manifest_id
+
+    # Cache identity folds in the materialization the same way "snapshot"
+    # mode's own stages do -- a checkpoint from a different materialization
+    # is never reused.
+    assert cache_inputs({"bindings": "x"}, launch) == snapshot_cache_inputs(
+        {"bindings": "x"}, snapshot_manifest_hash=launch.snapshot_manifest_hash,
+        request_hash=launch.request_hash, manifest_content_hash=launch.manifest_content_hash)
 
 
 # --------------------------------------------------------------------------
@@ -923,6 +1063,61 @@ def test_overlay_kinds_build_a_private_overlay_never_the_barrier(case, monkeypat
     assert not (service.store.staging_dir("att_score") / "legacy").exists()
 
     assert barrier_calls == []
+
+
+def test_model_evidence_also_gets_a_private_overlay_like_render(case, monkeypatch):
+    """Last read-set gap fix (2026-09-15): ``legacy_model_evidence`` joined
+    ``_OVERLAY_KINDS`` because ``build_model_evidence`` itself writes
+    ``data/features/model_evidence.json`` at its legacy path -- same reason
+    ``legacy_render`` needed the overlay, same mechanism, so this mirrors
+    ``test_overlay_kinds_build_a_private_overlay_never_the_barrier`` for it."""
+    import engine.v2.ops.supervisor as supervisor_mod
+    from engine.v2.ops.snapshot_stages import SnapshotLaunch
+
+    barrier_calls = []
+    monkeypatch.setattr(supervisor_mod.Service, "_pin_read_set",
+                        lambda self, claim: barrier_calls.append(claim.spec.kind) or None)
+
+    source = case.tmp / "materialization_root_me"
+    (source / "data" / "curated").mkdir(parents=True)
+    (source / "data" / "curated" / "part-0000.parquet").write_bytes(b"pinned")
+    launch = SnapshotLaunch(mode="snapshot", root=source, snapshot_artifact_id="a",
+                            request_artifact_id="b", request_hash="c", snapshot_manifest_hash="d")
+    service = case.service()
+
+    claim = _FakeClaim("legacy_model_evidence", "att_model_evidence")
+    overlay = service._stage_legacy_inputs(claim, launch)
+    assert overlay is True
+    linked = service.store.staging_dir("att_model_evidence") / "legacy" / "data" / \
+        "curated" / "part-0000.parquet"
+    assert linked.is_symlink() and linked.read_bytes() == b"pinned"
+    assert barrier_calls == []
+
+
+def test_finality_check_mode_still_stages_the_barrier_never_an_overlay(case, monkeypatch):
+    """Last read-set gap fix (2026-09-15): a ``"finality_check"`` launch is
+    NOT ``None`` (unlike a plain legacy-mode barrier attempt) but must still
+    take the barrier-staging branch -- ``legacy_finality`` never mounts the
+    materialization as its own legacy root."""
+    import engine.v2.ops.supervisor as supervisor_mod
+    from engine.v2.ops.snapshot_stages import SnapshotLaunch
+
+    barrier_calls = []
+    monkeypatch.setattr(supervisor_mod.Service, "_pin_read_set",
+                        lambda self, claim: barrier_calls.append(claim.spec.kind) or None)
+
+    source = case.tmp / "materialization_root_fc"
+    (source / "data" / "curated").mkdir(parents=True)
+    launch = SnapshotLaunch(mode="finality_check", root=source, snapshot_artifact_id="a",
+                            request_artifact_id="b", request_hash="c", snapshot_manifest_hash="d",
+                            envelope_extra={"finality_cross_check": {"materialization_root": str(source)}})
+    service = case.service()
+
+    claim = _FakeClaim("legacy_finality", "att_finality_check")
+    overlay = service._stage_legacy_inputs(claim, launch)
+    assert overlay is False
+    assert not (service.store.staging_dir("att_finality_check") / "legacy").exists()
+    assert barrier_calls == ["legacy_finality"]
 
 
 class _FakeClaim:

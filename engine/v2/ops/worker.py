@@ -144,7 +144,12 @@ def dispatch(worker, parameters, root, *, envelope=None):
     if worker.startswith("legacy_"):
         from engine.v2.ops.legacy_actions import run_action
         values = parameters if isinstance(parameters, dict) else vars(parameters)
-        output = run_action(worker, values, root, legacy_root=envelope.get("legacy_root"))
+        # Last read-set gap fix (2026-09-15): only present for a
+        # ``legacy_finality`` attempt whose launch resolved a
+        # ``finality_check`` materialization (``snapshot_stages.prepare_launch``);
+        # ``None`` for every other action, unchanged.
+        output = run_action(worker, values, root, legacy_root=envelope.get("legacy_root"),
+                            cross_check=envelope.get("finality_cross_check"))
         outputs = [{"name": worker, "path": output["path"], "schema": "legacy_action.v1.0"}]
         # A legacy action may publish additional named outputs alongside its
         # primary one (e.g. legacy_finality's finality_coverage.json) — see

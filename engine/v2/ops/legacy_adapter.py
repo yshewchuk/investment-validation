@@ -219,11 +219,15 @@ def _write_action(root, name, value):
     return {"path": str(path.relative_to(root)), "hash": content_hash(value)}
 
 
-def legacy_action(action, parameters, staging, legacy_root=None):
+def legacy_action(action, parameters, staging, legacy_root=None, cross_check=None):
     """Execute one registered legacy stage inside a fresh worker process.
 
     ``legacy_root``: a snapshot-backed stage's verified materialization root
-    (P2-6 §9.3); ``None`` keeps the barrier path's ``staging/legacy``."""
+    (P2-6 §9.3); ``None`` keeps the barrier path's ``staging/legacy``.
+    ``cross_check`` (last read-set gap fix, 2026-09-15): only ever non-empty
+    for ``legacy_finality``, when its launch resolved a ``finality_check``
+    materialization (``snapshot_stages.prepare_launch``) -- see
+    ``_action_finality``."""
     root = Path(staging).resolve()
     _rooted_import(Path(legacy_root) if legacy_root else root / "legacy")
     actions = {
@@ -243,10 +247,94 @@ def legacy_action(action, parameters, staging, legacy_root=None):
     # step event even where nothing inside it is instrumented more finely
     # below (Do §1: "instrument every legacy_adapter action").
     with worker_progress.step(action):
+        if action == "legacy_finality":
+            return _action_finality(parameters, root, cross_check=cross_check)
         return actions[action](parameters, root)
 
 
-def _action_finality(parameters, root):
+def _materialized_curated_frame(materialization_root, table, column, stamp):
+    """``{ticker, column}`` rows a verified materialization root carries for
+    ``table``, read directly off its curated year partitions -- never through
+    ``engine.data.store``/``engine.paths``: this worker process is already
+    rooted at the barrier legacy tree (``_rooted_import`` binds
+    ``engine.paths`` once, at first import, per this module's own
+    ``run_legacy_rebuild`` docstring), so a SECOND root cannot be read
+    through that same high-level API in the same process.
+
+    Mirrors ``engine.data.finality._coverage_frame``'s own
+    ``{ticker, column}``/``{stamp.year - 1, stamp.year}`` shape exactly, so
+    the two are directly comparable row for row (last read-set gap fix,
+    2026-09-15). Returns an EMPTY frame, never ``None``, when a year
+    partition is missing: ``_exact_share``'s own ``frame is None`` branch
+    falls back to reading the BARRIER's live tree, which would silently
+    defeat this cross-check by comparing the barrier against itself.
+    """
+    import pandas as pd
+
+    root = Path(materialization_root)
+    frames = []
+    for year in sorted({stamp.year - 1, stamp.year}):
+        year_dir = root / "data" / "curated" / table / f"year={year}"
+        if not year_dir.is_dir():
+            continue
+        for part in sorted(year_dir.glob("part-*.parquet")):
+            frames.append(pd.read_parquet(part, columns=["ticker", column]))
+    if not frames:
+        return pd.DataFrame(columns=["ticker", column])
+    return pd.concat(frames, ignore_index=True)
+
+
+def _cross_check_finality_against_materialization(parameters, result, materialization_root):
+    """Read-set gap fix, decision (b) for ``legacy_finality`` (task facts:
+    a byte comparison is the wrong cross-check here -- the 3 differing
+    ``option_chains`` parquet files real attempt 19/20 measured are a
+    projection artifact, not drift; compare CONTENT within each consumer's
+    own declared projection instead).
+
+    ``result`` was resolved against the barrier's live-tree read
+    (``engine.data.finality.resolve_final_session``, ``_action_finality``
+    below). This recomputes ``engine.data.finality.session_finality`` for the
+    SAME resolved date and tickers, sourced from the run's own committed
+    materialization instead of the live tree, reusing the exact coverage math
+    (``_exact_share``, via ``session_finality``'s own ``frames=`` parameter)
+    finality already applies to its own declared projection
+    (``ticker``+``date``/``obs_date`` only) -- so a change confined to a
+    column finality never reads (a projection-only difference) can never
+    trip this, and a changed IN-SCOPE row (a ticker covered at the resolved
+    date in one source and not the other) always does.
+
+    Refuses only when the materialization does NOT independently confirm the
+    same session final for the same tickers -- the real risk the task names:
+    the live tree grows daily, so the barrier can resolve a session the
+    pinned materialization has no rows for at all, while
+    ``legacy_score``/``legacy_render``/``legacy_selfcheck`` read ONLY the
+    materialization.
+    """
+    import pandas as pd
+
+    from engine.data.finality import session_finality
+
+    stamp = pd.Timestamp(result.date)
+    frames = {
+        "daily_market": _materialized_curated_frame(materialization_root, "daily_market",
+                                                     "date", stamp),
+        "option_chains": _materialized_curated_frame(materialization_root, "option_chains",
+                                                      "obs_date", stamp),
+    }
+    materialized = session_finality(result.date, parameters["tickers"], frames=frames)
+    if not materialized.is_final:
+        raise fail(
+            "SOURCE_NOT_FINAL",
+            "the resolved session is final on the live legacy tree but this run's own "
+            "materialization does not independently confirm it",
+            details={"date": result.date, "reason": "finality_snapshot_drift",
+                     "materialized_detail": materialized.detail,
+                     "materialized_daily_share": materialized.daily_share,
+                     "materialized_chain_share": materialized.chain_share,
+                     "materialized_covered": materialized.covered})
+
+
+def _action_finality(parameters, root, cross_check=None):
     from engine.calendar import trading_calendar
     from engine.data.finality import covered_tickers, resolve_final_session
 
@@ -259,6 +347,13 @@ def _action_finality(parameters, root):
                                        calendar=trading_calendar())
     except RuntimeError as exc:
         raise fail("SOURCE_NOT_FINAL", str(exc)) from exc
+    # Last read-set gap fix (2026-09-15): only set when this attempt's launch
+    # resolved a verified materialization for this exact run
+    # (``snapshot_stages``'s ``finality_check`` mode) -- absent for a plain
+    # legacy-mode nightly, unchanged from before this fix.
+    materialization_root = (cross_check or {}).get("materialization_root")
+    if materialization_root:
+        _cross_check_finality_against_materialization(parameters, result, materialization_root)
     # finality.json's dict is embedded verbatim into ledger rows (v1 parity);
     # per-ticker coverage is a SEPARATE output, never a key added here.
     primary = _write_action(root, "finality.json", result.as_dict())

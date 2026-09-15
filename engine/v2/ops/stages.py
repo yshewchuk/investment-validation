@@ -122,21 +122,42 @@ class MaterializeParameters:
 #: ``legacy_score`` (see ``legacy_adapter._scoring_context``) -- their reads
 #: beyond that are the ledger generation, model-evidence artifact and
 #: (for selfcheck) the render's own bundle, all already bound job inputs,
-#: never a second live-tree read. ``legacy_render`` additionally OVERLAYS
-#: those bound artifacts onto a private writable copy of the materialization
-#: (``supervisor._OVERLAY_KINDS`` / ``legacy_adapter.overlay_read_set``)
-#: because it writes ``data/features/model_evidence.json`` and ``ledger/``
-#: at their legacy paths; ``legacy_selfcheck`` is a pure reader and mounts
-#: the verified root directly, like score/decision_replay.
+#: never a second live-tree read. ``legacy_model_evidence`` (last read-set
+#: gap fix, 2026-09-15): ``engine.dashboard.model_evidence.build_model_evidence``
+#: reads ``load_registry()`` (a pinned reference input), ``load_panel()``,
+#: ``store.read_table('trades')`` and ``_events_with_session()`` (earnings_events)
+#: WHOLE, plus a per-role ``daily_market`` subset via ``_daily_subset`` -- every
+#: one of these is already ``LEGACY_SCORE_READ_PLAN_V1``'s own whole-table read
+#: (``daily_market``/``trades``/``earnings_events``/``feature_panel``), and the
+#: ``gate_forecast_analog`` role's ``Scorer(context=FeatureContext.load(...))``
+#: analog join never calls ``.score()``/loads a chain index, so it never touches
+#: ``option_chains`` -- model_evidence's ENTIRE read surface was already covered
+#: by the existing plan, with nothing to add. ``legacy_render`` and
+#: ``legacy_model_evidence`` both OVERLAY their bound artifacts onto a private
+#: writable copy of the materialization (``supervisor._OVERLAY_KINDS`` /
+#: ``legacy_adapter.overlay_read_set``) because each writes a legacy-rooted
+#: path directly (``data/features/model_evidence.json`` and ``ledger/`` for
+#: render; ``build_model_evidence`` itself writes ``data/features/
+#: model_evidence.json`` for model_evidence); ``legacy_selfcheck`` is a pure
+#: reader and mounts the verified root directly, like score/decision_replay.
 SNAPSHOT_BACKED_KINDS = frozenset({"legacy_score", "legacy_score_requests",
                                    "legacy_decision_replay", "legacy_render",
-                                   "legacy_selfcheck"})
-#: Read-only kinds guide §9.3 names that stay on the barrier: no declared read plan.
+                                   "legacy_selfcheck", "legacy_model_evidence"})
+#: Read-only kind that stays on the barrier: no declared read plan for its raw
+#: ORATS fetch-cache/calendar reads. ``legacy_model_evidence`` moved off this
+#: dict 2026-09-15 (its full read surface turned out to already be declared,
+#: see ``SNAPSHOT_BACKED_KINDS``'s comment above) -- ``legacy_finality`` is now
+#: the only remaining barrier-only kind, and it gains a content-level
+#: cross-check against this run's own materialization instead (read-only,
+#: never switches ``input_mode``): see ``legacy_adapter._action_finality``,
+#: ``nightly.CROSS_CHECK_STAGES`` and ``snapshot_stages``'s ``finality_check``
+#: launch mode.
 BARRIER_ONLY_REASONS = {
-    "legacy_finality": "reads trading-calendar and finality coverage inputs that "
-                       "LEGACY_SCORE_READ_PLAN_V1 does not declare",
-    "legacy_model_evidence": "reads model-evidence and training artifacts outside "
-                             "LEGACY_SCORE_READ_PLAN_V1",
+    "legacy_finality": "reads trading-calendar and raw ORATS fetch-cache inputs that "
+                       "LEGACY_SCORE_READ_PLAN_V1 does not declare; its daily_market/"
+                       "option_chains coverage reads ARE declared and are now "
+                       "cross-checked content-for-content against this run's own "
+                       "materialization instead (see legacy_adapter._action_finality)",
 }
 SNAPSHOT_BINDINGS = ("snapshot_ref.json", "materialization_request.json",
                      "materialization_manifest.json")

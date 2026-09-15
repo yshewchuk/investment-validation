@@ -98,16 +98,21 @@ _COORDINATOR_EFFECT_KINDS = frozenset({
     "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
     "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize"})
 
-#: Snapshot-backed kinds that write into their legacy tree (attempt-19 fix):
-#: ``legacy_render`` stages the bound model-evidence artifact and ledger
-#: generation at their legacy paths (``render_inputs.stage_model_evidence``/
-#: ``stage_ledger_generation``), so it cannot mount the shared, read-only
-#: materialization root directly like ``legacy_score``/``legacy_decision_
-#: replay``/``legacy_selfcheck`` do. It gets a private writable overlay
-#: instead (``legacy_adapter.overlay_read_set``): a fresh ``staging/legacy``
-#: symlinked file-for-file to the SAME verified materialization, never the
-#: live tree.
-_OVERLAY_KINDS = frozenset({"legacy_render"})
+#: Snapshot-backed kinds that write into their legacy tree (attempt-19 fix,
+#: extended 2026-09-15 for ``legacy_model_evidence``): ``legacy_render``
+#: stages the bound model-evidence artifact and ledger generation at their
+#: legacy paths (``render_inputs.stage_model_evidence``/
+#: ``stage_ledger_generation``); ``legacy_model_evidence``'s own
+#: ``build_model_evidence()`` writes ``data/features/model_evidence.json`` at
+#: ITS legacy path directly (``engine/dashboard/model_evidence.py``'s own
+#: ``path.write_text(...)`` at the end of that function -- legacy parity, not
+#: something ``_action_model_evidence`` controls). Neither can mount the
+#: shared, read-only materialization root directly like ``legacy_score``/
+#: ``legacy_decision_replay``/``legacy_selfcheck`` do. Both get a private
+#: writable overlay instead (``legacy_adapter.overlay_read_set``): a fresh
+#: ``staging/legacy`` symlinked file-for-file to the SAME verified
+#: materialization, never the live tree.
+_OVERLAY_KINDS = frozenset({"legacy_render", "legacy_model_evidence"})
 
 #: The attempt lease every heartbeat, resume renewal and keepalive extends to.
 LEASE_SECONDS = 120
@@ -313,8 +318,15 @@ class Service:
         """Populate this attempt's legacy inputs before the worker launches.
         Returns whether a private snapshot overlay root was built (attempt-19
         fix, ``_OVERLAY_KINDS``) -- the caller must not pass ``launch.
-        worker_legacy_root`` to ``executor.launch`` when this is true."""
-        if launch is None:
+        worker_legacy_root`` to ``executor.launch`` when this is true.
+
+        ``launch.mode == "finality_check"`` (last read-set gap fix,
+        2026-09-15) still stages the ordinary barrier read set -- unlike
+        ``"snapshot"``, ``legacy_finality`` never mounts the materialization
+        as its own legacy root; that mode only means a verified materialization
+        root was ALSO resolved, for ``_action_finality``'s own content-level
+        cross-check (passed through ``launch.envelope_extra``, never here)."""
+        if launch is None or launch.mode == "finality_check":
             legacy_manifest = self._pin_read_set(claim)
             if legacy_manifest is not None:
                 self._populate_legacy_staging(claim, legacy_manifest)

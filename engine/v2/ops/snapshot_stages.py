@@ -111,7 +111,22 @@ def launch_mode(spec) -> str:
         return "materialize"
     if (spec.parameters or {}).get("input_mode") == "snapshot":
         return "snapshot"
+    if spec.kind == "legacy_finality" and _has_finality_cross_check_bindings(spec):
+        return "finality_check"
     return "legacy"
+
+
+def _has_finality_cross_check_bindings(spec) -> bool:
+    """Last read-set gap fix (2026-09-15): ``legacy_finality`` never declares
+    ``input_mode="snapshot"`` (``stages.input_mode_problems`` refuses it -- no
+    declared read plan for the kind), but a snapshot-mode plan graph still
+    binds it the same three ``SNAPSHOT_BINDINGS`` read-only, so its worker can
+    cross-check its own barrier read against this run's committed
+    materialization (``legacy_adapter._action_finality``). A legacy-mode plan
+    leaves these unbound, so this is false and the kind launches as plain
+    ``"legacy"``, exactly as before this fix."""
+    bindings = (spec.parameters or {}).get("input_bindings") or {}
+    return all(name in bindings for name in SNAPSHOT_BINDINGS)
 
 
 def _catalog_path(conn) -> str:
@@ -302,6 +317,21 @@ def prepare_launch(conn, store, claim, *, base):
         raise fail("INPUT_CHANGED", "materialization manifest was not committed for this request")
     files = manifest_files(_read_json(conn, store, manifest_item.artifact_id), request)
     fingerprint = verify_root(common["root"], files)
+    if mode == "finality_check":
+        # Last read-set gap fix (2026-09-15): ``legacy_finality`` stays
+        # rooted at its own barrier legacy tree (``worker_legacy_root`` is
+        # ``None`` for every mode but ``"snapshot"``) -- this branch only
+        # verifies the SAME materialization score/render already trust and
+        # exposes its path to the worker via ``envelope_extra``, for
+        # ``_action_finality``'s own read-only content cross-check. No tier4
+        # coverage check: that guards the scoring population's own serving
+        # caches, which finality never reads.
+        return SnapshotLaunch(mode=mode, manifest_artifact_id=manifest_item.artifact_id,
+                              manifest_content_hash=manifest_item.content_hash,
+                              fingerprint=fingerprint,
+                              envelope_extra={"finality_cross_check":
+                                             {"materialization_root": str(common["root"])}},
+                              **common)
     _check_tier4_coverage(conn, store, claim, request, common["root"], resolved)
     return SnapshotLaunch(mode=mode, manifest_artifact_id=manifest_item.artifact_id,
                           manifest_content_hash=manifest_item.content_hash,
@@ -317,7 +347,12 @@ def snapshot_cache_inputs(base_inputs, *, snapshot_manifest_hash, request_hash,
 
 
 def cache_inputs(base_inputs, launch):
-    if launch is None or launch.mode != "snapshot":
+    # Last read-set gap fix (2026-09-15): a checkpoint reused from an earlier
+    # ``finality_check`` attempt must not skip re-running the cross-check
+    # against a materialization that has since changed identity, so its
+    # cache identity folds in the same three hashes a real "snapshot" stage's
+    # does.
+    if launch is None or launch.mode not in ("snapshot", "finality_check"):
         return base_inputs
     return snapshot_cache_inputs(base_inputs, snapshot_manifest_hash=launch.snapshot_manifest_hash,
                                  request_hash=launch.request_hash,
@@ -325,10 +360,17 @@ def cache_inputs(base_inputs, launch):
 
 
 def confirm_attempt(conn, store, claim, launch):
-    """§9.3 item 4: the same verified binding, recorded for this attempt, before admission."""
-    if launch_mode(claim.spec) != "snapshot":
+    """§9.3 item 4: the same verified binding, recorded for this attempt, before admission.
+
+    ``finality_check`` (last read-set gap fix, 2026-09-15) gets the same
+    re-verification as ``"snapshot"`` -- the three bindings recorded for this
+    attempt still name the exact materialization the worker's own cross-check
+    ran against, and the root has not changed since -- ``legacy_finality``'s
+    ``worker_legacy_root``/staged legacy tree stay untouched either way
+    (only ``"snapshot"`` mode roots the worker there)."""
+    if launch_mode(claim.spec) not in ("snapshot", "finality_check"):
         return
-    if launch is None or launch.mode != "snapshot":
+    if launch is None or launch.mode not in ("snapshot", "finality_check"):
         raise fail("INPUT_CHANGED", "snapshot-backed attempt has no verified launch")
     recorded = recorded_bindings(conn, claim.attempt_id)
     observed = tuple(getattr(recorded.get(name), "artifact_id", None) for name in SNAPSHOT_BINDINGS)
