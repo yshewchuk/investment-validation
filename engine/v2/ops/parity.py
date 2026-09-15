@@ -87,15 +87,47 @@ def _rows_by_id(doc: dict) -> dict[str, dict]:
     return rows
 
 
+def _verify_distinct_jobs(legacy_job_id: str, snapshot_job_id: str) -> None:
+    """Refuse the reviewer's self-parity repro: passing the SAME job as both
+    the legacy and the snapshot side trivially agrees with itself (identical
+    rows, identical key sets) over a nonzero population, certifying nothing.
+    """
+    if legacy_job_id == snapshot_job_id:
+        raise fail("INPUT_CHANGED",
+                   "legacy and snapshot score jobs must be two different jobs",
+                   details={"reason": "SAME_JOB", "job_id": legacy_job_id})
+
+
+def _verify_execution_modes(legacy_params: dict, snapshot_params: dict) -> None:
+    """The legacy side must actually be the barrier path (``input_mode``
+    absent or ``"legacy"``) and the snapshot side must actually be the
+    adapted path (``input_mode == "snapshot"``) -- a D15 receipt is
+    legacy-vs-adapter parity by definition, so two jobs run in the same mode
+    (both legacy, or both snapshot) are not a legacy/snapshot comparison at
+    all, regardless of what job ids were passed for which argument.
+    """
+    legacy_mode = legacy_params.get("input_mode") or "legacy"
+    if legacy_mode != "legacy":
+        raise fail("INPUT_CHANGED",
+                   "legacy_job_id did not run in legacy input mode",
+                   details={"reason": "LEGACY_MODE_MISMATCH", "input_mode": legacy_mode})
+    snapshot_mode = snapshot_params.get("input_mode") or "legacy"
+    if snapshot_mode != "snapshot":
+        raise fail("INPUT_CHANGED",
+                   "snapshot_job_id did not run in snapshot input mode",
+                   details={"reason": "SNAPSHOT_MODE_MISMATCH", "input_mode": snapshot_mode})
+
+
 def _verify_same_target(legacy_doc, snapshot_doc, legacy_params, snapshot_params) -> None:
     legacy_target = (legacy_doc.get("session"), tuple(sorted(legacy_doc.get("tickers") or ())),
-                     legacy_params.get("horizon_days", 35))
+                     legacy_params.get("horizon_days", 35), legacy_params.get("effect_scope") or "")
     snapshot_target = (snapshot_doc.get("session"), tuple(sorted(snapshot_doc.get("tickers") or ())),
-                       snapshot_params.get("horizon_days", 35))
+                       snapshot_params.get("horizon_days", 35),
+                       snapshot_params.get("effect_scope") or "")
     if legacy_target != snapshot_target:
         raise fail("INPUT_CHANGED",
                    "legacy and snapshot score jobs do not target the same resolved "
-                   "session, tickers and horizon",
+                   "session, tickers, horizon and effect scope",
                    details={"legacy": list(legacy_target), "snapshot": list(snapshot_target)})
 
 
@@ -104,18 +136,24 @@ def load_score_parity_inputs(conn, store, *, legacy_job_id: str,
     """Load both jobs' committed ``score.json``, refuse a target mismatch,
     and resolve the snapshot job's launch-time snapshot binding.
 
-    ``legacy_job_id`` normally ran ``--input-mode legacy`` (the barrier path)
-    and ``snapshot_job_id`` ran ``--input-mode snapshot`` (the adapted path)
-    — this function does not itself check ``input_mode``, only that both
-    committed a ``score.json`` targeting the same resolved session, tickers
-    and horizon. Raises (``INPUT_CHANGED``/``VALIDATION_FAILED``) rather than
-    returning inputs when either job has no committed score, or the two
+    ``legacy_job_id`` must have actually run ``--input-mode legacy`` (the
+    barrier path) and ``snapshot_job_id`` must have actually run
+    ``--input-mode snapshot`` (the adapted path) -- both are verified against
+    each job's own recorded ``JobSpec.parameters["input_mode"]``, not merely
+    assumed from which keyword argument the caller used. The two job ids must
+    also differ, and both must target the same resolved session, tickers,
+    horizon and effect scope. Raises (``INPUT_CHANGED``/``VALIDATION_FAILED``)
+    rather than returning inputs when either job has no committed score, the
+    two are the same job, either ran in the wrong execution mode, or the two
     disagree on target.
     """
+    _verify_distinct_jobs(legacy_job_id, snapshot_job_id)
+    legacy_params = _job_parameters(conn, legacy_job_id)
+    snapshot_params = _job_parameters(conn, snapshot_job_id)
+    _verify_execution_modes(legacy_params, snapshot_params)
     legacy_doc, _ = _committed_score(conn, store, legacy_job_id)
     snapshot_doc, snapshot_attempt_id = _committed_score(conn, store, snapshot_job_id)
-    _verify_same_target(legacy_doc, snapshot_doc, _job_parameters(conn, legacy_job_id),
-                        _job_parameters(conn, snapshot_job_id))
+    _verify_same_target(legacy_doc, snapshot_doc, legacy_params, snapshot_params)
     snapshot_ref = _snapshot_binding(conn, store, snapshot_attempt_id)
     return ScoreParityInputs(
         legacy_job_id=legacy_job_id, snapshot_job_id=snapshot_job_id,

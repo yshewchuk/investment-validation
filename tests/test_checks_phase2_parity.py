@@ -160,18 +160,24 @@ def _ops_catalog(root):
     return conn, clock, Supervisor(epoch, "boot")
 
 
-def _submit(conn, clock, supervisor, store, key, session, iv30):
+def _submit(conn, clock, supervisor, store, key, session, iv30, input_mode="legacy"):
     row = {"row_id": "FAKE|TWIN-P|2026-09-10|100.0|2026-10-16", "ticker": "FAKE",
           "strategy": "TWIN-P", "event_date": "2026-09-10", "strike": 100.0,
           "expiry": "2026-10-16", "iv30": iv30}
     doc = {"rows": [row], "expected_population": [row["row_id"]],
           "observed_population": [row["row_id"]], "ladder": {}, "tickers": ["FAKE"],
           "analog_entry_coverage": {}, "session": session, "requested_session": session}
+    parameters = {"expected_ids": ("legacy_score",), "session": session,
+                 "tickers": ("FAKE",), "year_start": 2020, "year_end": 2026,
+                 "expected_population": (row["row_id"],), "input_mode": input_mode}
+    if input_mode == "snapshot":
+        # input_mode_problems (stages.py) requires all three snapshot
+        # bindings before admitting a snapshot-mode legacy_score job.
+        parameters["input_bindings"] = {"snapshot_ref.json": "snap#ref",
+                                        "materialization_request.json": "snap#request",
+                                        "materialization_manifest.json": "snap#manifest"}
     job = JobSpec(kind="legacy_score", implementation_ref="x", spec_hash=None, environment_ref="x",
-                 parameters={"expected_ids": ("legacy_score",), "session": session,
-                             "tickers": ("FAKE",), "year_start": 2020, "year_end": 2026,
-                             "expected_population": (row["row_id"],)},
-                 output_namespace="shadow", resource_class="legacy_score",
+                 parameters=parameters, output_namespace="shadow", resource_class="legacy_score",
                  retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
     submit(conn, registry(), POLICY, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job), clock=clock)
@@ -192,8 +198,10 @@ def _submit(conn, clock, supervisor, store, key, session, iv30):
 def _root(tmp_path):
     conn, clock, supervisor = _ops_catalog(tmp_path)
     store = ArtifactStore(tmp_path)
-    legacy = _submit(conn, clock, supervisor, store, "legacy", "2026-09-10", 0.42)
-    snapshot = _submit(conn, clock, supervisor, store, "snapshot", "2026-09-10", 0.42)
+    legacy = _submit(conn, clock, supervisor, store, "legacy", "2026-09-10", 0.42,
+                     input_mode="legacy")
+    snapshot = _submit(conn, clock, supervisor, store, "snapshot", "2026-09-10", 0.42,
+                       input_mode="snapshot")
     conn.close()
     return tmp_path, legacy, snapshot
 

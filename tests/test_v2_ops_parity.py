@@ -50,18 +50,30 @@ def _score_doc(rows, *, session="2026-09-10", tickers=("FAKE",)):
 
 
 def _submit_score_job(conn, clock, supervisor, store, *, key, rows, session="2026-09-10",
-                      tickers=("FAKE",), horizon_days=35, snapshot_ref=None):
+                      tickers=("FAKE",), horizon_days=35, snapshot_ref=None, input_mode=None,
+                      effect_scope=""):
     """Submit, claim and synthetically succeed one ``legacy_score`` job: a
     real row in ``jobs``/``attempts``, a real ``score.json`` artifact
     registered under ``attempt_outputs`` name ``legacy_score``, and, when
     ``snapshot_ref`` is given, a real ``attempt_input_bindings`` row for
     ``snapshot_ref.json``."""
     doc = _score_doc(rows, session=session, tickers=tickers)
+    parameters = {"expected_ids": ("legacy_score",), "session": session,
+                 "tickers": tuple(tickers), "year_start": 2020, "year_end": 2026,
+                 "horizon_days": horizon_days, "expected_population": tuple(doc["expected_population"]),
+                 "effect_scope": effect_scope}
+    if input_mode is not None:
+        parameters["input_mode"] = input_mode
+    if input_mode == "snapshot":
+        # input_mode_problems (stages.py) requires all three snapshot
+        # bindings present (and no mutable legacy_manifest.json) before it
+        # will admit a snapshot-mode legacy_score job at submission at all;
+        # the placeholder values are never resolved by this test.
+        parameters["input_bindings"] = {"snapshot_ref.json": "snap#ref",
+                                        "materialization_request.json": "snap#request",
+                                        "materialization_manifest.json": "snap#manifest"}
     job = JobSpec(kind="legacy_score", implementation_ref="x", spec_hash=None, environment_ref="x",
-                 parameters={"expected_ids": ("legacy_score",), "session": session,
-                             "tickers": tuple(tickers), "year_start": 2020, "year_end": 2026,
-                             "horizon_days": horizon_days, "expected_population": tuple(doc["expected_population"])},
-                 output_namespace="shadow", resource_class="legacy_score",
+                 parameters=parameters, output_namespace="shadow", resource_class="legacy_score",
                  retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
     submit(conn, registry(), POLICY, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job), clock=clock)
@@ -93,15 +105,18 @@ def _submit_score_job(conn, clock, supervisor, store, *, key, rows, session="202
 
 
 def _world(tmp_path, *, legacy_rows, snapshot_rows, legacy_session="2026-09-10",
-          snapshot_session="2026-09-10", bind_snapshot=False):
+          snapshot_session="2026-09-10", bind_snapshot=False, legacy_input_mode="legacy",
+          snapshot_input_mode="snapshot", legacy_effect_scope="", snapshot_effect_scope=""):
     conn, clock, supervisor = ops_catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     snap_ref = _snapshot_ref("snap_current") if bind_snapshot else None
     legacy_job = _submit_score_job(conn, clock, supervisor, store, key="legacy",
-                                   rows=legacy_rows, session=legacy_session)
+                                   rows=legacy_rows, session=legacy_session,
+                                   input_mode=legacy_input_mode, effect_scope=legacy_effect_scope)
     snapshot_job = _submit_score_job(conn, clock, supervisor, store, key="snapshot",
                                      rows=snapshot_rows, session=snapshot_session,
-                                     snapshot_ref=snap_ref)
+                                     snapshot_ref=snap_ref, input_mode=snapshot_input_mode,
+                                     effect_scope=snapshot_effect_scope)
     return conn, store, legacy_job, snapshot_job, snap_ref
 
 
@@ -150,7 +165,58 @@ def test_missing_committed_score_is_refused(tmp_path):
     conn, clock, supervisor = ops_catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     rows = [_row("FAKE|TWIN-P|2026-09-10|100.0|2026-10-16")]
-    legacy_job = _submit_score_job(conn, clock, supervisor, store, key="legacy", rows=rows)
+    legacy_job = _submit_score_job(conn, clock, supervisor, store, key="legacy", rows=rows,
+                                   input_mode="legacy")
     with pytest.raises(OpsError) as err:
         _load(conn, store, legacy_job, "job_never_submitted")
+    assert err.value.code == "INPUT_CHANGED"
+
+
+# -- Finding #3: D15 self-parity (the reviewer's repro certified a snapshot
+# job compared against itself). --------------------------------------------
+
+
+def test_same_job_passed_as_both_sides_is_refused(tmp_path):
+    """The reviewer's exact repro: pass one committed ``legacy_score`` job
+    (run in snapshot mode) as BOTH ``legacy_job_id`` and ``snapshot_job_id``.
+    Before the fix this produced ``agree`` over a nonzero compared
+    population; it must now be refused before either job is even loaded."""
+    conn, clock, supervisor = ops_catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    rows = [_row("FAKE|TWIN-P|2026-09-10|100.0|2026-10-16")]
+    job = _submit_score_job(conn, clock, supervisor, store, key="only", rows=rows,
+                            input_mode="snapshot")
+    with pytest.raises(OpsError) as err:
+        _load(conn, store, job, job)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details.get("reason") == "SAME_JOB"
+
+
+def test_legacy_side_not_actually_legacy_mode_is_refused(tmp_path):
+    rows = [_row("FAKE|TWIN-P|2026-09-10|100.0|2026-10-16")]
+    conn, store, legacy_job, snapshot_job, _ = _world(
+        tmp_path, legacy_rows=rows, snapshot_rows=rows, legacy_input_mode="snapshot")
+    with pytest.raises(OpsError) as err:
+        _load(conn, store, legacy_job, snapshot_job)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details.get("reason") == "LEGACY_MODE_MISMATCH"
+
+
+def test_snapshot_side_not_actually_snapshot_mode_is_refused(tmp_path):
+    rows = [_row("FAKE|TWIN-P|2026-09-10|100.0|2026-10-16")]
+    conn, store, legacy_job, snapshot_job, _ = _world(
+        tmp_path, legacy_rows=rows, snapshot_rows=rows, snapshot_input_mode="legacy")
+    with pytest.raises(OpsError) as err:
+        _load(conn, store, legacy_job, snapshot_job)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details.get("reason") == "SNAPSHOT_MODE_MISMATCH"
+
+
+def test_scope_mismatch_between_jobs_is_refused(tmp_path):
+    rows = [_row("FAKE|TWIN-P|2026-09-10|100.0|2026-10-16")]
+    conn, store, legacy_job, snapshot_job, _ = _world(
+        tmp_path, legacy_rows=rows, snapshot_rows=rows,
+        legacy_effect_scope="shadow", snapshot_effect_scope="FAKE")
+    with pytest.raises(OpsError) as err:
+        _load(conn, store, legacy_job, snapshot_job)
     assert err.value.code == "INPUT_CHANGED"
