@@ -12,7 +12,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, make_problem
 
 
 def _write_diagnostics(root: Path) -> None:
@@ -57,7 +57,21 @@ def main():
             _write_diagnostics(root)
         except OSError:
             pass
-        problem = exc.problem if isinstance(exc, OpsError) else None
+        if isinstance(exc, OpsError):
+            problem = exc.problem
+        elif isinstance(exc, (ModuleNotFoundError, ImportError)):
+            # A deterministic import failure (e.g. a pinned model artifact's
+            # pickle names an engine.* module absent from this code
+            # snapshot) is not a transient worker crash: retrying it wastes
+            # an attempt and always fails the same way. Name the module so
+            # the failure is diagnosable without reading worker.stderr.
+            problem = make_problem(
+                "INPUT_CHANGED",
+                f"worker import failed: no module named "
+                f"{getattr(exc, 'name', None) or exc}",
+                details={"module": getattr(exc, "name", None)})
+        else:
+            problem = None
         if problem is None:
             result = {"schema_version": "worker_result.v1.0", "failure": "WORKER_FAILED"}
         else:

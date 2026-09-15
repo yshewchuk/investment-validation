@@ -104,6 +104,29 @@ def test_worker_plain_exception_stays_worker_failed(tmp_path, monkeypatch):
     assert "boom" in (staging / "diagnostics" / "worker.stderr").read_text()
 
 
+def test_worker_module_not_found_is_typed_nonretryable(tmp_path, monkeypatch):
+    """Real shadow nightly attempt 13: a pinned model artifact's pickle
+    named ``engine.models.ensemble``, absent from the code snapshot.
+    ``import_module`` raised ``ModuleNotFoundError`` deep inside
+    ``joblib.load`` (via ``score.py::_score_chooser``), which used to fall
+    into the plain-``BaseException`` branch above and come back as a
+    retryable ``WORKER_FAILED`` -- retried once for nothing, since a missing
+    module never resolves itself. It must now be typed, non-retryable, and
+    name the module."""
+    exc = ModuleNotFoundError("No module named 'engine.models.ensemble'",
+                              name="engine.models.ensemble")
+    exit_code, result, staging = _run_worker_main(tmp_path, monkeypatch, dispatch_raises=exc)
+    assert exit_code == 1
+    assert result["failure"] == "INPUT_CHANGED"
+    assert result["problem"]["code"] == "INPUT_CHANGED"
+    assert result["problem"]["category"] == "dependency"
+    assert result["problem"]["retryable"] is False
+    assert "engine.models.ensemble" in result["problem"]["message"]
+    details = json.loads((staging / "diagnostics" / "failure_details.json").read_text())
+    assert details == {"module": "engine.models.ensemble"}
+    assert "ModuleNotFoundError" in (staging / "diagnostics" / "worker.stderr").read_text()
+
+
 # --------------------------------------------------------------------------
 # 2. engine/v2/ops/supervisor.py -- real Service, stub worker subprocess
 # --------------------------------------------------------------------------
