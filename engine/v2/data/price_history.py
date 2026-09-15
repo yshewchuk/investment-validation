@@ -29,6 +29,34 @@ Two operations:
   ``as_of_view`` and ``engine.v2.data.price_history_query._provenance_by_date``
   use (SEND-BACK 2026-09-14 items 1 and 3 -- see :data:`_STORED_ROW_COLUMNS`'s
   own comment for the single read rule).
+
+**Leakage invariant for ``close_adj`` (added 2026-09-15).** ``close_adj`` is
+dividend/split-adjusted, which means a corporate action AFTER a given date
+retroactively rescales every close ON OR BEFORE it by one constant factor
+(one retrieval's `Adj Close` restates its own whole history uniformly, not
+per-date) -- the later a retrieval, the more of that future-conditioned
+rescaling its historical rows carry. That is safe to use ONLY for a feature
+that is scale-invariant within ONE retrieval's own view: a ratio of two
+closes drawn from the SAME ``retrieved_at`` (``engine.data.features.panel.
+add_runup_features``'s ``dist_high``/``dist_ema``/``ret5``/``ret10``/``ret20``,
+panel.py:544-573, are exactly this -- each is `close[t] / f(close[<=t])`, so
+the constant rescale factor cancels). Measured on real data (FDS, the ticker
+the verified Tier-1 parsing defect flagged as a genuine dividend
+restatement): the 08-27 px download and the 09-01 Tier-1 ``Adj Close`` differ
+by up to 3.8e-3 relative, yet the resulting runup features differ by at most
+1.4e-5 percentage points -- consistent with cancellation, not coincidence.
+It is UNSAFE to read an absolute ``close_adj`` LEVEL (a raw price, a
+dollar-denominated feature) or to STITCH ``close_adj`` values across
+different retrievals as if they were one continuous series (:func:`resolve_pool`
+already forward-fills across retrievals at the row-version grain by
+construction -- see its own docstring -- but each row keeps ITS retrieval's
+scale, so a feature spanning a version boundary mixes two different rescale
+factors and no longer cancels): either leaks a later corporate action's
+information into an earlier decision date. ``close_raw``/``high_raw``
+(split-adjusted only, never dividend-adjusted, since 2026-09-15) do not have
+this problem for splits handled the same way both sources apply them, but
+still restate around actual stock splits, so the same "ratio within one
+retrieval" discipline applies to them too.
 """
 from __future__ import annotations
 

@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -96,18 +97,26 @@ def _epoch(iso_timestamp: str) -> float:
     return datetime.fromisoformat(iso_timestamp).timestamp()
 
 
-def _yfinance_csv_bytes(rows: dict) -> bytes:
-    lines = ["Date,Open,High,Low,Close,Volume"]
+def _yfinance_csv_bytes(rows: dict, *, adj_close: dict | None = None) -> bytes:
+    """rows: {date: close} used for Open/High/Low/Close/high_raw (and
+    close_raw, since Close is unadjusted). ``adj_close`` (default: same as
+    ``rows``) sets ``Adj Close`` -- the dividend-adjusted series
+    ``read_tier1_body`` maps to ``close_adj`` -- per date, for tests that need
+    it to differ from ``Close``.
+    """
+    adj_close = adj_close if adj_close is not None else rows
+    lines = ["Date,Open,High,Low,Close,Adj Close,Volume"]
     for d, close in sorted(rows.items()):
-        lines.append(f"{d},{close},{close},{close},{close},1000")
+        lines.append(f"{d},{close},{close},{close},{close},{adj_close[d]},1000")
     return ("\n".join(lines) + "\n").encode()
 
 
 def _write_tier1(source_root: Path, ticker: str, rows: dict, *, key: str,
-                 fetched_at: str = "2024-01-04T00:00:00+00:00") -> None:
+                 fetched_at: str = "2024-01-04T00:00:00+00:00",
+                 adj_close: dict | None = None) -> None:
     directory = Path(source_root) / "data" / "raw" / "fetch" / "yfinance" / key[:2]
     directory.mkdir(parents=True, exist_ok=True)
-    body = _yfinance_csv_bytes(rows)
+    body = _yfinance_csv_bytes(rows, adj_close=adj_close)
     (directory / f"{key}.body.gz").write_bytes(gzip.compress(body, mtime=0))
     (directory / f"{key}.meta.json").write_text(json.dumps({
         "source": "yfinance", "endpoint": "history", "key": key,
@@ -301,6 +310,157 @@ def test_capture_rerun_after_multiple_retrievals_is_a_no_op(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Tier-1 parsing fix (2026-09-15): close_raw/high_raw are real values now,
+# not forced NaN, and diff_retrieval only stores what actually changed.
+# --------------------------------------------------------------------------
+
+
+def test_capture_stores_exactly_the_changed_close_adj_row_when_raw_and_high_match(tmp_path):
+    """px carries close_raw/high_raw natively; a later Tier-1 retrieval whose
+    Close/High match px's close_raw/high_raw on every date but whose
+    Adj Close differs on exactly one (a genuine restatement, the FDS shape
+    from the verified defect) must diff to exactly ONE new row -- proof that
+    close_raw/high_raw no longer force every Tier-1 row to look "changed"
+    the way the pre-fix all-NaN parse did.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    px_path = _write_px(source_root, "AAPL",
+                        {"2024-01-01": 100.0, "2024-01-02": 101.0, "2024-01-03": 102.0})
+    os.utime(px_path, (_epoch("2024-01-01T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+    assert first["rows_added"] == 3
+
+    _write_tier1(source_root, "AAPL",
+                {"2024-01-01": 100.0, "2024-01-02": 101.0, "2024-01-03": 102.0}, key="k1",
+                fetched_at="2024-02-01T00:00:00+00:00",
+                adj_close={"2024-01-01": 100.0, "2024-01-02": 105.5, "2024-01-03": 102.0})
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    # The unchanged px entry re-scans as a no-op; the tier1 entry contributes
+    # exactly the one row whose close_adj actually changed.
+    assert second["by_outcome"] == {"added": 1, "duplicate_source_hash": 1}
+    assert second["rows_added"] == 1
+
+    repository = Repository(conn, store)
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    snapshot = repository.resolve(second["result_snapshot_id"])
+    dvr = snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+                      columns=("date", "close_adj", "retrieved_at"),
+                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),),
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+    rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
+           for r in batch.to_pylist()]
+    changed = [r for r in rows if r["retrieved_at"][:10] == "2024-02-01"]
+    assert len(changed) == 1
+    assert changed[0]["date"] == "2024-01-02"
+    assert changed[0]["close_adj"] == 105.5
+
+
+def test_overlap_report_counts_per_column_and_max_relative_diff(tmp_path):
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    px_frame = pd.DataFrame([
+        {"date": "2024-01-01", "close_adj": 100.0, "close_raw": 100.0, "high_raw": 100.5},
+        {"date": "2024-01-02", "close_adj": 101.0, "close_raw": 101.0, "high_raw": 101.5},
+        {"date": "2024-01-03", "close_adj": 102.0, "close_raw": 102.0, "high_raw": 102.5},
+    ])
+    px_frame.to_csv(_px_dir(source_root) / "px_AAPL.csv", index=False)
+
+    # date 1: matches on every column. date 2: close_raw (Close) mismatches
+    # only. date 3: high_raw (High) AND close_adj (Adj Close) mismatch.
+    lines = ["Date,Open,High,Low,Close,Adj Close,Volume",
+            "2024-01-01,100.0,100.5,100.0,100.0,100.0,1000",
+            "2024-01-02,105.0,101.5,101.0,105.0,101.0,1000",
+            "2024-01-03,102.0,110.0,102.0,102.0,99.0,1000"]
+    body = ("\n".join(lines) + "\n").encode()
+    key = "kov1"
+    directory = Path(source_root) / "data" / "raw" / "fetch" / "yfinance" / key[:2]
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{key}.body.gz").write_bytes(gzip.compress(body, mtime=0))
+    (directory / f"{key}.meta.json").write_text(json.dumps({
+        "source": "yfinance", "endpoint": "history", "key": key,
+        "params": {"ticker": "AAPL", "period": "max"},
+        "fetched_at": "2024-02-01T00:00:00+00:00", "status": 200}))
+
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", dry_run=True, clock=clock)
+    overlap = report["overlap_by_column"]
+    assert report["overlapping_tickers"] == 1
+    assert overlap["close_raw"] == {"differing_dates": 1, "max_relative_diff": pytest.approx(4 / 101.0)}
+    assert overlap["high_raw"] == {"differing_dates": 1, "max_relative_diff": pytest.approx(7.5 / 102.5)}
+    assert overlap["close_adj"] == {"differing_dates": 1, "max_relative_diff": pytest.approx(3 / 102.0)}
+
+
+def test_capture_contract_bump_recaptures_cleanly_and_old_snapshot_is_unchanged(tmp_path):
+    """Stands in for the real 2026-09-15 transition: a ``price_history.v1``-
+    pinned snapshot already holds a wrongly-parsed row (close_raw/high_raw
+    NaN, the exact pre-fix shape) for AAPL. ``capture()`` always targets the
+    CURRENT ``PRICE_HISTORY_CONTRACT`` (now ``price_history.v2``), so it must
+    recapture AAPL fresh under the new contract -- never refused as
+    ``duplicate_source_hash`` even though the retrieval's raw bytes (and so
+    ``source_hash``) could otherwise collide with something already recorded
+    -- while the OLD snapshot keeps resolving its own, untouched
+    ``price_history.v1`` dataset version.
+    """
+    import dataclasses
+
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    from engine.v2.data import manifests as manifests_mod
+    from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
+
+    old_base = dataclasses.replace(PRICE_HISTORY_CONTRACT, contract_id="price_history.v1",
+                                   definition_hash="sha256:" + "0" * 64)
+    old_contract = dataclasses.replace(
+        old_base, definition_hash=manifests_mod.table_contract_hash(old_base))
+    old_ref = contract_ref_for(old_contract)
+    assert old_contract.contract_id != PRICE_HISTORY_CONTRACT.contract_id
+
+    conn, clock, store = catalog_and_store(tmp_path)
+    sec_record = publish_and_inspect(store, _SEC, _SEC_REF, [_securities_row("AAPL", 2024)], "2024")
+    wrong_row = dict(ticker="AAPL", date="2024-01-01", close_adj=999.0, close_raw=None,
+                     high_raw=None, retrieved_at="2024-01-01T00:00:00Z", deleted=False,
+                     source_kind="tier1_fetch", source_hash="pre-fix-hash", capture_id="pre-fix-cap")
+    ph_record = publish_and_inspect(store, old_contract, old_ref, [wrong_row], "AAPL")
+    base = commit_tables(conn, clock, {"securities": [sec_record], PRICE_HISTORY_TABLE_NAME: [ph_record]},
+                         {"securities": _SEC, PRICE_HISTORY_TABLE_NAME: old_contract}, scope="shadow",
+                         receipt_id="base-r1")
+    ref = ReferenceInput(kind="calendar", legacy_path="calendar.csv", object_id="art_cal",
+                         content_hash="sha256:" + "cd" * 32, byte_size=5)
+    with transaction(conn):
+        reference_catalog.insert_reference_inputs(conn, "base-r1", [ref])
+    assert (base.table_versions[PRICE_HISTORY_TABLE_NAME].table_contract_ref.contract_id
+           == "price_history.v1")
+
+    source_root = tmp_path / "legacy"
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="k1",
+                fetched_at="2024-02-01T00:00:00+00:00", adj_close={"2024-01-01": 99.5})
+
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    # Never duplicate_source_hash: the new contract's own chain started empty.
+    assert report["by_outcome"] == {"added": 1}
+
+    repository = Repository(conn, store)
+    new_snapshot = repository.resolve(report["result_snapshot_id"])
+    new_dvr = new_snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    assert new_dvr.table_contract_ref.contract_id == PRICE_HISTORY_CONTRACT.contract_id
+
+    query = DataQuery(snapshot_id=new_snapshot.snapshot_id, table_contract_ref=new_dvr.table_contract_ref,
+                      columns=("close_adj", "close_raw", "high_raw"),
+                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),),
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+    rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
+           for r in batch.to_pylist()]
+    assert rows == [{"close_adj": 99.5, "close_raw": 100.0, "high_raw": 100.0}]
+
+    # The OLD snapshot is untouched: still price_history.v1, same wrong values.
+    old_snapshot = repository.resolve(base.snapshot_id)
+    old_dvr = old_snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    assert old_dvr.table_contract_ref.contract_id == "price_history.v1"
+    assert old_dvr == base.table_versions[PRICE_HISTORY_TABLE_NAME]
+
+
+# --------------------------------------------------------------------------
 # reference inputs copied forward into the new receipt (SEND-BACK requirement 1)
 # --------------------------------------------------------------------------
 
@@ -367,6 +527,33 @@ def test_materialize_price_series_writes_px_files_and_parse_equality_holds(tmp_p
     from engine.v2.data import price_download_sources
     readback = price_download_sources.read_legacy_px_csv(written["AAPL"])
     assert list(readback["close_adj"]) == [100.0, 101.0]
+
+
+def test_materialize_price_series_writes_non_nan_columns_from_tier1_source(tmp_path):
+    """A Tier-1-only ticker (no px file): close_raw/high_raw must be real,
+    non-NaN values in the materialized px csv -- the 2026-09-15 fix; before
+    it, every Tier-1-sourced ticker's materialized close_raw/high_raw were
+    NaN (``read_tier1_body`` never parsed them)."""
+    from engine.v2.data.legacy_materialization import materialize_price_series
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 101.0}, key="k1",
+                fetched_at="2024-01-01T00:00:00+00:00",
+                adj_close={"2024-01-01": 99.0, "2024-01-02": 100.0})
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(report["result_snapshot_id"])
+
+    dest = tmp_path / "materialized"
+    written = materialize_price_series(repository, snapshot, dest, tickers=("AAPL",),
+                                       observation_ceiling=_FAR_FUTURE_CEILING)
+    from engine.v2.data import price_download_sources
+    readback = price_download_sources.read_legacy_px_csv(written["AAPL"])
+    assert list(readback["close_adj"]) == [99.0, 100.0]
+    assert list(readback["close_raw"]) == [100.0, 101.0]
+    assert list(readback["high_raw"]) == [100.0, 101.0]
+    assert not readback["close_raw"].isna().any()
+    assert not readback["high_raw"].isna().any()
 
 
 def test_materialize_price_series_refuses_typed_when_a_ticker_has_no_history(tmp_path):
@@ -451,3 +638,101 @@ def test_materialize_price_series_respects_the_jobs_own_cutoff_not_a_maximal_one
         observation_ceiling="2024-12-31T23:59:59Z")
     later = price_download_sources.read_legacy_px_csv(after_b["AAPL"])
     assert list(later["close_adj"]) == [200.0]
+
+
+# --------------------------------------------------------------------------
+# leakage guard: close_adj is only safe for SCALE-INVARIANT features within
+# one retrieval's own view (price_history.py's module docstring, "Leakage
+# invariant for close_adj", added 2026-09-15). A later retrieval that
+# restates every earlier close by one constant factor k (exactly what a new
+# dividend/split does to yfinance's Adj Close) must leave a ratio-of-closes
+# feature computed from dates strictly BEFORE the restated boundary
+# unchanged, because k cancels in the ratio -- real-data measured on FDS
+# (the ticker the verified Tier-1 parsing defect flagged as a genuine
+# restatement): 3.8e-3 relative close_adj difference, <=1.4e-5pp feature
+# difference.
+# --------------------------------------------------------------------------
+
+
+def _runup_style_features(closes, idx: int) -> dict:
+    """The exact arithmetic of ``engine.data.features.panel.add_runup_features``
+    (panel.py:556-573) for one anchor index: ``dist_high``/``dist_ema`` need
+    ``idx >= 252`` (rolling(252, min_periods=120).max() / ewm(span=252)), and
+    ``ret5``/``ret10``/``ret20`` need ``idx >= 20``. Each is a ratio of two
+    closes -- scale-invariant by construction -- computed directly rather
+    than through ``add_runup_features`` itself, which needs a full legacy
+    events frame and Tier-1 px-dir wiring this test has no reason to build.
+    """
+    series = pd.Series(closes)
+    ema252 = series.ewm(span=252, adjust=False).mean().to_numpy()
+    high252 = series.rolling(252, min_periods=120).max().to_numpy()
+    out = {}
+    if idx >= 252 and np.isfinite(high252[idx]) and np.isfinite(ema252[idx]) and ema252[idx] > 0:
+        out["dist_high"] = (closes[idx] / high252[idx] - 1.0) * 100
+        out["dist_ema"] = (closes[idx] / ema252[idx] - 1.0) * 100
+    if idx >= 20 and closes[idx - 20] > 0:
+        out["ret20"] = (closes[idx] / closes[idx - 20] - 1.0) * 100
+        out["ret10"] = (closes[idx] / closes[idx - 10] - 1.0) * 100
+        out["ret5"] = (closes[idx] / closes[idx - 5] - 1.0) * 100
+    return out
+
+
+def test_a_later_restatement_leaves_scale_invariant_runup_features_unchanged(tmp_path):
+    """Retrieval 1 (px, retrieved T1): 300 synthetic old dates. Retrieval 2
+    (Tier-1, retrieved T2 > T1): the SAME 300 dates with close_adj rescaled
+    by k=0.99 (a later dividend/split restating the whole history it covers,
+    same shape a real yfinance re-pull produces), plus 5 brand-new appended
+    dates. Both retrievals land in ONE pinned snapshot (a real capture -> `
+    materialize_price_series` round trip, never a bare DataFrame check).
+    Materializing at a cutoff BEFORE T2 sees only the k=1 view; materializing
+    at a cutoff AFTER T2 sees the k=0.99 view for the same old dates. A
+    ratio-of-closes feature anchored on the LAST old date (whose entire
+    252-day lookback lies inside the uniformly-rescaled old region) must
+    come out identical between the two views, within 1e-9 relative -- proof
+    that the rescale factor cancels exactly through the real storage/as-of
+    path, not merely in the abstract arithmetic.
+    """
+    from engine.v2.data import price_download_sources
+    from engine.v2.data.legacy_materialization import materialize_price_series
+
+    n_old, n_new, k = 300, 5, 0.99
+    rng = np.random.default_rng(20260915)
+    old_closes = 100.0 * np.cumprod(1 + rng.normal(0, 0.01, size=n_old))
+    new_closes = old_closes[-1] * np.cumprod(1 + rng.normal(0, 0.01, size=n_new))
+    old_dates = [d.strftime("%Y-%m-%d") for d in pd.date_range("2023-01-02", periods=n_old)]
+    new_dates = [d.strftime("%Y-%m-%d")
+                for d in pd.date_range(old_dates[-1], periods=n_new + 1)[1:]]
+
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    px_path = _write_px(source_root, "ZLK", dict(zip(old_dates, old_closes)))
+    os.utime(px_path, (_epoch("2024-01-01T00:00:00+00:00"),) * 2)
+    capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+
+    restated = dict(zip(old_dates, old_closes * k)) | dict(zip(new_dates, new_closes))
+    _write_tier1(source_root, "ZLK", restated, key="k1", fetched_at="2024-06-01T00:00:00+00:00")
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert report["rows_added"] == n_old + n_new  # every old date restated + n_new brand new
+
+    repository = Repository(conn, store)
+    pinned = repository.resolve(report["result_snapshot_id"])
+
+    before = materialize_price_series(repository, pinned, tmp_path / "before", tickers=("ZLK",),
+                                      observation_ceiling="2024-03-01T00:00:00Z")
+    after = materialize_price_series(repository, pinned, tmp_path / "after", tickers=("ZLK",),
+                                     observation_ceiling="2024-12-31T23:59:59Z")
+    before_closes = price_download_sources.read_legacy_px_csv(before["ZLK"])["close_adj"].to_numpy()
+    after_closes = price_download_sources.read_legacy_px_csv(after["ZLK"])["close_adj"].to_numpy()
+    assert len(before_closes) == n_old
+    assert len(after_closes) == n_old + n_new
+    # The restatement actually took effect (else this test would prove nothing).
+    assert not np.allclose(before_closes, after_closes[:n_old])
+
+    anchor_idx = n_old - 1  # the last old date -- its whole 252-day lookback is old-region
+    before_features = _runup_style_features(before_closes, anchor_idx)
+    after_features = _runup_style_features(after_closes, anchor_idx)
+    assert set(before_features) == {"dist_high", "dist_ema", "ret5", "ret10", "ret20"}
+    assert set(before_features) == set(after_features)
+    for name, b in before_features.items():
+        a = after_features[name]
+        assert abs(a - b) <= 1e-9 * max(abs(a), abs(b), 1.0), (name, a, b)
