@@ -356,8 +356,8 @@ def test_action_render_execution_clock_and_walk_back_flag_match_v1(monkeypatch, 
     monkeypatch.setattr(features_module.FeatureContext, "load",
                         staticmethod(lambda tickers, years: _FakeContext()))
 
-    result = _action_render({"session": REQUESTED, "tickers": ["FAKE"], "year_start": 2024,
-                             "year_end": 2026}, root)
+    result = _action_render({"session": REQUESTED, "tickers": ["FAKE"], "context_tickers": ["FAKE"],
+                             "year_start": 2024, "year_end": 2026}, root)
     assert result["path"] == "bundle.tar"
     assert captured["build_meta_as_of"] == RESOLVED
     clock = captured["meta"]["execution_clock"]
@@ -370,8 +370,8 @@ def test_action_render_execution_clock_and_walk_back_flag_match_v1(monkeypatch, 
     # and both execution_clock dates equal the (single) session.
     (root / "finality.json").write_text(json.dumps(_finality(date=REQUESTED)))
     captured.clear()
-    _action_render({"session": REQUESTED, "tickers": ["FAKE"], "year_start": 2024,
-                    "year_end": 2026}, root)
+    _action_render({"session": REQUESTED, "tickers": ["FAKE"], "context_tickers": ["FAKE"],
+                    "year_start": 2024, "year_end": 2026}, root)
     assert captured["meta"]["execution_clock"] == {
         "requested_as_of": REQUESTED, "resolved_as_of": REQUESTED, "finality": _finality(date=REQUESTED)}
     assert all(f.get("kind") != "as_of_resolved" for f in captured["flags"])

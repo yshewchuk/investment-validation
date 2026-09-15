@@ -179,6 +179,40 @@ def _action_finality(parameters, root):
     return primary
 
 
+def _scoring_context(parameters, *, action):
+    """P2-C04's single implementation of the scorer's evidence universe
+    (``context_tickers``) plus its ``years`` window, used by every action
+    that builds ``Scorer(context=FeatureContext.load(...))`` -- score,
+    decision_replay, render and selfcheck alike -- so they cannot drift.
+
+    External review finding (2026-09-14 fix): render and self-check built
+    their ``FeatureContext`` off the bare watchlist (``parameters["tickers"]``)
+    instead of ``context_tickers``, unlike score/decision_replay. A subset
+    run (e.g. watchlist AAA, context AAA+BBB) could then score correctly yet
+    fail render/self-check's own rescoring, blocking publication.
+
+    ``legacy_score``/``legacy_decision_replay`` predate ``context_tickers``
+    and default a caller that omits it to its own ``tickers`` -- unchanged,
+    still exactly what ``test_action_score_context_tickers_defaults_to_the_watchlist``
+    pins. ``legacy_render``/``legacy_selfcheck`` never had that grandfather
+    clause: ``build_legacy_job_requests`` (``engine/v2/ops/nightly.py``
+    ``_legacy_params``) has ALWAYS threaded ``context_tickers`` onto every
+    stage's parameters, so a render/selfcheck job actually missing it can
+    only mean a caller bypassed the plan builder or a payload regression
+    reintroduced this exact defect -- refused typed here, never silently
+    narrowed back to the watchlist (that silent narrowing is the bug).
+    """
+    context_tickers = parameters.get("context_tickers")
+    if not context_tickers:
+        if action in ("legacy_render", "legacy_selfcheck"):
+            raise fail("VALIDATION_FAILED",
+                      "legacy plan payload is missing context_tickers for this stage",
+                      details={"action": action})
+        context_tickers = parameters["tickers"]
+    years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
+    return sorted(set(context_tickers)), years
+
+
 def _action_score(parameters, root):
     import pandas as pd
 
@@ -194,8 +228,7 @@ def _action_score(parameters, root):
     # champions) is ``context_tickers``, never the direct watchlist — a
     # narrow watchlist must not shrink the context it is scored against.
     # Defaults to ``tickers`` for a caller that predates this parameter.
-    context_tickers = sorted(set(parameters.get("context_tickers") or parameters["tickers"]))
-    years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
+    context_tickers, years = _scoring_context(parameters, action="legacy_score")
     scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
     frame = score_calendar(pd.Timestamp(session),
                           horizon_days=int(parameters.get("horizon_days", 35)),
@@ -344,8 +377,7 @@ def _action_decision_replay(parameters, root):
     from engine.features import FeatureContext
     from engine.score import Scorer, score_calendar
 
-    context_tickers = sorted(set(parameters.get("context_tickers") or parameters["tickers"]))
-    years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
+    context_tickers, years = _scoring_context(parameters, action="legacy_decision_replay")
     scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
     eligible_tickers = sorted({str(row["ticker"]) for row in population})
     frame = score_calendar(pd.Timestamp(session),
@@ -536,9 +568,13 @@ def _action_render(parameters, root):
     if not ledger_tar.is_file():
         raise fail("VALIDATION_FAILED", "ledger generation not bound")
     stage_ledger_generation(ledger_tar, root / "legacy")
+    # ``tickers`` (the direct watchlist) stays separate from the scorer's
+    # evidence context below -- it only bounds _calendar_conflict_flags'
+    # "this render's own tickers" window, never the historical evidence a
+    # subset run's Scorer/FeatureContext must load (P2-C04 fix).
     tickers = sorted(set(parameters["tickers"]))
-    years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
-    scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+    context_tickers, years = _scoring_context(parameters, action="legacy_render")
+    scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
 
     as_of = resolved_as_of
     horizon_days = int(parameters.get("horizon_days", 35))
@@ -572,10 +608,8 @@ def _action_selfcheck(parameters, root):
     from engine.features import FeatureContext
     from engine.score import Scorer
 
-    tickers = sorted(set(parameters.get("tickers", ())))
-    years = range(int(parameters.get("year_start", 0)),
-                  int(parameters.get("year_end", 0)) + 1)
-    scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+    context_tickers, years = _scoring_context(parameters, action="legacy_selfcheck")
+    scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
     archive = root / "bundle.tar"
     if archive.is_file() and not (root / "bundle").is_dir():
         with tarfile.open(archive) as stream:
