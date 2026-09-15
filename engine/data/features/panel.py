@@ -38,7 +38,7 @@ import json
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -534,7 +534,15 @@ def add_runup_features(
         px = None
         if path.exists() and path.stat().st_size >= 50:
             try:
-                px = pd.read_csv(path, parse_dates=["date"]).sort_values("date")
+                # float_precision="round_trip": pandas' default C-parser
+                # ("high" precision) is not a true round trip for every
+                # float64 -- it can land 1 ULP off the value that was
+                # written (measured on the real shadow snapshot: ~40% of
+                # close_adj values need it, one mismatching row is enough
+                # to fail a whole ticker's readback). round_trip parses
+                # via Python's own correctly-rounding strtod instead.
+                px = pd.read_csv(path, parse_dates=["date"],
+                                 float_precision="round_trip").sort_values("date")
             except (ValueError, OSError):
                 px = None
         if px is None or len(px) < 300 or "close_adj" not in px.columns:
