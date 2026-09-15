@@ -599,3 +599,50 @@ def refuse_oversize_plan(conn, store, requests, *, policy=DEFAULT_POLICY):
         raise fail("RESOURCE_LIMIT_EXCEEDED",
                    "plan stages a legacy read set larger than its profile's scratch budget",
                    details={"jobs": problems})
+
+
+def plan_memory_problems(requests, *, policy=DEFAULT_POLICY, sample):
+    """Per-job STATIC memory admission problems for an already-built request
+    graph (§8.1, the legacy_score v5 6 GiB incident's plan-time follow-up).
+
+    Unlike ``plan_scratch_problems`` above, this never reads a manifest or a
+    live ``host_available_bytes`` -- it only asks whether ``resource_class``'s
+    profile could EVER be admitted under this policy at all
+    (``resources.static_ceiling_bytes``, host-total-based). ``sample`` is
+    still required (there is no other source for ``host_total_bytes``/
+    ``container_limit_bytes``), but its live, fluctuating field
+    (``host_available_bytes``) is never read here, so this never trips on
+    another process's transient memory use the way a claim-time
+    ``MEMORY_HEADROOM`` sample can.
+
+    Returns a list of problem dicts (empty means every named profile could
+    ever fit); never raises on its own.
+    """
+    from engine.v2.ops.resources import static_ceiling_bytes
+
+    ceiling = static_ceiling_bytes(policy, sample)
+    problems = []
+    seen_classes: set[str] = set()
+    for request in requests:
+        resource_class = request.job.resource_class
+        if resource_class in seen_classes:
+            continue
+        seen_classes.add(resource_class)
+        profile = profile_named(policy, resource_class)
+        if profile.memory_bytes > ceiling:
+            problems.append({"kind": request.job.kind, "profile": profile.name,
+                             "needed_bytes": profile.memory_bytes, "max_possible_bytes": ceiling})
+    return problems
+
+
+def refuse_unfittable_memory_plan(requests, *, policy=DEFAULT_POLICY, sample):
+    """Raise before submission if any job in ``requests`` names a resource
+    profile that could never be admitted on this host at all, no matter how
+    idle it gets (§8.1). Complements the claim-time sustained-window check
+    (``scheduler._advance_headroom_ceiling_window``): this one is static and
+    immediate, that one is live and patient."""
+    problems = plan_memory_problems(requests, policy=policy, sample=sample)
+    if problems:
+        raise fail("RESOURCE_PROFILE_UNSATISFIABLE",
+                   "plan names a resource profile bigger than this host could ever admit",
+                   details={"jobs": problems})
