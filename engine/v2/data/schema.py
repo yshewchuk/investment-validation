@@ -552,9 +552,58 @@ _V7 = (
     *_immutable_triggers("data_price_captures"),
 )
 
+# --------------------------------------------------------------------------
+# v8 — receipt lineage: a capture generation's accepted legacy read-set is
+# inherited from its base (never edit v1-v7 above)
+# --------------------------------------------------------------------------
+#
+# The integration gap this closes: ``engine.v2.ops.price_history_store``
+# commits a price_history-only capture generation under its OWN honest,
+# non-scheduler ``attempt_id`` (v7's docstring, "Honest attempt identity"),
+# which never carries an ``attempt_input_bindings`` row for
+# ``legacy_manifest.json`` the way a real scheduler-issued import attempt
+# does. A capture never changes the legacy input manifest — it only adds
+# ``price_history`` and carries every other table's dataset version forward
+# unchanged (``price_history_store``'s own "Cadence" docstring section) — so
+# its accepted legacy read-set IS its base receipt's, by construction, not a
+# fact this table re-derives or re-verifies.
+#
+# One row per capture receipt, naming the committed receipt (of the base
+# head at capture time) it inherits from. Immutable, like every other
+# catalog metadata table (invariant 1); unlike v5/v7 there is no "requires a
+# committed receipt" BEFORE INSERT trigger on ``receipt_id`` itself, because
+# the row is written inside that very receipt's own commit transaction
+# (``price_history_store._commit_generation``'s ``record_references``
+# callback, via ``engine.v2.ops.generation_binding.record_price_history_lineage``)
+# — the receipt row that owns it always exists by the time this one is
+# inserted, exactly as v5/v7's own committed-receipt check would already
+# require, but there is nothing to check separately since both writes share
+# one all-or-nothing transaction. ``base_receipt_id`` is a plain foreign key
+# (not required to be 'committed' at the SQL layer): by construction the
+# writer only ever passes an already-committed receipt
+# (``reference_catalog.committed_receipt_for_snapshot``'s result), and a
+# lineage row that names one no longer committed — impossible under normal
+# operation, but not something a foreign key alone can rule out for all
+# time — is a launch-time refusal in
+# ``engine.v2.ops.generation_binding.accepted_generation_refs`` (its lineage
+# walk re-queries each hop's own committed status), not a schema constraint.
+# ``kind`` is a closed, single-value vocabulary today (only one thing ever
+# produces a receipt with no manifest binding of its own); the ``CHECK``
+# keeps it that way rather than silently accepting an unrelated future kind
+# under the same walk semantics without a deliberate decision to extend it.
+_V8 = (
+    """CREATE TABLE data_receipt_lineage (
+        receipt_id TEXT PRIMARY KEY REFERENCES data_import_receipts(receipt_id),
+        base_receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        kind TEXT NOT NULL CHECK (kind = 'price_history_capture')
+    ) STRICT""",
+    "CREATE INDEX data_receipt_lineage_base ON data_receipt_lineage(base_receipt_id)",
+    *_immutable_triggers("data_receipt_lineage"),
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
              (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
              (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6),
-             (7, "price_captures", _V7))
+             (7, "price_captures", _V7), (8, "receipt_lineage", _V8))

@@ -56,33 +56,31 @@ no-op: real concurrency safety here is ``commit_snapshot``'s own head
 compare-and-swap (``expected_head_snapshot_id``/``expected_head_generation``,
 unchanged), not a job fence this non-supervised commit was never issued.
 
-**Reported, unresolved gap: ``attempt_input_bindings`` compatibility.**
-``engine.v2.ops.generation_binding.accepted_generation_refs`` (``engine/v2/
-ops/generation_binding.py:83-97``) resolves a barrier-only stage's accepted
-legacy read-set by looking up ``attempt_input_bindings`` (FK'd to
-``attempts.attempt_id``, ``engine/v2/ops/schema.py``) for the pinned
-generation receipt's OWN ``attempt_id``. The base generation's real,
-scheduler-issued attempt legitimately carries a ``legacy_manifest.json``
-binding there; this module's newly-minted, honest attempt_id never will
-(inserting one would need the exact fabricated-or-real-job-submission
-``attempts`` row this module deliberately does not create). Consequence: a
-LATER snapshot-mode plan whose ``pin_snapshot_inputs`` resolves its
-generation-pinned receipt to a price_history-only capture's own receipt
-(the newest committed receipt for that snapshot_id -- see
-``engine.v2.data.reference_catalog.committed_receipt_for_snapshot``) will
-find no manifest binding for that receipt's attempt_id, and any barrier-only
-stage in that plan (``legacy_finality``/``legacy_model_evidence``/
-``legacy_selfcheck``) refuses ``INPUT_CHANGED``/``generation_receipt_missing``
-at launch. Options, not decided here: (A) accept the gap -- a snapshot-mode
-plan with barrier stages cannot launch against a price_history-only-advanced
-head until a real snapshot/reference import next moves it; (B) fabricate a
-real ``attempts``/``jobs``/``supervisor_epochs`` row set for this CLI-driven
-commit (rejected: dishonest, and heavier than this task's scope); (C) route
-``ops price-history capture`` through real job submission (a much larger
-change, out of scope here); (D) change ``generation_binding.py``'s lookup to
-not require ``attempt_input_bindings`` (an architecture change to a file
-this task's brief asks to leave minimally touched). Reported per the
-coordinator's own instruction rather than picked silently.
+**Receipt lineage closes the ``attempt_input_bindings`` gap (schema v8).**
+``engine.v2.ops.generation_binding.accepted_generation_refs`` resolves a
+barrier-only stage's accepted legacy read-set by looking up
+``attempt_input_bindings`` (FK'd to ``attempts.attempt_id``,
+``engine/v2/ops/schema.py``) for the pinned generation receipt's OWN
+``attempt_id``. The base generation's real, scheduler-issued attempt
+legitimately carries a ``legacy_manifest.json`` binding there; this module's
+newly-minted, honest attempt_id never will (inserting one would need the
+exact fabricated-or-real-job-submission ``attempts`` row this module
+deliberately does not create) -- so a snapshot-mode plan whose
+``pin_snapshot_inputs`` resolves its generation-pinned receipt to a
+price_history-only capture's own receipt would, on that lookup alone, find
+no manifest binding at all. A capture never changes the legacy input
+manifest, though -- it only adds ``price_history`` and carries every other
+table's dataset version forward unchanged (see "Cadence" above) -- so its
+accepted legacy read-set IS its base generation's, by construction.
+:func:`_commit_generation` records that fact once, inside its own commit
+transaction, as a ``data_receipt_lineage`` row
+(``engine.v2.ops.generation_binding.record_price_history_lineage``, called
+from :func:`_commit_generation`'s ``record_references`` callback with
+``base_receipt_id=old_receipt_id``); ``accepted_generation_refs`` follows
+that row to the base receipt (and repeats, bounded and cycle-safe, for a
+chain of captures) whenever a receipt's own attempt carries no binding. See
+``generation_binding.py``'s module docstring, "Receipt lineage" section, for
+the full walk.
 
 **Multi-retrieval capture (2026-09-14 addition).** The planned
 ``live=True`` re-downloader (``engine/data/fetch.py:104-113``, the same
@@ -132,6 +130,7 @@ from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HIS
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, content_hash
 from engine.v2.ops.errors import fail
+from engine.v2.ops.generation_binding import record_price_history_lineage
 from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache
 from engine.v2.ops.recovery import SupervisorLock
 
@@ -527,6 +526,7 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
     def _record_references(c: sqlite3.Connection, rid: str) -> None:
         _copy_reference_inputs(c, old_receipt_id=old_receipt_id, new_receipt_id=rid)
         _insert_price_captures(c, rid, attempts)
+        record_price_history_lineage(c, receipt_id=rid, base_receipt_id=old_receipt_id)
 
     return data_catalog.commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=tuple(contracts.values()),
