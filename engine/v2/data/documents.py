@@ -13,11 +13,16 @@ characters") so a new field cannot silently skip validation by drifting from a
 name-guessing convention.
 
 A time bound (``TimeInterval``'s two fields, ``FragmentRecord.time_min``/
-``.time_max``) accepts three mutually exclusive kinds — ``"date"``, the
-offset-required RFC 3339 ``"timestamp"`` (``foundation.clock.parse_timestamp``),
-and the offset-less ``"naive_timestamp"`` legacy observation columns actually
-carry (``time_formats.is_naive_timestamp``) — never a silent alias between
-them: a field mixing two kinds, or a naive/aware pair, is refused.
+``.time_max``) accepts three mutually exclusive kinds — ``"date"``, an
+offset-required, timezone-aware ISO 8601 ``"timestamp"`` (``Z``, ``+00:00``,
+or any other real UTC offset -- a strict superset of
+``foundation.clock.parse_timestamp``'s own microseconds-required ``...Z``
+wire form, which is still one instance of this same kind), and the
+offset-less ``"naive_timestamp"`` legacy observation columns actually carry
+(``time_formats.is_naive_timestamp``) — never a silent alias between them: a
+field mixing two kinds, or a naive/aware pair, is refused. ``query.py``'s
+``_normalize_bound`` is what actually converts an aware bound to UTC for
+comparison; this module only recognizes the shape.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 ``engine.v2.contracts``, ``engine.v2.foundation``, and this package's own
@@ -192,11 +197,22 @@ def _time_bound_kind(value: str) -> str | None:
         return "date"
     if time_formats.is_naive_timestamp(value):
         return "naive_timestamp"
+    if _is_aware_timestamp(value):
+        return "timestamp"
+    return None
+
+
+def _is_aware_timestamp(value: str) -> bool:
+    """True iff ``value`` is a real, timezone-aware ISO 8601 timestamp --
+    ``Z``, ``+00:00``, or any other real UTC offset. A strict superset of
+    ``foundation.clock.parse_timestamp``'s own stricter microseconds-required
+    ``...Z`` form: everything that form accepts, this accepts too, plus the
+    other RFC 3339 spellings of the same aware kind."""
     try:
-        parse_timestamp(value)
-    except ValueError:
-        return None
-    return "timestamp"
+        parsed = datetime.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return False
+    return parsed.tzinfo is not None
 
 
 def _check_table_contract(tc: Any, path: str) -> None:
