@@ -27,15 +27,29 @@ caller (``supervisor.Service._pin_read_set``) only calls into this module
 when ``snapshot_generation_id`` is non-empty — a legacy-mode job's
 parameters leave it ``""`` and the check never runs.
 
-:func:`accepted_generation_refs` reads the SPECIFIC committed import that
-produced the plan's own pinned ``snapshot_id`` in its own ``scope`` — never
-"whatever is newest right now", which could have moved since the plan was
-built — and returns its pinned ``LegacyInputManifest``, the same document
-``snapshot_import_effect`` verified against ``SnapshotImportRequest.
-source_manifest_hash`` before ever committing, via the plain
-``attempt_input_bindings`` row the import job's own launch already recorded
-for ``legacy_manifest.json`` (``input_bindings.record_resolved_bindings``);
-no new binding, table or coordinator flow.
+:func:`accepted_generation_refs` reads ONE SPECIFIC committed import receipt,
+by its own ``receipt_id`` — never "whatever is newest for this snapshot_id
+right now" (external review finding #5, 2026-09-14: the data snapshot id
+alone does not identify a generation, because a reference-only reimport can
+commit a NEW receipt against the SAME ``result_snapshot_id`` with different
+pinned model/reference files; resolving "latest committed receipt for this
+snapshot_id" at launch time — as this module did before the fix — let a
+later import silently move what an already-planned job validated against,
+either into a false pass or a false ``INPUT_CHANGED`` on a job that never
+itself changed). ``pin_snapshot_inputs`` resolves "latest" exactly once, at
+plan time, and stamps the resulting ``receipt_id`` onto every stage in the
+plan graph (``nightly._stage_parameters`` ->
+``LegacyParameters.snapshot_generation_receipt_id``); that is the only place
+"latest" is allowed to mean anything. Every launch-time caller here reads
+the plan's own pinned receipt id and never re-resolves.
+
+``accepted_generation_refs`` returns the pinned ``LegacyInputManifest`` of
+that one receipt, the same document ``snapshot_import_effect`` verified
+against ``SnapshotImportRequest.source_manifest_hash`` before ever
+committing, via the plain ``attempt_input_bindings`` row the import job's own
+launch already recorded for ``legacy_manifest.json``
+(``input_bindings.record_resolved_bindings``); no new binding, table or
+coordinator flow.
 
 :func:`refuse_generation_mismatch` is the launch-time check: any path both
 manifests pin, pinned to a DIFFERENT content hash, refuses ``INPUT_CHANGED``
@@ -43,8 +57,16 @@ with ``details.reason: "generation_mismatch"`` and the differing paths only
 (never a byte, never a hash — paths are enough to act on). A path only one
 side pins (a barrier stage's own finality-coverage frames, or a file the
 import never touched) is not a disagreement and is silently allowed, exactly
-as the task brief specifies. No committed import for the pinned snapshot_id
-is not a mismatch either — there is nothing accepted to bind to.
+as the task brief specifies. An empty ``receipt_id`` is a deliberate no-op
+for isolated callers (nothing was ever pinned to check against); a
+NON-empty ``receipt_id`` that does not resolve to a committed receipt with a
+pinned manifest — deleted, tampered, or simply never committed — refuses
+``INPUT_CHANGED``/``generation_receipt_missing`` rather than silently
+proceeding, because by construction a real plan never stamps a receipt id
+that was not committed at plan time. ``Service._pin_read_set`` is the one
+caller that must never pass an empty ``receipt_id`` for a snapshot-mode job:
+it refuses ``generation_not_pinned`` itself first (see its docstring) for a
+job planned before this fix, which has no receipt id to pass at all.
 """
 from __future__ import annotations
 
@@ -55,10 +77,9 @@ from engine.v2.ops.errors import fail
 
 __all__ = ["accepted_generation_refs", "refuse_generation_mismatch"]
 
-_COMMITTED_IMPORT_FOR_SNAPSHOT = """
+_COMMITTED_RECEIPT_ATTEMPT = """
 SELECT attempt_id FROM data_import_receipts
-WHERE scope = ? AND status = 'committed' AND result_snapshot_id = ?
-ORDER BY registered_at DESC, rowid DESC LIMIT 1
+WHERE receipt_id = ? AND status = 'committed'
 """
 
 _MANIFEST_BINDING = """
@@ -67,13 +88,14 @@ WHERE attempt_id = ? AND name = 'legacy_manifest.json'
 """
 
 
-def accepted_generation_refs(conn, store, *, scope: str, snapshot_id: str) -> dict[str, str] | None:
-    """``{path: content_hash}`` of the committed import's own pinned
-    ``LegacyInputManifest`` that produced ``snapshot_id`` in ``scope`` — the
-    EXACT snapshot a plan pinned, never "whatever is newest in scope right
-    now". ``None`` when no committed import produced it (or pinned no
-    manifest) — nothing accepted to bind a barrier stage to."""
-    receipt = conn.execute(_COMMITTED_IMPORT_FOR_SNAPSHOT, (scope, snapshot_id)).fetchone()
+def accepted_generation_refs(conn, store, *, receipt_id: str) -> dict[str, str] | None:
+    """``{path: content_hash}`` of ONE SPECIFIC committed import receipt's own
+    pinned ``LegacyInputManifest`` — never "whatever is newest right now".
+    ``None`` when ``receipt_id`` is empty, was never committed, or pinned no
+    manifest — nothing accepted to bind a barrier stage to."""
+    if not receipt_id:
+        return None
+    receipt = conn.execute(_COMMITTED_RECEIPT_ATTEMPT, (receipt_id,)).fetchone()
     if receipt is None:
         return None
     binding = conn.execute(_MANIFEST_BINDING, (receipt[0],)).fetchone()
@@ -83,16 +105,21 @@ def accepted_generation_refs(conn, store, *, scope: str, snapshot_id: str) -> di
     return {ref["path"]: ref["content_hash"] for ref in document.get("file_refs", [])}
 
 
-def refuse_generation_mismatch(conn, store, *, scope: str, snapshot_id: str,
-                               barrier_manifest: dict) -> None:
-    """Refuse ``INPUT_CHANGED``/``generation_mismatch`` when ``barrier_manifest``
-    (the raw ``LegacyInputManifest`` document a barrier job just pinned) names
-    a path the plan's own pinned generation also pins, at a different content
-    hash. The caller is expected to skip this entirely for a legacy-mode job
-    (``snapshot_id`` empty) — see the module docstring."""
-    accepted = accepted_generation_refs(conn, store, scope=scope, snapshot_id=snapshot_id)
-    if not accepted:
+def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest: dict) -> None:
+    """Refuse ``INPUT_CHANGED`` when ``barrier_manifest`` (the raw
+    ``LegacyInputManifest`` document a barrier job just pinned) disagrees
+    with the plan's pinned generation receipt (``generation_mismatch``), or
+    when that exact receipt no longer resolves at all
+    (``generation_receipt_missing``). An empty ``receipt_id`` is a
+    deliberate no-op for isolated callers — see the module docstring."""
+    if not receipt_id:
         return
+    accepted = accepted_generation_refs(conn, store, receipt_id=receipt_id)
+    if accepted is None:
+        raise fail("INPUT_CHANGED",
+                   "the plan's pinned generation receipt is missing, was never committed, or "
+                   "pinned no reference manifest",
+                   details={"reason": "generation_receipt_missing", "receipt_id": receipt_id})
     barrier_refs = {ref["path"]: ref["content_hash"] for ref in barrier_manifest.get("file_refs", [])}
     differing = sorted(path for path, digest in barrier_refs.items()
                        if path in accepted and accepted[path] != digest)

@@ -93,6 +93,15 @@ class LegacyParameters:
     #: generation-binding check is skipped entirely for it.
     snapshot_generation_id: str = ""
     snapshot_generation_scope: str = ""
+    #: External review #5 (2026-09-14): the EXACT ``data_import_receipts``
+    #: row ``pin_snapshot_inputs`` resolved at plan time for
+    #: ``snapshot_generation_id`` -- ``generation_binding.accepted_generation_refs``
+    #: reads this receipt by id and never re-resolves "latest for this
+    #: snapshot id", so a later reference-only reimport against the same
+    #: snapshot id cannot invalidate (or silently rebind) an already-planned
+    #: job. Empty on a job planned before this field existed; such a job is
+    #: refused ``generation_not_pinned`` rather than falling back to "latest".
+    snapshot_generation_receipt_id: str = ""
 
 
 @dataclass(frozen=True)

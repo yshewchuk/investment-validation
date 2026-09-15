@@ -357,6 +357,9 @@ def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_s
         # generation-binding check still needs to know it is one, and which.
         params["snapshot_generation_id"] = snapshot.get("snapshot_id", "")
         params["snapshot_generation_scope"] = snapshot.get("scope", "")
+        # External review #5: the exact import receipt pin_snapshot_inputs
+        # resolved at plan time -- see LegacyParameters.snapshot_generation_receipt_id.
+        params["snapshot_generation_receipt_id"] = snapshot.get("snapshot_generation_receipt_id", "")
     return params
 
 
