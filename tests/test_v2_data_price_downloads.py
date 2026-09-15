@@ -107,6 +107,68 @@ def test_diff_retrieval_missing_date_tombstones():
     assert bool(new_rows.iloc[0]["deleted"]) is True
 
 
+def test_diff_retrieval_reversion_to_earlier_value_diffs_against_latest_state():
+    """External review reproduction (2026-09-15): 09-10 price 100, 09-11
+    correction to 110, 09-12 reverts to 100 (byte-identical retrieval to
+    09-10's). ``diff_retrieval`` always compares against ``latest_state`` --
+    never against any single earlier retrieval's own bytes -- so the 09-12
+    retrieval must diff against 110 (the CURRENT latest), not vanish as if it
+    matched 09-10. This is the pure logic; the duplicate short-circuit that
+    used to swallow this case lived one layer up, in
+    ``engine.v2.ops.price_history_store._capture_ticker``.
+    """
+    stored, _ = _apply(_empty_stored(), {"2024-09-10": (100.0, 100.0, 100.0)},
+                       retrieved_at="2024-09-10T00:00:00Z", source_hash="h_a")
+    stored, _ = _apply(stored, {"2024-09-10": (110.0, 110.0, 110.0)},
+                       retrieved_at="2024-09-11T00:00:00Z", source_hash="h_b")
+    stored, new_rows = _apply(stored, {"2024-09-10": (100.0, 100.0, 100.0)},
+                              retrieved_at="2024-09-12T00:00:00Z", source_hash="h_a")
+    assert len(new_rows) == 1
+    assert new_rows.iloc[0]["close_adj"] == 100.0
+    assert new_rows.iloc[0]["retrieved_at"] == "2024-09-12T00:00:00Z"
+
+
+def test_diff_retrieval_no_change_against_latest_is_empty_regardless_of_source_hash():
+    """A retrieval whose bytes/hash differ from every prior retrieval, but
+    whose VALUE matches the current latest state, is still ``no_change`` --
+    the duplicate/no-op distinction is about the observed value, not the hash
+    identity of the bytes that produced it.
+    """
+    stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1)},
+                       retrieved_at="2024-01-05T00:00:00Z", source_hash="h1")
+    _, new_rows = _apply(stored, {"2024-01-01": (1.0, 1.0, 1.1)},
+                         retrieved_at="2024-01-06T00:00:00Z", source_hash="h2_different_bytes")
+    assert new_rows.empty
+
+
+def test_as_of_view_reversion_sequence_reads_return_a_then_b_then_a():
+    """A->B->A: reads at each retrieval's own cutoff return that retrieval's
+    value -- the view rule (:func:`resolve_pool`/:func:`as_of_view`) already
+    picks the latest retrieval at-or-before cutoff and reconstructs from it,
+    so this passes today; it is asserted here as the read-side half of the
+    external review's reversion scenario.
+    """
+    stored, _ = _apply(_empty_stored(), {"2024-09-10": (100.0, None, None)},
+                       retrieved_at="2024-09-10T00:00:00Z", source_hash="h_a")
+    stored, _ = _apply(stored, {"2024-09-10": (110.0, None, None)},
+                       retrieved_at="2024-09-11T00:00:00Z", source_hash="h_b")
+    stored, _ = _apply(stored, {"2024-09-10": (100.0, None, None)},
+                       retrieved_at="2024-09-12T00:00:00Z", source_hash="h_a")
+
+    at_a = price_history.as_of_view(stored, "2024-09-10T00:00:00Z")
+    assert dict(zip(at_a["date"], at_a["close_adj"])) == {"2024-09-10": 100.0}
+
+    at_b = price_history.as_of_view(stored, "2024-09-11T00:00:00Z")
+    assert dict(zip(at_b["date"], at_b["close_adj"])) == {"2024-09-10": 110.0}
+
+    at_a_again = price_history.as_of_view(stored, "2024-09-12T00:00:00Z")
+    assert dict(zip(at_a_again["date"], at_a_again["close_adj"])) == {"2024-09-10": 100.0}
+
+    # A cutoff after the last retrieval also still resolves to the reverted value.
+    at_a_later = price_history.as_of_view(stored, "2024-12-01T00:00:00Z")
+    assert dict(zip(at_a_later["date"], at_a_later["close_adj"])) == {"2024-09-10": 100.0}
+
+
 def test_diff_retrieval_partial_window_refused():
     stored, _ = _apply(_empty_stored(), {"2024-01-01": (1.0, 1.0, 1.1), "2024-01-02": (2.0, 2.0, 2.1)},
                        retrieved_at="2024-01-05T00:00:00Z")

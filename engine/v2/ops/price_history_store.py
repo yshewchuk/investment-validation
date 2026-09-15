@@ -92,10 +92,18 @@ cache entry -- ``params`` stays ``{"ticker", "period": "max"}`` on every one
 records it), so :func:`_tier1_retrievals` collects EVERY matching entry per
 ticker rather than the single last-iterated one, and :func:`capture` walks
 them in ascending ``fetched_at`` order (ties on the retrieved body's own
-hash) -- an already-captured ``source_hash`` is a no-op, and one older than
-the ticker's latest already-observed ``retrieved_at`` is refused exactly as
-a legitimate backdated capture would be, whether that ordering violation
-comes from a single run or across two.
+hash) -- re-observing the exact SAME retrieval (matching ``source_hash`` AND
+``retrieved_at``, e.g. re-capturing an already-captured cached body) is a
+no-op, and one older than the ticker's latest already-observed
+``retrieved_at`` is refused exactly as a legitimate backdated capture would
+be, whether that ordering violation comes from a single run or across two.
+A later retrieval whose bytes happen to match an OLDER retrieval's (a
+reversion back to a prior value) is never treated as that no-op: it is
+diffed against the ticker's latest stored state and, if that state differs
+(2026-09-15 fix -- external review: a corrected-then-reverted value was
+silently discarded as ``duplicate_source_hash`` because only ``source_hash``
+was compared, not ``retrieved_at`` too), recorded as new version rows under
+its own ``retrieved_at`` (see :func:`_capture_ticker`).
 
 **px capture is not exclusive of Tier-1 (SEND-BACK 2026-09-14 fix).** A
 ticker with a px file used to capture ONLY the px entry, silently dropping
@@ -467,6 +475,14 @@ def _capture_ticker(conn: sqlite3.Connection, ticker: str, entries: list[tuple[s
     source_kind-specific rule on the v2 read side either, per the user's
     2026-09-14 decision; ``price_history.resolve_pool`` picks the single
     latest-at-or-before-cutoff retrieval of ANY source).
+
+    ``duplicate_source_hash`` means the SAME retrieval only -- matching
+    ``source_hash`` AND matching ``retrieved_at`` (e.g. re-running a capture
+    against an unchanged cache entry) -- kept idempotent: no new rows, no
+    change to stored state. A retrieval whose bytes match an OLDER, different
+    ``retrieved_at`` (a legitimate reversion) is never a duplicate: it is
+    diffed via :func:`price_history.diff_retrieval` against the ticker's
+    CURRENT latest stored state (2026-09-15 fix; see module docstring).
     """
     run_log = _prior_attempts(conn, ticker)
     results: list[dict] = []
@@ -483,8 +499,8 @@ def _capture_ticker(conn: sqlite3.Connection, ticker: str, entries: list[tuple[s
         source_kind, frame, raw = item["source_kind"], item["frame"], item["raw"]
         retrieved_at, source_hash = item["retrieved_at"], item["source_hash"]
         capture_id = _capture_id(ticker, source_hash, retrieved_at)
-        if any(a["source_hash"] == source_hash and a["outcome"] in _SUCCESS_OUTCOMES
-               for a in run_log):
+        if any(a["source_hash"] == source_hash and a["retrieved_at"] == retrieved_at
+               and a["outcome"] in _SUCCESS_OUTCOMES for a in run_log):
             _record(_attempt(capture_id, ticker, source_kind, source_hash, retrieved_at,
                              "duplicate_source_hash", 0, 0, created_at))
             results.append({"ticker": ticker, "outcome": "duplicate_source_hash", "rows_added": 0,
