@@ -12,9 +12,10 @@ from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
-           "invoke_score_calendar", "iter_raw_fetch_cache", "manifest_files",
-           "projected_trading_sessions", "run_engineering_gate", "run_legacy_rebuild",
-           "run_legacy_script", "run_security_scan", "verify_export_generation"]
+           "invoke_price_refresh", "invoke_score_calendar", "iter_raw_fetch_cache",
+           "manifest_files", "projected_trading_sessions", "run_engineering_gate",
+           "run_legacy_rebuild", "run_legacy_script", "run_security_scan",
+           "verify_export_generation"]
 
 
 def projected_trading_sessions(start, end) -> tuple[str, ...]:
@@ -118,6 +119,35 @@ def invoke_score_calendar(root, as_of, *, scorer, tickers=None, horizon_days=35)
     from engine.score import score_calendar
     return score_calendar(as_of, horizon_days=horizon_days, alt_strikes=0,
                           scorer=scorer, tickers=tickers, progress_every=10)
+
+
+def invoke_price_refresh(session, *, dry_run: bool = False):
+    """Plan (and, unless ``dry_run``, run) one ``ops price-refresh`` pass.
+
+    ``engine.v2.ops.cli`` may not import ``engine.data.*`` directly -- one
+    adapter module per package (``checks/import_layers.py`` §4.2) -- so this
+    is the whole crossing: ``engine.data.pulls.price_refresh`` (the actual
+    planning/fetch logic, this task's own new module) plus
+    ``engine.data.fetch.Fetcher`` for a real run. Never rooted via
+    ``_rooted_import``: unlike the snapshot-materialization callers above,
+    price-refresh has no ``--store-root``/``--source-root`` of its own yet
+    (out of this task's scope) and always reads/writes the checkout it
+    actually runs in.
+    """
+    from engine.data.pulls.price_refresh import (
+        load_events,
+        load_fetch_history,
+        load_price_universe,
+        plan_refresh,
+        run_refresh,
+    )
+
+    plan = plan_refresh(session, events=load_events(), price_universe=load_price_universe(),
+                        fetch_history=load_fetch_history())
+    if dry_run:
+        return {"plan": plan, "report": None}
+    from engine.data.fetch import Fetcher
+    return {"plan": plan, "report": run_refresh(plan, Fetcher())}
 
 
 def _write_action(root, name, value):

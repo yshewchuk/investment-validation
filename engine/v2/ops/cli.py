@@ -86,6 +86,21 @@ def _add_snapshot_commands(commands):
     rollback_p.add_argument("--expected-generation", type=int, required=True)
 
 
+def _add_price_refresh_command(commands):
+    """``ops price-refresh --session YYYY-MM-DD [--dry-run]`` — the scheduled
+    full-history yfinance re-downloader (see
+    ``engine.data.pulls.price_refresh``). Kept a single small function, in its
+    own subparser, so it stays a minimal diff alongside the ``price-history``
+    subcommands another agent edits this same file to add."""
+    price_refresh = commands.add_parser("price-refresh")
+    price_refresh.add_argument("--root", default=argparse.SUPPRESS)
+    price_refresh.add_argument("--session", required=True,
+                               help="YYYY-MM-DD; the trading session to plan/run for")
+    price_refresh.add_argument("--dry-run", action="store_true",
+                               help="print plan counts only; touches disk (Tier-2 events, "
+                                    "the Tier-1 fetch store) but never the network")
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", default="data/operations")
@@ -148,6 +163,7 @@ def parser():
     reconcile.add_argument("--expected-attempt", required=True)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
+    _add_price_refresh_command(commands)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -493,6 +509,37 @@ def reconcile_command(args, root, conn, clock):
         lock.release()
 
 
+def price_refresh_command(args, root):
+    """``ops price-refresh``. No catalog/job dependency — a plain data pull —
+    so it is dispatched in :func:`main` before the catalog is opened, the same
+    way ``capture-inputs`` is. Crosses into ``engine.data.*`` only through
+    ``engine.v2.ops.legacy_adapter.invoke_price_refresh`` — this module may
+    not import legacy code directly (one adapter module per package,
+    ``checks/import_layers.py`` §4.2). ``--dry-run`` returns after planning,
+    never constructing a :class:`~engine.data.fetch.Fetcher`, so it makes no
+    provider call by construction. A real run's report lands at
+    ``<root>/price_refresh/<session>.json``."""
+    from engine.v2.ops.legacy_adapter import invoke_price_refresh
+
+    result = invoke_price_refresh(args.session, dry_run=args.dry_run)
+    plan = result["plan"]
+    if args.dry_run:
+        return {"session": plan["session"], "dry_run": True,
+                "counts": {"daily": len(plan["daily"]),
+                          "monthly": len(plan["monthly"]),
+                          "skipped_already_fetched": len(plan["skipped_already_fetched"])}}
+
+    report = result["report"]
+    out_dir = root / "price_refresh"
+    ensure_directory(out_dir)
+    out_path = out_dir / f"{plan['session']}.json"
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    tmp_path.write_text(json.dumps(to_document(report), indent=2))
+    tmp_path.replace(out_path)
+    report["report_path"] = str(out_path)
+    return report
+
+
 def job_command(args, conn, clock):
     if args.command == "get":
         return {"job": to_document(get_job(conn, args.job_id)),
@@ -553,6 +600,8 @@ def main(argv=None):
             document = doctor(root, clock)
         elif args.command == "capture-inputs":
             document = capture_command(args)
+        elif args.command == "price-refresh":
+            document = price_refresh_command(args, root)
         else:
             if args.command == "init":
                 ensure_directory(root)
