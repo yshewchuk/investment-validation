@@ -7,10 +7,15 @@ that cannot does not.
 """
 from __future__ import annotations
 
+import gc
+import types
+import weakref
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from engine.models.training import chooser as chooser_mod
 from engine.models.training import common
 from engine.models.training import gate as gate_mod
 from engine.models.training import implied_t1 as implied_mod
@@ -341,3 +346,100 @@ class TestGate:
         assert len(out) == 1
         assert out["ret"].iloc[0] == 0.1
         assert out["entry_cost_pct"].iloc[0] == pytest.approx(4.0)
+
+
+class TestChooser:
+    """``chooser.build_dataset()`` unpacks ``(mid, raw)`` from
+    ``exp.load_data_menu`` but the pipeline after it -- add_causal_analogs /
+    build_schematics / join_tier4 -- reads only ``mid``. ``raw`` is
+    ``load_data_menu``'s own every-fill_alpha frame (~5x ``mid``'s row count,
+    the same JSON ``legs`` payload per row), and a real forced-miss
+    ``build_model_evidence()`` rebuild on real inputs under ``bounded_run``
+    peaked at 5.08 GiB with ``raw`` held alive, unread, through that entire
+    window. The fix drops it before the expensive candidate-level work
+    starts; these tests pin that behaviour so it cannot regress silently.
+    """
+
+    class _OneShotLoadDataMenu:
+        """A ``load_data_menu`` stand-in that drops ITS OWN reference to
+        ``raw`` the moment it is called, so after the call the only
+        remaining reference is whatever ``build_dataset`` chose to keep in
+        its own locals -- a plain closure over ``raw`` would instead keep it
+        alive for the fake experiment module's whole lifetime, which would
+        make the "is raw still reachable" check below pass regardless of
+        what build_dataset does internally, testing nothing."""
+
+        def __init__(self, mid, raw):
+            self._mid = mid
+            self._raw = raw
+
+        def __call__(self, menu):
+            mid, raw = self._mid, self._raw
+            self._raw = None
+            return mid, raw
+
+    def _fake_experiment(self, mid: pd.DataFrame, raw: object, *, on_add_causal_analogs=None):
+        fake_base = types.SimpleNamespace(
+            add_causal_analogs=lambda df: (on_add_causal_analogs(df) if on_add_causal_analogs
+                                            else df)
+        )
+        return types.SimpleNamespace(
+            MENU={"a": "A"},
+            base=fake_base,
+            load_data_menu=self._OneShotLoadDataMenu(mid, raw),
+            build_schematics=lambda df: df,
+            join_tier4=lambda df: df,
+            menu_features=lambda menu: ["x"],
+        )
+
+    def test_drops_raw_before_the_expensive_pipeline_runs(self, monkeypatch):
+        """The regression test: by the time add_causal_analogs (the first,
+        cheapest of the three expensive downstream steps) is called, `raw`
+        must already be unreachable -- not just eventually collected once
+        build_dataset returns (normal frame cleanup would do that anyway and
+        prove nothing about peak memory during the call)."""
+        mid = pd.DataFrame({"event_id": ["e1", "e1", "e2"], "pnl": [1.0, 3.0, 5.0], "x": [1, 2, 3]})
+
+        class Sentinel:
+            """Stand-in for load_data_menu's discarded every-fill_alpha frame."""
+
+        seen: dict[str, object] = {}
+
+        def probe(df):
+            gc.collect()
+            seen["raw_alive_during_analogs"] = alive() is not None
+            return df
+
+        raw = Sentinel()
+        alive = weakref.ref(raw)
+        fake_exp = self._fake_experiment(mid, raw, on_add_causal_analogs=probe)
+        monkeypatch.setattr(chooser_mod, "_experiment", lambda: fake_exp)
+        del raw  # this test's own local reference only
+
+        chooser_mod.build_dataset()
+
+        monkeypatch.undo()  # drop chooser_mod._experiment's own reference chain
+        del fake_exp
+        gc.collect()
+
+        assert seen["raw_alive_during_analogs"] is False, (
+            "build_dataset() still held load_data_menu's raw frame alive "
+            "when the expensive candidate-level pipeline started"
+        )
+        assert alive() is None
+
+    def test_output_is_unaffected_by_dropping_raw(self, monkeypatch):
+        """Correctness: raw was never read downstream, so dropping it must
+        not change the dataset, target or feature list build_dataset returns."""
+        mid = pd.DataFrame({"event_id": ["e1", "e1", "e2"], "pnl": [1.0, 3.0, 5.0], "x": [1, 2, 3]})
+        raw = pd.DataFrame({"unused": [1, 2, 3, 4, 5]})  # a real frame, never read
+        fake_exp = self._fake_experiment(mid, raw)
+        monkeypatch.setattr(chooser_mod, "_experiment", lambda: fake_exp)
+
+        dataset, target, features = chooser_mod.build_dataset()
+
+        assert target == chooser_mod.TARGET == "dev_target"
+        assert features == ["x"]
+        assert list(dataset["event_id"]) == ["e1", "e1", "e2"]
+        # event-demeaned pnl: e1's mean is 2.0, e2's is 5.0.
+        assert list(dataset["dev_target"]) == pytest.approx([-1.0, 1.0, 0.0])
