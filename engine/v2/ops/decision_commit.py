@@ -256,31 +256,22 @@ def commit_decisions(conn, claim, candidates, context, validated_context, *, clo
 _SETTLEMENT_DIVERGENCE_SCOPE = "legacy_settlement"
 
 
-#: Wall-clock fields ``engine.ledger.score_outcomes`` stamps from
-#: ``datetime.now()`` on every row (``resolved_at``, and
-#: ``calendar_checked_at`` -- both the same value; see
-#: ``engine/ledger.py::score_outcomes``). Nothing else in a settlement row is
-#: wall-clock derived (verified against the real attempt-13 candidate:
-#: ``exit_finality`` carries no timestamp of its own). Stripping these two
-#: gives two rerun lines for the identical underlying determination the same
-#: signature even though their wall clocks differ.
-_WALL_CLOCK_OUTCOME_FIELDS = ("resolved_at", "calendar_checked_at")
-
-
-def _content_signature(payload):
-    return content_hash({k: v for k, v in payload.items() if k not in _WALL_CLOCK_OUTCOME_FIELDS})
-
-
 def _existing_outcomes_by_row(conn):
     """Every already-committed outcome decision, grouped by the prediction
     row_id it observes.
 
     ``generation_ref`` carries the settlement session that committed the row
     (task brief rule 2 -- stamped by ``import_lines``' new ``generation_ref``
-    parameter below). Rows committed before this migration (the real
-    attempt-13 candidate's 626 admitted lines: verified ``generation_ref IS
-    NULL`` on every one) have no durable session recorded there; those are
-    matched by content instead -- see ``_match_same_session``.
+    parameter below). Rows committed before that fix landed, or imported by
+    ``ops ledger import-history``, start out with ``generation_ref IS NULL``;
+    ``engine.v2.ops.session_backfill.backfill_outcome_sessions`` (2026-09-15)
+    derives and stores a real session for as many of those as recorded
+    provenance allows -- see that module's docstring. A row whose session
+    cannot be derived (and so is never backfilled) stays NULL and never
+    matches a same-session rerun here (2026-09-15: matching NULL rows by
+    content signature regardless of session was unsafe -- see
+    ``_match_same_session``'s docstring) -- it can still be found terminal by
+    the ``already_resolved`` check below if it is itself resolved.
     """
     index: dict = {}
     for row in conn.execute("SELECT payload_json, generation_ref FROM decisions WHERE kind='outcome'"):
@@ -290,23 +281,31 @@ def _existing_outcomes_by_row(conn):
             continue
         index.setdefault(row_id, []).append({
             "status": payload.get("status"), "generation_ref": row["generation_ref"],
-            "signature": _content_signature(payload),
         })
     return index
 
 
-def _match_same_session(existing, session, signature):
+def _match_same_session(existing, session):
     """The already-committed observation (if any) that counts as THIS same
-    settlement session -- by recorded ``generation_ref`` when the committing
-    run stamped one, else (legacy pre-migration rows) by content signature
-    against the incoming line, which is the only session evidence those rows
-    carry (task brief real-check requirement: derived from committed data
-    only)."""
+    settlement session -- by recorded ``generation_ref`` ONLY.
+
+    2026-09-15 fix: this used to fall back, for a row with ``generation_ref
+    IS NULL``, to matching by content signature (payload minus the wall-clock
+    fields) against the incoming line REGARDLESS of session. NULL rows are
+    every outcome ``ops ledger import-history`` ever imported (thousands of
+    legacy rows) plus any nightly commit made before this fix -- so on a
+    LATER session, any unresolvable re-observation whose content happened to
+    equal an older NULL row was wrongly skipped as
+    ``already_observed_this_session``, silently dropping a real
+    re-observation (legacy normally re-observes unresolvable rows daily).
+    Same-session matching now uses only a recorded session: a NULL row
+    (never backfilled, never committed by the fixed code) can never match
+    here, so it can never wrongly suppress a same-session OR a later-session
+    commit -- see ``engine.v2.ops.session_backfill`` for how NULL rows get a
+    real session where provenance allows it.
+    """
     for entry in existing:
-        if entry["generation_ref"] is not None:
-            if entry["generation_ref"] == session:
-                return entry
-        elif entry["signature"] == signature:
+        if entry["generation_ref"] is not None and entry["generation_ref"] == session:
             return entry
     return None
 
@@ -467,7 +466,7 @@ def _settlement_dedupe_skip(conn, *, decision_id, row_id, payload, prediction, e
     if _already_this_observation(conn, row_id, payload):
         return False
     existing = existing_index.get(row_id, ())
-    same_session = _match_same_session(existing, session, _content_signature(payload))
+    same_session = _match_same_session(existing, session)
     if same_session is not None:
         if same_session["status"] == payload.get("status"):
             if on_skip is not None:

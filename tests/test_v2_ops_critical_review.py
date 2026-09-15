@@ -629,3 +629,182 @@ def test_settlement_same_session_status_change_records_one_divergence(tmp_path):
     assert again == []
     assert conn.execute(
         "SELECT COUNT(*) FROM decision_divergences WHERE occurrence=?", (row_id,)).fetchone()[0] == 1
+
+
+# --------------------------------------------------------------------------
+# 2026-09-15: engine.v2.ops.session_backfill -- the durable-session backfill
+# that replaces _match_same_session's removed content-signature fallback,
+# and the same-session/later-session behaviour that fallback made unsafe.
+# --------------------------------------------------------------------------
+
+
+def _register_nightly_settlement_artifact(conn, store, clock, claim, document):
+    """Simulate what a real nightly ``legacy_settlement`` attempt leaves
+    behind for ``session_backfill._nightly_session_map`` to find: an
+    ``attempt_outputs`` row named ``legacy_settlement`` whose artifact IS the
+    settlement candidate document (supervisor.py's own ``_settlement_effect``
+    reads ``document.get("session")`` off exactly this artifact). Returns the
+    artifact's ``content_hash`` -- the value to pass as ``import_lines``'
+    ``source_hash`` so a directly-``import_lines``-inserted row (standing in
+    for a pre-fix nightly commit, which never stamped ``generation_ref``)
+    carries the same ``decision_imports.source_hash`` a real commit would.
+    """
+    from engine.v2.ops.checkpoints import register_artifact
+
+    ref = store.publish_bytes(json.dumps(document, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        register_artifact(conn, ref, claim.attempt_id, clock)
+        conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                     (claim.attempt_id, "legacy_settlement", ref.artifact_id))
+    return ref.content_hash
+
+
+def test_unresolvable_reobservation_on_later_session_commits_despite_matching_backfilled_content(
+        tmp_path):
+    """The defect this whole fix targets: a re-observation whose content is
+    byte-identical (minus the wall-clock fields) to an OLDER, now-backfilled
+    row must still commit on a later session -- it must never be skipped as
+    ``already_observed_this_session`` just because the content matches."""
+    from engine.v2.ops.session_backfill import backfill_outcome_sessions
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-later-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P")
+
+    # A legacy-import-shaped outcome row (no generation_ref), as
+    # ``ops ledger import-history`` would have left it, observed unresolvable
+    # on 2026-09-01.
+    old_row = {"row_id": row_id, "ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-09",
+              "settlement": {"policy": "fixed"}, "status": "unresolvable",
+              "resolved_at": "2026-09-01T23:00:00+00:00"}
+    with transaction(conn):
+        import_lines(conn, "legacy_file_2026-09-01", [_raw(old_row)], kind="outcome", created_at=STAMP)
+    assert len(rows(conn, kind="outcome")) == 1
+
+    summary = backfill_outcome_sessions(conn, store, clock=clock)
+    assert summary["import_history_resolved_at"] == 1
+    [backfilled] = rows(conn, kind="outcome")
+    assert backfilled["generation_ref"] == "2026-09-01"
+
+    # A rerun on a LATER session (2026-09-13, the claim's default) re-observes
+    # the same unresolvable determination -- identical content, new wall
+    # clock. It must commit as a new observation, not be skipped.
+    claim = _settlement_claim(conn, clock, supervisor)
+    new_row = dict(old_row, resolved_at="2026-09-13T09:00:00+00:00")
+    candidate = [{"row": new_row, "original_b64": base64.b64encode(_raw(new_row)).decode("ascii")}]
+    ref = store.publish_bytes(json.dumps({"rows": candidate}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    skipped = []
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, claim, ref, candidate, clock=clock, on_skip=lambda r, reason: skipped.append((r, reason)))
+    assert len(receipts) == 1
+    assert skipped == []
+    assert len(rows(conn, kind="outcome")) == 2
+
+
+def test_same_session_rerun_against_backfilled_nightly_rows_commits_nothing(tmp_path):
+    """A same-session rerun against a row the migration backfilled from a
+    nightly ``legacy_settlement`` attempt's own provenance (attempt-13's real
+    shape: generation_ref NULL before the fix) must dedupe exactly as a
+    freshly-stamped row would -- 0 committed, 0 new divergences."""
+    from engine.v2.ops.session_backfill import backfill_outcome_sessions
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-attempt13-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P")
+    claim = _settlement_claim(conn, clock, supervisor)  # job requested session "2026-09-13"
+
+    old_row = {"row_id": row_id, "ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-09",
+              "settlement": {"policy": "fixed"}, "status": "unresolvable",
+              "resolved_at": "2026-09-10T01:00:00+00:00"}
+    # The settlement's own finality-resolved session (2026-09-10) differs
+    # from the job's requested session (2026-09-13) -- a walk-back night,
+    # exactly the shape the docstring's P2-C03 note describes.
+    document = {"session": "2026-09-10", "requested_session": "2026-09-13", "rows": [old_row]}
+    source_hash = _register_nightly_settlement_artifact(conn, store, clock, claim, document)
+    with transaction(conn):
+        import_lines(conn, source_hash, [_raw(old_row)], kind="outcome", created_at=STAMP)
+    assert len(rows(conn, kind="outcome")) == 1
+    assert rows(conn, kind="outcome")[0]["generation_ref"] is None
+
+    summary = backfill_outcome_sessions(conn, store, clock=clock)
+    assert summary["nightly_settlement"] == 1
+    assert rows(conn, kind="outcome")[0]["generation_ref"] == "2026-09-10"
+
+    # Rerun for the SAME settlement session (2026-09-10), new wall clock.
+    new_row = dict(old_row, resolved_at="2026-09-10T09:00:00+00:00")
+    candidate = [{"row": new_row, "original_b64": base64.b64encode(_raw(new_row)).decode("ascii")}]
+    ref = store.publish_bytes(json.dumps({"rows": candidate}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    skipped = []
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(
+            conn, claim, ref, candidate, clock=clock, session="2026-09-10",
+            on_skip=lambda r, reason: skipped.append((r, reason)))
+    assert repeated == []
+    assert skipped == [(row_id, "already_observed_this_session")]
+    assert len(rows(conn, kind="outcome")) == 1
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0
+
+    # A repeat backfill call is a no-op (idempotency marker).
+    again = backfill_outcome_sessions(conn, store, clock=clock)
+    assert again["already_applied"] is True
+
+
+def test_backfill_derives_both_sources_and_leaves_underivable_rows_null(tmp_path):
+    """One row from each of the two real sources, plus one the catalog
+    cannot derive a session for at all -- the three counts must partition
+    exactly, and the undetermined row must stay NULL."""
+    from engine.v2.ops.session_backfill import backfill_outcome_sessions
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    claim = _settlement_claim(conn, clock, supervisor)
+
+    _seed_prediction_ex(conn, "prediction-nightly-1", "2026-09-09", ticker="FAKE", strategy="TWIN-P")
+    nightly_row = {"row_id": "prediction-nightly-1", "ticker": "FAKE", "strategy": "TWIN-P",
+                   "event_date": "2026-09-09", "settlement": {"policy": "fixed"},
+                   "status": "unresolvable", "resolved_at": "2026-09-10T01:00:00+00:00"}
+    document = {"session": "2026-09-10", "rows": [nightly_row]}
+    source_hash = _register_nightly_settlement_artifact(conn, store, clock, claim, document)
+    with transaction(conn):
+        import_lines(conn, source_hash, [_raw(nightly_row)], kind="outcome", created_at=STAMP)
+
+    _seed_prediction_ex(conn, "prediction-import-1", "2026-09-05", ticker="FAKE", strategy="TWIN-P")
+    import_row = {"row_id": "prediction-import-1", "ticker": "FAKE", "strategy": "TWIN-P",
+                 "event_date": "2026-09-05", "settlement": {"policy": "fixed"},
+                 "status": "resolved", "realized_pnl": 0.1,
+                 "resolved_at": "2026-09-06T23:30:00+00:00"}
+    with transaction(conn):
+        import_lines(conn, "legacy_file_2026-09-06", [_raw(import_row)], kind="outcome", created_at=STAMP)
+
+    _seed_prediction_ex(conn, "prediction-undetermined-1", "2026-09-01", ticker="FAKE",
+                        strategy="TWIN-P")
+    undetermined_row = {"row_id": "prediction-undetermined-1", "ticker": "FAKE", "strategy": "TWIN-P",
+                        "event_date": "2026-09-01", "settlement": {"policy": "fixed"},
+                        "status": "unresolvable", "resolved_at": "not-a-real-timestamp"}
+    with transaction(conn):
+        import_lines(conn, "legacy_file_corrupt", [_raw(undetermined_row)], kind="outcome",
+                     created_at=STAMP)
+
+    assert len(rows(conn, kind="outcome")) == 3
+    summary = backfill_outcome_sessions(conn, store, clock=clock)
+    assert summary == {"already_applied": False, "nightly_settlement": 1,
+                       "import_history_resolved_at": 1, "undetermined": 1}
+
+    by_row = {}
+    for row in rows(conn, kind="outcome"):
+        by_row[json.loads(row["payload_json"])["row_id"]] = row["generation_ref"]
+    assert by_row["prediction-nightly-1"] == "2026-09-10"
+    assert by_row["prediction-import-1"] == "2026-09-06"
+    assert by_row["prediction-undetermined-1"] is None
