@@ -61,6 +61,64 @@ larger board: a wider watchlist that touches a THIRD Tier-4 producer or a
 second fold would need re-measurement, per this module's own "never lower a
 reservation until a stage fits on paper" rule (§8.1) applied in reverse --
 raise again with numbers, do not guess ahead of one.
+
+v6 (2026-09-15) lowers ``legacy_score`` from 6 GiB back to 5.25 GiB
+(``5*GIB + GIB//4`` = 5637144576 bytes): v5's 6 GiB was never actually
+admittable on this host and queued attempt 17 forever
+(``queue_reason MEMORY_HEADROOM``, ``needed.memory_bytes=6442450944``,
+``available.headroom_bytes=5846372352``, nothing else heavy running). v5's
+docstring compared 6 GiB to ``capacity_bytes`` (host_total - base_reserve,
+7089033216 bytes, ~6.60 GiB) -- the wrong ceiling. Admission's binding test
+is ``headroom_bytes`` (live ``host_available_bytes`` - ``free_margin_bytes``),
+which never reaches ``capacity_bytes`` in practice because base baseline
+processes (this box's own agents/shells) always hold some of the difference
+between ``base_reserve_bytes`` (1 GiB) and ``free_margin_bytes`` (512 MiB)
+plus more. Two real samples on this host (both via
+``engine.v2.ops.discovery.sample_capacity`` -> ``resources.headroom_bytes``,
+2026-09-15): the attempt-17 queuing moment gave 5846372352 bytes
+(~5.44 GiB, ~5.85 GB); a fresh idle read minutes later gave 6205313024 bytes
+(~5.78 GiB). The conservative (lower) of the two, 5846372352 bytes, is this
+module's stated ceiling -- a live figure, not a policy constant, so it can
+be lower on a busier day.
+
+5.25 GiB (5637144576 bytes) sits between the two real measured bases:
+~180.6 MiB (189386752 bytes) above ``legacy_score``'s own attempt-16
+watchdog tree-RSS peak of 5447757824 bytes (~5.07 GiB, the same measurement
+the executor's own kill check uses -- ``executor.py::poll`` fails the
+attempt with ``RESOURCE_LIMIT_EXCEEDED`` once tree RSS exceeds
+``reserved_memory_bytes``, so this margin **is** the kill margin, not a
+separate number), and ~199.5 MiB (209227776 bytes) below the conservative
+ceiling. Both margins are real and positive but thin (prior profiles in
+this file carry ~0.85-2.4x); there is no room to widen either side without
+either shrinking the other or touching ``free_margin_bytes``/
+``base_reserve_bytes`` (not done here -- no new evidence that either is
+wrong for this host, and the rule above is "don't lower the safety reserve
+without evidence").
+
+This number is NOT equally justified for the three actions sharing this
+profile. ``legacy_score_requests`` (warm-cache peak 4.44 GiB, measured) and
+``legacy_score`` (5.07 GiB watchdog peak, measured to completion) both clear
+5.25 GiB with real margin. ``legacy_decision_replay`` does not have a
+completed watchdog (tree-RSS) peak at all: its only tree-RSS data point is
+attempt ``att_86920be0153fb81004abef9ae927d0f9``, which the watchdog KILLED
+at 5396807680 bytes (~5.03 GiB) while still rising, under the OLD 5 GiB cap
+-- a lower bound, not a peak. The "5126 MiB replay peak" cited in v5's
+docstring is a same-process self-report from a clean reproduction via the
+adapter action path directly (not through ``bounded_run``/the watchdog), so
+it is not on the same tree-RSS basis as the 5.07 GiB score figure and
+cannot be trusted as replay's true ceiling. Judgement call (mine, not
+independently re-verified): 5.25 GiB is the best-evidenced number available
+for all three actions today, chosen over other splits (e.g. carving
+``legacy_decision_replay`` a separate, larger profile) because there is no
+real completed watchdog measurement to size a larger number against --
+inventing one would not be measurement, it would be a guess ahead of
+evidence, which this file's own rule forbids. The residual risk is real:
+if replay's true tree-RSS peak exceeds ~5.25 GiB, it will hit
+``RESOURCE_LIMIT_EXCEEDED`` again, the same failure mode v5 was chasing.
+The needed follow-up is a real, isolated ``legacy_decision_replay`` run
+under ``bounded_run.py --max-rss-gb`` set well above 5.25 GiB (per AGENTS.md
+"Running jobs on this box", with no other heavy job active) to get a
+completed tree-RSS peak, not a further paper resize.
 """
 from __future__ import annotations
 
@@ -72,7 +130,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-15.v5"
+POLICY_VERSION = "ops_resources.2026-09-15.v6"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -121,10 +179,18 @@ DEFAULT_POLICY = ResourcePolicy(
         # barrier-path read set outside snapshot mode.
         # Raised 2026-09-15 (v5) from 5 GiB to 6 GiB: real attempt-16
         # measured legacy_score at 5.07 GiB and legacy_decision_replay was
-        # killed rising through 5.03 GiB -- see the module docstring's v5
-        # entry for the full measured basis, the interim-vs-durable-fix
-        # distinction, and why 6 GiB (not higher) is the justified number.
-        ResourceProfile(name="legacy_score", memory_bytes=6 * GIB, cpu_count=5,
+        # killed rising through 5.03 GiB. 6 GiB was never admittable here --
+        # it exceeded the host's live headroom ceiling (~5.44-5.78 GiB
+        # measured, not the larger host-total-based capacity v5 compared
+        # against) and queued attempt 17 forever. Lowered 2026-09-15 (v6) to
+        # 5.25 GiB (5*GIB + GIB//4): ~180 MiB above the measured 5.07 GiB
+        # watchdog peak (also the kill margin -- executor.py's cap equals
+        # this reservation) and ~200 MiB below the conservative measured
+        # ceiling. See the module docstring's v6 entry for both real
+        # capacity samples, why the margins are this thin, and the
+        # unresolved risk for legacy_decision_replay specifically (no
+        # completed watchdog peak exists for it).
+        ResourceProfile(name="legacy_score", memory_bytes=5 * GIB + GIB // 4, cpu_count=5,
                         scratch_bytes=4 * GIB, heavy=True),
         # legacy_model_evidence (store_domains read) stages the legacy read
         # set through the same barrier -- scratch bumped 2026-09-14 (v4) from

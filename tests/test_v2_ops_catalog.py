@@ -5,14 +5,16 @@ import sqlite3
 
 import pytest
 
+from engine.v2.contracts import CapacitySample
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import backup_to, transaction
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.lifecycle import Outcome, commit_attempt, complete_cancel, request_cancel
 from engine.v2.ops.migrations import Migration, migrate
-from engine.v2.ops.profiles import DEFAULT_POLICY
+from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, profile_named
 from engine.v2.ops.recovery import expire_leases, reconcile_attempt
-from engine.v2.ops.scheduler import claim_next
+from engine.v2.ops.resources import headroom_bytes
+from engine.v2.ops.scheduler import HEADROOM_CEILING_WINDOW_SECONDS, claim_next
 from engine.v2.ops.submission import get_job, job_id_for, submit, submit_graph
 from tests.ops_support import POLICY, REGISTRY, FakeClock, catalog, enqueue_claim, request, sample
 
@@ -79,6 +81,148 @@ def test_o04_o05_admission_and_no_undersized_retry(tmp_path):
     queued = get_job(conn, job_id_for("shadow", "two"))
     assert queued.queue_reason.code == "PROFILE_EXCEEDS_CAPACITY"
     assert queued.attempt_count == 0
+
+
+#: A sample where legacy_score's 5.25 GiB profile does NOT fit headroom
+#: (host_available=5 GiB -> headroom ~4.5 GiB), but comfortably fits
+#: capacity_bytes (host_total=8 GiB -> capacity 7 GiB) -- so only
+#: MEMORY_HEADROOM can fire, never PROFILE_EXCEEDS_CAPACITY/RESERVATION_BUDGET.
+def _low_sample(clock):
+    return CapacitySample(sampled_at=clock.now().strftime("%Y-%m-%dT%H:%M:%S.000000Z"),
+                          allowed_cpu_ids=(1, 3, 5, 7, 9, 11), host_total_bytes=8 * GIB,
+                          host_available_bytes=5 * GIB, container_limit_bytes=None,
+                          container_current_bytes=None, swap_total_bytes=0, swap_free_bytes=0,
+                          disk_free_bytes=100 * GIB, executor_mode="fake", containment="none")
+
+
+#: Plenty of headroom for legacy_score (host_available=7 GiB -> headroom ~6.5 GiB).
+def _enough_sample(clock):
+    return replace(_low_sample(clock), host_available_bytes=7 * GIB)
+
+
+def test_non_ops_headroom_dip_queues_then_admits(tmp_path):
+    """§8.1 (2026-09-15, legacy_score v5 6 GiB incident follow-up): a single
+    low sample with nothing active must NOT fail the job -- ``active`` only
+    tracks ops-managed reservations, so one bad sample is indistinguishable
+    from a non-ops process (another agent's test sweep) transiently holding
+    memory. It stays a normal MEMORY_HEADROOM queue and admits as soon as a
+    later sample shows enough headroom."""
+    conn, clock, supervisor = catalog(tmp_path)
+    submit(conn, REGISTRY, POLICY, request(resource_class="legacy_score"), clock=clock)
+    assert claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                      supervisor=supervisor, clock=clock) is None
+    job = get_job(conn, job_id_for("shadow", "one"))
+    assert job.state == "queued"
+    assert job.queue_reason.code == "MEMORY_HEADROOM"
+    assert job.queue_reason.available["ceiling_window_samples"] == 1
+    claimed = claim_next(conn, policy=DEFAULT_POLICY, sample=_enough_sample(clock),
+                         supervisor=supervisor, clock=clock)
+    assert claimed is not None
+    assert get_job(conn, job_id_for("shadow", "one")).state == "running"
+
+
+def test_sustained_headroom_shortage_fails_with_details(tmp_path):
+    """The same low sample, continuously, with zero active reservations for
+    the whole ``HEADROOM_CEILING_WINDOW_SECONDS`` window: nothing ops-tracked
+    can be blamed, so this now fails outright (typed
+    ``RESOURCE_PROFILE_UNSATISFIABLE``, details needed/max_headroom_observed/
+    window_s/samples) instead of queuing forever."""
+    conn, clock, supervisor = catalog(tmp_path)
+    submit(conn, REGISTRY, POLICY, request(resource_class="legacy_score"), clock=clock)
+    assert claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                      supervisor=supervisor, clock=clock) is None
+    assert get_job(conn, job_id_for("shadow", "one")).queue_reason.code == "MEMORY_HEADROOM"
+    clock.advance(HEADROOM_CEILING_WINDOW_SECONDS + 5)
+    assert claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                      supervisor=supervisor, clock=clock) is None
+    job = get_job(conn, job_id_for("shadow", "one"))
+    assert job.state == "failed"
+    assert job.attempt_count == 0
+    assert job.queue_reason is None
+    assert job.failure.code == "RESOURCE_PROFILE_UNSATISFIABLE"
+    profile = profile_named(DEFAULT_POLICY, "legacy_score")
+    assert job.failure.details["needed"]["memory_bytes"] == profile.memory_bytes
+    assert job.failure.details["max_headroom_observed"] == headroom_bytes(DEFAULT_POLICY,
+                                                                          _low_sample(clock))
+    assert job.failure.details["window_s"] == HEADROOM_CEILING_WINDOW_SECONDS
+    assert job.failure.details["samples"] == 2
+
+
+def test_active_reservation_during_window_never_fails_and_resets_it(tmp_path):
+    """An active reservation on ANY sample during the window -- even one that
+    cannot itself explain the whole shortfall -- means nothing ops-tracked is
+    ruled out, so that sample must not advance the window, and the window
+    must not silently keep counting from before it once the active job is
+    gone (§8.1: the failure must come from sustained, unexplained badness,
+    never from wall-clock time that happened to elapse while something else
+    was legitimately running)."""
+    conn, clock, supervisor = catalog(tmp_path)
+    # A lease long enough to survive advancing the clock past the window --
+    # this test is about the memory window, not the unrelated lease timeout.
+    supervisor = replace(supervisor, lease_seconds=10 * HEADROOM_CEILING_WINDOW_SECONDS)
+    submit(conn, REGISTRY, POLICY, request("one", resource_class="legacy_score"), clock=clock)
+    assert claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                      supervisor=supervisor, clock=clock) is None
+    assert get_job(conn, job_id_for("shadow", "one")).queue_reason.available[
+        "ceiling_window_samples"] == 1
+
+    submit(conn, REGISTRY, POLICY, request("helper", resource_class="delivery"), clock=clock)
+    helper = claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                        supervisor=supervisor, clock=clock)
+    assert helper is not None and helper.job_id == job_id_for("shadow", "helper")
+
+    clock.advance(HEADROOM_CEILING_WINDOW_SECONDS + 5)
+    # "one" still does not fit, and wall-clock time is past the window, but
+    # "helper"'s reservation is active -- must not fail.
+    assert claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                      supervisor=supervisor, clock=clock) is None
+    job = get_job(conn, job_id_for("shadow", "one"))
+    assert job.state == "queued"
+    assert job.queue_reason.code == "MEMORY_HEADROOM"
+    assert "ceiling_window_started_epoch" not in job.queue_reason.available
+
+    commit_attempt(conn, helper.attempt_id, helper.fence, Outcome(True, "verified_dead"),
+                   clock=clock)
+    # active is empty again; despite wall-clock time already far past the
+    # window, this must start a FRESH window (reset, not resumed) and so
+    # must not fail immediately.
+    assert claim_next(conn, policy=DEFAULT_POLICY, sample=_low_sample(clock),
+                      supervisor=supervisor, clock=clock) is None
+    job = get_job(conn, job_id_for("shadow", "one"))
+    assert job.state == "queued"
+    assert job.queue_reason.available["ceiling_window_samples"] == 1
+
+
+def test_legacy_score_fits_the_measured_ceiling_with_documented_margins():
+    """A policy test, not a live probe: the ceiling comes from
+    ``resources.headroom_bytes`` and ``DEFAULT_POLICY``'s own constants
+    (``base_reserve_bytes``/``free_margin_bytes``), applied to two real
+    capacity samples taken on this host 2026-09-15 (cited in profiles.py's
+    v6 docstring) rather than any host number hard-coded into the
+    assertion. The conservative (lower) sample is the attempt-17 queuing
+    incident's ``free -b`` read (host_total=8162775040,
+    host_available=6543368192) -- the moment legacy_score's old 6 GiB
+    reservation queued forever with nothing else heavy running."""
+    incident = CapacitySample(sampled_at="2026-09-15T00:00:00.000000Z",
+                              allowed_cpu_ids=tuple(range(12)), host_total_bytes=8162775040,
+                              host_available_bytes=6543368192, container_limit_bytes=None,
+                              container_current_bytes=None, swap_total_bytes=0, swap_free_bytes=0,
+                              disk_free_bytes=100 * GIB, executor_mode="watchdog",
+                              containment="best_effort")
+    ceiling = headroom_bytes(DEFAULT_POLICY, incident)
+    profile = profile_named(DEFAULT_POLICY, "legacy_score")
+    assert profile.memory_bytes < ceiling
+    margin_under_ceiling = ceiling - profile.memory_bytes
+    assert margin_under_ceiling > 100 * (1 << 20)  # documented ~199.5 MiB margin
+
+    # Measured watchdog (tree-RSS) peaks, attempt-16 -- the same basis the
+    # executor's own RESOURCE_LIMIT_EXCEEDED kill check uses.
+    legacy_score_peak_bytes = 5447757824  # ~5.07 GiB
+    legacy_score_requests_peak_bytes = int(4.44 * GIB)  # warm-cache, documented in profiles.py
+    for peak in (legacy_score_peak_bytes, legacy_score_requests_peak_bytes):
+        assert profile.memory_bytes > peak
+    margin_over_score_peak = profile.memory_bytes - legacy_score_peak_bytes
+    assert margin_over_score_peak > 100 * (1 << 20)  # documented ~180.6 MiB margin
 
 
 def test_o08_o09_fence_and_recovery(tmp_path):

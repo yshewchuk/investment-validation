@@ -16,12 +16,29 @@ submission time, then job ID, so ties are deterministic. A heavy job that is
 blocked by work already running holds the heavy slot against **lower-priority
 heavy** jobs, which would otherwise starve it forever by always fitting first.
 Light jobs may still pass it when both memory tests allow. A job that can never
-fit (``PROFILE_EXCEEDS_CAPACITY``) holds nothing.
+fit (``PROFILE_EXCEEDS_CAPACITY``, a profile bigger than the host even without
+any container squeeze) holds nothing and stays queued -- unauthored policy
+mistakes are rare and inspectable via ``queue_reason``.
+
+A profile that merely exceeds THIS sample's live headroom (``MEMORY_HEADROOM``)
+stays a normal, patient queue -- ``active`` only tracks ops-managed
+reservations, so a non-ops process (another agent's pytest sweep, a second
+Claude session) can hold real memory this sample never explains, and that is
+exactly the transient case admission must keep waiting out. Only *sustained*
+``MEMORY_HEADROOM`` -- continuously, for ``HEADROOM_CEILING_WINDOW_SECONDS``,
+with zero ``active`` reservations the entire time, so nothing ops-tracked can
+be blamed either -- fails the job outright with a typed
+``RESOURCE_PROFILE_UNSATISFIABLE`` problem and blocks its descendants (§8.1;
+the legacy_score v5 6 GiB incident this guards against, attempt 17, showed
+exactly this shape: MEMORY_HEADROOM, nothing else heavy running, forever).
+The window's progress is recorded in the job's own ``queue_reason_json`` (see
+``_advance_headroom_ceiling_window``), so it survives a supervisor restart
+intact instead of resetting to "just started".
 """
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from engine.v2.contracts import (
@@ -34,12 +51,14 @@ from engine.v2.contracts import (
 )
 from engine.v2.foundation import Clock, content_hash, format_timestamp, parse_timestamp
 from engine.v2.ops.catalog import dumps, load_json, transaction
-from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.errors import OpsError, fail, make_problem
+from engine.v2.ops.lifecycle import block_descendants
 from engine.v2.ops.profiles import profile_named
-from engine.v2.ops.resources import ActiveReservation, decide, live_window_reason
+from engine.v2.ops.resources import ActiveReservation, decide, headroom_bytes, live_window_reason
 from engine.v2.ops.store_barrier import acquire_in, domains_of, lease_reason
 
 __all__ = [
+    "HEADROOM_CEILING_WINDOW_SECONDS",
     "MEASUREMENT_STALE_SECONDS",
     "Claim",
     "Supervisor",
@@ -50,6 +69,20 @@ __all__ = [
 
 #: A memory sample older than this is treated as absent, i.e. fully unconsumed.
 MEASUREMENT_STALE_SECONDS = 120
+#: How long a job must be continuously unfittable (MEMORY_HEADROOM, zero
+#: active reservations) before it fails instead of queuing (§8.1). 10
+#: minutes: long enough that a non-ops process's transient hold (a test
+#: sweep, a second session) is very unlikely to persist every single sample,
+#: short enough that a genuinely oversized profile does not queue for hours.
+HEADROOM_CEILING_WINDOW_SECONDS = 600
+#: Keys ``_advance_headroom_ceiling_window`` folds into ``QueueReason.available``
+#: to persist window progress across claim passes (catalog-durable: a
+#: supervisor restart rereads them from ``queue_reason_json`` rather than
+#: starting over at "just now", and rather than instantly treating the gap as
+#: a fresh sustained failure).
+_WINDOW_STARTED_KEY = "ceiling_window_started_epoch"
+_WINDOW_SAMPLES_KEY = "ceiling_window_samples"
+_WINDOW_MAX_HEADROOM_KEY = "ceiling_window_max_headroom_bytes"
 
 _READY = """
 SELECT j.* FROM jobs j
@@ -125,26 +158,100 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
         active = active_reservations(conn, now)
         heavy_held = False
         for row in conn.execute(_READY, {"now": stamp}).fetchall():
-            profile, reason = _profile_or_reason(policy, row)
-            domains = domains_of(registry, row["kind"], _parameters(row)) if reason is None else ()
-            if reason is None:
-                reason = lease_reason(conn, domains)
-            if reason is None:
-                reason = live_window_reason(policy, profile, now)
-            if reason is None:
-                reason = _provider_reason(conn, row, stamp)
-            if reason is None and heavy_held and profile.heavy:
-                reason = QueueReason(code="HEAVY_SLOT_HELD", reconsider="higher_priority_heavy_job")
-            if reason is None:
-                decision = decide(policy, profile, sample, active)
-                if decision.admitted:
-                    return _create_attempt(conn, row, profile, policy, decision.resources,
-                                           supervisor, now, domains)
-                reason = decision.reason
-                heavy_held |= profile.heavy and reason.code != "PROFILE_EXCEEDS_CAPACITY"
-            conn.execute("UPDATE jobs SET queue_reason_json = ? WHERE job_id = ?",
-                         (dumps(reason), row["job_id"]))
+            claim, heavy_held = _claim_row(conn, policy, sample, active, registry, row,
+                                           heavy_held, supervisor, now)
+            if claim is not None:
+                return claim
     return None
+
+
+def _claim_row(conn: sqlite3.Connection, policy: ResourcePolicy, sample: CapacitySample,
+               active: list[ActiveReservation], registry, row: sqlite3.Row, heavy_held: bool,
+               supervisor: Supervisor, now: datetime) -> tuple[Claim | None, bool]:
+    """One ready job's admission attempt. Returns ``(claim, heavy_held)``: a
+    ``Claim`` if admitted, or ``None`` after recording why it still waits --
+    or, for a sustained unexplained headroom shortfall, failing it outright
+    (§8.1, ``_advance_headroom_ceiling_window``)."""
+    profile, reason = _profile_or_reason(policy, row)
+    domains = domains_of(registry, row["kind"], _parameters(row)) if reason is None else ()
+    if reason is None:
+        reason = lease_reason(conn, domains)
+    if reason is None:
+        reason = live_window_reason(policy, profile, now)
+    if reason is None:
+        reason = _provider_reason(conn, row, format_timestamp(now))
+    if reason is None and heavy_held and profile.heavy:
+        reason = QueueReason(code="HEAVY_SLOT_HELD", reconsider="higher_priority_heavy_job")
+    if reason is None:
+        decision = decide(policy, profile, sample, active)
+        if decision.admitted:
+            claim = _create_attempt(conn, row, profile, policy, decision.resources,
+                                    supervisor, now, domains)
+            return claim, heavy_held
+        reason = decision.reason
+        heavy_held = heavy_held or (profile.heavy and reason.code != "PROFILE_EXCEEDS_CAPACITY")
+        if reason.code == "MEMORY_HEADROOM" and not active:
+            reason = _advance_headroom_ceiling_window(conn, row, policy, profile, sample,
+                                                       reason, now)
+            if reason is None:
+                return None, heavy_held
+    conn.execute("UPDATE jobs SET queue_reason_json = ? WHERE job_id = ?",
+                 (dumps(reason), row["job_id"]))
+    return None, heavy_held
+
+
+def _advance_headroom_ceiling_window(conn: sqlite3.Connection, row: sqlite3.Row,
+                                     policy: ResourcePolicy, profile: ResourceProfile,
+                                     sample: CapacitySample, reason: QueueReason,
+                                     now: datetime) -> QueueReason | None:
+    """Sustained-unfittable tracking for a ``MEMORY_HEADROOM`` shortfall with
+    zero active reservations (§8.1). Only called when THIS pass already shows
+    that shape; any pass that does not reach this call -- the job was
+    admitted, or something else explains the wait -- simply never advances
+    the window, which is exactly the reset "any sample that would have fit,
+    or where an active reservation exists, resets it" wants.
+
+    Progress is read back from the job's own ``queue_reason_json`` (written
+    by the previous pass, whether that was this function or a plain
+    ``MEMORY_HEADROOM``), so a supervisor restart resumes the window instead
+    of restarting it -- and, since a fresh row with no prior window looks
+    identical to one that just reset, it also never *instantly* fails a job
+    on the first sample after a restart.
+
+    Returns the ``QueueReason`` to record (window progress folded into
+    ``available``) if still queued, or ``None`` once the job has just been
+    failed.
+    """
+    prior = load_json(QueueReason, row["queue_reason_json"])
+    observed = headroom_bytes(policy, sample)
+    if prior is not None and prior.code == "MEMORY_HEADROOM" \
+            and _WINDOW_STARTED_KEY in prior.available:
+        started_epoch = prior.available[_WINDOW_STARTED_KEY]
+        samples = prior.available[_WINDOW_SAMPLES_KEY] + 1
+        max_observed = max(prior.available[_WINDOW_MAX_HEADROOM_KEY], observed)
+    else:
+        started_epoch = int(now.timestamp())
+        samples = 1
+        max_observed = observed
+    elapsed = int(now.timestamp()) - started_epoch
+    if elapsed >= HEADROOM_CEILING_WINDOW_SECONDS:
+        problem = make_problem(
+            "RESOURCE_PROFILE_UNSATISFIABLE",
+            "the job's resource profile stayed above the host's live headroom for "
+            "the whole observation window, with no active reservation to explain it",
+            details={"needed": {"memory_bytes": profile.memory_bytes},
+                     "max_headroom_observed": max_observed,
+                     "window_s": HEADROOM_CEILING_WINDOW_SECONDS, "samples": samples})
+        conn.execute("UPDATE jobs SET state = 'failed', queue_reason_json = NULL, "
+                    "failure_json = ?, updated_at = ? WHERE job_id = ?",
+                    (dumps(problem), format_timestamp(now), row["job_id"]))
+        block_descendants(conn, row["job_id"], now)
+        return None
+    available = dict(reason.available)
+    available[_WINDOW_STARTED_KEY] = started_epoch
+    available[_WINDOW_SAMPLES_KEY] = samples
+    available[_WINDOW_MAX_HEADROOM_KEY] = max_observed
+    return replace(reason, available=available)
 
 
 def _parameters(row):

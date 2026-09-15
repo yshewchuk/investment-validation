@@ -213,8 +213,8 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 MEASURED_READ_SET_BYTES = 1796916876
 
 
-def test_policy_version_is_v5():
-    assert POLICY_VERSION == "ops_resources.2026-09-15.v5"
+def test_policy_version_is_v6():
+    assert POLICY_VERSION == "ops_resources.2026-09-15.v6"
     assert POLICY_VERSION == DEFAULT_POLICY.version
 
 
@@ -224,15 +224,17 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
     legacy_model_evidence (``model_evidence``) and legacy_render
     (``projection``) all now admit the measured 1.67 GiB read set with
     margin, and scratch is untouched from v4. ``legacy_score``'s
-    ``memory_bytes`` is v5's own change (5 GiB -> 6 GiB, real attempt-16
-    peaks -- see profiles.py's module docstring); every other profile's
-    memory is unchanged by v5."""
-    for name, old_memory_gib in (("validation", 5), ("legacy_score", 6),
-                                 ("model_evidence", 4), ("projection", 2)):
+    ``memory_bytes`` moved twice after v4: v5 raised 5 GiB -> 6 GiB on real
+    attempt-16 peaks, then v6 lowered it to 5.25 GiB (5*GIB + GIB//4) because
+    6 GiB was never admittable on this host's live headroom -- see
+    profiles.py's module docstring for the full measured basis on both
+    moves. Every other profile's memory is unchanged since v4."""
+    for name, old_memory_bytes in (("validation", 5 * GIB), ("legacy_score", 5 * GIB + GIB // 4),
+                                   ("model_evidence", 4 * GIB), ("projection", 2 * GIB)):
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.scratch_bytes >= MEASURED_READ_SET_BYTES
         assert profile.scratch_bytes == 4 * GIB
-        assert profile.memory_bytes == old_memory_gib * GIB
+        assert profile.memory_bytes == old_memory_bytes
 
 
 # --------------------------------------------------------------------------
@@ -398,6 +400,49 @@ def test_refuse_oversize_plan_blocks_submission_with_details(tmp_path):
         assert "legacy_settlement" not in jobs
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# §8.1 (2026-09-15, legacy_score v5 6 GiB incident follow-up): a plan-time
+# STATIC memory check -- never a live host_available_bytes reading -- so a
+# resource profile too big for this host to EVER admit is refused before
+# submission, not only discovered as a claim-time queue.
+# --------------------------------------------------------------------------
+
+
+def test_refuse_unfittable_memory_plan_blocks_submission_with_details():
+    """A profile whose ``memory_bytes`` exceeds ``static_ceiling_bytes``
+    (``capacity_bytes - free_margin_bytes``, host-total-based) is refused at
+    plan time, with the offending kind/profile/needed/max_possible."""
+    from dataclasses import replace as dc_replace
+
+    from engine.v2.contracts import CapacitySample
+    from engine.v2.ops.nightly import refuse_unfittable_memory_plan
+    from engine.v2.ops.resources import static_ceiling_bytes
+    from tests.ops_support import request
+
+    sample = CapacitySample(sampled_at="2026-09-15T00:00:00.000000Z",
+                            allowed_cpu_ids=tuple(range(12)), host_total_bytes=8 * GIB,
+                            host_available_bytes=1 * GIB, container_limit_bytes=None,
+                            container_current_bytes=None, swap_total_bytes=0, swap_free_bytes=0,
+                            disk_free_bytes=100 * GIB, executor_mode="watchdog",
+                            containment="best_effort")
+    ceiling = static_ceiling_bytes(DEFAULT_POLICY, sample)
+    oversized = dc_replace(profile_named(DEFAULT_POLICY, "legacy_score"),
+                           memory_bytes=ceiling + 1)
+    policy = dc_replace(DEFAULT_POLICY, profiles=tuple(
+        oversized if p.name == "legacy_score" else p for p in DEFAULT_POLICY.profiles))
+    requests = [request(resource_class="legacy_score")]
+    with pytest.raises(OpsError) as err:
+        refuse_unfittable_memory_plan(requests, policy=policy, sample=sample)
+    assert err.value.code == "RESOURCE_PROFILE_UNSATISFIABLE"
+    jobs = {job["kind"]: job for job in err.value.problem.details["jobs"]}
+    assert jobs["tiny"] == {"kind": "tiny", "profile": "legacy_score",
+                            "needed_bytes": oversized.memory_bytes, "max_possible_bytes": ceiling}
+    # Static: an all-but-empty host_available_bytes (1 GiB, container=None)
+    # never enters the check -- only host_total/base_reserve/free_margin do.
+    assert refuse_unfittable_memory_plan(
+        [request(resource_class="validation")], policy=DEFAULT_POLICY, sample=sample) is None
 
 
 def test_populate_legacy_staging_still_refuses_an_oversize_read_set_at_claim_time():

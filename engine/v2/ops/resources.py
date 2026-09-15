@@ -19,6 +19,28 @@ rather than a guess. Admission is conservative coordination; kernel containment
 and free margin still matter, because external processes allocate after the
 sample is taken (§6.2).
 
+Two more helpers (added 2026-09-15, after ``legacy_score`` v5's 6 GiB
+reservation queued attempt 17 indefinitely) guard a profile that will never
+fit, but neither is wired into ``decide()``/the per-sample ``QueueReason`` it
+returns -- both are deliberately live-sample-independent or caller-driven, so
+an ordinary transient shortage (another process, or another agent's test
+sweep, briefly holding memory ``active`` never sees) still just queues:
+
+* ``static_ceiling_bytes`` is a structural bound from ``capacity_bytes`` alone
+  (host total, never ``host_available_bytes``) -- cheap enough to check before
+  a job is even submitted (``nightly.refuse_unfittable_memory_plan``), and
+  immune to any live contention because it never reads a live sample's
+  fluctuating field.
+* ``max_possible_headroom_bytes`` is what one live sample could ever yield
+  (headroom plus everything owed). A single sample below a profile's
+  ``memory_bytes`` is NOT refused on its own -- non-ops processes (another
+  agent's pytest sweep, a second Claude session) hold real memory that never
+  shows up in ``active``, so one bad sample is exactly the transient case this
+  module must keep queuing. The caller (``scheduler.claim_next``) is the one
+  that turns *sustained* badness -- the same shortfall, continuously, across a
+  policy window, with zero ``active`` reservations the whole time -- into a
+  terminal job failure; see ``scheduler.HEADROOM_CEILING_WINDOW_SECONDS``.
+
 CPUs come from the **allowed affinity**, never ``os.cpu_count()``. The lowest
 ``reserved_cpu_count`` allowed CPUs stay with the OS, API and supervisor; the
 rest are handed out disjointly, lowest free first, which works unchanged on a
@@ -44,7 +66,9 @@ __all__ = [
     "capacity_bytes",
     "decide",
     "headroom_bytes",
+    "max_possible_headroom_bytes",
     "owed_unconsumed_bytes",
+    "static_ceiling_bytes",
     "worker_cpu_ids",
     "live_window_reason",
 ]
@@ -89,8 +113,33 @@ def headroom_bytes(policy: ResourcePolicy, sample: CapacitySample) -> int:
     return available - policy.free_margin_bytes
 
 
+def static_ceiling_bytes(policy: ResourcePolicy, sample: CapacitySample) -> int:
+    """A structural bound on what any profile could ever be admitted with --
+    ``capacity_bytes`` (host total, never the live, fluctuating
+    ``host_available_bytes``) minus ``free_margin_bytes`` again, as an extra
+    margin against the gap between "total" and what a live sample can ever
+    actually report as available. Meant for a plan/submit-time refusal
+    (``nightly.refuse_unfittable_memory_plan``) that never depends on how
+    busy the host happens to be right now (§8.1)."""
+    return capacity_bytes(policy, sample) - policy.free_margin_bytes
+
+
 def owed_unconsumed_bytes(active: Sequence[ActiveReservation]) -> int:
     return sum(max(0, r.memory_bytes - (r.memory_current_bytes or 0)) for r in active)
+
+
+def max_possible_headroom_bytes(policy: ResourcePolicy, sample: CapacitySample,
+                                active: Sequence[ActiveReservation]) -> int:
+    """The most headroom this sample could ever yield: current headroom plus
+    every byte still owed to an active reservation, i.e. as if every active
+    job released its whole reservation right now. A profile whose
+    ``memory_bytes`` exceeds this can never be admitted from this sample
+    forward -- no release manufactures memory the sample does not already
+    account for. With ``active`` empty this is exactly ``headroom_bytes``
+    (the attempt-17 incident: legacy_score queued with nothing else heavy
+    running, so ``owed`` was already zero and the shortfall was structural,
+    not transient) (§8.1)."""
+    return headroom_bytes(policy, sample) + owed_unconsumed_bytes(active)
 
 
 def worker_cpu_ids(policy: ResourcePolicy, sample: CapacitySample) -> list[int]:
