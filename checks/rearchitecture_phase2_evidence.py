@@ -326,6 +326,62 @@ def _check_populations(evidence: dict, findings: list, field_ok: dict[str, bool]
         field_ok[f] = ordered
 
 
+def _check_receipt_population(field: str, receipt: Any, findings: list,
+                              field_ok: dict[str, bool]) -> None:
+    """Validate ONE comparison receipt's OWN population -- independent of
+    every other receipt's and of the evidence document's own three
+    top-level population fields (which only ever describe D15 /
+    ``comparison_receipt_ref``, per ``_check_population_binding`` below and
+    the module docstring's "one field's row" rule).
+
+    External review finding: the gate checked D15's populations (the
+    evidence document's three top-level fields, bound to the D15 receipt by
+    ``_check_population_binding``) and checked D19/D14's receipts for verdict
+    and comparison kind, but never looked at D19's or D14's OWN ``population``
+    at all. The reviewer's reproduction: take the existing valid synthetic
+    evidence fixture, rewrite ONLY the render receipt's population to
+    expected=supported=compared=0, recompute that one artifact's hash, and
+    the gate returned ``ok=True`` with no findings -- an empty render
+    population silently passed. This function is called once per
+    ``VERDICT_REF_FIELDS`` entry (D15, D19, D14 alike -- D15 redundantly with,
+    and never weaker than, ``_check_population_binding``'s document-vs-receipt
+    equality check) so every comparison receipt the gate accepts proves its
+    OWN nonempty, ordered, exclusion-accounted population, never borrowing
+    another field's numbers.
+
+    ``Population.excluded`` (``engine/v2/diagnosis/receipt.py``) is always
+    present on this schema (default empty tuple), so the "receipt schema
+    doesn't record exclusions at all" case never arises for
+    ``ComparisonReceipt``; the itemized-list check below is exact rather than
+    a fallback report.
+    """
+    if receipt is None:
+        return
+    pop = receipt.population
+    for attr in ("expected", "supported", "compared"):
+        value = getattr(pop, attr)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            findings.append({"code": "POPULATION_EMPTY", "field": field})
+            field_ok[field] = False
+            return
+    if not (pop.compared <= pop.supported <= pop.expected):
+        findings.append({"code": "POPULATION_COLLAPSED", "field": field})
+        field_ok[field] = False
+        return
+    for stage, drop in (("expected_to_supported", pop.expected - pop.supported),
+                        ("supported_to_compared", pop.supported - pop.compared)):
+        if drop <= 0:
+            continue
+        entries = [e for e in pop.excluded if isinstance(e, dict) and e.get("stage") == stage]
+        keys = [e.get("key") for e in entries]
+        explained = (len(entries) == drop and len(set(keys)) == len(keys)
+                    and all(isinstance(k, str) and isinstance(e.get("reason"), str)
+                            for k, e in zip(keys, entries)))
+        if not explained:
+            findings.append({"code": "POPULATION_UNEXPLAINED", "field": field, "stage": stage})
+            field_ok[field] = False
+
+
 def _check_verdicts(decoded: dict[str, Any], findings: list, field_ok: dict[str, bool]) -> None:
     for field in VERDICT_REF_FIELDS:
         receipt = decoded.get(field)
@@ -608,6 +664,8 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     _check_fault_matrix(resolved.get("fault_matrix_ref"), findings, field_ok)
     _check_table_contract_mapping_hash(evidence, findings, field_ok)
     _check_populations(evidence, findings, field_ok)
+    for verdict_field in VERDICT_REF_FIELDS:
+        _check_receipt_population(verdict_field, decoded.get(verdict_field), findings, field_ok)
     _check_verdicts(decoded, findings, field_ok)
     _check_receipt_kinds(evidence, decoded, findings, field_ok)
     _check_corpus_binding(decoded, artifact_root, corpus_root, findings, field_ok)

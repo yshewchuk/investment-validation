@@ -779,6 +779,100 @@ def test_explained_population_drop_has_no_population_unexplained_finding(tmp_pat
     assert "POPULATION_UNEXPLAINED" not in codes(result)
 
 
+# -- external review: every comparison receipt validates its OWN population ---
+#
+# The gate checked D15's populations (the evidence document's three
+# top-level fields, bound to the D15/score receipt) and checked D19/D14's
+# receipts for verdict and comparison kind -- but never looked at D19's or
+# D14's OWN ``population`` at all. Reviewer's reproduction: take the existing
+# valid synthetic evidence fixture, rewrite ONLY the render receipt's
+# population to expected=supported=compared=0, recompute that one artifact's
+# hash, and the gate returned ok=True with no findings.
+
+def test_render_receipt_zero_population_gives_population_empty_on_render_field(tmp_path):
+    """Reviewer's exact reproduction, D19/render receipt."""
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        zeroed = _comparison_receipt(
+            kind=p2evidence.RENDER_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            population=Population(expected=0, supported=0, compared=0), receipt_id="recv_render")
+        evidence["render_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "render_comparison.json", _dumps(zeroed))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"POPULATION_EMPTY"}
+    assert {f["field"] for f in result["findings"] if f["code"] == "POPULATION_EMPTY"} == {
+        "render_comparison_receipt_ref"}
+
+
+def test_corpus_receipt_zero_population_gives_population_empty_on_corpus_field(tmp_path):
+    """Same reproduction, D14/corpus receipt: an empty population must not
+    hide behind the corpus-snapshot-binding check either."""
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        binding_ref = _corpus_binding_ref(artifacts_dir)
+        zeroed = _comparison_receipt(
+            kind=p2evidence.CORPUS_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            population=Population(expected=0, supported=0, compared=0), receipt_id="recv_corpus",
+            diagnostic_ref=json.dumps(binding_ref, sort_keys=True))
+        evidence["corpus_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "corpus_comparison.json", _dumps(zeroed))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"POPULATION_EMPTY"}
+    assert {f["field"] for f in result["findings"] if f["code"] == "POPULATION_EMPTY"} == {
+        "corpus_comparison_receipt_ref"}
+
+
+def test_render_receipt_collapsed_ordering_gives_population_collapsed_on_render_field(tmp_path):
+    """A nonzero but collapsed ordering (compared > supported) on the render
+    receipt's OWN population must fail, named at its own field -- not silently
+    accepted because every count is individually positive."""
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        collapsed = _comparison_receipt(
+            kind=p2evidence.RENDER_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            population=Population(expected=50, supported=80, compared=90), receipt_id="recv_render")
+        evidence["render_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "render_comparison.json", _dumps(collapsed))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"POPULATION_COLLAPSED"}
+    assert {f["field"] for f in result["findings"] if f["code"] == "POPULATION_COLLAPSED"} == {
+        "render_comparison_receipt_ref"}
+
+
+def test_render_receipt_unexplained_drop_gives_population_unexplained_on_render_field(tmp_path):
+    """The render receipt's own drop must be itemized too, exactly like
+    D15's -- an unexplained expected->supported/supported->compared drop on
+    D19 must not hide behind D15's already-explained drop."""
+    def mutate(evidence, artifacts_dir):
+        snapshot_ref = _snapshot_ref("snap_current")
+        unexplained = _comparison_receipt(
+            kind=p2evidence.RENDER_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=snapshot_ref,
+            population=Population(expected=100, supported=80, compared=50), receipt_id="recv_render")
+        evidence["render_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "render_comparison.json", _dumps(unexplained))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"POPULATION_UNEXPLAINED"}
+    assert {f["field"] for f in result["findings"] if f["code"] == "POPULATION_UNEXPLAINED"} == {
+        "render_comparison_receipt_ref"}
+
+
+def test_fully_valid_evidence_with_all_three_receipts_still_passes(tmp_path):
+    """The existing valid fixture (score + render + corpus receipts, each
+    with an explained, ordered, nonempty population) is unaffected by the
+    new per-receipt population checks."""
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate=None)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == set()
+
+
 # -- task P2-C01: rollback + fault matrix --------------------------------------
 
 def test_rollback_receipt_with_non_increasing_generation_gives_rollback_evidence_invalid(tmp_path):
