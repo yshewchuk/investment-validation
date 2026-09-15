@@ -88,6 +88,7 @@ from engine.v2.ops.store_barrier import (
     read_set_complete,
     verified_write_in,
 )
+from engine.v2.ops.worker_progress import STEPS_FILENAME, read_new_records
 
 #: Kinds whose coordinator effect does real, non-idempotent catalog/outbox/
 #: filesystem work every attempt — the generic checkpoint-reuse shortcut
@@ -114,6 +115,34 @@ _FENCE_LOST_CODES = frozenset({"LEASE_LOST", "CANCELLED"})
 #: purely positional and must never be reused or propagated.
 _POSITIONAL_OUTPUT_NAME = re.compile(r"^\d+$")
 
+#: Default-message text for an executor-level failure with no dedicated
+#: problem builder below (``_failure_problem``) -- a nicer stand-in for the
+#: previous blanket "worker did not complete its contract" wherever the cause
+#: is already named by the failure code itself.
+_FAILURE_MESSAGES = {
+    "LEASE_LOST": "the attempt's lease expired before it reported back",
+    "CANCELLED": "the attempt was cancelled",
+    "UNKNOWN_KILL": "the worker process ended by signal, outside the watchdog's own kill",
+    "VALIDATION_FAILED": "the worker's result exceeded the result-pipe size limit",
+}
+
+
+@dataclasses.dataclass
+class _StepState:
+    """Per-attempt bookkeeping the supervisor keeps between polls to turn a
+    worker's step file into heartbeat/step progress rows. Never persisted --
+    rebuilt as ``steps.ndjson`` is re-read, and dropped once the attempt ends
+    (``Service._finish``)."""
+
+    offset: int = 0
+    current_step: str | None = None
+    #: max memory observed (any tick) since the step now open last started.
+    step_peaks: dict = dataclasses.field(default_factory=dict)
+    step_started_at: dict = dataclasses.field(default_factory=dict)
+    #: max memory observed (any tick) since the last heartbeat row was written.
+    interval_peak: int = 0
+    interval_peak_step: str | None = None
+
 
 class Service:
     def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None,
@@ -129,6 +158,9 @@ class Service:
         self.launches = {}
         #: attempt_id -> (monotonic time, observed state) of its last heartbeat row.
         self.observed = {}
+        #: attempt_id -> _StepState; every running attempt's step-file offset,
+        #: open step and interval memory peak.
+        self._progress_state = {}
         self.boot = read_boot_id()
         self.lock = SupervisorLock(self.root / "supervisor.lock")
         self.identity = None
@@ -380,6 +412,7 @@ class Service:
                                       clock=self.clock, lease_seconds=LEASE_SECONDS):
             running.failure = "CANCELLED" if cancelled else "LEASE_LOST"
             executor.stop(running, boot_id=self.boot, clock=self.clock)
+        self._track_steps(running, status)
         if self._observation_due(running, status):
             record_measurement(self.conn, claim.attempt_id, current_bytes=status["memory"],
                                peak_bytes=running.peak, clock=self.clock)
@@ -392,6 +425,65 @@ class Service:
             self._finish(running, status)
         return True
 
+    def _track_steps(self, running, status):
+        """Every tick (~1s, matching the watchdog's own sampling): pull new
+        step boundaries off the worker's private ``steps.ndjson`` and fold
+        this tick's memory sample into whichever step is currently open, so a
+        ramp under the 10s heartbeat gate still lands on the right step."""
+        attempt_id = running.claim.attempt_id
+        state = self._progress_state.setdefault(attempt_id, _StepState())
+        path = self.store.staging_dir(attempt_id) / "diagnostics" / STEPS_FILENAME
+        records, state.offset = read_new_records(path, state.offset)
+        for record in records:
+            self._apply_step_record(running, state, record)
+        if state.current_step is not None:
+            state.step_peaks[state.current_step] = max(
+                state.step_peaks.get(state.current_step, 0), status["memory"])
+        if status["memory"] >= state.interval_peak:
+            state.interval_peak = status["memory"]
+            state.interval_peak_step = state.current_step
+
+    def _apply_step_record(self, running, state, record):
+        name, event = record.get("step"), record.get("event")
+        if not isinstance(name, str) or event not in ("start", "end"):
+            return
+        if event == "start":
+            state.current_step = name
+            state.step_peaks.setdefault(name, 0)
+            state.step_started_at[name] = record.get("elapsed_seconds")
+            self._emit_progress(running, kind="progress", step=name, message="step started",
+                               elapsed_seconds=record.get("elapsed_seconds"),
+                               memory_current_bytes=record.get("rss_bytes"))
+            return
+        started = state.step_started_at.pop(name, None)
+        elapsed = record.get("elapsed_seconds")
+        duration = elapsed - started if started is not None and elapsed is not None else None
+        peak = state.step_peaks.pop(name, 0)
+        if state.current_step == name:
+            state.current_step = None
+        self._emit_progress(running, kind="progress", step=name, message="step complete",
+                           elapsed_seconds=elapsed, memory_current_bytes=record.get("rss_bytes"),
+                           memory_peak_bytes=peak, duration_seconds=duration,
+                           units=record.get("units"))
+
+    def _emit_progress(self, running, *, kind, message, elapsed_seconds, step=None,
+                       memory_current_bytes=None, memory_peak_bytes=None,
+                       duration_seconds=None, units=None):
+        claim = running.claim
+        sequence = self._next_sequence(claim.attempt_id)
+        event = ProgressEvent(
+            job_id=claim.job_id, attempt_id=claim.attempt_id, stage_id=claim.spec.kind,
+            sequence=sequence, recorded_at=format_timestamp(self.clock.now()), kind=kind,
+            elapsed_seconds=float(elapsed_seconds or 0.0), message=message, step=step,
+            memory_current_bytes=memory_current_bytes, memory_peak_bytes=memory_peak_bytes,
+            step_duration_seconds=duration_seconds, step_units=units)
+        record_progress(self.conn, event)
+
+    def _next_sequence(self, attempt_id):
+        return self.conn.execute(
+            "SELECT COALESCE(MAX(sequence),-1)+1 FROM progress_events WHERE attempt_id = ?",
+            (attempt_id,)).fetchone()[0]
+
     def _observation_due(self, running, status):
         """D: one heartbeat row per ``HEARTBEAT_EVENT_SECONDS``, or on a state change."""
         attempt_id, now = running.claim.attempt_id, self.clock.monotonic()
@@ -403,17 +495,23 @@ class Service:
         return True
 
     def _progress(self, running, status):
-        sequence = self.conn.execute("SELECT COALESCE(MAX(sequence),-1)+1 FROM progress_events "
-                                     "WHERE attempt_id = ?", (running.claim.attempt_id,)).fetchone()[0]
+        """D: one heartbeat row per ``HEARTBEAT_EVENT_SECONDS``. Its
+        ``memory_peak_bytes``/``step`` are the peak *since the previous
+        heartbeat* and whichever step was active when that peak was
+        sampled -- the cumulative all-time peak the 10s row used to carry is
+        still recorded every tick, unthrottled, on ``attempts.memory_peak_bytes``
+        (``record_measurement``, called right before this in ``_poll``)."""
+        state = self._progress_state.get(running.claim.attempt_id)
+        peak = status["memory"] if state is None else max(state.interval_peak, status["memory"])
+        peak_step = None if state is None else state.interval_peak_step
         message = ("worker exited" if status["done"] else
                    f"worker stopping: {running.failure}" if running.failure else "worker observed")
-        event = ProgressEvent(
-            job_id=running.claim.job_id, attempt_id=running.claim.attempt_id,
-            stage_id=running.claim.spec.kind, sequence=sequence,
-            recorded_at=format_timestamp(self.clock.now()), kind="heartbeat",
-            elapsed_seconds=self.clock.monotonic() - running.started, message=message,
-            memory_current_bytes=status["memory"], memory_peak_bytes=running.peak)
-        record_progress(self.conn, event)
+        self._emit_progress(running, kind="heartbeat", message=message,
+                           elapsed_seconds=self.clock.monotonic() - running.started,
+                           memory_current_bytes=status["memory"], memory_peak_bytes=peak,
+                           step=peak_step)
+        if state is not None:
+            state.interval_peak, state.interval_peak_step = status["memory"], state.current_step
 
     def _finish(self, running, status):
         claim = running.claim
@@ -426,6 +524,8 @@ class Service:
             problem = exc.problem if isinstance(exc, OpsError) else make_problem(
                 "VALIDATION_FAILED", "worker output failed validation")
             self._commit_failure(claim, status, problem)
+        finally:
+            self._progress_state.pop(claim.attempt_id, None)
 
     def _commit_success(self, running, status, launch, keepalive):
         claim = running.claim
@@ -439,9 +539,7 @@ class Service:
         if status["exit_code"] != 0:
             code = code or ("UNKNOWN_KILL" if status["exit_code"] < 0 else "WORKER_FAILED")
         if code:
-            problem = make_problem(code, "worker did not complete its contract")
-            if worker_reported:
-                problem = self._worker_typed_problem(claim, running) or problem
+            problem = self._failure_problem(claim, running, code, worker_reported=worker_reported)
             raise OpsError(problem)
         result = json.loads(running.data)
         outputs = validate_result(claim, result)
@@ -475,6 +573,28 @@ class Service:
                     verified_write_in(conn, claim.attempt_id, domain)
         commit_attempt(self.conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
                        clock=self.clock, effects=effects)
+
+    def _failure_problem(self, claim, running, code, *, worker_reported):
+        """A ``Problem`` for an attempt that will not succeed, with the best
+        detail available for its class (Do §3): a resource kill gets the
+        peak/limit/step/elapsed that explain it; anything the worker itself
+        typed is recovered via ``_worker_typed_problem``; everything else
+        falls back to a code-specific message, never the old blanket
+        "worker did not complete its contract" where a better one is known.
+        """
+        if code == "RESOURCE_LIMIT_EXCEEDED":
+            state = self._progress_state.get(claim.attempt_id)
+            started = running.stop_at if running.stop_at is not None else self.clock.monotonic()
+            return make_problem(
+                code, "worker exceeded its reserved memory",
+                details={"peak_bytes": running.peak,
+                         "limit_bytes": claim.resources.reserved_memory_bytes,
+                         "step": state.current_step if state is not None else None,
+                         "elapsed_s": round(started - running.started, 1)})
+        problem = make_problem(code, _FAILURE_MESSAGES.get(code, "worker did not complete its contract"))
+        if worker_reported:
+            problem = self._worker_typed_problem(claim, running) or problem
+        return problem
 
     def _worker_typed_problem(self, claim, running):
         """Recover the ``Problem`` a worker's caught ``OpsError`` carried,

@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from engine.v2.foundation import safe_relative_path
+from engine.v2.ops import worker_progress
 from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
 
@@ -202,7 +203,11 @@ def legacy_action(action, parameters, staging, legacy_root=None):
     }
     if action not in actions:
         raise fail("INVALID_REQUEST", "legacy action is not allowlisted")
-    return actions[action](parameters, root)
+    # A step spanning the whole action, so every action has at least one
+    # step event even where nothing inside it is instrumented more finely
+    # below (Do §1: "instrument every legacy_adapter action").
+    with worker_progress.step(action):
+        return actions[action](parameters, root)
 
 
 def _action_finality(parameters, root):
@@ -272,6 +277,7 @@ def _action_score(parameters, root):
     from engine.score import Scorer, score_calendar
     from engine.v2.ops.session_resolution import resolve_effective_session
 
+    worker_progress.step_start("inputs_load")
     session = resolve_effective_session(_load_finality(root), parameters["session"])
     tickers = sorted(set(parameters["tickers"]))
     # P2-C04: the historical EVIDENCE universe (analog pools, registered
@@ -279,11 +285,16 @@ def _action_score(parameters, root):
     # narrow watchlist must not shrink the context it is scored against.
     # Defaults to ``tickers`` for a caller that predates this parameter.
     context_tickers, years = _scoring_context(parameters, action="legacy_score")
+    worker_progress.step_end("inputs_load")
+    worker_progress.step_start("scorer_build")
     scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
+    worker_progress.step_end("scorer_build")
+    worker_progress.step_start("score_calendar")
     frame = score_calendar(pd.Timestamp(session),
                           horizon_days=int(parameters.get("horizon_days", 35)),
                           alt_strikes=0, scorer=scorer, tickers=tickers,
                           progress_every=10)
+    worker_progress.step_end("score_calendar", units=len(tickers))
     rows = json_safe(frame.to_dict(orient="records"), round_to=None)
     for row in rows:
         row["row_id"] = _score_row_id(row)
@@ -301,12 +312,15 @@ def _action_score(parameters, root):
     ladder = strike_ladder(frame, scorer=scorer,
                            alt_strikes=int(parameters.get("alt_strikes", 1)),
                            as_of=pd.Timestamp(session))
-    return _write_action(root, "score.json", {
+    worker_progress.step_start("write_outputs")
+    output = _write_action(root, "score.json", {
         "rows": rows, "expected_population": list(expected),
         "observed_population": sorted(observed_keys), "ladder": json_safe(ladder, round_to=None),
         "tickers": tickers, "context_tickers": context_tickers,
         "analog_entry_coverage": scorer.analog_entry_coverage,
         "session": session, "requested_session": parameters["session"]})
+    worker_progress.step_end("write_outputs")
+    return output
 
 
 def _action_score_requests(parameters, root):
@@ -323,10 +337,13 @@ def _action_score_requests(parameters, root):
     requests = [entry["request"] for entry in entries]
     tickers = sorted({str(row["ticker"]) for row in requests})
     years = range(int(parameters["year_start"]), int(parameters["year_end"]) + 1)
+    worker_progress.step_start("scorer_build")
     scorer = Scorer(context=FeatureContext.load(tickers, years=years))
+    worker_progress.step_end("scorer_build")
     rows = []
     fields = {field.name for field in dataclasses.fields(ScoreRequest)}
     dates = {"as_of", "event_date", "expiry", "chain_as_of"}
+    worker_progress.step_start("scoring_loop")
     for entry, request in zip(entries, requests):
         values = {key: value for key, value in request.items() if key in fields}
         for key in dates:
@@ -343,8 +360,12 @@ def _action_score_requests(parameters, root):
         record = json_safe(result.as_dict(), round_to=None)
         rows.append({"request_id": entry["canary_id"],
                      "record": record})
-    return _write_action(root, "score_requests.json", {"rows": rows,
-                                                        "expected_population": len(requests)})
+    worker_progress.step_end("scoring_loop", units=len(requests))
+    worker_progress.step_start("write_outputs")
+    output = _write_action(root, "score_requests.json", {"rows": rows,
+                                                          "expected_population": len(requests)})
+    worker_progress.step_end("write_outputs")
+    return output
 
 
 def _population_key(row):
@@ -427,9 +448,12 @@ def _action_decision_replay(parameters, root):
     from engine.features import FeatureContext
     from engine.score import Scorer, score_calendar
 
+    worker_progress.step_start("scorer_build")
     context_tickers, years = _scoring_context(parameters, action="legacy_decision_replay")
     scorer = Scorer(context=FeatureContext.load(context_tickers, years=years))
+    worker_progress.step_end("scorer_build")
     eligible_tickers = sorted({str(row["ticker"]) for row in population})
+    worker_progress.step_start("replay")
     frame = score_calendar(pd.Timestamp(session),
                           horizon_days=int(parameters.get("horizon_days", 35)),
                           alt_strikes=0, scorer=scorer, tickers=eligible_tickers)
@@ -438,7 +462,9 @@ def _action_decision_replay(parameters, root):
         row["row_id"] = _score_row_id(row)
     eligible_keys = {population_key(row) for row in population}
     replayed = [row for row in rows if population_key(row) in eligible_keys]
-    return _write_action(root, "replay.json", {
+    worker_progress.step_end("replay", units=len(eligible_tickers))
+    worker_progress.step_start("write_outputs")
+    output = _write_action(root, "replay.json", {
         "schema_version": "decision_replay.v1.0", "session": session,
         "requested_session": parameters["session"],
         "population": [population_key(row) for row in population],
@@ -446,6 +472,8 @@ def _action_decision_replay(parameters, root):
         "source_rows_hash": content_hash(population),
         "replayed_rows_hash": content_hash(replayed),
         "findings": compare_rows(population, replayed)})
+    worker_progress.step_end("write_outputs")
+    return output
 
 
 def _action_decisions(parameters, root):

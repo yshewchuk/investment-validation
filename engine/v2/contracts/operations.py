@@ -136,6 +136,17 @@ class ProgressEvent:
 
     Execution metadata, never part of an output hash. ``completed_units`` is
     reported work, never a percentage invented from elapsed time.
+
+    ``step``/``step_duration_seconds``/``step_units`` read differently by
+    ``kind``: on a ``"progress"`` (step boundary) event, ``step`` is that
+    step's own name -- ``step_duration_seconds``/``step_units`` are only set
+    on its "end" record, never its "start" one. On a ``"heartbeat"`` event,
+    ``step`` is whichever step was active when ``memory_peak_bytes`` (the
+    peak *since the previous heartbeat*, not the attempt's all-time peak --
+    that stays on ``attempts.memory_peak_bytes`` via ``record_measurement``)
+    was observed. An attempt with no step events at all (an older format, or
+    a worker kind nothing instruments) leaves ``step`` ``None`` throughout;
+    that is a valid, expected shape, never an error.
     """
 
     job_id: str
@@ -153,6 +164,9 @@ class ProgressEvent:
     checkpoint_ref: str | None = None
     eta_seconds: float | None = None
     latest_error_code: str | None = None
+    step: str | None = None
+    step_duration_seconds: float | None = None
+    step_units: int | None = None
     schema_version: str = PROGRESS_EVENT_V1
 
 

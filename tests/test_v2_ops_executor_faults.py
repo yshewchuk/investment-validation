@@ -208,6 +208,16 @@ def test_o14_watchdog_containment_is_declared_not_implied(tmp_path):
 
 
 def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
+    """O31's guarantee (guides/rearchitecture_phase1_operations.md) is that a
+    secret VALUE never reaches a receipt/log/status -- checked below directly
+    against the secret substrings, in the full pipe payload. Since the
+    ops-explain-from-logs task, an untyped exception's result legitimately
+    carries a curated, reviewed ``details`` (``exception_type``, code
+    ``location``) whose field NAMES happen to contain the substring
+    "exception"; the old proxy assertion banning that substring anywhere in
+    the payload is retired in favour of the real property -- no message text,
+    typed or not, and no secret substring, anywhere in the bytes actually
+    written to the pipe."""
     secret_url = "https://user:S3CRET-VALUE@api.example.invalid/v1?api_key=ANOTHER-SECRET"
     read_fd, write_fd = os.pipe()
     envelope = {
@@ -239,8 +249,16 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     assert payload["schema_version"] == "worker_result.v1.0"
     assert b"S3CRET-VALUE" not in data
     assert b"ANOTHER-SECRET" not in data
+    assert "request failed" not in json.dumps(payload)
     assert "message" not in payload
-    assert "exception" not in json.dumps(payload).lower()
+    assert payload["problem"]["message"] == "worker raised an unhandled exception"
+    assert "details" not in payload["problem"]
+    # details land only in the private staging file, never the pipe.
+    details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
+    assert details == {"exception_type": "RuntimeError",
+                       "location": details["location"]}
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:235")
+    assert "S3CRET-VALUE" not in json.dumps(details)
 
 
 def _fake_stat_line(pid: int, *, start_ticks: int = 12345, rss_pages: int = 10, pgrp: int = 111,
