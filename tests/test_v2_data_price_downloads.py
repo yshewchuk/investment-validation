@@ -151,6 +151,53 @@ def test_as_of_view_before_any_capture_uses_earliest():
     assert dict(zip(view["date"], view["close_adj"])) == {"2024-01-01": 1.0}
 
 
+def test_as_of_view_never_filters_by_source_kind_across_restatement_and_tombstone():
+    """User decision 2026-09-14 (replacing an earlier two-policy design):
+    ONE read rule, no source_kind filter, ever -- rows are diff-only, so an
+    unchanged value across sources stays stored once, under whichever
+    retrieval first saw it. A px retrieval, then a Tier-1 retrieval that adds
+    a new date and restates one old date, then a Tier-1 tombstone -- assert
+    the exact view at cutoffs before, between and after all three. If the
+    view were (wrongly) filtered down to the chosen retrieval's own
+    source_kind, 2024-01-01 (a px-only row, never restated by Tier-1) would
+    silently vanish the moment a Tier-1 retrieval became the chosen one.
+    """
+    stored = _empty_stored()
+    # T1 (px): the whole initial history.
+    stored, _ = _apply(stored, {"2024-01-01": (1.0, None, None), "2024-01-02": (2.0, None, None),
+                                "2024-01-03": (3.0, None, None)},
+                       retrieved_at="2024-01-05T00:00:00Z", source_kind="legacy_px_csv",
+                       source_hash="h1", capture_id="c1")
+    # T2 (tier1): adds 2024-01-04, restates 2024-01-02, leaves 2024-01-01/03
+    # untouched (diff-only: no new row for either).
+    stored, _ = _apply(stored, {"2024-01-01": (1.0, None, None), "2024-01-02": (20.0, None, None),
+                                "2024-01-03": (3.0, None, None), "2024-01-04": (4.0, None, None)},
+                       retrieved_at="2024-02-01T00:00:00Z", source_kind="tier1_fetch",
+                       source_hash="h2", capture_id="c2")
+    # T3 (tier1): drops 2024-01-04 -> tombstones it; the earliest date stays
+    # present so this is not a partial-window refusal.
+    stored, _ = _apply(stored, {"2024-01-01": (1.0, None, None), "2024-01-02": (20.0, None, None),
+                                "2024-01-03": (3.0, None, None)},
+                       retrieved_at="2024-03-01T00:00:00Z", source_kind="tier1_fetch",
+                       source_hash="h3", capture_id="c3")
+
+    before_t1 = price_history.as_of_view(stored, "2024-01-01T00:00:00Z")
+    assert dict(zip(before_t1["date"], before_t1["close_adj"])) == {
+        "2024-01-01": 1.0, "2024-01-02": 2.0, "2024-01-03": 3.0}
+
+    between_t1_t2 = price_history.as_of_view(stored, "2024-01-10T00:00:00Z")
+    assert dict(zip(between_t1_t2["date"], between_t1_t2["close_adj"])) == {
+        "2024-01-01": 1.0, "2024-01-02": 2.0, "2024-01-03": 3.0}
+
+    between_t2_t3 = price_history.as_of_view(stored, "2024-02-15T00:00:00Z")
+    assert dict(zip(between_t2_t3["date"], between_t2_t3["close_adj"])) == {
+        "2024-01-01": 1.0, "2024-01-02": 20.0, "2024-01-03": 3.0, "2024-01-04": 4.0}
+
+    after_t3 = price_history.as_of_view(stored, "2024-04-01T00:00:00Z")
+    assert dict(zip(after_t3["date"], after_t3["close_adj"])) == {
+        "2024-01-01": 1.0, "2024-01-02": 20.0, "2024-01-03": 3.0}
+
+
 def _simulate_full_history_captures(retrievals):
     stored = _empty_stored()
     for i, (retrieved_at, values) in enumerate(retrievals):

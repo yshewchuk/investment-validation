@@ -11,6 +11,10 @@ reconstruction needs), then hand the fetched rows to the pure
 ``QUERY_NOT_BOUNDED``/``RESULT_LIMIT_EXCEEDED`` escape hatch beyond what
 ``Repository.scan`` itself already enforces (``max_batch_rows``/
 ``max_result_rows``, sized for one ticker's full history).
+
+One read rule, no policy choice (user decision 2026-09-14, replacing an
+earlier two-policy design): the latest retrieval of any source at or before
+``observation_ceiling``, else the ticker's earliest.
 """
 from __future__ import annotations
 
@@ -18,13 +22,14 @@ import pandas as pd
 
 from engine.v2.contracts import DataQuery, KeyPredicate, PriceQuery, PriceSeriesRow, SnapshotRef
 
-from . import errors
+from . import errors, price_history
 from .price_history import as_of_view
 from .price_history_table import PRICE_HISTORY_TABLE_NAME
 
 __all__ = ["get_close", "get_price_series"]
 
-_COLUMNS = ("date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted", "source_hash")
+_COLUMNS = ("date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted", "source_kind",
+           "source_hash")
 _BATCH_CAP = 50_000
 _RESULT_CAP = 200_000
 
@@ -83,17 +88,13 @@ def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFr
 
 def _provenance_by_date(stored_rows: pd.DataFrame, cutoff: str) -> dict[str, tuple[str, str]]:
     """Per date: the ``(retrieved_at, source_hash)`` of the version
-    ``as_of_view`` actually selected -- the same eligible/fallback pool
-    ``as_of_view`` computes, kept here only for the two extra columns
-    ``as_of_view`` itself drops.
+    ``as_of_view`` actually selected -- ``price_history.resolve_pool``'s own
+    pool, kept here only for the two extra columns ``as_of_view`` itself
+    drops. The SAME resolution, never a second one.
     """
-    eligible = stored_rows[stored_rows["retrieved_at"] <= cutoff]
-    pool = eligible if len(eligible) else stored_rows[
-        stored_rows["retrieved_at"] == stored_rows["retrieved_at"].min()]
-    idx = pool.groupby("date")["retrieved_at"].idxmax()
-    winners = pool.loc[idx]
+    pool = price_history.resolve_pool(stored_rows, cutoff)
     return {str(row.date)[:10]: (row.retrieved_at, row.source_hash)
-            for row in winners.itertuples(index=False)}
+           for row in pool.itertuples(index=False)}
 
 
 def get_close(repository, ticker: str, date: str, observation_ceiling: str,

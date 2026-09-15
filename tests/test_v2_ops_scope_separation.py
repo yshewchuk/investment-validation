@@ -159,7 +159,8 @@ def test_pin_snapshot_inputs_refuses_a_watchlist_outside_the_context():
     with pytest.raises(OpsError) as err:
         pin_snapshot_inputs(None, None, "shadow", tickers=("AAA", "BBB"),
                             year_start=2020, year_end=2021,
-                            expected_population=("ZZZ|S1|2020-01-15",), clock=None)
+                            expected_population=("ZZZ|S1|2020-01-15",), clock=None,
+                            session=SESSION)
     assert err.value.problem.code == "INVALID_REQUEST"
 
 
@@ -169,7 +170,8 @@ def test_pin_snapshot_inputs_widens_evidence_scope_not_direct_scope(case):
     context_tickers = ("AAA", "BBB", "CCC", "DDD", "EEE")
     result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=context_tickers,
                                  year_start=2020, year_end=2021,
-                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
+                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
+                                 session=SESSION)
     ref = artifact(case.conn, case.store, result["materialization_request_ref"])
     request_doc = json.loads(case.store.read_verified(ref))
     assert sorted(request_doc["evidence_scope"]["tickers"]) == sorted(context_tickers)

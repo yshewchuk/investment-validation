@@ -400,8 +400,15 @@ def run_corpus(root: Path, store_root: Path, scope: str, corpus_root: Path, *, p
     conn, clock, store = _open(root)
     key = idempotency_key or scope
     try:
+        # SEND-BACK 2026-09-14 item 2: pin_snapshot_inputs now needs the
+        # job's own decision cutoff (session). A corpus parity run has no
+        # single nightly session of its own -- it scores the corpus's whole
+        # multi-year supported population in one job -- so "as of now" (the
+        # wall-clock date this check actually runs) is the honest cutoff:
+        # exactly what a fresh SystemClock-driven run would see either way.
         pinned = pin_snapshot_inputs(conn, store, scope, tickers=_tickers, year_start=year_start,
-                                     year_end=year_end, expected_population=population, clock=clock)
+                                     year_end=year_end, expected_population=population, clock=clock,
+                                     session=clock.now().date().isoformat())
         service = Service(conn, root, registry(), resource_policy, clock=clock,
                           code_source=ROOT, store_root=Path(store_root))
         try:

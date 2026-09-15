@@ -79,7 +79,7 @@ def _custom_request(case, *, registry_bytes, tier4_refs=()):
         case.repository, case.store, case.snap, case.snapshot_object,
         direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
         registry_and_model_refs=registry_refs, calendar_refs=calendar_refs,
-        expected_population=EXPECTED_POPULATION)
+        expected_population=EXPECTED_POPULATION, observation_ceiling="9999-12-31T23:59:59.000000Z")
 
 
 def _materialize_and_score(case, monkeypatch, *, registry_bytes, tier4_refs, key):

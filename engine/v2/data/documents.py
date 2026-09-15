@@ -76,6 +76,7 @@ _FORMATS: dict[tuple[str, str], str] = {
     ("SnapshotImportRequest", "source_manifest_hash"): "hash",
     ("SnapshotImportReceipt", "request_hash"): "hash",
     ("LegacyMaterializationRequest", "request_hash"): "hash",
+    ("LegacyMaterializationRequest", "observation_ceiling"): "timestamp",
     ("LegacyFileRef", "content_hash"): "hash",
     ("TimeInterval", "start_inclusive"): "date_or_timestamp",
     ("TimeInterval", "end_exclusive"): "date_or_timestamp",

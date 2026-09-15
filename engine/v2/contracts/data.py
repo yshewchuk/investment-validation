@@ -694,6 +694,14 @@ class LegacyMaterializationRequest:
     (e.g. ``{"tickers": [...], "years": [...]}``) rather than a new structured
     type: the phase-2 guide names their contents in prose only. Recorded as a
     judgement call.
+
+    ``observation_ceiling`` (SEND-BACK 2026-09-14 item 2) is the job's own
+    decision cutoff -- the nightly plan's session, end-of-day -- pinned into
+    the plan itself so materialization can never see a retrieval made after
+    this job's cutoff, even once a later capture sits in the same pinned
+    snapshot version. Replaces the earlier
+    ``PRICE_SERIES_MATERIALIZATION_CEILING = "9999-12-31T23:59:59Z"``
+    constant, which let materialization see every retrieval ever captured.
     """
 
     request_hash: str
@@ -706,4 +714,5 @@ class LegacyMaterializationRequest:
     calendar_refs: tuple[str, ...]
     legacy_layout_version: str
     expected_population: dict[str, int]
+    observation_ceiling: str
     schema_version: str = LEGACY_MATERIALIZATION_REQUEST_V1

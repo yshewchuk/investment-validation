@@ -320,7 +320,8 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
     from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
     return pin_snapshot_inputs(conn, ArtifactStore(root), args.snapshot_scope,
                                tickers=context_tickers, year_start=args.year_start,
-                               year_end=args.year_end, expected_population=population, clock=clock)
+                               year_end=args.year_end, expected_population=population, clock=clock,
+                               session=args.as_of)
 
 
 def _plan_command(args, root, conn, clock):
@@ -511,7 +512,7 @@ def price_history_command(args, root, conn, clock):
     if not args.source_root.is_dir():
         raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
                   details={"source_root": str(args.source_root)})
-    return capture(conn, ArtifactStore(root), args.source_root, scope=args.scope,
+    return capture(conn, ArtifactStore(root), args.source_root, scope=args.scope, root=root,
                    dry_run=args.dry_run, clock=clock)
 
 

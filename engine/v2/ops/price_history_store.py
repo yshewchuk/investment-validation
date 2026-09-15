@@ -32,21 +32,57 @@ derived-file reference pins (``engine.v2.data.reference_catalog``) are
 copied forward from the base generation's own receipt into the new one, in
 the same transaction, so a plan resolving the new head still finds them.
 
-**Generation-pin compatibility, documented gap.** ``engine.v2.ops.
-generation_binding.accepted_generation_refs`` reads a barrier stage's
-accepted legacy read-set off ``attempt_input_bindings`` for the snapshot's
-own committing ``attempt_id``. This module's commit reuses the BASE
-generation's ``attempt_id``/``fence`` verbatim in its own receipt (a
-deliberate choice, not an oversight: no legacy file is read here, so the
-accepted legacy manifest is genuinely unchanged, and reusing the same
-attempt_id means the existing ``legacy_manifest.json`` binding is found
-without minting a new one -- which would need a real ``attempts`` row this
-CLI-driven, non-supervised commit has no reason to create). ``fence_check``
-is a caller-injected no-op for the same reason (``catalog.commit_snapshot``'s
-own module docstring: this is one of the two judgement calls its design
-explicitly leaves to a caller outside the supervised job system); real
-concurrency safety here is ``commit_snapshot``'s own head compare-and-swap,
-not the job fence.
+**Honest attempt identity, not a borrowed fence (SEND-BACK 2026-09-14 item
+4).** This module used to reuse the BASE generation's ``attempt_id``/
+``fence`` verbatim in its own receipt -- a fence bypass: two different
+receipts sharing one attempt_id falsely claims this commit happened as part
+of that older, real job attempt. :func:`capture` now (a) holds
+``engine.v2.ops.recovery.SupervisorLock`` on ``root/supervisor.lock`` for
+the whole run, refusing ``RESOURCE_UNAVAILABLE`` typed if a running
+supervisor holds it -- the identical pattern ``engine.v2.ops.
+ledger_history_import.import_history`` uses for the same reason (a running
+supervisor is already the sole legitimate writer of this catalog) -- and (b)
+mints its OWN ``attempt_id``/``fence`` for ``_commit_generation``'s
+``commit_snapshot`` call, deterministic from this run's own ``receipt_id``
+(see :func:`_commit_generation`), never borrowed from ``old_receipt``.
+``data_import_receipts.attempt_id``/``fence`` (``engine/v2/data/schema.py``,
+``CREATE TABLE data_import_receipts``) carry no foreign key -- unlike
+``attempts.attempt_id`` -- so ``commit_snapshot`` itself accepts a freshly
+minted, self-describing identity with no need to fabricate a real
+``attempts``/``jobs``/``supervisor_epochs`` row (``engine/v2/ops/schema.py``
+migration v7's real FK chain, which only a genuine scheduler-submitted job
+attempt can honestly satisfy). ``fence_check`` stays a caller-injected
+no-op: real concurrency safety here is ``commit_snapshot``'s own head
+compare-and-swap (``expected_head_snapshot_id``/``expected_head_generation``,
+unchanged), not a job fence this non-supervised commit was never issued.
+
+**Reported, unresolved gap: ``attempt_input_bindings`` compatibility.**
+``engine.v2.ops.generation_binding.accepted_generation_refs`` (``engine/v2/
+ops/generation_binding.py:83-97``) resolves a barrier-only stage's accepted
+legacy read-set by looking up ``attempt_input_bindings`` (FK'd to
+``attempts.attempt_id``, ``engine/v2/ops/schema.py``) for the pinned
+generation receipt's OWN ``attempt_id``. The base generation's real,
+scheduler-issued attempt legitimately carries a ``legacy_manifest.json``
+binding there; this module's newly-minted, honest attempt_id never will
+(inserting one would need the exact fabricated-or-real-job-submission
+``attempts`` row this module deliberately does not create). Consequence: a
+LATER snapshot-mode plan whose ``pin_snapshot_inputs`` resolves its
+generation-pinned receipt to a price_history-only capture's own receipt
+(the newest committed receipt for that snapshot_id -- see
+``engine.v2.data.reference_catalog.committed_receipt_for_snapshot``) will
+find no manifest binding for that receipt's attempt_id, and any barrier-only
+stage in that plan (``legacy_finality``/``legacy_model_evidence``/
+``legacy_selfcheck``) refuses ``INPUT_CHANGED``/``generation_receipt_missing``
+at launch. Options, not decided here: (A) accept the gap -- a snapshot-mode
+plan with barrier stages cannot launch against a price_history-only-advanced
+head until a real snapshot/reference import next moves it; (B) fabricate a
+real ``attempts``/``jobs``/``supervisor_epochs`` row set for this CLI-driven
+commit (rejected: dishonest, and heavier than this task's scope); (C) route
+``ops price-history capture`` through real job submission (a much larger
+change, out of scope here); (D) change ``generation_binding.py``'s lookup to
+not require ``attempt_input_bindings`` (an architecture change to a file
+this task's brief asks to leave minimally touched). Reported per the
+coordinator's own instruction rather than picked silently.
 
 **Multi-retrieval capture (2026-09-14 addition).** The planned
 ``live=True`` re-downloader (``engine/data/fetch.py:104-113``, the same
@@ -62,6 +98,18 @@ hash) -- an already-captured ``source_hash`` is a no-op, and one older than
 the ticker's latest already-observed ``retrieved_at`` is refused exactly as
 a legitimate backdated capture would be, whether that ordering violation
 comes from a single run or across two.
+
+**px capture is not exclusive of Tier-1 (SEND-BACK 2026-09-14 fix).** A
+ticker with a px file used to capture ONLY the px entry, silently dropping
+every Tier-1 retrieval for the 2,934 of 2,975 tickers that have one --
+meaning no future ``ops price-refresh`` dated re-download would ever reach
+the table for almost every ticker. Legacy px precedence is a READ rule
+(the legacy scorer's own read behaviour, a known fact -- see ``price_history.
+py``'s module comment; the v2 read side applies no source_kind-specific
+rule at all, see :func:`engine.v2.data.price_history.resolve_pool`), never a
+capture rule: :func:`capture` now merges the px entry (if any) with EVERY
+Tier-1 entry into one ascending-``retrieved_at`` capture order per ticker,
+with anti-backdating across all of them (see :func:`_capture_ticker`).
 """
 from __future__ import annotations
 
@@ -85,6 +133,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, Clock, SystemClock, content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache
+from engine.v2.ops.recovery import SupervisorLock
 
 __all__ = ["FRAGMENT_COLUMNS", "capture"]
 
@@ -301,8 +350,44 @@ class _TickerOutcome:
     changed: bool
 
 
+def _parse_and_order_entries(ticker: str, entries: list[tuple[str, dict]],
+                             results: list[dict]) -> list[dict]:
+    """Parse every entry up front and sort ascending by ``(retrieved_at,
+    source_hash)`` -- only after parsing does a retrieved_at exist to sort
+    by, which is what makes ``_capture_ticker``'s single-pass, ascending-
+    order processing loop possible. A malformed source (e.g. a zero-byte px
+    csv, real-data dry-run 2026-09-14) appends its own ``error`` result to
+    ``results`` in place and is otherwise skipped -- never a reason to abort
+    the whole ticker or run.
+    """
+    parsed: list[dict] = []
+    for source_kind, entry in entries:
+        try:
+            frame, raw, retrieved_at = (_parse_px(entry) if source_kind == "legacy_px_csv"
+                                        else _parse_tier1(entry))
+        except Exception as exc:  # noqa: BLE001 -- see the docstring above.
+            results.append({"ticker": ticker, "outcome": "error",
+                           "error": getattr(exc, "code", type(exc).__name__)})
+            continue
+        source_hash = hashlib.sha256(raw).hexdigest()
+        parsed.append({"source_kind": source_kind, "frame": frame, "raw": raw,
+                       "retrieved_at": retrieved_at, "source_hash": source_hash})
+    parsed.sort(key=lambda item: (item["retrieved_at"], item["source_hash"]))
+    return parsed
+
+
 def _capture_ticker(conn: sqlite3.Connection, ticker: str, entries: list[tuple[str, dict]], *,
                     stored: pd.DataFrame, created_at: str) -> _TickerOutcome:
+    """Capture EVERY entry (px, undated Tier-1, every dated Tier-1) as its
+    OWN retrieval, in ascending ``retrieved_at`` order (ties on the retrieved
+    body's own sha256, see :func:`_parse_and_order_entries`), with
+    anti-backdating across all of them together -- never
+    px-precedence-at-capture-time (SEND-BACK 2026-09-14: "Legacy px
+    precedence is a READ rule, not a capture rule" -- there is no
+    source_kind-specific rule on the v2 read side either, per the user's
+    2026-09-14 decision; ``price_history.resolve_pool`` picks the single
+    latest-at-or-before-cutoff retrieval of ANY source).
+    """
     run_log = _prior_attempts(conn, ticker)
     results: list[dict] = []
     attempts: list[dict] = []
@@ -312,17 +397,11 @@ def _capture_ticker(conn: sqlite3.Connection, ticker: str, entries: list[tuple[s
         run_log.append(attempt)
         attempts.append(attempt)
 
-    for source_kind, entry in entries:
-        try:
-            frame, raw, retrieved_at = (_parse_px(entry) if source_kind == "legacy_px_csv"
-                                        else _parse_tier1(entry))
-        except Exception as exc:  # noqa: BLE001 -- a malformed source (e.g. a zero-byte px
-                                  # csv, real-data dry-run 2026-09-14) is this entry's own
-                                  # problem, never a reason to abort the ticker or the run.
-            results.append({"ticker": ticker, "outcome": "error",
-                           "error": getattr(exc, "code", type(exc).__name__)})
-            continue
-        source_hash = hashlib.sha256(raw).hexdigest()
+    parsed = _parse_and_order_entries(ticker, entries, results)
+
+    for item in parsed:
+        source_kind, frame, raw = item["source_kind"], item["frame"], item["raw"]
+        retrieved_at, source_hash = item["retrieved_at"], item["source_hash"]
         capture_id = _capture_id(ticker, source_hash, retrieved_at)
         if any(a["source_hash"] == source_hash and a["outcome"] in _SUCCESS_OUTCOMES
                for a in run_log):
@@ -395,24 +474,15 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
     head = conn.execute("SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
                         (scope,)).fetchone()
     if head is None:
-        # DEPENDENCY_FAILED, not SNAPSHOT_NOT_READY: that code is registered
-        # in DATA_FAILURE_CODES (engine.v2.data.errors), not ops's own
-        # FAILURE_CODES (engine.v2.contracts.operations) that engine.v2.ops.
-        # errors.fail validates against -- see engine/v2/ops/snapshot_promotion.py:351
-        # for a pre-existing (unrelated, out of this task's scope) instance of
-        # the same mismatch.
-        raise fail("DEPENDENCY_FAILED",
+        raise fail("SNAPSHOT_NOT_READY",
                   "scope has no existing head snapshot to add price_history to",
                   details={"scope": scope})
     old_snapshot_id, old_generation = head["snapshot_id"], head["generation"]
     old_receipt_id = reference_catalog.committed_receipt_for_snapshot(
         conn, scope=scope, snapshot_id=old_snapshot_id)
     if old_receipt_id is None:
-        raise fail("DEPENDENCY_FAILED", "scope's head snapshot has no committed import receipt",
+        raise fail("SNAPSHOT_NOT_READY", "scope's head snapshot has no committed import receipt",
                   details={"scope": scope, "snapshot_id": old_snapshot_id})
-    old_receipt = conn.execute(
-        "SELECT attempt_id, fence FROM data_import_receipts WHERE receipt_id = ?",
-        (old_receipt_id,)).fetchone()
 
     repository = Repository(conn, store)
     resolved = repository.resolve_full(old_snapshot_id)
@@ -445,6 +515,14 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
          "price_history_dataset_version_id": ph_manifest.dataset_version_ref.dataset_version_id,
          "result_manifest_hash": new_snapshot.manifest_hash})
     receipt_id = "receipt_ph_" + request_hash.removeprefix("sha256:")[:32]
+    # SEND-BACK 2026-09-14 item 4: this commit's OWN honest identity, never
+    # borrowed from ``old_receipt`` -- see the module docstring's "Honest
+    # attempt identity" section for why ``data_import_receipts.attempt_id``/
+    # ``fence`` can accept this (no FK, unlike ``attempts.attempt_id``).
+    attempt_id = "attempt_ph_" + content_hash(
+        {"kind": "price_history_generation_attempt", "receipt_id": receipt_id}
+    ).removeprefix("sha256:")[:32]
+    fence = 1
 
     def _record_references(c: sqlite3.Connection, rid: str) -> None:
         _copy_reference_inputs(c, old_receipt_id=old_receipt_id, new_receipt_id=rid)
@@ -455,7 +533,7 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
         objects=all_objects, records=all_records, manifests=tuple(table_manifests.values()),
         snapshot=new_snapshot, expected_head_snapshot_id=old_snapshot_id,
         expected_head_generation=old_generation, receipt_id=receipt_id,
-        attempt_id=old_receipt["attempt_id"], fence=old_receipt["fence"],
+        attempt_id=attempt_id, fence=fence,
         fence_check=lambda c: None, clock=clock, store=store,
         record_references=_record_references, audit_partitions=False)
 
@@ -466,14 +544,35 @@ def _commit_generation(conn: sqlite3.Connection, store: ArtifactStore, scope: st
 
 
 def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
-           dry_run: bool = False, clock: Clock | None = None) -> dict:
-    """Read both legacy sources (read-only), capture every not-yet-captured
-    retrieval per ticker (px file takes precedence over Tier-1; every
-    dated/undated Tier-1 ``history`` entry a ticker has, oldest first), and
-    -- unless ``dry_run`` -- commit one new snapshot generation under
-    ``scope`` carrying every other table's dataset version forward unchanged
-    alongside price_history's fresh one. Never touches ``source_root``'s bytes.
+           root: Path, dry_run: bool = False, clock: Clock | None = None) -> dict:
+    """Read both legacy sources (read-only), capture EVERY not-yet-captured
+    retrieval per ticker as its own row-version event -- the px file (if any)
+    AND every dated/undated Tier-1 ``history`` entry, merged into one
+    ascending-``retrieved_at`` order (px precedence is a read-time policy,
+    never a capture-time exclusion -- see the module docstring) -- and,
+    unless ``dry_run``, commit one new snapshot generation under ``scope``
+    carrying every other table's dataset version forward unchanged alongside
+    price_history's fresh one. Never touches ``source_root``'s bytes.
+
+    ``root`` (SEND-BACK 2026-09-14 item 4) is the operations root holding
+    ``supervisor.lock`` -- held for the whole run, exactly as
+    ``engine.v2.ops.ledger_history_import.import_history`` holds it, refusing
+    ``RESOURCE_UNAVAILABLE`` typed if a running supervisor already owns this
+    catalog rather than racing it. See the module docstring's "Honest attempt
+    identity" section for what this buys (and does not buy) beyond the
+    lock itself.
     """
+    lock = SupervisorLock(Path(root) / "supervisor.lock")
+    if not lock.acquire():
+        raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
+    try:
+        return _capture(conn, store, source_root, scope=scope, dry_run=dry_run, clock=clock)
+    finally:
+        lock.release()
+
+
+def _capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *, scope: str,
+            dry_run: bool, clock: Clock | None) -> dict:
     clock = clock or SystemClock()
     source_root = Path(source_root)
     px = _px_retrievals(source_root)
@@ -491,8 +590,10 @@ def capture(conn: sqlite3.Connection, store: ArtifactStore, source_root: Path, *
     disagreements: dict[str, int] = {}
 
     for ticker in tickers:
-        entries = ([("legacy_px_csv", px[ticker])] if ticker in px
-                  else [("tier1_fetch", e) for e in tier1.get(ticker, [])])
+        entries: list[tuple[str, dict]] = []
+        if ticker in px:
+            entries.append(("legacy_px_csv", px[ticker]))
+        entries.extend(("tier1_fetch", e) for e in tier1.get(ticker, []))
         stored = _read_fragment_rows(store, prior_by_ticker.get(ticker))
         outcome = _capture_ticker(conn, ticker, entries, stored=stored, created_at=created_at)
         results.extend(outcome.results)

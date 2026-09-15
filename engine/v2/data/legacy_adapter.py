@@ -307,7 +307,7 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
             # replay of pre-existing snapshot generations.
             legacy_materialization.materialize_price_series(
                 repository, request.snapshot_ref, dest_root, tickers=px_tickers,
-                observation_ceiling=legacy_materialization.PRICE_SERIES_MATERIALIZATION_CEILING)
+                observation_ceiling=request.observation_ceiling)
         legacy_materialization.lock_down(dest_root)
     except errors.DataError as exc:
         if exc.code not in _DEST_ROOT_SAFETY_CODES:

@@ -23,7 +23,12 @@ Two operations:
 * :func:`as_of_view` -- the design doc §3 as-of reconstruction for one ticker
   at one cutoff, decided once for the whole ticker (never per row/date) so a
   cutoff before the ticker's first capture cannot accidentally splice a later
-  capture's data in for one date and an earlier capture's for another.
+  capture's data in for one date and an earlier capture's for another. Built
+  on :func:`resolve_pool`, the shared "pick one retrieval to view the ticker
+  as of, then reconstruct every row up to it" implementation both
+  ``as_of_view`` and ``engine.v2.data.price_history_query._provenance_by_date``
+  use (SEND-BACK 2026-09-14 items 1 and 3 -- see :data:`_STORED_ROW_COLUMNS`'s
+  own comment for the single read rule).
 """
 from __future__ import annotations
 
@@ -39,12 +44,31 @@ __all__ = [
     "check_not_backdated",
     "diff_retrieval",
     "latest_state",
+    "resolve_pool",
 ]
 
 #: The three float columns a version's identity is compared on ("any value
 #: differs from that ticker/date's latest stored version").
 PRICE_HISTORY_VALUE_COLUMNS = ("close_adj", "close_raw", "high_raw")
 
+#: The one pinned read rule (user decision 2026-09-14, replacing an earlier
+#: two-policy design -- "let's not have a special rule for parity runs, it's
+#: potentially hiding issues... we need to run our real code"). Per ticker:
+#: select the latest retrieval of ANY source with ``retrieved_at <= cutoff``
+#: (else the ticker's globally earliest retrieval), then read the table as it
+#: stood at that retrieval's ``retrieved_at`` -- every version with
+#: ``retrieved_at`` at or before it, latest version per date, tombstones
+#: dropped. Never filtered by ``source_kind``: rows are diff-only, so an
+#: unchanged value across two different-source retrievals is stored only
+#: once, under whichever retrieval first saw it; filtering by source_kind
+#: would silently drop those shared rows and break after restatements.
+#:
+#: Known fact, not a special-cased behaviour: the legacy scorer read
+#: ``px_<T>.csv`` whenever it existed and never a fresher Tier-1 body
+#: (``panel.py:533``, falling back to Tier-1 only when px was missing --
+#: ``panel.py:444-474``). Parity against the 2026-09-10 legacy run may
+#: therefore differ on runup features for px tickers -- this module makes no
+#: attempt to reproduce that px-first behaviour.
 _STORED_ROW_COLUMNS = ("date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted",
                        "source_kind", "source_hash", "capture_id")
 
@@ -140,30 +164,48 @@ def diff_retrieval(stored_rows: pd.DataFrame, retrieval: pd.DataFrame, *, retrie
     return pd.DataFrame(new_rows, columns=list(_STORED_ROW_COLUMNS))
 
 
-def as_of_view(stored_rows: pd.DataFrame, cutoff: str) -> pd.DataFrame:
-    """Design doc §3: the reconstructed ``(date, close_adj, close_raw,
-    high_raw)`` series for one ticker at cutoff ``cutoff``, tombstones
-    dropped. The branch is chosen ONCE for the whole ticker, never per date:
+def _chosen_retrieved_at(stored_rows: pd.DataFrame, cutoff: str) -> str:
+    """The single ``retrieved_at`` value to view the ticker as of, at
+    ``cutoff``: the latest retrieval of ANY source at or before the cutoff,
+    else the ticker's globally earliest retrieval (user decision 2026-09-14
+    -- one rule, no source_kind filter, no policy choice)."""
+    eligible = stored_rows.loc[stored_rows["retrieved_at"] <= cutoff, "retrieved_at"]
+    if len(eligible):
+        return eligible.max()
+    return stored_rows["retrieved_at"].min()
 
-    * some stored version has ``retrieved_at <= cutoff``: for every date, the
-      latest such version wins (a forward-fill reconstruction -- exactly what
-      a full re-parse at that moment would have read, since a "full history
-      only" capture only ever appends a row for a date when it changed).
-    * otherwise (``cutoff`` predates the ticker's first-ever capture): the
-      ticker's globally earliest ``retrieved_at`` supplies every date it
-      touched -- never a per-date earliest, which could reach into a LATER
-      capture for a date that capture happened to also touch, attributing a
-      value to a cutoff before it was ever observed.
+
+def resolve_pool(stored_rows: pd.DataFrame, cutoff: str) -> pd.DataFrame:
+    """Design doc §3 as-of reconstruction: every stored column (tombstones,
+    ``retrieved_at``, ``source_hash`` included) for the view ``cutoff``
+    resolves to -- the ONE reconstruction both :func:`as_of_view` (drops
+    tombstones and the extra columns) and
+    ``price_history_query._provenance_by_date`` (keeps them, for per-date
+    provenance) share.
+
+    First, :func:`_chosen_retrieved_at` picks ONE ``retrieved_at`` value --
+    the latest retrieval of any source at or before ``cutoff``, else the
+    earliest. Then every row with ``retrieved_at`` at or before that chosen
+    value is included, latest version per date winning -- a forward-fill
+    reconstruction across ALL sources. Never source_kind-filtered: rows are
+    diff-only, so an unchanged value across two different-source retrievals
+    is stored only once, under whichever retrieval first saw it; filtering by
+    source_kind would silently drop it.
     """
     if stored_rows.empty:
-        return stored_rows.reindex(columns=["date", "close_adj", "close_raw", "high_raw"])
-    eligible = stored_rows[stored_rows["retrieved_at"] <= cutoff]
-    if len(eligible):
-        pool = eligible
-    else:
-        earliest = stored_rows["retrieved_at"].min()
-        pool = stored_rows[stored_rows["retrieved_at"] == earliest]
-    idx = pool.groupby("date")["retrieved_at"].idxmax()
-    view = pool.loc[idx]
-    view = view[~view["deleted"].astype(bool)].sort_values("date").reset_index(drop=True)
+        return stored_rows.reindex(columns=_STORED_ROW_COLUMNS)
+    chosen = _chosen_retrieved_at(stored_rows, cutoff)
+    eligible = stored_rows[stored_rows["retrieved_at"] <= chosen]
+    idx = eligible.groupby("date")["retrieved_at"].idxmax()
+    return eligible.loc[idx].reset_index(drop=True)
+
+
+def as_of_view(stored_rows: pd.DataFrame, cutoff: str) -> pd.DataFrame:
+    """The reconstructed ``(date, close_adj, close_raw, high_raw)`` series
+    for one ticker at cutoff ``cutoff`` (design doc §3), tombstones dropped.
+    See :func:`resolve_pool` for the shared reconstruction; this just drops
+    tombstones and the provenance columns.
+    """
+    pool = resolve_pool(stored_rows, cutoff)
+    view = pool[~pool["deleted"].astype(bool)].sort_values("date").reset_index(drop=True)
     return view[["date", "close_adj", "close_raw", "high_raw"]]

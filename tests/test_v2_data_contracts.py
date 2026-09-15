@@ -145,7 +145,8 @@ def _build_samples() -> dict[str, object]:
         evidence_scope={"tickers": ["AAPL", "MSFT"], "years": [2024, 2025, 2026]},
         table_queries={"data/curated/securities/2026.parquet": dq},
         registry_and_model_refs=("registry_1",), calendar_refs=("cal.v1",),
-        legacy_layout_version="legacy_layout.v1", expected_population={"securities": 100})
+        legacy_layout_version="legacy_layout.v1", expected_population={"securities": 100},
+        observation_ceiling="2026-09-10T23:59:59.000000Z")
     return {
         "ColumnContract": columns[0], "TableContract": tc, "TableContractRef": tcr,
         "ObjectRef": obj, "FragmentRef": frag_ref, "FragmentRecord": frag,

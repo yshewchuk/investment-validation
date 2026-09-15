@@ -83,26 +83,27 @@ def scratch_estimate(repository, store, request) -> int:
     return total
 
 
-def _request(repository, store, snapshot, pinned, scopes, ceilings):
+def _request(repository, store, snapshot, pinned, scopes, ceilings, observation_ceiling):
     return build_materialization_request(
         repository, store, snapshot, pinned["legacy_snapshot_object_ref"],
         direct_scope=scopes["direct"], evidence_scope=scopes["evidence"],
         registry_and_model_refs=pinned["registry_and_model_refs"],
-        calendar_refs=pinned["calendar_refs"], expected_population=ceilings)
+        calendar_refs=pinned["calendar_refs"], expected_population=ceilings,
+        observation_ceiling=observation_ceiling)
 
 
-def _build(repository, store, snapshot, pinned, scopes):
+def _build(repository, store, snapshot, pinned, scopes, observation_ceiling):
     """Two passes: the per-table row ceilings come from the first pass's own queries."""
-    first = _request(repository, store, snapshot, pinned, scopes, {})
+    first = _request(repository, store, snapshot, pinned, scopes, {}, observation_ceiling)
     ceilings = {name: query.max_result_rows for name, query in first.table_queries.items()}
-    request = _request(repository, store, snapshot, pinned, scopes, ceilings)
+    request = _request(repository, store, snapshot, pinned, scopes, ceilings, observation_ceiling)
     if not read_plan_complete(request, repository):
         raise fail("INVALID_REQUEST", "snapshot read plan is not complete for the planned scope")
     return request
 
 
 def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
-                        expected_population, clock) -> dict:
+                        expected_population, clock, session: str) -> dict:
     """Resolve ``scope``'s head once and publish the request built on that ref,
     with the reference inputs the catalog recorded for that exact snapshot.
 
@@ -112,9 +113,20 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     from ``expected_population``'s own tickers. A watchlist not fully covered
     by the evidence universe is refused: scoring can never need analog/feature
     context for a ticker it has no evidence plan for.
+
+    ``session`` (SEND-BACK 2026-09-14 item 2) is the nightly plan's own
+    session date (``args.as_of`` at the CLI) -- this job's decision cutoff.
+    Pinned into the request as ``observation_ceiling =
+    f"{session}T23:59:59.000000Z"`` (RFC 3339 UTC with microseconds, per
+    ``engine.v2.foundation.clock.parse_timestamp``) so materialization can
+    never see a ``price_history`` retrieval made after this job's own
+    cutoff, whatever a later capture adds to the pinned snapshot version.
     """
     if not tickers or not expected_population:
         raise fail("INVALID_REQUEST", "snapshot input mode needs planned tickers and population")
+    if not session:
+        raise fail("INVALID_REQUEST", "snapshot input mode needs the plan's session date")
+    observation_ceiling = f"{session}T23:59:59.000000Z"
     # P2-C03: the resolved session is unknown at plan time — a walk-back
     # (``engine.data.finality.resolve_final_session``, up to 15 trading
     # sessions back) can cross a year boundary a requested-year-only range
@@ -142,7 +154,7 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         pinned = pinned_materialization_refs(
             reference_inputs_for_snapshot(conn, scope=scope, snapshot_id=snapshot.snapshot_id))
         repository = Repository(conn, store)
-        request = _build(repository, store, snapshot, pinned, scopes)
+        request = _build(repository, store, snapshot, pinned, scopes, observation_ceiling)
         estimate = scratch_estimate(repository, store, request)
     except DataError as exc:
         raise fail("INPUT_CHANGED", "snapshot inputs cannot be pinned",

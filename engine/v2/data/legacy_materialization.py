@@ -203,7 +203,6 @@ __all__ = [
     "LEGACY_LAYOUT_VERSION",
     "LEGACY_SCORE_READ_PLAN_V1",
     "PRICE_HISTORY_TABLE_NAME",
-    "PRICE_SERIES_MATERIALIZATION_CEILING",
     "SCORE_READ_PLAN_TABLES",
     "TABLE_OUTPUT_KIND",
     "MaterializedTree",
@@ -225,12 +224,6 @@ __all__ = [
 ]
 
 LEGACY_LAYOUT_VERSION = "legacy_curated_layout.v1"
-
-#: :func:`materialize_price_series`'s ``observation_ceiling`` default -- see
-#: that function's docstring: a pinned ``price_history`` dataset version is
-#: immutable once committed, so a maximal ceiling safely means "everything
-#: this snapshot's own pin holds," with no separate per-job cutoff needed.
-PRICE_SERIES_MATERIALIZATION_CEILING = "9999-12-31T23:59:59Z"
 
 #: Tables a legacy score batch actually reads, in the order they are written.
 #: ``"whole_table"`` means the loader reads the table unconditionally, with no
@@ -503,7 +496,7 @@ def _verify_pinned_ref_exists(store, ref: str) -> None:
 def build_materialization_request(
     repository, store, snapshot_ref: SnapshotRef, legacy_snapshot_object_ref,
     *, direct_scope: dict, evidence_scope: dict, registry_and_model_refs, calendar_refs,
-    expected_population: dict,
+    expected_population: dict, observation_ceiling: str,
 ) -> LegacyMaterializationRequest:
     """One ``DataQuery`` per :data:`SCORE_READ_PLAN_TABLES` entry, hashed as a
     Command (decision 2): ``request_hash`` covers everything except itself.
@@ -516,6 +509,13 @@ def build_materialization_request(
     only a live instance can answer. Publishing the registry/model/calendar
     bytes those refs name is NOT this function's job (see this task's
     report for who is expected to: a snapshot/reference-data import job).
+
+    ``observation_ceiling`` (SEND-BACK 2026-09-14 item 2) is the job's own
+    decision cutoff, pinned into the request at plan time so
+    :func:`materialize_price_series` can never see a ``price_history``
+    retrieval made after this job's cutoff, even once a later capture sits in
+    the same pinned snapshot version -- replaces the old maximal-sentinel
+    ``PRICE_SERIES_MATERIALIZATION_CEILING`` constant, deleted.
     """
     for ref in (*registry_and_model_refs, *calendar_refs):
         _verify_pinned_ref_exists(store, ref)
@@ -526,7 +526,8 @@ def build_materialization_request(
         legacy_snapshot_object_ref=legacy_snapshot_object_ref, direct_scope=dict(direct_scope),
         evidence_scope=dict(evidence_scope), table_queries=table_queries,
         registry_and_model_refs=tuple(registry_and_model_refs), calendar_refs=tuple(calendar_refs),
-        legacy_layout_version=LEGACY_LAYOUT_VERSION, expected_population=dict(expected_population))
+        legacy_layout_version=LEGACY_LAYOUT_VERSION, expected_population=dict(expected_population),
+        observation_ceiling=observation_ceiling)
     doc = to_document(placeholder)
     del doc["request_hash"]
     return dataclasses.replace(placeholder, request_hash=content_hash(doc))
