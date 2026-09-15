@@ -154,7 +154,15 @@ def _validate_evidence(receipts, source, actual, expected, finality, findings):
     if not _same(receipts.get("coverage", {}).get("observed_population"), expected):
         _add(findings, "evidence.coverage.observed_population", "mismatch")
     _validate_finality_receipt(receipts.get("finality", {}), source, finality, findings)
-    if not _same(receipts.get("selection", {}).get("eligible_candidate_keys"), actual):
+    # Canonical order for every population-derived list in this contract is
+    # sorted-by-population-key (decision_replay.decision_population sorts
+    # its rows that way, and decision_evidence.derive's ``expected`` — what
+    # coverage.observed_population and replay.source_rows both carry — is
+    # built straight from that sorted population). ``candidates`` carries no
+    # such ordering guarantee (it is score-row order, whatever the legacy
+    # adapter emitted), so ``actual`` is sorted here before the comparison —
+    # content, not list order, is what this check is refusing a mismatch on.
+    if not _same(receipts.get("selection", {}).get("eligible_candidate_keys"), sorted(actual)):
         _add(findings, "evidence.selection.eligible_candidate_keys", "mismatch")
     _validate_replay(receipts.get("replay", {}), source, expected, findings)
 
