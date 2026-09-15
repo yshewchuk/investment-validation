@@ -6,6 +6,7 @@ import base64
 
 import pytest
 
+from engine.ledger import SCHEMA_VERSION as _CURRENT_SCHEMA_VERSION
 from engine.v2.ledger.decisions import DecisionConflict, import_lines, rows, set_authority
 from engine.v2.ledger.export import export_generation
 from engine.v2.contracts import JobSpec, SubmitRequest
@@ -127,7 +128,11 @@ def test_review_settlement_coordinator_retries_once_and_stale_fence_writes_nothi
         from engine.v2.ledger.decisions import insert
         insert(conn, logical_key="prediction-1", decision_id="prediction:prediction-1",
                payload={"row_id": "prediction-1", "ticker": "FAKE", "strategy": "TWIN-P",
-                        "event_date": "2026-09-09", "settlement": {"policy": "fixed"}},
+                        "event_date": "2026-09-09", "settlement": {"policy": "fixed"},
+                        # current-schema row: this test exercises idempotent
+                        # commit/retry, not the grandfathered finality-proof
+                        # rule, so it keeps legacy's own exit_finality path.
+                        "schema_version": _CURRENT_SCHEMA_VERSION},
                purpose="shadow", kind="prediction", validations={}, created_at=STAMP)
     claim = _settlement_claim(conn, clock, supervisor)
     unresolved = _outcome("unresolvable", "2026-09-10T23:00:00+00:00") | {
@@ -312,3 +317,181 @@ def test_settlement_missing_prediction_still_refuses(tmp_path):
         with transaction(conn):
             import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
     assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0
+
+
+# --------------------------------------------------------------------------
+# 2026-09-15: a grandfathered resolved settlement (recorded prediction
+# schema_version < SCHEMA_VERSION, exactly engine.ledger.score_outcomes's
+# own rule) settles on v2's OWN finality proof -- the recorded exit date at
+# or before the settlement's finality-resolved session -- instead of
+# legacy's exit_finality, which score_outcomes never computes for these
+# rows (real shadow nightly attempt 12: all 207 resolved rows had
+# exit_finality: None with schema_version 2 < SCHEMA_VERSION 3). A
+# current-schema row keeps the original, unweakened check. See
+# engine/v2/ops/decision_commit.py _validate_settlement_state.
+# --------------------------------------------------------------------------
+
+# _settlement_claim's job parameters pin session="2026-09-13" (no explicit
+# session= is passed to import_settlement_candidates_in_transaction below,
+# so that is the effective finality-resolved session throughout).
+
+
+def _seed_prediction_ex(conn, row_id, event_date, *, ticker="FAKE", strategy="TWIN-P",
+                        schema_version=None, exit_date=None):
+    from engine.v2.ledger.decisions import insert
+    payload = {"row_id": row_id, "ticker": ticker, "strategy": strategy,
+              "event_date": event_date, "settlement": {"policy": "fixed"}}
+    if schema_version is not None:
+        payload["schema_version"] = schema_version
+    if exit_date is not None:
+        payload["structure"] = {"exit_date": exit_date}
+    with transaction(conn):
+        insert(conn, logical_key=row_id, decision_id="prediction:" + row_id, payload=payload,
+              purpose="shadow", kind="prediction", validations={}, created_at=STAMP)
+
+
+def _resolved_candidate(row_id, event_date, *, ticker="FAKE", strategy="TWIN-P",
+                        resolved_at="2026-09-12T00:30:00+00:00", exit_finality=None):
+    row = {"row_id": row_id, "ticker": ticker, "strategy": strategy, "event_date": event_date,
+          "settlement": {"policy": "fixed"}, "status": "resolved", "resolved_at": resolved_at,
+          "settlement_source": "orats_quote_simulation", "exit_source": "chain"}
+    if exit_finality is not None:
+        row["exit_finality"] = exit_finality
+    return {"row": row, "original_b64": base64.b64encode(_raw(row)).decode("ascii")}
+
+
+def test_settlement_grandfathered_resolved_row_admits_via_v2_finality_session(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-gf-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=2, exit_date="2026-09-09")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_resolved_candidate(row_id, "2026-09-09")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    admitted = []
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, claim, ref, captured, clock=clock, on_admitted=lambda row_id, proof: admitted.append((row_id, proof)))
+    assert len(receipts) == 1
+    assert admitted == [(row_id, "v2_finality_session")]
+    assert len(rows(conn, kind="outcome")) == 1
+
+
+def test_settlement_grandfathered_resolved_row_exit_after_session_refuses(tmp_path):
+    from engine.v2.ops.errors import OpsError
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-gf-2"
+    # exit date is AFTER the settlement's finality-resolved session (2026-09-13).
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=2, exit_date="2026-09-20")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_resolved_candidate(row_id, "2026-09-09")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with pytest.raises(OpsError, match="resolved settlement lacks recorded exit evidence"):
+        with transaction(conn):
+            import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 0
+
+
+def test_settlement_grandfathered_resolved_row_missing_exit_date_refuses(tmp_path):
+    from engine.v2.ops.errors import OpsError
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-gf-3"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=2)  # no exit_date at all
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_resolved_candidate(row_id, "2026-09-09")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with pytest.raises(OpsError, match="resolved settlement lacks recorded exit evidence"):
+        with transaction(conn):
+            import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 0
+
+
+def test_settlement_current_schema_resolved_row_without_exit_finality_still_refuses(tmp_path):
+    from engine.v2.ops.errors import OpsError
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-cur-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=_CURRENT_SCHEMA_VERSION,
+                        exit_date="2026-09-09")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_resolved_candidate(row_id, "2026-09-09")]  # no exit_finality
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with pytest.raises(OpsError, match="resolved settlement lacks recorded exit evidence"):
+        with transaction(conn):
+            import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 0
+
+
+def test_settlement_current_schema_resolved_row_with_is_final_true_commits(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-cur-2"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=_CURRENT_SCHEMA_VERSION,
+                        exit_date="2026-09-09")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_resolved_candidate(row_id, "2026-09-09", exit_finality={"is_final": True})]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    admitted = []
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, claim, ref, captured, clock=clock, on_admitted=lambda row_id, proof: admitted.append((row_id, proof)))
+    assert len(receipts) == 1
+    assert admitted == [(row_id, "legacy_exit_finality")]
+
+
+def test_settlement_unresolvable_rows_are_unaffected(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-unres-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09")  # no schema_version, no exit_date at all
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_settlement_candidate(row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    admitted = []
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, claim, ref, captured, clock=clock, on_admitted=lambda row_id, proof: admitted.append((row_id, proof)))
+    assert len(receipts) == 1
+    assert admitted == [(row_id, "unresolvable")]
+
+
+def test_settlement_grandfathered_admission_retry_is_idempotent(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-gf-retry"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=2, exit_date="2026-09-09")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_resolved_candidate(row_id, "2026-09-09")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        first = import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert [item["decision_id"] for item in first] == [item["decision_id"] for item in repeated]
+    assert len(rows(conn, kind="outcome")) == 1

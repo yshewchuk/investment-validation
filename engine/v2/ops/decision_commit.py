@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime
 
 from engine.v2.foundation import content_hash, format_timestamp
 from engine.v2.ledger.decisions import DecisionConflict, import_lines, insert, record_divergence
@@ -250,7 +251,7 @@ _SETTLEMENT_DIVERGENCE_SCOPE = "legacy_settlement"
 
 
 def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows, *, clock,
-                                                 session=None, on_divergence=None):
+                                                 session=None, on_divergence=None, on_admitted=None):
     """Import only rows captured from the isolated legacy append, under the active fence.
 
     ``session`` is the finality-resolved date the settlement worker actually
@@ -258,6 +259,8 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
     ``settlement.json`` document (``_action_settlement``'s own ``session``
     field). It defaults to the job's REQUESTED ``session`` parameter for a
     caller that predates that field (no walk-back, same value either way).
+    That resolved value is also v2's own finality proof for a grandfathered
+    resolved line -- see ``_validate_settlement_state``.
 
     A settlement line that CONFLICTS with its recorded prediction on a
     contract field (``ticker``/``strategy``/``event_date``/``settlement``) is
@@ -278,14 +281,22 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
     per-job divergence count/row_id list on the job's own output (see
     ``engine.v2.ops.supervisor``'s ``legacy_settlement`` effect) without this
     function's return value (the committed ``receipts``, unchanged) having
-    to carry it.
+    to carry it. ``on_admitted``, when given, is called for every line that
+    passes validation (including unresolvable ones) with
+    ``(row_id, proof_kind)`` -- ``proof_kind`` is ``"unresolvable"``,
+    ``"legacy_exit_finality"`` or ``"v2_finality_session"`` (see
+    ``_validate_settlement_state``) -- the caller's hook for a per-proof-kind
+    admission count on the job's own output, without altering the committed
+    original bytes.
     """
     if not conn.in_transaction:
         raise ValueError("settlement import requires the attempt transaction")
     verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
+    effective_session = session or claim.spec.parameters["session"]
     source_lines = []
     for item in rows:
-        line = _settlement_line(conn, item, clock=clock, on_divergence=on_divergence)
+        line = _settlement_line(conn, item, session=effective_session, clock=clock,
+                                on_divergence=on_divergence, on_admitted=on_admitted)
         if line is not None:
             source_lines.append(line)
     try:
@@ -299,12 +310,11 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
     scope = _job_effect_scope(claim)
     release_key = content_hash(["settlement", scope, candidate_ref.content_hash])
     enqueue(conn, "export", release_key, {"settlement_candidate": candidate_ref.content_hash})
-    watermark(conn, "nightly", scope, "settlement",
-              session or claim.spec.parameters["session"], release_key, clock=clock)
+    watermark(conn, "nightly", scope, "settlement", effective_session, release_key, clock=clock)
     return receipts
 
 
-def _settlement_line(conn, item, *, clock, on_divergence=None):
+def _settlement_line(conn, item, *, session, clock, on_divergence=None, on_admitted=None):
     """Validate one captured settlement line; return its original bytes to
     import, or ``None`` when it diverged from the recorded prediction (a
     divergence row was recorded instead, and the line must not be
@@ -335,7 +345,9 @@ def _settlement_line(conn, item, *, clock, on_divergence=None):
         if on_divergence is not None:
             on_divergence(row_id)
         return None
-    _validate_settlement_state(payload)
+    proof = _validate_settlement_state(payload, recorded=recorded, session=session)
+    if on_admitted is not None:
+        on_admitted(row_id, proof)
     return original
 
 
@@ -370,11 +382,81 @@ def _record_settlement_divergence(conn, *, decision_id, row_id, field, payload, 
         created_at=format_timestamp(clock.now()))
 
 
-def _validate_settlement_state(payload):
+def _stamp_date(value):
+    """A bare ``date`` for a date-or-datetime string, or ``None`` -- used
+    only to compare a recorded exit date against a settlement session, never
+    to reconstruct a timestamp."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_settlement_state(payload, *, recorded, session):
+    """Refuse a settlement line without a valid observation state, or a
+    ``resolved`` one without exit evidence; return the proof kind that
+    admitted it (``"unresolvable"``, ``"legacy_exit_finality"`` or
+    ``"v2_finality_session"``).
+
+    ``engine.ledger.score_outcomes`` computes ``exit_finality`` (legacy's own
+    proof, a ``finality_fn`` result) ONLY for a row whose RECORDED prediction
+    has ``schema_version >= SCHEMA_VERSION`` and a recorded exit date;
+    "Legacy rows predate this proof and keep their historical retry
+    behavior" (``engine/ledger.py`` ``score_outcomes``) -- every such
+    grandfathered row settles with ``exit_finality: None`` by construction,
+    never because evidence is missing. Refusing those on ``exit_finality``
+    (real shadow nightly attempt 12, job ``legacy_settlement``, attempt
+    ``att_99875e127ec1b3a446372e31e1ea4521``: all 207 resolved rows,
+    ``schema_version`` 2 < ``SCHEMA_VERSION`` 3) is a v2-side gap, not a
+    legacy defect -- legacy's own finality proof was never computed for
+    these rows in the first place.
+
+    v2 supplies its OWN proof for exactly that grandfathered case instead of
+    weakening the check: the RECORDED prediction's exit date (never the
+    settlement candidate's own ``schema_version``, which ``score_outcomes``
+    always stamps as the CURRENT ``SCHEMA_VERSION`` regardless of the source
+    row's vintage) must fall on or before ``session`` -- the settlement's own
+    finality-resolved session, the same date ``import_settlement_candidates_in_transaction``
+    already receives off the bound ``settlement.json`` document. A session
+    this settlement was scored ``through`` cannot itself be non-final, so an
+    exit on or before it is exactly as final as legacy's own
+    ``finality_fn`` proof would have found -- just derived from data v2
+    already holds instead of a value legacy never computed. A current-schema
+    row (``schema_version >= SCHEMA_VERSION``) keeps the unweakened original
+    check: legacy's own ``exit_finality.is_final is True`` is still
+    required, exactly as before.
+    """
     if payload.get("status") not in ("resolved", "unresolvable") or not payload.get("resolved_at"):
         raise fail("VALIDATION_FAILED", "settlement has no valid observation state")
-    if payload["status"] == "resolved" and (
-            not payload.get("settlement_source") or not payload.get("exit_source")
-            or not isinstance(payload.get("exit_finality"), dict)
-            or payload["exit_finality"].get("is_final") is not True):
+    if payload["status"] != "resolved":
+        return "unresolvable"
+    if not payload.get("settlement_source") or not payload.get("exit_source"):
         raise fail("VALIDATION_FAILED", "resolved settlement lacks recorded exit evidence")
+    from engine.v2.ops.legacy_adapter import legacy_ledger_schema_version
+
+    if int((recorded or {}).get("schema_version") or 0) >= legacy_ledger_schema_version():
+        return _require_legacy_exit_finality(payload)
+    return _require_v2_finality_session(recorded, session)
+
+
+def _require_legacy_exit_finality(payload):
+    """Current-schema proof, unchanged: legacy's own ``exit_finality`` must
+    say the exit session is final."""
+    finality = payload.get("exit_finality")
+    if not isinstance(finality, dict) or finality.get("is_final") is not True:
+        raise fail("VALIDATION_FAILED", "resolved settlement lacks recorded exit evidence")
+    return "legacy_exit_finality"
+
+
+def _require_v2_finality_session(recorded, session):
+    """Grandfathered proof: the RECORDED prediction's own exit date, at or
+    before the settlement's finality-resolved ``session``."""
+    structure = (recorded or {}).get("structure") or {}
+    score = (recorded or {}).get("score") or {}
+    exit_date = _stamp_date(structure.get("exit_date") or score.get("exit_date"))
+    session_date = _stamp_date(session)
+    if exit_date is None or session_date is None or exit_date > session_date:
+        raise fail("VALIDATION_FAILED", "resolved settlement lacks recorded exit evidence")
+    return "v2_finality_session"

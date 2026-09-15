@@ -472,6 +472,22 @@ def _action_settlement(parameters, root):
         "session": session, "requested_session": parameters["session"]})
 
 
+def legacy_ledger_schema_version() -> int:
+    """The legacy ledger's own schema version constant
+    (``engine.ledger.SCHEMA_VERSION``), bridged through the one declared
+    adapter module for ``engine.v2.ops`` (§4.2 rule 2 -- every v2 -> legacy
+    dependency is confined to this module, never imported directly from
+    another ``engine.v2.ops`` module).
+
+    Used to decide whether a recorded prediction is "current-schema" or
+    "grandfathered" for settlement finality-proof purposes -- see
+    ``engine.v2.ops.decision_commit._validate_settlement_state``.
+    """
+    from engine.ledger import SCHEMA_VERSION
+
+    return SCHEMA_VERSION
+
+
 def _action_model_evidence(parameters, root):
     """P2-C08: preserve v1's degraded/stale state as data, not an exception.
 

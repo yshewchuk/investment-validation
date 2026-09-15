@@ -677,20 +677,34 @@ class Service:
         occurrence = session or claim.spec.parameters["session"]
 
         def _commit(conn):
-            # Surface any divergence on the job's own output -- row_ids
-            # only, never payloads -- so an operator sees it without reading
-            # the ledger directly. Only written when at least one divergence
-            # was recorded, so a normal (non-diverging) settlement's outputs
-            # are unchanged.
+            # Surface any divergence, and which proof kind admitted each
+            # resolved line, on the job's own output -- row_ids and counts
+            # only, never payloads -- so an operator sees both without
+            # reading the ledger directly. ``proof_counts`` distinguishes a
+            # grandfathered resolved line admitted on v2's own exit-date
+            # proof ("v2_finality_session") from one admitted on legacy's
+            # own ``exit_finality`` ("legacy_exit_finality") -- see
+            # ``decision_commit._validate_settlement_state``. Only written
+            # when there is something to report (a divergence, or at least
+            # one resolved admission), so a purely-unresolvable settlement's
+            # outputs are unchanged.
             diverged_row_ids = []
+            proof_counts = {}
+
+            def _record_proof(row_id, proof):
+                proof_counts[proof] = proof_counts.get(proof, 0) + 1
+
             import_settlement_candidates_in_transaction(
                 conn, claim, candidate_ref, rows, clock=self.clock, session=session,
-                on_divergence=diverged_row_ids.append)
-            if diverged_row_ids:
+                on_divergence=diverged_row_ids.append, on_admitted=_record_proof)
+            resolved_admitted = (proof_counts.get("legacy_exit_finality", 0)
+                                + proof_counts.get("v2_finality_session", 0))
+            if diverged_row_ids or resolved_admitted:
                 row_ids = sorted(str(row_id) for row_id in diverged_row_ids)
                 document_out = {"schema_version": "settlement_commit_receipt.v1.0",
                                 "scope": effect_scope(claim), "session": occurrence,
-                                "settlement_divergences": len(row_ids), "row_ids": row_ids}
+                                "settlement_divergences": len(row_ids), "row_ids": row_ids,
+                                "proof_counts": proof_counts}
                 ref = self.store.publish_bytes(
                     json.dumps(document_out, sort_keys=True).encode(),
                     schema_ref="settlement_commit_receipt.v1.0")
