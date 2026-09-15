@@ -12,6 +12,7 @@ pre-seeded scoped watermark -- mirroring the patterns in
 from __future__ import annotations
 
 import json
+import tarfile
 from pathlib import Path
 
 import pandas as pd
@@ -26,7 +27,12 @@ from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.effects_graph import ledger_export_effect
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
-from engine.v2.ops.legacy_adapter import _action_decision_replay, _action_score
+from engine.v2.ops.legacy_adapter import (
+    _action_decision_replay,
+    _action_render,
+    _action_score,
+    _action_selfcheck,
+)
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan, effect_scope_for
 from engine.v2.ops.plans import nightly_plan
@@ -254,6 +260,176 @@ def test_action_decision_replay_loads_context_tickers_not_the_watchlist(monkeypa
     assert result["hash"]
     assert calls["context_tickers"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
     assert calls["score_tickers"] == ["AAA"]
+
+
+# --------------------------------------------------------------------------
+# render/selfcheck: external review finding (2026-09-14) -- both previously
+# built their Scorer/FeatureContext off the bare watchlist ("tickers"),
+# never "context_tickers", unlike score/decision_replay above. A subset
+# run's valid score could then fail render/self-check replay and block
+# publication. Neither action calls score_calendar, so context is captured
+# straight off FeatureContext.load rather than via ``_stub_scoring``.
+# --------------------------------------------------------------------------
+
+
+def _stub_context_load(monkeypatch):
+    import engine.features as features_module
+    import engine.score as score_module
+
+    calls = {}
+
+    class _FakeContext:
+        panel = None
+
+    class _FakeScorer:
+        def __init__(self, context):
+            self.context = context
+            self.registry = None
+            self.trades = None
+            self.analog_entry_coverage = 1.0
+
+    def fake_load(tickers, years):
+        calls["context_tickers"] = sorted(tickers)
+        return _FakeContext()
+
+    monkeypatch.setattr(features_module.FeatureContext, "load", staticmethod(fake_load))
+    monkeypatch.setattr(score_module, "Scorer", _FakeScorer)
+    return calls
+
+
+def _stub_render(monkeypatch):
+    import engine.dashboard.render as render_module
+
+    monkeypatch.setattr(render_module, "build_meta", lambda *a, **k: {})
+    monkeypatch.setattr(render_module, "build_health", lambda *a, **k: {})
+
+    def fake_render_bundle(scores, out, **kwargs):
+        Path(out).mkdir(parents=True, exist_ok=True)
+        return {"ok": True}
+
+    monkeypatch.setattr(render_module, "render_bundle", fake_render_bundle)
+    monkeypatch.setattr(render_module, "freshness_summary", lambda as_of: {})
+    monkeypatch.setattr(render_module, "quota_state", lambda: {})
+    monkeypatch.setattr(render_module, "size_model_mae_from_ledger", lambda panel: {})
+
+
+def _render_root(tmp_path):
+    root = tmp_path / "render"
+    root.mkdir()
+    row = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": SESSION,
+          "as_of": SESSION, "fill": 0.5}
+    (root / "score.json").write_text(json.dumps({"rows": [row], "ladder": []}))
+    (root / "finality.json").write_text(
+        json.dumps({"date": SESSION, "is_final": True}))
+    (root / "model_evidence.json").write_text(json.dumps({"models": {}}))
+    with tarfile.open(root / "ledger_generation.tar", "w"):
+        pass
+    return root
+
+
+def _selfcheck_root(tmp_path):
+    root = tmp_path / "selfcheck"
+    root.mkdir()
+    bundle_src = tmp_path / "bundle_src"
+    bundle_src.mkdir()
+    with tarfile.open(root / "bundle.tar", "w") as archive:
+        archive.add(bundle_src, arcname="bundle")
+    return root
+
+
+def test_action_render_loads_context_tickers_not_the_watchlist(monkeypatch, tmp_path):
+    calls = _stub_context_load(monkeypatch)
+    _stub_render(monkeypatch)
+    root = _render_root(tmp_path)
+
+    result = _action_render(
+        {"session": SESSION, "tickers": ["AAA"],
+         "context_tickers": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+         "year_start": 2024, "year_end": 2026}, root)
+    assert result["path"] == "bundle.tar"
+    assert calls["context_tickers"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+
+
+def test_action_render_refuses_a_plan_missing_context_tickers(tmp_path):
+    root = _render_root(tmp_path)
+    with pytest.raises(OpsError) as err:
+        _action_render({"session": SESSION, "tickers": ["AAA"],
+                        "year_start": 2024, "year_end": 2026}, root)
+    assert err.value.problem.code == "VALIDATION_FAILED"
+
+
+def test_action_selfcheck_loads_context_tickers_not_the_watchlist(monkeypatch, tmp_path):
+    calls = _stub_context_load(monkeypatch)
+    import engine.dashboard.selfcheck as selfcheck_module
+
+    class _FakeReport:
+        def as_dict(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(selfcheck_module, "selfcheck",
+                        lambda bundle, *, n, scorer: _FakeReport())
+    root = _selfcheck_root(tmp_path)
+
+    result = _action_selfcheck(
+        {"tickers": ["AAA"], "context_tickers": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+         "year_start": 2024, "year_end": 2026}, root)
+    assert result["hash"]
+    assert calls["context_tickers"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+
+
+def test_action_selfcheck_refuses_a_plan_missing_context_tickers(tmp_path):
+    root = _selfcheck_root(tmp_path)
+    with pytest.raises(OpsError) as err:
+        _action_selfcheck({"tickers": ["AAA"], "year_start": 2024, "year_end": 2026}, root)
+    assert err.value.problem.code == "VALIDATION_FAILED"
+
+
+def test_all_four_scoring_actions_load_identical_context_for_a_subset_request(
+        monkeypatch, tmp_path):
+    """The review's proof, closed: score, decision_replay, render and
+    selfcheck all build the SAME scorer context (context_tickers, years)
+    for one subset request -- never drifting to the bare watchlist."""
+    context = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    row = {"ticker": "AAA", "strategy": "TWIN-P", "event_date": SESSION,
+          "as_of": SESSION, "session": "AMC", "fill": 0.5, "strike_offset": None,
+          "exp_pnl_model": 0.1}
+    common = {"tickers": ["AAA"], "context_tickers": context,
+             "year_start": 2024, "year_end": 2026}
+
+    score_root = tmp_path / "score"
+    score_root.mkdir()
+    (score_root / "finality.json").write_text(json.dumps({"date": SESSION, "is_final": True}))
+    score_calls = _stub_scoring(monkeypatch, [row])
+    _action_score(dict(common, session=SESSION, horizon_days=35, alt_strikes=1,
+                       expected_population=("AAA|TWIN-P|" + SESSION,)), score_root)
+    assert score_calls["context_tickers"] == context
+
+    replay_root = tmp_path / "replay"
+    replay_root.mkdir()
+    (replay_root / "score.json").write_text(json.dumps({"rows": [row]}))
+    (replay_root / "finality.json").write_text(json.dumps({"date": SESSION, "is_final": True}))
+    replay_calls = _stub_scoring(monkeypatch, [row])
+    _action_decision_replay(dict(common, session=SESSION), replay_root)
+    assert replay_calls["context_tickers"] == context
+
+    render_calls = _stub_context_load(monkeypatch)
+    _stub_render(monkeypatch)
+    render_root = _render_root(tmp_path)
+    _action_render(dict(common, session=SESSION), render_root)
+    assert render_calls["context_tickers"] == context
+
+    selfcheck_calls = _stub_context_load(monkeypatch)
+    import engine.dashboard.selfcheck as selfcheck_module
+
+    class _FakeReport:
+        def as_dict(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(selfcheck_module, "selfcheck",
+                        lambda bundle, *, n, scorer: _FakeReport())
+    selfcheck_root = _selfcheck_root(tmp_path)
+    _action_selfcheck(common, selfcheck_root)
+    assert selfcheck_calls["context_tickers"] == context
 
 
 # --------------------------------------------------------------------------

@@ -55,8 +55,8 @@ from tests.render_parity_support import (
 )
 
 _PARAMETERS = {"expected_ids": ("legacy_render",), "session": str(AS_OF.date()),
-               "tickers": [TICKER], "year_start": 2025, "year_end": 2026,
-               "horizon_days": 35, "alt_strikes": 1}
+               "tickers": [TICKER], "context_tickers": [TICKER], "year_start": 2025,
+               "year_end": 2026, "horizon_days": 35, "alt_strikes": 1}
 
 
 def _publish(store, conn, clock, data, *, schema_ref):

@@ -235,8 +235,8 @@ def _stage(tmp_path: Path, *, with_model_evidence=True, with_ledger=True) -> Pat
     return root
 
 
-_PARAMETERS = {"session": str(AS_OF.date()), "tickers": [TICKER], "year_start": 2025,
-               "year_end": 2026, "horizon_days": 35, "alt_strikes": 1}
+_PARAMETERS = {"session": str(AS_OF.date()), "tickers": [TICKER], "context_tickers": [TICKER],
+               "year_start": 2025, "year_end": 2026, "horizon_days": 35, "alt_strikes": 1}
 
 
 # --------------------------------------------------------------------------
