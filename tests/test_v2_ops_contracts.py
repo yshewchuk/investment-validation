@@ -177,3 +177,47 @@ def test_effect_class_outside_the_vocabulary_is_refused():
     with pytest.raises(DocumentError) as err:
         from_document(StageSpec, doc)
     assert err.value.code == "BAD_ENUM"
+
+
+def _ops_fail_literal_calls():
+    """Every literal code passed to ``engine.v2.ops.errors.fail`` in the ops
+    tree, found statically (AST, not import-and-run) so a file that only
+    raises on an untested branch is still caught.
+
+    Only calls to the name bound to ``engine.v2.ops.errors.fail`` in each
+    file count -- a module that imports ``engine.v2.data.errors.fail`` under
+    its own alias (the ``data_fail`` convention, e.g. ``ops/snapshots.py``)
+    is validated against ``DATA_FAILURE_CODES`` instead and is out of scope
+    here.
+    """
+    root = Path(__file__).resolve().parents[1] / "engine" / "v2" / "ops"
+    hits = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        local_name = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "engine.v2.ops.errors":
+                for alias in node.names:
+                    if alias.name == "fail":
+                        local_name = alias.asname or alias.name
+        if local_name is None:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == local_name and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                hits.append((node.args[0].value, str(path.relative_to(root.parents[2])),
+                             node.lineno))
+    return hits
+
+
+def test_every_ops_fail_literal_code_is_registered():
+    """Guard for the SNAPSHOT_NOT_READY gap: every code an ops module raises
+    through ``fail("<CODE>", ...)`` must be in ``FAILURE_CODES``, or
+    ``make_problem`` raises a bare ``ValueError`` instead of the typed
+    ``OpsError`` callers branch on.
+    """
+    missing = [(code, loc, lineno) for code, loc, lineno in _ops_fail_literal_calls()
+              if code not in FAILURE_CODES]
+    assert not missing, missing
