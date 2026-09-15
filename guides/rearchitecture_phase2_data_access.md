@@ -901,7 +901,11 @@ not a suggestion to assert an implementation detail.
   - v2 reads the latest price_history retrieval, which includes Tier-1 fetches through 2026-09-11.
   - Every affected row is a forward event, and forecast-sized structures inherit the forecast difference.
 - **Ruled out** by measurement: the option_chains projection (the dropped columns are never read), thread count, hash seed, the panel/Tier-4/model/registry inputs (byte-identical), and materialization corruption.
-- **To turn D14 green,** resolve why the legacy px archive stopped on 08-27 (under investigation), then refresh the corpus at current legacy and rerun D14. Until then, exit criterion 7 holds only as "no unexplained differences"; D14 itself does not pass.
+- **Px archive cause and decision (2026-09-15).** RAW_YF `px_<T>.csv` was written once, on 2026-08-27, by a research pull for EXP-021 and was never refreshed.
+  - Legacy's px-first rule (`engine/data/features/panel.py:~533`) uses it whenever it exists.
+  - On the 09-10 live board, 132 of 201 tickers get runup features from 08-27 prices, and all 26 chosen events are affected.
+  - The user accepted this as a known legacy limitation until cutover; v2 already reads the freshest price_history.
+  - D14 therefore stays `differ` (explained) until cutover. A corpus refresh would not make it agree. Exit criterion 7 holds as "no unexplained differences".
 
 
 Suggested test files:
