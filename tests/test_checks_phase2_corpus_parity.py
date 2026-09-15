@@ -24,12 +24,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import checks.rearchitecture_phase2_corpus_parity as corpus_parity  # noqa: E402
 from checks.rearchitecture_phase2_corpus_parity import (  # noqa: E402
+    _job_output_artifact,
     build_receipt,
     control_localized_to_analogs,
+    default_run_key,
     filtered_legacy_root,
     import_corpus,
     legacy_store_snapshot_hash,
+    main as corpus_parity_main,
     publish,
     publish_corpus_snapshot_binding,
     run_corpus,
@@ -43,10 +47,13 @@ from checks.rearchitecture_phase2_evidence import (  # noqa: E402
 )
 from engine.v2.data import reference_inputs  # noqa: E402
 from engine.v2.diagnosis import AGREE, DIFFER  # noqa: E402
-from engine.v2.foundation import SystemClock  # noqa: E402
+from engine.v2.foundation import ArtifactStore, SystemClock  # noqa: E402
 from engine.v2.ops import executor  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.ops.checkpoints import artifact as load_artifact  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
+from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root  # noqa: E402
+from engine.v2.ops.snapshot_stages import MANIFEST_OUTPUT  # noqa: E402
 from engine.v2.ops.submission import NamespacePolicy  # noqa: E402
 from tests.ops_support import TEST_POLICY  # noqa: E402
 from tests.test_v2_data_import import build_legacy_store  # noqa: E402
@@ -528,3 +535,222 @@ def test_filtered_legacy_root_drops_only_the_named_tickers_trades_rows(tmp_path)
     # Everything else is hard-linked, not rewritten.
     panel = filtered / "data" / "features" / "panel.parquet"
     assert panel.stat().st_ino == (store_root / "data" / "features" / "panel.parquet").stat().st_ino
+
+
+# --------------------------------------------------------------------------
+# D14-resume: default rerun key, --run-key override, receipt provenance
+# --------------------------------------------------------------------------
+
+
+def _stats(root: Path) -> dict:
+    """A file-content-change fingerprint (inode + mtime), same technique
+    ``tests/test_v2_ops_snapshot_stages.py`` uses to prove a materialization
+    root was reused rather than rewritten."""
+    return {str(p.relative_to(root)): (p.stat().st_ino, p.stat().st_mtime_ns)
+            for p in root.rglob("*") if p.is_file()}
+
+
+def _materialize_root_for(ops_root: Path, materialize_job_id: str) -> Path:
+    """The real on-disk materialization root a ``legacy_materialize`` job
+    wrote into, re-derived from its own manifest artifact's ``request_hash``
+    -- the SAME content address :func:`engine.v2.ops.materialization_worker
+    .run_materialize` and the coordinator both key off, independent of
+    whichever idempotency key/job id produced it."""
+    conn = open_catalog(ops_root / "catalog.sqlite", clock=SystemClock())
+    store = ArtifactStore(ops_root)
+    try:
+        manifest_id = _job_output_artifact(conn, materialize_job_id, MANIFEST_OUTPUT)
+        manifest = json.loads(store.read_verified(load_artifact(conn, store, manifest_id)))
+        return materialization_root(default_materialization_base(ops_root), manifest["request_hash"])
+    finally:
+        conn.close()
+
+
+def _bare_setup(tmp_path) -> tuple[Path, Path, Path]:
+    """A synthetic legacy store + corpus + imported ops scope, key-agnostic
+    (no ``run`` yet) -- reused across two ``run_corpus`` calls against the
+    SAME ``ops_root``/``store_root`` so the rerun-key behavior can be
+    observed directly, without ``_setup_and_run``'s per-call fresh trees."""
+    store_root = tmp_path / "legacy_store"
+    build_legacy_store(store_root, year=YEAR, daily_market_parts=1, rows_per_part=2)
+    _set_legacy_snapshot(store_root, SNAPSHOT_HASH)
+    corpus_root = build_corpus(tmp_path / "corpus")
+    ops_root = tmp_path / "ops"
+    import_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                 resource_policy=TEST_POLICY)
+    return store_root, corpus_root, ops_root
+
+
+def test_default_run_key_is_scope_plus_implementation_ref_and_changes_with_code(monkeypatch):
+    real = corpus_parity._implementation_ref
+    key_a = default_run_key("corpus")
+    assert key_a.startswith("corpus-")
+    assert key_a == default_run_key("corpus")  # deterministic, same code
+    monkeypatch.setattr(corpus_parity, "_implementation_ref", lambda root=None: "sha256:" + "b" * 64)
+    key_b = default_run_key("corpus")
+    assert key_b != key_a
+    monkeypatch.setattr(corpus_parity, "_implementation_ref", real)
+    assert default_run_key("corpus") == key_a
+
+
+def test_run_corpus_same_code_rerun_is_idempotent_same_jobs(tmp_path, monkeypatch):
+    store_root, corpus_root, ops_root = _bare_setup(tmp_path)
+    install_stub(monkeypatch, expected_canned())
+    first = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                       resource_policy=TEST_POLICY)
+    before = _jobs_count(ops_root)
+    second = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                        resource_policy=TEST_POLICY)
+    assert _jobs_count(ops_root) == before  # no new job rows inserted
+    assert second["materialize_job_id"] == first["materialize_job_id"]
+    assert second["score_job_id"] == first["score_job_id"]
+    assert second["implementation_ref"] == first["implementation_ref"]
+    assert second["rows"] == first["rows"]
+
+
+def test_run_corpus_explicit_run_key_gets_new_jobs_and_reuses_materialization(tmp_path, monkeypatch):
+    """A different key (real code, unchanged -- what ``default_run_key``
+    would also produce for genuinely different code, verified separately by
+    :func:`test_default_run_key_is_scope_plus_implementation_ref_and_changes_with_code`
+    since faking ``_implementation_ref`` here would only lie to the
+    COORDINATOR: ``Service._launch`` (``engine/v2/ops/supervisor.py:239``)
+    independently recomputes ``worker_source_manifest(self.code_source)`` at
+    launch time and refuses ``INPUT_CHANGED`` on ANY mismatch against the
+    job's declared ref, real code change or fake -- confirmed by running
+    this test with the naive fake first) must NOT raise
+    IDEMPOTENCY_CONFLICT, must submit genuinely NEW jobs, and must reuse the
+    content-addressed materialization root rather than re-materializing
+    (task Do item 3's third and fourth tests)."""
+    store_root, corpus_root, ops_root = _bare_setup(tmp_path)
+    install_stub(monkeypatch, expected_canned())
+    first = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                       resource_policy=TEST_POLICY)
+    root_before = _materialize_root_for(ops_root, first["materialize_job_id"])
+    stats_before = _stats(root_before)
+
+    second = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                        idempotency_key="corpus-after-code-change",
+                        resource_policy=TEST_POLICY)  # must not raise IDEMPOTENCY_CONFLICT
+
+    assert second["materialize_job_id"] != first["materialize_job_id"]
+    assert second["score_job_id"] != first["score_job_id"]
+    assert second["implementation_ref"] == first["implementation_ref"]  # same real code
+    root_after = _materialize_root_for(ops_root, second["materialize_job_id"])
+    assert root_after == root_before  # same request_hash -> same content-addressed root
+    assert _stats(root_after) == stats_before  # not rewritten: the worker reused it
+
+
+def test_import_corpus_default_key_is_scope_plus_implementation_ref(tmp_path):
+    """Task Do item 3, last bullet: ``import`` shares the same default-key
+    pattern as ``run`` (both call :func:`default_run_key`) -- checked
+    directly against the catalog row rather than by actually rerunning
+    ``import`` a second time into the same scope, which hits a SEPARATE,
+    pre-existing constraint unrelated to idempotency keys: ``import_corpus``
+    always plans against ``expected_head_generation=0`` (a fresh-scope-only
+    operation), so a second import into an already-populated scope fails
+    ``VALIDATION_FAILED``/``expected head does not match the current catalog
+    state`` regardless of the key fix -- confirmed while writing this test."""
+    store_root = tmp_path / "legacy_store"
+    build_legacy_store(store_root, year=YEAR)
+    _set_legacy_snapshot(store_root, SNAPSHOT_HASH)
+    corpus_root = build_corpus(tmp_path / "corpus")
+    ops_root = tmp_path / "ops"
+    result = import_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                           resource_policy=TEST_POLICY)
+    conn = open_catalog(ops_root / "catalog.sqlite", clock=SystemClock())
+    try:
+        row = conn.execute("SELECT idempotency_key FROM jobs WHERE job_id=?",
+                           (result["import_job_id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == f"{default_run_key('corpus', ROOT)}-import"
+
+
+def test_run_key_cli_flag_overrides_the_default(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run_corpus(root, store_root, scope, corpus_root, *, policy, idempotency_key=None,
+                        resource_policy=None):
+        captured["idempotency_key"] = idempotency_key
+        return {"rows": [], "snapshot_id": None, "snapshot_manifest_hash": None,
+               "legacy_snapshot_hash": None, "implementation_ref": "sha256:" + "e" * 64,
+               "materialize_job_id": "job_m", "score_job_id": "job_s"}
+
+    monkeypatch.setattr(corpus_parity, "run_corpus", fake_run_corpus)
+    out = tmp_path / "out.json"
+    rc = corpus_parity_main(["run", "--root", str(tmp_path / "ops"), "--store-root",
+                             str(tmp_path / "store"), "--corpus", str(tmp_path / "corpus"),
+                             "--out", str(out), "--run-key", "my-custom-key"])
+    assert rc == 0
+    assert captured["idempotency_key"] == "my-custom-key"
+    assert json.loads(out.read_text())["materialize_job_id"] == "job_m"
+
+
+def test_run_key_cli_flag_defaults_to_none(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run_corpus(root, store_root, scope, corpus_root, *, policy, idempotency_key=None,
+                        resource_policy=None):
+        captured["idempotency_key"] = idempotency_key
+        return {"rows": [], "implementation_ref": "x", "materialize_job_id": "m", "score_job_id": "s"}
+
+    monkeypatch.setattr(corpus_parity, "run_corpus", fake_run_corpus)
+    corpus_parity_main(["run", "--root", str(tmp_path / "ops"), "--store-root",
+                        str(tmp_path / "store"), "--corpus", str(tmp_path / "corpus"),
+                        "--out", str(tmp_path / "out.json")])
+    assert captured["idempotency_key"] is None  # run_corpus itself derives default_run_key
+
+
+def test_run_result_records_implementation_ref_and_job_ids(tmp_path, monkeypatch):
+    store_root, corpus_root, ops_root = _bare_setup(tmp_path)
+    install_stub(monkeypatch, expected_canned())
+    result = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                        resource_policy=TEST_POLICY)
+    assert result["implementation_ref"] == corpus_parity._implementation_ref()
+    assert result["materialize_job_id"] and result["materialize_job_id"].startswith("job_")
+    assert result["score_job_id"] and result["score_job_id"].startswith("job_")
+
+
+def test_corpus_snapshot_binding_records_run_provenance(tmp_path, monkeypatch):
+    store_root, corpus_root, ops_root = _bare_setup(tmp_path)
+    install_stub(monkeypatch, expected_canned())
+    run_result = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                            resource_policy=TEST_POLICY)
+    artifact_root = tmp_path / "evidence"
+    receipt = build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1",
+                            artifact_root=artifact_root)
+    ref = json.loads(receipt.envelope.diagnostic_ref)
+    binding = json.loads((artifact_root / ref["path"]).read_bytes())
+    assert binding["run_implementation_ref"] == run_result["implementation_ref"]
+    assert binding["materialize_job_id"] == run_result["materialize_job_id"]
+    assert binding["score_job_id"] == run_result["score_job_id"]
+
+
+def test_build_receipt_refuses_stale_run_code(tmp_path, monkeypatch):
+    """``compare`` reading a ``--rows`` file scored by DIFFERENT worker code
+    than this checkout currently has must refuse, not silently bind a
+    receipt's code_hash to the current repo state over stale rows."""
+    store_root, corpus_root, ops_root = _bare_setup(tmp_path)
+    install_stub(monkeypatch, expected_canned())
+    run_result = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                            resource_policy=TEST_POLICY)
+    monkeypatch.setattr(corpus_parity, "_implementation_ref", lambda root=None: "sha256:" + "f" * 64)
+    with pytest.raises(OpsError) as excinfo:
+        build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1")
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["reason"] == "STALE_RUN_CODE"
+
+
+def test_build_receipt_allows_run_result_missing_implementation_ref(tmp_path, monkeypatch):
+    """Backward compatible: an older saved ``--rows`` JSON with no
+    ``implementation_ref`` key at all is not treated as stale (nothing to
+    compare against), matching every ``build_receipt`` call already in this
+    file that hand-builds a ``run_result`` without the field."""
+    store_root, corpus_root, ops_root = _bare_setup(tmp_path)
+    install_stub(monkeypatch, expected_canned())
+    run_result = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
+                            resource_policy=TEST_POLICY)
+    del run_result["implementation_ref"]
+    monkeypatch.setattr(corpus_parity, "_implementation_ref", lambda root=None: "sha256:" + "f" * 64)
+    receipt = build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1")
+    assert receipt.verdict == AGREE, receipt.summary()
