@@ -815,27 +815,47 @@ def run_engineering_gate(repo_root, *, timeout=600):
 
 _SECURITY_SCAN_SCRIPT = (
     "import json, sys, tarfile\n"
-    "from checks.repo_hygiene import check_files, load_secrets\n"
     "from pathlib import Path\n"
-    "bundle, repo_root = Path(sys.argv[1]), Path(sys.argv[2])\n"
+    "from checks.repo_hygiene import check_bundle, load_secrets\n"
+    "from engine.dashboard.render import RENDERED_DATA_STEMS\n"
+    "bundle, env_root = Path(sys.argv[1]), Path(sys.argv[2])\n"
     "files = {}\n"
     "with tarfile.open(bundle) as archive:\n"
     "    for member in archive.getmembers():\n"
     "        if member.isfile():\n"
     "            files[member.name] = archive.extractfile(member).read()\n"
-    "needles = load_secrets(repo_root / '.env')\n"
-    "report = check_files(files, needles)\n"
+    "declared = frozenset(\n"
+    "    f'bundle/data/{stem}.{ext}' for stem in RENDERED_DATA_STEMS for ext in ('json', 'js')\n"
+    ")\n"
+    "needles = load_secrets(env_root / '.env')\n"
+    "report = check_bundle(files, needles, declared=declared)\n"
     "print(json.dumps({'ok': report.ok, 'checked': report.checked,\n"
+    "                   'secrets_loaded': report.secrets_loaded,\n"
     "                   'violations': [[v.path, v.rule, v.detail] for v in report.violations]}))\n"
 )
 
 
-def run_security_scan(bundle_path, repo_root, *, timeout=120):
-    """Secret-scan a release bundle tar with ``checks.repo_hygiene``, isolated."""
+def run_security_scan(bundle_path, repo_root, env_root=None, *, timeout=120):
+    """Secret-scan a release bundle tar with ``checks.repo_hygiene``, isolated.
+
+    ``repo_root`` is the CODE checkout the subprocess runs from (it must have
+    ``checks/`` and ``engine/`` importable from its cwd) -- it is never where
+    secrets are read from: a snapshot-backed/frozen worktree run from here
+    carries no ``.env`` at all. ``env_root`` is the store/source checkout
+    that holds the real ``.env`` (``Service.store_root`` / the ops CLI's
+    ``--store-root``, "the legacy checkout"), passed explicitly. It defaults
+    to ``repo_root`` only for a caller that genuinely has one combined
+    checkout (tests, a single-directory dev setup); production always passes
+    the two apart. ``check_bundle`` itself refuses (0 needles is a
+    violation) rather than silently scanning with an empty needle set, so an
+    ``env_root`` that turns out to have no ``.env`` fails the gate instead of
+    passing it open.
+    """
     import subprocess
 
     result = subprocess.run(
-        ["/usr/bin/python3", "-c", _SECURITY_SCAN_SCRIPT, str(bundle_path), str(repo_root)],
+        ["/usr/bin/python3", "-c", _SECURITY_SCAN_SCRIPT, str(bundle_path),
+         str(env_root if env_root is not None else repo_root)],
         cwd=str(repo_root), capture_output=True, text=True, timeout=timeout)
     return _json_stdout(result, "security scan produced no JSON")
 

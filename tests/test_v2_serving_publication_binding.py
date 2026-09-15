@@ -35,6 +35,7 @@ from engine.v2.ops.publication import publish_local, stage_release  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import create_app  # noqa: E402
 from tests.ops_support import catalog, enqueue_claim  # noqa: E402
+from tests.test_v2_ops_effects_graph import FAKE_STORE_ROOT  # noqa: E402
 from tests.test_v2_ops_effects_graph import REPO  # noqa: E402
 from tests.test_v2_ops_effects_graph import _bundle_tar  # noqa: E402
 from tests.test_v2_ops_effects_graph import _commit as _ops_commit  # noqa: E402
@@ -493,7 +494,8 @@ def test_publication_effect_binds_the_operator_supplied_projection_and_publishes
             dependency_job_ids=(finality_job, projection_job, binding_job, selfcheck_job, engineering_job))
         resolve_and_record(conn, store, claim)
 
-        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock,
+                                    store_root=FAKE_STORE_ROOT)
         _ops_commit(conn, clock, claim, result)
 
         target = root / "releases" / scope

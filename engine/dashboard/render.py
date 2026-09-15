@@ -46,6 +46,7 @@ from engine.jsonio import json_safe
 
 __all__ = [
     "BOARD_MAX_BYTES",
+    "RENDERED_DATA_STEMS",
     "RENDER_VERSION",
     "compact_row",
     "row_digest",
@@ -67,6 +68,15 @@ RENDER_VERSION = 2
 #: the renderer flags the bundle rather than failing — the board still works,
 #: it just loads slowly on a phone.
 BOARD_MAX_BYTES = 1_200_000
+
+#: The stems :func:`render_bundle` writes as ``data/<stem>.json`` plus its
+#: ``data/<stem>.js`` wrapper (:func:`_write_pair`) — the render contract's
+#: own declared-file list. The publication security gate
+#: (``checks.repo_hygiene.check_bundle``) reads this rather than a
+#: hand-copied set of names, so any file this renderer writes is
+#: automatically covered by the declared-file size policy instead of being
+#: refused later as an "unexpected" oversize path.
+RENDERED_DATA_STEMS = ("board", "meta", "health", "flags", "strategies", "book", "models")
 
 #: Fields a board row carries. Everything else stays in the per-ticker file,
 #: which loads lazily — the board is the only file every visit pays for.
@@ -228,11 +238,14 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, default=str) + "\n")
 
 
+#: One source of truth with :data:`RENDERED_DATA_STEMS` — every stem's JS
+#: global is just its own uppercase name, so this is built FROM that list
+#: rather than duplicated as a second hand-written mapping.
+_JS_GLOBALS = {stem: stem.upper() for stem in RENDERED_DATA_STEMS}
+
+
 def _js_name(stem: str) -> str:
-    return {
-        "board": "BOARD", "meta": "META", "health": "HEALTH", "flags": "FLAGS",
-        "strategies": "STRATEGIES", "models": "MODELS", "book": "BOOK",
-    }.get(stem)
+    return _JS_GLOBALS.get(stem)
 
 
 def _write_pair(directory: Path, stem: str, payload: Any, *, js_expr: str | None = None) -> Path:

@@ -54,6 +54,7 @@ from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, catalog, sample
 from tests.test_v2_ops_effects_graph import (
+    FAKE_STORE_ROOT,
     POLICY,
     REPO,
     DEFAULT_POLICY,
@@ -268,7 +269,7 @@ def test_status_carries_conflicts_degraded_evidence_and_selfcheck(tmp_path):
         claim = _setup_publication(conn, clock, supervisor, store, session=SESSION,
                                    deployment="shadow:impl-1", decision_clock="2026-09-12T01:00:00Z",
                                    bundle_bytes=bundle, selfcheck_ok=True)
-        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         _ops_commit(conn, clock, claim, result)
 
         target = root / "releases" / SCOPE
@@ -293,7 +294,7 @@ def test_status_surfaces_requested_and_resolved_session_verbatim(tmp_path):
         claim = _setup_publication(conn, clock, supervisor, store, session="2026-09-12",
                                    deployment="shadow:impl-1", decision_clock="2026-09-12T01:00:00Z",
                                    bundle_bytes=_bundle_with_flags([]), finality_session="2026-09-10")
-        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         _ops_commit(conn, clock, claim, result)
 
         target = root / "releases" / SCOPE
@@ -315,7 +316,7 @@ def test_prior_selfcheck_observation_carries_into_status(tmp_path):
                                    bundle_bytes=_bundle_with_flags([]), selfcheck_ok=False,
                                    engineering_ok=True)
         with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
-            publication_effect(conn, store, claim, root, REPO, clock=clock)
+            publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
 
         target = root / "releases" / SCOPE
         document = json.loads((target / "operations_status.json").read_text())
@@ -337,7 +338,7 @@ def test_failed_update_keeps_old_release_and_shows_reason(tmp_path):
         good = _setup_publication(conn, clock, supervisor, store, session=SESSION,
                                   deployment="shadow:impl-1", decision_clock="2026-09-12T01:00:00Z",
                                   bundle_bytes=_bundle_with_flags([]))
-        good_result = publication_effect(conn, store, good, root, REPO, clock=clock)
+        good_result = publication_effect(conn, store, good, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         _ops_commit(conn, clock, good, good_result)
         target = root / "releases" / SCOPE
         first_release_id = release_current(target)
@@ -347,7 +348,7 @@ def test_failed_update_keeps_old_release_and_shows_reason(tmp_path):
                                  deployment="shadow:impl-2", decision_clock="2026-09-12T05:00:00Z",
                                  bundle_bytes=_bundle_with_flags([]), engineering_ok=False)
         with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
-            publication_effect(conn, store, bad, root, REPO, clock=clock)
+            publication_effect(conn, store, bad, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
 
         # the old release is still current and readable
         assert release_current(target) == first_release_id
@@ -377,7 +378,7 @@ def test_unobserved_history_window_is_never_rendered_as_a_pass(tmp_path):
         claim = _setup_publication(conn, clock, supervisor, store, session=SESSION,
                                    deployment="shadow:impl-1", decision_clock="2026-09-12T01:00:00Z",
                                    bundle_bytes=_bundle_with_flags([]))
-        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         _ops_commit(conn, clock, claim, result)
 
         target = root / "releases" / SCOPE
@@ -412,7 +413,7 @@ def _blocked_publication_setup(conn, clock, supervisor, store, root, *, tag, gat
     good = _setup_publication(conn, clock, supervisor, store, session=SESSION,
                               deployment="shadow:impl-1", decision_clock="2026-09-12T01:00:00Z",
                               bundle_bytes=_bundle_with_flags([]))
-    good_result = publication_effect(conn, store, good, root, REPO, clock=clock)
+    good_result = publication_effect(conn, store, good, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
     _ops_commit(conn, clock, good, good_result)
     target = root / "releases" / SCOPE
     first_release_id = release_current(target)
@@ -545,7 +546,7 @@ def test_reconcile_does_not_clobber_a_later_successful_publish(tmp_path):
                                         deployment="shadow:impl-3",
                                         decision_clock="2026-09-12T09:00:00Z",
                                         bundle_bytes=_bundle_with_flags([]))
-        good_result = publication_effect(conn, store, good_again, root, REPO, clock=clock)
+        good_result = publication_effect(conn, store, good_again, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         _ops_commit(conn, clock, good_again, good_result)
         second_release_id = release_current(target)
         assert second_release_id not in (None, first_release_id)

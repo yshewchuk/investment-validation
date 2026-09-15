@@ -14,8 +14,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from checks.repo_hygiene import (  # noqa: E402
+    DECLARED_MAX_BYTES,
     MAX_BYTES,
     Report,
+    check_bundle,
     check_files,
     load_secrets,
     parse_env,
@@ -257,3 +259,58 @@ class TestCli:
         subprocess.run(["git", "add", "f.py"], cwd=repo, check=True)
         (repo / "f.py").write_text(f'K = "{SECRET}"\n')
         assert self._run(repo, "--repo-root", str(repo)).returncode == 0
+
+
+class TestBundlePolicy:
+    """`check_bundle` — the release-bundle security gate's entry point.
+
+    Deliberately separate from `check_files` (committed source, unchanged):
+    a declared render-contract file gets `DECLARED_MAX_BYTES`, everything
+    else keeps `MAX_BYTES`, and zero loaded needles is itself a violation
+    (fail CLOSED, not the pre-commit hook's WARNING-only fail-open).
+    """
+
+    DECLARED = frozenset({"bundle/data/models.json", "bundle/data/models.js"})
+
+    def test_a_declared_file_under_the_cap_passes(self, needles):
+        files = {"bundle/data/models.json": b"x" * 2_000_000}
+        report = check_bundle(files, needles, declared=self.DECLARED)
+        assert report.ok, report.violations
+
+    def test_an_undeclared_file_the_same_size_refuses(self, needles):
+        files = {"bundle/data/unexpected.json": b"x" * 2_000_000}
+        report = check_bundle(files, needles, declared=self.DECLARED)
+        assert not report.ok
+        assert any(v.rule == "oversize" for v in report.violations)
+
+    def test_a_declared_file_over_the_declared_cap_refuses(self, needles):
+        files = {"bundle/data/models.json": b"x" * (DECLARED_MAX_BYTES + 1)}
+        report = check_bundle(files, needles, declared=self.DECLARED)
+        assert not report.ok
+        assert any(v.rule == "oversize" for v in report.violations)
+
+    def test_a_needle_inside_a_declared_bundle_file_still_refuses(self, needles):
+        files = {"bundle/data/models.json": SECRET.encode()}
+        report = check_bundle(files, needles, declared=self.DECLARED)
+        assert not report.ok
+        assert any(v.rule == "secret" for v in report.violations)
+
+    def test_zero_loaded_needles_refuses_even_with_clean_files(self):
+        files = {"bundle/index.html": b"<html></html>"}
+        report = check_bundle(files, {}, declared=self.DECLARED)
+        assert not report.ok
+        assert any(v.rule == "no-secrets-loaded" for v in report.violations)
+
+    def test_missing_env_file_yields_zero_needles_and_refuses(self, tmp_path):
+        needles = load_secrets(tmp_path / "absent.env")
+        report = check_bundle({"bundle/index.html": b"clean"}, needles)
+        assert not report.ok
+        assert any(v.rule == "no-secrets-loaded" for v in report.violations)
+
+    def test_secrets_loaded_is_always_recorded(self, needles):
+        assert check_bundle({"a.json": b"x"}, needles).secrets_loaded == len(needles)
+        assert check_bundle({"a.json": b"x"}, {}).secrets_loaded == 0
+
+    def test_check_files_source_hygiene_is_unaffected(self):
+        # The 1 MB source-commit limit is untouched by the bundle policy.
+        assert not check_files({"big.py": b"x" * (MAX_BYTES + 1)}, {}).ok

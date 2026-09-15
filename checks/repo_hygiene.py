@@ -255,13 +255,74 @@ def check_files(
 ) -> Report:
     """Check an in-memory ``{repo_relative_path: content}`` mapping.
 
-    This is the pure core the CLI and the tests both drive.
+    This is the pure core the CLI and the tests both drive. Committed
+    *source* hygiene only -- a missing ``.env`` here just means the
+    value-grep pass is inactive (the CLI prints a WARNING); it never blocks
+    a commit on its own, because a contributor without local credentials
+    must still be able to commit ordinary code. :func:`check_bundle` is the
+    fail-closed sibling for a *published* release bundle, where an inactive
+    secret check would be silent, not warned-about.
     """
     report = Report(secrets_loaded=len(needles or {}))
     for rel in sorted(files):
         report.checked += 1
         check_path_policy(rel, report)
         check_blob(rel, files[rel], needles or {}, report)
+    return report
+
+
+# --------------------------------------------------------------------------
+# release-bundle policy -- deliberately separate from check_files above.
+# --------------------------------------------------------------------------
+
+#: Cap for the declared, name-matched release-bundle data files (the render
+#: contract's own file list, ``engine.dashboard.render.RENDERED_DATA_STEMS``)
+#: -- :data:`MAX_BYTES` is a committed-*source* limit and the wrong policy for
+#: a *published* rendered artifact legacy has always shipped uncapped
+#: (``engine/dashboard/publish.py``'s ``secret_scan`` carries no size limit
+#: at all). Real sizes measured off a real shadow attempt-14 bundle
+#: (2026-09-15, ``jobs/render/bundle.tar``): ``data/models.js`` and
+#: ``data/models.json`` ~1.985 MB each, ``data/book.js`` and
+#: ``data/book.json`` ~1.643 MB each. No hosting per-file limit is documented
+#: anywhere in this repo (the Cloudflare Pages/R2 target is a user-configured
+#: credential per ``dashboard/README.md``, not code this repo controls), so
+#: the only anchor is the measured maximum: this cap gives it roughly 2x
+#: headroom. Every path NOT in the declared set -- including an unexpected
+#: path under ``data/`` -- still gets the ordinary :data:`MAX_BYTES` rule.
+DECLARED_MAX_BYTES = 4_000_000  # 4 MB
+
+
+def check_bundle(
+    files: dict[str, bytes],
+    needles: dict[bytes, str] | None = None,
+    *,
+    declared: frozenset[str] = frozenset(),
+) -> Report:
+    """Check a release bundle's ``{tar_member_path: content}`` mapping.
+
+    The publication security gate's entry point -- never used for committed
+    source. Two differences from :func:`check_files`:
+
+    * a path in ``declared`` is held to :data:`DECLARED_MAX_BYTES`, not
+      :data:`MAX_BYTES`; every other path (declared-looking or not) keeps the
+      ordinary limit, so an unexpected file cannot hide behind the raised cap;
+    * zero loaded needles is itself a violation. A secret scan run over an
+      empty needle set reports "clean" whether or not the bundle actually
+      leaked anything -- fail CLOSED here, not open, unlike the pre-commit
+      hook's WARNING-only behavior in :func:`check_files`.
+    """
+    report = Report(secrets_loaded=len(needles or {}))
+    if not needles:
+        report.add(
+            "", "no-secrets-loaded",
+            "0 secret needles loaded -- refusing to scan a release bundle "
+            "without an active secret check (missing or empty .env)",
+        )
+    for rel in sorted(files):
+        report.checked += 1
+        check_path_policy(rel, report)
+        limit = DECLARED_MAX_BYTES if rel in declared else MAX_BYTES
+        check_blob(rel, files[rel], needles or {}, report, max_bytes=limit)
     return report
 
 

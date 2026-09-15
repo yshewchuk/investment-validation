@@ -648,7 +648,8 @@ class Service:
                                            clock=self.clock)
         if claim.spec.kind == "publication":
             return publication_effect(self.conn, self.store, claim, self.root, self.code_source,
-                                      clock=self.clock, keepalive=keepalive)
+                                      clock=self.clock, store_root=self.store_root,
+                                      keepalive=keepalive)
         if claim.spec.kind == "backup":
             return backup_effect(self.conn, self.store, claim, self.root, clock=self.clock,
                                  keepalive=keepalive)
