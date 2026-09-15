@@ -167,6 +167,72 @@ need (round 2) and the tier4 cache-miss windows above (round 3) all
 trivially satisfied by construction; ``evidence_scope_covers_trades()``
 still runs and still proves it, now vacuously, rather than being removed —
 a regression guard costs nothing to keep.
+
+**D14 gap found 2026-09-15 (this audit was incomplete, not zero-finding).**
+Investigating 212 value findings between a D14 materialized-root run and a
+native legacy recapture on the live tree found the divergence is NOT
+``option_chains`` (its evidence-scoped 12-column, per-ticker rows and row
+order were verified byte-identical to the live tree for every affected
+request, and a grep of ``engine/`` excluding ``engine/v2`` for the 9 dropped
+columns — ``mid``/``iv``/``src``/``src_file``/``chain_kind``/``volume``/
+``open_interest``/``bid_size``/``ask_size`` — finds no read site reachable
+from the four entry points). Every table/reference input this audit and
+:mod:`engine.v2.data.reference_inputs` name was independently re-hashed
+(panel, tier4_forecasts, registry.json, structures.json, every champion
+joblib, the matching tier4 serving-cache subset, SNAPSHOT, pnl_sim_history,
+recalibration_pairs, chooser_analog_pool) and all matched byte-for-byte.
+Thread count (5 vs 6 — ``tools/bounded_run.py``/``executor.py`` set
+``OMP_NUM_THREADS`` et al. from the caller's core count) and Python's
+per-process hash-seed randomization were both ruled out empirically: two
+independent native-legacy recapture runs, one at each thread count, produced
+BYTE-IDENTICAL ``score_requests.json`` output.
+
+The real gap: ``engine.features.live_features`` — called from
+``Scorer._live_values``/``_market_block``/``_features`` for any event with
+no panel row yet, i.e. every forward/board-looking request, which is
+unconditionally reachable from ``Scorer.score()`` and was never in this
+module's read audit — calls ``engine.data.features.panel.add_runup_features``
+(panel.py:477-497), whose ``dist_high``/``dist_ema``/``ret5``/``ret10``/
+``ret20`` block reads ``px_<TICKER>.csv`` under ``engine.paths.RAW_YF``
+(``earnings_predictions/data/raw/yfinance/``) by DEFAULT PATH, not through
+``Repository``/``store``/any name in :data:`LEGACY_SCORE_READ_PLAN_V1` or
+:data:`engine.v2.data.reference_inputs.LEGACY_REFERENCE_INPUTS_V1`.
+
+:func:`materialize_price_series` DOES write a ``px_<T>.csv`` at that exact
+legacy path — but from ``Repository.get_price_series`` (this task's own
+``price_history`` catalog table, pinned to ``observation_ceiling``), never
+by copying the live tree's actual ``RAW_YF`` archive file. ``RAW_YF`` is
+documented (``engine/paths.py``, ``engine/data/pulls/price_refresh.py``
+``load_price_universe``: "Read-only on both sides; nothing here ever writes
+to RAW_YF") as a frozen, never-updated legacy archive — so native legacy,
+reading it directly, sees whatever was pulled long ago, while v2's
+regenerated file reflects everything ``price_history`` has since captured.
+Measured on the D14 corpus's 10 evidence tickers: the materialized root's 9
+pinned ``px_<T>.csv`` files ALL differ from the live tree's ``RAW_YF`` — 6
+with different content (``AAPL``/``ABBV``/``ACI``/``HAIN``/``LEN``/``RLGT``,
+materialized trailing observation 2026-09-11 vs the live archive's
+2026-08-27) and 3 (``ISPR``/``LUXE``/``USAU``) present in the materialized
+root but ABSENT from the live tree entirely. Every one of the 23 affected
+D14 rows scores a forward event (2026-09-14/16, i.e. not yet in the panel)
+on ``LEN``/``LUXE``/``RLGT``/``USAU`` — the exact intersection of "forward
+row" and "px file differs" — and the size-model-sized structure families
+(``CND-PS``/``BFLY-P``/``BFLY-P5``/``TWIN-P``/``TWIN-P5``, plus their
+``DYN-SV`` menu frames) size their width directly off the resulting
+forecast (``engine/forecast_sizing.py``), which is why ``structure_spec``/
+``structure_params`` inherit the divergence alongside ``forecast_abs_move``/
+``p10``/``p90``/``analog_buckets``/``ci_high``/``ci_low``.
+
+Not fixed here: whether ``materialize_price_series`` should instead copy the
+source root's live ``RAW_YF`` bytes byte-for-byte (restoring native-legacy
+parity, at the cost of reproducing legacy's own staleness/absence gaps) or
+keep sourcing from ``price_history`` (richer, but an un-pinned, undocumented
+departure from what ``engine.features.live_features`` actually reads on a
+real box) is a product decision, not a bug fix — it touches how
+``capture-inputs``/``reference_inputs`` would need to pin ``RAW_YF`` bytes at
+snapshot time. This paragraph exists so the next reader does not re-derive
+the same 212 findings from scratch, and so ``add_runup_features``'s
+``px_dir`` default is a named entry in this module's read audit rather than
+an absence someone has to notice on their own.
 """
 from __future__ import annotations
 
