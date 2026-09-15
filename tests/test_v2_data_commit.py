@@ -44,9 +44,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.contracts.data import ObjectRef  # noqa: E402
+from engine.v2.data import catalog as catalog_module  # noqa: E402
 from engine.v2.data import manifests  # noqa: E402
 from engine.v2.data.catalog import commit_snapshot, move_head, record_failed_import  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
+from engine.v2.data.errors import fail as data_fail  # noqa: E402
+from engine.v2.data.objects import FragmentInspection  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import content_hash  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
@@ -54,8 +58,10 @@ from tests.ops_support import FakeClock  # noqa: E402
 from tests.test_v2_data_manifests import (  # noqa: E402
     _SEC_CONTRACT,
     _SEC_REF,
+    IRH_A,
     RECEIPT_A,
     RECEIPT_B,
+    _fake_hash,
     _inspection_for,
     _record_for,
 )
@@ -588,3 +594,105 @@ def test_receipt_shortcut_conflicts_on_different_snapshot_id(tmp_path):
         _replay(conn, clock, other_record, request_hash=_hash("r1-request"), scope="shadow",
                attempt_id="att-1")
     assert err.value.code == "IDENTITY_CONFLICT"
+
+
+# --------------------------------------------------------------------------
+# Coverage ratchet fix (2026-09-15): catalog.py's own pre-transaction
+# verification helpers and a few refusal branches ``commit_snapshot``'s
+# higher-level tests above never happen to reach.
+# --------------------------------------------------------------------------
+
+
+def test_immediate_transaction_refuses_nesting(tmp_path):
+    conn, _clock = _catalog(tmp_path)
+    conn.execute("BEGIN")
+    with pytest.raises(RuntimeError):
+        with catalog_module._immediate_transaction(conn):
+            pass
+    conn.execute("ROLLBACK")
+
+
+def test_records_for_refuses_a_manifest_referencing_an_unprovided_fragment():
+    record = _record_for("2024")
+    manifest, _snap = _manifest_and_snapshot([record])
+    with pytest.raises(DataError) as err:
+        catalog_module._records_for(manifest, [])
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_table_name_for_refuses_a_manifest_the_snapshot_does_not_reference():
+    record = _record_for("2024")
+    manifest, snap = _manifest_and_snapshot([record])
+    other_record = _record_for("2025")
+    other_manifest, _other_snap = _manifest_and_snapshot([other_record])
+    with pytest.raises(DataError) as err:
+        catalog_module._table_name_for(other_manifest, snap)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_check_no_key_overlap_refuses_overlapping_ranges_in_one_partition():
+    insp_a = FragmentInspection(
+        object_ref=ObjectRef(kind="parquet_fragment", object_id="art_" + "1" * 32,
+                             content_hash=_fake_hash("ov-a"), byte_size=10),
+        partition_key="2024", row_count=1, byte_hash=_fake_hash("ov-a"),
+        logical_content_hash=_fake_hash("ov-a-logical"),
+        primary_key_min=("AAA", 2024), primary_key_max=("MMM", 2024),
+        time_min=None, time_max=None)
+    insp_b = FragmentInspection(
+        object_ref=ObjectRef(kind="parquet_fragment", object_id="art_" + "2" * 32,
+                             content_hash=_fake_hash("ov-b"), byte_size=10),
+        partition_key="2024", row_count=1, byte_hash=_fake_hash("ov-b"),
+        logical_content_hash=_fake_hash("ov-b-logical"),
+        primary_key_min=("KKK", 2024), primary_key_max=("ZZZ", 2024),
+        time_min=None, time_max=None)
+    record_a = manifests.fragment_record(insp_a, _SEC_REF, input_receipt_refs=(RECEIPT_A,),
+                                         import_request_hash=IRH_A)
+    record_b = manifests.fragment_record(insp_b, _SEC_REF, input_receipt_refs=(RECEIPT_A,),
+                                         import_request_hash=IRH_A)
+    with pytest.raises(DataError) as err:
+        catalog_module._check_no_key_overlap([record_a, record_b])
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_verify_everything_refuses_a_contract_whose_hash_does_not_match_its_content():
+    tampered = dataclasses.replace(_SEC_CONTRACT, definition_hash="sha256:" + "0" * 64)
+    with pytest.raises(DataError) as err:
+        catalog_module._verify_everything([tampered], [], [], None, None, False)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_commit_snapshot_refuses_an_expected_head_on_an_empty_scope(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    manifest, snap = _manifest_and_snapshot([record])
+    with pytest.raises(DataError) as err:
+        commit_snapshot(
+            conn, scope="brand-new-scope", request_hash=_hash("x-request"), contracts=[_SEC_CONTRACT],
+            objects=[record.object_ref], records=[record], manifests=[manifest], snapshot=snap,
+            expected_head_snapshot_id="snap_" + "0" * 32, expected_head_generation=0,
+            receipt_id="r1", attempt_id="att-1", fence=1, fence_check=_noop_fence, clock=clock)
+    assert err.value.code == "SNAPSHOT_CONFLICT"
+
+
+def test_move_head_refuses_an_unknown_target_snapshot(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    _, snap_a = _commit(conn, clock, [_record_for("2024")], receipt_id="ra", scope="shadow")
+    with pytest.raises(DataError) as err:
+        move_head(conn, scope="shadow", to_snapshot_id="snap_" + "0" * 32,
+                 expected_snapshot_id=snap_a.snapshot_id, expected_generation=1,
+                 receipt_ref="rollback-unknown", clock=clock)
+    assert err.value.code == "SNAPSHOT_NOT_FOUND"
+
+
+def test_record_failed_import_refuses_the_same_receipt_id_with_a_different_outcome(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    problem_a = data_fail("SNAPSHOT_CONFLICT", "first outcome").problem
+    record_failed_import(conn, receipt_id="dup-receipt", request_hash=_hash("dup-request"),
+                         attempt_id="att-a", fence=1, problem=problem_a, clock=clock)
+    problem_b = data_fail("MANIFEST_CORRUPT", "different outcome").problem
+    with pytest.raises(DataError) as err:
+        record_failed_import(conn, receipt_id="dup-receipt", request_hash=_hash("dup-request"),
+                             attempt_id="att-a", fence=1, problem=problem_b, clock=clock)
+    assert err.value.code == "IDENTITY_CONFLICT"
+
+
