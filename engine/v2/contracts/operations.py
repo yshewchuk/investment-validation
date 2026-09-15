@@ -78,6 +78,10 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "LEASE_LOST": ("dependency", True),
     "DELIVERY_FAILED": ("dependency", True),
     "BACKUP_FAILED": ("dependency", True),
+    # Mirrors engine.v2.data DATA_FAILURE_CODES: a scope with no committed
+    # head yet is a dependency that may resolve on its own once the pending
+    # commit lands, not a permanent failure (§10 build_comparison_receipt).
+    "SNAPSHOT_NOT_READY": ("dependency", True),
     "VALIDATION_FAILED": ("validation", False),
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),

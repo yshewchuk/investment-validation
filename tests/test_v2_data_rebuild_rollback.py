@@ -272,6 +272,29 @@ def test_candidate_promotion_and_rollback(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_comparison_receipt_on_unready_candidate_raises_typed_snapshot_not_ready(tmp_path):
+    """``build_comparison_receipt`` refuses a candidate scope with no
+    committed head via ``fail("SNAPSHOT_NOT_READY", ...)``. That code must be
+    registered in ``engine.v2.contracts.operations.FAILURE_CODES`` -- before
+    the fix it was not, so ``make_problem`` raised a bare ``ValueError``
+    instead of the typed ``OpsError`` this test expects.
+    """
+    ops_root = tmp_path / "ops"
+    ops_root.mkdir()
+    clock = SystemClock()
+    conn = open_catalog(ops_root / "ops.sqlite", clock=clock)
+    try:
+        store = ArtifactStore(ops_root)
+        with pytest.raises(OpsError) as excinfo:
+            build_comparison_receipt(conn, store, candidate_scope="candidate:never-imported",
+                                     target_scope="legacy_primary", clock=clock)
+        assert excinfo.value.code == "SNAPSHOT_NOT_READY"
+        assert excinfo.value.problem.category == "dependency"
+        assert excinfo.value.problem.retryable is True
+    finally:
+        conn.close()
+
+
 def _immutable_row_counts(conn) -> tuple[int, int, int, int]:
     return (
         conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0],
