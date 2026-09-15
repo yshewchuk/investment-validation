@@ -130,7 +130,7 @@ from engine.v2.ops.supervisor import Service  # noqa: E402
 
 __all__ = ["corpus_population", "legacy_store_snapshot_hash", "import_corpus", "run_corpus",
            "build_receipt", "control_localized_to_analogs", "publish",
-           "publish_corpus_snapshot_binding", "main"]
+           "publish_corpus_snapshot_binding", "default_run_key", "main"]
 
 DEFAULT_SCOPE = "corpus"
 _TERMINAL = ("succeeded", "failed", "blocked", "cancelled")
@@ -285,11 +285,53 @@ def _job_output_artifact(conn, job_id, name=None) -> str:
     return row[0]
 
 
+def _implementation_ref(root: Path = ROOT) -> str:
+    """The worker code fingerprint every job this module submits embeds as
+    its own ``JobSpec.implementation_ref`` -- the SAME computation
+    ``_submit``/``engine.v2.ops.snapshot_import.submit_import`` use
+    (``content_hash(worker_source_manifest(root))``). Factored out so the
+    rerun key (:func:`default_run_key`) and the run's own recorded
+    provenance (``run_corpus``/``import_corpus``'s ``implementation_ref``)
+    can never drift from what the submitted jobs actually carry."""
+    return content_hash(worker_source_manifest(root))
+
+
+def default_run_key(scope: str, root: Path = ROOT) -> str:
+    """The default idempotency key for ``import``/``run``: ``scope`` plus a
+    slice of the worker code fingerprint (:func:`_implementation_ref`).
+
+    This is the D14-resume fix: before, the default key was ``scope`` alone
+    (``run``) or ``f"{scope}-import"`` (``import``), so a rerun on DIFFERENT
+    code reused the SAME job id with a different request digest and was
+    refused ``IDEMPOTENCY_CONFLICT`` -- the harness could not be rerun after
+    a code change. Folding the implementation ref into the key means:
+
+    * same code, same inputs -- same key -- the existing idempotent path:
+      ``_insert_or_match`` finds a matching digest and returns the existing
+      job without inserting a new row; ``_run_to_terminal`` then ticks the
+      real ``Service`` forward, which resumes an interrupted (non-terminal)
+      job from its own committed checkpoints (guide O08) with no new work
+      submitted. This is how an interrupted run on the SAME code resumes.
+    * different code -- different key -- a genuinely NEW job id, so the
+      submission is a fresh insert, never a conflict, even though the
+      OLD (failed or still-queued) job under the old key is left exactly as
+      it was. ``python3 -m engine.v2.ops resume <job_id> --dry-run`` reports
+      whether a stuck/failed job's own implementation/environment ref still
+      matches the current checkout (``invalidation.reasons``); when code has
+      moved on, re-running this harness (new default key, or an explicit
+      ``--run-key``) is the supported way to get a fresh attempt -- the old
+      job is not mutated in place.
+
+    An explicit ``idempotency_key``/``--run-key`` always overrides this."""
+    ref = _implementation_ref(root).removeprefix("sha256:")
+    return f"{scope}-{ref[:16]}"
+
+
 def _submit(conn, policy, clock, *, kind, parameters, input_refs, resource,
            checkpoint_contract, key, deps=()) -> str:
     profile = profile_named(DEFAULT_POLICY, resource)
     job = JobSpec(
-        kind=kind, implementation_ref=content_hash(worker_source_manifest(ROOT)), spec_hash=None,
+        kind=kind, implementation_ref=_implementation_ref(ROOT), spec_hash=None,
         environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
         parameters=parameters, input_refs=tuple(input_refs), dependency_job_ids=tuple(deps),
         output_namespace="shadow", resource_class=resource, retry_policy_ref="bounded",
@@ -330,7 +372,7 @@ def import_corpus(root: Path, source_root: Path, scope: str, corpus_root: Path, 
         plan_ref = save_import_plan(conn, store, plan, clock=clock)
         receipt = submit_import(conn, store, plan_ref.artifact_id, registry=registry(),
                                 policy=policy, clock=clock,
-                                idempotency_key=idempotency_key or f"{scope}-import",
+                                idempotency_key=idempotency_key or f"{default_run_key(scope, ROOT)}-import",
                                 repo_root=ROOT)
         service = Service(conn, root, registry(), resource_policy, clock=clock,
                           code_source=ROOT, store_root=Path(source_root))
@@ -344,7 +386,8 @@ def import_corpus(root: Path, source_root: Path, scope: str, corpus_root: Path, 
                             "WHERE scope=?", (scope,)).fetchone()
         snapshot = Repository(conn, store).resolve(head["snapshot_id"])
         return {"scope": scope, "snapshot_id": head["snapshot_id"], "generation": head["generation"],
-               "snapshot_manifest_hash": snapshot.manifest_hash}
+               "snapshot_manifest_hash": snapshot.manifest_hash,
+               "implementation_ref": _implementation_ref(ROOT), "import_job_id": receipt.job_id}
     finally:
         conn.close()
 
@@ -390,7 +433,16 @@ def run_corpus(root: Path, store_root: Path, scope: str, corpus_root: Path, *, p
     job over the corpus's full supported population, with the full corpus
     context, in a fresh worker process. ``resource_policy``: see
     :func:`import_corpus`. Refuses ``root`` resolving inside ``store_root``
-    before anything is opened, same as :func:`import_corpus`."""
+    before anything is opened, same as :func:`import_corpus`.
+
+    ``idempotency_key`` defaults to :func:`default_run_key` (``--run-key`` on
+    the CLI overrides it): a rerun on the SAME code recomputes the SAME key
+    and rides the existing idempotent path (no new jobs, the real
+    ``Service`` resumes anything left non-terminal from its own committed
+    checkpoints); a rerun on DIFFERENT code gets a different key and a fresh
+    submission, never ``IDEMPOTENCY_CONFLICT``. The returned dict records
+    ``implementation_ref``/``materialize_job_id``/``score_job_id`` so later
+    evidence can tell which code and which jobs produced these rows."""
     _refuse_if_inside("root", root, "store-root", store_root)
     corpus = load_corpus(resolve_corpus(Path(corpus_root)))
     supported, _excluded = corpus_population(corpus)
@@ -398,7 +450,7 @@ def run_corpus(root: Path, store_root: Path, scope: str, corpus_root: Path, *, p
         raise RuntimeError("no supported corpus requests to score")
     _tickers, year_start, year_end, population = _context(supported)
     conn, clock, store = _open(root)
-    key = idempotency_key or scope
+    key = idempotency_key or default_run_key(scope, ROOT)
     try:
         # SEND-BACK 2026-09-14 item 2: pin_snapshot_inputs now needs the
         # job's own decision cutoff (session). A corpus parity run has no
@@ -429,7 +481,9 @@ def run_corpus(root: Path, store_root: Path, scope: str, corpus_root: Path, *, p
         document = json.loads(store.read_verified(load_artifact(conn, store, rows_id)))
         return {"rows": document["rows"], "snapshot_id": pinned["snapshot_id"],
                "snapshot_manifest_hash": pinned["snapshot_manifest_hash"],
-               "legacy_snapshot_hash": legacy_store_snapshot_hash(store_root)}
+               "legacy_snapshot_hash": legacy_store_snapshot_hash(store_root),
+               "implementation_ref": _implementation_ref(ROOT),
+               "materialize_job_id": materialize_id, "score_job_id": score_id}
     finally:
         conn.close()
 
@@ -485,7 +539,39 @@ def _corpus_snapshot_binding(corpus, corpus_root: Path, run_result: dict, *,
         "source_snapshot_hash": run_result.get("legacy_snapshot_hash"),
         "control": control_drop_ticker is not None,
         "control_drop_ticker": control_drop_ticker,
+        # D14-resume: which code and which jobs produced ``run_result["rows"]``
+        # -- optional/informational (an older run_result missing these keys
+        # still publishes a valid binding), so evidence naming a receipt can
+        # always trace it back to the run that produced it, separately from
+        # whether that code still matches THIS checkout (see the
+        # STALE_RUN_CODE refusal in build_receipt, which runs before this).
+        "run_implementation_ref": run_result.get("implementation_ref"),
+        "materialize_job_id": run_result.get("materialize_job_id"),
+        "score_job_id": run_result.get("score_job_id"),
     }
+
+
+def _check_run_code(run_result: dict, root: Path = ROOT) -> None:
+    """Refuse (``INPUT_CHANGED``/``STALE_RUN_CODE``) before building a receipt
+    from rows that were not produced by THIS checkout's current worker code.
+
+    Without this, ``compare`` reading a ``--rows`` file saved by an earlier
+    ``run`` could silently bind a receipt's ``code_hash``/``environment_hash``
+    to the CURRENT repo state while the rows underneath it were scored by
+    different code -- exactly the "evidence from different code versions
+    gets confused" gap this fix closes. Skipped when ``run_result`` carries
+    no ``implementation_ref`` at all (an older run's saved JSON, or a
+    hand-built ``run_result`` in a unit test) -- nothing to compare against."""
+    run_ref = run_result.get("implementation_ref")
+    if run_ref is None:
+        return
+    current = _implementation_ref(root)
+    if run_ref != current:
+        raise fail("INPUT_CHANGED",
+                  "the rows being compared were produced by different worker code than this "
+                  "checkout's current implementation_ref -- rerun `run` before `compare`",
+                  details={"reason": "STALE_RUN_CODE", "run_implementation_ref": run_ref,
+                          "current_implementation_ref": current})
 
 
 def publish_corpus_snapshot_binding(binding: dict, artifact_root: Path) -> dict:
@@ -516,7 +602,11 @@ def build_receipt(corpus_root: Path, run_result: dict, *, code_hash: str,
     corpus-snapshot binding is published there (next to where the caller
     will ``publish()`` this receipt) and ``envelope.diagnostic_ref`` is set
     to point at it; ``None`` leaves ``diagnostic_ref`` unset (a receipt built
-    only to inspect population/findings, not for evidence submission)."""
+    only to inspect population/findings, not for evidence submission).
+    Refuses ``INPUT_CHANGED``/``STALE_RUN_CODE`` first (:func:`_check_run_code`)
+    when ``run_result`` was produced by different worker code than this
+    checkout currently has."""
+    _check_run_code(run_result)
     corpus = load_corpus(resolve_corpus(Path(corpus_root)))
     supported, excluded = corpus_population(corpus)
     actual_by_id = {row["request_id"]: row["record"] for row in run_result["rows"]
@@ -670,6 +760,10 @@ def _parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run")
     _add_common(run_p, store_root=True, corpus=True)
     run_p.add_argument("--out", type=Path, required=True)
+    run_p.add_argument("--run-key", dest="run_key", default=None,
+                       help="override the default idempotency key "
+                            "(scope + worker-code fingerprint, see default_run_key); "
+                            "needed to force a fresh submission under the SAME code")
 
     cmp_p = sub.add_parser("compare")
     cmp_p.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -701,7 +795,8 @@ def _dispatch(args, policy) -> int:
              args.out)
         return 0
     if args.command == "run":
-        _emit(run_corpus(args.root, args.store_root, args.scope, args.corpus, policy=policy),
+        _emit(run_corpus(args.root, args.store_root, args.scope, args.corpus, policy=policy,
+                         idempotency_key=args.run_key),
              args.out)
         return 0
     if args.command == "compare":
