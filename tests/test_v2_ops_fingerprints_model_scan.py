@@ -45,6 +45,8 @@ import pytest
 
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import (
+    CODE_ASSET_DIRS,
+    CODE_ASSET_FILES,
     MODEL_PICKLE_MODULES,
     file_hash,
     verify_pinned_model_modules,
@@ -101,6 +103,13 @@ def _dump_pickle_referencing(root: Path, artifact_relative: str, *, dotted_modul
 def _seed_base(root: Path) -> None:
     for relative, content in _BASE_FILES.items():
         _write(root, relative, content)
+    # worker_source_manifest also requires the declared non-.py code assets
+    # (tests/test_v2_ops_fingerprints_code_assets.py covers those directly;
+    # this file is only about MODEL_PICKLE_MODULES, so seed trivial stand-ins).
+    for relative in CODE_ASSET_FILES:
+        _write(root, relative, "{}")
+    for relative in CODE_ASSET_DIRS:
+        _write(root, f"{relative}/index.html", "<html></html>")
 
 
 # --------------------------------------------------------------------------
