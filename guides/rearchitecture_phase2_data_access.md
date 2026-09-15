@@ -891,6 +891,19 @@ not a suggestion to assert an implementation detail.
 | D19 | 2 | The v2 render stage's bundle, compared with `render_bundle` invoked the legacy way on the same scores, ladder, model evidence, ledger generation, meta, and health, is identical in every serialized view except declared execution-metadata fields; the serialized selfcheck passes in a separate bounded process. |
 | D20 | 1 | Export produces a complete generation that the compatibility reader resolves before projection starts; publication cannot advance `current` without the selfcheck and engineering receipts, and a stale fence cannot advance it; a failed backup retries alone and no watermark other than its own moves. |
 
+**D14 real-run disposition (2026-09-15, user decision).**
+- The first real D14 run (main `a9cf387`, root `/root/phase2-corpus-ops`) returned verdict `differ` with 336 findings over 38 compared rows. Receipt: `evidence/corpus_parity_a4d4c4e4889d64b3.json`. The gate row stays 0/1: there is no acceptance list, and the harness verdict is not overridden.
+- All 336 findings are explained, and none is a v2 defect.
+- The explanation rests on a native legacy recapture at `0fbaa07` on the live tree, compared with the harness's own comparison functions: `/root/phase2-corpus-ops/legacy_recapture_0fbaa07/compare_result.json`.
+- **124 are legacy drift since corpus capture.** The rows are 17 of 38, in gate/chooser/simulation/features. Legacy finality now sees more settled sessions, so events simulated at capture time now carry real outcomes. The recapture shows the same differences from the corpus.
+- **212 are the documented price-read rule difference** (`engine/v2/data/price_history.py`, "Known fact" note; user decision 2026-09-14 to run real code). The rows are 23 of 38, in forecast/serialization/analogs/simulation/features.
+  - Legacy `add_runup_features` reads `px_<T>.csv` first. That archive ends 2026-08-27 and has no file for ISPR, LUXE or USAU.
+  - v2 reads the latest price_history retrieval, which includes Tier-1 fetches through 2026-09-11.
+  - Every affected row is a forward event, and forecast-sized structures inherit the forecast difference.
+- **Ruled out** by measurement: the option_chains projection (the dropped columns are never read), thread count, hash seed, the panel/Tier-4/model/registry inputs (byte-identical), and materialization corruption.
+- **To turn D14 green,** resolve why the legacy px archive stopped on 08-27 (under investigation), then refresh the corpus at current legacy and rerun D14. Until then, exit criterion 7 holds only as "no unexplained differences"; D14 itself does not pass.
+
+
 Suggested test files:
 
 - `tests/test_v2_data_contracts.py` — D01–D03;
