@@ -14,6 +14,7 @@ dashboard rebuilds the exact rows the champion was trained on rather than a
 reimplementation that could drift."""
 from __future__ import annotations
 
+import gc
 import importlib.util
 import sys
 from pathlib import Path
@@ -36,7 +37,18 @@ def _experiment():
 def build_dataset():
     """(rows, target, features) for the evidence table — the chooser's frame."""
     exp = _experiment()
-    mid, _raw = exp.load_data_menu(exp.MENU)
+    mid, raw = exp.load_data_menu(exp.MENU)
+    # ``raw`` is ``load_data_menu``'s full every-fill_alpha frame (~5x ``mid``'s
+    # row count, same JSON ``legs`` payload per row) — EXP-169's own pipeline
+    # never reads it past this point, only ``mid`` feeds add_causal_analogs /
+    # build_schematics / join_tier4 below. Left alive it is dominant, avoidable
+    # peak-memory dead weight for the whole rest of this call (measured: a
+    # forced-miss ``build_model_evidence()`` cache rebuild peaked 5.08 GiB on
+    # real inputs under `bounded_run`, most of it resident through this exact
+    # window). Drop the reference and reclaim it before the expensive
+    # candidate-level work starts, rather than after.
+    del raw
+    gc.collect()
     dataset = exp.base.add_causal_analogs(mid)
     dataset = exp.build_schematics(dataset)
     dataset = exp.join_tier4(dataset)
