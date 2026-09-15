@@ -19,6 +19,17 @@ rather than a guess. Admission is conservative coordination; kernel containment
 and free margin still matter, because external processes allocate after the
 sample is taken (§6.2).
 
+A third test, ``_headroom_ceiling_reason``, refuses rather than queues: a
+profile above ``max_possible_headroom_bytes`` (headroom plus everything owed,
+i.e. what this sample could ever admit even if every active job released in
+full) cannot be explained by transient competition and will not resolve on
+its own. ``decide`` returns this as a normal ``QueueReason``; the caller
+(``scheduler.claim_next``) is the one that turns it into a terminal job
+failure instead of leaving the job queued (added 2026-09-15, after
+``legacy_score`` v5's 6 GiB reservation queued attempt 17 indefinitely: the
+host's live headroom never reached 6 GiB even fully idle, and nothing was
+active to blame it on).
+
 CPUs come from the **allowed affinity**, never ``os.cpu_count()``. The lowest
 ``reserved_cpu_count`` allowed CPUs stay with the OS, API and supervisor; the
 rest are handed out disjointly, lowest free first, which works unchanged on a
@@ -44,6 +55,7 @@ __all__ = [
     "capacity_bytes",
     "decide",
     "headroom_bytes",
+    "max_possible_headroom_bytes",
     "owed_unconsumed_bytes",
     "worker_cpu_ids",
     "live_window_reason",
@@ -93,6 +105,20 @@ def owed_unconsumed_bytes(active: Sequence[ActiveReservation]) -> int:
     return sum(max(0, r.memory_bytes - (r.memory_current_bytes or 0)) for r in active)
 
 
+def max_possible_headroom_bytes(policy: ResourcePolicy, sample: CapacitySample,
+                                active: Sequence[ActiveReservation]) -> int:
+    """The most headroom this sample could ever yield: current headroom plus
+    every byte still owed to an active reservation, i.e. as if every active
+    job released its whole reservation right now. A profile whose
+    ``memory_bytes`` exceeds this can never be admitted from this sample
+    forward -- no release manufactures memory the sample does not already
+    account for. With ``active`` empty this is exactly ``headroom_bytes``
+    (the attempt-17 incident: legacy_score queued with nothing else heavy
+    running, so ``owed`` was already zero and the shortfall was structural,
+    not transient) (§8.1)."""
+    return headroom_bytes(policy, sample) + owed_unconsumed_bytes(active)
+
+
 def worker_cpu_ids(policy: ResourcePolicy, sample: CapacitySample) -> list[int]:
     return sorted(sample.allowed_cpu_ids)[policy.reserved_cpu_count:]
 
@@ -129,6 +155,7 @@ def decide(policy: ResourcePolicy, profile: ResourceProfile, sample: CapacitySam
            active: Sequence[ActiveReservation]) -> Admission:
     """Admit ``profile`` now, or say exactly why not, with the numbers."""
     reason = (_fits_at_all(policy, profile, sample)
+              or _headroom_ceiling_reason(policy, profile, sample, active)
               or _memory_reason(policy, profile, sample, active)
               or _slot_reason(policy, profile, active)
               or _disk_reason(policy, profile, sample, active))
@@ -164,6 +191,25 @@ def _fits_at_all(policy: ResourcePolicy, profile: ResourceProfile,
     return QueueReason(code="PROFILE_EXCEEDS_CAPACITY",
                        needed={"memory_bytes": profile.memory_bytes, "cpus": profile.cpu_count},
                        available={"capacity_bytes": capacity, "worker_cpus": cpus},
+                       reconsider="capacity_or_profile_change")
+
+
+def _headroom_ceiling_reason(policy: ResourcePolicy, profile: ResourceProfile,
+                             sample: CapacitySample,
+                             active: Sequence[ActiveReservation]) -> QueueReason | None:
+    """Refuse -- never queue -- a profile bigger than this sample could ever
+    admit, even in the best case where every active reservation released in
+    full right now. Distinct from ``_memory_reason``'s transient
+    ``MEMORY_HEADROOM``: that shortfall can resolve when an active job's real
+    usage frees; this one cannot, because nothing currently reserved explains
+    it (§8.1, the legacy_score v5 6 GiB incident: attempt 17 queued forever
+    with zero active heavy reservations)."""
+    ceiling = max_possible_headroom_bytes(policy, sample, active)
+    if profile.memory_bytes <= ceiling:
+        return None
+    return QueueReason(code="PROFILE_EXCEEDS_HEADROOM_CEILING",
+                       needed={"memory_bytes": profile.memory_bytes},
+                       available={"max_possible_headroom_bytes": ceiling},
                        reconsider="capacity_or_profile_change")
 
 

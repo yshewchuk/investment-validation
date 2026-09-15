@@ -120,13 +120,18 @@ def test_default_policy_reservations_unchanged_and_test_policy_is_smaller():
     admission still reserves margin over the measured peak (profiles.py:
     ``validation`` 5 GiB, 0.85 GiB over the 4.15 GiB 2026-09-13 canary peak,
     right-sized 2026-09-14 so it can be admitted alongside other work on this
-    7.8 GiB host; ``legacy_score`` raised 2026-09-15 (v5) to 6 GiB, ~0.93 GiB
-    over the 5.07 GiB real attempt-16 legacy_score peak -- see profiles.py's
-    module docstring for the full measured basis). TEST_POLICY
-    (tests/ops_support.py) exists only so a real ``Service`` admits its job
-    without racing whatever else happens to be using host memory."""
+    7.8 GiB host; ``legacy_score`` raised 2026-09-15 (v5) to 6 GiB then
+    lowered the same day (v6) to 5.25 GiB (5*GIB + GIB//4) once 6 GiB proved
+    unadmittable against this host's real live headroom (~5.44-5.78 GiB
+    measured, not the larger host-total-based capacity v5 compared against)
+    -- 5.25 GiB keeps ~180 MiB over the 5.07 GiB real attempt-16
+    legacy_score peak and ~200 MiB under the conservative measured ceiling;
+    see profiles.py's module docstring for the full measured basis).
+    TEST_POLICY (tests/ops_support.py) exists only so a real ``Service``
+    admits its job without racing whatever else happens to be using host
+    memory."""
     assert profile_named(DEFAULT_POLICY, "validation").memory_bytes == 5 * GIB
-    assert profile_named(DEFAULT_POLICY, "legacy_score").memory_bytes == 6 * GIB
+    assert profile_named(DEFAULT_POLICY, "legacy_score").memory_bytes == 5 * GIB + GIB // 4
     for name in ("validation", "legacy_score"):
         assert profile_named(TEST_POLICY, name).memory_bytes <= 512 * MIB
 

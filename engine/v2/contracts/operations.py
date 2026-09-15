@@ -65,6 +65,13 @@ ProgressKind = Literal["heartbeat", "progress", "checkpoint", "error", "final"]
 FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "RESOURCE_UNAVAILABLE": ("resource", True),
     "RESOURCE_LIMIT_EXCEEDED": ("resource", False),
+    # A profile whose reservation exceeds the host's maximum possible
+    # headroom under the current policy (resources.py's
+    # ``max_possible_headroom_bytes``): not retryable, since nothing releases
+    # memory the sample does not already account for -- only a policy or
+    # profile change fixes it (§8.1, added 2026-09-15 after the legacy_score
+    # v5 attempt-17 infinite-queue incident).
+    "RESOURCE_PROFILE_UNSATISFIABLE": ("resource", False),
     "UNKNOWN_KILL": ("resource", False),
     "TRANSIENT_SOURCE": ("source", True),
     "RATE_LIMITED": ("source", True),

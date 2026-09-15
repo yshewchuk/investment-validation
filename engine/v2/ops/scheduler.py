@@ -16,7 +16,15 @@ submission time, then job ID, so ties are deterministic. A heavy job that is
 blocked by work already running holds the heavy slot against **lower-priority
 heavy** jobs, which would otherwise starve it forever by always fitting first.
 Light jobs may still pass it when both memory tests allow. A job that can never
-fit (``PROFILE_EXCEEDS_CAPACITY``) holds nothing.
+fit (``PROFILE_EXCEEDS_CAPACITY``, a profile bigger than the host even without
+any container squeeze) holds nothing and stays queued -- unauthored policy
+mistakes are rare and inspectable via ``queue_reason``. A profile that exceeds
+the live host's own maximum possible headroom (``PROFILE_EXCEEDS_HEADROOM_CEILING``,
+resources.py's ``max_possible_headroom_bytes``) is different: it is reachable
+by ordinary configuration (the legacy_score v5 6 GiB incident) and an infinite
+queue hides it, so this one fails the job outright with a typed
+``RESOURCE_PROFILE_UNSATISFIABLE`` problem and blocks its descendants (§8.1,
+added 2026-09-15).
 """
 from __future__ import annotations
 
@@ -34,10 +42,21 @@ from engine.v2.contracts import (
 )
 from engine.v2.foundation import Clock, content_hash, format_timestamp, parse_timestamp
 from engine.v2.ops.catalog import dumps, load_json, transaction
-from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.errors import OpsError, fail, make_problem
+from engine.v2.ops.lifecycle import block_descendants
 from engine.v2.ops.profiles import profile_named
 from engine.v2.ops.resources import ActiveReservation, decide, live_window_reason
 from engine.v2.ops.store_barrier import acquire_in, domains_of, lease_reason
+
+#: Queue reasons that mean "will never fit this policy", not "wait" -- the
+#: job never holds a heavy slot against others, and (unlike a normal
+#: QueueReason) claim_next fails it outright instead of leaving it queued.
+_UNFITTABLE_CODES = frozenset({"PROFILE_EXCEEDS_CAPACITY", "PROFILE_EXCEEDS_HEADROOM_CEILING"})
+#: Of those, the ones that get a terminal job failure (§8.1). Kept separate
+#: from ``_UNFITTABLE_CODES`` so ``PROFILE_EXCEEDS_CAPACITY`` (an existing,
+#: tested "stays queued" contract -- test_o04_o05) is unchanged; only the new
+#: headroom-ceiling refusal added 2026-09-15 gets the fail-fast behaviour.
+_FAILS_JOB_CODES = frozenset({"PROFILE_EXCEEDS_HEADROOM_CEILING"})
 
 __all__ = [
     "MEASUREMENT_STALE_SECONDS",
@@ -141,10 +160,31 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
                     return _create_attempt(conn, row, profile, policy, decision.resources,
                                            supervisor, now, domains)
                 reason = decision.reason
-                heavy_held |= profile.heavy and reason.code != "PROFILE_EXCEEDS_CAPACITY"
+                heavy_held |= profile.heavy and reason.code not in _UNFITTABLE_CODES
+            if reason.code in _FAILS_JOB_CODES:
+                _fail_unfittable(conn, row, reason, now)
+                continue
             conn.execute("UPDATE jobs SET queue_reason_json = ? WHERE job_id = ?",
                          (dumps(reason), row["job_id"]))
     return None
+
+
+def _fail_unfittable(conn: sqlite3.Connection, row: sqlite3.Row, reason: QueueReason,
+                     now: datetime) -> None:
+    """Terminal failure for a job whose profile can never fit (§8.1): a typed
+    ``RESOURCE_PROFILE_UNSATISFIABLE`` problem with the numbers, not an
+    infinite ``queued`` wait. Blocks descendants the same way any other
+    terminal job failure does."""
+    problem = make_problem(
+        "RESOURCE_PROFILE_UNSATISFIABLE",
+        "the job's resource profile exceeds the host's maximum possible "
+        "headroom under the current policy",
+        details={"needed": reason.needed, "max_possible": reason.available})
+    stamp = format_timestamp(now)
+    conn.execute("UPDATE jobs SET state = 'failed', queue_reason_json = NULL, "
+                "failure_json = ?, updated_at = ? WHERE job_id = ?",
+                (dumps(problem), stamp, row["job_id"]))
+    block_descendants(conn, row["job_id"], now)
 
 
 def _parameters(row):
