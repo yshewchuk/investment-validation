@@ -26,6 +26,41 @@ read set -- headroom for a larger watchlist, not a value chosen to clear one
 run by the smallest margin; disk free on this host is ~900 GiB, so nothing
 here is disk-constrained. ``legacy_rebuild`` (20 GiB) and ``materialize``
 (20 GiB) already clear this basis and are unchanged.
+
+v5 (2026-09-15) raises ``legacy_score``'s ``memory_bytes`` from 5 GiB to
+6 GiB -- an interim safety margin, not a substitute for the real fix (see
+``engine/data/features/tier4.py::serving_model``'s cache-hit branch, same
+commit: a serving-cache HIT now serves its pool from the joblib file instead
+of unconditionally re-deriving it via ``_pool_before`` -> ``model.prepare
+(panel)`` -> a full ``daily_market`` re-read; that fix only pays off once
+Tier 4 rebuilds and repins cache files in the new format -- every cache file
+pinned as of this commit still lacks the embedded pool and falls back to the
+exact prior behaviour, so THIS corpus still needs the extra headroom below
+until Tier 4 is rebuilt). Basis: real attempt-16 (6-ticker shadow nightly,
+201-ticker context, `/root/phase2-shadow-ops`) --
+``legacy_score`` attempt ``att_2e0745184ae4c4eb17aeb782a0d398ac`` measured
+``memory_peak_bytes=5447757824`` (~5.07 GiB), above the old 5 GiB (
+5368709120) reservation; ``legacy_decision_replay`` attempt
+``att_86920be0153fb81004abef9ae927d0f9`` was killed at 93s,
+``memory_peak_bytes=5396807680`` and rising. A clean reproduction against
+the same materialized inputs, via the real adapter action path
+(``engine.v2.ops.legacy_adapter._action_score`` /
+``_action_decision_replay``, current code, no profile/code change), peaked
+at self-reported RSS 4748 MiB for score and 5126 MiB for replay --
+``legacy_decision_replay`` exercises MORE distinct Tier-4 producers than
+``legacy_score`` for the identical board (the DYN-SV chooser's menu touches
+``size_v1_4``/``iv_crush_v1_gbm`` in addition to the two producers
+``legacy_score`` itself needed), which is why replay's peak is higher and
+why it was the one actually killed. 6 GiB (6442450944 bytes) gives ~0.93 GiB
+margin over the measured 5.07 GiB score peak and ~1.26 GiB over the
+reproduced 5.13 GiB (5126 MiB) replay peak, and fits inside the effective
+host budget of 7089033216 bytes (~6.60 GiB) with ``max_heavy_concurrency=1``
+(no other heavy profile is ever admitted alongside it) -- margin to the host
+budget itself is ~0.60 GiB. This is not full headroom for an arbitrarily
+larger board: a wider watchlist that touches a THIRD Tier-4 producer or a
+second fold would need re-measurement, per this module's own "never lower a
+reservation until a stage fits on paper" rule (§8.1) applied in reverse --
+raise again with numbers, do not guess ahead of one.
 """
 from __future__ import annotations
 
@@ -37,7 +72,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-14.v4"
+POLICY_VERSION = "ops_resources.2026-09-15.v5"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -84,7 +119,12 @@ DEFAULT_POLICY = ResourcePolicy(
         # headroom basis as validation above -- this profile also carries
         # legacy_score/legacy_score_requests/legacy_decision_replay's own
         # barrier-path read set outside snapshot mode.
-        ResourceProfile(name="legacy_score", memory_bytes=5 * GIB, cpu_count=5,
+        # Raised 2026-09-15 (v5) from 5 GiB to 6 GiB: real attempt-16
+        # measured legacy_score at 5.07 GiB and legacy_decision_replay was
+        # killed rising through 5.03 GiB -- see the module docstring's v5
+        # entry for the full measured basis, the interim-vs-durable-fix
+        # distinction, and why 6 GiB (not higher) is the justified number.
+        ResourceProfile(name="legacy_score", memory_bytes=6 * GIB, cpu_count=5,
                         scratch_bytes=4 * GIB, heavy=True),
         # legacy_model_evidence (store_domains read) stages the legacy read
         # set through the same barrier -- scratch bumped 2026-09-14 (v4) from
