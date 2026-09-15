@@ -182,8 +182,17 @@ def _record_legacy_divergence(conn, *, decision_id, row_id, existing_row, origin
 
 
 def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="raise",
-                 provenance_label=None):
+                 provenance_label=None, generation_ref=None):
     """Import exact legacy JSONL bytes; duplicate bytes collapse.
+
+    ``generation_ref``, when given, is stamped on every FRESHLY inserted
+    decision (never on one returned via the ``prior``/exact-bytes shortcut
+    below, which is a no-op). Used by
+    ``decision_commit.import_settlement_candidates_in_transaction`` to record
+    the settlement session an outcome observation was committed for -- the
+    durable session marker task brief rule 2 needs, reusing this pre-existing
+    column rather than a new one (it is otherwise unused for ``kind="outcome"``
+    imports).
 
     ``on_conflict`` governs a decision_id that already carries DIFFERENT
     content than the line being imported (a mismatched ``decisions.
@@ -238,7 +247,8 @@ def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="rai
             continue
         receipt = insert(conn, logical_key=decision_id, decision_id=decision_id, payload=payload,
                          purpose="legacy_import", kind=kind, validations=[], created_at=created_at,
-                         supersedes=kind + ":" + payload["supersedes"] if payload.get("supersedes") else None)
+                         supersedes=kind + ":" + payload["supersedes"] if payload.get("supersedes") else None,
+                         generation_ref=generation_ref)
         conn.execute("INSERT INTO decision_imports VALUES (?,?,?,?)",
                      (source_hash, number, receipt["decision_id"], original))
         receipts.append(receipt)
