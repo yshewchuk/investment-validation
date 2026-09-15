@@ -495,3 +495,137 @@ def test_settlement_grandfathered_admission_retry_is_idempotent(tmp_path):
         repeated = import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
     assert [item["decision_id"] for item in first] == [item["decision_id"] for item in repeated]
     assert len(rows(conn, kind="outcome")) == 1
+
+
+# --------------------------------------------------------------------------
+# 2026-09-15: same-session settlement rerun dedupe (task brief rules 1/2/4).
+# A rerun of ``score_outcomes`` stamps a NEW wall-clock ``resolved_at`` on
+# the SAME underlying determination -- new candidate bytes, a new
+# ``decisions.decision_id`` (``decisions._import_decision_id``), and by
+# itself a duplicate commit. See ``decision_commit._settlement_dedupe_skip``.
+# --------------------------------------------------------------------------
+
+
+def test_settlement_same_session_rerun_with_new_wall_clock_commits_nothing(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-rerun-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=2, exit_date="2026-09-09")
+    claim = _settlement_claim(conn, clock, supervisor)  # session "2026-09-13"
+    first_candidate = [_resolved_candidate(row_id, "2026-09-09", resolved_at="2026-09-13T01:00:00+00:00")]
+    ref = store.publish_bytes(json.dumps({"rows": first_candidate}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        import_settlement_candidates_in_transaction(conn, claim, ref, first_candidate, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 1
+
+    second_candidate = [_resolved_candidate(row_id, "2026-09-09", resolved_at="2026-09-13T09:00:00+00:00")]
+    second_ref = store.publish_bytes(json.dumps({"rows": second_candidate}, sort_keys=True).encode(),
+                                     schema_ref="legacy_action.v1.0")
+    skipped = []
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(
+            conn, claim, second_ref, second_candidate, clock=clock, on_skip=lambda row_id, reason: skipped.append((row_id, reason)))
+    assert repeated == []
+    assert skipped == [(row_id, "already_observed_this_session")]
+    assert len(rows(conn, kind="outcome")) == 1
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0
+
+
+def test_settlement_resolved_prediction_settled_again_on_later_session_commits_nothing(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-terminal-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", schema_version=2, exit_date="2026-09-09")
+    claim = _settlement_claim(conn, clock, supervisor)  # session "2026-09-13"
+    first_candidate = [_resolved_candidate(row_id, "2026-09-09", resolved_at="2026-09-13T01:00:00+00:00")]
+    ref = store.publish_bytes(json.dumps({"rows": first_candidate}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        import_settlement_candidates_in_transaction(conn, claim, ref, first_candidate, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 1
+
+    later_candidate = [_resolved_candidate(row_id, "2026-09-09", resolved_at="2026-09-20T01:00:00+00:00")]
+    later_ref = store.publish_bytes(json.dumps({"rows": later_candidate}, sort_keys=True).encode(),
+                                    schema_ref="legacy_action.v1.0")
+    skipped = []
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(
+            conn, claim, later_ref, later_candidate, clock=clock, session="2026-09-20",
+            on_skip=lambda row_id, reason: skipped.append((row_id, reason)))
+    assert repeated == []
+    assert skipped == [(row_id, "already_resolved")]
+    assert len(rows(conn, kind="outcome")) == 1
+
+
+def test_settlement_unresolvable_reobserved_on_later_session_commits_new_observation(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-retry-later-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P")
+    claim = _settlement_claim(conn, clock, supervisor)  # session "2026-09-13"
+    first_candidate = [_settlement_candidate(row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P",
+                                             status="unresolvable", resolved_at="2026-09-13T01:00:00+00:00")]
+    ref = store.publish_bytes(json.dumps({"rows": first_candidate}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        import_settlement_candidates_in_transaction(conn, claim, ref, first_candidate, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 1
+
+    later_candidate = [_settlement_candidate(row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P",
+                                             status="unresolvable", resolved_at="2026-09-20T01:00:00+00:00")]
+    later_ref = store.publish_bytes(json.dumps({"rows": later_candidate}, sort_keys=True).encode(),
+                                    schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(
+            conn, claim, later_ref, later_candidate, clock=clock, session="2026-09-20")
+    assert len(repeated) == 1
+    assert len(rows(conn, kind="outcome")) == 2
+
+
+def test_settlement_same_session_status_change_records_one_divergence(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "prediction-status-change-1"
+    _seed_prediction_ex(conn, row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P")
+    claim = _settlement_claim(conn, clock, supervisor)  # session "2026-09-13"
+    first_candidate = [_settlement_candidate(row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P",
+                                             status="unresolvable", resolved_at="2026-09-13T01:00:00+00:00")]
+    ref = store.publish_bytes(json.dumps({"rows": first_candidate}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        import_settlement_candidates_in_transaction(conn, claim, ref, first_candidate, clock=clock)
+    assert len(rows(conn, kind="outcome")) == 1
+
+    flipped = [_resolved_candidate(row_id, "2026-09-09", ticker="FAKE", strategy="TWIN-P",
+                                   resolved_at="2026-09-13T09:00:00+00:00",
+                                   exit_finality={"is_final": True})]
+    flipped_ref = store.publish_bytes(json.dumps({"rows": flipped}, sort_keys=True).encode(),
+                                      schema_ref="legacy_action.v1.0")
+    diverged = []
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(
+            conn, claim, flipped_ref, flipped, clock=clock, on_divergence=diverged.append)
+    assert repeated == []
+    assert diverged == [row_id]
+    assert len(rows(conn, kind="outcome")) == 1  # first committed observation stays
+    divergences = [dict(row) for row in conn.execute(
+        "SELECT * FROM decision_divergences WHERE scope='legacy_settlement' AND occurrence=?",
+        (row_id,))]
+    assert len(divergences) == 1
+    assert "status" in divergences[0]["reason"]
+
+    # A rerun of the same flip must not add a second divergence row.
+    with transaction(conn):
+        again = import_settlement_candidates_in_transaction(conn, claim, flipped_ref, flipped, clock=clock)
+    assert again == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM decision_divergences WHERE occurrence=?", (row_id,)).fetchone()[0] == 1

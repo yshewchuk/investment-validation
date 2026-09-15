@@ -6,7 +6,13 @@ import json
 from datetime import datetime
 
 from engine.v2.foundation import content_hash, format_timestamp
-from engine.v2.ledger.decisions import DecisionConflict, import_lines, insert, record_divergence
+from engine.v2.ledger.decisions import (
+    DecisionConflict,
+    _import_decision_id,
+    import_lines,
+    insert,
+    record_divergence,
+)
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.decision_validation import validate
@@ -14,7 +20,7 @@ from engine.v2.ops.effects_graph import effect_scope as _job_effect_scope
 from engine.v2.ops.errors import fail
 from engine.v2.ops.input_bindings import recorded_bindings
 from engine.v2.ops.lifecycle import verify_fence
-from engine.v2.ops.outbox import enqueue, watermark
+from engine.v2.ops.outbox import enqueue, watermark, watermark_would_conflict
 
 
 def _document(conn, store, artifact_id, name):
@@ -250,58 +256,131 @@ def commit_decisions(conn, claim, candidates, context, validated_context, *, clo
 _SETTLEMENT_DIVERGENCE_SCOPE = "legacy_settlement"
 
 
+#: Wall-clock fields ``engine.ledger.score_outcomes`` stamps from
+#: ``datetime.now()`` on every row (``resolved_at``, and
+#: ``calendar_checked_at`` -- both the same value; see
+#: ``engine/ledger.py::score_outcomes``). Nothing else in a settlement row is
+#: wall-clock derived (verified against the real attempt-13 candidate:
+#: ``exit_finality`` carries no timestamp of its own). Stripping these two
+#: gives two rerun lines for the identical underlying determination the same
+#: signature even though their wall clocks differ.
+_WALL_CLOCK_OUTCOME_FIELDS = ("resolved_at", "calendar_checked_at")
+
+
+def _content_signature(payload):
+    return content_hash({k: v for k, v in payload.items() if k not in _WALL_CLOCK_OUTCOME_FIELDS})
+
+
+def _existing_outcomes_by_row(conn):
+    """Every already-committed outcome decision, grouped by the prediction
+    row_id it observes.
+
+    ``generation_ref`` carries the settlement session that committed the row
+    (task brief rule 2 -- stamped by ``import_lines``' new ``generation_ref``
+    parameter below). Rows committed before this migration (the real
+    attempt-13 candidate's 626 admitted lines: verified ``generation_ref IS
+    NULL`` on every one) have no durable session recorded there; those are
+    matched by content instead -- see ``_match_same_session``.
+    """
+    index: dict = {}
+    for row in conn.execute("SELECT payload_json, generation_ref FROM decisions WHERE kind='outcome'"):
+        payload = json.loads(row["payload_json"])
+        row_id = payload.get("row_id")
+        if not row_id:
+            continue
+        index.setdefault(row_id, []).append({
+            "status": payload.get("status"), "generation_ref": row["generation_ref"],
+            "signature": _content_signature(payload),
+        })
+    return index
+
+
+def _match_same_session(existing, session, signature):
+    """The already-committed observation (if any) that counts as THIS same
+    settlement session -- by recorded ``generation_ref`` when the committing
+    run stamped one, else (legacy pre-migration rows) by content signature
+    against the incoming line, which is the only session evidence those rows
+    carry (task brief real-check requirement: derived from committed data
+    only)."""
+    for entry in existing:
+        if entry["generation_ref"] is not None:
+            if entry["generation_ref"] == session:
+                return entry
+        elif entry["signature"] == signature:
+            return entry
+    return None
+
+
+def _already_this_observation(conn, row_id, payload):
+    """Whether THIS exact (row_id, resolved_at) outcome observation --
+    ``decisions._import_decision_id``'s own identity -- is already on file.
+
+    Checked before the rules below run so a byte-identical retry (same
+    candidate bytes, same wall clock: every pre-existing idempotency test)
+    still falls through unchanged to ``import_lines``' own exact-bytes
+    shortcut, instead of being intercepted here as a dedupe skip -- that
+    shortcut is what makes a byte-identical retry return the SAME receipts,
+    which the new dedupe below (built for a rerun with a NEW wall clock and
+    therefore a NEW decision_id) would not reproduce.
+    """
+    try:
+        decision_id = _import_decision_id("outcome", row_id, payload)
+    except DecisionConflict:
+        return False
+    return conn.execute("SELECT 1 FROM decisions WHERE decision_id=?", (decision_id,)).fetchone() is not None
+
+
 def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows, *, clock,
-                                                 session=None, on_divergence=None, on_admitted=None):
+                                                 session=None, on_divergence=None, on_admitted=None,
+                                                 on_skip=None):
     """Import only rows captured from the isolated legacy append, under the active fence.
 
     ``session`` is the finality-resolved date the settlement worker actually
-    scored ``through`` (P2-C03) — the caller reads it off the bound
-    ``settlement.json`` document (``_action_settlement``'s own ``session``
-    field). It defaults to the job's REQUESTED ``session`` parameter for a
-    caller that predates that field (no walk-back, same value either way).
-    That resolved value is also v2's own finality proof for a grandfathered
-    resolved line -- see ``_validate_settlement_state``.
+    scored ``through`` (P2-C03) — read off the bound ``settlement.json``
+    document, defaulting to the job's REQUESTED ``session`` parameter for a
+    caller that predates that field. Also v2's own finality proof for a
+    grandfathered resolved line (``_validate_settlement_state``), and stamped
+    as ``generation_ref`` on every freshly-committed outcome decision (task
+    brief rule 2) -- what a later rerun's same-session dedupe checks against.
 
-    A settlement line that CONFLICTS with its recorded prediction on a
-    contract field (``ticker``/``strategy``/``event_date``/``settlement``) is
-    the standing legacy-duplicate case (2026-09-15 nightly attempt 10, the
-    DLNG row: the prediction was first-imported with the event's original
-    date, and the legacy ledger's later, differing outcome line names the
-    date it moved to after an AMC->BMO shift). The same user decision that
-    governs ``ops ledger import-history`` (guide §5.5 item 1 / the
-    ``legacy_import`` scope) applies here: the first committed content stays
-    authoritative, the conflicting line is recorded as a durable
-    ``decision_divergences`` row (scope ``legacy_settlement``) and dropped,
-    and the stage COMMITS the rest instead of refusing outright. A line
-    naming no committed prediction at all is a different failure (a missing
-    contract, not a duplicate) and still refuses -- see ``_settlement_line``.
+    A CONTRACT-mismatched line (``ticker``/``strategy``/``event_date``/
+    ``settlement`` differs from the recorded prediction -- the DLNG shape,
+    real nightly attempt 10) records a durable ``decision_divergences`` row
+    (scope ``legacy_settlement``, guide §5.5 item 1) and is dropped; the
+    stage still COMMITS the rest. A line naming no committed prediction at
+    all is a different failure (missing contract) and still hard-refuses --
+    see ``_settlement_line``.
 
-    ``on_divergence``, when given, is called with each diverging line's
-    ``row_id`` as it is recorded -- the caller's hook for surfacing a
-    per-job divergence count/row_id list on the job's own output (see
-    ``engine.v2.ops.supervisor``'s ``legacy_settlement`` effect) without this
-    function's return value (the committed ``receipts``, unchanged) having
-    to carry it. ``on_admitted``, when given, is called for every line that
-    passes validation (including unresolvable ones) with
-    ``(row_id, proof_kind)`` -- ``proof_kind`` is ``"unresolvable"``,
-    ``"legacy_exit_finality"`` or ``"v2_finality_session"`` (see
-    ``_validate_settlement_state``) -- the caller's hook for a per-proof-kind
-    admission count on the job's own output, without altering the committed
-    original bytes.
+    Once a line clears the contract check, ``_settlement_dedupe_skip``
+    applies task brief rules 1/2/4 -- terminal-resolved, same-session
+    dedupe, and same-session status-change divergence -- the fix for a
+    same-session rerun's NEW wall-clock ``resolved_at`` otherwise minting a
+    brand-new ``decisions.decision_id`` and committing a duplicate
+    observation (``decisions._import_decision_id``).
+
+    ``on_divergence(row_id)`` fires for every diverging/status-changed line;
+    ``on_admitted(row_id, proof_kind)`` for every line that passes validation
+    (``proof_kind``: ``"unresolvable"``, ``"legacy_exit_finality"``,
+    ``"v2_finality_session"`` -- see ``_validate_settlement_state``);
+    ``on_skip(row_id, reason)`` for every dedupe drop (``reason``:
+    ``"already_resolved"``, ``"already_observed_this_session"``). None alter
+    the committed ``receipts`` return value.
     """
     if not conn.in_transaction:
         raise ValueError("settlement import requires the attempt transaction")
     verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
     effective_session = session or claim.spec.parameters["session"]
+    existing_index = _existing_outcomes_by_row(conn)
     source_lines = []
     for item in rows:
         line = _settlement_line(conn, item, session=effective_session, clock=clock,
-                                on_divergence=on_divergence, on_admitted=on_admitted)
+                                existing_index=existing_index, on_divergence=on_divergence,
+                                on_admitted=on_admitted, on_skip=on_skip)
         if line is not None:
             source_lines.append(line)
     try:
         receipts = import_lines(conn, candidate_ref.content_hash, source_lines, kind="outcome",
-                                created_at=format_timestamp(clock.now()))
+                                created_at=format_timestamp(clock.now()), generation_ref=effective_session)
     except DecisionConflict:
         raise fail("IDEMPOTENCY_CONFLICT", "settlement observation conflicts with history") from None
     # P2-C04: settlement uses the same effect scope decision commit and
@@ -309,15 +388,30 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
     # must never advance the global watermark either.
     scope = _job_effect_scope(claim)
     release_key = content_hash(["settlement", scope, candidate_ref.content_hash])
+    # 2026-09-15 (task brief): a same-session rerun that commits NOTHING new
+    # (every line dropped by the rules 1/2/4 dedupe above) must not touch the
+    # outbox/watermark either. ``release_key`` is derived from
+    # ``candidate_ref.content_hash``, which changes on every rerun --
+    # ``engine.ledger.score_outcomes`` stamps a new wall-clock ``resolved_at``
+    # even when nothing about the determination changed -- so without this
+    # guard a bare no-op rerun would still collide with the FIRST successful
+    # pass's already-recorded receipt at ``watermark()``'s own idempotency
+    # check (a same-occurrence, different-receipt write is refused by
+    # design) and fail the whole attempt instead of being the no-op it is.
+    if not source_lines and watermark_would_conflict(
+            conn, "nightly", scope, "settlement", effective_session, release_key):
+        return receipts
     enqueue(conn, "export", release_key, {"settlement_candidate": candidate_ref.content_hash})
     watermark(conn, "nightly", scope, "settlement", effective_session, release_key, clock=clock)
     return receipts
 
 
-def _settlement_line(conn, item, *, session, clock, on_divergence=None, on_admitted=None):
+def _settlement_line(conn, item, *, session, clock, existing_index, on_divergence=None,
+                     on_admitted=None, on_skip=None):
     """Validate one captured settlement line; return its original bytes to
-    import, or ``None`` when it diverged from the recorded prediction (a
-    divergence row was recorded instead, and the line must not be
+    import, or ``None`` when it diverged from the recorded prediction, or was
+    dropped by the same-session/terminal-resolved dedupe (a divergence row,
+    or nothing at all, was recorded instead; either way the line must not be
     imported).
     """
     if not isinstance(item, dict):
@@ -341,14 +435,55 @@ def _settlement_line(conn, item, *, session, clock, on_divergence=None, on_admit
     field = _contract_mismatch_field(payload, recorded)
     if field is not None:
         _record_settlement_divergence(conn, decision_id=decision_id, row_id=row_id, field=field,
-                                      payload=payload, prediction=prediction, clock=clock)
+                                      payload=payload, prediction=prediction, session=session, clock=clock)
         if on_divergence is not None:
             on_divergence(row_id)
         return None
+
+    if _settlement_dedupe_skip(conn, decision_id=decision_id, row_id=row_id, payload=payload,
+                               prediction=prediction, existing_index=existing_index, session=session,
+                               clock=clock, on_divergence=on_divergence, on_skip=on_skip):
+        return None
+
     proof = _validate_settlement_state(payload, recorded=recorded, session=session)
     if on_admitted is not None:
         on_admitted(row_id, proof)
     return original
+
+
+def _settlement_dedupe_skip(conn, *, decision_id, row_id, payload, prediction, existing_index, session,
+                            clock, on_divergence=None, on_skip=None):
+    """Task brief rules 1/2/4 -- terminal-resolved, same-session dedupe, and
+    same-session status-change divergence. Split out of ``_settlement_line``
+    (function-length/complexity budget). Returns ``True`` when the line must
+    NOT be imported (a skip was counted, or a divergence recorded); ``False``
+    when it should proceed to ``_validate_settlement_state``.
+
+    Skipped entirely when THIS exact observation is already on file
+    (``_already_this_observation``) -- see that function's docstring: a
+    byte-identical retry must fall through to ``import_lines``' own
+    exact-bytes shortcut unchanged, never be intercepted here.
+    """
+    if _already_this_observation(conn, row_id, payload):
+        return False
+    existing = existing_index.get(row_id, ())
+    same_session = _match_same_session(existing, session, _content_signature(payload))
+    if same_session is not None:
+        if same_session["status"] == payload.get("status"):
+            if on_skip is not None:
+                on_skip(row_id, "already_observed_this_session")
+            return True
+        _record_status_change_divergence(
+            conn, decision_id=decision_id, row_id=row_id, payload=payload, prediction=prediction,
+            session=session, clock=clock, previous_status=same_session["status"])
+        if on_divergence is not None:
+            on_divergence(row_id)
+        return True
+    if any(entry["status"] == "resolved" for entry in existing):
+        if on_skip is not None:
+            on_skip(row_id, "already_resolved")
+        return True
+    return False
 
 
 def _contract_mismatch_field(payload, recorded):
@@ -358,28 +493,89 @@ def _contract_mismatch_field(payload, recorded):
     return None
 
 
-def _record_settlement_divergence(conn, *, decision_id, row_id, field, payload, prediction, clock):
+def _divergence_already_recorded(conn, *, decision_id, occurrence, marker):
+    """Whether a ``legacy_settlement`` divergence naming ``marker`` already
+    exists for this occurrence -- checked by the stable, human-authored
+    ``reason`` text rather than by recomputing ``record_divergence``'s
+    content-keyed ``divergence_id``, because the 3 real divergences already
+    committed by attempt 13 were keyed off wall-clock ``resolved_at`` (the
+    pre-fix scheme) and a freshly-computed session-keyed id would never
+    match them -- this check is what keeps a rerun from re-recording those."""
+    row = conn.execute(
+        "SELECT 1 FROM decision_divergences WHERE decision_id=? AND scope=? AND occurrence=? "
+        "AND reason LIKE ?",
+        (decision_id, _SETTLEMENT_DIVERGENCE_SCOPE, occurrence, "%" + marker + "%")).fetchone()
+    return row is not None
+
+
+def _record_settlement_divergence(conn, *, decision_id, row_id, field, payload, prediction, session,
+                                  clock):
     """Durable evidence that a settlement line disagreed with the recorded
-    prediction's contract (guide §5.5 item 1 applied to settlement). Keyed so
-    an identical retry or replay of the SAME divergent line never duplicates
-    the row: ``attempted_generation_ref`` is the settlement's own observation
-    identity (``resolved_at``/``settled_at``, the same field
-    ``decisions._import_decision_id`` already uses to distinguish repeated
-    outcome observations for one row) rather than anything session- or
-    wall-clock-derived, so ``record_divergence``'s content-keyed
-    ``divergence_id`` is reproduced exactly on a retry.
+    prediction's contract (guide §5.5 item 1 applied to settlement).
+
+    Idempotent per (row_id, field) -- task brief rule 3, "at most once per
+    (row_id, field, session)" applied as its stricter, simpler upper bound:
+    a contract mismatch is a property of the recorded prediction versus a
+    legacy-ledger fact, not something that legitimately varies by session, so
+    recording it once is enough evidence forever. ``attempted_generation_ref``
+    is now the settlement ``session`` (never wall-clock ``resolved_at``, the
+    2026-09-15 finding that made the OLD keying re-diverge on every rerun),
+    but the ``_divergence_already_recorded`` guard above is what actually
+    keeps a rerun from adding a new row, since it also covers rows recorded
+    under the old wall-clock keying before this fix.
     """
-    attempted_hash = content_hash(payload)
-    generation_ref = str(payload.get("resolved_at") or payload.get("settled_at") or attempted_hash)
+    marker = "field " + field + " differs"
+    if _divergence_already_recorded(conn, decision_id=decision_id, occurrence=str(row_id), marker=marker):
+        return
+    attempted_hash = content_hash({"field": field, "value": payload.get(field), "session": session})
     record_divergence(
         conn, decision_id=decision_id, scope=_SETTLEMENT_DIVERGENCE_SCOPE, occurrence=str(row_id),
         existing_generation_ref=prediction["generation_ref"],
-        attempted_generation_ref=generation_ref,
+        attempted_generation_ref=str(session),
         existing_payload_hash=prediction["payload_hash"],
         attempted_payload_hash=attempted_hash,
         reason="settlement_contract_mismatch: field " + field + " differs from the recorded "
                "prediction; the first committed prediction stays authoritative (guide §5.5 item 1)",
         created_at=format_timestamp(clock.now()))
+
+
+def _record_status_change_divergence(conn, *, decision_id, row_id, payload, prediction, session, clock,
+                                     previous_status):
+    """Task brief rule 4: a rerun for the SAME settlement session that
+    produces a DIFFERENT status than what was already committed for that
+    session (unresolvable -> resolved, or the reverse) commits nothing and
+    records exactly ONE divergence instead -- idempotent per (row_id,
+    session) the same way as ``_record_settlement_divergence`` above (a
+    fixed reason marker, checked before recording)."""
+    if _divergence_already_recorded(conn, decision_id=decision_id, occurrence=str(row_id),
+                                    marker="status_change_this_session"):
+        return
+    new_status = payload.get("status")
+    attempted_hash = content_hash({"field": "status", "from": previous_status, "to": new_status,
+                                   "session": session})
+    record_divergence(
+        conn, decision_id=decision_id, scope=_SETTLEMENT_DIVERGENCE_SCOPE, occurrence=str(row_id),
+        existing_generation_ref=prediction["generation_ref"],
+        attempted_generation_ref=str(session),
+        existing_payload_hash=prediction["payload_hash"],
+        attempted_payload_hash=attempted_hash,
+        reason="settlement_status_change_this_session: recorded status " + str(previous_status)
+               + " differs from " + str(new_status) + " for the same settlement session "
+               + str(session) + "; the first committed observation for this session stays "
+               "authoritative",
+        created_at=format_timestamp(clock.now()))
+
+
+def _stamp_date(value):
+    """A bare ``date`` for a date-or-datetime string, or ``None`` -- used
+    only to compare a recorded exit date against a settlement session, never
+    to reconstruct a timestamp."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+    except (TypeError, ValueError):
+        return None
 
 
 def _stamp_date(value):
