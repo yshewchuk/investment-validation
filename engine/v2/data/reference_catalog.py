@@ -64,6 +64,11 @@ REFERENCE_KINDS: tuple[str, ...] = (
     CALENDAR_KIND, "model_registry", "structure_champions", "chooser_analog_pool",
     LEGACY_SNAPSHOT_KIND, "champion_artifact", "tier4_serving_cache",
     "pnl_sim_history", "recalibration_pairs",
+    #: Last read-set gap fix, part 2 (2026-09-15): optional (not in
+    #: :data:`_REQUIRED_MODEL_OUTPUT_KINDS` — legitimately absent, e.g. a
+    #: first-ever generation) so it is never enumerated there and never
+    #: refused by :func:`pinned_materialization_refs`.
+    "model_evidence_cache",
 )
 #: Task brief 2026-09-14: model-output kinds a snapshot-mode launch must have
 #: pinned before ``legacy_score`` can run against it — see

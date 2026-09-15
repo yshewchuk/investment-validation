@@ -253,8 +253,13 @@ def test_plan_import_enumerates_declared_files(tmp_path):
     assert request.legacy_snapshot_source_ref.path == "data/features/SNAPSHOT"
     table_paths = {ref.path for refs in request.table_sources.values() for ref in refs}
     reference_paths = {ref.path for ref in plan.legacy_input_manifest.file_refs} - table_paths
-    assert reference_paths == {*(spec["path"] for spec in _INPUTS.values() if "path" in spec),
-                               reference_artifact_path(), reference_cache_path(tmp_path)}
+    # An optional exact path (``required: False``, e.g. ``model_evidence_cache``)
+    # is only expected here if this fixture's store actually carries it --
+    # ``build_legacy_store`` never writes it, matching its legitimate
+    # first-ever-generation absence in production.
+    expected = {spec["path"] for spec in _INPUTS.values() if "path" in spec
+               and (spec.get("required", True) or (tmp_path / spec["path"]).is_file())}
+    assert reference_paths == {*expected, reference_artifact_path(), reference_cache_path(tmp_path)}
     assert len(plan.legacy_input_manifest.file_refs) == len(table_paths) + len(reference_paths)
 
 

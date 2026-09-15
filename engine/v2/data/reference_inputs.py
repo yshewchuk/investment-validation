@@ -153,11 +153,29 @@ LEGACY_REFERENCE_INPUTS_V1: dict[str, object] = {
             "resolution": "exact", "path": legacy_adapter.legacy_pnl_sim_history_path()},
         "recalibration_pairs": {
             "resolution": "exact", "path": legacy_adapter.legacy_recalibration_pairs_path()},
+        #: Last read-set gap fix, part 2 (2026-09-15 real incident:
+        #: job_caaed30eb5d1745ce87ed22a55dbc2e3, RESOURCE_LIMIT_EXCEEDED).
+        #: ``required: False`` (like barrier mode's own ``model_evidence_cache``
+        #: family, ``legacy_nightly_read_plan.py``) because it is legitimately
+        #: absent on a first-ever run/generation, and refusing the whole
+        #: materialization over a missing CACHE file (as opposed to a missing
+        #: data table) would be strictly worse than the rebuild it exists to
+        #: avoid. See :func:`legacy_adapter.legacy_model_evidence_cache_path`.
+        "model_evidence_cache": {
+            "resolution": "exact", "required": False,
+            "path": legacy_adapter.legacy_model_evidence_cache_path()},
     },
 }
 
 _INPUTS: dict[str, dict] = LEGACY_REFERENCE_INPUTS_V1["inputs"]  # type: ignore[assignment]
 _EXACT = {spec["path"]: kind for kind, spec in _INPUTS.items() if spec["resolution"] == "exact"}
+#: The subset of :data:`_EXACT` that may legitimately be absent (last read-set
+#: gap fix, part 2): skipped rather than refused by
+#: :func:`resolve_reference_files`, and excluded from
+#: :func:`publish_reference_inputs`'s missing-required check.
+_OPTIONAL_EXACT = frozenset(
+    spec["path"] for spec in _INPUTS.values()
+    if spec["resolution"] == "exact" and not spec.get("required", True))
 _CACHE_NAME = re.compile(r"^[^/]+_[0-9a-f]{12}\.joblib$")
 
 
@@ -184,8 +202,17 @@ def resolve_reference_files(root: Path, *, panel_content_hash: str,
 
     ``file_ref(root, relative)`` is ``import_snapshot``'s own hashing
     enumerator: it refuses a missing or symlinked file with ``INPUT_CHANGED``.
+    An :data:`_OPTIONAL_EXACT` path is exempt from that refusal — silently
+    skipped, the same "not a regular file, not an error" reading
+    ``capture_inputs._single_file`` already gives the identical file under
+    barrier mode — rather than calling ``file_ref`` and letting it refuse.
     """
-    refs = {path: file_ref(root, path) for path in _EXACT}
+    def _present(path: str) -> bool:
+        candidate = root / path
+        return candidate.is_file() and not candidate.is_symlink()
+
+    refs = {path: file_ref(root, path) for path in _EXACT
+           if path not in _OPTIONAL_EXACT or _present(path)}
     champions = champion_entries(root / _REGISTRY_PATH)
     for entry in champions:
         path = _artifact_path(entry)
@@ -310,8 +337,10 @@ def publish_reference_inputs(store, attempt_id: str, legacy_root, file_refs, *,
                              as_of=None, keepalive=None) -> tuple[catalog_rows.ReferenceInput, ...]:
     """Publish every reference file in ``file_refs`` from the staged legacy root.
 
-    Refuses with ``CONTRACT_MISMATCH`` if any ``exact`` input is absent: a
-    manifest that was not built by :func:`resolve_reference_files`. Also
+    Refuses with ``CONTRACT_MISMATCH`` if any REQUIRED ``exact`` input is
+    absent: a manifest that was not built by :func:`resolve_reference_files`.
+    An :data:`_OPTIONAL_EXACT` path is exempt, the same as it is there — it
+    may legitimately never have been in ``file_refs`` at all. Also
     refuses ``CONTRACT_MISMATCH`` if a :data:`_FOLD_KINDS` file is being
     pinned and ``as_of`` is ``None`` — a missing Tier-4 fold must never be
     silent, the same discipline the missing-file check already applies.
@@ -333,7 +362,7 @@ def publish_reference_inputs(store, attempt_id: str, legacy_root, file_refs, *,
         published.append(catalog_rows.ReferenceInput(
             kind=kind, legacy_path=ref.path, object_id=obj.object_id,
             content_hash=obj.content_hash, byte_size=obj.byte_size, fold=fold))
-    missing = sorted(set(_EXACT) - {item.legacy_path for item in published})
+    missing = sorted(set(_EXACT) - _OPTIONAL_EXACT - {item.legacy_path for item in published})
     if missing:
         raise errors.fail("CONTRACT_MISMATCH", "import manifest lacks required reference inputs",
                           details={"paths": missing})
