@@ -55,6 +55,8 @@ re-derives it) so the two cannot silently drift apart.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from .legacy_materialization import LEGACY_SCORE_READ_PLAN_V1
 
 __all__ = [
@@ -304,6 +306,58 @@ def _family_present(family_name: str, manifest: dict) -> bool:
     return checker(spec, paths, manifest) if checker else False
 
 
+def _ledger_bound_problems(manifest: dict) -> list[dict]:
+    """No nightly job for session S may see a prediction or outcome line
+    dated AT or after S -- both files are exactly what v2 must produce and
+    commit itself for S, never read pre-computed from the staged legacy
+    ledger. Real 2026-09-10 attempt 11 failure: a manifest captured from the
+    live legacy tree after the fact carried ``ledger/predictions/
+    2026-09-10.jsonl`` (session S's own predictions) and ``ledger/outcomes/
+    2026-09-11.jsonl``/``2026-09-12.jsonl`` (future settle dates);
+    ``legacy_settlement`` then tried to commit 153 outcome lines naming
+    predictions never committed in the catalog and refused
+    ``VALIDATION_FAILED``.
+
+    2026-09-15 correction (send-back on 7d235f8): ``ledger/outcomes/
+    S.jsonl`` is refused too, not only files dated strictly after S -- it is
+    S's own nightly settlement output (legacy's ``score_outcomes(through=S)``
+    writes it same-day). Staging it makes legacy's own ``_unresolved`` treat
+    those rows as already settled and skip them, so v2 never produces or
+    commits them itself. Predictions and outcomes therefore share ONE bound.
+
+    ``engine.v2.ops.capture_inputs._enumerate_ledger_glob`` now bounds a
+    FRESH capture the same way; this is defense in depth (deliverable-3
+    style, `_check_nightly_manifest`/`_check_submitted_nightly_manifest`) for
+    a manifest captured before that fix, or built by any other tool.
+    """
+    session = manifest.get("selected_session")
+    try:
+        cutoff = date.fromisoformat(session)
+    except (TypeError, ValueError):
+        return []
+    problems: list[dict] = []
+    for file_ref in manifest.get("file_refs") or ():
+        path = file_ref.get("path", "") if isinstance(file_ref, dict) else ""
+        for directory, family in (("ledger/predictions/", "ledger_predictions"),
+                                  ("ledger/outcomes/", "ledger_outcomes")):
+            if not path.startswith(directory) or not path.endswith(".jsonl"):
+                continue
+            try:
+                file_date = date.fromisoformat(path[len(directory):-len(".jsonl")])
+            except ValueError:
+                continue
+            if file_date >= cutoff:
+                problems.append({
+                    "kind": None, "family": family,
+                    "reason": f"{path!r} is session {cutoff.isoformat()}'s own output (or "
+                             "later) -- v2 must produce and commit this itself, never read it "
+                             "pre-computed from the staged legacy ledger; re-capture with "
+                             "capture-inputs bounded strictly before the session, or drop the "
+                             "file from the manifest",
+                })
+    return problems
+
+
 def manifest_problems(manifest: dict, *, kinds: tuple[str, ...] = BARRIER_KINDS) -> list[dict]:
     """Pure plan-time check (deliverable 3): problems with ``manifest`` for
     running ``kinds`` against the barrier. Empty means the manifest is fine.
@@ -330,4 +384,5 @@ def manifest_problems(manifest: dict, *, kinds: tuple[str, ...] = BARRIER_KINDS)
                     "kind": kind, "family": family,
                     "reason": FAMILIES[family]["reason"],
                 })
+    problems.extend(_ledger_bound_problems(manifest))
     return problems

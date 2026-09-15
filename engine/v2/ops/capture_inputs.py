@@ -117,12 +117,49 @@ def _enumerate_table_years(root: Path, table: str, years: set[int] | None) -> li
     return out
 
 
-def _enumerate_ledger_glob(root: Path, directory: str) -> list[str]:
+def _enumerate_ledger_glob(root: Path, directory: str, as_of: pd.Timestamp) -> list[str]:
+    """``.jsonl`` files under ``directory``, bounded to strictly BEFORE
+    session ``as_of``.
+
+    2026-09-15 fix (real 2026-09-10 attempt 11 failure): an unbounded glob
+    picked up ``ledger/predictions/2026-09-10.jsonl`` -- session S's own
+    predictions, which v2 must produce and commit itself, never read
+    pre-computed from the staged legacy ledger -- and
+    ``ledger/outcomes/2026-09-11.jsonl``/``2026-09-12.jsonl``, dated after
+    the session (outcomes files are named by settle date). Both leaked into
+    ``legacy_settlement``, which then tried to commit outcome lines naming
+    predictions never committed in the catalog and refused
+    ``VALIDATION_FAILED``.
+
+    2026-09-15 correction (send-back on 7d235f8): ``ledger/outcomes/S.jsonl``
+    must be excluded too, not only files dated AFTER S. It is S's own
+    nightly settlement output (legacy's ``score_outcomes(through=S)`` writes
+    it same-day, keyed by ``resolved_at``) -- staging it makes legacy's own
+    ``_unresolved`` treat those rows as already settled and skip them, so v2
+    never produces or commits them itself. That is exactly the predictions
+    case: S's own output belongs to v2, not to a staged copy of legacy's.
+    Predictions and outcomes therefore share ONE bound -- excluded strictly
+    AT and after the session, matching ``ops ledger import-history
+    --through``'s own exclusive bound. A file whose name is not a bare
+    ``YYYY-MM-DD.jsonl`` date is left out rather than guessed at -- an
+    unrecognized name is not proof it is in-bounds.
+    """
     ledger_dir = root / directory
     if not ledger_dir.is_dir() or ledger_dir.is_symlink():
         return []
-    return sorted(f"{directory}/{p.name}" for p in ledger_dir.iterdir()
-                  if p.is_file() and not p.is_symlink() and p.name.endswith(".jsonl"))
+    cutoff = pd.Timestamp(as_of).normalize()
+    out = []
+    for p in ledger_dir.iterdir():
+        if not (p.is_file() and not p.is_symlink() and p.name.endswith(".jsonl")):
+            continue
+        try:
+            file_date = pd.Timestamp(p.name[:-len(".jsonl")])
+        except ValueError:
+            continue
+        if file_date >= cutoff:
+            continue
+        out.append(f"{directory}/{p.name}")
+    return sorted(out)
 
 
 def _lookback_sessions(root: Path, as_of: pd.Timestamp, *, max_sessions: int = 15) -> tuple[str, ...]:
@@ -291,7 +328,7 @@ def _capture_family(root: Path, family: str, scope: _Scope, finality_years: set[
     if kind == "scoped_curated_table":
         return _capture_scoped_curated_table(family, spec, root, scope, finality_years), panel_hash
     if kind == "ledger_glob":
-        return _enumerate_ledger_glob(root, spec["directory"]), panel_hash
+        return _enumerate_ledger_glob(root, spec["directory"], scope.as_of), panel_hash
     if kind == "single_file":
         return _capture_single_file(family, spec, root), panel_hash
     return [], panel_hash
