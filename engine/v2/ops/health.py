@@ -181,12 +181,20 @@ def health(conn, *, clock, executor_mode="watchdog"):
     # must clear rather than stick forever.
     show_withheld = withheld is not None and (
         current is None or withheld["occurrence"] > current["occurrence"])
+    # A nonzero count here (any scope) means some run recorded evidence that
+    # a later generation/legacy line disagreed with an already-committed
+    # decision instead of overwriting it (guide §5.5 item 1; includes the
+    # ``legacy_settlement`` scope's contract-field divergences) -- surfaced
+    # here so an operator sees it without reading the ledger directly.
+    divergences = {row["scope"]: row["count"] for row in conn.execute(
+        "SELECT scope, COUNT(*) AS count FROM decision_divergences GROUP BY scope")}
     return {"schema_version": "operations_health.v1.0", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks")],
             "current_release": dict(current) if current else None,
             "withheld_release": dict(withheld) if show_withheld else None,
-            "code_budgets": budget_streak(conn), "activation": "shadow_only"}
+            "code_budgets": budget_streak(conn), "activation": "shadow_only",
+            "decision_divergences": divergences}
 
 
 def write_health(path, document):

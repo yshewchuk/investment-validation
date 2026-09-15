@@ -193,3 +193,122 @@ def test_review_settlement_worker_captures_only_new_exact_bytes(tmp_path, monkey
     assert document["rows"][0]["row"] == json.loads(new)
     assert document["session"] == "2026-09-13"
     assert document["requested_session"] == "2026-09-13"
+
+
+# --------------------------------------------------------------------------
+# 2026-09-15: legacy ledger duplicates (DLNG-shape) diverge instead of
+# refusing the whole settlement stage -- guide §5.5 item 1 applied to
+# settlement contract mismatches. See engine/v2/ops/decision_commit.py
+# _settlement_line / _contract_mismatch_field / _record_settlement_divergence.
+# --------------------------------------------------------------------------
+
+
+def _seed_prediction(conn, row_id, event_date, *, ticker="DLNG", strategy="STR-THRU"):
+    from engine.v2.ledger.decisions import insert
+    with transaction(conn):
+        insert(conn, logical_key=row_id, decision_id="prediction:" + row_id,
+              payload={"row_id": row_id, "ticker": ticker, "strategy": strategy,
+                       "event_date": event_date, "settlement": {"policy": "fixed"}},
+              purpose="shadow", kind="prediction", validations={}, created_at=STAMP)
+
+
+def _settlement_candidate(row_id, event_date, *, ticker="DLNG", strategy="STR-THRU",
+                          status="unresolvable", resolved_at="2026-09-10T23:00:00+00:00"):
+    row = {"row_id": row_id, "ticker": ticker, "strategy": strategy, "event_date": event_date,
+           "settlement": {"policy": "fixed"}, "status": status, "resolved_at": resolved_at}
+    return {"row": row, "original_b64": base64.b64encode(_raw(row)).decode("ascii")}
+
+
+def test_settlement_event_date_mismatch_diverges_and_stage_succeeds(tmp_path):
+    """The DLNG shape from the real shadow nightly (attempt 10): the recorded
+    prediction has the event's ORIGINAL date (first-imported, first-wins),
+    and the legacy ledger's settlement line names the date it moved to after
+    an AMC->BMO shift. The mismatch must record a divergence, not refuse the
+    stage."""
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "2026-09-04|DLNG|STR-THRU|2.5000|2026-09-18"
+    _seed_prediction(conn, row_id, "2026-09-07")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_settlement_candidate(row_id, "2026-09-08")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    diverged = []
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, claim, ref, captured, clock=clock, on_divergence=diverged.append)
+    assert receipts == []
+    assert len(rows(conn, kind="outcome")) == 0
+    # The coordinator's job-output summary (engine/v2/ops/supervisor.py's
+    # legacy_settlement effect) reports settlement_divergences: <count> plus
+    # row_ids straight from this hook.
+    assert diverged == [row_id]
+    divergences = [dict(row) for row in conn.execute(
+        "SELECT * FROM decision_divergences WHERE scope='legacy_settlement'")]
+    assert len(divergences) == 1
+    assert divergences[0]["decision_id"] == "prediction:" + row_id
+    assert divergences[0]["occurrence"] == row_id
+    assert "event_date" in divergences[0]["reason"]
+
+
+def test_settlement_mixed_batch_commits_matches_and_diverges_the_mismatch(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    for row_id in ("row-a", "row-b", "row-c"):
+        _seed_prediction(conn, row_id, "2026-09-07", ticker="FAKE", strategy="TWIN-P")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [
+        _settlement_candidate("row-a", "2026-09-08", ticker="FAKE", strategy="TWIN-P"),  # mismatch
+        _settlement_candidate("row-b", "2026-09-07", ticker="FAKE", strategy="TWIN-P"),  # matches
+        _settlement_candidate("row-c", "2026-09-07", ticker="FAKE", strategy="TWIN-P"),  # matches
+    ]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert len(receipts) == 2
+    assert len(rows(conn, kind="outcome")) == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM decision_divergences WHERE scope='legacy_settlement'").fetchone()[0] == 1
+
+
+def test_settlement_divergence_retry_is_idempotent(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    row_id = "2026-09-04|DLNG|STR-THRU|2.5000|2026-09-18"
+    _seed_prediction(conn, row_id, "2026-09-07")
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_settlement_candidate(row_id, "2026-09-08")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with transaction(conn):
+        import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    with transaction(conn):
+        repeated = import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert repeated == []
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+    assert len(rows(conn, kind="outcome")) == 0
+
+
+def test_settlement_missing_prediction_still_refuses(tmp_path):
+    """Not a duplicate -- a missing contract. Must still hard-refuse."""
+    from engine.v2.ops.errors import OpsError
+
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    with transaction(conn):
+        set_authority(conn, None, "catalog", STAMP)
+    claim = _settlement_claim(conn, clock, supervisor)
+    captured = [_settlement_candidate("ghost-1", "2026-09-07")]
+    ref = store.publish_bytes(json.dumps({"rows": captured}, sort_keys=True).encode(),
+                              schema_ref="legacy_action.v1.0")
+    with pytest.raises(OpsError, match="settlement names no committed prediction"):
+        with transaction(conn):
+            import_settlement_candidates_in_transaction(conn, claim, ref, captured, clock=clock)
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0

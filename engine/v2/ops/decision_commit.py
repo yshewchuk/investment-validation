@@ -240,8 +240,17 @@ def commit_decisions(conn, claim, candidates, context, validated_context, *, clo
         return commit_decisions_in_transaction(conn, claim, candidates, validated_context, clock=clock)
 
 
+#: Fixed, literal scope for settlement-line divergences -- deliberately NOT
+#: the job's effect scope (``_job_effect_scope``, e.g. "shadow"), matching
+#: ``ledger_history_import._record_legacy_divergence``'s own "legacy_import"
+#: convention: a scope names the KIND of legacy-duplicate evidence, and
+#: ``occurrence`` (below, the row_id) names the specific decision it is
+#: about -- not the nightly session.
+_SETTLEMENT_DIVERGENCE_SCOPE = "legacy_settlement"
+
+
 def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows, *, clock,
-                                                 session=None):
+                                                 session=None, on_divergence=None):
     """Import only rows captured from the isolated legacy append, under the active fence.
 
     ``session`` is the finality-resolved date the settlement worker actually
@@ -249,11 +258,36 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
     ``settlement.json`` document (``_action_settlement``'s own ``session``
     field). It defaults to the job's REQUESTED ``session`` parameter for a
     caller that predates that field (no walk-back, same value either way).
+
+    A settlement line that CONFLICTS with its recorded prediction on a
+    contract field (``ticker``/``strategy``/``event_date``/``settlement``) is
+    the standing legacy-duplicate case (2026-09-15 nightly attempt 10, the
+    DLNG row: the prediction was first-imported with the event's original
+    date, and the legacy ledger's later, differing outcome line names the
+    date it moved to after an AMC->BMO shift). The same user decision that
+    governs ``ops ledger import-history`` (guide §5.5 item 1 / the
+    ``legacy_import`` scope) applies here: the first committed content stays
+    authoritative, the conflicting line is recorded as a durable
+    ``decision_divergences`` row (scope ``legacy_settlement``) and dropped,
+    and the stage COMMITS the rest instead of refusing outright. A line
+    naming no committed prediction at all is a different failure (a missing
+    contract, not a duplicate) and still refuses -- see ``_settlement_line``.
+
+    ``on_divergence``, when given, is called with each diverging line's
+    ``row_id`` as it is recorded -- the caller's hook for surfacing a
+    per-job divergence count/row_id list on the job's own output (see
+    ``engine.v2.ops.supervisor``'s ``legacy_settlement`` effect) without this
+    function's return value (the committed ``receipts``, unchanged) having
+    to carry it.
     """
     if not conn.in_transaction:
         raise ValueError("settlement import requires the attempt transaction")
     verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
-    source_lines = [_settlement_line(conn, item) for item in rows]
+    source_lines = []
+    for item in rows:
+        line = _settlement_line(conn, item, clock=clock, on_divergence=on_divergence)
+        if line is not None:
+            source_lines.append(line)
     try:
         receipts = import_lines(conn, candidate_ref.content_hash, source_lines, kind="outcome",
                                 created_at=format_timestamp(clock.now()))
@@ -270,7 +304,12 @@ def import_settlement_candidates_in_transaction(conn, claim, candidate_ref, rows
     return receipts
 
 
-def _settlement_line(conn, item):
+def _settlement_line(conn, item, *, clock, on_divergence=None):
+    """Validate one captured settlement line; return its original bytes to
+    import, or ``None`` when it diverged from the recorded prediction (a
+    divergence row was recorded instead, and the line must not be
+    imported).
+    """
     if not isinstance(item, dict):
         raise fail("VALIDATION_FAILED", "settlement candidate is malformed")
     try:
@@ -280,20 +319,58 @@ def _settlement_line(conn, item):
         raise fail("VALIDATION_FAILED", "settlement candidate has invalid original bytes") from None
     if payload != item.get("row"):
         raise fail("VALIDATION_FAILED", "settlement payload differs from captured bytes")
-    prediction = conn.execute("SELECT payload_json FROM decisions WHERE decision_id=?",
-                              ("prediction:" + str(payload.get("row_id")),)).fetchone()
+    row_id = payload.get("row_id")
+    decision_id = "prediction:" + str(row_id)
+    prediction = conn.execute(
+        "SELECT payload_json, generation_ref, payload_hash FROM decisions WHERE decision_id=?",
+        (decision_id,)).fetchone()
     if prediction is None:
+        # Not a duplicate: a missing contract. Always a hard refusal.
         raise fail("VALIDATION_FAILED", "settlement names no committed prediction")
-    _validate_settlement(payload, json.loads(prediction[0]))
+    recorded = json.loads(prediction["payload_json"])
+    field = _contract_mismatch_field(payload, recorded)
+    if field is not None:
+        _record_settlement_divergence(conn, decision_id=decision_id, row_id=row_id, field=field,
+                                      payload=payload, prediction=prediction, clock=clock)
+        if on_divergence is not None:
+            on_divergence(row_id)
+        return None
+    _validate_settlement_state(payload)
     return original
 
 
-def _validate_settlement(payload, recorded):
-    row_id = payload.get("row_id")
+def _contract_mismatch_field(payload, recorded):
     for field in ("ticker", "strategy", "event_date", "settlement"):
         if payload.get(field) != recorded.get(field):
-            raise fail("VALIDATION_FAILED", "settlement does not match recorded contract",
-                       details={"field": field, "row_id": row_id})
+            return field
+    return None
+
+
+def _record_settlement_divergence(conn, *, decision_id, row_id, field, payload, prediction, clock):
+    """Durable evidence that a settlement line disagreed with the recorded
+    prediction's contract (guide §5.5 item 1 applied to settlement). Keyed so
+    an identical retry or replay of the SAME divergent line never duplicates
+    the row: ``attempted_generation_ref`` is the settlement's own observation
+    identity (``resolved_at``/``settled_at``, the same field
+    ``decisions._import_decision_id`` already uses to distinguish repeated
+    outcome observations for one row) rather than anything session- or
+    wall-clock-derived, so ``record_divergence``'s content-keyed
+    ``divergence_id`` is reproduced exactly on a retry.
+    """
+    attempted_hash = content_hash(payload)
+    generation_ref = str(payload.get("resolved_at") or payload.get("settled_at") or attempted_hash)
+    record_divergence(
+        conn, decision_id=decision_id, scope=_SETTLEMENT_DIVERGENCE_SCOPE, occurrence=str(row_id),
+        existing_generation_ref=prediction["generation_ref"],
+        attempted_generation_ref=generation_ref,
+        existing_payload_hash=prediction["payload_hash"],
+        attempted_payload_hash=attempted_hash,
+        reason="settlement_contract_mismatch: field " + field + " differs from the recorded "
+               "prediction; the first committed prediction stays authoritative (guide §5.5 item 1)",
+        created_at=format_timestamp(clock.now()))
+
+
+def _validate_settlement_state(payload):
     if payload.get("status") not in ("resolved", "unresolvable") or not payload.get("resolved_at"):
         raise fail("VALIDATION_FAILED", "settlement has no valid observation state")
     if payload["status"] == "resolved" and (
