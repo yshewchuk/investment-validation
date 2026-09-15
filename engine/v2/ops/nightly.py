@@ -281,7 +281,11 @@ _DAG_PARENTS = {"finality": (), "score": ("finality",),
                 "backup": ("decision_commit",)}
 #: P2-6 §9.3: DAG stages whose kinds read a verified snapshot materialization
 #: in snapshot input mode. Every other stage keeps the Phase 1 barrier.
-SNAPSHOT_STAGES = frozenset({"score", "decision_replay"})
+#: ``projection``/``selfcheck`` (attempt-19 fix, 2026-09-15): render and
+#: selfcheck must bind the SAME materialization ``legacy_score`` used, never
+#: a second independent ``legacy_manifest.json`` live-tree capture -- see
+#: ``stages.SNAPSHOT_BACKED_KINDS``.
+SNAPSHOT_STAGES = frozenset({"score", "decision_replay", "projection", "selfcheck"})
 _SNAPSHOT_REQUIRED = ("snapshot_ref_artifact_id", "materialization_request_ref",
                       "scratch_estimate_bytes")
 

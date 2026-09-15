@@ -50,7 +50,7 @@ from engine.v2.ops.fingerprints import (
 )
 from engine.v2.ops.generation_binding import refuse_generation_mismatch
 from engine.v2.ops.input_bindings import recorded_bindings, resolve_bindings, resolved_inputs_hash
-from engine.v2.ops.legacy_adapter import copy_read_set
+from engine.v2.ops.legacy_adapter import copy_read_set, overlay_read_set
 from engine.v2.ops.lifecycle import (
     Keepalive,
     Outcome,
@@ -97,6 +97,17 @@ _COORDINATOR_EFFECT_KINDS = frozenset({
     "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
     "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
     "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize"})
+
+#: Snapshot-backed kinds that write into their legacy tree (attempt-19 fix):
+#: ``legacy_render`` stages the bound model-evidence artifact and ledger
+#: generation at their legacy paths (``render_inputs.stage_model_evidence``/
+#: ``stage_ledger_generation``), so it cannot mount the shared, read-only
+#: materialization root directly like ``legacy_score``/``legacy_decision_
+#: replay``/``legacy_selfcheck`` do. It gets a private writable overlay
+#: instead (``legacy_adapter.overlay_read_set``): a fresh ``staging/legacy``
+#: symlinked file-for-file to the SAME verified materialization, never the
+#: live tree.
+_OVERLAY_KINDS = frozenset({"legacy_render"})
 
 #: The attempt lease every heartbeat, resume renewal and keepalive extends to.
 LEASE_SECONDS = 120
@@ -276,10 +287,7 @@ class Service:
             # P2-6 §9.3: a snapshot-backed stage validates its SnapshotRef, request
             # and root instead of pinning or copying mutable legacy data.
             launch = prepare_launch(self.conn, self.store, claim, base=self.materialization_base)
-            if launch is None:
-                legacy_manifest = self._pin_read_set(claim)
-                if legacy_manifest is not None:
-                    self._populate_legacy_staging(claim, legacy_manifest)
+            overlay = self._stage_legacy_inputs(claim, launch)
             if self._cache_allowed(claim) and claim.spec.kind in self.registry.names() \
                     and claim.spec.kind not in _COORDINATOR_EFFECT_KINDS:
                 cached = self._reuse_staged_checkpoint(claim, launch)
@@ -290,7 +298,8 @@ class Service:
             running = executor.launch(
                 self.conn, claim, self.registry.get(claim.spec.kind), self.store, code,
                 clock=self.clock, boot_id=self.boot,
-                legacy_root=launch.worker_legacy_root if launch else None,
+                legacy_root=(None if overlay else
+                            (launch.worker_legacy_root if launch else None)),
                 envelope_extra=launch.envelope_extra if launch else None)
             self.launches[claim.attempt_id] = launch
             self.running[claim.attempt_id] = running
@@ -299,6 +308,21 @@ class Service:
                 "LAUNCH_FAILED", "trusted worker launch failed")
             commit_attempt(self.conn, claim.attempt_id, claim.fence,
                            Outcome(False, "verified_dead", failure=problem), clock=self.clock)
+
+    def _stage_legacy_inputs(self, claim, launch):
+        """Populate this attempt's legacy inputs before the worker launches.
+        Returns whether a private snapshot overlay root was built (attempt-19
+        fix, ``_OVERLAY_KINDS``) -- the caller must not pass ``launch.
+        worker_legacy_root`` to ``executor.launch`` when this is true."""
+        if launch is None:
+            legacy_manifest = self._pin_read_set(claim)
+            if legacy_manifest is not None:
+                self._populate_legacy_staging(claim, legacy_manifest)
+            return False
+        overlay = launch.mode == "snapshot" and claim.spec.kind in _OVERLAY_KINDS
+        if overlay:
+            self._build_snapshot_overlay(claim, launch)
+        return overlay
 
     def _store_domains(self, claim):
         if claim.spec.kind not in self.registry.names():
@@ -361,6 +385,21 @@ class Service:
                          "scratch_limit_bytes": claim.resources.scratch_limit_bytes}))
         staging = self.store.staging_dir(claim.attempt_id)
         copy_read_set(self.store_root, staging / "legacy", [ref["path"] for ref in refs])
+
+    def _build_snapshot_overlay(self, claim, launch):
+        """Attempt-19 fix: an ``_OVERLAY_KINDS`` attempt's private legacy
+        tree is symlinked from the SAME verified materialization root
+        ``legacy_score`` used (``launch.root``), never a live-tree copy.
+        Runs before ``executor.launch`` so ``staging/legacy`` exists (and is
+        fully populated) before the worker starts; idempotent against a
+        relaunch of the same attempt, since ``staging_dir`` never changes
+        for a given ``attempt_id`` and a leftover overlay from an earlier,
+        interrupted launch is reused rather than rebuilt.
+        """
+        staging = self.store.staging_dir(claim.attempt_id)
+        destination = staging / "legacy"
+        if not destination.exists():
+            overlay_read_set(launch.root, destination)
 
     def _reuse_staged_checkpoint(self, claim, launch=None):
         schema = "receipt.v1.0" if claim.spec.kind == "artifact_check" else "legacy_action.v1.0"

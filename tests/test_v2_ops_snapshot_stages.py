@@ -457,9 +457,9 @@ def test_uncommitted_manifest_is_refused_even_when_the_root_matches(case, monkey
 
 def test_snapshot_input_mode_is_refused_for_kinds_without_a_read_plan(case):
     assert SNAPSHOT_BACKED_KINDS == {"legacy_score", "legacy_score_requests",
-                                     "legacy_decision_replay"}
-    assert set(BARRIER_ONLY_REASONS) == {"legacy_finality", "legacy_model_evidence",
-                                         "legacy_selfcheck"}
+                                     "legacy_decision_replay", "legacy_render",
+                                     "legacy_selfcheck"}
+    assert set(BARRIER_ONLY_REASONS) == {"legacy_finality", "legacy_model_evidence"}
     bindings = {"snapshot_ref.json": case.snapshot_ref.artifact_id,
                 "materialization_request.json": case.request_ref.artifact_id,
                 "materialization_manifest.json": case.request_ref.artifact_id}
@@ -602,7 +602,10 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     assert materialize["dependency_job_ids"] == []
     assert set(materialize["parameters"]["input_bindings"]) == {"snapshot_ref.json",
                                                                 "materialization_request.json"}
-    for kind in ("legacy_score", "legacy_decision_replay"):
+    # Attempt-19 fix (2026-09-15): legacy_render/legacy_selfcheck are now
+    # snapshot-backed too, bound to the SAME materialization legacy_score
+    # is -- never their own live-tree legacy_manifest.json.
+    for kind in ("legacy_score", "legacy_decision_replay", "legacy_render", "legacy_selfcheck"):
         _, spec = by_kind[kind]
         bindings = spec["parameters"]["input_bindings"]
         assert spec["parameters"]["input_mode"] == "snapshot"
@@ -613,7 +616,8 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
         assert materialize_id in spec["dependency_job_ids"]
     for kind, (_, spec) in by_kind.items():
         bindings = spec["parameters"]["input_bindings"]
-        if kind not in ("legacy_score", "legacy_decision_replay", "legacy_materialize"):
+        if kind not in ("legacy_score", "legacy_decision_replay", "legacy_render",
+                        "legacy_selfcheck", "legacy_materialize"):
             assert "input_mode" not in spec["parameters"]
             assert bindings["legacy_manifest.json"] == planned["plan"]["input_manifest_ref"]
         for binding in bindings.values():
@@ -879,6 +883,55 @@ def test_manifest_and_request_refusals(case):
         confirm_attempt(case.conn, case.store, Claim, launch)
     with pytest.raises(OpsError):
         materialize_effect(case.conn, case.store, Claim, [], launch)
+
+
+def test_overlay_kinds_build_a_private_overlay_never_the_barrier(case, monkeypatch):
+    """Attempt-19 fix: ``legacy_render`` (an ``_OVERLAY_KINDS`` member) gets a
+    private writable overlay of the verified materialization root, and never
+    goes through ``Service._pin_read_set``/``copy_read_set`` (the live-tree
+    barrier path) when it is part of a snapshot-mode plan. A pure reader
+    (``legacy_score``, direct-mount) builds no overlay and never touches the
+    barrier either."""
+    import engine.v2.ops.supervisor as supervisor_mod
+    from engine.v2.ops.snapshot_stages import SnapshotLaunch
+
+    barrier_calls = []
+    monkeypatch.setattr(supervisor_mod.Service, "_pin_read_set",
+                        lambda self, claim: barrier_calls.append(claim.spec.kind) or None)
+
+    source = case.tmp / "materialization_root"
+    (source / "data" / "curated").mkdir(parents=True)
+    (source / "data" / "curated" / "part-0000.parquet").write_bytes(b"pinned")
+    launch = SnapshotLaunch(mode="snapshot", root=source, snapshot_artifact_id="a",
+                            request_artifact_id="b", request_hash="c", snapshot_manifest_hash="d")
+    service = case.service()
+
+    render_claim = _FakeClaim("legacy_render", "att_render")
+    overlay = service._stage_legacy_inputs(render_claim, launch)
+    assert overlay is True
+    overlay_root = service.store.staging_dir("att_render") / "legacy"
+    linked = overlay_root / "data" / "curated" / "part-0000.parquet"
+    assert linked.is_symlink() and linked.read_bytes() == b"pinned"
+    assert (overlay_root / "data" / "curated" / "part-0000.parquet").resolve() == \
+        (source / "data" / "curated" / "part-0000.parquet").resolve()
+    # Re-running the same attempt (a relaunch) reuses the overlay instead of
+    # rebuilding or refusing on "already exists".
+    assert service._stage_legacy_inputs(render_claim, launch) is True
+
+    score_claim = _FakeClaim("legacy_score", "att_score")
+    assert service._stage_legacy_inputs(score_claim, launch) is False
+    assert not (service.store.staging_dir("att_score") / "legacy").exists()
+
+    assert barrier_calls == []
+
+
+class _FakeClaim:
+    def __init__(self, kind, attempt_id):
+        self.attempt_id = attempt_id
+        self.spec = JobSpec(kind=kind, implementation_ref="i", spec_hash=None,
+                            environment_ref="e", parameters={"input_mode": "snapshot"},
+                            output_namespace="shadow", resource_class=kind,
+                            retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
 
 
 def test_planning_refusals(case):
