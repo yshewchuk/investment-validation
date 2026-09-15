@@ -66,10 +66,35 @@ MODEL_PICKLE_MODULES = (
     "engine.models.training.runup_move",
 )
 
+#: Non-``.py`` files legacy/v2 code reads as a ``__file__``-relative sibling
+#: of its own module, rather than through ``engine.paths`` — declared here,
+#: the same way :data:`MODEL_PICKLE_MODULES` is, because the AST-based
+#: :func:`source_closure` walk only follows ``import``/``from`` statements
+#: and a file-relative sibling read leaves no import for it to find.
+#:
+#: Real evidence: shadow attempt 15, ``legacy_render`` — ``_copy_static``
+#: (``engine/dashboard/render.py:1090``) raised ``FileNotFoundError`` at
+#: ``/root/phase2-shadow-ops/code/<impl_hash>/engine/dashboard/static``
+#: because ``worker_source_manifest`` never packaged it.
+#:
+#: A single file goes in :data:`CODE_ASSET_FILES`; a whole directory (like
+#: the dashboard's static client) goes in :data:`CODE_ASSET_DIRS` and every
+#: file under it is packaged, content-hashed like a ``.py`` entry. Both are
+#: git-tracked code, never anything under ``data/`` or a secret — enforced by
+#: :func:`_assert_code_asset_path_safe`, not just convention.
+CODE_ASSET_FILES: tuple[str, ...] = (
+    "engine/v2/data/legacy_annotations.json",
+)
+
+CODE_ASSET_DIRS: tuple[str, ...] = (
+    "engine/dashboard/static",
+)
+
 
 def worker_source_manifest(root):
     """Package initializers imported before the fixed worker module, plus
-    :data:`MODEL_PICKLE_MODULES` and their own import closure — unconditional,
+    :data:`MODEL_PICKLE_MODULES` and :data:`CODE_ASSET_FILES`/
+    :data:`CODE_ASSET_DIRS`, each with their own closure — unconditional,
     independent of whether ``data/`` exists under ``root``."""
     root = Path(root)
     entries = [
@@ -77,7 +102,46 @@ def worker_source_manifest(root):
         "engine/v2/ops/__init__.py", "engine/v2/ops/worker.py",
     ]
     entries += _declared_module_entries(root, MODEL_PICKLE_MODULES)
+    entries += _code_asset_entries(root)
     return source_closure(root, entries)
+
+
+def _assert_code_asset_path_safe(rel):
+    """Refuse a declared code asset that resolves under the repo-root
+    ``data/`` store (:data:`engine.paths.DATA`) or names a secrets file —
+    the code-asset closure must never carry either. Only the LEADING path
+    segment is checked against ``data``: ``engine/v2/data/...`` is a code
+    package, not the Tier-1/2/3 store, and must not be rejected."""
+    parts = Path(rel).parts
+    if parts[0] == "data" or Path(rel).name == ".env":
+        raise fail("INPUT_CHANGED", "a declared code asset resolves under a data/secret path",
+                  details={"path": rel})
+
+
+def _code_asset_entries(root):
+    """Entries for :data:`CODE_ASSET_FILES` plus every file under
+    :data:`CODE_ASSET_DIRS`, refusing (``INPUT_CHANGED``) if a declared
+    directory is entirely missing — a directory that merely expands to zero
+    files would otherwise pass silently, unlike :func:`source_closure`'s own
+    per-file check, which still covers each expanded file below."""
+    entries = []
+    for rel in CODE_ASSET_FILES:
+        safe_relative_path(rel)
+        _assert_code_asset_path_safe(rel)
+        entries.append(rel)
+    for rel in CODE_ASSET_DIRS:
+        safe_relative_path(rel)
+        _assert_code_asset_path_safe(rel)
+        directory = root / rel
+        if not directory.is_dir():
+            raise fail("INPUT_CHANGED", "a declared code-asset directory is missing from the "
+                      "source tree", details={"path": rel})
+        for path in sorted(directory.rglob("*")):
+            if path.is_file():
+                found = path.relative_to(root).as_posix()
+                _assert_code_asset_path_safe(found)
+                entries.append(found)
+    return entries
 
 
 def _declared_module_entries(root, modules):
