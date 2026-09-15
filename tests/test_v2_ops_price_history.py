@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 
 from engine.v2.contracts import DATA_FAILURE_CODES
-from engine.v2.data import reference_catalog
+from engine.v2.data import price_history, reference_catalog
 from engine.v2.data.errors import DataError
 from engine.v2.data.legacy_materialization import px_series_tickers
 from engine.v2.data.price_history_table import PRICE_HISTORY_TABLE_NAME
@@ -310,6 +310,165 @@ def test_capture_rerun_after_multiple_retrievals_is_a_no_op(tmp_path):
     second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
     assert second["by_outcome"] == {"duplicate_source_hash": 2}
     assert second["rows_added"] == 0
+
+
+# --------------------------------------------------------------------------
+# reversion fix (2026-09-15, external review): a later retrieval whose bytes
+# match an OLDER retrieval's (never the immediately-prior one) must diff
+# against the ticker's CURRENT latest state, not be swallowed as
+# duplicate_source_hash of that older attempt. Real sqlite + ArtifactStore,
+# the reviewer's own 09-10/09-11/09-12 reproduction.
+# --------------------------------------------------------------------------
+
+
+def _scan_price_history(conn, store, snapshot_id, ticker="AAPL"):
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(snapshot_id)
+    dvr = snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+                      columns=("date", "close_adj", "close_raw", "high_raw", "retrieved_at",
+                              "deleted", "source_kind", "source_hash", "capture_id"),
+                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),),
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+    rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
+           for r in batch.to_pylist()]
+    return pd.DataFrame(rows)
+
+
+def test_capture_reversion_is_not_a_duplicate_and_reads_return_a_b_a(tmp_path):
+    """Reviewer's reproduction, on real sqlite/parquet storage: 09-10 price
+    100 stored; 09-11 correction to 110, stored; 09-12 reverts to 100 --
+    byte-identical px body to 09-10's, but a DIFFERENT retrieved_at. Before
+    the fix this was silently skipped as ``duplicate_source_hash`` (matched
+    on source_hash alone) and reads stayed stuck at 110. Now it must diff
+    against the ticker's latest stored state (110) and record the reverted
+    value under its OWN retrieved_at, so reads at/after 09-12 return 100.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 110.0})
+    os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert second["by_outcome"] == {"added": 1}
+
+    # Byte-identical to the 09-10 px body (same source_hash), but a NEW,
+    # later retrieved_at -- a genuine reversion, not a re-capture of 09-10.
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-12T00:00:00+00:00"),) * 2)
+    third = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert third["by_outcome"] == {"added": 1}
+    assert third["rows_added"] == 1
+
+    stored = _scan_price_history(conn, store, third["result_snapshot_id"])
+    assert list(stored["retrieved_at"].str[:10]) == ["2024-09-10", "2024-09-11", "2024-09-12"]
+    assert list(stored["close_adj"]) == [100.0, 110.0, 100.0]
+    # 09-10 and 09-12 share a source_hash (byte-identical bodies) but are two
+    # DIFFERENT stored rows, each under its own retrieved_at -- never merged.
+    assert stored.iloc[0]["source_hash"] == stored.iloc[2]["source_hash"]
+    assert stored.iloc[0]["capture_id"] != stored.iloc[2]["capture_id"]
+
+    at_a = price_history.as_of_view(stored, "2024-09-10T00:00:00+00:00")
+    assert at_a.set_index("date")["close_adj"].to_dict() == {"2024-01-01": 100.0}
+    at_b = price_history.as_of_view(stored, "2024-09-11T00:00:00+00:00")
+    assert at_b.set_index("date")["close_adj"].to_dict() == {"2024-01-01": 110.0}
+    at_a_again = price_history.as_of_view(stored, "2024-09-12T00:00:00+00:00")
+    assert at_a_again.set_index("date")["close_adj"].to_dict() == {"2024-01-01": 100.0}
+    # A cutoff well after the reversion also reads the reverted value.
+    at_a_later = price_history.as_of_view(stored, "2024-12-01T00:00:00+00:00")
+    assert at_a_later.set_index("date")["close_adj"].to_dict() == {"2024-01-01": 100.0}
+
+
+def test_capture_recapturing_the_exact_same_retrieval_stays_idempotent(tmp_path):
+    """Re-running capture against an UNCHANGED px file (same bytes, same
+    mtime -> same source_hash AND same retrieved_at) is the one true
+    duplicate: no new rows, no new stored state, outcome
+    ``duplicate_source_hash``, every re-run identical."""
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert second["by_outcome"] == {"duplicate_source_hash": 1}
+    assert second["rows_added"] == 0
+    third = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert third["by_outcome"] == {"duplicate_source_hash": 1}
+    assert third["rows_added"] == 0
+
+    stored = _scan_price_history(conn, store, third["result_snapshot_id"])
+    assert len(stored) == 1  # never duplicated into a second row
+
+
+def test_capture_same_value_at_a_later_retrieved_at_gives_no_change(tmp_path):
+    """A->A at a later time: a new retrieval (own retrieved_at) whose VALUE
+    matches the ticker's current latest state gives ``no_change`` -- not
+    ``duplicate_source_hash`` (that outcome is reserved for the exact same
+    retrieval, see the idempotency test above) -- and adds no rows.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+
+    # Same bytes (px content unchanged), but rewritten so the source_hash is
+    # forced to differ while the OBSERVED VALUE is identical -- an
+    # independent, later confirmation of the same price.
+    _write_tier1(source_root, "AAPL", {"2024-01-01": 100.0}, key="confirm",
+                fetched_at="2024-09-11T00:00:00+00:00")
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert second["by_outcome"] == {"no_change": 1, "duplicate_source_hash": 1}
+    assert second["rows_added"] == 0
+
+    stored = _scan_price_history(conn, store, second["result_snapshot_id"])
+    assert len(stored) == 1  # still just the original 09-10 row
+
+
+def test_capture_tombstone_then_reappearance_via_a_byte_identical_reversion(tmp_path):
+    """A date drops out of a retrieval (tombstoned), then reappears in a
+    LATER retrieval whose bytes are byte-identical to the ORIGINAL (pre-
+    tombstone) retrieval. Exercises the same class of bug: the reappearance
+    retrieval's source_hash matches an old, non-immediately-prior successful
+    attempt, so it must not be discarded as a duplicate -- the tombstoned row
+    must be revived under the reappearance's own retrieved_at.
+    """
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 100.0})
+    os.utime(px_path, (_epoch("2024-09-10T00:00:00+00:00"),) * 2)
+    first = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert first["by_outcome"] == {"added": 1}
+    assert first["rows_added"] == 2
+
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0})  # 01-02 dropped
+    os.utime(px_path, (_epoch("2024-09-11T00:00:00+00:00"),) * 2)
+    second = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert second["by_outcome"] == {"added": 1}
+    assert second["rows_tombstoned"] == 1
+
+    # Byte-identical to the FIRST (pre-tombstone) retrieval.
+    px_path = _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 100.0})
+    os.utime(px_path, (_epoch("2024-09-12T00:00:00+00:00"),) * 2)
+    third = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    assert third["by_outcome"] == {"added": 1}
+    assert third["rows_added"] == 1
+    assert third["rows_tombstoned"] == 0
+
+    stored = _scan_price_history(conn, store, third["result_snapshot_id"])
+    view = price_history.as_of_view(stored, "2024-12-01T00:00:00+00:00")
+    assert view.set_index("date")["close_adj"].to_dict() == {
+        "2024-01-01": 100.0, "2024-01-02": 100.0}
 
 
 # --------------------------------------------------------------------------
