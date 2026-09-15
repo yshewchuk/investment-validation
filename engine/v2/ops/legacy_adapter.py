@@ -701,7 +701,7 @@ def _action_render(parameters, root):
 def _action_selfcheck(parameters, root):
     import tarfile
 
-    from engine.dashboard.selfcheck import DEFAULT_N, selfcheck
+    from engine.dashboard.selfcheck import DEFAULT_N, scrub_mismatches, selfcheck
     from engine.features import FeatureContext
     from engine.score import Scorer
 
@@ -722,7 +722,18 @@ def _action_selfcheck(parameters, root):
                        scorer=scorer)
     value = result.as_dict() if hasattr(result, "as_dict") else vars(result)
     if not value.get("ok"):
-        raise fail("VALIDATION_FAILED", "serialized legacy bundle selfcheck failed")
+        # The result is discarded below (never written as an artifact), so
+        # without this the ONLY record of a failed selfcheck was a bare
+        # traceback in private worker.stderr -- no row, no field, no reason.
+        # Scrub to row key/field path/reason before it leaves this process:
+        # `details` lands in the attempt's `diagnostics/failure_details.json`
+        # (worker.py `_write_failure_details`), which other agents and the
+        # supervisor read, so it must never carry board/engine values.
+        raise fail("VALIDATION_FAILED", "serialized legacy bundle selfcheck failed",
+                  details={"n_checked": value.get("n_checked"),
+                           "n_board_rows": value.get("n_board_rows"),
+                           "snapshot_ok": value.get("snapshot_ok"),
+                           "mismatches": scrub_mismatches(value.get("mismatches", []))})
     return _write_action(root, "selfcheck.json", value)
 
 

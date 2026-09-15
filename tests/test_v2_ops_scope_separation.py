@@ -379,6 +379,76 @@ def test_action_selfcheck_loads_context_tickers_not_the_watchlist(monkeypatch, t
     assert calls["context_tickers"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
 
 
+def test_scrub_mismatches_strips_values_keeps_row_field_reason():
+    from engine.dashboard.selfcheck import scrub_mismatches
+
+    mismatches = [
+        {"row_id": "AAA|TWIN-P|2026-09-12", "reason": "missing digest"},
+        {"row_id": "BBB|TWIN-P|2026-09-13", "reason": "digest mismatch",
+         "stored": "abc123", "fresh": "def456",
+         "fields": [{"field": "exp_pnl_sim", "board": 12.3, "fresh": 45.6},
+                    {"field": "win_sim", "board": 0.1, "fresh": 0.2}],
+         "note": "digest differs but every hashed field agrees under _norm"},
+    ]
+    scrubbed = scrub_mismatches(mismatches)
+    assert scrubbed[0] == {"row_id": "AAA|TWIN-P|2026-09-12", "reason": "missing digest"}
+    assert scrubbed[1]["fields"] == ["exp_pnl_sim", "win_sim"]
+    assert scrubbed[1]["note"] == "digest differs but every hashed field agrees under _norm"
+    assert "stored" not in scrubbed[1] and "fresh" not in scrubbed[1]
+    dumped = json.dumps(scrubbed)
+    for forbidden in ("12.3", "45.6", "0.1", "0.2"):
+        assert forbidden not in dumped
+
+
+def test_action_selfcheck_persists_scrubbed_mismatches_on_failure(monkeypatch, tmp_path):
+    """The selfcheck result is discarded on failure (no ``selfcheck.json``
+    artifact), so the mismatch list has to travel through the raised
+    ``OpsError``'s ``details`` -- which becomes the attempt's
+    ``diagnostics/failure_details.json`` (``worker.py``). Row key, field
+    path and reason survive; board/engine VALUES do not."""
+    _stub_context_load(monkeypatch)
+    import engine.dashboard.selfcheck as selfcheck_module
+
+    class _FakeReport:
+        def as_dict(self):
+            return {
+                "ok": False,
+                "n_checked": 2,
+                "n_board_rows": 5,
+                "snapshot_ok": True,
+                "mismatches": [
+                    {"row_id": "AAA|TWIN-P|2026-09-12", "reason": "digest mismatch",
+                     "stored": "abc", "fresh": "def",
+                     "fields": [{"field": "exp_pnl_sim", "board": 123.45, "fresh": 67.89}]},
+                    {"row_id": "BBB|TWIN-P|2026-09-13",
+                     "reason": "display values diverge from the engine",
+                     "fields": [{"field": "gate_pass", "board": True, "fresh": False}]},
+                ],
+            }
+
+    monkeypatch.setattr(selfcheck_module, "selfcheck",
+                        lambda bundle, *, n, scorer: _FakeReport())
+    root = _selfcheck_root(tmp_path)
+
+    with pytest.raises(OpsError) as err:
+        _action_selfcheck(
+            {"tickers": ["AAA"], "context_tickers": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+             "year_start": 2024, "year_end": 2026}, root)
+
+    details = err.value.problem.details
+    assert details["n_checked"] == 2 and details["n_board_rows"] == 5
+    mismatches = details["mismatches"]
+    assert [m["row_id"] for m in mismatches] == [
+        "AAA|TWIN-P|2026-09-12", "BBB|TWIN-P|2026-09-13"]
+    assert mismatches[0]["reason"] == "digest mismatch"
+    assert mismatches[0]["fields"] == ["exp_pnl_sim"]
+    assert mismatches[1]["fields"] == ["gate_pass"]
+    # No numeric board/fresh values leaked into the persisted details.
+    dumped = json.dumps(details)
+    for forbidden in ("123.45", "67.89"):
+        assert forbidden not in dumped
+
+
 def test_action_selfcheck_refuses_a_plan_missing_context_tickers(tmp_path):
     root = _selfcheck_root(tmp_path)
     with pytest.raises(OpsError) as err:

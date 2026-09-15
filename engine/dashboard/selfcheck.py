@@ -40,7 +40,7 @@ import pandas as pd
 
 from engine.dashboard.render import _engine_fields, row_digest
 
-__all__ = ["SelfCheckReport", "selfcheck", "reconstruct_request"]
+__all__ = ["SelfCheckReport", "selfcheck", "reconstruct_request", "scrub_mismatches"]
 
 #: The guide's sample size for the nightly re-score.
 DEFAULT_N = 20
@@ -117,6 +117,31 @@ def reconstruct_request(row: dict, *, board_as_of=None):
             pd.Timestamp(board_as_of).normalize() if board_as_of is not None else None
         ),
     )
+
+
+def scrub_mismatches(mismatches: Sequence[dict]) -> list[dict]:
+    """A mismatch list safe to persist to a shared diagnostics file: row key,
+    field path and reason only, no board/engine values.
+
+    A caller that fails the job (``legacy_adapter._action_selfcheck``) raises
+    before :func:`selfcheck`'s own return value is ever written anywhere, so
+    the ONLY record of what mismatched has been the traceback in a private
+    ``worker.stderr`` -- unhelpful (no row/field identity) and, worse, not
+    even guaranteed off-limits for the numbers this file's caller is told
+    never to print (see AGENTS.md "Never print ... prices, PnL or score
+    values"). This strips every value while keeping enough identity to find
+    the mechanism: which row, which field(s), which reason.
+    """
+    scrubbed = []
+    for entry in mismatches:
+        item: dict[str, Any] = {"row_id": entry.get("row_id"), "reason": entry.get("reason")}
+        fields = entry.get("fields")
+        if fields:
+            item["fields"] = [f.get("field") for f in fields if isinstance(f, dict)]
+        if entry.get("note"):
+            item["note"] = entry["note"]
+        scrubbed.append(item)
+    return scrubbed
 
 
 def _chooser_detail_ok(row: dict, fresh_detail: Any) -> str | None:
