@@ -10,7 +10,8 @@ ACTION_NAMES = (
 )
 
 
-def run_action(action, parameters, staging, legacy_root=None):
+def run_action(action, parameters, staging, legacy_root=None, cross_check=None):
     if action not in ACTION_NAMES:
         raise ValueError("legacy action is not allowlisted")
-    return legacy_action(action, parameters, staging, legacy_root=legacy_root)
+    return legacy_action(action, parameters, staging, legacy_root=legacy_root,
+                         cross_check=cross_check)

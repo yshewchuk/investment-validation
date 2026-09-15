@@ -20,28 +20,36 @@ stages, stages.py ~217-224). Every ``legacy_*`` kind can run in the default
 ``input_mode="legacy"`` (barrier) — this module's declared families are what
 ``capture_inputs`` uses to build that barrier manifest whenever a plan is
 NOT snapshot-mode, or (attempt-19 fix, 2026-09-15) is snapshot-mode but the
-stage is one of the two remaining true barrier-only kinds.
+stage is the one remaining true barrier-only kind.
 ``SNAPSHOT_BACKED_KINDS`` (stages.py ~120-134) additionally lets a kind run
 against a verified snapshot materialization INSTEAD of the barrier once a
 plan pins one: originally ``{"legacy_score", "legacy_score_requests",
-"legacy_decision_replay"}``, now also ``"legacy_render"`` and
-``"legacy_selfcheck"`` — the fix that closed the read-set drift between
-``legacy_score``'s materialization and ``legacy_render``/``legacy_selfcheck``'s
-own separate live-tree capture (real shadow nightly attempt 19). Those two
+"legacy_decision_replay"}``, then also ``"legacy_render"`` and
+``"legacy_selfcheck"`` (attempt-19 fix, the fix that closed the read-set
+drift between ``legacy_score``'s materialization and
+``legacy_render``/``legacy_selfcheck``'s own separate live-tree capture),
+and now also ``"legacy_model_evidence"`` (last read-set gap fix,
+2026-09-15 — its entire read surface turned out to already be
+``LEGACY_SCORE_READ_PLAN_V1``, with nothing left to declare). Those three
 are therefore dual-mode: still barrier-declared HERE (for a legacy-mode
 plan, or a snapshot-mode plan's ``legacy_materialize`` job failing to admit),
 but snapshot-backed whenever the plan actually pins one
 (``engine/v2/ops/nightly.py``'s ``SNAPSHOT_STAGES``, now
-``{"score", "decision_replay", "projection", "selfcheck"}``). ``stages.py``'s
-own ``BARRIER_ONLY_REASONS`` dict names the two kinds that are barrier-only
-with NO snapshot-backed alternative at all
-(``legacy_finality``/``legacy_model_evidence``) with a one-line reason each;
+``{"score", "decision_replay", "projection", "selfcheck", "model_evidence"}``).
+``legacy_finality`` is the sole remaining entry in ``stages.py``'s own
+``BARRIER_ONLY_REASONS`` dict (its raw ORATS fetch-cache/calendar reads are
+not declarable) — it never joins ``SNAPSHOT_BACKED_KINDS``, but its
+daily_market/option_chains coverage reads, which ARE already declared here,
+now get a read-only content cross-check against the run's own materialization
+instead (``nightly.CROSS_CHECK_STAGES``, ``snapshot_stages``'s
+``"finality_check"`` launch mode, ``legacy_adapter._action_finality`` — see
+``generation_binding.py``'s module docstring for the full design).
 ``legacy_decisions``/``legacy_settlement`` are barrier-only for the identical
 structural reason — absent from ``SNAPSHOT_BACKED_KINDS`` — the dict simply
 never grew a comment for them. :data:`BARRIER_KINDS` below is the full set
 of six kinds this module declares a read plan for; it is no longer the exact
-complement of ``SNAPSHOT_BACKED_KINDS`` within ``ACTION_NAMES`` now that two
-kinds are dual-mode (see ``test_v2_ops_capture_inputs.py``'s
+complement of ``SNAPSHOT_BACKED_KINDS`` within ``ACTION_NAMES`` now that
+three kinds are dual-mode (see ``test_v2_ops_capture_inputs.py``'s
 ``test_barrier_kinds_are_the_structural_six``).
 
 **Families.** Rather than list raw path globs per kind, each kind declares

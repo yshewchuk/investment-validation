@@ -284,8 +284,23 @@ _DAG_PARENTS = {"finality": (), "score": ("finality",),
 #: ``projection``/``selfcheck`` (attempt-19 fix, 2026-09-15): render and
 #: selfcheck must bind the SAME materialization ``legacy_score`` used, never
 #: a second independent ``legacy_manifest.json`` live-tree capture -- see
-#: ``stages.SNAPSHOT_BACKED_KINDS``.
-SNAPSHOT_STAGES = frozenset({"score", "decision_replay", "projection", "selfcheck"})
+#: ``stages.SNAPSHOT_BACKED_KINDS``. ``model_evidence`` (last read-set gap
+#: fix, 2026-09-15): its entire read surface was already declared by
+#: ``LEGACY_SCORE_READ_PLAN_V1`` (see ``stages.SNAPSHOT_BACKED_KINDS``'s
+#: comment) -- moved here from a bare barrier read the same way ``projection``/
+#: ``selfcheck`` were.
+SNAPSHOT_STAGES = frozenset({"score", "decision_replay", "projection", "selfcheck",
+                             "model_evidence"})
+#: Barrier-only stages (``stages.BARRIER_ONLY_REASONS``) that additionally
+#: bind the three snapshot artifacts, read-only, in a snapshot-mode plan --
+#: never ``input_mode="snapshot"`` itself (last read-set gap fix, 2026-09-15).
+#: ``legacy_finality``'s worker cross-checks its own barrier
+#: daily_market/option_chains coverage reads against the SAME committed
+#: materialization ``score``/``render``/``selfcheck`` trust, content-for-
+#: content within its own declared projection (``legacy_adapter.
+#: _action_finality``), rather than reading the materialization as its own
+#: root (its raw ORATS fetch-cache/calendar reads are not declarable there).
+CROSS_CHECK_STAGES = frozenset({"finality"})
 _SNAPSHOT_REQUIRED = ("snapshot_ref_artifact_id", "materialization_request_ref",
                       "scratch_estimate_bytes")
 
@@ -370,6 +385,18 @@ def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_s
 def _stage_inputs(stage, parameters, keys, input_refs, snapshot):
     """Bind one stage's inputs for the plan's input mode; returns its ``input_refs``."""
     bindings = parameters["input_bindings"]
+    if snapshot is not None and stage in CROSS_CHECK_STAGES:
+        # Last read-set gap fix (2026-09-15): keep the ordinary barrier
+        # binding (``legacy_manifest.json``) -- this stage never becomes
+        # ``input_mode="snapshot"`` -- and ALSO bind the three snapshot
+        # artifacts read-only, for the worker's own content cross-check.
+        if input_refs:
+            bindings["legacy_manifest.json"] = input_refs[0]
+        bindings["snapshot_ref.json"] = snapshot["snapshot_ref_artifact_id"]
+        bindings["materialization_request.json"] = snapshot["materialization_request_ref"]
+        bindings["materialization_manifest.json"] = keys["materialize"] + "#materialization_manifest"
+        return tuple(input_refs) + (snapshot["snapshot_ref_artifact_id"],
+                                    snapshot["materialization_request_ref"])
     if snapshot is None or stage not in SNAPSHOT_STAGES | {"materialize"}:
         if input_refs:
             bindings["legacy_manifest.json"] = input_refs[0]
@@ -387,7 +414,7 @@ def _stage_parents(stage, include_prerequisites, snapshot):
         return GRAPH[stage]
     if stage == "materialize":
         return ()
-    if snapshot is not None and stage in SNAPSHOT_STAGES:
+    if snapshot is not None and stage in SNAPSHOT_STAGES | CROSS_CHECK_STAGES:
         return _DAG_PARENTS[stage] + ("materialize",)
     return _DAG_PARENTS[stage]
 
