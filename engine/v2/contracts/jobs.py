@@ -244,6 +244,10 @@ class AttemptReceipt:
     started_at: str | None = None
     heartbeat_at: str | None = None
     lease_expires_at: str | None = None
+    ended_at: str | None = None
+    exit_code: int | None = None
+    memory_current_bytes: int | None = None
+    memory_peak_bytes: int | None = None
     resolved_resources: ResolvedResources | None = None
     input_manifest_ref: str | None = None
     checkpoint_refs: tuple[str, ...] = ()

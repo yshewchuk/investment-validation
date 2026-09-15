@@ -12,6 +12,7 @@ import sys
 import traceback
 from pathlib import Path
 
+from engine.v2.ops import worker_progress
 from engine.v2.ops.errors import OpsError, make_problem
 
 
@@ -47,67 +48,92 @@ def main():
     root = Path(envelope["staging"])
     os.environ["INVESTING_PLAN_ROOT"] = str(envelope.get("legacy_root") or root / "legacy")
     fd = int(envelope["result_fd"])
+    worker_progress.configure(root)
     try:
         result = dispatch(envelope["worker"], envelope["parameters"], root, envelope=envelope)
         result.update(schema_version="worker_result.v1.0", job_id=envelope["job_id"],
                       attempt_id=envelope["attempt_id"], fence=envelope["fence"])
         result["self_peak_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
     except BaseException as exc:
-        try:
-            _write_diagnostics(root)
-        except OSError:
-            pass
-        if isinstance(exc, OpsError):
-            problem = exc.problem
-        elif isinstance(exc, (ModuleNotFoundError, ImportError)):
-            # A deterministic import failure (e.g. a pinned model artifact's
-            # pickle names an engine.* module absent from this code
-            # snapshot) is not a transient worker crash: retrying it wastes
-            # an attempt and always fails the same way. Name the module so
-            # the failure is diagnosable without reading worker.stderr.
-            problem = make_problem(
-                "INPUT_CHANGED",
-                f"worker import failed: no module named "
-                f"{getattr(exc, 'name', None) or exc}",
-                details={"module": getattr(exc, "name", None)})
-        elif isinstance(exc, ValueError):
-            # A bare ValueError out of adapter/dispatch code is a
-            # deterministic defect in what the worker tried to produce, not
-            # a transient crash -- real shadow nightly attempt 14:
-            # legacy_adapter._write_action's json.dumps(allow_nan=False)
-            # raised "Out of range float values are not JSON compliant: nan"
-            # on a real (legacy-produced) NaN, twice, on two fresh attempts,
-            # because the SAME inputs deterministically produce the SAME
-            # exception every retry. Falling through to the untyped
-            # WORKER_FAILED branch below marks that ("internal", True) --
-            # retryable -- exactly the mistake that spent two attempts
-            # re-running a bug retrying can never fix. VALIDATION_FAILED
-            # ("validation", False) matches how every OTHER adapter defect
-            # detected inline is already reported (e.g.
-            # legacy_adapter._action_render's own explicit VALIDATION_FAILED
-            # calls) and needs no new failure code. This is intentionally
-            # narrow -- a type check, not a blanket reclassification of
-            # WORKER_FAILED -- so a genuinely transient crash that happens
-            # to surface as some other exception type still retries.
-            problem = make_problem(
-                "VALIDATION_FAILED",
-                f"worker raised {type(exc).__name__}: {exc}"[:300])
-        else:
-            problem = None
-        if problem is None:
-            result = {"schema_version": "worker_result.v1.0", "failure": "WORKER_FAILED"}
-        else:
-            try:
-                _write_failure_details(root, problem.details)
-            except OSError:
-                pass
-            result = {"schema_version": "worker_result.v1.0", "failure": problem.code,
-                      "problem": {"code": problem.code, "category": problem.category,
-                                 "retryable": problem.retryable, "message": problem.message}}
+        result = _failure_result(root, exc)
+    worker_progress.reset()
     data = json.dumps(result, allow_nan=False).encode()
     os.write(fd, data + b"\n")
     os.close(fd)
     return int("failure" in result)
+
+
+def _failure_result(root: Path, exc: BaseException) -> dict:
+    try:
+        _write_diagnostics(root)
+    except OSError:
+        pass
+    problem = _classify(exc)
+    try:
+        _write_failure_details(root, problem.details)
+    except OSError:
+        pass
+    return {"schema_version": "worker_result.v1.0", "failure": problem.code,
+           "problem": {"code": problem.code, "category": problem.category,
+                      "retryable": problem.retryable, "message": problem.message}}
+
+
+def _classify(exc: BaseException):
+    """A typed ``Problem`` for a caught worker exception.
+
+    Three narrow, reviewed branches whose message shape is known to carry no
+    data value; anything else falls to :func:`_generic_problem`, which never
+    includes the message at all (see its docstring)."""
+    if isinstance(exc, OpsError):
+        return exc.problem
+    if isinstance(exc, (ModuleNotFoundError, ImportError)):
+        # A deterministic import failure (e.g. a pinned model artifact's
+        # pickle names an engine.* module absent from this code snapshot) is
+        # not a transient worker crash: retrying it wastes an attempt and
+        # always fails the same way. Name the module so the failure is
+        # diagnosable without reading worker.stderr.
+        return make_problem(
+            "INPUT_CHANGED",
+            f"worker import failed: no module named {getattr(exc, 'name', None) or exc}",
+            details={"module": getattr(exc, "name", None)})
+    if isinstance(exc, ValueError):
+        # A bare ValueError out of adapter/dispatch code is a deterministic
+        # defect in what the worker tried to produce, not a transient crash
+        # -- real shadow nightly attempt 14: legacy_adapter._write_action's
+        # json.dumps(allow_nan=False) raised "Out of range float values are
+        # not JSON compliant: nan" on a real (legacy-produced) NaN, twice, on
+        # two fresh attempts, because the SAME inputs deterministically
+        # produce the SAME exception every retry. Falling through to the
+        # untyped WORKER_FAILED branch marks that ("internal", True) --
+        # retryable -- exactly the mistake that spent two attempts re-running
+        # a bug retrying can never fix. VALIDATION_FAILED ("validation",
+        # False) matches how every OTHER adapter defect detected inline is
+        # already reported and needs no new failure code. This is
+        # intentionally narrow -- a type check, not a blanket
+        # reclassification -- so a genuinely transient crash that happens to
+        # surface as some other exception type still retries.
+        return make_problem("VALIDATION_FAILED",
+                            f"worker raised {type(exc).__name__}: {exc}"[:300])
+    # Fully unreviewed exception type: never carry its message (real shadow
+    # nightly attempt 16, a missing code asset surfaced as a bare
+    # FileNotFoundError here) -- an arbitrary message cannot be vetted for a
+    # credential, a price or a score (§5.2 redaction rule), unlike the three
+    # branches above whose message shape is reviewed. Class name and code
+    # location are structural, never a data value, so they are always safe.
+    return _generic_problem(exc)
+
+
+def _last_frame(exc: BaseException) -> str | None:
+    frames = traceback.extract_tb(exc.__traceback__)
+    return f"{frames[-1].filename}:{frames[-1].lineno}" if frames else None
+
+
+def _generic_problem(exc: BaseException):
+    """``exception_type`` and code ``location`` only -- see the redaction
+    comment at the call site for why the message is never included here."""
+    return make_problem(
+        "WORKER_FAILED", "worker raised an unhandled exception",
+        details={"exception_type": type(exc).__name__, "location": _last_frame(exc)})
 
 
 def dispatch(worker, parameters, root, *, envelope=None):

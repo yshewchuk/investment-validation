@@ -26,6 +26,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
+from engine.v2.ops import worker_progress
 from engine.v2.ops.snapshot_roots import (
     MANIFEST_SCHEMA_REF,
     hash_tree,
@@ -103,14 +104,19 @@ def run_materialize(parameters, root: Path, envelope: dict) -> dict:
         (root / "materialization_request.json").read_text()))
     dest = materialization_root(spec["base"], request.request_hash)
     files = None
-    if not (dest.exists() or dest.is_symlink()):
+    fresh = not (dest.exists() or dest.is_symlink())
+    worker_progress.step_start("materialize" if fresh else "materialize_reuse")
+    if fresh:
         files = _write_root(request, spec, dest, envelope["attempt_id"])
     reused = files is None
     if reused:
         files = hash_tree(dest)
+    worker_progress.step_end("materialize" if fresh else "materialize_reuse", units=len(files))
+    worker_progress.step_start("write_manifest")
     document = manifest_document(request, files)
     (root / "materialization_manifest.json").write_text(json.dumps(document, sort_keys=True))
     px_absent_tickers = _px_absent_tickers(request, dest)
+    worker_progress.step_end("write_manifest")
     return {"outputs": [{"name": "materialization_manifest", "path": "materialization_manifest.json",
                          "schema": MANIFEST_SCHEMA_REF}],
             "completed_ids": list(parameters["expected_ids"]),

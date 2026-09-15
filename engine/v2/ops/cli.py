@@ -12,6 +12,7 @@ from engine.v2.foundation import (
     SystemClock,
     content_hash,
     ensure_directory,
+    parse_timestamp,
     to_document,
 )
 from engine.v2.ops import executor
@@ -426,7 +427,7 @@ def dispatch(args, root, conn, clock):
         return ledger_command(args, root, conn, clock)
     if args.command == "price-history":
         return price_history_command(args, root, conn, clock)
-    return job_command(args, conn, clock)
+    return job_command(args, conn, clock, root)
 
 
 def _submit_nightly(plan, conn, store, policy, clock):
@@ -637,7 +638,7 @@ def price_refresh_command(args, root):
     return report
 
 
-def job_command(args, conn, clock):
+def job_command(args, conn, clock, root):
     if args.command == "get":
         return {"job": to_document(get_job(conn, args.job_id)),
                 "attempts": to_document(attempt_receipts(conn, args.job_id))}
@@ -646,7 +647,7 @@ def job_command(args, conn, clock):
     if args.command == "resume":
         return resume_command(args, conn)
     if args.command == "explain":
-        return explain_command(args, conn)
+        return explain_command(args, conn, root)
     return logs_command(args, conn)
 
 
@@ -670,23 +671,202 @@ def resume_command(args, conn):
             "new_effects_authorized": False}
 
 
-def explain_command(args, conn):
+#: Bound on the raw ``worker.stderr`` excerpt ``explain`` reads off local
+#: disk. This is the one unredacted field in explain's output -- see
+#: ``_stderr_tail``'s docstring for why that is safe here and nowhere else.
+_STDERR_TAIL_BYTES = 4000
+
+
+def explain_command(args, conn, root):
+    """Everything an attempt did, from its own catalog rows and its private
+    staging files, so nobody has to query the catalog, staging files or an
+    external monitor by hand (task: "make a v2 ops job explain itself from
+    its own logs")."""
     job = get_job(conn, args.job_id)
+    store = ArtifactStore(root)
+    attempts = [_explain_attempt(conn, store, receipt)
+               for receipt in attempt_receipts(conn, args.job_id)]
     return {"job_id": args.job_id, "state": job.state,
             "queue_reason": to_document(job.queue_reason),
-            "failure": to_document(job.failure)}
+            "failure": to_document(job.failure), "attempts": attempts}
+
+
+def _explain_attempt(conn, store, receipt):
+    rows = conn.execute("SELECT body_json FROM progress_events WHERE attempt_id = ? "
+                        "ORDER BY sequence", (receipt.attempt_id,)).fetchall()
+    events = [json.loads(row[0]) for row in rows]
+    reserved = (receipt.resolved_resources.reserved_memory_bytes
+               if receipt.resolved_resources else None)
+    return {"attempt_id": receipt.attempt_id, "attempt_number": receipt.attempt_number,
+            "state": receipt.state, "process_state": receipt.process_state,
+            "started_at": receipt.started_at, "ended_at": receipt.ended_at,
+            "duration_seconds": _duration(receipt.started_at, receipt.ended_at),
+            "exit_code": receipt.exit_code,
+            "memory": {"peak_bytes": receipt.memory_peak_bytes, "reserved_bytes": reserved},
+            "step_events_recorded": any(e.get("kind") == "progress" for e in events),
+            "steps": _step_timeline(events),
+            "failure": to_document(receipt.failure),
+            "stderr_tail": _stderr_tail(store, receipt.attempt_id)}
+
+
+def _duration(started_at, ended_at):
+    if not started_at or not ended_at:
+        return None
+    return (parse_timestamp(ended_at) - parse_timestamp(started_at)).total_seconds()
+
+
+def _step_timeline(events):
+    """One ordered entry per completed step -- duration, RSS at its end and
+    the memory peak sampled while it was running. A "step started" row (kept
+    for ``ops logs --follow``) carries no duration/peak yet, so it is not a
+    timeline entry on its own; an attempt with none of either (an older
+    format, or a worker kind nothing instruments) yields an empty list,
+    rendered as "no step events recorded" rather than an empty table."""
+    return [{"step": event["step"], "duration_seconds": event.get("step_duration_seconds"),
+            "rss_at_end_bytes": event.get("memory_current_bytes"),
+            "peak_bytes": event.get("memory_peak_bytes"), "units": event.get("step_units")}
+           for event in events
+           if event.get("kind") == "progress" and event.get("message") == "step complete"]
+
+
+def _stderr_tail(store, attempt_id):
+    """The last ``_STDERR_TAIL_BYTES`` of this attempt's private
+    ``worker.stderr``, unredacted -- unlike ``failure.details`` (published as
+    a catalog artifact, so restricted to a reviewed, secret-free shape;
+    ``worker.py``'s ``_classify``/``_generic_problem``), this file never
+    leaves local disk and never crosses a namespace boundary: an operator
+    running ``ops explain`` already has the same filesystem access to it
+    directly. ``None`` when nothing was ever written (no crash, or an
+    attempt that predates this field)."""
+    path = store.staging_dir(attempt_id) / "diagnostics" / "worker.stderr"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    tail = data[-_STDERR_TAIL_BYTES:]
+    return tail.decode("utf-8", errors="replace")
 
 
 def logs_command(args, conn):
+    """All recorded ``progress_events`` rows; ``--follow`` streams only the
+    ones not yet printed, so a step boundary shows up live instead of
+    waiting behind a reprinted, ever-growing blob."""
+    if not args.follow:
+        return _progress_rows(conn, args.job_id)
+    printed = 0
     while True:
-        rows = conn.execute("SELECT body_json FROM progress_events WHERE job_id=? "
-                            "ORDER BY recorded_at,sequence", (args.job_id,)).fetchall()
-        if not args.follow:
-            return [json.loads(row[0]) for row in rows]
-        print(json.dumps([json.loads(row[0]) for row in rows]), flush=True)
+        rows = _progress_rows(conn, args.job_id)
+        for row in rows[printed:]:
+            print(json.dumps(row) if args.json else _render_progress_text(row), flush=True)
+        printed = len(rows)
         if get_job(conn, args.job_id).state in ("succeeded", "failed", "cancelled", "blocked"):
             return {"complete": True}
         time.sleep(2)
+
+
+def _progress_rows(conn, job_id):
+    rows = conn.execute("SELECT body_json FROM progress_events WHERE job_id = ? "
+                        "ORDER BY recorded_at, sequence", (job_id,)).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def _print_result(args, document):
+    """``explain``/``logs`` (non-``--follow``) render as text by default,
+    ``--json`` unchanged; every other command prints JSON exactly as before.
+    ``--follow`` already streams its own lines as it goes (``logs_command``);
+    its final ``{"complete": True}`` still prints as JSON here."""
+    if args.command == "explain" and not args.json:
+        print(_render_explain_text(document))
+    elif args.command == "logs" and not args.follow and not args.json:
+        for row in document:
+            print(_render_progress_text(row))
+    else:
+        print(json.dumps(to_document(document), indent=2))
+
+
+def _human_bytes(value):
+    if value is None:
+        return "?"
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if amount < 1024 or unit == "GiB":
+            return f"{amount:.0f}{unit}" if unit == "B" else f"{amount:.1f}{unit}"
+        amount /= 1024
+    return f"{amount:.1f}GiB"
+
+
+def _fmt_seconds(value):
+    return f"{value:.1f}s" if value is not None else "?"
+
+
+def _render_explain_text(document):
+    lines = [f"job {document['job_id']}: {document['state']}"]
+    failure = document.get("failure")
+    if failure:
+        lines.append(f"  job failure: {failure['code']}: {failure['message']}")
+    if not document["attempts"]:
+        lines.append("  (no attempts yet)")
+    for attempt in document["attempts"]:
+        lines.extend(_render_attempt_text(attempt))
+    return "\n".join(lines)
+
+
+def _render_attempt_text(attempt):
+    mem = attempt["memory"]
+    lines = [f"attempt {attempt['attempt_number']} ({attempt['attempt_id']}): "
+            f"{attempt['state']}/{attempt['process_state']}, started {attempt['started_at']}, "
+            f"duration {_fmt_seconds(attempt['duration_seconds'])}, exit {attempt['exit_code']}",
+            f"  memory: peak {_human_bytes(mem['peak_bytes'])} / "
+            f"reserved {_human_bytes(mem['reserved_bytes'])}"]
+    lines.extend(_render_steps_text(attempt["steps"]) if attempt["steps"]
+                else ["  steps: no step events recorded"])
+    lines.extend(_render_failure_text(attempt["failure"], attempt["stderr_tail"]))
+    return lines
+
+
+def _render_steps_text(steps):
+    lines = ["  steps:"]
+    for step in steps:
+        units = f"  units {step['units']}" if step["units"] is not None else ""
+        lines.append(f"    {step['step']}: {_fmt_seconds(step['duration_seconds'])}  "
+                    f"rss {_human_bytes(step['rss_at_end_bytes'])}  "
+                    f"peak {_human_bytes(step['peak_bytes'])}{units}")
+    return lines
+
+
+def _render_failure_text(failure, stderr_tail):
+    if not failure:
+        return []
+    lines = [f"  failure: {failure['code']}: {failure['message']}"]
+    if failure.get("details"):
+        lines.append(f"    details: {json.dumps(failure['details'], sort_keys=True)}")
+    if failure.get("diagnostic_ref"):
+        lines.append(f"    diagnostic_ref: {failure['diagnostic_ref']}")
+    if stderr_tail:
+        lines.append("  stderr tail:")
+        lines.extend(f"    {line}" for line in stderr_tail.splitlines()[-20:])
+    return lines
+
+
+def _render_progress_text(event):
+    step, kind = event.get("step"), event.get("kind")
+    if kind == "progress" and step and event.get("message") == "step complete":
+        units = f"  units {event['step_units']}" if event.get("step_units") is not None else ""
+        return (f"step {step} done  {_fmt_seconds(event.get('step_duration_seconds'))}  "
+               f"rss {_human_bytes(event.get('memory_current_bytes'))}  "
+               f"peak {_human_bytes(event.get('memory_peak_bytes'))}{units}")
+    if kind == "progress" and step:
+        return f"step {step} started"
+    bits = [event.get("message", "")]
+    if event.get("memory_current_bytes") is not None:
+        bits.append(f"mem {_human_bytes(event['memory_current_bytes'])}")
+    if event.get("memory_peak_bytes") is not None:
+        bits.append(f"peak {_human_bytes(event['memory_peak_bytes'])}")
+    if step:
+        bits.append(f"at {step}")
+    return "  ".join(bits)
 
 
 def main(argv=None):
@@ -711,7 +891,7 @@ def main(argv=None):
                 document = dispatch(args, root, conn, clock)
             finally:
                 conn.close()
-        print(json.dumps(to_document(document), indent=2))
+        _print_result(args, document)
         return 0
     except OpsError as exc:
         print(json.dumps(to_document(exc.problem)))

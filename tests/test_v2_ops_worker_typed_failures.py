@@ -96,11 +96,26 @@ def test_worker_writes_typed_problem_for_caught_opserror(tmp_path, monkeypatch):
 
 
 def test_worker_plain_exception_stays_worker_failed(tmp_path, monkeypatch):
+    """Extended by the ops-explain-from-logs task: an untyped exception now
+    stays classified WORKER_FAILED (unchanged) but carries ``exception_type``
+    and a code ``location`` in its details, so ``ops explain`` has something
+    better than "worker did not complete its contract" without reading
+    ``worker.stderr``. Its own message ("boom") is deliberately NOT included
+    -- only the three narrow, reviewed exception branches above ever put a
+    message in the details; see ``test_o31_...`` for why."""
     exit_code, result, staging = _run_worker_main(
         tmp_path, monkeypatch, dispatch_raises=RuntimeError("boom"))
     assert exit_code == 1
-    assert result == {"schema_version": "worker_result.v1.0", "failure": "WORKER_FAILED"}
-    assert not (staging / "diagnostics" / "failure_details.json").exists()
+    assert result["failure"] == "WORKER_FAILED"
+    assert result["problem"]["code"] == "WORKER_FAILED"
+    assert result["problem"]["category"] == "internal"
+    assert result["problem"]["retryable"] is True
+    assert "boom" not in result["problem"]["message"]
+    details = json.loads((staging / "diagnostics" / "failure_details.json").read_text())
+    assert details["exception_type"] == "RuntimeError"
+    path, _, line = details["location"].rpartition(":")
+    assert path.endswith(".py") and line.isdigit()
+    assert "boom" not in json.dumps(details)
     assert "boom" in (staging / "diagnostics" / "worker.stderr").read_text()
 
 
@@ -304,6 +319,6 @@ def test_explain_shows_diagnostic_ref_when_present(tmp_path, monkeypatch):
     _install_stub(monkeypatch)
     job_id = _submit(conn, clock, key="parent", scenario="validation_failed")
     job = _run_until(conn, service, job_id, {"failed"})
-    document = explain_command(SimpleNamespace(job_id=job_id), conn)
+    document = explain_command(SimpleNamespace(job_id=job_id), conn, service.root)
     assert document["failure"]["diagnostic_ref"] == job.failure.diagnostic_ref
     assert document["failure"]["diagnostic_ref"] is not None
