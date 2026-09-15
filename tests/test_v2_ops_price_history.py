@@ -514,6 +514,78 @@ def test_px_series_tickers_is_direct_union_evidence(tmp_path):
     assert px_series_tickers(_Req()) == ("AAPL", "MSFT", "SPY")
 
 
+class _CountingRepository:
+    """Wraps a real ``Repository``, counting ``.scan()`` and
+    ``.fragment_records()`` calls separately -- proves
+    :func:`tickers_with_price_history` (task brief 2026-09-15 send-back)
+    answers existence from catalog metadata (``fragment_records``) ONCE per
+    pinned table version, for however many tickers are asked about
+    together, and never falls back to a ``Repository.scan`` of actual row
+    content (the first implementation of this primitive did exactly that
+    and hit ``RESULT_LIMIT_EXCEEDED`` against real data -- see the
+    function's own docstring). Delegates every other attribute to the
+    wrapped real repository."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.scan_calls = 0
+        self.fragment_records_calls = 0
+
+    def scan(self, *args, **kwargs):
+        self.scan_calls += 1
+        return self._inner.scan(*args, **kwargs)
+
+    def fragment_records(self, *args, **kwargs):
+        self.fragment_records_calls += 1
+        return self._inner.fragment_records(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_tickers_with_price_history_is_one_metadata_lookup_for_many_tickers(tmp_path):
+    """task brief 2026-09-15 send-back: existence is answered from ONE
+    ``fragment_records`` catalog lookup for N tickers together (never a
+    per-ticker loop, and never a ``Repository.scan`` of row content at
+    all), and a repeat call for the SAME pinned table version -- any ticker
+    subset -- is a cache hit (no additional lookup)."""
+    from engine.v2.data import price_history_query
+    from engine.v2.data.price_history_query import tickers_with_price_history
+
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    present_tickers = ["AAA", "BBB", "CCC"]
+    for ticker in present_tickers:
+        _write_px(source_root, ticker, {"2024-01-01": 100.0})
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    real_repository = Repository(conn, store)
+    snapshot = real_repository.resolve(report["result_snapshot_id"])
+
+    # A fresh cache state: the in-process LRU is module-global, so a prior
+    # test's entry must never make this assertion pass for the wrong reason.
+    price_history_query._EXISTENCE_CACHE.clear()
+
+    wrapped = _CountingRepository(real_repository)
+    requested = tuple(present_tickers) + ("YYY", "ZZZ")  # two genuinely absent tickers too
+    present = tickers_with_price_history(wrapped, snapshot, requested)
+    assert present == frozenset(present_tickers)
+    assert wrapped.fragment_records_calls == 1
+    assert wrapped.scan_calls == 0  # never falls back to a row-content scan
+
+    # Same pinned table version, a DIFFERENT ticker subset: still a cache hit.
+    again = tickers_with_price_history(wrapped, snapshot, ("AAA", "YYY"))
+    assert again == frozenset({"AAA"})
+    assert wrapped.fragment_records_calls == 1
+    assert wrapped.scan_calls == 0
+
+    # has_price_history (kept as a thin single-ticker convenience) goes
+    # through the same primitive/cache -- no additional lookup.
+    assert price_history_query.has_price_history(wrapped, snapshot, "AAA") is True
+    assert wrapped.fragment_records_calls == 1
+    assert price_history_query.has_price_history(wrapped, snapshot, "YYY") is False
+    assert wrapped.fragment_records_calls == 1
+
+
 def test_materialize_price_series_writes_px_files_and_parse_equality_holds(tmp_path):
     from engine.v2.data.legacy_materialization import materialize_price_series
     conn, clock, store, _base = _base_snapshot(tmp_path)

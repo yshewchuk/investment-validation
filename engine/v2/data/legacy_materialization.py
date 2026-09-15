@@ -218,6 +218,8 @@ __all__ = [
     "panel_object_ref",
     "parse_pinned_ref",
     "px_csv_path",
+    "px_expected_paths",
+    "px_relative_path",
     "px_series_tickers",
     "read_plan_complete",
     "scanned_rows",
@@ -1171,11 +1173,51 @@ def _verify_price_readback(ticker: str, written, readback) -> None:
 _PX_RELATIVE_DIR = Path("earnings_predictions") / "data" / "raw" / "yfinance"
 
 
+def px_relative_path(ticker: str) -> str:
+    """The ``px_<T>.csv`` path relative to a materialization ``dest_root`` --
+    the same string both :func:`px_csv_path` (a full path under one root) and
+    :func:`px_expected_paths`/``materialize_price_series``'s own manifest
+    entries (which must match ``legacy_adapter.materialize``'s ``tree.manifest``
+    keys byte for byte, see ``snapshot_roots.verify_root``) build from, so the
+    two can never drift apart."""
+    return (_PX_RELATIVE_DIR / f"px_{ticker}.csv").as_posix()
+
+
 def px_csv_path(dest_root, ticker: str) -> Path:
     """Where :func:`materialize_price_series` writes (or, for a
     ``px_absent`` ticker, would have written) ``ticker``'s px csv under
     ``dest_root``."""
-    return Path(dest_root) / _PX_RELATIVE_DIR / f"px_{ticker}.csv"
+    return Path(dest_root) / px_relative_path(ticker)
+
+
+def px_expected_paths(repository, request: LegacyMaterializationRequest) -> frozenset[str]:
+    """Every ``px_<T>.csv`` relative path this request's price series
+    materialization would actually write -- i.e. every ticker
+    :func:`px_series_tickers` names that has at least one ``price_history``
+    row under ``request.snapshot_ref`` -- without writing anything.
+
+    Mirrors :func:`materialize_price_series`'s own skip rule (a ticker with
+    no ``price_history`` rows gets no file) purely from the request and the
+    repository, so ``engine.v2.ops.snapshot_stages._expected_layout`` can
+    validate a manifest's declared px paths against the REQUEST -- the same
+    kind of check every other table output already gets -- without touching
+    disk or re-deriving the skip logic a second, divergent way.
+
+    task brief 2026-09-15 send-back: ONE
+    ``price_history_query.tickers_with_price_history`` call for every
+    ticker in :func:`px_series_tickers` together -- never a per-ticker
+    ``has_price_history`` loop (the defect this send-back removed: that
+    loop ran here at BOTH the supervisor's ``prepare_launch`` and
+    ``materialize_effect``, on top of ``materialize_price_series``'s own
+    per-ticker check).
+    """
+    if PRICE_HISTORY_TABLE_NAME not in request.snapshot_ref.table_versions:
+        return frozenset()
+    from . import price_history_query
+
+    tickers = px_series_tickers(request)
+    present = price_history_query.tickers_with_price_history(repository, request.snapshot_ref, tickers)
+    return frozenset(px_relative_path(ticker) for ticker in present)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1189,9 +1231,19 @@ class PriceSeriesMaterialization:
     (``engine.data.features.panel.add_runup_features``, panel.py:446-560):
     when ``px_<T>.csv`` is missing and the Tier-1 fallback is also absent,
     that ticker's runup features just stay NaN. It is never a refusal.
+
+    ``manifest`` is ``{relative_path: content_hash}`` for every file in
+    ``written`` -- the piece ``legacy_adapter.materialize`` was silently
+    dropping (task brief 2026-09-15): ``materialize_tree``'s own
+    ``MaterializedTree.manifest`` is built and returned BEFORE this function
+    ever runs, so a px write that happens after it can only reach the
+    declared manifest if it hands its own hashes back explicitly, the same
+    way every other written file's hash lands in ``manifest`` at the moment
+    it is written.
     """
     written: dict[str, Path]
     px_absent: tuple[str, ...]
+    manifest: dict[str, str]
 
 
 def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *, tickers,
@@ -1210,9 +1262,16 @@ def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *
     refused on a missing px file either. This is the ONLY case that skips.
     Every other path -- a malformed or incomplete series, a readback
     mismatch, the snapshot itself having no ``price_history`` table at all --
-    still refuses ``CONTRACT_MISMATCH`` typed, via ``has_price_history``
-    (the snapshot-wide case) or ``get_price_series``/``_verify_price_readback``
-    (everything else), exactly as before.
+    still refuses ``CONTRACT_MISMATCH`` typed, via
+    ``tickers_with_price_history`` (the snapshot-wide case) or
+    ``get_price_series``/``_verify_price_readback`` (everything else),
+    exactly as before.
+
+    task brief 2026-09-15 send-back: the presence check is now ONE
+    ``price_history_query.tickers_with_price_history`` call over every
+    ticker in ``tickers`` together, not a per-ticker ``has_price_history``
+    scan -- each PRESENT ticker's rows are then read exactly once, via
+    ``get_price_series``.
 
     Judgement call: no separate ``session_date``. ``px_<T>.csv`` is a WHOLE
     per-ticker history file (``panel.add_runup_features`` reads it once and
@@ -1230,10 +1289,12 @@ def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *
     dest_root = Path(dest_root)
     dest_dir = dest_root / _PX_RELATIVE_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
+    present = price_history_query.tickers_with_price_history(repository, snapshot_ref, tickers)
     written: dict[str, Path] = {}
+    manifest: dict[str, str] = {}
     px_absent: list[str] = []
     for ticker in tickers:
-        if not price_history_query.has_price_history(repository, snapshot_ref, ticker):
+        if ticker not in present:
             px_absent.append(ticker)
             continue
         query = PriceQuery(ticker=ticker, session_date=observation_ceiling[:10],
@@ -1244,7 +1305,9 @@ def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *
         readback = price_download_sources.read_legacy_px_csv(dest)
         _verify_price_readback(ticker, frame, readback)
         written[ticker] = dest
-    return PriceSeriesMaterialization(written=written, px_absent=tuple(sorted(px_absent)))
+        manifest[str(dest.relative_to(dest_root))] = _file_content_hash(dest)
+    return PriceSeriesMaterialization(written=written, px_absent=tuple(sorted(px_absent)),
+                                      manifest=dict(sorted(manifest.items())))
 
 
 def lock_down(dest_root) -> None:
