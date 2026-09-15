@@ -906,6 +906,9 @@ not a suggestion to assert an implementation detail.
   - On the 09-10 live board, 132 of 201 tickers get runup features from 08-27 prices, and all 26 chosen events are affected.
   - The user accepted this as a known legacy limitation until cutover; v2 already reads the freshest price_history.
   - D14 therefore stays `differ` (explained) until cutover. A corpus refresh would not make it agree. Exit criterion 7 holds as "no unexplained differences".
+- **Gate decision (user, 2026-09-15).** `checks/rearchitecture_phase2_gate.py` stays strict and red on D14: `corpus_comparison_receipt_ref` must say agree, and no acceptance list or disposition artifact is added.
+  - Phase 2 sign-off records D14 as explained-differ on this evidence.
+  - D15, D19, the rollback receipt and the fault matrix must still pass for real on the final unchanged commit.
 
 
 Suggested test files:
