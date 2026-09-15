@@ -33,7 +33,9 @@ from engine.v2.foundation import (  # noqa: E402
     format_timestamp,
     from_document,
     parse_timestamp,
+    tag_nonfinite,
     to_document,
+    untag_nonfinite,
 )
 
 # --------------------------------------------------------------------------
@@ -237,3 +239,53 @@ def test_real_contracts_round_trip_through_the_decoder():
                    retry_policy_ref="retry.none", checkpoint_contract_ref="ckpt.none",
                    parameters={"n": 1})
     assert from_document(JobSpec, to_document(spec)) == spec
+
+
+# --------------------------------------------------------------------------
+# tag_nonfinite / untag_nonfinite: legacy NaN round trip through a real
+# artifact write (real shadow nightly attempt 14, model_evidence.json's
+# magnitude_spearman)
+# --------------------------------------------------------------------------
+
+
+def test_tag_nonfinite_is_valid_strict_json_and_matches_content_hash():
+    import json
+    import math
+
+    value = {"models": {"dyn_sv_chooser_v1_1": {"inputs": [
+        {"name": "magnitude_spearman", "value": float("nan")},
+        {"name": "other", "value": float("inf")},
+    ]}}}
+    tagged = tag_nonfinite(value)
+    # allow_nan=False must not raise: every NaN/Infinity is gone.
+    text = json.dumps(tagged, sort_keys=True, allow_nan=False)
+    reloaded = json.loads(text)
+    # Written bytes and the identity taken over the raw value agree --
+    # `_write_action` writes `tag_nonfinite(value)` but hashes `value`.
+    assert canonical_json(reloaded) == canonical_json(value)
+    assert content_hash(value) == content_hash(reloaded)
+    restored = untag_nonfinite(reloaded)
+    inputs = restored["models"]["dyn_sv_chooser_v1_1"]["inputs"]
+    assert math.isnan(inputs[0]["value"])
+    assert math.isinf(inputs[1]["value"]) and inputs[1]["value"] > 0
+
+
+def test_untag_nonfinite_round_trips_legacy_reader_semantics():
+    """The legacy consumer this exists for: ``abs(s.get("magnitude_spearman")
+    or 0.0)`` (``engine/dashboard/model_evidence.py:387``) sees a real NaN,
+    not the tag, and NaN stays truthy under ``or`` the way legacy's own
+    ``json.load`` of a raw ``NaN`` literal already behaves -- ``or 0.0``
+    must NOT replace it with ``0.0``.
+    """
+    import math
+
+    tagged = {"magnitude_spearman": {"__nonfinite__": "nan"}}
+    restored = untag_nonfinite(tagged)
+    value = restored.get("magnitude_spearman") or 0.0
+    assert isinstance(value, float) and math.isnan(value)
+
+
+def test_tag_nonfinite_leaves_ordinary_values_unchanged():
+    value = {"a": [1, 2.5, "x", None, True], "b": {"c": 3}}
+    assert tag_nonfinite(value) == value
+    assert untag_nonfinite(tag_nonfinite(value)) == value

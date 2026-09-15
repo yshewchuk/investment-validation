@@ -41,6 +41,7 @@ from engine.v2.ops.render_inputs import (
     bundle_content_hash,
     diff_bundles,
     model_evidence_stale_flag,
+    stage_model_evidence,
     unknown_selfcheck_report,
 )
 
@@ -566,6 +567,54 @@ def test_model_evidence_action_marks_a_clean_rebuild_not_degraded(monkeypatch, t
     doc = json.loads((root / "model_evidence.json").read_text())
     assert doc["degraded"] is False
     assert model_evidence_stale_flag(doc) is None
+
+
+def test_model_evidence_action_writes_a_real_nan_as_valid_json_and_stages_it_for_legacy(
+        monkeypatch, tmp_path):
+    """Real shadow nightly attempt 14: a Spearman correlation on a constant
+    input (``engine/dashboard/model_evidence.py:104``) can be a genuine
+    NaN. ``json.dumps(..., allow_nan=False)`` used to raise ValueError on it
+    (``legacy_adapter._write_action``, ``json.dumps`` has no way to write a
+    Python NaN as strict JSON) -- fixed by tagging it
+    (``engine.v2.foundation.tag_nonfinite``) before the dump. The artifact on
+    disk must now be valid strict JSON, AND ``stage_model_evidence`` must
+    still hand the REAL (unmodified) ``engine.dashboard.model_evidence.
+    load_model_evidence`` -- real legacy code, plain ``json.load`` -- back
+    a real ``float('nan')``, not the tag: legacy's own
+    ``abs(s.get("magnitude_spearman") or 0.0)`` would TypeError on a dict.
+    """
+    import math
+
+    import engine.dashboard.model_evidence as model_evidence_module
+    from engine.v2.ops.legacy_adapter import _action_model_evidence
+
+    monkeypatch.setattr(model_evidence_module, "build_model_evidence", lambda **k: {
+        "generated_at": "fresh",
+        "models": {"dyn_sv_chooser_v1_1": {"inputs": [
+            {"name": "magnitude_spearman", "n": 12, "coverage": 1.0,
+             "usable": True, "magnitude_spearman": float("nan")},
+        ]}},
+    })
+    root = tmp_path / "job"
+    root.mkdir()
+    _action_model_evidence({}, root)
+
+    raw_text = (root / "model_evidence.json").read_text()
+    # Valid strict JSON: no bare NaN/Infinity literal, and json.loads (no
+    # parse_constant override) does not silently accept one either.
+    parsed = json.loads(raw_text)
+    magnitude = parsed["models"]["dyn_sv_chooser_v1_1"]["inputs"][0]["magnitude_spearman"]
+    assert magnitude == {"__nonfinite__": "nan"}
+
+    legacy_root = tmp_path / "legacy"
+    destination = stage_model_evidence(root / "model_evidence.json", legacy_root)
+    staged = json.loads(destination.read_text())
+    staged_value = staged["models"]["dyn_sv_chooser_v1_1"]["inputs"][0]["magnitude_spearman"]
+    assert isinstance(staged_value, float) and math.isnan(staged_value)
+    # Legacy's own reader sees exactly what its own writer would have
+    # produced for this value -- a bare NaN token, not a tagged object.
+    assert "NaN" in destination.read_text()
+    assert "__nonfinite__" not in destination.read_text()
 
 
 # --------------------------------------------------------------------------

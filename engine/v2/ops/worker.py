@@ -70,6 +70,28 @@ def main():
                 f"worker import failed: no module named "
                 f"{getattr(exc, 'name', None) or exc}",
                 details={"module": getattr(exc, "name", None)})
+        elif isinstance(exc, ValueError):
+            # A bare ValueError out of adapter/dispatch code is a
+            # deterministic defect in what the worker tried to produce, not
+            # a transient crash -- real shadow nightly attempt 14:
+            # legacy_adapter._write_action's json.dumps(allow_nan=False)
+            # raised "Out of range float values are not JSON compliant: nan"
+            # on a real (legacy-produced) NaN, twice, on two fresh attempts,
+            # because the SAME inputs deterministically produce the SAME
+            # exception every retry. Falling through to the untyped
+            # WORKER_FAILED branch below marks that ("internal", True) --
+            # retryable -- exactly the mistake that spent two attempts
+            # re-running a bug retrying can never fix. VALIDATION_FAILED
+            # ("validation", False) matches how every OTHER adapter defect
+            # detected inline is already reported (e.g.
+            # legacy_adapter._action_render's own explicit VALIDATION_FAILED
+            # calls) and needs no new failure code. This is intentionally
+            # narrow -- a type check, not a blanket reclassification of
+            # WORKER_FAILED -- so a genuinely transient crash that happens
+            # to surface as some other exception type still retries.
+            problem = make_problem(
+                "VALIDATION_FAILED",
+                f"worker raised {type(exc).__name__}: {exc}"[:300])
         else:
             problem = None
         if problem is None:

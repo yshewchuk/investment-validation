@@ -37,7 +37,7 @@ from engine.v2.ops.checkpoints import cache_identity, register_artifact
 from engine.v2.ops.decision_commit import commit_decisions_in_transaction, validated_decision_candidate
 from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
-from engine.v2.ops.decision_validation import validate
+from engine.v2.ops.decision_validation import _validate_causality, validate
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
 from engine.v2.ops.input_bindings import (
@@ -1509,6 +1509,75 @@ def test_no_entry_night_commits_zero_decisions_and_still_enqueues_release(tmp_pa
     assert state == "succeeded", failure
     assert decisions == 0
     assert outbox == 2
+
+
+def test_unscored_row_with_no_evidence_window_does_not_block_decisions(tmp_path):
+    """Real shadow nightly attempt 14: 16 of 93 score rows (tickers CBRL/FDS/
+    LEN/SCHL) were ones ``engine/score.py`` never scored at all --
+    ``as_of``/``entry_date``/``exit_date``/``evidence_cutoff``/``quote_date``
+    all ``None``, flagged ``UNVALIDATED_STRUCTURE``. ``build_prediction_rows``
+    (``entry_dated_only=True``) already excludes any row with no ``as_of`` /
+    ``decision_date`` / ``entry_date`` from the recorded population -- legacy
+    never turns one into a prediction. ``decision_validation._validate_causality``
+    used to scan every row in ``score.json`` unconditionally, including these,
+    and refuse each one for having no cutoff to bind (there being no evidence
+    window at all) -- 16 spurious ``unbound_or_late_cutoff`` findings that
+    blocked a night with real, valid decisions alongside them. A row with no
+    ``as_of`` must be skipped, not refused; the genuinely eligible row must
+    still commit.
+    """
+    score, finality = _score_and_finality()
+    # Same column set as `score` (real score.json rows all share one uniform
+    # schema, None-filled where a row was never scored) -- a differing key
+    # set would make pandas pad `score`'s OWN reconstructed record with
+    # spurious NaN columns when legacy_decisions rebuilds it from the frame,
+    # which is an artifact of this test's DataFrame round trip, not
+    # anything the real bug is about.
+    unscored = dict.fromkeys(score, None)
+    unscored.update(ticker="FAKE", event_id="event-2", event_date="2026-09-16",
+                    strategy="CAL-P")
+    score_doc = {"rows": [score, unscored]}
+    key = "FAKE|TWIN-P|" + SESSION
+    replay_doc = {"schema_version": "decision_replay.v1.0", "session": SESSION,
+                  "population": [key], "source_rows": [score], "replayed_rows": [score],
+                  "source_rows_hash": content_hash([score]),
+                  "replayed_rows_hash": content_hash([score]), "findings": []}
+    state, failure, decisions, outbox = _run_decisions_with_derived_evidence(
+        tmp_path, "unscored-row", score_doc, finality, replay_doc)
+    assert state == "succeeded", failure
+    assert decisions == 1
+    assert outbox == 2
+
+
+def test_validate_causality_unit_cases():
+    """Direct coverage of ``_validate_causality``'s per-row rule, isolated
+    from plan/finality/receipt-binding plumbing: an unscored row (no
+    ``as_of``, real shadow nightly attempt 14) is skipped entirely, while a
+    scored row (``as_of`` set) is still refused for a missing, late or
+    mismatched cutoff -- the fix must not weaken that half of the check."""
+    scored = {"as_of": SESSION, "evidence_cutoff": SESSION}
+    unscored = {"as_of": None, "evidence_cutoff": None}
+    good_causal = {"observed_cutoffs": {"scored": SESSION, "unscored": None}}
+
+    findings = []
+    _validate_causality(good_causal, {"scored": scored, "unscored": unscored}, findings)
+    assert findings == []
+
+    missing = []
+    _validate_causality({"observed_cutoffs": {"unscored": None}},
+                        {"scored": scored, "unscored": unscored}, missing)
+    assert [f["field"] for f in missing] == ["evidence.causality.scored"]
+
+    late = []
+    late_row = {"as_of": SESSION, "evidence_cutoff": SESSION + "T23:59:59+00:00"}
+    _validate_causality({"observed_cutoffs": {"scored": SESSION + "T23:59:59+00:00"}},
+                        {"scored": late_row}, late)
+    assert [f["field"] for f in late] == ["evidence.causality.scored"]
+
+    mismatched = []
+    _validate_causality({"observed_cutoffs": {"scored": "2026-01-01"}},
+                        {"scored": scored}, mismatched)
+    assert [f["field"] for f in mismatched] == ["evidence.causality.scored"]
 
 
 def _empty_plan_and_evidence(score_doc, finality, coverage_doc):

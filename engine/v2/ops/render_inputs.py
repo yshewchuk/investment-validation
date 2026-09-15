@@ -293,12 +293,30 @@ def stage_model_evidence(evidence_path: Path, legacy_root: Path) -> Path:
     ``paths.FEATURES / "model_evidence.json"`` — i.e.
     ``<legacy_root>/data/features/model_evidence.json`` once
     ``INVESTING_PLAN_ROOT`` is ``legacy_root``.
+
+    Not a byte copy. ``evidence_path`` is v2's own artifact: valid strict
+    JSON, so a possible NaN (``magnitude_spearman`` on a constant input,
+    ``engine/dashboard/model_evidence.py:104``) is tagged
+    ``{"__nonfinite__": ...}`` rather than a raw JSON literal
+    (``legacy_adapter._write_action``/``engine.v2.foundation.tag_nonfinite``).
+    ``load_model_evidence()`` is real, unmodified legacy code — plain
+    ``json.load`` with no notion of that tag — so staging must hand it
+    legacy's OWN encoding: the tag decoded back to a real float and
+    re-written the way ``model_evidence.py:412`` itself writes one
+    (``json.dumps(out, indent=1, default=str)``, no ``allow_nan=False``,
+    i.e. a bare ``NaN`` token that ``json.load`` reads back as float('nan')
+    by default). Anything else and legacy would see a one-key dict where it
+    expects a float — ``abs({"__nonfinite__": "nan"} or 0.0)`` raises,
+    exactly the "v2 must carry what legacy produces" rule this exists for.
     """
+    from engine.v2.foundation import untag_nonfinite
+
     destination = Path(legacy_root) / "data" / "features" / "model_evidence.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() or destination.is_symlink():
         destination.unlink()
-    shutil.copyfile(Path(evidence_path), destination)
+    value = untag_nonfinite(json.loads(Path(evidence_path).read_text()))
+    destination.write_text(json.dumps(value, indent=1, default=str))
     return destination
 
 
