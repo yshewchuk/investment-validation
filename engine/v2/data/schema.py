@@ -504,8 +504,57 @@ _V6 = (
     CHECK (fold = '' OR (length(fold) = 6 AND fold GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'))""",
 )
 
+
+# --------------------------------------------------------------------------
+# v7 — price_history capture log (never edit v1-v6 above)
+# --------------------------------------------------------------------------
+#
+# SEND-BACK 2026-09-14 ("it isn't a Tier-2 table... no separate ops-root
+# SQLite registry"): ``engine.v2.ops.price_history_store`` used to keep its
+# own per-attempt capture log in a private ``registry.sqlite3`` outside the
+# shared catalog. That log's PURPOSE — one immutable row per per-ticker
+# capture ATTEMPT, successful or refused, so a later capture can tell "have I
+# already observed this exact source_hash" and "what is the latest
+# retrieved_at I've ever seen for this ticker" without re-deriving either from
+# the dataset's own rows (a no-change retrieval adds no row there, so it
+# alone cannot tell a refused re-download apart from one that was never
+# tried) — is unchanged by moving here; only its storage is. One row per
+# capture attempt, keyed by the ``data_import_receipts`` row of the commit
+# it happened inside of (``price_history_store.capture`` mints exactly one
+# price_history-advancing receipt per call, via ``record_references``,
+# mirroring v5's own pattern), immutable, and requiring a committed receipt
+# the same way v5 does.
+_PRICE_CAPTURE_OUTCOMES = ("added", "no_change", "duplicate_source_hash", "refused_backdate",
+                          "refused_partial", "error")
+
+_V7 = (
+    f"""CREATE TABLE data_price_captures (
+        capture_id TEXT PRIMARY KEY,
+        receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        ticker TEXT NOT NULL CHECK (length(ticker) > 0),
+        source_kind TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN {_PRICE_CAPTURE_OUTCOMES!r}),
+        rows_added INTEGER NOT NULL CHECK (rows_added >= 0),
+        rows_tombstoned INTEGER NOT NULL CHECK (rows_tombstoned >= 0),
+        created_at TEXT NOT NULL
+    ) STRICT""",
+    "CREATE INDEX data_price_captures_ticker ON data_price_captures(ticker, retrieved_at)",
+    "CREATE INDEX data_price_captures_receipt ON data_price_captures(receipt_id)",
+    """CREATE TRIGGER data_price_captures_committed_receipt
+    BEFORE INSERT ON data_price_captures
+    WHEN (SELECT status FROM data_import_receipts WHERE receipt_id = NEW.receipt_id)
+         IS NOT 'committed'
+    BEGIN
+        SELECT RAISE(ABORT, 'data_price_captures requires a committed import receipt');
+    END""",
+    *_immutable_triggers("data_price_captures"),
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
              (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
-             (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6))
+             (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6),
+             (7, "price_captures", _V7))

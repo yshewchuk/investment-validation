@@ -76,6 +76,7 @@ from engine.v2.contracts.data import (
     FragmentRecord,
     FragmentRef,
     KnowledgeMode,
+    ObjectRef,
     SnapshotRef,
     TableContract,
     TableContractRef,
@@ -86,6 +87,7 @@ from engine.v2.foundation import CONTENT_HASH_PREFIX, ArtifactStore, content_has
 
 __all__ = [
     "DATASET_LOGICAL_ALGORITHM",
+    "ResolvedSnapshot",
     "dataset_manifest",
     "dataset_version_identity_payload",
     "fragment_identity_payload",
@@ -102,6 +104,29 @@ __all__ = [
 
 DATASET_LOGICAL_ALGORITHM = "dataset_logical_rows.v1"
 _PLACEHOLDER_HASH = CONTENT_HASH_PREFIX + "0" * 64
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ResolvedSnapshot:
+    """Everything ``Repository.resolve_full`` reconstructed for one
+    already-committed snapshot: full ``TableContract``\\ s (not refs), every
+    fragment's ``ObjectRef``, every table's full ``FragmentRecord`` list, one
+    ``DatasetManifest`` per table, and the resolved ``SnapshotRef`` itself.
+    Shaped to be handed straight to ``catalog.commit_snapshot``'s
+    ``contracts``/``objects``/``records`` parameters (and
+    ``tuple(table_manifests.values())`` for its ``manifests`` parameter) when
+    a caller is carrying these tables forward into a NEW snapshot unchanged
+    (defined here, not in ``repository.py``, purely to stay within the §4.3
+    fan-out budget: this module already imports ``dataclasses`` and is
+    already one of ``repository.py``'s counted edges, so re-exporting the
+    name as ``manifests.ResolvedSnapshot`` there costs no new one).
+    """
+
+    contracts: tuple[TableContract, ...]
+    objects: tuple[ObjectRef, ...]
+    records: tuple[FragmentRecord, ...]
+    table_manifests: dict[str, DatasetManifest]
+    snapshot: SnapshotRef
 
 
 def table_contract_hash(contract: TableContract) -> str:

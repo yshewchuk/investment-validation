@@ -81,6 +81,11 @@ _FORMATS: dict[tuple[str, str], str] = {
     ("TimeInterval", "end_exclusive"): "date_or_timestamp",
     ("FragmentRecord", "time_min"): "date_or_timestamp",
     ("FragmentRecord", "time_max"): "date_or_timestamp",
+    ("PriceQuery", "observation_ceiling"): "timestamp",
+    ("PriceQuery", "session_date"): "date",
+    ("PriceSeriesRow", "retrieved_at"): "timestamp",
+    ("PriceSeriesRow", "source_hash"): "hash",
+    ("PriceSeriesRow", "date"): "date",
 }
 
 
