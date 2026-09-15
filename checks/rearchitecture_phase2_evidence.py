@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -126,8 +127,25 @@ COMPARISON_KIND_BY_FIELD = {
     "render_comparison_receipt_ref": RENDER_PARITY_KIND,
     "corpus_comparison_receipt_ref": CORPUS_PARITY_KIND,
 }
+#: Whether each ``VERDICT_REF_FIELDS`` receipt must bind to the RELEASE's own
+#: snapshot (finding #2, D14 review): D15/D19 do; D14's corpus receipt binds
+#: data provenance to its OWN ``corpus_snapshot_binding`` instead (checked
+#: separately by ``_check_corpus_binding`` -- corpus == source == INDEX
+#: snapshot, f7091f7) and is exempt from the release-snapshot equality check
+#: here. Declared per field, explicitly, not inferred by string-matching a
+#: D-id: every field in ``VERDICT_REF_FIELDS`` names its own requirement, and
+#: this module works in terms of evidence FIELDS throughout, never D-ids.
+BINDS_RELEASE_SNAPSHOT = {
+    "comparison_receipt_ref": True,
+    "render_comparison_receipt_ref": True,
+    "corpus_comparison_receipt_ref": False,
+}
 POPULATION_FIELDS = ("expected_population", "supported_population", "compared_population")
 AUTHORITY_MODE = "shadow"
+#: ``table_contract_mapping_hash`` is a bare hash of reviewed content, not a
+#: pointer to stored bytes (module docstring) -- excluded from
+#: ``DECODE_CLASS``/``REF_FIELDS``, so it needs its own shape check.
+_MAPPING_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 #: The fifteen §7.3 commit-boundary fault points a real D11/D16 fault matrix
 #: must cover (task P2-C01 decision 5): five object-side, ten catalog-side,
@@ -253,9 +271,13 @@ def _check_fault_matrix(data: bytes | None, findings: list, field_ok: dict[str, 
     shape_ok = isinstance(points, list)
     if shape_ok:
         for entry in points:
+            # ``verified_objects`` must actually be ``True`` -- a bool-typed
+            # ``False`` used to pass this shape check (task sweep, finding
+            # #1): a real fault point whose objects failed verification was
+            # indistinguishable from one that never ran.
             valid_entry = (isinstance(entry, dict) and isinstance(entry.get("point"), str)
                           and entry.get("outcome") in FAULT_OUTCOMES
-                          and isinstance(entry.get("verified_objects"), bool))
+                          and entry.get("verified_objects") is True)
             if not valid_entry:
                 shape_ok = False
                 break
@@ -264,6 +286,26 @@ def _check_fault_matrix(data: bytes | None, findings: list, field_ok: dict[str, 
     if not shape_ok or missing:
         findings.append({"code": "FAULT_MATRIX_INCOMPLETE", "missing": missing})
         field_ok["fault_matrix_ref"] = False
+
+
+def _check_table_contract_mapping_hash(evidence: dict, findings: list,
+                                       field_ok: dict[str, bool]) -> None:
+    """Shape-check ``table_contract_mapping_hash`` -- absence is caught by
+    ``_check_row`` the same way as any other field a registry row declares
+    required (task sweep, finding #1); this only refuses a VALUE that is
+    present but not a real ``sha256:<64 hex>`` digest, the one check this
+    field never had (it is excluded from ``REF_FIELDS``/``DECODE_CLASS`` and
+    ``_check_refs`` never even looks at it).
+    """
+    field = "table_contract_mapping_hash"
+    if field not in evidence:
+        return
+    value = evidence[field]
+    if isinstance(value, str) and _MAPPING_HASH_RE.match(value):
+        field_ok[field] = True
+    else:
+        findings.append({"code": "ARTIFACT_SHAPE_INVALID", "field": field, "reason": "invalid_hash"})
+        field_ok[field] = False
 
 
 def _check_populations(evidence: dict, findings: list, field_ok: dict[str, bool]) -> None:
@@ -429,6 +471,18 @@ def _check_bindings(decoded: dict[str, Any], snapshot_ref_obj: Any, findings: li
     environment and snapshot identity (task P2-C01 decision 2) -- a receipt
     that merely coexists with a manifest claiming fresh values is not bound
     to them.
+
+    Snapshot binding is skipped for a field ``BINDS_RELEASE_SNAPSHOT`` marks
+    ``False`` (finding #2: D14's corpus receipt binds a DIFFERENT, older
+    frozen snapshot by design, checked separately). For every other field,
+    when the evidence document declares no ``snapshot_ref`` at all, the
+    per-receipt equality check has nothing to check against and is skipped
+    here (unchanged from before this task) -- that gap is closed at the
+    registry level instead (finding #1: D10 now declares ``snapshot_ref``
+    itself a required field, so its total absence already turns the gate red
+    on its own row; a caller of this function directly, outside the gate,
+    still gets pure kind/code/environment binding checks with no snapshot_ref
+    supplied at all).
     """
     for field in VERDICT_REF_FIELDS:
         receipt = decoded.get(field)
@@ -441,6 +495,8 @@ def _check_bindings(decoded: dict[str, Any], snapshot_ref_obj: Any, findings: li
         if env.environment_hash != environment_hash:
             findings.append({"code": "ENVIRONMENT_MISMATCH", "field": field})
             field_ok[field] = False
+        if not BINDS_RELEASE_SNAPSHOT.get(field, True):
+            continue
         if snapshot_ref_obj is not None and (
                 env.snapshot_id != snapshot_ref_obj.snapshot_id
                 or env.snapshot_manifest_hash != snapshot_ref_obj.manifest_hash):
@@ -550,6 +606,7 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     snapshot_ref_obj = decoded.get("snapshot_ref")
 
     _check_fault_matrix(resolved.get("fault_matrix_ref"), findings, field_ok)
+    _check_table_contract_mapping_hash(evidence, findings, field_ok)
     _check_populations(evidence, findings, field_ok)
     _check_verdicts(decoded, findings, field_ok)
     _check_receipt_kinds(evidence, decoded, findings, field_ok)

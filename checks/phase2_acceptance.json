@@ -7,7 +7,8 @@
     },
     "D02": {
       "tier": 0,
-      "tests": ["tests/test_v2_data_legacy_adapter.py"]
+      "tests": ["tests/test_v2_data_legacy_adapter.py"],
+      "evidence_fields": ["table_contract_mapping_hash"]
     },
     "D03": {
       "tier": 0,
@@ -19,7 +20,8 @@
     },
     "D05": {
       "tier": 0,
-      "tests": ["tests/test_v2_data_query.py"]
+      "tests": ["tests/test_v2_data_query.py"],
+      "evidence_fields": ["dependency_plan_refs"]
     },
     "D06": {
       "tier": 0,
@@ -35,11 +37,13 @@
     },
     "D09": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_objects.py", "tests/test_v2_data_roundtrip.py"]
+      "tests": ["tests/test_v2_data_objects.py", "tests/test_v2_data_roundtrip.py"],
+      "evidence_fields": ["legacy_snapshot_object_ref"]
     },
     "D10": {
       "tier": 1,
-      "tests": ["tests/test_v2_data_repository.py"]
+      "tests": ["tests/test_v2_data_repository.py"],
+      "evidence_fields": ["snapshot_ref"]
     },
     "D11": {
       "tier": 1,

@@ -712,6 +712,29 @@ def test_receipt_bound_to_wrong_snapshot_gives_snapshot_binding_mismatch(tmp_pat
     assert codes(result) == {"SNAPSHOT_BINDING_MISMATCH"}
 
 
+def test_corpus_receipt_bound_to_its_own_older_snapshot_is_accepted(tmp_path):
+    """External review finding #2: a D14 corpus receipt legitimately binds a
+    DIFFERENT (older, frozen) snapshot than the release's own ``snapshot_ref``
+    -- its own ``corpus_snapshot_binding`` is the evidence that matters
+    (f7091f7's corpus==source==INDEX check), never equality with the release
+    snapshot D15/D19 require. Before the fix, ``_check_bindings`` required
+    EVERY ``VERDICT_REF_FIELDS`` receipt (corpus included) to name the
+    release's own snapshot, so an agreeing corpus receipt bound to its own
+    older snapshot was wrongly refused ``SNAPSHOT_BINDING_MISMATCH``."""
+    def mutate(evidence, artifacts_dir):
+        older_snapshot = _snapshot_ref("snap_older", manifest_hash="sha256:" + "7" * 64)
+        corpus = _comparison_receipt(
+            kind=p2evidence.CORPUS_PARITY_KIND, code_hash=evidence["code_hash"],
+            environment_hash=evidence["environment_hash"], snapshot_ref=older_snapshot,
+            receipt_id="recv_corpus",
+            diagnostic_ref=json.dumps(_corpus_binding_ref(artifacts_dir), sort_keys=True))
+        evidence["corpus_comparison_receipt_ref"] = _ref(
+            artifacts_dir, "corpus_comparison.json", _dumps(corpus))
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == set(), result["findings"]
+
+
 def test_import_receipt_not_committed_gives_snapshot_binding_mismatch(tmp_path):
     """Decision 2's last line is a conjunction -- committed AND names the
     snapshot. This isolates the "committed" half: the id is still
@@ -785,6 +808,83 @@ def test_fault_matrix_missing_one_point_gives_fault_matrix_incomplete(tmp_path):
     w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
     result = _gate_with_evidence(w, evidence_path, artifacts_dir)
     assert codes(result) == {"FAULT_MATRIX_INCOMPLETE"}
+
+
+def test_fault_matrix_every_point_unverified_gives_fault_matrix_incomplete(tmp_path):
+    """External review finding #1: every fault point present with
+    ``verified_objects: false`` used to pass ``_check_fault_matrix``'s shape
+    check, because it only asserted the field was a bool, not that it was
+    ``True``. A fault matrix that VERIFIES nothing must not be
+    indistinguishable from a real one."""
+    def mutate(evidence, artifacts_dir):
+        matrix = [{"point": p, "outcome": "old_head", "verified_objects": False}
+                 for p in p2evidence.FAULT_POINTS]
+        evidence["fault_matrix_ref"] = _ref(artifacts_dir, "fault_matrix.json",
+                                            json.dumps(matrix).encode())
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"FAULT_MATRIX_INCOMPLETE"}
+
+
+def test_table_contract_mapping_hash_not_a_real_hash_gives_artifact_shape_invalid(tmp_path):
+    def mutate(evidence, artifacts_dir):
+        evidence["table_contract_mapping_hash"] = "not-a-hash"
+    w, evidence_path, artifacts_dir = _evidence_world(tmp_path, mutate)
+    result = _gate_with_evidence(w, evidence_path, artifacts_dir)
+    assert codes(result) == {"ARTIFACT_SHAPE_INVALID"}
+
+
+# -- external review finding #1: reviewer's exact repro, real D01-D20 registry --
+#
+# "The reviewer's repro used the actual D01-D20 registry with synthetic
+# passing prerequisites. The gate stayed green after removing the snapshot
+# ref, the legacy snapshot ref, the dependency plans and the mapping hash. It
+# also stayed green with every fault verification set to false." Reproduced
+# here against the REAL registry (``REAL_REGISTRY_PATH``), not a hand-picked
+# subset, and table-driven over every field any real row now declares
+# required: each is removed in turn and must turn the gate red under the
+# field's own owning D-id.
+
+
+def test_real_registry_fully_valid_evidence_is_ok(tmp_path):
+    """Baseline for the table below: the REAL D01-D20 registry, synthetic
+    green prerequisites, and otherwise-untouched ``valid_evidence`` is green."""
+    registry = p2cov.load_registry(REAL_REGISTRY_PATH)
+    w = world(tmp_path, registry)
+    evidence, artifacts_dir = valid_evidence(tmp_path, w["root"])
+    evidence_path = tmp_path / "evidence_final.json"
+    evidence_path.write_text(json.dumps(evidence))
+    result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                         evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                         corpus_root=artifacts_dir.parent / "corpus",
+                         prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+    assert result["ok"] is True, result["findings"]
+
+
+def test_removing_each_registry_required_field_in_turn_turns_the_real_gate_red(tmp_path):
+    registry = p2cov.load_registry(REAL_REGISTRY_PATH)
+    required_fields = {field: d_id for d_id, row in registry.items()
+                       for field in row.get("evidence_fields", [])}
+    # The four fields the reviewer's repro named must be registry-required now.
+    for reviewer_field in ("snapshot_ref", "legacy_snapshot_object_ref",
+                          "table_contract_mapping_hash", "dependency_plan_refs"):
+        assert reviewer_field in required_fields, reviewer_field
+
+    for field, d_id in sorted(required_fields.items()):
+        case_dir = tmp_path / field
+        case_dir.mkdir()
+        w = world(case_dir, registry)
+        evidence, artifacts_dir = valid_evidence(case_dir, w["root"])
+        assert field in evidence, field
+        del evidence[field]
+        evidence_path = case_dir / "evidence_final.json"
+        evidence_path.write_text(json.dumps(evidence))
+        result = p2gate.gate(root=w["root"], coverage_path=w["coverage_path"],
+                             evidence_manifest_path=evidence_path, artifact_root=artifacts_dir,
+                             corpus_root=artifacts_dir.parent / "corpus",
+                             prerequisite_runner=GREEN_RUNNER, registry_path=w["registry_path"])
+        assert result["ok"] is False, (field, "stayed green after removal")
+        assert d_id in d_ids_with(result, "MISSING_EVIDENCE"), (field, d_id, result["findings"])
 
 
 # -- real repo smoke ----------------------------------------------------------
