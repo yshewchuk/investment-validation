@@ -161,6 +161,20 @@ def _validate_evidence(receipts, source, actual, expected, finality, findings):
 
 def _validate_causality(causal, source, findings):
     for key, row in source.items():
+        if row.get("as_of") is None:
+            # engine/score.py scores this row with no window at all (real
+            # shadow nightly attempt 14: status/flags such as
+            # UNVALIDATED_STRUCTURE, as_of/entry_date/exit_date/
+            # evidence_cutoff/quote_date all None) -- there is no evidence
+            # to be late against. engine/ledger.py::build_prediction_rows
+            # (mirrored here by decision_replay.decision_population, which
+            # every candidate/population field above is already built from)
+            # excludes exactly these rows from the decision population the
+            # same way, so causality has nothing to check for one that was
+            # never a candidate. A row that DOES have an ``as_of`` still
+            # gets the full check below, whether or not it happens to be in
+            # this session's population.
+            continue
         cutoff, actual_cutoff = _stamp(causal.get("observed_cutoffs", {}).get(key)), _stamp(row.get("evidence_cutoff"))
         row_as_of = _stamp(row.get("as_of"))
         if (cutoff is None or actual_cutoff is None or row_as_of is None

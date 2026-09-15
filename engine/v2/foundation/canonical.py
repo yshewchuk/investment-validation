@@ -35,10 +35,16 @@ import math
 from decimal import Decimal
 from typing import Any
 
-__all__ = ["canonical_json", "content_hash", "CONTENT_HASH_PREFIX"]
+__all__ = ["canonical_json", "content_hash", "CONTENT_HASH_PREFIX",
+           "NONFINITE_KEY", "tag_nonfinite", "untag_nonfinite"]
 
 #: contracts §2.1: ContentHash is ``sha256:`` plus the full 64-hex digest.
 CONTENT_HASH_PREFIX = "sha256:"
+
+#: The tag a non-finite float (NaN, +/-Infinity) normalizes to below, and the
+#: same key ``tools/capture_tier0_corpus.py``/``checks/tier0_corpus.py`` use
+#: for the tier-0 corpus's own frozen NaN markers -- one convention, not two.
+NONFINITE_KEY = "__nonfinite__"
 
 
 def _scalar(value: Any) -> Any:
@@ -50,7 +56,7 @@ def _scalar(value: Any) -> Any:
             # contracts §2.1: a missing value is never NaN, Infinity or zero.
             # Naming it here rather than writing `NaN` keeps the hash over
             # strict JSON, and keeps "absent" distinguishable from "0.0".
-            return {"__nonfinite__": repr(value)}
+            return {NONFINITE_KEY: repr(value)}
         return value
     # Dates, Decimals, numpy scalars and anything else with a faithful string
     # form. `repr` is deliberately not used: it is a Python display convention,
@@ -136,3 +142,37 @@ def content_hash(value: Any) -> str:
     """``sha256:<64 hex>`` over the canonical JSON of ``value``."""
     digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
     return f"{CONTENT_HASH_PREFIX}{digest}"
+
+
+def tag_nonfinite(value: Any) -> Any:
+    """``value`` normalized into strict-JSON-safe form (contracts §2.1): a
+    NaN or +/-Infinity float becomes ``{"__nonfinite__": repr(value)}``
+    instead of raising, everything else round-trips unchanged. This is the
+    same normalization :func:`canonical_json`/:func:`content_hash` already
+    apply internally, exposed so a writer that must put the SAME value on
+    disk as a real (``allow_nan=False``) JSON document can do so and still
+    have its file agree byte-for-semantics with the hash taken over the raw
+    value -- see :func:`untag_nonfinite` for the read-side inverse.
+    """
+    return _normalize(value)
+
+
+def untag_nonfinite(value: Any) -> Any:
+    """Inverse of :func:`tag_nonfinite`: decode a ``{"__nonfinite__": ...}``
+    tag back into a real ``float('nan')``/``inf``/``-inf``, recursively over
+    dicts and lists. The read-boundary companion to ``tag_nonfinite`` --
+    apply this right after ``json.loads`` on anything written that way, so a
+    legacy NaN round-trips as a real float for every downstream reader
+    (arithmetic, ``or 0.0`` truthiness, comparisons) instead of landing as an
+    opaque one-key dict.
+    """
+    if isinstance(value, dict):
+        if set(value) == {NONFINITE_KEY} and isinstance(value[NONFINITE_KEY], str):
+            try:
+                return float(value[NONFINITE_KEY])
+            except ValueError:
+                pass
+        return {k: untag_nonfinite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [untag_nonfinite(v) for v in value]
+    return value

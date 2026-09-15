@@ -21,8 +21,11 @@ from engine.v2.foundation.artifacts import (
 )
 from engine.v2.foundation.canonical import (
     CONTENT_HASH_PREFIX,
+    NONFINITE_KEY,
     canonical_json,
     content_hash,
+    tag_nonfinite,
+    untag_nonfinite,
 )
 from engine.v2.foundation.clock import (
     Clock,
@@ -39,6 +42,7 @@ from engine.v2.foundation.typed import (
 
 __all__ = [
     "CONTENT_HASH_PREFIX",
+    "NONFINITE_KEY",
     "ArtifactError",
     "ArtifactStore",
     "Clock",
@@ -54,5 +58,7 @@ __all__ = [
     "parse_schema_version",
     "parse_timestamp",
     "safe_relative_path",
+    "tag_nonfinite",
     "to_document",
+    "untag_nonfinite",
 ]

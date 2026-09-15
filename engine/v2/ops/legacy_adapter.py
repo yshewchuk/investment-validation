@@ -153,12 +153,32 @@ def invoke_price_refresh(session, *, dry_run: bool = False):
 def _write_action(root, name, value):
     import json
 
-    from engine.v2.foundation import content_hash
+    from engine.v2.foundation import content_hash, tag_nonfinite
 
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True, default=str,
-                               allow_nan=False))
+    # Real shadow nightly attempt 14: engine.dashboard.model_evidence can
+    # legitimately produce a NaN (a Spearman correlation on a constant
+    # input, engine/dashboard/model_evidence.py:104), and legacy writes it
+    # as a raw JSON `NaN` literal (model_evidence.py:412's bare
+    # ``json.dumps``, no ``allow_nan=False``) -- Python's own json.load reads
+    # that literal back as float('nan') without complaint. Dumping the SAME
+    # raw ``value`` here with ``allow_nan=False`` doesn't reject the literal
+    # the way legacy's own writer would -- ``json.dumps`` has no way to
+    # express a Python NaN as anything else, so it raises ValueError instead
+    # (worker.py then had no typed mapping for that and it surfaced as a
+    # retried WORKER_FAILED). ``tag_nonfinite`` swaps every NaN/Infinity for
+    # the ``{"__nonfinite__": repr(value)}`` marker canonical_json/
+    # content_hash already use for the SAME value (contracts §2.1) before
+    # this ever reaches ``json.dumps``, so the artifact stays valid strict
+    # JSON and ``allow_nan=False`` has nothing left to refuse.  A reader
+    # that needs the real float back (v2's own, or a legacy consumer that
+    # must see exactly what legacy itself would have produced) applies
+    # ``untag_nonfinite`` at its own read boundary -- see
+    # ``_action_render``'s ``evidence`` load and
+    # ``render_inputs.stage_model_evidence``.
+    path.write_text(json.dumps(tag_nonfinite(value), indent=2, sort_keys=True,
+                               default=str, allow_nan=False))
     return {"path": str(path.relative_to(root)), "hash": content_hash(value)}
 
 
@@ -589,6 +609,7 @@ def _action_render(parameters, root):
     from engine.dashboard.render import render_bundle
     from engine.features import FeatureContext
     from engine.score import Scorer
+    from engine.v2.foundation import untag_nonfinite
     from engine.v2.ops.render_inputs import (
         ABSENT_STAGES,
         assemble_scores,
@@ -607,7 +628,9 @@ def _action_render(parameters, root):
     evidence_path = root / "model_evidence.json"
     if not evidence_path.is_file():
         raise fail("VALIDATION_FAILED", "model evidence artifact is missing")
-    evidence = json.loads(evidence_path.read_text())
+    # v2's own read boundary: undo _write_action's {"__nonfinite__": ...} tag
+    # so a NaN reads as a real float here, matching legacy's own reader.
+    evidence = untag_nonfinite(json.loads(evidence_path.read_text()))
     stage_model_evidence(evidence_path, root / "legacy")
 
     ledger_tar = root / "ledger_generation.tar"

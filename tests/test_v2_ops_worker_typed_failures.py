@@ -127,6 +127,29 @@ def test_worker_module_not_found_is_typed_nonretryable(tmp_path, monkeypatch):
     assert "ModuleNotFoundError" in (staging / "diagnostics" / "worker.stderr").read_text()
 
 
+def test_worker_value_error_is_typed_nonretryable(tmp_path, monkeypatch):
+    """Real shadow nightly attempt 14: ``legacy_adapter._write_action``'s
+    ``json.dumps(value, allow_nan=False)`` raised ``ValueError: Out of range
+    float values are not JSON compliant: nan`` on a real (legacy-produced)
+    NaN (``model_evidence.py``'s ``magnitude_spearman``), on two separate
+    fresh attempts (``att_4a4bc10ceed84fe44e5bc03bd96d5660``,
+    ``att_94c281762ed961ef3606eb573796a688``) -- the exact same deterministic
+    exception both times, because retrying re-runs the exact same inputs
+    through the exact same code. It used to fall into the plain-
+    ``BaseException`` branch and come back as a retryable ``WORKER_FAILED``.
+    It must now be typed VALIDATION_FAILED and non-retryable, the same shape
+    the ModuleNotFoundError/INPUT_CHANGED precedent above already gets."""
+    exc = ValueError("Out of range float values are not JSON compliant: nan")
+    exit_code, result, staging = _run_worker_main(tmp_path, monkeypatch, dispatch_raises=exc)
+    assert exit_code == 1
+    assert result["failure"] == "VALIDATION_FAILED"
+    assert result["problem"]["code"] == "VALIDATION_FAILED"
+    assert result["problem"]["category"] == "validation"
+    assert result["problem"]["retryable"] is False
+    assert "ValueError" in result["problem"]["message"]
+    assert "ValueError" in (staging / "diagnostics" / "worker.stderr").read_text()
+
+
 # --------------------------------------------------------------------------
 # 2. engine/v2/ops/supervisor.py -- real Service, stub worker subprocess
 # --------------------------------------------------------------------------
