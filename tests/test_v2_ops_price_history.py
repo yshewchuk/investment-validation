@@ -524,8 +524,10 @@ def test_materialize_price_series_writes_px_files_and_parse_equality_holds(tmp_p
     snapshot = repository.resolve(report["result_snapshot_id"])
 
     dest = tmp_path / "materialized"
-    written = materialize_price_series(repository, snapshot, dest, tickers=("AAPL",),
-                                       observation_ceiling=_FAR_FUTURE_CEILING)
+    result = materialize_price_series(repository, snapshot, dest, tickers=("AAPL",),
+                                      observation_ceiling=_FAR_FUTURE_CEILING)
+    written = result.written
+    assert result.px_absent == ()
     assert written["AAPL"].is_file()
     from engine.v2.data import price_download_sources
     readback = price_download_sources.read_legacy_px_csv(written["AAPL"])
@@ -549,7 +551,7 @@ def test_materialize_price_series_writes_non_nan_columns_from_tier1_source(tmp_p
 
     dest = tmp_path / "materialized"
     written = materialize_price_series(repository, snapshot, dest, tickers=("AAPL",),
-                                       observation_ceiling=_FAR_FUTURE_CEILING)
+                                       observation_ceiling=_FAR_FUTURE_CEILING).written
     from engine.v2.data import price_download_sources
     readback = price_download_sources.read_legacy_px_csv(written["AAPL"])
     assert list(readback["close_adj"]) == [99.0, 100.0]
@@ -559,16 +561,57 @@ def test_materialize_price_series_writes_non_nan_columns_from_tier1_source(tmp_p
     assert not readback["high_raw"].isna().any()
 
 
-def test_materialize_price_series_refuses_typed_when_a_ticker_has_no_history(tmp_path):
+def test_materialize_price_series_skips_and_records_a_ticker_with_no_history(tmp_path):
+    """A ticker with NO price_history rows at all is skipped, not refused
+    (task brief 2026-09-15: mirror legacy's absence semantics, panel.py
+    446-560) -- no ``px_<T>.csv`` is written for it, it is named in
+    ``px_absent``, and every ticker that DOES have history is still written
+    and readback-verified normally."""
     from engine.v2.data.legacy_materialization import materialize_price_series
     conn, clock, store, _base = _base_snapshot(tmp_path)
     source_root = tmp_path / "legacy"
-    _write_px(source_root, "AAPL", {"2024-01-01": 100.0})
+    _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 101.0})
     report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
     repository = Repository(conn, store)
     snapshot = repository.resolve(report["result_snapshot_id"])
+
+    dest = tmp_path / "out"
+    result = materialize_price_series(repository, snapshot, dest, tickers=("AAPL", "ZZZZ"),
+                                      observation_ceiling=_FAR_FUTURE_CEILING)
+    assert result.px_absent == ("ZZZZ",)
+    assert "ZZZZ" not in result.written
+    assert not (dest / "earnings_predictions" / "data" / "raw" / "yfinance" / "px_ZZZZ.csv").exists()
+    assert result.written["AAPL"].is_file()
+    from engine.v2.data import price_download_sources
+    readback = price_download_sources.read_legacy_px_csv(result.written["AAPL"])
+    assert list(readback["close_adj"]) == [100.0, 101.0]
+
+
+def test_materialize_price_series_still_refuses_typed_for_a_readback_mismatch(tmp_path, monkeypatch):
+    """Requirement 2: absence is the ONLY case that skips. A ticker that DOES
+    have price_history rows but whose materialized file fails the readback
+    round trip must still refuse ``CONTRACT_MISMATCH`` typed, exactly as
+    before -- it must not be swallowed by the new skip-on-absence path."""
+    from engine.v2.data import price_download_sources
+    from engine.v2.data.legacy_materialization import materialize_price_series
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    _write_px(source_root, "AAPL", {"2024-01-01": 100.0, "2024-01-02": 101.0})
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(report["result_snapshot_id"])
+
+    real_read = price_download_sources.read_legacy_px_csv
+
+    def _corrupted_read(path):
+        frame = real_read(path)
+        frame = frame.copy()
+        frame["close_adj"] = frame["close_adj"] + 1.0
+        return frame
+
+    monkeypatch.setattr(price_download_sources, "read_legacy_px_csv", _corrupted_read)
     with pytest.raises(DataError) as exc:
-        materialize_price_series(repository, snapshot, tmp_path / "out", tickers=("ZZZZ",),
+        materialize_price_series(repository, snapshot, tmp_path / "out", tickers=("AAPL",),
                                  observation_ceiling=_FAR_FUTURE_CEILING)
     assert exc.value.code == "CONTRACT_MISMATCH"
 
@@ -625,7 +668,7 @@ def test_materialize_price_series_round_trips_awkward_float_close_adj(tmp_path):
 
     dest = tmp_path / "materialized"
     written = materialize_price_series(repository, snapshot, dest, tickers=("AAPL",),
-                                       observation_ceiling=_FAR_FUTURE_CEILING)
+                                       observation_ceiling=_FAR_FUTURE_CEILING).written
     from engine.v2.data import price_download_sources
     readback = price_download_sources.read_legacy_px_csv(written["AAPL"])
     expected = [by_date[d] for d in sorted(by_date)]
@@ -690,14 +733,14 @@ def test_materialize_price_series_respects_the_jobs_own_cutoff_not_a_maximal_one
 
     between_a_and_b = materialize_price_series(
         repository, pinned_snapshot, tmp_path / "between", tickers=("AAPL",),
-        observation_ceiling="2024-03-01T00:00:00Z")
+        observation_ceiling="2024-03-01T00:00:00Z").written
     before = price_download_sources.read_legacy_px_csv(
         between_a_and_b["AAPL"])
     assert list(before["close_adj"]) == [100.0]
 
     after_b = materialize_price_series(
         repository, pinned_snapshot, tmp_path / "after", tickers=("AAPL",),
-        observation_ceiling="2024-12-31T23:59:59Z")
+        observation_ceiling="2024-12-31T23:59:59Z").written
     later = price_download_sources.read_legacy_px_csv(after_b["AAPL"])
     assert list(later["close_adj"]) == [200.0]
 
@@ -780,9 +823,9 @@ def test_a_later_restatement_leaves_scale_invariant_runup_features_unchanged(tmp
     pinned = repository.resolve(report["result_snapshot_id"])
 
     before = materialize_price_series(repository, pinned, tmp_path / "before", tickers=("ZLK",),
-                                      observation_ceiling="2024-03-01T00:00:00Z")
+                                      observation_ceiling="2024-03-01T00:00:00Z").written
     after = materialize_price_series(repository, pinned, tmp_path / "after", tickers=("ZLK",),
-                                     observation_ceiling="2024-12-31T23:59:59Z")
+                                     observation_ceiling="2024-12-31T23:59:59Z").written
     before_closes = price_download_sources.read_legacy_px_csv(before["ZLK"])["close_adj"].to_numpy()
     after_closes = price_download_sources.read_legacy_px_csv(after["ZLK"])["close_adj"].to_numpy()
     assert len(before_closes) == n_old

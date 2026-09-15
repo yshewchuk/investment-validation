@@ -206,6 +206,7 @@ __all__ = [
     "SCORE_READ_PLAN_TABLES",
     "TABLE_OUTPUT_KIND",
     "MaterializedTree",
+    "PriceSeriesMaterialization",
     "assert_rows_match",
     "build_materialization_request",
     "evidence_scope_covers_trades",
@@ -216,6 +217,7 @@ __all__ = [
     "narrow_query_to_year",
     "panel_object_ref",
     "parse_pinned_ref",
+    "px_csv_path",
     "px_series_tickers",
     "read_plan_complete",
     "scanned_rows",
@@ -1162,16 +1164,55 @@ def _verify_price_readback(ticker: str, written, readback) -> None:
                               details={"ticker": ticker})
 
 
+#: Relative path (under a materialization ``dest_root``) of the legacy px
+#: directory -- shared by :func:`materialize_price_series` (the writer) and
+#: :func:`px_csv_path` (a reader-side helper other modules use to find, or
+#: confirm the absence of, one ticker's file) so the two never drift apart.
+_PX_RELATIVE_DIR = Path("earnings_predictions") / "data" / "raw" / "yfinance"
+
+
+def px_csv_path(dest_root, ticker: str) -> Path:
+    """Where :func:`materialize_price_series` writes (or, for a
+    ``px_absent`` ticker, would have written) ``ticker``'s px csv under
+    ``dest_root``."""
+    return Path(dest_root) / _PX_RELATIVE_DIR / f"px_{ticker}.csv"
+
+
+@dataclasses.dataclass(frozen=True)
+class PriceSeriesMaterialization:
+    """What :func:`materialize_price_series` did for each requested ticker.
+
+    ``written`` maps ticker -> the ``px_<T>.csv`` path, for every ticker that
+    had at least one ``price_history`` row under this snapshot. ``px_absent``
+    names every ticker (sorted) that had NONE at all -- no file was written
+    for it, mirroring legacy's own absence semantics
+    (``engine.data.features.panel.add_runup_features``, panel.py:446-560):
+    when ``px_<T>.csv`` is missing and the Tier-1 fallback is also absent,
+    that ticker's runup features just stay NaN. It is never a refusal.
+    """
+    written: dict[str, Path]
+    px_absent: tuple[str, ...]
+
+
 def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *, tickers,
-                             observation_ceiling: str) -> dict[str, Path]:
+                             observation_ceiling: str) -> PriceSeriesMaterialization:
     """Write ``px_<T>.csv`` at the legacy relpath
     (``earnings_predictions/data/raw/yfinance/px_<T>.csv``) for every ticker
-    in ``tickers``, from ``Repository.get_price_series`` pinned to
-    ``snapshot_ref`` -- the job's own cutoff, never re-resolved later (task
-    brief 2026-09-14: "a later re-capture never rewriting what a past scoring
-    saw"). Refuses ``CONTRACT_MISMATCH`` typed (via ``get_price_series``
-    itself) when a needed ticker has no price_history at all under this
-    snapshot. Call before :func:`lock_down`.
+    in ``tickers`` that has price_history, from ``Repository.get_price_series``
+    pinned to ``snapshot_ref`` -- the job's own cutoff, never re-resolved
+    later (task brief 2026-09-14: "a later re-capture never rewriting what a
+    past scoring saw"). Call before :func:`lock_down`.
+
+    A ticker with NO ``price_history`` rows at all under this snapshot is
+    SKIPPED, not refused (task brief 2026-09-15): no file is written for it
+    and it is named in the returned ``px_absent`` -- this mirrors legacy's
+    own behavior (see :class:`PriceSeriesMaterialization`), which never
+    refused on a missing px file either. This is the ONLY case that skips.
+    Every other path -- a malformed or incomplete series, a readback
+    mismatch, the snapshot itself having no ``price_history`` table at all --
+    still refuses ``CONTRACT_MISMATCH`` typed, via ``has_price_history``
+    (the snapshot-wide case) or ``get_price_series``/``_verify_price_readback``
+    (everything else), exactly as before.
 
     Judgement call: no separate ``session_date``. ``px_<T>.csv`` is a WHOLE
     per-ticker history file (``panel.add_runup_features`` reads it once and
@@ -1187,10 +1228,14 @@ def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *
     from . import price_download_sources, price_history_query
 
     dest_root = Path(dest_root)
-    dest_dir = dest_root / "earnings_predictions" / "data" / "raw" / "yfinance"
+    dest_dir = dest_root / _PX_RELATIVE_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
+    px_absent: list[str] = []
     for ticker in tickers:
+        if not price_history_query.has_price_history(repository, snapshot_ref, ticker):
+            px_absent.append(ticker)
+            continue
         query = PriceQuery(ticker=ticker, session_date=observation_ceiling[:10],
                            observation_ceiling=observation_ceiling, lookback_sessions=0)
         series = price_history_query.get_price_series(repository, query, snapshot_ref)
@@ -1199,7 +1244,7 @@ def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *
         readback = price_download_sources.read_legacy_px_csv(dest)
         _verify_price_readback(ticker, frame, readback)
         written[ticker] = dest
-    return written
+    return PriceSeriesMaterialization(written=written, px_absent=tuple(sorted(px_absent)))
 
 
 def lock_down(dest_root) -> None:
