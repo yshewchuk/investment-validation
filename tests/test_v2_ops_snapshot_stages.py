@@ -742,6 +742,58 @@ def test_materialize_worker_writes_once_reuses_and_discards_a_losing_partial(cas
     assert not list(case.base.glob(".*partial*"))
 
 
+def test_materialize_worker_declares_px_files_and_a_reused_root_still_verifies(case):
+    """task brief 2026-09-15: the real shadow-nightly failure -- verify_root
+    refusing 'undeclared' px_<T>.csv paths (att_7ca7b53d..., 144 written / 57
+    absent) -- reproduced end to end through the real worker, on a snapshot
+    that (like the real one) carries price_history for some tickers (AAA)
+    and none for others (BBB, still in EVIDENCE_SCOPE). Covers: fresh write
+    declares exactly the written px files, verify_root passes, the SUPERVISOR's
+    own request_mismatches admits them, and a REUSED root (second attempt,
+    dest already present) still verifies.
+    """
+    from engine.v2.ops import materialization_worker as worker
+    from engine.v2.ops.price_history_store import capture
+    from engine.v2.ops.snapshot_roots import verify_root
+    from engine.v2.ops.snapshot_stages import request_mismatches
+    from tests.test_v2_ops_price_history import _write_px
+
+    source_root = case.tmp / "px_source"
+    _write_px(source_root, "AAA", {"2020-01-01": 100.0, "2020-01-02": 101.0})
+    # BBB gets no px source at all -- stays px_absent, same as the real
+    # attempt's 57 absent tickers.
+    report = capture(case.conn, case.store, source_root, root=case.tmp, scope="shadow",
+                     clock=case.clock)
+    new_snap = case.repository.resolve(report["result_snapshot_id"])
+    request = _build_request(case.repository, new_snap, case.snapshot_object, case.store,
+                             extra_registry_refs=_model_output_refs(case.store))
+
+    staging = case.tmp / "staging_px"
+    staging.mkdir()
+    (staging / "materialization_request.json").write_text(json.dumps(to_document(request)))
+    first = worker.run_materialize({"expected_ids": ["legacy_materialize"]}, staging,
+                                   _envelope(case, "att_px_one"))
+    dest = materialization_root(case.base, request.request_hash)
+    written = json.loads((staging / "materialization_manifest.json").read_text())
+
+    aaa_path = "earnings_predictions/data/raw/yfinance/px_AAA.csv"
+    bbb_path = "earnings_predictions/data/raw/yfinance/px_BBB.csv"
+    assert first["reused"] is False
+    assert first["px_absent_tickers"] == ["BBB"] and first["px_absent_count"] == 1
+    assert aaa_path in written["files"] and bbb_path not in written["files"]
+    assert written["files"] == hash_tree(dest)
+    fingerprint = verify_root(dest, written["files"])
+    assert aaa_path in fingerprint
+    assert request_mismatches(case.repository, request, written["files"]) == []
+
+    second = worker.run_materialize({"expected_ids": ["legacy_materialize"]}, staging,
+                                    _envelope(case, "att_px_two"))
+    reused_written = json.loads((staging / "materialization_manifest.json").read_text())
+    assert second["reused"] is True
+    assert reused_written == written
+    verify_root(dest, reused_written["files"])  # the reused root still verifies
+
+
 def test_verify_root_refuses_links_extras_writable_entries_and_absence(tmp_path):
     from engine.v2.ops.errors import OpsError
     from engine.v2.ops.fingerprints import file_hash

@@ -262,6 +262,129 @@ def test_tree_contains_only_declared_paths_and_is_read_only(tmp_path):
     on_disk = {str(p.relative_to(dest_root)) for p in dest_root.rglob("*") if p.is_file()}
     assert on_disk == set(manifest)
 
+
+# --------------------------------------------------------------------------
+# task brief 2026-09-15: px_<T>.csv files must land in materialize()'s own
+# manifest -- the bug that made verify_root refuse a real shadow-nightly
+# attempt (att_7ca7b53d..., 144 written / 57 absent) with "undeclared" px
+# paths, because materialize_tree's MaterializedTree.manifest was built and
+# returned BEFORE materialize_price_series ever ran.
+# --------------------------------------------------------------------------
+
+
+def _snapshot_with_price_history(tmp_path, *, present=("AAA",)):
+    """Extends ``_build_snapshot``'s six-table snapshot with a real
+    ``price_history`` generation (via the same ``capture()`` production code
+    a nightly's capture job uses) carrying rows for every ticker in
+    ``present`` only. Any other ticker in ``DIRECT_SCOPE``/``EVIDENCE_SCOPE``
+    (BBB) gets no px source at all, so it stays ``px_absent`` -- present and
+    absent tickers in the same request, as the task brief requires."""
+    from engine.v2.data import reference_catalog
+    from engine.v2.data.reference_catalog import ReferenceInput
+    from engine.v2.ops.catalog import transaction
+    from tests.ops_support import FakeClock
+    from tests.test_v2_ops_price_history import _write_px
+
+    conn, store, _snap = _build_snapshot(tmp_path)
+    # capture()'s own generation-commit carries the PRIOR receipt's reference
+    # inputs forward (`_copy_reference_inputs`) -- _build_snapshot's plain
+    # commit_tables(receipt_id="r1") never records any, so give it one row to
+    # copy, the same way tests/test_v2_ops_price_history.py::_base_snapshot does.
+    with transaction(conn):
+        reference_catalog.insert_reference_inputs(conn, "r1", [ReferenceInput(
+            kind="calendar", legacy_path="calendar.csv", object_id="art_cal",
+            content_hash="sha256:" + "cd" * 32, byte_size=5)])
+    source_root = tmp_path / "legacy_source"
+    for ticker in present:
+        _write_px(source_root, ticker, {"2020-01-01": 100.0, "2020-01-02": 101.0})
+    from engine.v2.ops.price_history_store import capture
+
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=FakeClock())
+    repository = Repository(conn, store)
+    new_snap = repository.resolve(report["result_snapshot_id"])
+    return repository, store, new_snap
+
+
+def test_materialize_declares_every_written_px_file_and_verify_root_passes(tmp_path):
+    from engine.v2.ops.snapshot_roots import hash_tree, verify_root
+
+    repository, store, snap = _snapshot_with_price_history(tmp_path)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    manifest = materialize(repository, store, request, dest_root)
+
+    aaa_path = lm.px_relative_path("AAA")
+    bbb_path = lm.px_relative_path("BBB")
+    assert aaa_path in manifest and bbb_path not in manifest
+    # the manifest declares EXACTLY what materialize() wrote -- including px --
+    # the same invariant test_tree_contains_only_declared_paths_and_is_read_only
+    # already pins for the no-px case.
+    on_disk = {str(p.relative_to(dest_root)) for p in dest_root.rglob("*") if p.is_file()}
+    assert on_disk == set(manifest) == set(hash_tree(dest_root))
+    fingerprint = verify_root(dest_root, manifest)
+    assert aaa_path in fingerprint
+
+
+def test_verify_root_refuses_a_tampered_px_file(tmp_path):
+    from engine.v2.ops.errors import OpsError
+    from engine.v2.ops.snapshot_roots import verify_root
+
+    repository, store, snap = _snapshot_with_price_history(tmp_path)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    manifest = materialize(repository, store, request, dest_root)
+
+    aaa_path = dest_root / lm.px_relative_path("AAA")
+    # Tamper: rewrite AAA's px content in place, restoring the lock-down mode
+    # so the walk's own mode/link checks stay silent and the refusal is
+    # specifically the content-hash mismatch this task cares about.
+    aaa_path.chmod(0o644)
+    aaa_path.write_text(aaa_path.read_text() + "2020-01-03,102.0,102.0,102.0\n")
+    aaa_path.chmod(0o444)
+    with pytest.raises(OpsError):
+        verify_root(dest_root, manifest)
+
+
+def test_verify_root_refuses_an_extra_undeclared_px_file(tmp_path):
+    from engine.v2.ops.errors import OpsError
+    from engine.v2.ops.snapshot_roots import verify_root
+
+    repository, store, snap = _snapshot_with_price_history(tmp_path)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    manifest = materialize(repository, store, request, dest_root)
+
+    px_dir = (dest_root / lm.px_relative_path("AAA")).parent
+    px_dir.chmod(0o755)
+    extra = px_dir / "px_ZZZZ.csv"
+    extra.write_text("date,close_adj,close_raw,high_raw\n2020-01-01,1.0,1.0,1.0\n")
+    extra.chmod(0o444)
+    px_dir.chmod(0o555)
+    with pytest.raises(OpsError):
+        verify_root(dest_root, manifest)
+
+
+def test_request_mismatches_admits_expected_px_and_flags_wrong_ones(tmp_path):
+    from engine.v2.ops.snapshot_stages import request_mismatches
+
+    repository, store, snap = _snapshot_with_price_history(tmp_path)
+    request = _build_request(repository, snap, _snapshot_object_ref(store), store)
+    dest_root = tmp_path / "legacy_root"
+    manifest = materialize(repository, store, request, dest_root)
+
+    assert request_mismatches(repository, request, manifest) == []
+
+    # A path for a ticker that genuinely has no price_history (BBB) must
+    # never be declared, even with a well-formed hash.
+    bbb_path = lm.px_relative_path("BBB")
+    wrong = request_mismatches(repository, request, {**manifest, bbb_path: manifest[lm.px_relative_path("AAA")]})
+    assert bbb_path in wrong
+
+    # An untracked ticker outside px_series_tickers entirely is also wrong.
+    stray_path = lm.px_relative_path("ZZZZ")
+    wrong2 = request_mismatches(repository, request, {**manifest, stray_path: manifest[lm.px_relative_path("AAA")]})
+    assert stray_path in wrong2
+
     for rel in manifest:
         path = dest_root / rel
         assert not path.is_symlink()

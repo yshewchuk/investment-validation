@@ -37,6 +37,7 @@ from engine.v2.data.legacy_materialization import (
     TABLE_OUTPUT_KIND,
     panel_object_ref,
     parse_pinned_ref,
+    px_expected_paths,
     read_plan_complete,
 )
 from engine.v2.data.reference_inputs import (
@@ -375,6 +376,14 @@ def _expected_layout(repository, request):
             exact.update(_curated_copies(table, records))
         else:
             prefixes.append(f"data/curated/{table}/")
+    # task brief 2026-09-15: ``px_<T>.csv`` files are not object-store copies
+    # (no pinned hash to check exactly), and which tickers get one depends on
+    # live ``price_history`` content, not the request's static shape -- so
+    # ``px_expected_paths`` asks the repository the same question
+    # ``materialize_price_series`` itself answers. Every one of these MUST be
+    # declared (a missing one is "wrong" below the same way a missing
+    # required single-file path is); no other px path may appear.
+    required |= px_expected_paths(repository, request)
     return exact, required, tuple(prefixes)
 
 

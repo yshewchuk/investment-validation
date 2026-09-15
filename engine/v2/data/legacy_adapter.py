@@ -305,9 +305,17 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
             # all -- their materialized tree simply carries no px files,
             # exactly as it did before this task, rather than refusing every
             # replay of pre-existing snapshot generations.
-            legacy_materialization.materialize_price_series(
+            px_result = legacy_materialization.materialize_price_series(
                 repository, request.snapshot_ref, dest_root, tickers=px_tickers,
                 observation_ceiling=request.observation_ceiling)
+            # task brief 2026-09-15: every ``px_<T>.csv`` this call just wrote
+            # is a file under ``dest_root`` like any other and MUST be
+            # declared in the manifest ``verify_root`` checks against, the
+            # same as every table/pinned-ref path ``materialize_tree`` already
+            # added above -- ``tree.manifest`` is a plain dict, so mutating it
+            # in place (frozen only blocks rebinding ``tree.manifest`` itself)
+            # is the same "add as written" pattern ``materialize_tree`` uses.
+            tree.manifest.update(px_result.manifest)
         legacy_materialization.lock_down(dest_root)
     except errors.DataError as exc:
         if exc.code not in _DEST_ROOT_SAFETY_CODES:
