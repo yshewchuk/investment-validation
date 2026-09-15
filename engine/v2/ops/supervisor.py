@@ -35,6 +35,7 @@ from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.effects_graph import (
     backup_effect,
+    effect_scope,
     engineering_gate_effect,
     ledger_export_effect,
     publication_effect,
@@ -635,15 +636,7 @@ class Service:
 
             return _commit, ()
         if claim.spec.kind == "legacy_settlement":
-            candidate_ref = _named_ref(refs, "legacy_settlement")
-            document = json.loads(self.store.read_verified(candidate_ref))
-            rows = document.get("rows") if isinstance(document, dict) else None
-            if not isinstance(rows, list):
-                raise OpsError(make_problem("VALIDATION_FAILED",
-                                            "settlement candidate artifact has no rows"))
-            return (lambda conn: import_settlement_candidates_in_transaction(
-                conn, claim, candidate_ref, rows, clock=self.clock,
-                session=document.get("session"))), ()
+            return self._settlement_effect(claim, refs)
         if claim.spec.kind == "decision_evidence":
             _verify_decision_evidence(self.conn, self.store, claim, refs, keepalive)
             return None, ()
@@ -665,6 +658,47 @@ class Service:
         if claim.spec.kind == "legacy_rebuild_candidate":
             return legacy_rebuild_candidate_effect(self.conn, self.store, claim, refs, clock=self.clock)
         return None, ()
+
+    def _settlement_effect(self, claim, refs):
+        """``legacy_settlement``'s own commit closure, split out of
+        ``_coordinator_effect`` (function-length budget). A settlement line
+        that conflicts with its recorded prediction's contract is recorded
+        as a divergence and dropped rather than failing the stage (guide
+        §5.5 item 1 applied to settlement -- see
+        ``engine.v2.ops.decision_commit.import_settlement_candidates_in_transaction``).
+        """
+        candidate_ref = _named_ref(refs, "legacy_settlement")
+        document = json.loads(self.store.read_verified(candidate_ref))
+        rows = document.get("rows") if isinstance(document, dict) else None
+        if not isinstance(rows, list):
+            raise OpsError(make_problem("VALIDATION_FAILED",
+                                        "settlement candidate artifact has no rows"))
+        session = document.get("session")
+        occurrence = session or claim.spec.parameters["session"]
+
+        def _commit(conn):
+            # Surface any divergence on the job's own output -- row_ids
+            # only, never payloads -- so an operator sees it without reading
+            # the ledger directly. Only written when at least one divergence
+            # was recorded, so a normal (non-diverging) settlement's outputs
+            # are unchanged.
+            diverged_row_ids = []
+            import_settlement_candidates_in_transaction(
+                conn, claim, candidate_ref, rows, clock=self.clock, session=session,
+                on_divergence=diverged_row_ids.append)
+            if diverged_row_ids:
+                row_ids = sorted(str(row_id) for row_id in diverged_row_ids)
+                document_out = {"schema_version": "settlement_commit_receipt.v1.0",
+                                "scope": effect_scope(claim), "session": occurrence,
+                                "settlement_divergences": len(row_ids), "row_ids": row_ids}
+                ref = self.store.publish_bytes(
+                    json.dumps(document_out, sort_keys=True).encode(),
+                    schema_ref="settlement_commit_receipt.v1.0")
+                register_artifact(conn, ref, claim.attempt_id, self.clock)
+                conn.execute("INSERT INTO attempt_outputs VALUES (?,?,?)",
+                            (claim.attempt_id, "settlement_commit_receipt", ref.artifact_id))
+
+        return _commit, ()
 
     def close(self):
         for running in self.running.values():
