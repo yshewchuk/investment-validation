@@ -37,6 +37,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -307,6 +308,136 @@ def test_capture_bounds_ledger_predictions_and_outcomes_to_the_session(tmp_path)
     assert f"ledger/outcomes/{future}.jsonl" not in paths
 
     assert manifest_problems(to_document(manifest)) == []
+
+
+# --------------------------------------------------------------------------
+# capture(): score_context_price_series (real 2026-09-10 defect --
+# job_ab3df699bc040a0ad012312f04995ad9 omitted 6 planned DYN-SV rows because
+# neither px_<T>.csv nor the Tier-1 yfinance fetch cache reached the staged
+# legacy tree)
+# --------------------------------------------------------------------------
+
+
+def _write_px_csv(root: Path, ticker: str, days) -> None:
+    import pandas as pd
+
+    path = root / "earnings_predictions" / "data" / "raw" / "yfinance" / f"px_{ticker}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"date": days, "close_adj": 100.0 + np.arange(len(days), dtype=float)}).to_csv(
+        path, index=False)
+
+
+def _write_yfinance_tier1_cache(root: Path, ticker: str, days) -> None:
+    """A real Tier-1 cache entry via the actual ``Fetcher``/``cache_key``
+    machinery (not a hand-rolled path), so the test exercises the same
+    key/body-path shape ``_yf_history_from_tier1`` and ``iter_raw_fetch_cache``
+    read, matching ``_write_orats_cache``'s equivalent role for the ORATS
+    family above."""
+    import gzip
+
+    from engine.data.fetch import Fetcher, cache_key
+
+    key = cache_key("yfinance", "history", {"ticker": ticker, "period": "max"})
+    fetcher = Fetcher(root=root / "data" / "raw" / "fetch")
+    body_path = fetcher.body_path("yfinance", key)
+    meta_path = fetcher.meta_path("yfinance", key)
+    body_path.parent.mkdir(parents=True, exist_ok=True)
+    body = "Date,Close\n" + "\n".join(f"{d.date()},{100.0 + i}" for i, d in enumerate(days))
+    with gzip.open(body_path, "wb") as fh:
+        fh.write(body.encode())
+    meta = {"key": key, "source": "yfinance", "endpoint": "history",
+            "params": {"ticker": ticker, "period": "max"}, "url": "x", "status": 200,
+            "bytes": len(body), "elapsed_s": 0.1, "quota_remaining": None,
+            "fetched_at": SESSION + "T00:00:00Z", "note": ""}
+    meta_path.write_text(json.dumps(meta))
+
+
+def test_capture_includes_px_and_tier1_price_sources_for_context_tickers(tmp_path):
+    """The staged tree must carry BOTH price sources
+    ``engine.data.features.panel.add_runup_features``/``_yf_history_from_tier1``
+    actually read (panel.py:495,533,444-475): the legacy ``px_<T>.csv``
+    default-path file for a ticker that has one, and the Tier-1 yfinance
+    fetch-cache entry for a ticker whose only source is Tier-1 -- neither
+    was captured before ``score_context_price_series`` existed."""
+    import pandas as pd
+
+    _build_fixture(tmp_path)
+    px_ticker, tier1_ticker = "PXTICK", "T1TICK"
+    days = pd.bdate_range("2023-01-02", periods=310)
+    _write_px_csv(tmp_path, px_ticker, days)
+    _write_yfinance_tier1_cache(tmp_path, tier1_ticker, days)
+
+    manifest = capture(tmp_path, as_of=SESSION, tickers=[px_ticker, tier1_ticker],
+                       year_start=2024, year_end=2024)
+    paths = {ref.path for ref in manifest.file_refs}
+
+    assert f"earnings_predictions/data/raw/yfinance/px_{px_ticker}.csv" in paths
+    assert any(p.startswith("data/raw/fetch/yfinance/") for p in paths)
+    assert manifest_problems(to_document(manifest)) == []
+
+
+_RUNUP_SCRIPT = r"""
+import json, os, sys
+staging, tickers_json = sys.argv[1], sys.argv[2]
+os.environ["INVESTING_PLAN_ROOT"] = staging
+px_ticker, tier1_ticker = json.loads(tickers_json)
+
+import pandas as pd
+from engine.data.features import panel as panel_mod
+
+days = pd.bdate_range("2023-01-02", periods=310)
+event_date = days[305]
+frame = pd.DataFrame({
+    "ticker": [px_ticker, tier1_ticker],
+    "date": [event_date, event_date],
+    "move": [5.0, 5.0],
+    "n_prior": [20, 20],
+    "ema12_prior_abs_move": [4.0, 4.0],
+    "mean_prior_abs_move": [3.0, 3.0],
+})
+out = panel_mod.add_runup_features(frame)
+print(json.dumps({
+    "px_nan": bool(pd.isna(out.loc[out["ticker"] == px_ticker, "dist_high"].iloc[0])),
+    "tier1_nan": bool(pd.isna(out.loc[out["ticker"] == tier1_ticker, "dist_high"].iloc[0])),
+}))
+"""
+
+
+def test_captured_price_sources_produce_runup_features_not_nan(tmp_path):
+    """End-to-end proof for the real defect: stage a private root from ONLY
+    ``capture()``'s declared files (no other write to the staged tree), then
+    run ``add_runup_features`` (default ``px_dir``, no override -- exactly
+    what a real legacy score batch calls) against it in a fresh process so
+    ``engine.paths.ROOT`` binds to the staging root. Both the px-file ticker
+    and the Tier-1-only ticker must come back with real ``dist_high`` values,
+    not NaN -- NaN here is exactly what fed ``size_v1_4`` a NaN input and
+    produced ``NO_FORECAST`` for the 6 omitted DYN-SV rows.
+    """
+    import pandas as pd
+
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    _build_fixture(fixture)
+    px_ticker, tier1_ticker = "PXTICK", "T1TICK"
+    days = pd.bdate_range("2023-01-02", periods=310)
+    _write_px_csv(fixture, px_ticker, days)
+    _write_yfinance_tier1_cache(fixture, tier1_ticker, days)
+
+    manifest = capture(fixture, as_of=SESSION, tickers=[px_ticker, tier1_ticker],
+                       year_start=2024, year_end=2024)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    copy_read_set(fixture, staging, [ref.path for ref in manifest.file_refs])
+
+    result = subprocess.run(
+        ["/usr/bin/python3", "-c", _RUNUP_SCRIPT, str(staging),
+         json.dumps([px_ticker, tier1_ticker])],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr[-4000:]
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    assert outcome["px_nan"] is False, "px_<T>.csv source did not produce runup features"
+    assert outcome["tier1_nan"] is False, "Tier-1 yfinance fallback did not produce runup features"
 
 
 # --------------------------------------------------------------------------

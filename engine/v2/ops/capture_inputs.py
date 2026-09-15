@@ -60,7 +60,7 @@ import pandas as pd
 from engine.v2.contracts import LegacyFileRef, LegacyInputManifest
 from engine.v2.data import reference_inputs
 from engine.v2.data.legacy_mapping import PANEL_RELATIVE_PATH, TIER4_RELATIVE_PATH
-from engine.v2.data.legacy_materialization import LEGACY_SCORE_READ_PLAN_V1
+from engine.v2.data.legacy_materialization import LEGACY_SCORE_READ_PLAN_V1, px_relative_path
 from engine.v2.data.legacy_nightly_read_plan import (
     BARRIER_KINDS,
     FAMILIES,
@@ -272,6 +272,37 @@ def _to_refs(hashed: dict) -> tuple[LegacyFileRef, ...]:
                 for path, info in sorted(hashed.items()))
 
 
+def _capture_price_series(root: Path, scope: _Scope) -> list[str]:
+    """``px_<T>.csv`` (legacy's default-path price file) plus the Tier-1
+    yfinance fetch-cache entry (``_yf_history_from_tier1``'s fallback) for
+    every ticker in ``scope.context_tickers`` -- the same evidence universe
+    ``engine.data.features.panel.add_runup_features`` iterates
+    (panel.py:527,533). Neither source is required per-ticker: a ticker with
+    neither legitimately leaves its runup columns NaN, matching native
+    legacy exactly -- this reproduces whatever legacy actually has on disk
+    (stale px files included), never refreshes or fixes it.
+    """
+    found: list[str] = []
+    for ticker in scope.context_tickers:
+        relative = px_relative_path(ticker)
+        path = root / relative
+        if path.is_file() and not path.is_symlink():
+            found.append(relative)
+
+    wanted = set(scope.context_tickers)
+    for entry in iter_raw_fetch_cache(root, "yfinance"):
+        if entry.endpoint != "history":
+            continue
+        if str(entry.params.get("ticker")) not in wanted:
+            continue
+        body = entry.path
+        meta = body.with_name(body.name.replace(".body.gz", ".meta.json"))
+        for candidate in (meta, body):
+            if candidate.is_file() and not candidate.is_symlink():
+                found.append(candidate.resolve().relative_to(root.resolve()).as_posix())
+    return sorted(set(found))
+
+
 def _capture_raw_fetch_window(root: Path, family: str, spec: dict, scope: _Scope) -> list[str]:
     sessions = _lookback_sessions(root, scope.as_of, max_sessions=spec["lookback_sessions"])
     found = _enumerate_raw_fetch_orats(root, sessions, spec["endpoints"])
@@ -320,6 +351,8 @@ def _capture_family(root: Path, family: str, scope: _Scope, finality_years: set[
     if kind == "score_context_bundle":
         paths, panel_hash = _score_context_paths(root, scope)
         return paths, panel_hash
+    if kind == "price_series_bundle":
+        return _capture_price_series(root, scope), panel_hash
     if kind == "reference_calendar":
         return [], panel_hash  # folded into the reference-input bundle, below
     if kind == "raw_fetch_window":
