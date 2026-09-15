@@ -111,6 +111,23 @@ FAMILIES: dict[str, dict] = {
                   "legacy_render's and legacy_selfcheck's own Scorer(FeatureContext.load(...)) "
                   "(engine/v2/ops/legacy_adapter.py:_action_render, :_action_selfcheck)",
     },
+    "score_context_price_series": {
+        "kind": "price_series_bundle",
+        "required": False,
+        "reason": "engine.data.features.panel.add_runup_features (panel.py:495,523-551) reads "
+                  "px_<TICKER>.csv under engine.paths.RAW_YF by DEFAULT PATH for every ticker "
+                  "in the score_context evidence universe -- not through Repository/store, so "
+                  "it is not one of LEGACY_SCORE_READ_PLAN_V1's tables. When that file is "
+                  "absent, short (<300 rows) or missing close_adj, it falls back to "
+                  "_yf_history_from_tier1 (panel.py:444-475), the Tier-1 yfinance fetch-cache "
+                  "entry keyed by cache_key('yfinance','history',{'ticker':T,'period':'max'}). "
+                  "Real 2026-09-10 shadow closeout job_ab3df699bc040a0ad012312f04995ad9 omitted "
+                  "6 planned DYN-SV rows (CBRL, FDS, KR, LEN x2, SCHL) to NO_FORECAST because "
+                  "this family did not exist and neither source reached the staged legacy tree. "
+                  "Reproduces legacy faithfully -- stale px files included, never refreshed "
+                  "here -- not a staleness fix. Not required: a ticker with neither source "
+                  "legitimately leaves its runup columns NaN, same as native legacy.",
+    },
     "finality_calendar": {
         "kind": "reference_calendar",
         "reason": "engine.calendar.trading_calendar() reads engine.paths.GSPC_DAILY "
@@ -233,19 +250,19 @@ LEGACY_NIGHTLY_READ_PLAN_V1: dict[str, object] = {
                       "engine.ledger.score_outcomes -> _unresolved/_settlement_calendar/replay",
         },
         "legacy_model_evidence": {
-            "families": ("score_context", "model_evidence_cache"),
+            "families": ("score_context", "score_context_price_series", "model_evidence_cache"),
             "reason": "engine/v2/ops/legacy_adapter.py:_action_model_evidence -> "
                       "engine.dashboard.model_evidence.build_model_evidence/load_model_evidence",
         },
         "legacy_render": {
-            "families": ("score_context", "earnings_events_whole", "ledger_outcomes",
-                        "finality_calendar", "fetch_log", "quota_log"),
+            "families": ("score_context", "score_context_price_series", "earnings_events_whole",
+                        "ledger_outcomes", "finality_calendar", "fetch_log", "quota_log"),
             "reason": "engine/v2/ops/legacy_adapter.py:_action_render -> "
                       "render_bundle/build_meta/build_health/_panel_lag_flags/"
                       "_calendar_conflict_flags",
         },
         "legacy_selfcheck": {
-            "families": ("score_context",),
+            "families": ("score_context", "score_context_price_series"),
             "reason": "engine/v2/ops/legacy_adapter.py:_action_selfcheck -> "
                       "Scorer(context=FeatureContext.load(tickers, years=years))",
         },
@@ -301,6 +318,19 @@ def _present_single_file(spec, paths, manifest) -> bool:
     return spec["path"] in paths
 
 
+def _present_price_series_bundle(spec, paths, manifest) -> bool:
+    """Present if EITHER source (px csv or the Tier-1 yfinance cache) has at
+    least one file -- ``required: False`` means ``manifest_problems`` never
+    calls this in practice (dropped by ``required_families(only_required=
+    True)``), but it is kept so ``_family_present`` stays correct for a
+    caller that asks about this family directly."""
+    if not spec.get("required", True):
+        return True
+    px_prefix = "earnings_predictions/data/raw/yfinance/"
+    tier1_prefix = "data/raw/fetch/yfinance/"
+    return any(path.startswith(px_prefix) or path.startswith(tier1_prefix) for path in paths)
+
+
 #: One presence checker per family ``kind`` (task brief §1's declared shapes).
 #: A dispatch table rather than an if/elif chain: it keeps this module's own
 #: complexity budget (checks/code_budgets.py) low as families are added.
@@ -312,6 +342,7 @@ _PRESENCE_CHECKS = {
     "whole_curated_table": _present_prefixed,
     "ledger_glob": _present_ledger_glob,
     "single_file": _present_single_file,
+    "price_series_bundle": _present_price_series_bundle,
 }
 
 
