@@ -101,13 +101,16 @@ import pyarrow.parquet as pq
 # already-imported ``errors``/``objects`` modules rather than their own
 # separate import lines, and the deadline check uses
 # ``foundation.SystemClock`` instead of a bare ``datetime`` import, for the
-# same reason.
+# same reason. ``ResolvedSnapshot`` (task brief 2026-09-14) lives in
+# ``manifests.py`` and is re-exported below as a plain attribute alias, not
+# an import statement, for the same budget reason.
 from engine.v2.contracts.data import (
     CHAIN_QUERY_V1,
     DATA_QUERY_V1,
     ChainQuery,
     ChainSnapshot,
     DataQuery,
+    DatasetManifest,
     DependencyEntry,
     DependencyPlan,
     EarningsEvent,
@@ -129,7 +132,12 @@ from engine.v2.foundation import (
     to_document,
 )
 
-__all__ = ["Repository"]
+__all__ = ["ResolvedSnapshot", "Repository"]
+
+#: Re-exported from ``manifests`` (already one of this module's counted
+#: fan-out edges) rather than imported directly, so this type costs no new
+#: one -- see the import block comment above.
+ResolvedSnapshot = manifests.ResolvedSnapshot
 
 
 @contextmanager
@@ -414,6 +422,94 @@ class Repository:
 
     def get_chain(self, query: ChainQuery, snapshot_ref: SnapshotRef) -> ChainSnapshot:
         return chains.get_chain(self, query, snapshot_ref)
+
+    def get_price_series(self, query, snapshot_ref: SnapshotRef):
+        from engine.v2.data import price_history_query
+        return price_history_query.get_price_series(self, query, snapshot_ref)
+
+    def get_close(self, ticker: str, date: str, observation_ceiling: str, snapshot_ref: SnapshotRef):
+        from engine.v2.data import price_history_query
+        return price_history_query.get_close(self, ticker, date, observation_ceiling, snapshot_ref)
+
+    # ----------------------------------------------------------------------
+    # SEND-BACK 2026-09-14 requirement 1: reuse without re-scan.
+    #
+    # ``resolve_full``/``latest_dataset_version`` reconstruct exactly what
+    # ``catalog.commit_snapshot`` needs to CO-COMMIT a table unchanged
+    # alongside a genuinely new one -- ``_manifest``/``_records``/
+    # ``_full_contract`` above already prove every byte of a committed
+    # snapshot is recoverable from catalog SQL rows alone (no legacy file
+    # read, no Arrow scan of a source tree); these two methods are the
+    # public doors onto that proof, for a caller (``engine.v2.ops.
+    # price_history_store``) building a NEW snapshot that carries most
+    # tables forward untouched. Passing the results back into
+    # ``commit_snapshot`` is safe and cheap even though every reused row is
+    # already in the catalog: ``_insert_contract``/``_insert_object``/
+    # ``_insert_fragment``/``_insert_dataset_version`` are idempotent
+    # no-ops on an identical payload (``engine/v2/data/catalog.py`` lines
+    # 193-295), and ``audit_partitions=False`` (the caller's choice) skips
+    # the one optional step that would re-stream object bytes.
+    # ----------------------------------------------------------------------
+
+    def resolve_full(self, snapshot_id: str):
+        """``ResolvedSnapshot`` — every contract, object, fragment record and
+        per-table manifest a fresh ``commit_snapshot`` call would need to
+        carry this snapshot's tables forward unchanged, plus the resolved
+        ``SnapshotRef`` itself (identical to what :meth:`resolve` returns).
+        """
+        with _read_only(self._conn) as conn:
+            snap_row = conn.execute(
+                "SELECT * FROM data_snapshots WHERE snapshot_id = ?", (snapshot_id,)).fetchone()
+            if snap_row is None:
+                raise errors.fail("SNAPSHOT_NOT_FOUND", "unknown snapshot id",
+                          details={"snapshot_id": snapshot_id})
+            table_rows = conn.execute(
+                "SELECT table_name, dataset_version_id FROM data_snapshot_tables "
+                "WHERE snapshot_id = ?", (snapshot_id,)).fetchall()
+            table_versions: dict[str, DatasetManifest] = {}
+            contracts: dict[str, TableContract] = {}
+            all_records: list[FragmentRecord] = []
+            for row in table_rows:
+                manifest = self._manifest(conn, row["dataset_version_id"])
+                table_versions[row["table_name"]] = manifest
+                contract_id = manifest.dataset_version_ref.table_contract_ref.contract_id
+                if contract_id not in contracts:
+                    contracts[contract_id] = self._full_contract(conn, contract_id)
+                records = self._records(conn, row["dataset_version_id"],
+                                        manifest.dataset_version_ref.table_contract_ref)
+                all_records.extend(records)
+            snap = manifests.snapshot_ref(
+                table_versions, calendar_version=snap_row["calendar_version"],
+                source_priority_version=snap_row["source_priority_version"],
+                finality_receipt_refs=tuple(json.loads(snap_row["finality_receipt_refs_json"])),
+                parent_snapshot_id=snap_row["parent_snapshot_id"])
+            if (snap.snapshot_id != snap_row["snapshot_id"]
+                    or snap.manifest_hash != snap_row["manifest_hash"]):
+                raise errors.fail("MANIFEST_CORRUPT", "snapshot does not match its catalog identity",
+                          details={"snapshot_id": snapshot_id})
+        objects_by_id = {r.object_ref.object_id: r.object_ref for r in all_records}
+        return ResolvedSnapshot(
+            contracts=tuple(contracts.values()), objects=tuple(objects_by_id.values()),
+            records=tuple(all_records), table_manifests=table_versions, snapshot=snap)
+
+    def latest_dataset_version(self, contract_id: str):
+        """The newest committed dataset version for ``contract_id``, independent
+        of any snapshot -- ``(None, ())`` if none has ever been committed. This
+        is how a table that accumulates its own version chain outside the
+        nightly snapshot cadence (``price_history``) finds "my own current
+        state" without reading ``data_snapshot_heads`` (no snapshot need ever
+        have pinned that version) or re-deriving it from a scan.
+        """
+        with _read_only(self._conn) as conn:
+            row = conn.execute(
+                "SELECT dataset_version_id FROM data_dataset_versions WHERE contract_id = ? "
+                "ORDER BY registered_at DESC, rowid DESC LIMIT 1", (contract_id,)).fetchone()
+            if row is None:
+                return None, ()
+            manifest = self._manifest(conn, row["dataset_version_id"])
+            records = tuple(self._records(conn, row["dataset_version_id"],
+                                          manifest.dataset_version_ref.table_contract_ref))
+        return manifest, records
 
     # ----------------------------------------------------------------------
     # P2-6: table_contract — the one public contract lookup a query planner

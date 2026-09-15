@@ -59,6 +59,32 @@ def _add_ledger_commands(commands):
                                   help="report counts without writing anything")
 
 
+def _add_price_history_commands(commands):
+    """The ``ops price-history capture`` sub-subparser (task brief
+    2026-09-14; Tier-2 rework 2026-09-14 SEND-BACK): reads the two legacy
+    yfinance sources read-only, captures them into the ``price_history``
+    Tier-2 catalog table, and commits a new snapshot generation under
+    ``--scope`` carrying every other table's dataset version forward
+    unchanged alongside it (see ``engine.v2.ops.price_history_store``). Like
+    ``snapshot plan-import``, this needs the shared operations catalog, so
+    (unlike the ``capture-inputs``/``doctor`` pure-filesystem commands) it is
+    dispatched from inside ``dispatch()``, after ``main()`` opens one.
+    """
+    price_history = commands.add_parser("price-history")
+    price_history.add_argument("--root", default=argparse.SUPPRESS)
+    price_history_sub = price_history.add_subparsers(dest="price_history_command", required=True)
+    capture_p = price_history_sub.add_parser("capture")
+    capture_p.add_argument("--source-root", required=True, type=Path,
+                           help="the legacy checkout to read the px csv tree and the Tier-1 "
+                                "yfinance fetch cache from, read-only")
+    capture_p.add_argument("--scope", required=True,
+                           help="the snapshot scope to add/advance price_history's dataset "
+                                "version in (e.g. 'shadow'); must already have a head snapshot")
+    capture_p.add_argument("--dry-run", action="store_true",
+                           help="report counts; every check still runs, but nothing is written "
+                                "and no snapshot is committed")
+
+
 def _add_snapshot_commands(commands):
     """The ``ops snapshot plan-import|submit|promote|rollback`` sub-subparsers,
     split out of :func:`parser` to keep that function under the line budget."""
@@ -164,6 +190,7 @@ def parser():
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
     _add_price_refresh_command(commands)
+    _add_price_history_commands(commands)
     for name in ("get", "logs", "cancel", "resume", "explain"):
         sub = commands.add_parser(name)
         sub.add_argument("job_id")
@@ -293,7 +320,8 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
     from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
     return pin_snapshot_inputs(conn, ArtifactStore(root), args.snapshot_scope,
                                tickers=context_tickers, year_start=args.year_start,
-                               year_end=args.year_end, expected_population=population, clock=clock)
+                               year_end=args.year_end, expected_population=population, clock=clock,
+                               session=args.as_of)
 
 
 def _plan_command(args, root, conn, clock):
@@ -343,6 +371,8 @@ def dispatch(args, root, conn, clock):
         return snapshot_command(args, root, conn, clock)
     if args.command == "ledger":
         return ledger_command(args, root, conn, clock)
+    if args.command == "price-history":
+        return price_history_command(args, root, conn, clock)
     return job_command(args, conn, clock)
 
 
@@ -470,6 +500,20 @@ def capture_command(args):
     return {"schema_version": "capture_inputs_report.v1.0", "output": str(args.output),
             "manifest_id": manifest.manifest_id, "file_count": len(manifest.file_refs),
             "total_bytes": sum(ref.byte_size for ref in manifest.file_refs)}
+
+
+def price_history_command(args, root, conn, clock):
+    """``ops price-history capture`` -- see ``engine.v2.ops.price_history_store``.
+    Needs the shared operations catalog (a Tier-2 table, SEND-BACK 2026-09-14),
+    so this runs inside ``dispatch()``, not before it.
+    """
+    from engine.v2.ops.price_history_store import capture
+
+    if not args.source_root.is_dir():
+        raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
+                  details={"source_root": str(args.source_root)})
+    return capture(conn, ArtifactStore(root), args.source_root, scope=args.scope, root=root,
+                   dry_run=args.dry_run, clock=clock)
 
 
 def reconcile_command(args, root, conn, clock):

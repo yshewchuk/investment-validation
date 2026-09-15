@@ -182,18 +182,27 @@ from engine.v2.contracts.data import (
     DataQuery,
     KeyPredicate,
     LegacyMaterializationRequest,
+    PriceQuery,
     SnapshotRef,
     TableContract,
     TimeInterval,
 )
 from engine.v2.foundation import CONTENT_HASH_PREFIX, content_hash, to_document
 
-from . import errors, time_formats
+from . import errors, price_history_table, time_formats
 from . import query as query_mod
+
+#: Re-exported from ``price_history_table`` (already one of this module's
+#: counted §4.3 fan-out edges via the ``from . import`` line above) as a
+#: plain attribute alias rather than its own import statement, so this name
+#: costs no new edge -- see ``repository.ResolvedSnapshot`` for the same
+#: pattern and its full rationale.
+PRICE_HISTORY_TABLE_NAME = price_history_table.PRICE_HISTORY_TABLE_NAME
 
 __all__ = [
     "LEGACY_LAYOUT_VERSION",
     "LEGACY_SCORE_READ_PLAN_V1",
+    "PRICE_HISTORY_TABLE_NAME",
     "SCORE_READ_PLAN_TABLES",
     "TABLE_OUTPUT_KIND",
     "MaterializedTree",
@@ -202,10 +211,12 @@ __all__ = [
     "evidence_scope_covers_trades",
     "format_pinned_ref",
     "lock_down",
+    "materialize_price_series",
     "materialize_tree",
     "narrow_query_to_year",
     "panel_object_ref",
     "parse_pinned_ref",
+    "px_series_tickers",
     "read_plan_complete",
     "scanned_rows",
     "tier4_cache_refs_match_panel",
@@ -485,7 +496,7 @@ def _verify_pinned_ref_exists(store, ref: str) -> None:
 def build_materialization_request(
     repository, store, snapshot_ref: SnapshotRef, legacy_snapshot_object_ref,
     *, direct_scope: dict, evidence_scope: dict, registry_and_model_refs, calendar_refs,
-    expected_population: dict,
+    expected_population: dict, observation_ceiling: str,
 ) -> LegacyMaterializationRequest:
     """One ``DataQuery`` per :data:`SCORE_READ_PLAN_TABLES` entry, hashed as a
     Command (decision 2): ``request_hash`` covers everything except itself.
@@ -498,6 +509,13 @@ def build_materialization_request(
     only a live instance can answer. Publishing the registry/model/calendar
     bytes those refs name is NOT this function's job (see this task's
     report for who is expected to: a snapshot/reference-data import job).
+
+    ``observation_ceiling`` (SEND-BACK 2026-09-14 item 2) is the job's own
+    decision cutoff, pinned into the request at plan time so
+    :func:`materialize_price_series` can never see a ``price_history``
+    retrieval made after this job's cutoff, even once a later capture sits in
+    the same pinned snapshot version -- replaces the old maximal-sentinel
+    ``PRICE_SERIES_MATERIALIZATION_CEILING`` constant, deleted.
     """
     for ref in (*registry_and_model_refs, *calendar_refs):
         _verify_pinned_ref_exists(store, ref)
@@ -508,7 +526,8 @@ def build_materialization_request(
         legacy_snapshot_object_ref=legacy_snapshot_object_ref, direct_scope=dict(direct_scope),
         evidence_scope=dict(evidence_scope), table_queries=table_queries,
         registry_and_model_refs=tuple(registry_and_model_refs), calendar_refs=tuple(calendar_refs),
-        legacy_layout_version=LEGACY_LAYOUT_VERSION, expected_population=dict(expected_population))
+        legacy_layout_version=LEGACY_LAYOUT_VERSION, expected_population=dict(expected_population),
+        observation_ceiling=observation_ceiling)
     doc = to_document(placeholder)
     del doc["request_hash"]
     return dataclasses.replace(placeholder, request_hash=content_hash(doc))
@@ -1099,6 +1118,88 @@ def _file_content_hash(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return CONTENT_HASH_PREFIX + digest.hexdigest()
+
+
+def px_series_tickers(request: LegacyMaterializationRequest) -> tuple[str, ...]:
+    """Every ticker :func:`materialize_price_series` should write a
+    ``px_<T>.csv`` for: the union of ``direct_scope``'s tickers (the planned
+    score population -- ``engine.score``/``engine.features`` reading the
+    EVENT ticker's own px at ``panel.add_runup_features``, panel.py:533) and
+    ``evidence_scope``'s (the broader analog/context universe -- the same
+    reader, over every context ticker the panel/feature build touches).
+    "Any benchmark such as SPY" (task brief 2026-09-14) is not a separate
+    case: the S&P regime block (``spy_ret21``/``spy_vol20``/...) is read from
+    a distinct legacy file (``paths.GSPC_DAILY``, ``add_regime_features``),
+    never from ``px_SPY.csv``, so a benchmark ticker only needs a px file
+    here if it is ALREADY part of one of these two scopes (e.g. it is itself
+    scored or used as analog context) -- covered by the union with no special
+    case.
+    """
+    direct = request.direct_scope.get("tickers", ())
+    evidence = request.evidence_scope.get("tickers", ())
+    return tuple(sorted(set(direct) | set(evidence)))
+
+
+def _verify_price_readback(ticker: str, written, readback) -> None:
+    """Parse-equality: the date/close_adj a legacy read of the just-written
+    file recovers must equal what :func:`materialize_price_series` wrote --
+    never merely trusted from the writer's own side."""
+    if len(written) != len(readback):
+        raise errors.fail("VALIDATION_FAILED",
+                          "materialized px file row count does not match what was written",
+                          details={"ticker": ticker})
+    w_dates = written["date"].astype(str).str.slice(0, 10).tolist()
+    r_dates = readback["date"].astype(str).str.slice(0, 10).tolist()
+    if w_dates != r_dates:
+        raise errors.fail("VALIDATION_FAILED",
+                          "materialized px file dates do not match what was written",
+                          details={"ticker": ticker})
+    for w, r in zip(written["close_adj"], readback["close_adj"]):
+        w_nan, r_nan = (w != w), (r != r)  # NaN != NaN
+        if w_nan != r_nan or (not w_nan and float(w) != float(r)):
+            raise errors.fail("VALIDATION_FAILED",
+                              "materialized px file close_adj does not match what was written",
+                              details={"ticker": ticker})
+
+
+def materialize_price_series(repository, snapshot_ref: SnapshotRef, dest_root, *, tickers,
+                             observation_ceiling: str) -> dict[str, Path]:
+    """Write ``px_<T>.csv`` at the legacy relpath
+    (``earnings_predictions/data/raw/yfinance/px_<T>.csv``) for every ticker
+    in ``tickers``, from ``Repository.get_price_series`` pinned to
+    ``snapshot_ref`` -- the job's own cutoff, never re-resolved later (task
+    brief 2026-09-14: "a later re-capture never rewriting what a past scoring
+    saw"). Refuses ``CONTRACT_MISMATCH`` typed (via ``get_price_series``
+    itself) when a needed ticker has no price_history at all under this
+    snapshot. Call before :func:`lock_down`.
+
+    Judgement call: no separate ``session_date``. ``px_<T>.csv`` is a WHOLE
+    per-ticker history file (``panel.add_runup_features`` reads it once and
+    computes each event's own "last close strictly before" window internally,
+    panel.py:544-547) -- truncating it to one job's own session would drop
+    history every OTHER event in the materialized batch needs. ``session_date``
+    is therefore derived from ``observation_ceiling`` itself (its date part),
+    which -- since ``get_price_series``'s only use of ``session_date`` is
+    ``date <= session_date`` -- guarantees nothing is ever truncated: the
+    ceiling alone (the snapshot's own pinned price_history dataset version,
+    immutable once committed) already bounds exactly what a past scoring saw.
+    """
+    from . import price_download_sources, price_history_query
+
+    dest_root = Path(dest_root)
+    dest_dir = dest_root / "earnings_predictions" / "data" / "raw" / "yfinance"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+    for ticker in tickers:
+        query = PriceQuery(ticker=ticker, session_date=observation_ceiling[:10],
+                           observation_ceiling=observation_ceiling, lookback_sessions=0)
+        series = price_history_query.get_price_series(repository, query, snapshot_ref)
+        dest = dest_dir / f"px_{ticker}.csv"
+        frame = price_download_sources.write_legacy_px_csv(dest, series)
+        readback = price_download_sources.read_legacy_px_csv(dest)
+        _verify_price_readback(ticker, frame, readback)
+        written[ticker] = dest
+    return written
 
 
 def lock_down(dest_root) -> None:

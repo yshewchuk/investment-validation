@@ -94,6 +94,12 @@ TIER4_ROWS = [
 
 DIRECT_SCOPE = {"tickers": ["AAA"], "years": [2020]}
 EVIDENCE_SCOPE = {"tickers": ["AAA", "BBB"], "years": [2020, 2021]}
+#: A test-only maximal cutoff (SEND-BACK 2026-09-14 item 2:
+#: ``build_materialization_request`` now requires the job's own real
+#: ``observation_ceiling`` -- see ``snapshot_planning.pin_snapshot_inputs``
+#: for how a real caller derives one from its session date; these tests only
+#: need SOME valid cutoff, not a specific one).
+FAR_FUTURE_CEILING = "9999-12-31T23:59:59.000000Z"
 
 
 def _build_snapshot(tmp_path):
@@ -163,12 +169,16 @@ def _pinned_refs(store):
 
 
 def _build_request(repository, snap, snapshot_object_ref, store, *, direct_scope=None, evidence_scope=None,
-                   extra_registry_refs=()):
+                   extra_registry_refs=(), observation_ceiling=FAR_FUTURE_CEILING):
     """``extra_registry_refs`` (task brief 2026-09-14): callers outside this
     module that need the pnl_sim_history/recalibration_pairs refs too (e.g.
     ``tests/test_v2_ops_snapshot_stages.py::Case``, whose ``pin_snapshot_inputs``
     now requires them pinned) pass them here rather than duplicating this
-    function's whole body."""
+    function's whole body. ``observation_ceiling`` (SEND-BACK 2026-09-14 item
+    2) defaults to :data:`FAR_FUTURE_CEILING`; a caller comparing against a
+    REAL ``pin_snapshot_inputs`` call must pass the SAME
+    ``f"{session}T23:59:59.000000Z"`` that produces, since it is now part of
+    the hashed request."""
     registry_refs, calendar_refs = _pinned_refs(store)
     # Sorted by path, matching reference_catalog.pinned_materialization_refs's
     # own sort -- request_hash is order-sensitive (build_materialization_request
@@ -180,7 +190,8 @@ def _build_request(repository, snap, snapshot_object_ref, store, *, direct_scope
         direct_scope=direct_scope or DIRECT_SCOPE, evidence_scope=evidence_scope or EVIDENCE_SCOPE,
         registry_and_model_refs=combined, calendar_refs=calendar_refs,
         expected_population={"earnings_events": 2, "daily_market": 3, "trades": 2,
-                             "option_chains": 2, "feature_panel": 2, "tier4_forecasts": 2})
+                             "option_chains": 2, "feature_panel": 2, "tier4_forecasts": 2},
+        observation_ceiling=observation_ceiling)
 
 
 # --------------------------------------------------------------------------
@@ -270,10 +281,10 @@ def test_identical_request_yields_identical_hash_and_manifest(tmp_path):
     registry_refs, calendar_refs = _pinned_refs(store)
     request_a = lm.build_materialization_request(
         repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
-        registry_and_model_refs=registry_refs, calendar_refs=calendar_refs, expected_population={})
+        registry_and_model_refs=registry_refs, calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     request_b = lm.build_materialization_request(
         repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
-        registry_and_model_refs=registry_refs, calendar_refs=calendar_refs, expected_population={})
+        registry_and_model_refs=registry_refs, calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert request_a.request_hash == request_b.request_hash
 
     manifest_a = materialize(repository, store, request_a, tmp_path / "root_a")
@@ -304,7 +315,7 @@ def test_model_output_reference_inputs_materialize_at_their_legacy_paths(tmp_pat
         repository, store, snap, _snapshot_object_ref(store),
         direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
         registry_and_model_refs=registry_refs + model_output_refs, calendar_refs=calendar_refs,
-        expected_population={})
+        expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
 
     dest_root = tmp_path / "legacy_root"
     manifest = materialize(repository, store, request, dest_root)
@@ -335,7 +346,7 @@ def test_changing_scope_or_refs_changes_request_hash(tmp_path):
                                                               schema_ref="legacy_pinned_ref.v1").content_hash),)
     changed_model_ref = lm.build_materialization_request(
         repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
-        registry_and_model_refs=other_registry, calendar_refs=calendar_refs, expected_population={})
+        registry_and_model_refs=other_registry, calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert changed_model_ref.request_hash != base.request_hash
 
     other_calendar = (lm.format_pinned_ref(CALENDAR_PATH,
@@ -343,14 +354,14 @@ def test_changing_scope_or_refs_changes_request_hash(tmp_path):
                                                               schema_ref="legacy_pinned_ref.v1").content_hash),)
     changed_calendar_ref = lm.build_materialization_request(
         repository, store, snap, snapshot_object_ref, direct_scope=DIRECT_SCOPE, evidence_scope=EVIDENCE_SCOPE,
-        registry_and_model_refs=registry_refs, calendar_refs=other_calendar, expected_population={})
+        registry_and_model_refs=registry_refs, calendar_refs=other_calendar, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert changed_calendar_ref.request_hash != base.request_hash
 
     other_snapshot_object_ref = _snapshot_object_ref(store)
     changed_snapshot_object = lm.build_materialization_request(
         repository, store, snap, other_snapshot_object_ref, direct_scope=DIRECT_SCOPE,
         evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=registry_refs,
-        calendar_refs=calendar_refs, expected_population={})
+        calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert changed_snapshot_object.request_hash != base.request_hash
 
 
@@ -681,7 +692,7 @@ def test_missing_pinned_ref_is_refused(tmp_path):
         lm.build_materialization_request(
             repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
             evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(never_published,),
-            calendar_refs=calendar_refs, expected_population={})
+            calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert err.value.code == "OBJECT_CORRUPT"
 
 
@@ -695,7 +706,7 @@ def test_pinned_ref_with_wrong_hash_is_refused(tmp_path):
         lm.build_materialization_request(
             repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
             evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(tampered,),
-            calendar_refs=calendar_refs, expected_population={})
+            calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert err.value.code == "OBJECT_CORRUPT"
 
 
@@ -955,7 +966,7 @@ def test_tier4_cache_ref_naming_an_unpublished_object_is_refused(tmp_path):
         lm.build_materialization_request(
             repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
             evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(*registry_refs, missing_cache_ref),
-            calendar_refs=calendar_refs, expected_population={})
+            calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
     assert err.value.code == "OBJECT_CORRUPT"
 
 
@@ -976,7 +987,7 @@ def test_tier4_cache_ref_with_wrong_panel_hash_prefix_is_stale(tmp_path):
     request = lm.build_materialization_request(
         repository, store, snap, _snapshot_object_ref(store), direct_scope=DIRECT_SCOPE,
         evidence_scope=EVIDENCE_SCOPE, registry_and_model_refs=(*registry_refs, stale_ref),
-        calendar_refs=calendar_refs, expected_population={})
+        calendar_refs=calendar_refs, expected_population={}, observation_ceiling=FAR_FUTURE_CEILING)
 
     assert not lm.tier4_cache_refs_match_panel(repository, request)
     assert not lm.read_plan_complete(request, repository)

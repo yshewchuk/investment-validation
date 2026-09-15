@@ -345,7 +345,8 @@ def test_v5_v6_migrations_are_checksummed_idempotent_and_append_only(tmp_path):
     conn, clock = catalog(tmp_path)
     versions = conn.execute("SELECT version, name, checksum FROM schema_versions WHERE owner='data' "
                             "ORDER BY version").fetchall()
-    assert tuple(versions[-1])[:2] == (6, "import_reference_input_fold")
+    # v7 (price_captures) exists too now; this test only cares that v6 applied.
+    assert (6, "import_reference_input_fold") in [tuple(v)[:2] for v in versions]
     ids = build_chain(conn, clock)
     insert_reference_inputs(conn, ids["receipt_id"], [_reference()])
     row = conn.execute("SELECT fold FROM data_import_reference_inputs WHERE receipt_id=?",

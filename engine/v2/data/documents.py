@@ -76,11 +76,17 @@ _FORMATS: dict[tuple[str, str], str] = {
     ("SnapshotImportRequest", "source_manifest_hash"): "hash",
     ("SnapshotImportReceipt", "request_hash"): "hash",
     ("LegacyMaterializationRequest", "request_hash"): "hash",
+    ("LegacyMaterializationRequest", "observation_ceiling"): "timestamp",
     ("LegacyFileRef", "content_hash"): "hash",
     ("TimeInterval", "start_inclusive"): "date_or_timestamp",
     ("TimeInterval", "end_exclusive"): "date_or_timestamp",
     ("FragmentRecord", "time_min"): "date_or_timestamp",
     ("FragmentRecord", "time_max"): "date_or_timestamp",
+    ("PriceQuery", "observation_ceiling"): "timestamp",
+    ("PriceQuery", "session_date"): "date",
+    ("PriceSeriesRow", "retrieved_at"): "timestamp",
+    ("PriceSeriesRow", "source_hash"): "hash",
+    ("PriceSeriesRow", "date"): "date",
 }
 
 

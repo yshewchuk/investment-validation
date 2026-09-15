@@ -72,6 +72,18 @@ supervisor holds the catalog's lock, since that supervisor already
 reconciles every tick; a proof that fails prints its blocking processes as
 pid plus start time only.
 
+Capturing a `price_history` generation (task brief 2026-09-14; SEND-BACK
+2026-09-14: a real Tier-2 catalog table, `engine.v2.ops.price_history_store`)
+from the two legacy yfinance sources under a read-only checkout, advancing
+`--scope`'s head to a new snapshot that carries every other table's dataset
+version forward unchanged alongside price_history's fresh one:
+
+    python3 -m engine.v2.ops price-history capture \
+        --source-root /path/to/legacy/checkout --scope shadow [--dry-run]
+
+`--scope` must already have a committed head snapshot. `--dry-run` reports
+counts without writing anything or committing a new generation.
+
 ## Testing
 
 Recommended fast invocation, once `pytest-xdist` (pinned in

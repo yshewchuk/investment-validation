@@ -58,6 +58,8 @@ __all__ = [
     "KEY_PREDICATE_V1",
     "LEGACY_MATERIALIZATION_REQUEST_V1",
     "OBJECT_REF_V1",
+    "PRICE_QUERY_V1",
+    "PRICE_SERIES_ROW_V1",
     "ROLLBACK_RECEIPT_V1",
     "SNAPSHOT_IMPORT_RECEIPT_V1",
     "SNAPSHOT_IMPORT_REQUEST_V1",
@@ -83,6 +85,8 @@ __all__ = [
     "KnowledgeMode",
     "LegacyMaterializationRequest",
     "ObjectRef",
+    "PriceQuery",
+    "PriceSeriesRow",
     "RollbackReceipt",
     "SnapshotImportReceipt",
     "SnapshotImportRequest",
@@ -122,6 +126,10 @@ LEGACY_MATERIALIZATION_REQUEST_V1 = "legacy_materialization_request.v1.0"
 #: durable rollback receipt CONTRACT existed before this -- see
 #: ``RollbackReceipt``'s docstring for the producer gap this leaves open.
 ROLLBACK_RECEIPT_V1 = "rollback_receipt.v1.0"
+#: task brief 2026-09-14: a bounded, decision-time-eligible price-history
+#: request for one ticker, modeled on ``ChainQuery``.
+PRICE_QUERY_V1 = "price_query.v1.0"
+PRICE_SERIES_ROW_V1 = "price_series_row.v1.0"
 
 #: component contracts §5.1: recorded per table, never per snapshot, because
 #: the risk it describes (availability vs. vintage) is a property of the field.
@@ -476,6 +484,42 @@ class ChainQuery:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PriceQuery:
+    """A bounded, decision-time-eligible ``price_history`` request for one
+    ticker (task brief 2026-09-14, modeled on :class:`ChainQuery`).
+
+    ``session_date`` is the last date the caller may see; ``observation_ceiling``
+    bounds which retrieved *versions* of a date's price may be used (the same
+    per-ticker rule ``price_history.as_of_view`` implements: the latest
+    version with ``retrieved_at <= observation_ceiling``, or, if none exists,
+    the ticker's earliest retrieval). ``lookback_sessions`` bounds how many
+    trading sessions strictly before (and including) ``session_date`` a
+    caller may request — a query planner's cap, not a guarantee that many
+    rows exist.
+    """
+
+    ticker: str
+    session_date: str
+    observation_ceiling: str
+    lookback_sessions: int
+    schema_version: str = PRICE_QUERY_V1
+
+
+@dataclass(frozen=True, kw_only=True)
+class PriceSeriesRow:
+    """One resolved ``(ticker, date)`` price, with the provenance it came
+    from (task brief 2026-09-14)."""
+
+    date: str
+    close_adj: float | None
+    close_raw: float | None
+    high_raw: float | None
+    retrieved_at: str
+    source_hash: str
+    schema_version: str = PRICE_SERIES_ROW_V1
+
+
+@dataclass(frozen=True, kw_only=True)
 class ChainMember:
     """One contract row of a resolved chain, with null-with-reason liquidity.
 
@@ -650,6 +694,14 @@ class LegacyMaterializationRequest:
     (e.g. ``{"tickers": [...], "years": [...]}``) rather than a new structured
     type: the phase-2 guide names their contents in prose only. Recorded as a
     judgement call.
+
+    ``observation_ceiling`` (SEND-BACK 2026-09-14 item 2) is the job's own
+    decision cutoff -- the nightly plan's session, end-of-day -- pinned into
+    the plan itself so materialization can never see a retrieval made after
+    this job's cutoff, even once a later capture sits in the same pinned
+    snapshot version. Replaces the earlier
+    ``PRICE_SERIES_MATERIALIZATION_CEILING = "9999-12-31T23:59:59Z"``
+    constant, which let materialization see every retrieval ever captured.
     """
 
     request_hash: str
@@ -662,4 +714,5 @@ class LegacyMaterializationRequest:
     calendar_refs: tuple[str, ...]
     legacy_layout_version: str
     expected_population: dict[str, int]
+    observation_ceiling: str
     schema_version: str = LEGACY_MATERIALIZATION_REQUEST_V1

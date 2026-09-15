@@ -298,6 +298,16 @@ def materialize(repository, store, request, dest_root) -> dict[str, str]:
                 read_legacy_part(path, columns=None)  # proves the unchanged reader opens it; no coerce()
             else:                                     # feature_panel/tier4_forecasts (no legacy schema)
                 _validate_single_file(repository, request.table_queries[table_name], table_name, path)
+        px_tickers = legacy_materialization.px_series_tickers(request)
+        if px_tickers and legacy_materialization.PRICE_HISTORY_TABLE_NAME in request.snapshot_ref.table_versions:
+            # Older snapshots (imported before price_history joined the
+            # catalog, task brief 2026-09-14) have no price_history table at
+            # all -- their materialized tree simply carries no px files,
+            # exactly as it did before this task, rather than refusing every
+            # replay of pre-existing snapshot generations.
+            legacy_materialization.materialize_price_series(
+                repository, request.snapshot_ref, dest_root, tickers=px_tickers,
+                observation_ceiling=request.observation_ceiling)
         legacy_materialization.lock_down(dest_root)
     except errors.DataError as exc:
         if exc.code not in _DEST_ROOT_SAFETY_CODES:

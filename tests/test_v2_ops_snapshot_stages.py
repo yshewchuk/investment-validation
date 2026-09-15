@@ -592,7 +592,8 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     # EVIDENCE_SCOPE, so the comparison request here must widen the same way.
     widened = _build_request(case.repository, case.snap, case.snapshot_object, case.store,
                              evidence_scope={"tickers": ["AAA", "BBB"], "years": [2019, 2020, 2021]},
-                             extra_registry_refs=_model_output_refs(case.store))
+                             extra_registry_refs=_model_output_refs(case.store),
+                             observation_ceiling=f"{SESSION}T23:59:59.000000Z")
     assert inputs["materialization_request_hash"] == widened.request_hash  # refs from the catalog
 
     ids, specs = _submitted_specs(case, planned["plan_ref"], "k1")
@@ -839,16 +840,19 @@ def test_planning_refusals(case):
         direct_scope_for(["AAA|2020-01-15"])
     with pytest.raises(OpsError):
         pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=(), year_start=2020,
-                            year_end=2021, expected_population=(), clock=case.clock)
+                            year_end=2021, expected_population=(), clock=case.clock,
+                            session=SESSION)
     with pytest.raises(OpsError) as err:
         pin_snapshot_inputs(case.conn, case.store, "no-such-scope", tickers=("AAA",),
                             year_start=2020, year_end=2021,
-                            expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
+                            expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
+                            session=SESSION)
     assert err.value.problem.code == "INPUT_CHANGED"
     with pytest.raises(OpsError):  # direct years (2025) outside the evidence years
         pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
                             year_start=2020, year_end=2021,
-                            expected_population=("AAA|S1|2025-01-15",), clock=case.clock)
+                            expected_population=("AAA|S1|2025-01-15",), clock=case.clock,
+                            session=SESSION)
     with pytest.raises(OpsError):
         dispatch(parser().parse_args(["plan", "nightly", "--as-of", SESSION, "--input-mode",
                                       "snapshot"]), case.root, case.conn, case.clock)
@@ -878,7 +882,7 @@ def test_planning_succeeds_when_trades_spans_more_tickers_and_earlier_years(case
 
     result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("BBB",), year_start=2021,
                                  year_end=2021, expected_population=("BBB|S1|2021-02-10",),
-                                 clock=case.clock)
+                                 clock=case.clock, session=SESSION)
     assert result["snapshot_id"] == case.snap.snapshot_id
 
 
@@ -892,12 +896,14 @@ def test_pin_snapshot_inputs_pins_the_exact_receipt_it_resolved(case):
 
     result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
                                  year_start=2020, year_end=2021,
-                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
+                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
+                                 session=SESSION)
     assert result["snapshot_generation_receipt_id"] == "r1-references"
 
     record_reference_inputs(case, case.snap.snapshot_id, "r2-references",
                             registry=b'{"models": [{"id": "retrained"}]}')
     later = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
                                 year_start=2020, year_end=2021,
-                                expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
+                                expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
+                                session=SESSION)
     assert later["snapshot_generation_receipt_id"] == "r2-references"
