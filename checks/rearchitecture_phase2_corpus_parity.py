@@ -539,12 +539,14 @@ def _corpus_snapshot_binding(corpus, corpus_root: Path, run_result: dict, *,
         "source_snapshot_hash": run_result.get("legacy_snapshot_hash"),
         "control": control_drop_ticker is not None,
         "control_drop_ticker": control_drop_ticker,
-        # D14-resume: which code and which jobs produced ``run_result["rows"]``
-        # -- optional/informational (an older run_result missing these keys
-        # still publishes a valid binding), so evidence naming a receipt can
-        # always trace it back to the run that produced it, separately from
-        # whether that code still matches THIS checkout (see the
-        # STALE_RUN_CODE refusal in build_receipt, which runs before this).
+        # D14-resume: which code and which jobs produced ``run_result["rows"]``,
+        # so evidence naming a receipt can always trace it back to the run
+        # that produced it. ``build_receipt`` already refused (MISSING_/
+        # STALE_RUN_CODE, :func:`_check_run_code`) before this ever runs when
+        # ``implementation_ref`` was absent or did not match THIS checkout,
+        # so ``run_implementation_ref`` here is always present and current
+        # by the time a binding is published -- the ``.get()`` is only
+        # defensive, not a tolerated gap.
         "run_implementation_ref": run_result.get("implementation_ref"),
         "materialize_job_id": run_result.get("materialize_job_id"),
         "score_job_id": run_result.get("score_job_id"),
@@ -552,19 +554,25 @@ def _corpus_snapshot_binding(corpus, corpus_root: Path, run_result: dict, *,
 
 
 def _check_run_code(run_result: dict, root: Path = ROOT) -> None:
-    """Refuse (``INPUT_CHANGED``/``STALE_RUN_CODE``) before building a receipt
-    from rows that were not produced by THIS checkout's current worker code.
+    """Refuse (``INPUT_CHANGED``) before building a receipt from rows that
+    are not verifiably THIS checkout's current worker code.
 
     Without this, ``compare`` reading a ``--rows`` file saved by an earlier
     ``run`` could silently bind a receipt's ``code_hash``/``environment_hash``
     to the CURRENT repo state while the rows underneath it were scored by
-    different code -- exactly the "evidence from different code versions
-    gets confused" gap this fix closes. Skipped when ``run_result`` carries
-    no ``implementation_ref`` at all (an older run's saved JSON, or a
-    hand-built ``run_result`` in a unit test) -- nothing to compare against."""
+    different (or unrecorded) code -- exactly the "evidence from different
+    code versions gets confused" gap this fix closes. Fails closed on a
+    MISSING ``implementation_ref`` too (details ``reason=MISSING_RUN_CODE``):
+    acceptance evidence with unrecorded provenance is refused, not tolerated
+    -- no real ``run_result`` has ever been produced without this field
+    (``run_corpus``/``import_corpus`` always set it), so there is no
+    legitimate caller this would break."""
     run_ref = run_result.get("implementation_ref")
     if run_ref is None:
-        return
+        raise fail("INPUT_CHANGED",
+                  "run_result carries no implementation_ref -- its provenance cannot be "
+                  "verified against this checkout's current worker code",
+                  details={"reason": "MISSING_RUN_CODE"})
     current = _implementation_ref(root)
     if run_ref != current:
         raise fail("INPUT_CHANGED",
@@ -603,8 +611,9 @@ def build_receipt(corpus_root: Path, run_result: dict, *, code_hash: str,
     will ``publish()`` this receipt) and ``envelope.diagnostic_ref`` is set
     to point at it; ``None`` leaves ``diagnostic_ref`` unset (a receipt built
     only to inspect population/findings, not for evidence submission).
-    Refuses ``INPUT_CHANGED``/``STALE_RUN_CODE`` first (:func:`_check_run_code`)
-    when ``run_result`` was produced by different worker code than this
+    Refuses ``INPUT_CHANGED`` first (:func:`_check_run_code`, fail-closed):
+    ``MISSING_RUN_CODE`` when ``run_result`` carries no ``implementation_ref``
+    at all, ``STALE_RUN_CODE`` when it names different worker code than this
     checkout currently has."""
     _check_run_code(run_result)
     corpus = load_corpus(resolve_corpus(Path(corpus_root)))

@@ -741,16 +741,19 @@ def test_build_receipt_refuses_stale_run_code(tmp_path, monkeypatch):
     assert excinfo.value.problem.details["reason"] == "STALE_RUN_CODE"
 
 
-def test_build_receipt_allows_run_result_missing_implementation_ref(tmp_path, monkeypatch):
-    """Backward compatible: an older saved ``--rows`` JSON with no
-    ``implementation_ref`` key at all is not treated as stale (nothing to
-    compare against), matching every ``build_receipt`` call already in this
-    file that hand-builds a ``run_result`` without the field."""
+def test_build_receipt_refuses_missing_run_code(tmp_path, monkeypatch):
+    """Fail closed, not tolerant: acceptance evidence with unrecorded
+    provenance must be refused, not silently accepted -- a ``run_result``
+    with no ``implementation_ref`` at all (never produced by the real
+    ``run_corpus``/``import_corpus``, which always set it) is refused the
+    same way a mismatched one is, not treated as "nothing to compare
+    against"."""
     store_root, corpus_root, ops_root = _bare_setup(tmp_path)
     install_stub(monkeypatch, expected_canned())
     run_result = run_corpus(ops_root, store_root, "corpus", corpus_root, policy=POLICY,
                             resource_policy=TEST_POLICY)
     del run_result["implementation_ref"]
-    monkeypatch.setattr(corpus_parity, "_implementation_ref", lambda root=None: "sha256:" + "f" * 64)
-    receipt = build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1")
-    assert receipt.verdict == AGREE, receipt.summary()
+    with pytest.raises(OpsError) as excinfo:
+        build_receipt(corpus_root, run_result, code_hash="c1", environment_hash="e1")
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["reason"] == "MISSING_RUN_CODE"
