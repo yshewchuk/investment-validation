@@ -69,7 +69,13 @@ def _refused(root) -> str:
 
 
 def _expected_paths(root: Path) -> set[str]:
-    exact = {spec["path"] for spec in INPUTS.values() if spec["resolution"] == "exact"}
+    """Every ``exact`` reference path a fixture built by ``build_legacy_store``
+    (which never writes the optional ``model_evidence_cache`` file) should
+    resolve/pin/publish/materialize — REQUIRED exact paths always, an
+    OPTIONAL one (``required: False``) only if this particular ``root``
+    happens to carry it."""
+    exact = {spec["path"] for spec in INPUTS.values() if spec["resolution"] == "exact"
+            and (spec.get("required", True) or (root / spec["path"]).is_file())}
     return exact | {reference_artifact_path(), reference_cache_path(root)}
 
 
@@ -155,6 +161,45 @@ def test_missing_model_output_reference_input_is_refused(tmp_path, kind):
     build_legacy_store(tmp_path)
     (tmp_path / INPUTS[kind]["path"]).unlink()
     assert _refused(tmp_path) == "INPUT_CHANGED"
+
+
+def test_absent_model_evidence_cache_is_not_refused(tmp_path):
+    """Last read-set gap fix, part 2 (real incident:
+    job_caaed30eb5d1745ce87ed22a55dbc2e3, RESOURCE_LIMIT_EXCEEDED at 4.38 GiB
+    against a 4 GiB reservation -- ``engine/dashboard/model_evidence.py``'s
+    own fingerprint-cache short-circuit never fired under snapshot mode
+    because the materialization never carried a copy of the dashboard's
+    previous ``model_evidence.json``, forcing a full ~350s/multi-GiB rebuild
+    every attempt). ``model_evidence_cache`` is ``required: False`` (like
+    barrier mode's own family, ``legacy_nightly_read_plan.py``): unlike
+    :func:`test_missing_model_output_reference_input_is_refused`'s two
+    REQUIRED kinds, a plan built from a fixture that never writes this file
+    (``build_legacy_store``, matching a genuine first-ever generation) must
+    resolve normally, not refuse."""
+    build_legacy_store(tmp_path)
+    assert INPUTS["model_evidence_cache"]["required"] is False
+    manifest = _plan(tmp_path).legacy_input_manifest
+    assert INPUTS["model_evidence_cache"]["path"] not in {ref.path for ref in manifest.file_refs}
+
+
+def test_present_model_evidence_cache_is_pinned_and_materialized(imported):
+    """The regression case: a real prior run's cache file IS on the legacy
+    tree, so import pins it (kind ``model_evidence_cache``) and
+    ``legacy_materialize`` writes it byte-identical -- restoring the fast
+    fingerprint-cache hit under snapshot mode, the same as barrier mode
+    already gets from the identical file."""
+    tmp_path, store_root, conn, clock = imported
+    cache_path = INPUTS["model_evidence_cache"]["path"]
+    payload = b'{"fingerprint": {"champ_a": "sha256:abc"}, "models": {}}'
+    (store_root / cache_path).write_bytes(payload)
+    _import(tmp_path, store_root, conn, clock, "with-cache")
+    rows = _rows(conn)
+    assert cache_path in rows
+    _receipt_id, kind, content_hash_value, byte_size, fold = rows[cache_path]
+    assert kind == "model_evidence_cache"
+    assert byte_size == len(payload)
+    assert fold == ""
+    assert _store_bytes(tmp_path, content_hash_value) == payload
 
 
 def test_tier4_champion_without_a_cache_for_this_panel_is_stale(tmp_path):

@@ -242,6 +242,30 @@ def legacy_recalibration_pairs_path() -> str:
     return _root_relative(FEATURES / "recalibration_pairs.parquet")
 
 
+def legacy_model_evidence_cache_path() -> str:
+    """``engine.dashboard.model_evidence.evidence_path()`` — the dashboard's
+    per-champion input-evidence cache, keyed by champion artifact fingerprint.
+
+    Model OUTPUT downstream of the registry, same reasoning as
+    :func:`legacy_pnl_sim_history_path` — not raw Tier-2/3 data. Its own
+    ``build_model_evidence()`` reads this file FIRST, before doing any other
+    work, and returns it verbatim when the recorded ``fingerprint`` still
+    matches the current champion set (``engine/dashboard/model_evidence.py``'s
+    own ``cached.get("fingerprint") == fingerprint`` short-circuit) — skipping
+    a rebuild that loads the full panel/trades tables and every champion's
+    training set (measured ~350s wall, several GiB peak). Barrier mode already
+    captures this file, best-effort, as the ``model_evidence_cache`` family
+    (``legacy_nightly_read_plan.py``); a snapshot-backed
+    ``legacy_model_evidence`` attempt's materialization never gained the same
+    file (real shadow nightly: job_caaed30eb5d1745ce87ed22a55dbc2e3,
+    RESOURCE_LIMIT_EXCEEDED at 4.38 GiB against barrier's measured 235 MiB for
+    the identical job), so every snapshot-mode attempt paid full rebuild cost
+    forever, not just on a genuine champion change. Typed verbatim rather than
+    imported, same fan-out-budget reason as :func:`legacy_pnl_sim_history_path`.
+    """
+    return _root_relative(FEATURES / "model_evidence.json")
+
+
 # --------------------------------------------------------------------------
 # P2-6: materialize — the one legacy-touching validation step (§9.1, D13/D14)
 # --------------------------------------------------------------------------

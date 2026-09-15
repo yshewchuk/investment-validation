@@ -676,18 +676,39 @@ def _action_model_evidence(parameters, root):
     and the render job in separate processes, so a raised exception here must
     become a *field* on the artifact the render job reads back, or the
     degraded/stale information never reaches it (render_inputs.model_evidence_stale_flag).
+
+    Phase-level step events (last read-set gap fix, part 2, 2026-09-15: real
+    incident job_caaed30eb5d1745ce87ed22a55dbc2e3, RESOURCE_LIMIT_EXCEEDED at
+    4.38 GiB after 6.1s with the outer ``legacy_model_evidence`` step as the
+    ONLY event -- no phase-level signal existed to show whether the peak came
+    from the cheap fingerprint-cache read or the expensive full rebuild).
+    ``model_evidence_cache_probe`` and ``model_evidence_build`` bracket
+    exactly the same ``build_model_evidence()`` call ``build_model_evidence``
+    itself makes internally (its own ``load_model_evidence()``/fingerprint
+    check first, full rebuild only on a miss) -- no new legacy symbol crossing
+    (both functions were already declared adapter symbols before this fix),
+    so a killed attempt's ``diagnostics/steps.ndjson`` now shows start/end RSS
+    for the read-only probe separately from the (possibly never-finishing)
+    rebuild, and ``model_evidence_write`` isolates the JSON write.
     """
     from engine.dashboard.model_evidence import build_model_evidence, load_model_evidence
 
+    with worker_progress.step("model_evidence_cache_probe"):
+        # Read-only, same file build_model_evidence() itself reads first;
+        # never mutates anything, purely so a step event marks how much RSS
+        # was already resident before the (possibly expensive) build call.
+        load_model_evidence()
     try:
-        result = dict(build_model_evidence(force=bool(parameters.get("force", False))))
+        with worker_progress.step("model_evidence_build"):
+            result = dict(build_model_evidence(force=bool(parameters.get("force", False))))
         result.setdefault("degraded", False)
     except Exception as exc:  # noqa: BLE001 -- v1 parity: stale evidence beats a dark board
         cached = load_model_evidence() or {}
         result = dict(cached)
         result["degraded"] = True
         result["degraded_reason"] = f"{type(exc).__name__}: {exc}"[:300]
-    return _write_action(root, "model_evidence.json", result)
+    with worker_progress.step("model_evidence_write"):
+        return _write_action(root, "model_evidence.json", result)
 
 
 def _panel_lag_flags(as_of):
