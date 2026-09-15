@@ -455,8 +455,7 @@ def test_naive_and_aware_bounds_mixed_in_a_time_interval_is_refused():
 
 
 @pytest.mark.parametrize("malformed", [
-    "2026-01-15T20:00:00",   # naive shape but no microseconds
-    "2026-01-15T20:00:00Z",  # naive shape with a trailing Z but no microseconds
+    "2026-01-15T20:00:00",   # naive shape but no microseconds and no offset -- neither kind
 ])
 def test_malformed_naive_time_bound_is_refused(malformed):
     doc = to_document(SAMPLES["TimeInterval"])
@@ -464,6 +463,27 @@ def test_malformed_naive_time_bound_is_refused(malformed):
     with pytest.raises(DocumentError) as err:
         decode_document(TimeInterval, doc)
     assert err.value.code == "BAD_TIME_BOUND_FORMAT"
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2026-01-15T20:00:00Z", "2026-01-16T20:00:00Z"),            # aware, Z, no microseconds
+    ("2026-01-15T20:00:00+00:00", "2026-01-16T20:00:00+00:00"),  # aware, +00:00
+])
+def test_aware_time_bounds_without_the_strict_clock_wire_form_are_accepted(start, end):
+    """External review (P2-4 query.py timestamp-bound fix): a real
+    timezone-aware ISO 8601 timestamp is one ``"timestamp"`` kind whether or
+    not it also happens to satisfy ``foundation.clock.parse_timestamp``'s
+    stricter microseconds-required ``...Z`` wire form. Before the fix, only
+    that exact wire form passed here -- everything else in this same kind
+    (no micros, or a ``+00:00``/other real offset) was refused as malformed,
+    so ``Repository.scan`` could never even reach ``query.py``'s
+    ``_normalize_bound`` with such a bound to normalize it correctly."""
+    doc = to_document(SAMPLES["TimeInterval"])
+    doc["start_inclusive"] = start
+    doc["end_exclusive"] = end
+    decoded = decode_document(TimeInterval, doc)
+    assert decoded.start_inclusive == start
+    assert decoded.end_exclusive == end
 
 
 def test_fragment_record_naive_time_bounds_are_accepted():

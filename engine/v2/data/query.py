@@ -33,6 +33,8 @@ Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pyarrow as pa
 
 from engine.v2.contracts.data import (
@@ -222,12 +224,34 @@ def _comparable_value(value, physical_type: str):
 
 
 def _normalize_bound(value: str) -> str:
-    """A ``TimeInterval``/predicate bound, widened to the naive-timestamp
-    form when it is a bare ``YYYY-MM-DD`` date, so it compares directly
-    against a row's (always full-timestamp) comparable value."""
+    """The one comparable form for a ``TimeInterval``/predicate bound --
+    the same shared naive-timestamp wire form :func:`_comparable_value`
+    produces for a stored row, so the two sides of every comparison are
+    always literally the same shape:
+
+    * a bare ``YYYY-MM-DD`` date is midnight of that date;
+    * a naive timestamp (already exactly the wire form) is taken as UTC,
+      unchanged -- this is the fast, byte-identical path every current
+      caller (recorded fragment bounds, ``legacy_materialization``'s bare
+      dates and naive timestamps) takes;
+    * a timezone-aware timestamp (``Z``, ``+00:00``, or any other offset)
+      is converted to UTC before being dropped to the naive wire form.
+
+    ``_time_may_match`` (fragment pruning), ``_predicate_matches``, and
+    ``_interval_matches`` (row filtering) all route their bounds through
+    this one function, so a boundary can never be included by one path and
+    excluded by another. An unparseable bound refuses typed rather than
+    being compared as a raw, mismatched string.
+    """
     if time_formats.is_naive_timestamp(value):
         return value
-    return value + "T00:00:00.000000"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise fail("CONTRACT_MISMATCH", "a time bound is not a parseable date or timestamp") from None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return time_formats.format_naive_timestamp(parsed)
 
 
 def _predicate_matches(row: dict, contract: TableContract, predicate: KeyPredicate) -> bool:

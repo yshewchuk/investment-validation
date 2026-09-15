@@ -465,6 +465,140 @@ def test_boundary_duplicate_key_across_fragments_raises_manifest_corrupt(tmp_pat
 
 
 # --------------------------------------------------------------------------
+# timestamp-bound normalization (external review): a ``TimeInterval``/
+# ``KeyPredicate`` bound given as a bare date, a naive timestamp, or a
+# timezone-aware timestamp (``Z``, ``+00:00``, another offset) must compare
+# identically -- before the fix, ``_normalize_bound`` only recognized a bare
+# date or the exact naive wire form; any complete UTC timestamp got a bogus
+# ``"T00:00:00.000000"`` appended, silently reversing inclusion at interval
+# boundaries. Both fragment pruning (``_time_may_match``, reached from
+# ``Repository.scan`` before any fragment is even opened) and row filtering
+# (``_interval_matches``, ``_predicate_matches``) route through the one
+# fixed ``_normalize_bound``, so all of this is exercised end to end through
+# real temp storage.
+# --------------------------------------------------------------------------
+
+
+def _daily_market_row_at(ticker: str, when, year: int = 2026) -> dict:
+    return dict(ticker=ticker, date=when, year=year, spot=100.0, iv10=30.0,
+               iv30=32.0, exern_iv10=29.0, exern_iv30=31.0, implied_move=5.0,
+               implied_reconstructed=False, rvol30=28.0, skew=1.1, contango=0.5, fwd90_30=33.0,
+               fexern90_30=34.0, iee=0.2, mcap_usd=1e9, mcap_log=20.7,
+               mcap_asof=when, mcap_age_days=0.0, src_spot="orats",
+               src_iv="orats", src_mcap="orats")
+
+
+def _boundary_snapshot(tmp_path):
+    """One ``daily_market`` fragment with rows on 2026-09-10 and 2026-09-11
+    -- the reviewer's own boundary."""
+    from datetime import datetime
+    conn, clock, store = catalog_and_store(tmp_path)
+    record = publish_and_inspect(
+        store, _DM, _DM_REF,
+        [_daily_market_row_at("AAA", datetime(2026, 9, 10)),
+         _daily_market_row_at("AAA", datetime(2026, 9, 11))], "2026")
+    snap = commit_tables(conn, clock, {"daily_market": [record]}, {"daily_market": _DM})
+    return conn, store, snap
+
+
+def _scan_dates(repo, snap, *, start=None, end=None):
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
+        key_filter=(),
+        time_interval=TimeInterval(column="date", start_inclusive=start, end_exclusive=end),
+        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+    rows = [row for batch in repo.scan(query, table_name="daily_market") for row in batch.to_pylist()]
+    return [r["date"] for r in rows]
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2026-09-10", "2026-09-11"),                                     # bare date -- unchanged
+    ("2026-09-10T00:00:00.000000", "2026-09-11T00:00:00.000000"),     # naive wire form -- unchanged
+    ("2026-09-10T00:00:00Z", "2026-09-11T00:00:00Z"),                 # aware, Z, no micros
+    ("2026-09-10T00:00:00.000000Z", "2026-09-11T00:00:00.000000Z"),   # aware, Z, with micros
+    ("2026-09-10T00:00:00+00:00", "2026-09-11T00:00:00+00:00"),       # aware, +00:00
+])
+def test_time_interval_boundary_matches_regardless_of_bound_form(tmp_path, start, end):
+    """The reviewer's own repro: the half-open interval [09-10, 09-11) must
+    return exactly the 09-10 row -- never the 09-11 row, never both, never
+    neither -- whichever of the five equivalent spellings the bound uses."""
+    from datetime import datetime
+    conn, store, snap = _boundary_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    assert _scan_dates(repo, snap, start=start, end=end) == [datetime(2026, 9, 10)]
+
+
+def test_time_interval_non_utc_offset_converts_to_utc(tmp_path):
+    """05:30 local at +05:30 is 00:00 UTC -- the same boundary as every form
+    above, not shifted by the raw offset digits."""
+    from datetime import datetime
+    conn, store, snap = _boundary_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    dates = _scan_dates(repo, snap, start="2026-09-10T05:30:00+05:30", end="2026-09-11T05:30:00+05:30")
+    assert dates == [datetime(2026, 9, 10)]
+
+
+def test_fragment_pruning_keeps_matching_fragment_for_utc_suffixed_interval(tmp_path):
+    """Two fragments (2026 and 2027); only the 2026 fragment's time_min/
+    time_max fall inside a Z-suffixed interval spanning September 2026.
+    Before the fix, ``_time_may_match``'s malformed comparison could wrongly
+    prune the fragment that legitimately matches, silently dropping its rows
+    -- this exercises pruning, not just row filtering, since a wrongly-
+    pruned fragment is never even opened."""
+    from datetime import datetime
+    conn, clock, store = catalog_and_store(tmp_path)
+    sept_2026 = publish_and_inspect(
+        store, _DM, _DM_REF,
+        [_daily_market_row_at("AAA", datetime(2026, 9, 10)),
+         _daily_market_row_at("AAA", datetime(2026, 9, 11))], "2026")
+    jan_2027 = publish_and_inspect(
+        store, _DM, _DM_REF, [_daily_market_row_at("AAA", datetime(2027, 1, 5), year=2027)], "2027")
+    snap = commit_tables(conn, clock, {"daily_market": [sept_2026, jan_2027]}, {"daily_market": _DM})
+    repo = Repository(conn, store)
+    dates = _scan_dates(repo, snap, start="2026-09-01T00:00:00Z", end="2026-09-30T00:00:00Z")
+    assert dates == [datetime(2026, 9, 10), datetime(2026, 9, 11)]
+
+
+def test_key_predicate_timestamp_equality_matches_z_form(tmp_path):
+    """A ``KeyPredicate`` equality on a timestamp column, given in ``Z``
+    form, must match the same row a naive-form value matches -- ``Z`` bounds
+    on ``KeyPredicate.values`` are not format-checked at document decode
+    (that check only knows a column is a timestamp at scan time), so this
+    exercises ``_predicate_matches``' own call into ``_normalize_bound``."""
+    from datetime import datetime
+    conn, store, snap = _boundary_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
+        key_filter=(KeyPredicate(column="date", operator="eq", values=("2026-09-10T00:00:00Z",)),),
+        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+    rows = [row for batch in repo.scan(query, table_name="daily_market") for row in batch.to_pylist()]
+    assert [r["date"] for r in rows] == [datetime(2026, 9, 10)]
+
+
+def test_normalize_bound_rejects_unparseable_value():
+    with pytest.raises(DataError) as err:
+        query_mod._normalize_bound("not-a-timestamp")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+def test_scan_with_unparseable_key_predicate_timestamp_refuses_contract_mismatch(tmp_path):
+    """An unparseable ``KeyPredicate`` value on a timestamp column reaches
+    ``_normalize_bound`` (it is not caught by document-decode, which cannot
+    know a plain ``str`` field is a timestamp without the table contract)
+    and refuses typed rather than comparing as a raw, mismatched string."""
+    conn, store, snap = _boundary_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
+        key_filter=(KeyPredicate(column="date", operator="eq", values=("not-a-timestamp",)),),
+        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="daily_market"))
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+
+# --------------------------------------------------------------------------
 # query.py pure-function coverage
 # --------------------------------------------------------------------------
 
