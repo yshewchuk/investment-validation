@@ -6,6 +6,7 @@ as newly validated decisions. The table is owned here, not by the scheduler.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from engine.v2.foundation import canonical_json, content_hash
 
@@ -181,33 +182,62 @@ def _record_legacy_divergence(conn, *, decision_id, row_id, existing_row, origin
     return dict(existing_row)
 
 
+def outcome_generation_ref(payload):
+    """The session an outcome ``payload`` alone proves, for a caller with no
+    other durable provenance to derive ``generation_ref`` from: the UTC date
+    of its own ``resolved_at`` (or ``settled_at``, for an older shape).
+
+    Legacy's nightly writes ``outcomes/<date>.jsonl`` with ``resolved_at``
+    stamped on that same wall-clock date (``engine/ledger.py::
+    score_outcomes``), so this ordinarily agrees with the session a fixed-
+    forward commit would have stamped. Returns ``None`` when the payload
+    carries no parseable timestamp -- the caller must leave
+    ``generation_ref`` unset rather than guess.
+
+    Shared by :mod:`engine.v2.ops.session_backfill` (recovering the session
+    for pre-fix rows already in the catalog) and :func:`import_lines` below
+    (stamping it on freshly-imported ``kind="outcome"`` rows going forward)
+    so the rule is defined exactly once.
+    """
+    observed = payload.get("resolved_at") or payload.get("settled_at")
+    if not observed:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc).date().isoformat()
+
+
 def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="raise",
-                 provenance_label=None, generation_ref=None):
+                 provenance_label=None, generation_ref=None, derive_generation_ref=False):
     """Import exact legacy JSONL bytes; duplicate bytes collapse.
 
     ``generation_ref``, when given, is stamped on every FRESHLY inserted
-    decision (never on one returned via the ``prior``/exact-bytes shortcut
-    below, which is a no-op). Used by
+    decision (never on the ``prior``/exact-bytes shortcut, a no-op). Used by
     ``decision_commit.import_settlement_candidates_in_transaction`` to record
-    the settlement session an outcome observation was committed for -- the
-    durable session marker task brief rule 2 needs, reusing this pre-existing
-    column rather than a new one (it is otherwise unused for ``kind="outcome"``
-    imports).
+    the settlement session an outcome observation was committed for.
+
+    ``derive_generation_ref`` (2026-09-15, default ``False`` so every
+    pre-existing caller -- and every test that imports a row bare to
+    simulate a pre-fix ``generation_ref IS NULL`` row -- keeps getting NULL
+    back unchanged): when ``True`` and ``generation_ref`` is ``None``, each
+    freshly-inserted ``kind="outcome"`` row instead gets a PER-ROW value
+    from :func:`outcome_generation_ref`. Set only by
+    ``engine.v2.ops.ledger_history_import``, the one caller with no other
+    durable provenance to stamp a session from. A row with no derivable
+    timestamp still lands NULL. Ignored for ``kind="prediction"`` and
+    whenever ``generation_ref`` is given explicitly.
 
     ``on_conflict`` governs a decision_id that already carries DIFFERENT
-    content than the line being imported (a mismatched ``decisions.
-    payload_json``, or mismatched ``decision_imports.original_bytes``
-    recorded under an earlier line):
-
-    - ``"raise"`` (default -- every pre-existing caller, e.g.
-      ``decision_commit.import_settlement_candidates_in_transaction``):
-      refuses typed as a :class:`DecisionConflict`, unchanged from before
-      ``on_conflict`` existed.
-    - ``"diverge"`` (used only by the legacy history bootstrap importer,
-      :mod:`engine.v2.ops.ledger_history_import`): keeps the FIRST-imported
-      content authoritative and records the later, differing occurrence as a
-      durable ``decision_divergences`` row instead of raising -- see
-      :func:`_record_legacy_divergence`.
+    content than the line being imported: ``"raise"`` (default -- every
+    pre-existing caller) refuses typed as a :class:`DecisionConflict`.
+    ``"diverge"`` (only :mod:`engine.v2.ops.ledger_history_import`) keeps
+    the FIRST-imported content authoritative and records the later,
+    differing occurrence as a ``decision_divergences`` row instead --
+    see :func:`_record_legacy_divergence`.
 
     A byte-identical RE-import of the exact same ``(source_hash,
     line_number)`` always stays a plain no-op in both modes, and a changed
@@ -245,10 +275,13 @@ def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="rai
                 original=original, payload=payload, source_hash=source_hash, number=number,
                 created_at=created_at, provenance_label=provenance_label))
             continue
+        row_generation_ref = generation_ref
+        if row_generation_ref is None and derive_generation_ref and kind == "outcome":
+            row_generation_ref = outcome_generation_ref(payload)
         receipt = insert(conn, logical_key=decision_id, decision_id=decision_id, payload=payload,
                          purpose="legacy_import", kind=kind, validations=[], created_at=created_at,
                          supersedes=kind + ":" + payload["supersedes"] if payload.get("supersedes") else None,
-                         generation_ref=generation_ref)
+                         generation_ref=row_generation_ref)
         conn.execute("INSERT INTO decision_imports VALUES (?,?,?,?)",
                      (source_hash, number, receipt["decision_id"], original))
         receipts.append(receipt)

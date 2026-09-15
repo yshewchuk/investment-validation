@@ -14,7 +14,7 @@ import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import ArtifactStore
-from engine.v2.ledger.decisions import _import_decision_id
+from engine.v2.ledger.decisions import _import_decision_id, rows
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.decision_commit import (
@@ -432,3 +432,93 @@ def test_bootstrap_prediction_then_different_nightly_recommit_diverges_not_crash
     committed = conn.execute("SELECT payload_json FROM decisions WHERE decision_id=?",
                              ("prediction:" + row_id,)).fetchone()
     assert json.loads(committed[0])["event_id"] == "evt1"
+
+
+# --------------------------------------------------------------------------
+# 2026-09-15: import-history stamps generation_ref on outcome rows it
+# inserts, so it never mints another generation_ref IS NULL row that the
+# session backfill would have to recover -- engine.v2.ledger.decisions.
+# outcome_generation_ref, shared with engine.v2.ops.session_backfill.
+# --------------------------------------------------------------------------
+
+
+def test_import_history_stamps_generation_ref_from_resolved_at(tmp_path):
+    root = _root(tmp_path)
+    conn, clock, _ = catalog(root)
+    source = tmp_path / "legacy"
+    row_id = "2026-08-01|FAKE|TWIN-P|100.0|2026-08-15"
+    _write(source / "ledger/predictions/2026-08-01.jsonl", [_prediction(row_id, "2026-08-01")])
+    _write(source / "ledger/outcomes/2026-08-16.jsonl", [_outcome(row_id, "2026-08-16T22:00:00Z")])
+
+    import_history(conn, root, source, clock=clock)
+
+    [imported] = rows(conn, kind="outcome")
+    assert imported["generation_ref"] == "2026-08-16"
+    # kind="prediction" rows are untouched -- this rule is outcome-only.
+    [predicted] = rows(conn, kind="prediction")
+    assert predicted["generation_ref"] is None
+
+
+def test_import_history_rerun_commits_zero_duplicates_and_keeps_the_stamp(tmp_path):
+    root = _root(tmp_path)
+    conn, clock, _ = catalog(root)
+    source = tmp_path / "legacy"
+    row_id = "2026-08-01|FAKE|TWIN-P|100.0|2026-08-15"
+    _write(source / "ledger/predictions/2026-08-01.jsonl", [_prediction(row_id, "2026-08-01")])
+    _write(source / "ledger/outcomes/2026-08-16.jsonl", [_outcome(row_id, "2026-08-16T22:00:00Z")])
+
+    import_history(conn, root, source, clock=clock)
+    again = import_history(conn, root, source, clock=clock)
+
+    assert again["families"]["outcomes"]["imported"] == 0
+    assert again["families"]["outcomes"]["already_present"] == 1
+    assert len(rows(conn, kind="outcome")) == 1
+    [imported] = rows(conn, kind="outcome")
+    assert imported["generation_ref"] == "2026-08-16"
+
+
+def test_import_history_generation_ref_enables_same_session_settlement_dedupe(tmp_path):
+    """The fix's whole point applied end to end: a row import-history
+    commits now carries a real ``generation_ref`` (not NULL), so a
+    same-session settlement re-observation of that same determination --
+    identical content, new wall-clock ``resolved_at``, exactly what legacy's
+    nightly does for an unresolvable row every day -- correctly dedupes via
+    ``decision_commit._match_same_session`` instead of minting a duplicate
+    ``kind="outcome"`` decision."""
+    root = _root(tmp_path)
+    conn, clock, supervisor = catalog(root)
+    store = ArtifactStore(root)
+    source = tmp_path / "legacy"
+    row_id = "2026-08-01|FAKE|TWIN-P|100.0|2026-08-15"
+    _write(source / "ledger/predictions/2026-08-01.jsonl", [_prediction(row_id, "2026-08-01")])
+    _write(source / "ledger/outcomes/2026-08-16.jsonl",
+          [_outcome(row_id, "2026-08-16T22:00:00Z", status="unresolvable")])
+    import_history(conn, root, source, clock=clock)
+    [imported] = rows(conn, kind="outcome")
+    assert imported["generation_ref"] == "2026-08-16"
+
+    settlement_job = JobSpec(kind="legacy_settlement", implementation_ref="x", spec_hash=None,
+                             environment_ref="x",
+                             parameters={"expected_ids": ("legacy_settlement",), "session": "2026-08-16"},
+                             output_namespace="shadow", resource_class="legacy_rebuild",
+                             retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(namespace="shadow", idempotency_key="settle",
+          principal="operator", job=settlement_job), clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry())
+    assert claim is not None
+
+    new_row = {"row_id": row_id, "ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-08-15",
+              "status": "unresolvable", "resolved_at": "2026-08-16T23:30:00.000000Z"}
+    candidate = [{"row": new_row,
+                 "original_b64": base64.b64encode(json.dumps(new_row).encode()).decode("ascii")}]
+    candidate_ref = _publish(store, conn, clock, {"rows": candidate}, "legacy_action.v1.0")
+    skipped = []
+    with transaction(conn):
+        receipts = import_settlement_candidates_in_transaction(
+            conn, claim, candidate_ref, candidate, clock=clock, session="2026-08-16",
+            on_skip=lambda r, reason: skipped.append((r, reason)))
+    assert receipts == []
+    assert skipped == [(row_id, "already_observed_this_session")]
+    assert len(rows(conn, kind="outcome")) == 1
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0

@@ -188,13 +188,24 @@ def health(conn, *, clock, executor_mode="watchdog"):
     # here so an operator sees it without reading the ledger directly.
     divergences = {row["scope"]: row["count"] for row in conn.execute(
         "SELECT scope, COUNT(*) AS count FROM decision_divergences GROUP BY scope")}
+    # 2026-09-15: a generation_ref IS NULL outcome row can never dedupe a
+    # same-session legacy_settlement rerun (decision_commit.
+    # _match_same_session matches only a recorded generation_ref) --
+    # engine.v2.ops.session_backfill fixes every row it can derive a
+    # session for automatically (cli.main, on every write-opened catalog);
+    # what is left here is either underivable by design, or this catalog
+    # has not been opened for write since the fix -- surfaced either way.
+    undetermined_outcome_sessions = conn.execute(
+        "SELECT COUNT(*) FROM decisions WHERE kind='outcome' "
+        "AND generation_ref IS NULL").fetchone()[0]
     return {"schema_version": "operations_health.v1.0", "generated_at": format_timestamp(clock.now()),
             "executor_mode": executor_mode, "containment": "best_effort" if executor_mode == "watchdog" else "kernel",
             "jobs": jobs, "watermarks": [dict(row) for row in conn.execute("SELECT * FROM watermarks")],
             "current_release": dict(current) if current else None,
             "withheld_release": dict(withheld) if show_withheld else None,
             "code_budgets": budget_streak(conn), "activation": "shadow_only",
-            "decision_divergences": divergences}
+            "decision_divergences": divergences,
+            "undetermined_outcome_sessions": undetermined_outcome_sessions}
 
 
 def write_health(path, document):

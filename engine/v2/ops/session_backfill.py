@@ -69,10 +69,10 @@ never be flagged "schema is newer than this code supports" on a later
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import ArtifactError, content_hash, format_timestamp
+from engine.v2.ledger.decisions import outcome_generation_ref
 from engine.v2.ops.catalog import transaction
 
 __all__ = ["backfill_outcome_sessions"]
@@ -134,19 +134,6 @@ def _nightly_session_map(conn, store):
     return mapping
 
 
-def _resolved_at_session(payload):
-    observed = payload.get("resolved_at") or payload.get("settled_at")
-    if not observed:
-        return None
-    try:
-        stamp = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp.astimezone(timezone.utc).date().isoformat()
-
-
 def backfill_outcome_sessions(conn, store, *, clock):
     """Derive and write ``generation_ref`` for every ``kind='outcome'``
     decision that still has ``generation_ref IS NULL``.
@@ -175,7 +162,7 @@ def backfill_outcome_sessions(conn, store, *, clock):
             session = next((nightly_map[h] for h in info["hashes"] if h in nightly_map), None)
             source = "nightly_settlement" if session is not None else None
             if session is None:
-                session = _resolved_at_session(json.loads(info["payload_json"]))
+                session = outcome_generation_ref(json.loads(info["payload_json"]))
                 source = "import_history_resolved_at" if session is not None else "undetermined"
             counts[source] += 1
             if session is not None:

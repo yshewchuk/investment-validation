@@ -20,6 +20,15 @@ decisions._import_decision_id` builds ``"prediction:" + row_id`` for
 ``kind="prediction"`` — byte-for-byte what ``_settlement_line`` looks up and
 what ``decision_commit._commit_row_or_diverge`` computes for a live nightly
 commit. No fix was needed; a probe in this module's tests pins the identity.
+
+2026-09-15: every freshly-imported ``kind="outcome"`` row is now stamped
+with ``generation_ref`` -- the UTC date of its own ``resolved_at``, via
+:func:`engine.v2.ledger.decisions.import_lines`'s ``derive_generation_ref``
+(``engine.v2.ledger.decisions.outcome_generation_ref``, the same rule
+``engine.v2.ops.session_backfill`` uses to recover it for rows this importer
+committed before this date). Without it, this importer would keep minting
+new ``generation_ref IS NULL`` rows forever, which can never dedupe a
+same-session settlement rerun.
 """
 from __future__ import annotations
 
@@ -228,7 +237,8 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
         committed_owner = _set_authority_once(conn, committed_owner, stamp, dry_run=dry_run)
         try:
             import_lines(conn, source_hash, included, kind=kind, created_at=stamp,
-                        on_conflict="diverge", provenance_label=path.name)
+                        on_conflict="diverge", provenance_label=path.name,
+                        derive_generation_ref=True)
         except DecisionConflict as exc:
             totals["conflicts"].append("IDEMPOTENCY_CONFLICT")
             raise fail("IDEMPOTENCY_CONFLICT",
