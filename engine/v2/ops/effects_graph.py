@@ -270,11 +270,13 @@ def _engineering_receipt_gate(conn, store, bindings, binding_hash):
     return _gate_dict(store, document)
 
 
-def _security_gate(store, files, binding_hash, repo_root):
+def _security_gate(store, files, binding_hash, repo_root, store_root):
     bundle_ref = files.get("bundle.tar")
-    scan = run_security_scan(store.verify(bundle_ref), repo_root) if bundle_ref else {"ok": False}
+    scan = (run_security_scan(store.verify(bundle_ref), repo_root, store_root)
+            if bundle_ref else {"ok": False})
     document = {"schema_version": "security_gate.v1.0", "kind": "security",
                 "status": "passed" if scan.get("ok") else "failed", "input_hash": binding_hash,
+                "secrets_loaded": scan.get("secrets_loaded", 0),
                 "violations": scan.get("violations", [])}
     return _gate_dict(store, document)
 
@@ -661,7 +663,7 @@ def _stage_and_publish(conn, store, claim, release_id, session, files, gates, *,
     _write_operations_status(conn, store, target, failed_update=False, failure=None, **status_kwargs)
 
 
-def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
+def publication_effect(conn, store, claim, ops_root, repo_root, *, clock, store_root=None,
                        keepalive=_no_keepalive, fault=None):
     """Build the four gate receipts, stage the release, then publish it.
 
@@ -678,6 +680,13 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
     published still leaves ``release_intent`` bound (never re-pending) while
     ``publication``/``delivery`` stay exactly where a failed attempt left
     them. ``fault`` (test-only) is threaded straight into ``publish_local``.
+
+    ``store_root`` is the checkout the security gate loads the real
+    ``.env`` from (``Service.store_root``) -- distinct from ``repo_root``,
+    which is only the CODE checkout the security scan subprocess runs from
+    and may be a frozen/snapshot worktree with no ``.env`` at all. Defaults
+    to ``repo_root`` for a caller with one combined checkout; a caller with
+    the two apart (production) always passes it.
     """
     scope = effect_scope(claim)
     bindings = recorded_bindings(conn, claim.attempt_id)
@@ -707,7 +716,8 @@ def publication_effect(conn, store, claim, ops_root, repo_root, *, clock,
     builders = (
         ("decision", lambda: _decision_gate(conn, store, scope, session, binding_hash)),
         ("projection", lambda: _projection_gate(conn, store, bindings, binding_hash)),
-        ("security", lambda: _security_gate(store, files, binding_hash, repo_root)),
+        ("security", lambda: _security_gate(store, files, binding_hash, repo_root,
+                                            store_root if store_root is not None else repo_root)),
         ("engineering", lambda: _engineering_receipt_gate(conn, store, bindings, binding_hash)),
     )
     gates = {}

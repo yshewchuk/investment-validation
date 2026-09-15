@@ -54,6 +54,7 @@ from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY, sample
 from tests.test_v2_ops_effects_graph import (
+    FAKE_STORE_ROOT,
     _open as _effects_open,
     _params as _effects_params,
     _publication_setup,
@@ -562,7 +563,7 @@ def test_publication_uses_the_resolved_session_on_walk_back(tmp_path):
         claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=REQUESTED,
                                    decisions_session=RESOLVED, finality_session=RESOLVED)
         from engine.v2.ops.publication import current as release_current
-        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert release_current(root / "releases" / scope) is not None
         wm = conn.execute("SELECT occurrence FROM watermarks WHERE pipeline='nightly' AND scope=? "
                           "AND stage='publication'", (scope,)).fetchone()

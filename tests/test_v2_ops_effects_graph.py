@@ -25,6 +25,7 @@ import base64
 import io
 import json
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,16 @@ from tests.ops_support import DEFAULT_POLICY, FakeClock, sample
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"
+
+#: A throwaway checkout carrying a fake `.env`, used as `store_root` for the
+#: publication security gate: `REPO` (this worktree) has no `.env` at all, and
+#: the gate now fails CLOSED with zero loaded needles (checks/repo_hygiene.py
+#: `check_bundle`), so a test that expects the security gate to PASS needs a
+#: real (fake-valued) needle source separate from the code checkout —
+#: exactly the repo_root/store_root split production makes via
+#: `Service.store_root` / `--store-root`. Made-up value only.
+FAKE_STORE_ROOT = Path(tempfile.mkdtemp(prefix="v2_security_gate_test_"))
+(FAKE_STORE_ROOT / ".env").write_text("TEST_FAKE_SECRET=made-up-test-secret-value-0000\n")
 
 
 # --------------------------------------------------------------------------
@@ -545,7 +556,7 @@ def test_publication_all_gates_valid_advances_current_and_watermarks(tmp_path):
     try:
         scope = "shadow"
         claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
-        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert result == (None, ())
         commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
                        clock=clock)
@@ -564,6 +575,42 @@ def test_publication_all_gates_valid_advances_current_and_watermarks(tmp_path):
         conn.close()
 
 
+def test_security_gate_document_carries_secrets_loaded(tmp_path):
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import from_document
+    from engine.v2.ops.effects_graph import _security_gate
+
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        bundle_ref = _publish_raw(store, conn, clock, _bundle_tar(), "legacy_action.v1.0")
+        result = _security_gate(store, {"bundle.tar": bundle_ref}, "hash", REPO, FAKE_STORE_ROOT)
+        assert result["ok"] is True
+        receipt_ref = from_document(ArtifactRef, result["receipt_artifact"])
+        document = json.loads(store.read_verified(receipt_ref))
+        assert document["secrets_loaded"] >= 1
+    finally:
+        conn.close()
+
+
+def test_publication_refused_when_store_root_has_no_env(tmp_path):
+    # store_root omitted -> falls back to repo_root (REPO), which has no
+    # .env in this worktree: zero loaded needles must fail the security
+    # gate CLOSED, not pass it open the way the old check_files-based scan
+    # did (P2-... real shadow attempt-14 evidence: a git worktree code
+    # checkout has no .env at all).
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        assert not (REPO / ".env").exists()
+        scope = "shadow"
+        claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
+        target = root / "releases" / scope
+        with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
+            publication_effect(conn, store, claim, root, REPO, clock=clock)
+        assert release_current(target) is None
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("kwargs,match", [
     ({"selfcheck": "missing"}, "PUBLICATION_REFUSED"),
     ({"selfcheck": "failed"}, "PUBLICATION_REFUSED"),
@@ -578,7 +625,7 @@ def test_publication_refused_when_a_gate_is_invalid(tmp_path, kwargs, match):
                                    **kwargs)
         target = root / "releases" / scope
         with pytest.raises(OpsError, match=match):
-            publication_effect(conn, store, claim, root, REPO, clock=clock)
+            publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert release_current(target) is None
     finally:
         conn.close()
@@ -594,7 +641,7 @@ def test_publication_refused_on_stale_fence(tmp_path):
                         ("2000-01-01T00:00:00.000000Z", claim.attempt_id))
         target = root / "releases" / scope
         with pytest.raises(OpsError, match="LEASE_LOST"):
-            publication_effect(conn, store, claim, root, REPO, clock=clock)
+            publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert release_current(target) is None
     finally:
         conn.close()
@@ -619,7 +666,7 @@ def test_publication_older_occurrence_cannot_replace_newer(tmp_path):
         older_scope = "shadow"
         older = _publication_setup(conn, clock, supervisor, store, scope=older_scope,
                                    session="2026-09-10")
-        publication_effect(conn, store, older, root, REPO, clock=clock)
+        publication_effect(conn, store, older, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         older_target = root / "releases" / older_scope
         older_release_id = "rel" + content_hash([older_scope, "2026-09-10"]).split(":")[1][:24]
         pointer_after_older = release_current(older_target)
@@ -627,7 +674,7 @@ def test_publication_older_occurrence_cannot_replace_newer(tmp_path):
         newer_scope = "shadow:newer"
         newer = _publication_setup(conn, clock, supervisor, store, scope=newer_scope,
                                    session="2026-09-12")
-        publication_effect(conn, store, newer, root, REPO, clock=clock)
+        publication_effect(conn, store, newer, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
 
         with pytest.raises(OpsError, match="STALE_EXPECTATION"):
             publish_local(conn, older, store, older_target, older_release_id,
@@ -645,7 +692,7 @@ def test_publication_refused_when_decisions_watermark_is_an_earlier_session(tmp_
                                    decisions_session="2026-09-11")
         target = root / "releases" / scope
         with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
-            publication_effect(conn, store, claim, root, REPO, clock=clock)
+            publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert release_current(target) is None
     finally:
         conn.close()
@@ -657,7 +704,7 @@ def test_publication_passes_at_the_correct_session(tmp_path):
         scope = "shadow"
         claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION,
                                    decisions_session=SESSION)
-        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert release_current(root / "releases" / scope) is not None
     finally:
         conn.close()
@@ -672,7 +719,7 @@ def test_publication_passes_on_a_no_entry_night(tmp_path):
         scope = "shadow"
         claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION,
                                    no_entry=True)
-        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         assert release_current(root / "releases" / scope) is not None
     finally:
         conn.close()
@@ -695,7 +742,7 @@ def test_publication_binds_and_delivers_release_intent(tmp_path):
         release_key = _decisions_release_key(conn, scope)
         release_id = "rel" + content_hash([scope, SESSION]).split(":")[1][:24]
 
-        result = publication_effect(conn, store, claim, root, REPO, clock=clock)
+        result = publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
                        clock=clock)
 
@@ -738,7 +785,7 @@ def test_publication_failure_leaves_release_intent_bound_and_retry_delivers_once
                 raise RuntimeError("ack lost")
 
         with pytest.raises(RuntimeError, match="ack lost"):
-            publication_effect(conn, store, claim, root, REPO, clock=clock, fault=crash)
+            publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT, fault=crash)
 
         intent_row = conn.execute("SELECT state, receipt_json FROM outbox WHERE kind='release_intent' "
                                   "AND logical_key=?", (release_key,)).fetchone()
@@ -753,7 +800,7 @@ def test_publication_failure_leaves_release_intent_bound_and_retry_delivers_once
                             "AND stage='publication'", (scope,)).fetchone() is None
 
         # Retry: same claim, no fault this time.
-        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
                        clock=clock)
 
@@ -791,7 +838,7 @@ def test_export_release_intent_publication_backup_independently_verifiable(tmp_p
         export_result = ledger_export_effect(conn, store, export_claim, root, REPO, clock=clock)
         _commit(conn, clock, export_claim, export_result)
 
-        publication_effect(conn, store, claim, root, REPO, clock=clock)
+        publication_effect(conn, store, claim, root, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
         commit_attempt(conn, claim.attempt_id, claim.fence, Outcome(True, "verified_dead", 0),
                        clock=clock)
 
