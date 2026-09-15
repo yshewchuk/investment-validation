@@ -76,6 +76,24 @@ def _write_root(request, spec: dict, dest: Path, attempt_id: str):
     return files
 
 
+def _px_absent_tickers(request, dest: Path) -> tuple[str, ...]:
+    """Every ticker :func:`px_series_tickers` names that has no ``px_<T>.csv``
+    under ``dest`` -- recomputed from the tree on disk rather than threaded
+    through ``materialize``'s return value, so it is correct on BOTH the
+    fresh-write and the reused-root path (a reused root never calls
+    ``materialize``/``materialize_price_series`` again, task brief
+    2026-09-15's ``px_absent_tickers`` requirement). Mirrors the same
+    snapshot-has-no-price_history-table guard ``legacy_adapter.materialize``
+    uses before calling ``materialize_price_series`` at all."""
+    from engine.v2.data import legacy_materialization
+
+    if legacy_materialization.PRICE_HISTORY_TABLE_NAME not in request.snapshot_ref.table_versions:
+        return ()
+    px_tickers = legacy_materialization.px_series_tickers(request)
+    return tuple(sorted(t for t in px_tickers
+                        if not legacy_materialization.px_csv_path(dest, t).is_file()))
+
+
 def run_materialize(parameters, root: Path, envelope: dict) -> dict:
     from engine.v2.contracts import LegacyMaterializationRequest
     from engine.v2.data.documents import decode_document
@@ -92,8 +110,11 @@ def run_materialize(parameters, root: Path, envelope: dict) -> dict:
         files = hash_tree(dest)
     document = manifest_document(request, files)
     (root / "materialization_manifest.json").write_text(json.dumps(document, sort_keys=True))
+    px_absent_tickers = _px_absent_tickers(request, dest)
     return {"outputs": [{"name": "materialization_manifest", "path": "materialization_manifest.json",
                          "schema": MANIFEST_SCHEMA_REF}],
             "completed_ids": list(parameters["expected_ids"]),
             "no_work": not parameters["expected_ids"], "reused": reused,
-            "file_count": len(files)}
+            "file_count": len(files),
+            "px_absent_tickers": list(px_absent_tickers),
+            "px_absent_count": len(px_absent_tickers)}

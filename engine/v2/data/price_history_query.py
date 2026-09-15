@@ -26,7 +26,7 @@ from . import errors, price_history
 from .price_history import as_of_view
 from .price_history_table import PRICE_HISTORY_TABLE_NAME
 
-__all__ = ["get_close", "get_price_series"]
+__all__ = ["get_close", "get_price_series", "has_price_history"]
 
 _COLUMNS = ("date", "close_adj", "close_raw", "high_raw", "retrieved_at", "deleted", "source_kind",
            "source_hash")
@@ -71,6 +71,24 @@ def get_price_series(repository, query: PriceQuery, snapshot_ref: SnapshotRef
             high_raw=None if pd.isna(row.high_raw) else float(row.high_raw),
             retrieved_at=retrieved_at, source_hash=source_hash))
     return tuple(rows)
+
+
+def has_price_history(repository, snapshot_ref: SnapshotRef, ticker: str) -> bool:
+    """True iff ``snapshot_ref`` carries at least one ``price_history`` row
+    for ``ticker`` -- the one existence check callers should use to decide
+    "this ticker has no price history at all" BEFORE calling
+    :func:`get_price_series`, instead of catching its ``CONTRACT_MISMATCH``
+    (which also covers the snapshot-wide "no price_history table" case, a
+    different condition than one ticker having no rows).
+
+    Still refuses ``CONTRACT_MISMATCH`` if the snapshot has no
+    ``price_history`` table at all -- that is a snapshot-level invariant,
+    not a per-ticker absence, so it is not something a caller should treat
+    as "this ticker is absent" and silently skip.
+    """
+    if PRICE_HISTORY_TABLE_NAME not in snapshot_ref.table_versions:
+        raise errors.fail("CONTRACT_MISMATCH", "snapshot has no price_history table")
+    return not _fetch_rows(repository, snapshot_ref, ticker).empty
 
 
 def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFrame:
