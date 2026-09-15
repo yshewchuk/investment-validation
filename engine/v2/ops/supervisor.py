@@ -297,9 +297,23 @@ class Service:
         # barrier job that is itself part of a snapshot-mode plan graph.
         snapshot_id = str(claim.spec.parameters.get("snapshot_generation_id") or "")
         if claim.spec.kind in BARRIER_ONLY_REASONS and snapshot_id:
-            scope = str(claim.spec.parameters.get("snapshot_generation_scope") or "")
-            refuse_generation_mismatch(self.conn, self.store, scope=scope,
-                                       snapshot_id=snapshot_id, barrier_manifest=manifest)
+            # External review #5 (2026-09-14): the data snapshot id alone
+            # does not identify a generation -- a later reference-only
+            # reimport can commit a new receipt against the same snapshot id
+            # with different pinned model/reference files. The plan's own
+            # ``pin_snapshot_inputs`` call stamped the EXACT receipt id it
+            # resolved (the only place "latest" is allowed); a job planned
+            # before this field existed has none, and must be re-planned
+            # rather than silently falling back to "whatever is newest now".
+            receipt_id = str(claim.spec.parameters.get("snapshot_generation_receipt_id") or "")
+            if not receipt_id:
+                raise OpsError(make_problem(
+                    "INPUT_CHANGED",
+                    "snapshot-mode job has no pinned generation receipt (planned before this "
+                    "fix) -- re-plan the job",
+                    details={"reason": "generation_not_pinned"}))
+            refuse_generation_mismatch(self.conn, self.store, receipt_id=receipt_id,
+                                       barrier_manifest=manifest)
         pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root)
         return manifest
 

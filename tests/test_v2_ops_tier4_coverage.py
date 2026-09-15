@@ -231,16 +231,16 @@ def _accept_generation(case, file_refs, *, receipt_id):
 
 
 def test_no_accepted_generation_yet_is_a_noop(case):
-    assert accepted_generation_refs(case.conn, case.store, scope="shadow",
-                                    snapshot_id=case.snap.snapshot_id) is None
-    refuse_generation_mismatch(case.conn, case.store, scope="shadow", snapshot_id=case.snap.snapshot_id,
+    assert accepted_generation_refs(case.conn, case.store, receipt_id="") is None
+    assert accepted_generation_refs(case.conn, case.store, receipt_id="never-committed") is None
+    refuse_generation_mismatch(case.conn, case.store, receipt_id="",
                                barrier_manifest={"file_refs": []})  # does not raise
 
 
 def test_matching_manifest_proceeds(case):
     _accept_generation(case, [("data/x.csv", "sha256:" + "1" * 64)], receipt_id="acc-match")
     barrier = {"file_refs": [{"path": "data/x.csv", "content_hash": "sha256:" + "1" * 64}]}
-    refuse_generation_mismatch(case.conn, case.store, scope="shadow", snapshot_id=case.snap.snapshot_id,
+    refuse_generation_mismatch(case.conn, case.store, receipt_id="acc-match",
                                barrier_manifest=barrier)  # does not raise
 
 
@@ -248,7 +248,7 @@ def test_overlapping_path_with_a_different_hash_refuses(case):
     _accept_generation(case, [("data/x.csv", "sha256:" + "1" * 64)], receipt_id="acc-mismatch")
     barrier = {"file_refs": [{"path": "data/x.csv", "content_hash": "sha256:" + "2" * 64}]}
     with pytest.raises(OpsError) as err:
-        refuse_generation_mismatch(case.conn, case.store, scope="shadow", snapshot_id=case.snap.snapshot_id,
+        refuse_generation_mismatch(case.conn, case.store, receipt_id="acc-mismatch",
                                    barrier_manifest=barrier)
     assert err.value.code == "INPUT_CHANGED"
     assert err.value.problem.details["reason"] == "generation_mismatch"
@@ -262,8 +262,22 @@ def test_non_overlapping_extra_paths_are_allowed(case):
     barrier = {"file_refs": [
         {"path": "data/x.csv", "content_hash": "sha256:" + "1" * 64},
         {"path": "data/finality_only.csv", "content_hash": "sha256:" + "9" * 64}]}
-    refuse_generation_mismatch(case.conn, case.store, scope="shadow", snapshot_id=case.snap.snapshot_id,
+    refuse_generation_mismatch(case.conn, case.store, receipt_id="acc-extra",
                                barrier_manifest=barrier)  # does not raise
+
+
+def test_tampered_or_missing_pinned_receipt_is_refused(case):
+    """External review #5, step 4: a receipt_id that does not resolve to a
+    committed receipt with a pinned manifest -- deleted, tampered, or simply
+    never committed -- refuses INPUT_CHANGED rather than silently proceeding
+    as a no-op. Only an EMPTY receipt_id (see
+    ``test_no_accepted_generation_yet_is_a_noop``) is a no-op."""
+    with pytest.raises(OpsError) as err:
+        refuse_generation_mismatch(case.conn, case.store, receipt_id="does-not-exist",
+                                   barrier_manifest={"file_refs": []})
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "generation_receipt_missing"
+    assert err.value.problem.details["receipt_id"] == "does-not-exist"
 
 
 def _claim(kind, *, namespace="shadow", parameters=None, attempt_id="att_test"):
@@ -288,13 +302,14 @@ def _service(case):
         code_source=ROOT, store_root=case.live_store)
 
 
-def _snapshot_mode_params(case, *, bindings):
+def _snapshot_mode_params(case, *, bindings, receipt_id):
     """A barrier job's own parameters as ``nightly._stage_parameters`` stamps
     them inside a snapshot-mode plan graph: the plan's pinned
-    ``snapshot_id``/``scope``, alongside the ordinary ``legacy_manifest.json``
-    binding every barrier kind has always carried."""
+    ``snapshot_id``/``scope``/``snapshot_generation_receipt_id`` (external
+    review #5), alongside the ordinary ``legacy_manifest.json`` binding every
+    barrier kind has always carried."""
     return {"input_bindings": bindings, "snapshot_generation_id": case.snap.snapshot_id,
-           "snapshot_generation_scope": "shadow"}
+           "snapshot_generation_scope": "shadow", "snapshot_generation_receipt_id": receipt_id}
 
 
 def test_pin_read_set_refuses_a_snapshot_mode_barrier_kind_on_mismatch(case):
@@ -307,7 +322,7 @@ def test_pin_read_set_refuses_a_snapshot_mode_barrier_kind_on_mismatch(case):
     _accept_generation(case, [("data/x.csv", "sha256:" + "1" * 64)], receipt_id="acc-wired")
     manifest_ref, _ = _publish_manifest(case, [("data/x.csv", "sha256:" + "2" * 64)])
     claim = _claim("legacy_finality", parameters=_snapshot_mode_params(
-        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id}))
+        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id}, receipt_id="acc-wired"))
     with pytest.raises(OpsError) as err:
         _service(case)._pin_read_set(claim)
     assert err.value.code == "INPUT_CHANGED"
@@ -327,9 +342,81 @@ def test_pin_read_set_snapshot_mode_barrier_kind_proceeds_on_a_match(case, monke
     manifest_ref, document = _publish_manifest(case, [("data/x.csv", "sha256:" + "1" * 64)])
     monkeypatch.setattr(supervisor_mod, "pin_read_set", lambda *a, **k: None)
     claim = _claim("legacy_finality", parameters=_snapshot_mode_params(
-        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id}))
+        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id},
+        receipt_id="acc-match-wired"))
     result = _service(case)._pin_read_set(claim)  # does not raise
     assert result == document
+
+
+def test_pin_read_set_snapshot_mode_barrier_job_without_a_pinned_receipt_is_refused(case, monkeypatch):
+    """Compatibility (external review #5, step 3): a job planned before this
+    fix carries ``snapshot_generation_id`` (it IS a snapshot-mode plan) but
+    has no ``snapshot_generation_receipt_id`` at all -- no existing field
+    identifies which receipt it was pinned to, since the snapshot id alone
+    is exactly the ambiguous value the review flagged. Refused typed with a
+    clear re-plan message; never falls back to "latest"."""
+    import engine.v2.ops.supervisor as supervisor_mod
+
+    _accept_generation(case, [("data/x.csv", "sha256:" + "1" * 64)], receipt_id="acc-legacy-plan")
+    manifest_ref, _ = _publish_manifest(case, [("data/x.csv", "sha256:" + "1" * 64)])
+    monkeypatch.setattr(supervisor_mod, "pin_read_set", lambda *a, **k: None)
+    claim = _claim("legacy_finality", parameters={
+        "input_bindings": {"legacy_manifest.json": manifest_ref.artifact_id},
+        "snapshot_generation_id": case.snap.snapshot_id, "snapshot_generation_scope": "shadow"})
+        # no snapshot_generation_receipt_id -- the pre-fix shape
+    with pytest.raises(OpsError) as err:
+        _service(case)._pin_read_set(claim)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.details["reason"] == "generation_not_pinned"
+
+
+def test_reviewer_finding5_repro_old_job_survives_newer_reference_only_import(case, monkeypatch):
+    """External review finding #5, faithfully reproduced: import A commits;
+    a job is planned pinned to A's generation (``pin_snapshot_inputs``
+    stamps the EXACT receipt id it resolved, per the fix); a later
+    reference-only reimport (B) commits a NEW receipt against the SAME
+    snapshot id with a DIFFERENT model file. The old job's barrier stage --
+    whose own read of the legacy tree has not changed since capture -- must
+    still validate cleanly against A, never against B.
+
+    Before the fix (``_snapshot_mode_params`` stamping only
+    ``snapshot_generation_id``/``scope``, the pre-fix shape), this same
+    sequence raises INPUT_CHANGED/generation_mismatch: the launch-time check
+    re-resolved "latest committed receipt for this snapshot id", which is B
+    by the time this barrier stage launches -- an unrelated, later import
+    retroactively invalidating an unchanged, already-planned job."""
+    import engine.v2.ops.supervisor as supervisor_mod
+
+    _accept_generation(case, [("engine/models/registry.json", "sha256:" + "1" * 64)],
+                       receipt_id="gen-A")
+    # The old job's own barrier read, captured before B ever existed -- and
+    # unchanged since (this is the point: the barrier's read set is fine).
+    manifest_ref, document = _publish_manifest(
+        case, [("engine/models/registry.json", "sha256:" + "1" * 64)])
+    old_job_params = _snapshot_mode_params(
+        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id}, receipt_id="gen-A")
+    # A later reference-only reimport of the SAME snapshot pins a DIFFERENT
+    # model file. It must not retroactively invalidate the already-planned job.
+    _accept_generation(case, [("engine/models/registry.json", "sha256:" + "2" * 64)],
+                       receipt_id="gen-B")
+    monkeypatch.setattr(supervisor_mod, "pin_read_set", lambda *a, **k: None)
+    claim = _claim("legacy_finality", parameters=old_job_params)
+    result = _service(case)._pin_read_set(claim)  # must not raise
+    assert result == document
+
+
+def test_a_new_plan_after_a_reference_only_reimport_pins_the_newer_receipt(case):
+    """The one place "latest" is still correct: PLANNING a NEW job after B
+    commits must pick up B, not A -- ``committed_receipt_for_snapshot`` is
+    plan-time-only resolution, and ``pin_snapshot_inputs`` calls it exactly
+    once per plan."""
+    from engine.v2.data.reference_catalog import committed_receipt_for_snapshot
+
+    _accept_generation(case, [("data/x.csv", "sha256:" + "1" * 64)], receipt_id="new-plan-A")
+    _accept_generation(case, [("data/x.csv", "sha256:" + "2" * 64)], receipt_id="new-plan-B")
+    resolved = committed_receipt_for_snapshot(case.conn, scope="shadow",
+                                              snapshot_id=case.snap.snapshot_id)
+    assert resolved == "new-plan-B"
 
 
 def test_pin_read_set_legacy_mode_barrier_job_ignores_a_mismatching_shadow_snapshot(case, monkeypatch):
@@ -367,7 +454,7 @@ def test_pin_read_set_leaves_non_barrier_kinds_unchecked(case, monkeypatch):
                         lambda *a, **k: calls.append(a))
     manifest_ref, _ = _publish_manifest(case, [("data/x.csv", "sha256:" + "2" * 64)])
     claim = _claim("legacy_decisions", parameters=_snapshot_mode_params(
-        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id}))
+        case, bindings={"legacy_manifest.json": manifest_ref.artifact_id}, receipt_id="irrelevant"))
     try:
         _service(case)._pin_read_set(claim)
     except OpsError:

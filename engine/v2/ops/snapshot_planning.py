@@ -18,6 +18,16 @@ by the most recent committed import receipt in ``scope`` whose resulting
 snapshot is the pinned one (``engine.v2.data.reference_catalog``). No such
 receipt, or one that pinned no reference inputs, refuses the plan
 (``INPUT_CHANGED`` with ``data_code`` ``SNAPSHOT_NOT_READY``).
+
+That receipt's own id is resolved exactly once here and returned as
+``snapshot_generation_receipt_id`` (external review #5, 2026-09-14): a later
+reference-only reimport can commit a NEW receipt against the SAME
+``result_snapshot_id`` with different pinned model/reference files, so
+"newest committed receipt for this snapshot id" is only a correct answer at
+THIS moment, plan time. ``nightly._stage_parameters`` stamps the returned
+receipt id onto every stage in the plan graph, and
+``engine.v2.ops.generation_binding`` reads that pinned id at launch time
+rather than re-resolving "latest" — see its module docstring.
 """
 from __future__ import annotations
 
@@ -33,6 +43,7 @@ from engine.v2.data.legacy_materialization import (
     read_plan_complete,
 )
 from engine.v2.data.reference_catalog import (
+    committed_receipt_for_snapshot,
     pinned_materialization_refs,
     reference_inputs_for_snapshot,
 )
@@ -121,6 +132,13 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
         snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+        # External review #5: resolve "latest committed receipt for this
+        # snapshot" exactly once, here, and carry the receipt_id itself
+        # forward in the returned dict -- nightly._stage_parameters stamps
+        # it onto every stage, so a launch-time generation check reads this
+        # SAME receipt rather than re-resolving "latest" against whatever a
+        # later reference-only reimport has since committed.
+        receipt_id = committed_receipt_for_snapshot(conn, scope=scope, snapshot_id=snapshot.snapshot_id)
         pinned = pinned_materialization_refs(
             reference_inputs_for_snapshot(conn, scope=scope, snapshot_id=snapshot.snapshot_id))
         repository = Repository(conn, store)
@@ -137,6 +155,7 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         register_artifact(conn, ref, None, clock)
     return {"scope": scope, "snapshot_ref_artifact_id": head.artifact_id,
             "snapshot_id": snapshot.snapshot_id, "snapshot_manifest_hash": snapshot.manifest_hash,
+            "snapshot_generation_receipt_id": receipt_id or "",
             "materialization_request_ref": ref.artifact_id,
             "materialization_request_hash": request.request_hash,
             "scratch_estimate_bytes": estimate}

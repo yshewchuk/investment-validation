@@ -14,10 +14,22 @@ can insert rows inside its own transaction without loading a legacy module.
 
 * :func:`insert_reference_inputs` runs inside ``commit_snapshot``'s
   transaction, right after the receipt row.
-* :func:`reference_inputs_for_snapshot` returns the rows of the most recent
-  committed receipt in ``scope`` whose resulting snapshot is ``snapshot_id``.
-  It refuses with ``SNAPSHOT_NOT_READY`` when that receipt is missing or
-  recorded no reference inputs.
+* :func:`committed_receipt_for_snapshot` returns the receipt_id of the most
+  recent committed receipt in ``scope`` whose resulting snapshot is
+  ``snapshot_id`` — ``None`` if none exists. This "latest" resolution is only
+  ever correct at PLAN time (a fresh plan should pick up the newest
+  generation); external review finding #5 (2026-09-14) is a launch-time
+  caller re-running this same "latest" query and picking up a reference-only
+  reimport committed after the plan was built. Callers after plan time must
+  read a specific receipt_id a plan already pinned, via
+  :func:`reference_inputs_for_receipt`, never call this again.
+* :func:`reference_inputs_for_snapshot` is the plan-time convenience that
+  chains the two: the rows of the most recent committed receipt in ``scope``
+  whose resulting snapshot is ``snapshot_id``. It refuses with
+  ``SNAPSHOT_NOT_READY`` when that receipt is missing or recorded no
+  reference inputs.
+* :func:`reference_inputs_for_receipt` returns the rows of ONE SPECIFIC
+  receipt, by id — the launch-time-safe read.
 * :func:`pinned_materialization_refs` turns those rows into the three pinned
   inputs a ``LegacyMaterializationRequest`` needs.
 """
@@ -38,8 +50,10 @@ __all__ = [
     "REFERENCE_KINDS",
     "REFERENCE_OBJECT_KIND",
     "ReferenceInput",
+    "committed_receipt_for_snapshot",
     "insert_reference_inputs",
     "pinned_materialization_refs",
+    "reference_inputs_for_receipt",
     "reference_inputs_for_snapshot",
 ]
 
@@ -95,25 +109,47 @@ def insert_reference_inputs(conn: sqlite3.Connection, receipt_id: str,
              item.byte_size, item.fold))
 
 
-def reference_inputs_for_snapshot(conn: sqlite3.Connection, *, scope: str,
-                                  snapshot_id: str) -> tuple[ReferenceInput, ...]:
-    """The reference inputs of the newest committed receipt for ``snapshot_id`` in ``scope``."""
-    receipt = conn.execute(
-        "SELECT receipt_id FROM data_import_receipts WHERE scope = ? AND status = 'committed' "
-        "AND result_snapshot_id = ? ORDER BY registered_at DESC, rowid DESC LIMIT 1",
-        (scope, snapshot_id)).fetchone()
-    if receipt is None:
-        raise errors.fail("SNAPSHOT_NOT_READY", "no committed import receipt for this snapshot",
-                          details={"scope": scope, "snapshot_id": snapshot_id})
+_COMMITTED_RECEIPT_FOR_SNAPSHOT = (
+    "SELECT receipt_id FROM data_import_receipts WHERE scope = ? AND status = 'committed' "
+    "AND result_snapshot_id = ? ORDER BY registered_at DESC, rowid DESC LIMIT 1"
+)
+
+
+def committed_receipt_for_snapshot(conn: sqlite3.Connection, *, scope: str,
+                                   snapshot_id: str) -> str | None:
+    """The receipt_id of the newest committed receipt for ``snapshot_id`` in
+    ``scope`` — ``None`` if none exists. PLAN-TIME ONLY (external review #5):
+    a launch-time caller must instead read a specific receipt_id a plan
+    already pinned (:func:`reference_inputs_for_receipt`), never call this."""
+    row = conn.execute(_COMMITTED_RECEIPT_FOR_SNAPSHOT, (scope, snapshot_id)).fetchone()
+    return row[0] if row else None
+
+
+def reference_inputs_for_receipt(conn: sqlite3.Connection, *,
+                                 receipt_id: str) -> tuple[ReferenceInput, ...]:
+    """The reference inputs of ONE SPECIFIC committed receipt, by id — never
+    re-resolved. Refuses ``SNAPSHOT_NOT_READY`` if it pinned no reference
+    inputs (or does not exist)."""
     rows = conn.execute(
         "SELECT kind, legacy_path, object_id, content_hash, byte_size, fold FROM "
         "data_import_reference_inputs WHERE receipt_id = ? ORDER BY legacy_path",
-        (receipt[0],)).fetchall()
+        (receipt_id,)).fetchall()
     if not rows:
-        raise errors.fail("SNAPSHOT_NOT_READY", "the snapshot's newest import receipt pinned no "
-                          "reference inputs", details={"receipt_id": receipt[0]})
+        raise errors.fail("SNAPSHOT_NOT_READY", "the import receipt pinned no reference inputs",
+                          details={"receipt_id": receipt_id})
     return tuple(ReferenceInput(kind=r[0], legacy_path=r[1], object_id=r[2], content_hash=r[3],
                                 byte_size=r[4], fold=r[5]) for r in rows)
+
+
+def reference_inputs_for_snapshot(conn: sqlite3.Connection, *, scope: str,
+                                  snapshot_id: str) -> tuple[ReferenceInput, ...]:
+    """The reference inputs of the newest committed receipt for ``snapshot_id``
+    in ``scope`` — plan-time convenience; see :func:`committed_receipt_for_snapshot`."""
+    receipt_id = committed_receipt_for_snapshot(conn, scope=scope, snapshot_id=snapshot_id)
+    if receipt_id is None:
+        raise errors.fail("SNAPSHOT_NOT_READY", "no committed import receipt for this snapshot",
+                          details={"scope": scope, "snapshot_id": snapshot_id})
+    return reference_inputs_for_receipt(conn, receipt_id=receipt_id)
 
 
 def pinned_materialization_refs(inputs: Sequence[ReferenceInput]) -> dict:

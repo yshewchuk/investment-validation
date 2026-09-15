@@ -880,3 +880,24 @@ def test_planning_succeeds_when_trades_spans_more_tickers_and_earlier_years(case
                                  year_end=2021, expected_population=("BBB|S1|2021-02-10",),
                                  clock=case.clock)
     assert result["snapshot_id"] == case.snap.snapshot_id
+
+
+def test_pin_snapshot_inputs_pins_the_exact_receipt_it_resolved(case):
+    """External review #5: a plan must carry forward the EXACT import
+    receipt it resolved reference inputs from, not just the (ambiguous)
+    data snapshot id -- a later reference-only reimport can commit a new
+    receipt against the same snapshot id. Planning again after that later
+    import picks up the newer receipt (the one place "latest" is correct)."""
+    from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
+
+    result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
+                                 year_start=2020, year_end=2021,
+                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
+    assert result["snapshot_generation_receipt_id"] == "r1-references"
+
+    record_reference_inputs(case, case.snap.snapshot_id, "r2-references",
+                            registry=b'{"models": [{"id": "retrained"}]}')
+    later = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
+                                year_start=2020, year_end=2021,
+                                expected_population=("AAA|S1|2020-01-15",), clock=case.clock)
+    assert later["snapshot_generation_receipt_id"] == "r2-references"
