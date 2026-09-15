@@ -89,8 +89,15 @@ NORMALIZED_COLUMNS = ("ticker", "date", "close_adj", "close_raw", "high_raw",
 
 
 def read_legacy_px_csv(path: Path) -> pd.DataFrame:
-    """Exactly ``panel.add_runup_features``'s own read at panel.py:533."""
-    return pd.read_csv(path, parse_dates=["date"]).sort_values("date")
+    """Exactly ``panel.add_runup_features``'s own read at panel.py:533,
+    ``float_precision="round_trip"`` included: pandas' default C-parser is
+    not a true round trip for every float64 (measured ~1 ULP off, common
+    enough on real close_adj values that nearly every ticker in the real
+    shadow snapshot hit it on at least one row) -- panel.py carries the
+    same kwarg, so this stays a faithful mirror of the real reader rather
+    than a looser stand-in for it."""
+    return pd.read_csv(path, parse_dates=["date"],
+                       float_precision="round_trip").sort_values("date")
 
 
 def write_legacy_px_csv(path: Path, rows) -> pd.DataFrame:

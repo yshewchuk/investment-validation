@@ -1145,19 +1145,19 @@ def _verify_price_readback(ticker: str, written, readback) -> None:
     file recovers must equal what :func:`materialize_price_series` wrote --
     never merely trusted from the writer's own side."""
     if len(written) != len(readback):
-        raise errors.fail("VALIDATION_FAILED",
+        raise errors.fail("CONTRACT_MISMATCH",
                           "materialized px file row count does not match what was written",
                           details={"ticker": ticker})
     w_dates = written["date"].astype(str).str.slice(0, 10).tolist()
     r_dates = readback["date"].astype(str).str.slice(0, 10).tolist()
     if w_dates != r_dates:
-        raise errors.fail("VALIDATION_FAILED",
+        raise errors.fail("CONTRACT_MISMATCH",
                           "materialized px file dates do not match what was written",
                           details={"ticker": ticker})
     for w, r in zip(written["close_adj"], readback["close_adj"]):
         w_nan, r_nan = (w != w), (r != r)  # NaN != NaN
         if w_nan != r_nan or (not w_nan and float(w) != float(r)):
-            raise errors.fail("VALIDATION_FAILED",
+            raise errors.fail("CONTRACT_MISMATCH",
                               "materialized px file close_adj does not match what was written",
                               details={"ticker": ticker})
 

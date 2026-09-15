@@ -14,6 +14,8 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import random
+import struct
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +23,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.contracts import DATA_FAILURE_CODES
 from engine.v2.data import reference_catalog
 from engine.v2.data.errors import DataError
 from engine.v2.data.legacy_materialization import px_series_tickers
@@ -568,6 +571,65 @@ def test_materialize_price_series_refuses_typed_when_a_ticker_has_no_history(tmp
         materialize_price_series(repository, snapshot, tmp_path / "out", tickers=("ZZZZ",),
                                  observation_ceiling=_FAR_FUTURE_CEILING)
     assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def _awkward_close_adj_values(n=300, seed=20260915):
+    """Same construction as test_v2_data_price_downloads.py's
+    ``_awkward_float64s`` -- doubles needing the full 17 significant digits
+    for an exact round trip often enough to reproduce the real snapshot's
+    behavior (143 of 144 real tickers hit at least one such row)."""
+    rng = random.Random(seed)
+    out = []
+    while len(out) < n:
+        bits = rng.getrandbits(64)
+        x = struct.unpack("<d", struct.pack("<Q", bits))[0]
+        if x == x and 0.0001 < abs(x) < 100000:
+            out.append(x)
+    return out
+
+
+def test_verify_price_readback_mismatch_refuses_typed_registered_code():
+    """Regression for the 2026-09-15 defect: ``_verify_price_readback`` used
+    to raise the unregistered literal ``VALIDATION_FAILED``, so
+    ``errors.make_problem`` threw a bare, untyped ``ValueError`` the moment
+    a real mismatch occurred (worker.stderr on att_7eaea005.../
+    att_6059778f...) instead of the typed ``DataError`` every other refusal
+    in this package raises. It must now come back as a registered code a
+    caller can branch on."""
+    from engine.v2.data.legacy_materialization import _verify_price_readback
+    written = pd.DataFrame({"date": ["2024-01-01", "2024-01-02"], "close_adj": [100.0, 101.0]})
+    readback = pd.DataFrame({"date": ["2024-01-01", "2024-01-02"], "close_adj": [100.0, 101.5]})
+    with pytest.raises(DataError) as exc:
+        _verify_price_readback("AAPL", written, readback)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code in DATA_FAILURE_CODES
+
+
+def test_materialize_price_series_round_trips_awkward_float_close_adj(tmp_path):
+    """End-to-end through capture -> materialize_price_series ->
+    ``_verify_price_readback`` with real awkward doubles as close_adj: must
+    not raise (the 2026-09-15 defect made this fail on almost every real
+    ticker in the shadow snapshot), and the materialized file must read
+    back the exact values captured."""
+    from engine.v2.data.legacy_materialization import materialize_price_series
+    conn, clock, store, _base = _base_snapshot(tmp_path)
+    source_root = tmp_path / "legacy"
+    values = _awkward_close_adj_values()
+    # one distinct calendar date per value (12 * 28 = 336 slots, 300 values: no collisions)
+    by_date = {f"2024-{((i // 28) % 12) + 1:02d}-{(i % 28) + 1:02d}": v
+              for i, v in enumerate(values)}
+    _write_px(source_root, "AAPL", by_date)
+    report = capture(conn, store, source_root, root=tmp_path, scope="shadow", clock=clock)
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(report["result_snapshot_id"])
+
+    dest = tmp_path / "materialized"
+    written = materialize_price_series(repository, snapshot, dest, tickers=("AAPL",),
+                                       observation_ceiling=_FAR_FUTURE_CEILING)
+    from engine.v2.data import price_download_sources
+    readback = price_download_sources.read_legacy_px_csv(written["AAPL"])
+    expected = [by_date[d] for d in sorted(by_date)]
+    assert list(readback["close_adj"]) == expected
 
 
 def test_appending_a_changed_capture_after_pinning_leaves_materialized_output_unchanged(tmp_path):

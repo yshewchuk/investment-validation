@@ -22,6 +22,8 @@ from __future__ import annotations
 import gzip
 import json
 import random
+import struct
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -256,6 +258,68 @@ def test_read_legacy_px_csv(tmp_path):
                     "2024-01-01,99.0,99.0,99.5\n")
     frame = sources.read_legacy_px_csv(path)
     assert list(frame["date"].astype(str).str.slice(0, 10)) == ["2024-01-01", "2024-01-02"]
+
+
+def _awkward_float64s(n=500, seed=20260915):
+    """Deterministic doubles built from random 64-bit patterns, restricted
+    to a plausible price magnitude -- close to what real close_adj values
+    (raw price times a cumulative float adjustment ratio) actually look
+    like. Measured against the real shadow snapshot (snap_6ae7348...):
+    ~40-47% of values built this way need the full 17 significant digits
+    for an exact round trip, and 143 of 144 fetched real tickers hit at
+    least one such row somewhere in their history."""
+    rng = random.Random(seed)
+    out = []
+    while len(out) < n:
+        bits = rng.getrandbits(64)
+        x = struct.unpack("<d", struct.pack("<Q", bits))[0]
+        if x == x and 0.0001 < abs(x) < 100000:  # finite, plausible price range
+            out.append(x)
+    return out
+
+
+def test_write_then_read_legacy_px_csv_round_trips_full_float64_precision(tmp_path):
+    """The writer/reader pair ``materialize_price_series`` actually uses
+    must recover the exact float64 ``close_adj`` bit pattern it wrote, for
+    awkward doubles that need every significant digit -- not merely
+    ``==`` up to some approximation. Regression for the 2026-09-15
+    VALIDATION_FAILED defect (see
+    test_default_pandas_read_csv_loses_precision_on_some_float64_values
+    below for the mechanism this pins)."""
+    values = _awkward_float64s()
+    dates = pd.date_range("2020-01-01", periods=len(values), freq="D").strftime("%Y-%m-%d")
+    rows = [SimpleNamespace(date=d, close_adj=v, close_raw=v, high_raw=v)
+           for d, v in zip(dates, values)]
+    path = tmp_path / "px_AAPL.csv"
+    written = sources.write_legacy_px_csv(path, rows)
+    readback = sources.read_legacy_px_csv(path)
+    assert len(readback) == len(written)
+    assert list(readback["close_adj"]) == list(written["close_adj"])
+    assert list(readback["close_raw"]) == list(written["close_raw"])
+    assert list(readback["high_raw"]) == list(written["high_raw"])
+
+
+def test_default_pandas_read_csv_loses_precision_on_some_float64_values(tmp_path):
+    """Documents the actual mechanism behind the 2026-09-15 VALIDATION_FAILED
+    defect (worker.stderr on attempts att_7eaea005... / att_6059778f...):
+    pandas' default C float parser (no ``float_precision`` kwarg) is not a
+    true round trip for an arbitrary float64 -- it can read back a value 1
+    ULP off from what ``to_csv`` wrote, for a real (not vanishingly rare)
+    fraction of values. This is exactly why both
+    ``price_download_sources.read_legacy_px_csv`` and
+    ``engine/data/features/panel.py:533`` now pass
+    ``float_precision="round_trip"``."""
+    values = _awkward_float64s()
+    path = tmp_path / "close_adj_only.csv"
+    pd.DataFrame({"close_adj": values}).to_csv(path, index=False)
+    default_read = pd.read_csv(path)["close_adj"].tolist()
+    mismatches = sum(1 for w, r in zip(values, default_read) if w != r)
+    assert mismatches > 0, ("expected the default pandas float parser to lose precision on at "
+                            "least one of these awkward doubles -- if this stops reproducing, "
+                            "the round_trip fix may no longer be necessary, but check the real "
+                            "mechanism before removing it")
+    round_trip_read = pd.read_csv(path, float_precision="round_trip")["close_adj"].tolist()
+    assert round_trip_read == values
 
 
 def test_normalize_px_csv_reshapes_and_fills_missing_columns(tmp_path):

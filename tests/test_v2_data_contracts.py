@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2 import contracts  # noqa: E402
 from engine.v2.contracts import (  # noqa: E402
+    DATA_FAILURE_CODES,
     ChainMember,
     ChainQuery,
     ChainSnapshot,
@@ -504,3 +505,76 @@ def test_snapshot_import_request_extra_source_table_is_refused():
     with pytest.raises(DocumentError) as err:
         decode_document(SnapshotImportRequest, doc)
     assert err.value.code == "TABLE_KEYS_MISMATCH"
+
+
+# --------------------------------------------------------------------------
+# guard: every literal code the data package raises through ``fail`` must be
+# registered (companion to ``tests/test_v2_ops_contracts.py``'s ops guard --
+# that file's own docstring calls out this exact gap: a module that imports
+# ``engine.v2.data.errors.fail`` was explicitly out of its scope. This is
+# the guard that would have caught ``VALIDATION_FAILED`` in
+# ``legacy_materialization._verify_price_readback`` before it ever reached
+# a real worker: the raise built fine at import time -- ``fail`` just
+# returns a ``DataError`` -- but ``make_problem`` throws a bare, untyped
+# ``ValueError`` the instant that code path actually runs.)
+# --------------------------------------------------------------------------
+
+
+def _data_fail_literal_calls():
+    """Every literal code passed to ``engine.v2.data.errors.fail`` under
+    ``engine/v2/data``, found statically (AST, not import-and-run) so a
+    raise on an untested branch is still caught.
+
+    Two call shapes are both in real use across this package and both are
+    tracked here: ``errors.fail("CODE", ...)`` (``from . import errors`` or
+    ``from engine.v2.data import errors``) and the bare ``fail("CODE", ...)``
+    (``from .errors import fail`` or ``from engine.v2.data.errors import
+    fail``, aliasing included).
+    """
+    root = Path(__file__).resolve().parents[1] / "engine" / "v2" / "data"
+    hits = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        fail_name = None       # local name bound to errors.fail itself
+        module_alias = None    # local name bound to the errors module
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module in ("errors", "engine.v2.data.errors"):
+                for alias in node.names:
+                    if alias.name == "fail":
+                        fail_name = alias.asname or alias.name
+            elif node.module in (None, "engine.v2.data") and node.level in (0, 1):
+                for alias in node.names:
+                    if alias.name == "errors":
+                        module_alias = alias.asname or alias.name
+        if fail_name is None and module_alias is None:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            first = node.args[0]
+            if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                continue
+            func = node.func
+            is_bare_fail = (fail_name is not None and isinstance(func, ast.Name)
+                            and func.id == fail_name)
+            is_module_fail = (module_alias is not None and isinstance(func, ast.Attribute)
+                              and func.attr == "fail" and isinstance(func.value, ast.Name)
+                              and func.value.id == module_alias)
+            if is_bare_fail or is_module_fail:
+                hits.append((first.value, str(path.relative_to(root.parents[2])), node.lineno))
+    return hits
+
+
+def test_every_data_fail_literal_code_is_registered():
+    """Guard for the VALIDATION_FAILED gap (legacy_materialization's px
+    readback check raised an unregistered code -- ``make_problem`` throws a
+    bare ``ValueError`` instead of the typed ``DataError`` callers branch
+    on, and the real code path that hits it never surfaces which ticker or
+    why): every code the data package raises through ``fail(...)`` must be
+    in ``DATA_FAILURE_CODES``.
+    """
+    missing = [(code, loc, lineno) for code, loc, lineno in _data_fail_literal_calls()
+              if code not in DATA_FAILURE_CODES]
+    assert not missing, missing
