@@ -117,15 +117,26 @@ class MaterializeParameters:
 
 #: Kinds whose complete reads ``LEGACY_SCORE_READ_PLAN_V1`` declares
 #: (``FeatureContext.load`` + ``Scorer`` + ``score_calendar(alt_strikes=0)``).
+#: ``legacy_render``/``legacy_selfcheck`` (real shadow nightly attempt 19 fix)
+#: build the SAME ``Scorer``/``FeatureContext`` off ``context_tickers`` as
+#: ``legacy_score`` (see ``legacy_adapter._scoring_context``) -- their reads
+#: beyond that are the ledger generation, model-evidence artifact and
+#: (for selfcheck) the render's own bundle, all already bound job inputs,
+#: never a second live-tree read. ``legacy_render`` additionally OVERLAYS
+#: those bound artifacts onto a private writable copy of the materialization
+#: (``supervisor._OVERLAY_KINDS`` / ``legacy_adapter.overlay_read_set``)
+#: because it writes ``data/features/model_evidence.json`` and ``ledger/``
+#: at their legacy paths; ``legacy_selfcheck`` is a pure reader and mounts
+#: the verified root directly, like score/decision_replay.
 SNAPSHOT_BACKED_KINDS = frozenset({"legacy_score", "legacy_score_requests",
-                                   "legacy_decision_replay"})
+                                   "legacy_decision_replay", "legacy_render",
+                                   "legacy_selfcheck"})
 #: Read-only kinds guide §9.3 names that stay on the barrier: no declared read plan.
 BARRIER_ONLY_REASONS = {
     "legacy_finality": "reads trading-calendar and finality coverage inputs that "
                        "LEGACY_SCORE_READ_PLAN_V1 does not declare",
     "legacy_model_evidence": "reads model-evidence and training artifacts outside "
                              "LEGACY_SCORE_READ_PLAN_V1",
-    "legacy_selfcheck": "re-derives the rendered bundle from stores no read plan declares",
 }
 SNAPSHOT_BINDINGS = ("snapshot_ref.json", "materialization_request.json",
                      "materialization_manifest.json")

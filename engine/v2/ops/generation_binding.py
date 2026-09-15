@@ -2,8 +2,10 @@
 P2-C02 (Phase 2 review closeout, §12.2): "Bind remaining manifest-backed
 stages to the same accepted data/model generation as snapshot scoring."
 
-A barrier-only kind (``legacy_finality``/``legacy_model_evidence``/
-``legacy_selfcheck``, ``stages.BARRIER_ONLY_REASONS``) has no declared read
+A barrier-only kind (``legacy_finality``/``legacy_model_evidence``,
+``stages.BARRIER_ONLY_REASONS`` -- ``legacy_selfcheck`` moved off the
+barrier in the attempt-19 fix, see ``stages.SNAPSHOT_BACKED_KINDS``) has no
+declared read
 plan, so it can never run snapshot-backed: it always launches through
 ``supervisor.Service._pin_read_set``, reading a pinned ``LegacyInputManifest``
 copied from the LIVE legacy store at that moment. Nothing before this task
@@ -193,3 +195,34 @@ def refuse_generation_mismatch(conn, store, *, receipt_id: str, barrier_manifest
                    "barrier stage's legacy read set differs from the accepted data/model "
                    "generation the plan's own snapshot pinned",
                    details={"reason": "generation_mismatch", "paths": differing})
+
+
+#: Considered and NOT implemented (attempt-19 fix, task Do §2): a second
+#: cross-check comparing a barrier-only stage's pinned manifest (finality,
+#: model_evidence -- the two remaining kinds in ``stages.BARRIER_ONLY_
+#: REASONS`` now that ``legacy_render``/``legacy_selfcheck`` are snapshot-
+#: backed, see ``stages.SNAPSHOT_BACKED_KINDS``) against THIS run's own
+#: committed ``legacy_materialize`` manifest, byte for byte, refusing on any
+#: difference. Measured directly on the real attempt-19 nightly
+#: (``/root/phase2-shadow-ops``, plan snapshot ``snap_6ae7348848e4d27486823eb0a9baceff``):
+#: the barrier manifest every one of finality/model_evidence/the-old-
+#: selfcheck shared (``art_c7b886a159cc8b41b2df2b9968a8a3d7``, 548 files) and
+#: the run's own materialization manifest for the SAME score job's request
+#: (637 files) overlap on 492 paths, of which 3 already differ --
+#: ``data/curated/option_chains/year={2024,2025,2026}/part-0000.parquet``,
+#: the same files ``legacy_render``/``legacy_selfcheck`` used to disagree on
+#: with the un-pinned live tree -- plus 145 present only in the
+#: materialization and 56 present only in the barrier capture. A strict
+#: byte-identical check over that overlap would have refused this real run,
+#: not a synthetic one, and would refuse most real runs going forward: the
+#: barrier path reads the LIVE tree at whatever moment its own job launches,
+#: while the materialization is frozen at plan/materialize time, so some
+#: drift between them across a run's own wall-clock is the normal case, not
+#: a bug. Finality/model_evidence's actual outputs (session resolution,
+#: coverage, evidence quality) do not depend on ``option_chains`` at all, so
+#: this measured drift does not currently reach them -- but the check as
+#: specified would still fire on it. Reported per the task brief rather than
+#: enforced; re-measure before reconsidering, and if enforcement is revisited
+#: scope it to the tables a barrier stage's OWN action actually reads
+#: (``_action_finality``/``_action_model_evidence``), not the whole shared
+#: manifest.

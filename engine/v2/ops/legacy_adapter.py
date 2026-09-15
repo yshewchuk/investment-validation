@@ -14,9 +14,9 @@ from engine.v2.ops.errors import fail
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
            "invoke_price_refresh", "invoke_score_calendar", "iter_raw_fetch_cache",
-           "manifest_files", "projected_trading_sessions", "run_engineering_gate",
-           "run_legacy_rebuild", "run_legacy_script", "run_security_scan",
-           "verify_export_generation"]
+           "manifest_files", "overlay_read_set", "projected_trading_sessions",
+           "run_engineering_gate", "run_legacy_rebuild", "run_legacy_script",
+           "run_security_scan", "verify_export_generation"]
 
 
 def projected_trading_sessions(start, end) -> tuple[str, ...]:
@@ -107,6 +107,42 @@ def copy_read_set(source_root: Path | str, private_root: Path | str,
                        details={"path": relative})
         destination.chmod(0o444)
     return manifest
+
+
+def overlay_read_set(materialization_root: Path | str, private_root: Path | str) -> None:
+    """Mirror a verified, read-only materialization root into a fresh
+    writable private directory with one symlink per file (real shadow
+    nightly attempt 19 fix).
+
+    ``legacy_render`` needs a legacy tree it can write into (the bound
+    model-evidence artifact and ledger generation land at their legacy paths,
+    ``render_inputs.stage_model_evidence``/``stage_ledger_generation``), but
+    ``materialization_root`` is shared across every attempt bound to the same
+    request hash and its own integrity check (``snapshot_roots._walk``)
+    requires every file to keep ``st_nlink == 1`` -- so it must never be
+    written into, and a file inside it must never gain a second (hard) link.
+    A symlink is not a link in that sense (it does not touch the target's
+    link count) and costs no bytes, so this makes the SAME pinned bytes score
+    read reachable at a writable path for free, without copying ~600+ curated
+    files. Never touches ``materialization_root``; raises if ``private_root``
+    already exists, since it must be a fresh per-attempt directory.
+    """
+    source = Path(materialization_root)
+    if source.is_symlink():
+        raise fail("INTEGRITY_FAILED", "materialization root may not be a symlink")
+    source = source.resolve()
+    target = Path(private_root)
+    if target.exists() or target.is_symlink():
+        raise fail("INTEGRITY_FAILED", "overlay destination must not already exist")
+    target.mkdir(parents=True)
+    for entry in sorted(source.rglob("*")):
+        relative = entry.relative_to(source)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if entry.is_dir():
+            destination.mkdir(exist_ok=True)
+        else:
+            destination.symlink_to(entry)
 
 
 def _rooted_import(root: Path | str):

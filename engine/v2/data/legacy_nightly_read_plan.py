@@ -16,21 +16,33 @@ memory.
 ``engine/v2/ops/stages.py::registry()`` gives every ``legacy_*`` job kind a
 ``store_domains=(("legacy_store", "read"),)`` lease (the loop building
 ``kinds`` for ``ACTION_NAMES`` minus the four ``ledger_export``-style pure
-stages, stages.py ~217-224). ``SNAPSHOT_BACKED_KINDS = {"legacy_score",
-"legacy_score_requests", "legacy_decision_replay"}`` (stages.py ~112-113) are
-the only three kinds ``input_mode_problems`` (stages.py ~127-138) ever lets
-run against a verified snapshot materialization instead of the barrier —
-every other ``legacy_*`` kind stays on the barrier in EVERY nightly plan,
-snapshot-mode or not (``engine/v2/ops/nightly.py`` ~282-284:
-``SNAPSHOT_STAGES = frozenset({"score", "decision_replay"})``, "Every other
-stage keeps the Phase 1 barrier"). ``stages.py``'s own
-``BARRIER_ONLY_REASONS`` dict names three of these six
-(``legacy_finality``/``legacy_model_evidence``/``legacy_selfcheck``) with a
-one-line reason each; ``legacy_decisions``/``legacy_settlement``/
-``legacy_render`` are barrier-only for the identical structural reason —
-absent from ``SNAPSHOT_BACKED_KINDS`` — the dict simply never grew a comment
-for them. :data:`BARRIER_KINDS` below is the full, structurally-derived set
-of six.
+stages, stages.py ~217-224). Every ``legacy_*`` kind can run in the default
+``input_mode="legacy"`` (barrier) — this module's declared families are what
+``capture_inputs`` uses to build that barrier manifest whenever a plan is
+NOT snapshot-mode, or (attempt-19 fix, 2026-09-15) is snapshot-mode but the
+stage is one of the two remaining true barrier-only kinds.
+``SNAPSHOT_BACKED_KINDS`` (stages.py ~120-134) additionally lets a kind run
+against a verified snapshot materialization INSTEAD of the barrier once a
+plan pins one: originally ``{"legacy_score", "legacy_score_requests",
+"legacy_decision_replay"}``, now also ``"legacy_render"`` and
+``"legacy_selfcheck"`` — the fix that closed the read-set drift between
+``legacy_score``'s materialization and ``legacy_render``/``legacy_selfcheck``'s
+own separate live-tree capture (real shadow nightly attempt 19). Those two
+are therefore dual-mode: still barrier-declared HERE (for a legacy-mode
+plan, or a snapshot-mode plan's ``legacy_materialize`` job failing to admit),
+but snapshot-backed whenever the plan actually pins one
+(``engine/v2/ops/nightly.py``'s ``SNAPSHOT_STAGES``, now
+``{"score", "decision_replay", "projection", "selfcheck"}``). ``stages.py``'s
+own ``BARRIER_ONLY_REASONS`` dict names the two kinds that are barrier-only
+with NO snapshot-backed alternative at all
+(``legacy_finality``/``legacy_model_evidence``) with a one-line reason each;
+``legacy_decisions``/``legacy_settlement`` are barrier-only for the identical
+structural reason — absent from ``SNAPSHOT_BACKED_KINDS`` — the dict simply
+never grew a comment for them. :data:`BARRIER_KINDS` below is the full set
+of six kinds this module declares a read plan for; it is no longer the exact
+complement of ``SNAPSHOT_BACKED_KINDS`` within ``ACTION_NAMES`` now that two
+kinds are dual-mode (see ``test_v2_ops_capture_inputs.py``'s
+``test_barrier_kinds_are_the_structural_six``).
 
 **Families.** Rather than list raw path globs per kind, each kind declares
 which named :data:`FAMILIES` it reads; a family is one bounded, reviewable
@@ -70,8 +82,10 @@ __all__ = [
 #: caught before submission: ``snapshot_import_plan.v1`` is not this.
 NIGHTLY_CAPTURE_IMPLEMENTATION_REF = "legacy_nightly_capture.v1"
 
-#: The six ``legacy_*`` nightly kinds that never run in snapshot input mode —
-#: see the module docstring for the structural derivation from ``stages.py``.
+#: The six ``legacy_*`` nightly kinds this module declares a barrier read
+#: plan for. Two of them (``legacy_render``, ``legacy_selfcheck``) ALSO run
+#: snapshot-backed once a plan pins a snapshot (``stages.SNAPSHOT_BACKED_
+#: KINDS``) -- see the module docstring for the structural derivation.
 BARRIER_KINDS: tuple[str, ...] = (
     "legacy_finality", "legacy_decisions", "legacy_settlement",
     "legacy_model_evidence", "legacy_render", "legacy_selfcheck",

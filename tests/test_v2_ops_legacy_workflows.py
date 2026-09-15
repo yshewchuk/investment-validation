@@ -18,6 +18,7 @@ from engine.v2.ops.legacy_adapter import (
     invoke_nightly_helper,
     legacy_action,
     manifest_files,
+    overlay_read_set,
 )
 from engine.v2.ops.nightly import (
     GRAPH,
@@ -46,6 +47,44 @@ def test_private_copy_rejects_indirection_and_is_read_only(tmp_path):
     (source / "link").symlink_to(source / "input.bin")
     with pytest.raises(OpsError, match="indirect"):
         manifest_files(source, ("link",))
+
+
+def test_overlay_read_set_symlinks_every_file_without_touching_the_source(tmp_path):
+    """Attempt-19 fix: ``legacy_render``'s writable overlay must reach the
+    SAME bytes a verified materialization root pins, never copy them, and
+    must never modify that shared root (files stay ``0444``, ``st_nlink``
+    stays 1 -- ``snapshot_roots._walk``'s own invariant)."""
+    source = tmp_path / "materialization"
+    (source / "data" / "curated").mkdir(parents=True)
+    (source / "data" / "curated" / "part-0000.parquet").write_bytes(b"pinned-bytes")
+    (source / "registry").mkdir()
+    (source / "registry" / "registry.json").write_bytes(b"{}")
+    for path in source.rglob("*"):
+        if path.is_file():
+            path.chmod(0o444)
+        else:
+            path.chmod(0o555)
+    source.chmod(0o555)
+    before = source.stat()
+
+    overlay = tmp_path / "overlay"
+    overlay_read_set(source, overlay)
+
+    linked = overlay / "data" / "curated" / "part-0000.parquet"
+    assert linked.is_symlink()
+    assert linked.resolve() == (source / "data" / "curated" / "part-0000.parquet").resolve()
+    assert linked.read_bytes() == b"pinned-bytes"
+    assert (source / "data" / "curated" / "part-0000.parquet").stat().st_nlink == 1
+    assert source.stat().st_mtime_ns == before.st_mtime_ns
+
+    # The overlay is a real, writable tree: a caller can add a new file at a
+    # path the source never had (render's model_evidence.json/ledger).
+    (overlay / "data" / "features").mkdir(parents=True)
+    (overlay / "data" / "features" / "model_evidence.json").write_text("{}")
+    assert not (source / "data" / "features").exists()
+
+    with pytest.raises(OpsError, match="already exist"):
+        overlay_read_set(source, overlay)
 
 
 def test_shadow_nightly_required_and_optional_receipts(tmp_path):

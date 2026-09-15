@@ -113,12 +113,26 @@ def _build_fixture(root: Path, *, year: int = 2024, with_orats: bool = True) -> 
 
 def test_barrier_kinds_are_the_structural_six():
     """BARRIER_KINDS must equal the real ``legacy_*`` ACTION_NAMES minus the
-    three kinds ``stages.py`` allows into snapshot input mode -- derived from
-    the registry/allowlist, never typed by hand (task brief deliverable 1)."""
+    three kinds that are ALWAYS snapshot-backed once a plan pins a snapshot
+    and never fall back to the barrier (``legacy_score``, ``legacy_score_
+    requests``, ``legacy_decision_replay``) -- derived from the registry/
+    allowlist, never typed by hand (task brief deliverable 1).
+
+    ``legacy_render``/``legacy_selfcheck`` (attempt-19 fix, 2026-09-15) are
+    dual-mode: in ``SNAPSHOT_BACKED_KINDS`` (they run snapshot-backed when a
+    plan pins one) AND in ``BARRIER_KINDS`` (they still need this module's
+    declared read plan for a legacy-mode plan), so the two sets are no
+    longer exact complements within ``ACTION_NAMES`` -- assert the sharper
+    invariant instead: every barrier kind not exclusively snapshot-backed is
+    declared here, and nothing declared here is snapshot-only.
+    """
     from engine.v2.ops.legacy_actions import ACTION_NAMES
     from engine.v2.ops.stages import SNAPSHOT_BACKED_KINDS
 
-    assert set(BARRIER_KINDS) == set(ACTION_NAMES) - SNAPSHOT_BACKED_KINDS
+    snapshot_only = SNAPSHOT_BACKED_KINDS - set(BARRIER_KINDS)
+    assert snapshot_only == {"legacy_score", "legacy_score_requests", "legacy_decision_replay"}
+    assert set(BARRIER_KINDS) == set(ACTION_NAMES) - snapshot_only
+    assert set(BARRIER_KINDS) & snapshot_only == set()
 
 
 def test_manifest_problems_rejects_wrong_capture_ref():
