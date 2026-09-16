@@ -365,6 +365,40 @@ def test_ledger_export_catalog_growth_preserves_old_generation(tmp_path, growth)
         conn.close()
 
 
+@pytest.mark.parametrize("corruption", ["changed", "missing", "extra", "symlink"])
+def test_ledger_export_corruption_refuses_delivery_and_preserves_current(tmp_path, corruption):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        export_root = root / "exports" / scope
+        exported = export_generation(conn, export_root, purposes=EXPORT_PURPOSES)
+        prior = export_generation(conn, export_root, generation="prior", purposes=EXPORT_PURPOSES)
+        path = exported / "predictions" / (SESSION + ".jsonl")
+        prior_path = prior / path.relative_to(exported)
+        prior_bytes = prior_path.read_bytes()
+        if corruption == "changed":
+            path.write_bytes(b"{}\n")
+        elif corruption == "missing":
+            path.unlink()
+        elif corruption == "extra":
+            (exported / "extra.jsonl").write_bytes(b"{}\n")
+        else:
+            path.unlink()
+            path.symlink_to(prior_path)
+        claim = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="corrupt",
+                                  parameters=_params("ledger_export", SESSION, scope))
+        with pytest.raises(ValueError, match="export generation differs from catalog"):
+            ledger_export_effect(conn, store, claim, root, REPO, clock=clock)
+        assert (export_root / "CURRENT").read_text() == "prior\n"
+        assert prior_path.read_bytes() == prior_bytes
+        assert all(row[0] == "pending" for row in conn.execute("SELECT state FROM outbox"))
+        assert conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM watermarks WHERE stage=?", ("export",)).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_ledger_export_settlement_present_when_committed(tmp_path):
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
