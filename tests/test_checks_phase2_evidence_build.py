@@ -27,8 +27,8 @@ from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor
 from tests.ops_support import enqueue_claim
 from tests.test_v2_data_commit import _catalog, _hash, _manifest_and_snapshot, _noop_fence
+from tests.test_v2_data_legacy_materialization import ROW_COUNT, oversized_case
 from tests.test_v2_data_manifests import _SEC_CONTRACT, _record_for
-from tests.test_v2_data_materialization_plans import ROW_COUNT, oversized_case
 
 H = CONTENT_HASH_PREFIX + "0" * 64
 _SUPPLIED_FIELDS = {"comparison_receipt_ref", "render_comparison_receipt_ref",
