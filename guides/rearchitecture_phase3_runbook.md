@@ -173,7 +173,8 @@ V2_DASHBOARD_TOKEN=$V2_DASHBOARD_TOKEN /usr/bin/python3 -m engine.v2.dashboard.p
 ```bash
 V2_DASHBOARD_TOKEN=$V2_DASHBOARD_TOKEN /usr/bin/python3 -m engine.v2.serving.api \
     --host 127.0.0.1 --port 8766 --serving-db <serving-root>/serving.sqlite \
-    --store-root <serving-root>/objects --serving-root <serving-root>
+    --store-root <serving-root>/objects --serving-root <serving-root> \
+    --publication-root <ops-root>/releases/<scope>
 ```
 
 Both refuse a non-loopback `--host` without `--allow-non-loopback`, and both
