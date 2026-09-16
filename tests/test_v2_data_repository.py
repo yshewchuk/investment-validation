@@ -164,3 +164,119 @@ def test_resolve_snapshot_head_no_committed_head_raises(tmp_path):
     with pytest.raises(DataError) as err:
         resolve_snapshot_head(conn, store, "shadow", clock=_clock)
     assert err.value.code == "SNAPSHOT_NOT_READY"
+
+
+# --------------------------------------------------------------------------
+# Coverage ratchet fix (2026-09-15): resolve_full/latest_dataset_version/
+# table_contract/fragment_records and the private per-row corruption checks
+# were entirely untested under the Phase 2 fixed suite even though
+# Repository is already in scope here (D10).
+# --------------------------------------------------------------------------
+
+
+def test_read_only_refuses_a_nested_transaction(tmp_path):
+    conn, _clock = _catalog(tmp_path)
+    conn.execute("BEGIN")
+    with pytest.raises(RuntimeError):
+        Repository(conn).resolve("snap_" + "0" * 32)
+    conn.execute("ROLLBACK")
+
+
+def test_private_row_lookups_refuse_unknown_ids(tmp_path):
+    """Direct calls into Repository's own per-row corruption checks --
+    ``resolve``/``resolve_full`` reach these only through a fully corrupted
+    catalog, so this exercises each refusal in isolation instead."""
+    conn, _clock = _catalog(tmp_path)
+    repo = Repository(conn)
+    with pytest.raises(DataError) as err:
+        repo._manifest(conn, "dsv_" + "0" * 32)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+    with pytest.raises(DataError) as err:
+        repo._contract_ref(conn, "contract_" + "0" * 32)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+    with pytest.raises(DataError) as err:
+        repo._full_contract(conn, "contract_" + "0" * 32)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+    with pytest.raises(DataError) as err:
+        repo._record(conn, {"object_id": "obj_" + "0" * 32}, _SEC_CONTRACT)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_resolve_full_happy_path_and_unknown_id(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _, snap = _commit(conn, clock, [record], receipt_id="r1")
+
+    resolved = Repository(conn).resolve_full(snap.snapshot_id)
+    assert resolved.snapshot == Repository(conn).resolve(snap.snapshot_id)
+    assert len(resolved.records) == 1
+    assert resolved.records[0].fragment_id == record.fragment_id
+    assert len(resolved.contracts) == 1
+    assert len(resolved.objects) == 1
+
+    with pytest.raises(DataError) as err:
+        Repository(conn).resolve_full("snap_" + "0" * 32)
+    assert err.value.code == "SNAPSHOT_NOT_FOUND"
+
+
+def test_resolve_and_resolve_full_refuse_a_tampered_snapshot_row(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _, snap = _commit(conn, clock, [record], receipt_id="r1")
+    conn.close()
+
+    copy_path = tmp_path / "tampered.sqlite"
+    _consistent_copy(tmp_path / "catalog.sqlite", copy_path)
+    tampered = ops_connect(copy_path)
+    tampered.execute("DROP TRIGGER data_snapshots_no_delete")
+    tampered.execute("DROP TRIGGER data_snapshots_no_update")
+    tampered.execute("UPDATE data_snapshots SET manifest_hash = ? WHERE snapshot_id = ?",
+                     ("sha256:" + "0" * 64, snap.snapshot_id))
+
+    with pytest.raises(DataError) as err:
+        Repository(tampered).resolve(snap.snapshot_id)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+    with pytest.raises(DataError) as err:
+        Repository(tampered).resolve_full(snap.snapshot_id)
+    assert err.value.code == "MANIFEST_CORRUPT"
+    tampered.close()
+
+
+def test_latest_dataset_version_empty_and_populated(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    repo = Repository(conn)
+    manifest, records = repo.latest_dataset_version(_SEC_CONTRACT.contract_id)
+    assert manifest is None
+    assert records == ()
+
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1")
+    manifest, records = repo.latest_dataset_version(_SEC_CONTRACT.contract_id)
+    assert manifest is not None
+    assert len(records) == 1
+    assert records[0].fragment_id == record.fragment_id
+
+
+def test_table_contract_and_fragment_records_refuse_unknown_table(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _, snap = _commit(conn, clock, [record], receipt_id="r1")
+    repo = Repository(conn)
+
+    contract = repo.table_contract(snap, "securities")
+    assert contract.contract_id == _SEC_CONTRACT.contract_id
+    records = repo.fragment_records(snap, "securities")
+    assert len(records) == 1
+
+    with pytest.raises(DataError) as err:
+        repo.table_contract(snap, "not_a_real_table")
+    assert err.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as err:
+        repo.fragment_records(snap, "not_a_real_table")
+    assert err.value.code == "CONTRACT_MISMATCH"
+
+

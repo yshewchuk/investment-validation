@@ -495,3 +495,37 @@ def test_verify_snapshot_ref_catches_knowledge_mode_tamper():
     with pytest.raises(DataError) as err:
         manifests.verify_snapshot_ref(tampered, {"securities": manifest})
     assert err.value.code == "MANIFEST_CORRUPT"
+
+
+# --------------------------------------------------------------------------
+# Coverage-margin follow-up (2026-09-15): three more manifests.py refusal
+# branches the tests above never happen to reach.
+# --------------------------------------------------------------------------
+
+
+def test_fragment_record_refuses_an_empty_partition():
+    empty = dataclasses.replace(_inspection_for("2024"), primary_key_min=None, primary_key_max=None)
+    with pytest.raises(DataError) as err:
+        manifests.fragment_record(empty, _SEC_REF, input_receipt_refs=(RECEIPT_A,), import_request_hash=IRH_A)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_verify_fragment_record_catches_a_manifest_hash_only_tamper():
+    """``manifest_hash`` covers ``input_receipt_refs``/``import_request_hash``,
+    which ``fragment_id`` does not (module docstring) -- tampering the stored
+    ``manifest_hash`` directly leaves ``fragment_id`` valid and must still be
+    caught by ``verify_fragment_record``'s SECOND check, not its first."""
+    record = _record_for("2024")
+    tampered = dataclasses.replace(record, manifest_hash=_fake_hash("wrong-manifest-hash"))
+    with pytest.raises(DataError) as err:
+        manifests.verify_fragment_record(tampered)
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+
+def test_resolve_partition_hashes_refuses_an_unknown_partition_key():
+    record = _record_for("2024")
+    with pytest.raises(DataError) as err:
+        manifests._resolve_partition_hashes([record], {"2024": record.logical_content_hash,
+                                                        "2099": _fake_hash("no-such-partition")})
+    assert err.value.code == "MANIFEST_CORRUPT"
+

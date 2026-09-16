@@ -1,6 +1,7 @@
 """Complete, sequence-ordered compatibility exports for legacy readers."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -8,14 +9,14 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
-from engine.v2.foundation import canonical_json, fsync_directory
+from engine.v2.foundation import canonical_json, content_hash, fsync_directory
 
 
 def _no_fault(_name):
     return None
 
 
-def export_generation(conn, root: Path | str, *, generation: str, purposes=None,
+def export_generation(conn, root: Path | str, *, generation: str | None = None, purposes=None,
                       fault=None) -> Path:
     """Write all prediction rows through a durable generation and switch CURRENT atomically.
 
@@ -25,6 +26,11 @@ def export_generation(conn, root: Path | str, *, generation: str, purposes=None,
     ``research_reconstruction`` row is never a legacy row and must never
     appear). Left ``None``, every row is exported — the pre-existing,
     unfiltered behaviour every caller before D20 still relies on.
+
+    Omit ``generation`` to identify the exact exported file names and bytes.
+    The identity and files come from the same captured catalog rows: catalog
+    growth produces a new immutable directory even when decision receipts
+    are unchanged. Explicit names retain their strict verification contract.
 
     Resumable (P2-C06): every file is written into a private sibling
     ``root/.<generation>.partial-<attempt>/`` first, fsynced file-by-file and
@@ -39,13 +45,19 @@ def export_generation(conn, root: Path | str, *, generation: str, purposes=None,
     again -- only verified byte-for-byte against the catalog (the pre-D06
     behaviour, preserved for the already-durable case) or left as-is.
     """
-    if "/" in generation or generation in ("", ".", ".."):
+    if generation is not None and ("/" in generation or generation in ("", ".", "..")):
         raise ValueError("unsafe export generation")
+    grouped = _grouped_lines(conn, purposes)
+    if generation is None:
+        generation = content_hash([
+            "ledger_export_files.v1",
+            [[bucket + "/" + date + ".jsonl", hashlib.sha256(b"".join(lines)).hexdigest()]
+             for (bucket, date), lines in sorted(grouped.items())],
+        ])
     fault = fault or _no_fault
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     destination = root / generation
-    grouped = _grouped_lines(conn, purposes)
     if destination.exists():
         _verify_complete(destination, grouped)
     else:
@@ -73,6 +85,15 @@ def _grouped_lines(conn, purposes):
 
 
 def _verify_complete(destination, grouped):
+    expected = {bucket for bucket, _ in grouped}
+    expected.update(bucket + "/" + date + ".jsonl" for bucket, date in grouped)
+    actual = set()
+    for path in destination.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError("export generation differs from catalog")
+        actual.add(path.relative_to(destination).as_posix())
+    if destination.is_symlink() or not destination.is_dir() or actual != expected:
+        raise ValueError("export generation differs from catalog")
     for (bucket, date), lines in grouped.items():
         path = destination / bucket / (date + ".jsonl")
         if not path.is_file() or path.read_bytes() != b"".join(lines):

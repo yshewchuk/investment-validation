@@ -276,6 +276,7 @@ __all__ = [
     "assert_rows_match",
     "build_materialization_request",
     "evidence_scope_covers_trades",
+    "explain_materialization_dependencies",
     "format_pinned_ref",
     "lock_down",
     "materialize_price_series",
@@ -489,6 +490,29 @@ def _whole_table_copy_eligible(repository, snapshot_ref: SnapshotRef, table_name
     if not _interval_covers(query.time_interval, manifest_interval):
         return False
     return query.max_result_rows >= _manifest_row_count(repository, snapshot_ref, table_name)
+
+
+def explain_materialization_dependencies(repository, snapshot_ref: SnapshotRef,
+                                          table_name: str, query: DataQuery):
+    """Explain a recorded query under the materializer whole-table copy policy.
+
+    Only a supported, provably complete pinned-manifest copy can exceed the
+    scan result cap. All original query bounds and its hash remain unchanged.
+    """
+    if table_name not in TABLE_OUTPUT_KIND or not isinstance(query, DataQuery):
+        raise errors.fail("UNSUPPORTED_CONTRACT", "unsupported materialization query")
+    if query.snapshot_id != snapshot_ref.snapshot_id:
+        raise errors.fail("CONTRACT_MISMATCH", "materialization query pins another snapshot")
+
+    def validate(contract, validated):
+        eligible = (table_name not in _EVIDENCE_SCOPED_TABLES
+                    and _whole_table_copy_eligible(repository, snapshot_ref, table_name,
+                                                   contract, validated))
+        if eligible:
+            contract = dataclasses.replace(contract, maximum_result_rows=validated.max_result_rows)
+        query_mod.validate_query(contract, validated)
+
+    return repository._explain_data_query(query, table_name, query_validator=validate)
 
 
 def _scope_bounds(repository, snapshot_ref: SnapshotRef, table_name: str,

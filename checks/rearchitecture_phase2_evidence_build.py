@@ -32,7 +32,11 @@ from checks.rearchitecture_phase2_gate import environment_hash as _environment_h
 from engine.v2.contracts import SnapshotImportReceipt  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.legacy_mapping import build_legacy_mapping  # noqa: E402
-from engine.v2.data.reference_catalog import pinned_materialization_refs, reference_inputs_for_snapshot  # noqa: E402
+from engine.v2.data.legacy_materialization import explain_materialization_dependencies  # noqa: E402
+from engine.v2.data.reference_catalog import (  # noqa: E402
+    pinned_materialization_refs,
+    reference_inputs_for_snapshot,
+)
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
@@ -57,6 +61,37 @@ def _publish_document(value, artifact_root: Path, name: str) -> dict:
                           artifact_root, name)
 
 
+def _copy_corpus_binding(receipt_data: bytes, receipt_path: Path, artifact_root: Path) -> None:
+    """Copy the single hash-pinned diagnostic without rewriting its receipt.
+
+    Paths must stay under both roots, including symlinks. This is a small
+    binding document, never a recursive artifact walk or an unbounded read.
+    Missing diagnostics remain absent so the strict validator reports them.
+    """
+    raw_ref = json.loads(receipt_data).get("envelope", {}).get("diagnostic_ref")
+    if raw_ref is None:
+        return
+    try:
+        ref = json.loads(raw_ref)
+        relative = Path(ref["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("unsafe diagnostic path")
+        source = (receipt_path.parent / relative).resolve()
+        target = (artifact_root / relative).resolve()
+        source.relative_to(receipt_path.parent.resolve())
+        target.relative_to(artifact_root.resolve())
+        with source.open("rb") as handle:
+            data = handle.read((1 << 20) + 1)
+        if len(data) > 1 << 20 or "sha256:" + hashlib.sha256(data).hexdigest() != ref["content_hash"]:
+            raise ValueError("invalid diagnostic hash or size")
+        if target.exists() and (target.stat().st_size != len(data) or target.read_bytes() != data):
+            raise ValueError("diagnostic destination collision")
+    except (OSError, ValueError, TypeError, KeyError):
+        raise fail("INPUT_CHANGED", "corpus diagnostic artifact is missing, unsafe or hash-invalid") from None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+
 def _head_snapshot_id(conn, scope: str) -> str | None:
     row = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope=?",
                        (scope,)).fetchone()
@@ -79,7 +114,7 @@ def _committed_import_receipts(conn, scope: str) -> list[SnapshotImportReceipt]:
 def _dependency_plan_refs(conn, store, score_doc: dict, artifact_root: Path) -> list[dict]:
     """The D15 snapshot job's materialization request, read from ITS OWN
     ``right_ref`` (the snapshot job id ``score_parity_receipt`` recorded),
-    turned into one ``DependencyPlan`` per query via ``explain_dependencies``.
+    turned into one ``DependencyPlan`` per query using the materializer policy.
     """
     snapshot_job_id = score_doc["right_ref"]
     attempt = conn.execute(
@@ -94,7 +129,7 @@ def _dependency_plan_refs(conn, store, score_doc: dict, artifact_root: Path) -> 
     repo = Repository(conn, store)
     refs = []
     for index, (table_name, query) in enumerate(sorted(request.table_queries.items())):
-        plan = repo.explain_dependencies(query, table_name=table_name)
+        plan = explain_materialization_dependencies(repo, request.snapshot_ref, table_name, query)
         refs.append(_publish_document(plan, artifact_root, f"dependency_plan_{index}_{table_name}.json"))
     return refs
 
@@ -139,6 +174,8 @@ def build(root: Path, *, scope: str, artifact_root: Path, score_receipt: Path | 
             if path is None:
                 continue
             data = path.read_bytes()
+            if flag == "corpus_receipt":
+                _copy_corpus_binding(data, path, artifact_root)
             evidence[_RECEIPT_FLAGS[flag]] = _publish_bytes(data, artifact_root, path.name)
         if score_receipt is not None:
             score_doc = json.loads(score_receipt.read_bytes())

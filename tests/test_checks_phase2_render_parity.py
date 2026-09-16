@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ import engine.features as features_module
 import engine.score as score_module
 from checks.rearchitecture_phase2_evidence import PHASE2_EVIDENCE_V1, validate_evidence
 from checks.rearchitecture_phase2_render_parity import (
+    _run_selfcheck,
     build_render_comparison_receipt,
     main,
     publish_receipt,
@@ -171,6 +173,28 @@ def test_selfcheck_failing_makes_the_receipt_disagree(seeded_render_job, monkeyp
     assert receipt.verdict == "differ"
     assert any(f.field_path == "__selfcheck__.ok" for f in receipt.findings)
     assert any(p["code"] == "SELFCHECK_FAILED" for p in receipt.problems)
+
+
+def test_isolated_selfcheck_preserves_nightly_context_and_default_sample(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_worker(mode, job_file, out_dir, **kwargs):
+        captured.update(json.loads(job_file.read_text()))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "selfcheck.json").write_text(json.dumps({"ok": True}))
+        return True, SimpleNamespace()
+
+    monkeypatch.setattr("checks.rearchitecture_phase2_render_parity._run_worker_subprocess",
+                        fake_worker)
+    spec = SimpleNamespace(parameters={"tickers": ["WATCH"],
+                                       "context_tickers": ["WATCH", "CONTEXT"],
+                                       "year_start": 2025, "year_end": 2026})
+    ok, report, _ = _run_selfcheck(job_spec=spec, bundle_v2=tmp_path / "bundle",
+                                   legacy_root=tmp_path / "legacy", scratch=tmp_path / "scratch",
+                                   max_rss_gb=4.0, repo_root=tmp_path)
+    assert ok and report == {"ok": True}
+    assert captured["context_tickers"] == ["CONTEXT", "WATCH"]
+    assert "sample" not in captured
 
 
 def test_cli_publishes_and_exits_zero_on_agree(seeded_render_job, patched_env, tmp_path, capsys):

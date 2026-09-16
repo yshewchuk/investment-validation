@@ -11,6 +11,7 @@ checkpoint cache-identity guarantee.
 """
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import tempfile
@@ -29,12 +30,25 @@ from engine.v2.contracts import (
     SubmitRequest,
 )
 from engine.v2.foundation import ArtifactStore, SystemClock, artifact_reference, content_hash, to_document
-from engine.v2.ledger.decisions import set_authority
+from engine.v2.ledger import decisions as ledger_decisions
+from engine.v2.ledger.decisions import DecisionConflict, set_authority
 from engine.v2.ops import schema
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import cache_identity, register_artifact
-from engine.v2.ops.decision_commit import commit_decisions_in_transaction, validated_decision_candidate
+from engine.v2.ops.decision_commit import (
+    _contract_mismatch_field,
+    _match_same_session,
+    _require_legacy_exit_finality,
+    _require_v2_finality_session,
+    _settlement_line,
+    _stamp_date,
+    _validate_settlement_state,
+    commit_decisions,
+    commit_decisions_in_transaction,
+    validate_candidates,
+    validated_decision_candidate,
+)
 from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.decision_replay import compare_rows, decision_population, population_key
 from engine.v2.ops.decision_validation import _validate_causality, validate
@@ -47,7 +61,21 @@ from engine.v2.ops.input_bindings import (
     resolved_inputs_hash,
 )
 from engine.v2.ops.legacy_actions import ACTION_NAMES
-from engine.v2.ops.legacy_adapter import _action_decision_replay
+from engine.v2.ops.legacy_adapter import (
+    _action_decision_replay,
+    _json_stdout,
+    _load_action_frame,
+    _load_finality,
+    _load_score_document,
+    copy_read_set,
+    invoke_nightly_helper,
+    legacy_action,
+    legacy_ledger_schema_version,
+    manifest_files,
+    overlay_read_set,
+    run_legacy_rebuild,
+    run_legacy_script,
+)
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.migrations import applied_versions, checksum
 from engine.v2.ops.nightly import _legacy_resource, build_legacy_job_requests, build_nightly_plan
@@ -1757,3 +1785,1010 @@ def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(tmp_path, c
         assert json.loads(rows[0][0])["parameters"]["decision_clock"] == decision_clock
     finally:
         raw.close()
+
+
+# ==========================================================================
+# Coverage ratchet fixes (2026-09-15): engine.v2.ledger.decisions is D18's
+# own decision ledger (this file already imports set_authority from it);
+# engine.v2.ops.decision_commit's settlement-import path
+# (import_settlement_candidates_in_transaction and everything it calls) and
+# commit_decisions_in_transaction's own validation guards were entirely
+# untested under the Phase 2 fixed suite even though the module is already
+# in scope here. engine.v2.ops.legacy_adapter's filesystem-safety helpers
+# are exercised the same way. Direct/white-box calls into private helpers
+# are the established style in this file already (``_validate_causality``,
+# ``_action_decision_replay``, ``_legacy_resource`` above).
+# ==========================================================================
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ledger.decisions: schema install, authority, insert, imports
+# --------------------------------------------------------------------------
+
+
+def test_ledger_decisions_install_creates_tables_standalone():
+    """``install`` -- unlike every other test in this file, which reaches the
+    same three tables through ``open_catalog``'s migration path -- is never
+    itself called anywhere else."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        ledger_decisions.install(conn)
+        names = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"decisions", "decision_imports", "decision_authority"} <= names
+    finally:
+        conn.close()
+
+
+def test_set_authority_requires_transaction_and_rejects_wrong_owner(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with pytest.raises(ValueError):
+            set_authority(conn, None, "catalog", "2026-09-12T20:00:00Z")
+        with transaction(conn):
+            set_authority(conn, None, "catalog", "2026-09-12T20:00:00Z")
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                set_authority(conn, "someone-else", "catalog-2", "2026-09-12T20:01:00Z")
+        # Real owner switch: current owner "catalog" hands off to "catalog-2".
+        with transaction(conn):
+            set_authority(conn, "catalog", "catalog-2", "2026-09-12T20:02:00Z")
+        row = conn.execute("SELECT owner, generation FROM decision_authority WHERE singleton=1").fetchone()
+        assert row["owner"] == "catalog-2"
+        assert row["generation"] == 2
+    finally:
+        conn.close()
+
+
+def test_ledger_decisions_insert_conflict_paths(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with pytest.raises(ValueError):
+            ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                    payload={"row_id": "r1"}, purpose="shadow", kind="prediction",
+                                    validations=[], created_at="2026-09-12T20:00:00Z")
+        with transaction(conn):
+            set_authority(conn, None, "catalog", "2026-09-12T20:00:00Z")
+        # Authority mismatch: no caller currently holds "wrong-owner".
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                        payload={"row_id": "r1"}, purpose="shadow", kind="prediction",
+                                        validations=[], created_at="2026-09-12T20:00:00Z",
+                                        owner="wrong-owner")
+        # Supersession without a reason.
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                        payload={"row_id": "r1"}, purpose="shadow", kind="prediction",
+                                        validations=[], created_at="2026-09-12T20:00:00Z",
+                                        supersedes="prediction:r0")
+        with transaction(conn):
+            first = ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                            payload={"row_id": "r1", "v": 1}, purpose="shadow",
+                                            kind="prediction", validations=[],
+                                            created_at="2026-09-12T20:00:00Z")
+        assert first["decision_id"] == "prediction:r1"
+        # Byte-identical retry (same logical_key, decision_id, payload_hash,
+        # purpose, kind, supersedes) is a no-op that returns the same row.
+        with transaction(conn):
+            again = ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                            payload={"row_id": "r1", "v": 1}, purpose="shadow",
+                                            kind="prediction", validations=[],
+                                            created_at="2026-09-12T20:05:00Z")
+        assert again["sequence"] == first["sequence"]
+        # Same identity, different content: IDEMPOTENCY_CONFLICT.
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                        payload={"row_id": "r1", "v": 2}, purpose="shadow",
+                                        kind="prediction", validations=[],
+                                        created_at="2026-09-12T20:06:00Z")
+    finally:
+        conn.close()
+
+
+def test_ledger_decisions_rows_filters_by_kind_and_through(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with transaction(conn):
+            set_authority(conn, None, "catalog", "2026-09-12T20:00:00Z")
+            ledger_decisions.insert(conn, logical_key="k1", decision_id="prediction:r1",
+                                    payload={"row_id": "r1"}, purpose="shadow", kind="prediction",
+                                    validations=[], created_at="2026-09-12T20:00:00Z")
+            ledger_decisions.insert(conn, logical_key="k2", decision_id="outcome:r1:a",
+                                    payload={"row_id": "r1"}, purpose="shadow", kind="outcome",
+                                    validations=[], created_at="2026-09-12T20:01:00Z")
+        all_rows = ledger_decisions.rows(conn)
+        assert [r["kind"] for r in all_rows] == ["prediction", "outcome"]
+        only_predictions = ledger_decisions.rows(conn, kind="prediction")
+        assert len(only_predictions) == 1
+        first_sequence = all_rows[0]["sequence"]
+        bounded = ledger_decisions.rows(conn, through=first_sequence)
+        assert [r["decision_id"] for r in bounded] == ["prediction:r1"]
+    finally:
+        conn.close()
+
+
+def test_row_conflicts_pure():
+    original = b'{"a": 1}'
+    payload = {"a": 1}
+    assert ledger_decisions._row_conflicts(None, [], original, payload) is False
+    # A prior import with DIFFERENT bytes under the same identity conflicts.
+    assert ledger_decisions._row_conflicts(None, [(b'{"a": 2}',)], original, payload) is True
+    # A committed row whose canonical content differs from this payload.
+    existing_row = {"payload_json": ledger_decisions.canonical_json({"a": 2})}
+    assert ledger_decisions._row_conflicts(existing_row, [], original, payload) is True
+    matching_row = {"payload_json": ledger_decisions.canonical_json(payload)}
+    assert ledger_decisions._row_conflicts(matching_row, [], original, payload) is False
+
+
+def test_outcome_generation_ref_parses_and_rejects():
+    assert ledger_decisions.outcome_generation_ref({}) is None
+    assert ledger_decisions.outcome_generation_ref({"resolved_at": "not-a-timestamp"}) is None
+    assert ledger_decisions.outcome_generation_ref(
+        {"resolved_at": "2026-09-12T21:00:00Z"}) == "2026-09-12"
+    assert ledger_decisions.outcome_generation_ref(
+        {"settled_at": "2026-09-12T21:00:00+00:00"}) == "2026-09-12"
+
+
+def test_import_lines_conflict_and_diverge_paths(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with transaction(conn):
+            set_authority(conn, None, "catalog", "2026-09-12T20:00:00Z")
+        with pytest.raises(ValueError):
+            with transaction(conn):
+                ledger_decisions.import_lines(conn, "src-hash", [], kind="outcome",
+                                              created_at="2026-09-12T20:00:00Z",
+                                              on_conflict="not-a-mode")
+        line_a = json.dumps({"row_id": "r1", "v": 1}, sort_keys=True).encode()
+        with transaction(conn):
+            receipts = ledger_decisions.import_lines(
+                conn, "src-hash", [line_a], kind="prediction", created_at="2026-09-12T20:00:00Z")
+        assert len(receipts) == 1
+        # Byte-identical re-import of the same (source_hash, line_number):
+        # the "prior" shortcut, a no-op that returns the same receipt.
+        with transaction(conn):
+            again = ledger_decisions.import_lines(
+                conn, "src-hash", [line_a], kind="prediction", created_at="2026-09-12T20:09:00Z")
+        assert again[0]["decision_id"] == receipts[0]["decision_id"]
+        # A changed byte at an ALREADY-imported (source_hash, line_number):
+        # a provenance conflict, refused in both modes.
+        line_a_changed = json.dumps({"row_id": "r1", "v": 999}, sort_keys=True).encode()
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                ledger_decisions.import_lines(conn, "src-hash", [line_a_changed], kind="prediction",
+                                              created_at="2026-09-12T20:10:00Z")
+        # No row_id at all.
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                ledger_decisions.import_lines(
+                    conn, "src-hash-2", [json.dumps({}).encode()], kind="prediction",
+                    created_at="2026-09-12T20:11:00Z")
+        # Same decision_id, DIFFERENT content, imported under a NEW
+        # (source_hash, line) pair: on_conflict="raise" (default) refuses.
+        line_b_conflict = json.dumps({"row_id": "r1", "v": 2}, sort_keys=True).encode()
+        with pytest.raises(DecisionConflict):
+            with transaction(conn):
+                ledger_decisions.import_lines(conn, "src-hash-3", [line_b_conflict], kind="prediction",
+                                              created_at="2026-09-12T20:12:00Z")
+        # Same conflict under on_conflict="diverge": records a
+        # decision_divergences row instead of failing, and is idempotent.
+        with transaction(conn):
+            diverged = ledger_decisions.import_lines(
+                conn, "src-hash-4", [line_b_conflict], kind="prediction",
+                created_at="2026-09-12T20:13:00Z", on_conflict="diverge",
+                provenance_label="legacy-ledger.jsonl")
+        assert diverged[0]["decision_id"] == receipts[0]["decision_id"]
+        count = conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0]
+        assert count == 1
+        with transaction(conn):
+            ledger_decisions.import_lines(
+                conn, "src-hash-4", [line_b_conflict], kind="prediction",
+                created_at="2026-09-12T20:14:00Z", on_conflict="diverge")
+        assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+        # Fresh outcome import with derive_generation_ref: a per-row
+        # generation_ref stamped from the payload's own resolved_at.
+        outcome_line = json.dumps(
+            {"row_id": "r9", "status": "resolved", "resolved_at": "2026-09-12T22:00:00Z"},
+            sort_keys=True).encode()
+        with transaction(conn):
+            outcome_receipts = ledger_decisions.import_lines(
+                conn, "src-hash-5", [outcome_line], kind="outcome",
+                created_at="2026-09-12T20:15:00Z", derive_generation_ref=True)
+        assert outcome_receipts[0]["generation_ref"] == "2026-09-12"
+    finally:
+        conn.close()
+
+
+def test_import_decision_id_outcome_requires_observation_identity():
+    with pytest.raises(DecisionConflict):
+        ledger_decisions._import_decision_id("outcome", "r1", {"status": "resolved"})
+    with pytest.raises(DecisionConflict):
+        ledger_decisions._import_decision_id(
+            "outcome", "r1", {"status": "pending", "resolved_at": "2026-09-12T20:00:00Z"})
+    first = ledger_decisions._import_decision_id(
+        "outcome", "r1", {"status": "resolved", "resolved_at": "2026-09-12T20:00:00Z"})
+    assert first.startswith("outcome:r1:")
+    assert ledger_decisions._import_decision_id("prediction", "r1", {}) == "prediction:r1"
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ops.decision_commit: pure helpers
+# --------------------------------------------------------------------------
+
+
+def test_stamp_date_parses_and_rejects():
+    assert _stamp_date(None) is None
+    assert _stamp_date("") is None
+    assert _stamp_date("not-a-date") is None
+    assert _stamp_date("2026-09-12").isoformat() == "2026-09-12"
+    assert _stamp_date("2026-09-12T21:00:00Z").isoformat() == "2026-09-12"
+
+
+def test_contract_mismatch_field_detects_each_field():
+    recorded = {"ticker": "FAKE", "strategy": "TWIN-P", "event_date": SESSION, "settlement": "closed"}
+    assert _contract_mismatch_field(dict(recorded), recorded) is None
+    for field in ("ticker", "strategy", "event_date", "settlement"):
+        payload = dict(recorded)
+        payload[field] = "different"
+        assert _contract_mismatch_field(payload, recorded) == field
+
+
+def test_match_same_session_only_matches_recorded_generation_ref():
+    existing = [{"status": "unresolvable", "generation_ref": None},
+               {"status": "resolved", "generation_ref": "2026-09-10"},
+               {"status": "resolved", "generation_ref": SESSION}]
+    match = _match_same_session(existing, SESSION)
+    assert match["generation_ref"] == SESSION
+    assert _match_same_session(existing, "2026-09-20") is None
+    # A NULL generation_ref (legacy/never-backfilled row) can never match,
+    # even when the caller asks for "no session" (None).
+    assert _match_same_session(existing, None) is None
+
+
+def test_validate_settlement_state_paths():
+    with pytest.raises(OpsError) as err:
+        _validate_settlement_state({"status": "pending"}, recorded={}, session=SESSION)
+    assert err.value.code == "VALIDATION_FAILED"
+
+    assert _validate_settlement_state(
+        {"status": "unresolvable", "resolved_at": SESSION + "T21:00:00Z"},
+        recorded={}, session=SESSION) == "unresolvable"
+
+    with pytest.raises(OpsError):
+        _validate_settlement_state(
+            {"status": "resolved", "resolved_at": SESSION + "T21:00:00Z"}, recorded={}, session=SESSION)
+
+    # Current schema: legacy's own exit_finality must say is_final True.
+    current = {"schema_version": legacy_ledger_schema_version()}
+    with pytest.raises(OpsError):
+        _validate_settlement_state(
+            {"status": "resolved", "resolved_at": SESSION + "T21:00:00Z",
+             "settlement_source": "polygon", "exit_source": "polygon"},
+            recorded=current, session=SESSION)
+    with pytest.raises(OpsError):
+        _require_legacy_exit_finality({"exit_finality": {"is_final": False}})
+    assert _require_legacy_exit_finality({"exit_finality": {"is_final": True}}) == "legacy_exit_finality"
+    assert _validate_settlement_state(
+        {"status": "resolved", "resolved_at": SESSION + "T21:00:00Z",
+         "settlement_source": "polygon", "exit_source": "polygon",
+         "exit_finality": {"is_final": True}},
+        recorded=current, session=SESSION) == "legacy_exit_finality"
+
+    # Grandfathered (schema_version below current): v2's own exit-date proof.
+    grandfathered = {"structure": {"exit_date": SESSION}}
+    assert _require_v2_finality_session(grandfathered, SESSION) == "v2_finality_session"
+    with pytest.raises(OpsError):
+        _require_v2_finality_session({"structure": {"exit_date": "2026-09-20"}}, SESSION)
+    with pytest.raises(OpsError):
+        _require_v2_finality_session({}, SESSION)
+    assert _validate_settlement_state(
+        {"status": "resolved", "resolved_at": SESSION + "T21:00:00Z",
+         "settlement_source": "polygon", "exit_source": "polygon"},
+        recorded=grandfathered, session=SESSION) == "v2_finality_session"
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ops.decision_commit: the settlement-import line validator,
+# driven directly against a real ledger connection (no job scheduler
+# needed -- _settlement_line/_settlement_dedupe_skip take only ``conn``).
+# --------------------------------------------------------------------------
+
+
+def _seed_prediction(conn, clock, *, row_id, generation_ref, extra=None):
+    payload = {"row_id": row_id, "ticker": "FAKE", "strategy": "TWIN-P", "event_date": SESSION,
+              "settlement": "closed"}
+    if extra:
+        payload.update(extra)
+    with transaction(conn):
+        return ledger_decisions.insert(
+            conn, logical_key="pred-" + row_id, decision_id="prediction:" + row_id, payload=payload,
+            purpose="shadow", kind="prediction", validations=[], created_at=SESSION + "T20:00:00Z",
+            generation_ref=generation_ref)
+
+
+def _settlement_item(row_id, **fields):
+    payload = {"row_id": row_id, "ticker": "FAKE", "strategy": "TWIN-P", "event_date": SESSION,
+              "settlement": "closed"}
+    payload.update(fields)
+    original = json.dumps(payload, sort_keys=True).encode()
+    return {"original_b64": base64.b64encode(original).decode("ascii"), "row": payload}
+
+
+def test_settlement_line_malformed_and_missing_prediction(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with transaction(conn):
+            set_authority(conn, None, "catalog", SESSION + "T20:00:00Z")
+        with pytest.raises(OpsError) as err:
+            with transaction(conn):
+                _settlement_line(conn, "not-a-dict", session=SESSION, clock=clock, existing_index={})
+        assert err.value.code == "VALIDATION_FAILED"
+
+        with pytest.raises(OpsError):
+            with transaction(conn):
+                _settlement_line(conn, {"original_b64": "###not-b64###", "row": {}}, session=SESSION,
+                                 clock=clock, existing_index={})
+
+        item = _settlement_item("r-nomatch", status="resolved", resolved_at=SESSION + "T21:00:00Z")
+        item["row"] = dict(item["row"], ticker="DIFFERENT")
+        with pytest.raises(OpsError):
+            with transaction(conn):
+                _settlement_line(conn, item, session=SESSION, clock=clock, existing_index={})
+
+        unknown = _settlement_item("r-unknown", status="resolved", resolved_at=SESSION + "T21:00:00Z")
+        with pytest.raises(OpsError) as err2:
+            with transaction(conn):
+                _settlement_line(conn, unknown, session=SESSION, clock=clock, existing_index={})
+        assert err2.value.code == "VALIDATION_FAILED"
+    finally:
+        conn.close()
+
+
+def test_settlement_line_contract_mismatch_records_divergence(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with transaction(conn):
+            set_authority(conn, None, "catalog", SESSION + "T20:00:00Z")
+        _seed_prediction(conn, clock, row_id="r1", generation_ref="gen-a")
+        item = _settlement_item("r1", status="resolved", resolved_at=SESSION + "T21:00:00Z",
+                                settlement_source="polygon", exit_source="polygon",
+                                ticker="OTHER")
+        diverged = []
+        with transaction(conn):
+            result = _settlement_line(conn, item, session=SESSION, clock=clock, existing_index={},
+                                      on_divergence=lambda row_id, *a: diverged.append(row_id))
+        assert result is None
+        assert diverged == ["r1"]
+        assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_settlement_line_dedupe_and_happy_paths(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        with transaction(conn):
+            set_authority(conn, None, "catalog", SESSION + "T20:00:00Z")
+        _seed_prediction(conn, clock, row_id="r1", generation_ref="gen-a",
+                         extra={"structure": {"exit_date": SESSION}})
+
+        # already_observed_this_session: same generation_ref, same status.
+        existing_index = {"r1": [{"status": "resolved", "generation_ref": SESSION}]}
+        item = _settlement_item("r1", status="resolved", resolved_at=SESSION + "T21:00:00Z",
+                                settlement_source="polygon", exit_source="polygon")
+        skipped = []
+        with transaction(conn):
+            result = _settlement_line(conn, item, session=SESSION, clock=clock,
+                                      existing_index=existing_index,
+                                      on_skip=lambda row_id, reason: skipped.append((row_id, reason)))
+        assert result is None
+        assert skipped == [("r1", "already_observed_this_session")]
+
+        # Same session, DIFFERENT status: a status-change divergence.
+        diverged = []
+        with transaction(conn):
+            result = _settlement_line(conn, item, session=SESSION, clock=clock,
+                                      existing_index={"r1": [{"status": "unresolvable",
+                                                              "generation_ref": SESSION}]},
+                                      on_divergence=lambda row_id, *a: diverged.append(row_id))
+        assert result is None
+        assert diverged == ["r1"]
+
+        # already_resolved: a DIFFERENT session already recorded "resolved".
+        skipped2 = []
+        with transaction(conn):
+            result = _settlement_line(
+                conn, item, session=SESSION, clock=clock,
+                existing_index={"r1": [{"status": "resolved", "generation_ref": "2026-09-01"}]},
+                on_skip=lambda row_id, reason: skipped2.append((row_id, reason)))
+        assert result is None
+        assert skipped2 == [("r1", "already_resolved")]
+
+        # Happy path: no existing observation at all -- returns the original
+        # bytes and reports the grandfathered proof kind.
+        admitted = []
+        with transaction(conn):
+            result = _settlement_line(
+                conn, item, session=SESSION, clock=clock, existing_index={},
+                on_admitted=lambda row_id, proof: admitted.append((row_id, proof)))
+        assert result == base64.b64decode(item["original_b64"])
+        assert json.loads(result) == item["row"]
+        assert admitted == [("r1", "v2_finality_session")]
+    finally:
+        conn.close()
+
+
+def test_validate_candidates_requires_bound_evidence():
+    with pytest.raises(OpsError) as err:
+        validate_candidates([], {})
+    assert err.value.code == "VALIDATION_FAILED"
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ops.decision_commit: commit_decisions_in_transaction's own
+# validation guards, and the commit_decisions/validate_candidates
+# "compatibility test seam" pair -- reusing the real claim/context build
+# from test_coordinator_refuses_when_recorded_binding_disagrees_with_validation
+# above, since ``resolve_bindings``/``validated_decision_candidate`` are not
+# worth re-deriving by hand.
+# --------------------------------------------------------------------------
+
+
+def _build_valid_claim_and_context(conn, store, clock):
+    score, finality = _score_and_finality()
+    plan = {"schema_version": "decision_plan.v1.0", "session": SESSION,
+            "deployment": "shadow-deployment", "decision_clock": SESSION + "T21:00:00+00:00",
+            "expected_population": ["FAKE|TWIN-P|" + SESSION]}
+    score_ref = _publish(store, conn, clock, {"rows": [score]}, "legacy_action.v1.0")
+    finality_ref = _publish(store, conn, clock, finality, "legacy_action.v1.0")
+    plan_ref = _publish(store, conn, clock, plan, "decision_plan.v1.0")
+    evidence = _decision_evidence(score_ref, finality_ref, plan_ref, score, finality, plan)
+    evidence_ref = _publish(store, conn, clock, evidence, "decision_evidence.v1.0")
+    with transaction(conn):
+        set_authority(conn, None, "catalog", SESSION + "T20:00:00.000000Z")
+    bindings = {"score.json": score_ref.artifact_id, "finality.json": finality_ref.artifact_id,
+                "decision_plan.json": plan_ref.artifact_id,
+                "decision_evidence.json": evidence_ref.artifact_id}
+    refs = (score_ref.artifact_id, finality_ref.artifact_id, plan_ref.artifact_id,
+            evidence_ref.artifact_id)
+    job = JobSpec(kind="legacy_decisions", implementation_ref="x", spec_hash=None,
+                 environment_ref="x",
+                 parameters={"expected_ids": ("legacy_decisions",), "session": SESSION,
+                             "input_bindings": bindings},
+                 input_refs=refs, output_namespace="shadow", resource_class="validation",
+                 retry_policy_ref="bounded", checkpoint_contract_ref="legacy_action.v1.0")
+    submit(conn, registry(), POLICY, SubmitRequest(
+        namespace="shadow", idempotency_key="guard-fixture", principal="operator", job=job),
+        clock=clock)
+    setup_epoch = begin_epoch(conn, clock=clock, boot_id="setup", pid=1)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=Supervisor(setup_epoch, "setup"), clock=clock, registry=registry())
+    resolved = resolve_bindings(conn, store, claim.spec)
+    with transaction(conn):
+        record_resolved_bindings(conn, claim.attempt_id, resolved)
+    decision = {"row_id": "FAKE|TWIN-P|" + SESSION, "event_id": "event-1",
+                "ticker": "FAKE", "strategy": "TWIN-P", "event_date": SESSION,
+                "as_of": SESSION, "written_at": plan["decision_clock"],
+                "decision_ts": plan["decision_clock"], "snapshot_hash": score["snapshot_hash"],
+                "score": score, "finality": finality}
+    candidate_ref = _publish(store, conn, clock, {"rows": [decision]}, "legacy_action.v1.0")
+    candidates, context = validated_decision_candidate(conn, store, claim, candidate_ref)
+    return claim, candidates, context, score, finality, plan, evidence
+
+
+def test_commit_decisions_in_transaction_guard_branches(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    store = ArtifactStore(tmp_path)
+    try:
+        claim, candidates, context, *_ = _build_valid_claim_and_context(conn, store, clock)
+
+        # Requires the caller's own open transaction.
+        with pytest.raises(ValueError):
+            commit_decisions_in_transaction(conn, claim, candidates, context, clock=clock)
+
+        bad_purpose = dict(context, purpose="not-shadow")
+        with pytest.raises(OpsError) as err:
+            with transaction(conn):
+                commit_decisions_in_transaction(conn, claim, candidates, bad_purpose, clock=clock)
+        assert err.value.code == "VALIDATION_FAILED"
+
+        bad_requested = dict(context, requested_session="2020-01-01")
+        with pytest.raises(OpsError) as err:
+            with transaction(conn):
+                commit_decisions_in_transaction(conn, claim, candidates, bad_requested, clock=clock)
+        assert err.value.code == "INPUT_CHANGED"
+
+        bad_finality_date = dict(context, finality_date="2020-01-01")
+        with pytest.raises(OpsError) as err:
+            with transaction(conn):
+                commit_decisions_in_transaction(conn, claim, candidates, bad_finality_date, clock=clock)
+        assert err.value.code == "INPUT_CHANGED"
+
+        bad_rows_hash = dict(context, candidate_rows_hash="sha256:" + "0" * 64)
+        with pytest.raises(OpsError) as err:
+            with transaction(conn):
+                commit_decisions_in_transaction(conn, claim, candidates, bad_rows_hash, clock=clock)
+        assert err.value.code == "INPUT_CHANGED"
+
+        # No decisions committed by any of the refused attempts above.
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+
+        # The untampered context still commits cleanly.
+        with transaction(conn):
+            receipts = commit_decisions_in_transaction(conn, claim, candidates, context, clock=clock)
+        assert len(receipts) == 1
+    finally:
+        conn.close()
+
+
+def test_commit_decisions_wrapper_and_validate_candidates_seam(tmp_path):
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    store = ArtifactStore(tmp_path)
+    try:
+        claim, candidates, context, score, finality, plan, evidence = (
+            _build_valid_claim_and_context(conn, store, clock))
+        strict = {"score": {"rows": [score]}, "finality": finality, "plan": plan, "evidence": evidence,
+                  "bindings": context["bindings"]}
+        wrapper_context = {"candidate_validation": strict}
+        validated = validate_candidates(candidates, wrapper_context)
+        assert validated["candidate_rows_hash"] == context["candidate_rows_hash"]
+
+        # A mismatched validated_context refuses before ever opening a
+        # transaction or touching the catalog.
+        with pytest.raises(OpsError) as err:
+            commit_decisions(conn, claim, candidates, wrapper_context, {"tampered": True}, clock=clock)
+        assert err.value.code == "INPUT_CHANGED"
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+
+        # The matched validated_context commits through the real
+        # in-transaction path.
+        receipts = commit_decisions(conn, claim, candidates, wrapper_context, validated, clock=clock)
+        assert len(receipts) == 1
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ops.legacy_adapter: filesystem-safety helpers and small pure
+# refusals -- real files/symlinks under tmp_path, no legacy subprocess.
+# --------------------------------------------------------------------------
+
+
+def test_manifest_files_refuses_missing_or_symlinked_member(tmp_path):
+    real = tmp_path / "a.txt"
+    real.write_bytes(b"data")
+    manifest = manifest_files(tmp_path, ("a.txt",))
+    assert manifest["a.txt"]["byte_size"] == 4
+
+    with pytest.raises(OpsError) as err:
+        manifest_files(tmp_path, ("missing.txt",))
+    assert err.value.code == "INPUT_CHANGED"
+
+    (tmp_path / "link.txt").symlink_to(real)
+    with pytest.raises(OpsError):
+        manifest_files(tmp_path, ("link.txt",))
+
+
+def test_copy_read_set_refuses_symlinked_roots_and_verifies_copies(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.txt").write_bytes(b"data")
+    target = tmp_path / "private"
+
+    copied = copy_read_set(source, target, ("a.txt",))
+    assert copied["a.txt"]["byte_size"] == 4
+    assert (target / "a.txt").read_bytes() == b"data"
+
+    symlinked_source = tmp_path / "source-link"
+    symlinked_source.symlink_to(source)
+    with pytest.raises(OpsError) as err:
+        copy_read_set(symlinked_source, tmp_path / "private2", ("a.txt",))
+    assert err.value.code == "INTEGRITY_FAILED"
+
+    symlinked_target = tmp_path / "target-link"
+    symlinked_target.symlink_to(target)
+    with pytest.raises(OpsError):
+        copy_read_set(source, symlinked_target, ("a.txt",))
+
+
+def test_overlay_read_set_refuses_symlinked_source_and_existing_destination(tmp_path):
+    materialization = tmp_path / "materialized"
+    materialization.mkdir()
+    (materialization / "curated").mkdir()
+    (materialization / "curated" / "f.txt").write_bytes(b"x")
+
+    private = tmp_path / "overlay"
+    overlay_read_set(materialization, private)
+    assert (private / "curated" / "f.txt").is_symlink()
+    assert (private / "curated" / "f.txt").read_bytes() == b"x"
+
+    with pytest.raises(OpsError) as err:
+        overlay_read_set(materialization, private)
+    assert err.value.code == "INTEGRITY_FAILED"
+
+    symlinked = tmp_path / "materialized-link"
+    symlinked.symlink_to(materialization)
+    with pytest.raises(OpsError):
+        overlay_read_set(symlinked, tmp_path / "overlay-2")
+
+
+def test_legacy_action_refuses_unallowlisted_action(tmp_path):
+    with pytest.raises(OpsError) as err:
+        legacy_action("legacy_not_a_real_action", {}, tmp_path)
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_invoke_nightly_helper_refuses_unaudited_helper():
+    with pytest.raises(OpsError) as err:
+        invoke_nightly_helper(REPO, "not_an_audited_helper")
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_run_legacy_script_refuses_unregistered_and_args(tmp_path):
+    with pytest.raises(OpsError) as err:
+        run_legacy_script(REPO, "experiments/not_registered/run.py")
+    assert err.value.code == "INVALID_REQUEST"
+
+    with pytest.raises(OpsError) as err:
+        run_legacy_script(REPO, "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+                          args=("--extra",))
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_run_legacy_rebuild_surfaces_subprocess_failure(tmp_path):
+    """A candidate root with no ``engine.data.rebuild`` module fails fast
+    (``ModuleNotFoundError``, non-zero exit) -- a real subprocess, never a
+    successful rebuild, so this stays cheap."""
+    empty_repo = tmp_path / "empty-repo"
+    empty_repo.mkdir()
+    with pytest.raises(OpsError) as err:
+        run_legacy_rebuild(tmp_path / "candidate", empty_repo, timeout=30)
+    assert err.value.code == "VALIDATION_FAILED"
+
+
+class _FakeResult:
+    def __init__(self, stdout, stderr=""):
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_json_stdout_refuses_non_json_output():
+    with pytest.raises(OpsError) as err:
+        _json_stdout(_FakeResult("not json", "boom"), "could not parse")
+    assert err.value.code == "VALIDATION_FAILED"
+    assert _json_stdout(_FakeResult(json.dumps({"a": 1})), "x") == {"a": 1}
+
+
+def test_legacy_adapter_load_helpers_require_their_artifact(tmp_path):
+    with pytest.raises(OpsError) as err:
+        _load_action_frame(tmp_path)
+    assert err.value.code == "INPUT_CHANGED"
+    with pytest.raises(OpsError):
+        _load_finality(tmp_path)
+    with pytest.raises(OpsError):
+        _load_score_document(tmp_path)
+
+
+def test_legacy_ledger_schema_version_is_a_real_constant():
+    assert legacy_ledger_schema_version() == 3
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.foundation: small pure edges the Phase 1/2 suites never happen
+# to exercise (RFC 8785 exponential number form, a naive-datetime refusal,
+# and _serialize's own defensive type guard).
+# --------------------------------------------------------------------------
+
+
+def test_format_timestamp_refuses_a_naive_datetime():
+    import datetime as _dt
+
+    from engine.v2.foundation import format_timestamp
+    with pytest.raises(ValueError):
+        format_timestamp(_dt.datetime(2026, 9, 12, 12, 0, 0))
+
+
+def test_canonical_json_renders_large_magnitudes_in_exponential_form():
+    from engine.v2.foundation import canonical_json
+    encoded = canonical_json(1e21)
+    assert "e+" in encoded
+
+
+def test_canonical_serialize_refuses_an_unnormalized_type_directly():
+    from engine.v2.foundation import canonical as canonical_module
+    with pytest.raises(TypeError):
+        canonical_module._serialize(object())
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ops.provider_budget: account-wide leases, call accounting and
+# durable source backoff. Not part of any D0x row's own dedicated test file,
+# but wholly untested under the Phase 2 fixed suite before this addition
+# (only D4's admission-blocking case, in tests/test_v2_ops_provider_admission.py,
+# is covered, and that file is not in the fixed suite) -- real sqlite
+# transactions via ops_support.catalog/enqueue_claim, no mocking.
+# --------------------------------------------------------------------------
+
+from engine.v2.ops import provider_budget as _provider_budget  # noqa: E402
+from tests import ops_support as _ops_support  # noqa: E402
+
+
+def test_configure_account_refuses_a_negative_budget(tmp_path):
+    conn, clock, _supervisor = _ops_support.catalog(tmp_path)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.configure_account(conn, "acct-neg", "gen-1", remaining=-1, live_reserve=0)
+    assert err.value.code == "INVALID_REQUEST"
+    with pytest.raises(OpsError):
+        _provider_budget.configure_account(conn, "acct-neg", "gen-1", remaining=1, live_reserve=-1)
+
+
+def test_reserve_refuses_a_non_positive_call_count(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    claim = _ops_support.enqueue_claim(conn, clock, supervisor)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.reserve(conn, claim, "acct-1", 0, clock=clock)
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_reserve_refuses_an_unconfigured_or_blocked_account(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    claim = _ops_support.enqueue_claim(conn, clock, supervisor)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.reserve(conn, claim, "no-such-account", 1, clock=clock)
+    assert err.value.code == "CREDENTIAL_INVALID"
+
+    _provider_budget.configure_account(conn, "acct-blocked", "gen-1", remaining=10, live_reserve=0)
+    _provider_budget.record_response(conn, "acct-blocked", 401, clock=clock)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.reserve(conn, claim, "acct-blocked", 1, clock=clock)
+    assert err.value.code == "CREDENTIAL_INVALID"
+
+
+def test_reserve_refuses_during_an_unexpired_backoff(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    claim = _ops_support.enqueue_claim(conn, clock, supervisor)
+    _provider_budget.configure_account(conn, "acct-rl", "gen-1", remaining=10, live_reserve=0)
+    _provider_budget.record_response(conn, "acct-rl", 429, clock=clock)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.reserve(conn, claim, "acct-rl", 1, clock=clock)
+    assert err.value.code == "RATE_LIMITED"
+    clock.advance(66)
+    _provider_budget.reserve(conn, claim, "acct-rl", 1, clock=clock)
+
+
+def test_reserve_refuses_a_second_active_lease_and_an_over_budget_request(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    claim_a = _ops_support.enqueue_claim(conn, clock, supervisor, key="one")
+    claim_b = _ops_support.enqueue_claim(conn, clock, supervisor, key="two")
+    _provider_budget.configure_account(conn, "acct-lease", "gen-1", remaining=5, live_reserve=0)
+    _provider_budget.reserve(conn, claim_a, "acct-lease", 2, clock=clock)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.reserve(conn, claim_b, "acct-lease", 1, clock=clock)
+    assert err.value.code == "RESOURCE_UNAVAILABLE"
+
+    _provider_budget.configure_account(conn, "acct-tight", "gen-1", remaining=2, live_reserve=1)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.reserve(conn, claim_a, "acct-tight", 5, clock=clock)
+    assert err.value.code == "RESOURCE_UNAVAILABLE"
+
+
+def test_before_request_refuses_without_an_active_reservation(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    claim = _ops_support.enqueue_claim(conn, clock, supervisor)
+    _provider_budget.configure_account(conn, "acct-noreserve", "gen-1", remaining=10, live_reserve=0)
+    with pytest.raises(OpsError) as err:
+        _provider_budget.before_request(conn, claim, "acct-noreserve", clock=clock)
+    assert err.value.code == "CREDENTIAL_INVALID"
+
+
+def test_before_request_refuses_rate_limit_and_exhausted_retries_then_admits(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    claim = _ops_support.enqueue_claim(conn, clock, supervisor)
+    _provider_budget.configure_account(conn, "acct-br", "gen-1", remaining=10, live_reserve=0)
+    _provider_budget.reserve(conn, claim, "acct-br", 1, clock=clock)
+
+    with transaction(conn):
+        conn.execute("UPDATE provider_accounts SET next_eligible_at = ? WHERE account = ?",
+                     ("2099-01-01T00:00:00.000000Z", "acct-br"))
+    with pytest.raises(OpsError) as err:
+        _provider_budget.before_request(conn, claim, "acct-br", clock=clock)
+    assert err.value.code == "RATE_LIMITED"
+    with transaction(conn):
+        conn.execute("UPDATE provider_accounts SET next_eligible_at = NULL WHERE account = ?",
+                     ("acct-br",))
+
+    before = conn.execute("SELECT remaining FROM provider_accounts WHERE account=?",
+                          ("acct-br",)).fetchone()["remaining"]
+    _provider_budget.before_request(conn, claim, "acct-br", clock=clock)
+    after = conn.execute("SELECT remaining, uncertain FROM provider_accounts WHERE account=?",
+                         ("acct-br",)).fetchone()
+    assert after["remaining"] == before - 1
+    assert after["uncertain"] == 1
+
+    with pytest.raises(OpsError) as err:
+        _provider_budget.before_request(conn, claim, "acct-br", clock=clock)
+    assert err.value.code == "RESOURCE_UNAVAILABLE"
+
+
+def test_record_response_maps_every_status_family(tmp_path):
+    conn, clock, supervisor = _ops_support.catalog(tmp_path)
+    _provider_budget.configure_account(conn, "acct-resp", "gen-1", remaining=10, live_reserve=0)
+
+    with pytest.raises(OpsError) as err:
+        _provider_budget.record_response(conn, "acct-resp", 200, clock=clock, remaining=-1)
+    assert err.value.code == "INVALID_REQUEST"
+
+    code = _provider_budget.record_response(conn, "acct-resp", 403, clock=clock)
+    assert code == "CREDENTIAL_INVALID"
+    blocked = conn.execute("SELECT blocked_code FROM provider_accounts WHERE account=?",
+                           ("acct-resp",)).fetchone()["blocked_code"]
+    assert blocked == "CREDENTIAL_INVALID"
+
+    assert _provider_budget.record_response(conn, "acct-resp", 404, clock=clock) == "SOURCE_NOT_FOUND"
+    assert _provider_budget.record_response(conn, "acct-resp", 503, clock=clock) == "TRANSIENT_SOURCE"
+
+    code = _provider_budget.record_response(conn, "acct-resp", 429, clock=clock)
+    assert code == "RATE_LIMITED"
+    eligible = conn.execute("SELECT next_eligible_at FROM provider_accounts WHERE account=?",
+                            ("acct-resp",)).fetchone()["next_eligible_at"]
+    assert eligible is not None
+
+    assert _provider_budget.record_response(conn, "acct-resp", 200, clock=clock, final=False) == "SOURCE_NOT_FINAL"
+    assert _provider_budget.record_response(conn, "acct-resp", 200, clock=clock, empty=True) == "SOURCE_EMPTY"
+    assert _provider_budget.record_response(conn, "acct-resp", 200, clock=clock, remaining=42) is None
+    remaining = conn.execute("SELECT remaining, uncertain FROM provider_accounts WHERE account=?",
+                             ("acct-resp",)).fetchone()
+    assert remaining["remaining"] == 42
+    assert remaining["uncertain"] == 0
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.ops.worker: the fixed subprocess entrypoint's own pure/file-local
+# helpers (exception classification, diagnostics staging, the non-subprocess
+# ``dispatch`` branches) -- real files under tmp_path, no mocking. ``main()``
+# itself (stdin pipe + sched_setaffinity) stays untested here; every worker
+# already exercises it end-to-end through a real subprocess elsewhere.
+# --------------------------------------------------------------------------
+
+from engine.v2.ops import worker as _worker  # noqa: E402
+
+
+def test_classify_maps_each_reviewed_exception_family(tmp_path):
+    ops_err = OpsError(_worker.make_problem("VALIDATION_FAILED", "x"))
+    assert _worker._classify(ops_err) is ops_err.problem
+
+    problem = _worker._classify(ModuleNotFoundError("no module named 'bogus_thing'"))
+    assert problem.code == "INPUT_CHANGED"
+    assert "bogus_thing" in problem.message or problem.details.get("module") is not None
+
+    problem = _worker._classify(ValueError("boom"))
+    assert problem.code == "VALIDATION_FAILED"
+    assert "boom" in problem.message
+
+    problem = _worker._classify(KeyError("missing"))
+    assert problem.code == "WORKER_FAILED"
+    assert problem.details["exception_type"] == "KeyError"
+    assert "missing" not in problem.message
+
+
+def test_last_frame_reads_the_deepest_traceback_entry_or_none():
+    assert _worker._last_frame(ValueError("no traceback")) is None
+    try:
+        raise ValueError("has one")
+    except ValueError as exc:
+        frame = _worker._last_frame(exc)
+        assert frame is not None
+        assert __file__.split("/")[-1] in frame or "test_v2_ops_nightly_completion.py" in frame
+
+
+def test_write_diagnostics_and_failure_details_land_in_private_files(tmp_path):
+    try:
+        raise RuntimeError("diagnostic content")
+    except RuntimeError:
+        _worker._write_diagnostics(tmp_path)
+    stderr_path = tmp_path / "diagnostics" / "worker.stderr"
+    assert "diagnostic content" in stderr_path.read_text()
+
+    _worker._write_failure_details(tmp_path, {"missing": ["a"], "unplanned": ["b"]})
+    details_path = tmp_path / "diagnostics" / "failure_details.json"
+    assert json.loads(details_path.read_text()) == {"missing": ["a"], "unplanned": ["b"]}
+
+
+def test_failure_result_assembles_a_typed_worker_result(tmp_path):
+    try:
+        raise ValueError("bad candidate")
+    except ValueError as exc:
+        result = _worker._failure_result(tmp_path, exc)
+    assert result["failure"] == "VALIDATION_FAILED"
+    assert result["problem"]["code"] == "VALIDATION_FAILED"
+    assert (tmp_path / "diagnostics" / "worker.stderr").exists()
+
+
+def test_dispatch_refuses_an_unsupported_worker(tmp_path):
+    with pytest.raises(ValueError):
+        _worker.dispatch("no-such-worker", {}, tmp_path)
+
+
+def test_dispatch_artifact_check_reports_affinity_and_threads(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    result = _worker.dispatch("artifact_check", {"expected_ids": ["a", "b"]}, tmp_path)
+    assert result["completed_ids"] == ["a", "b"]
+    assert result["no_work"] is False
+    assert (tmp_path / "receipt.json").exists()
+    assert result["observed"]["threads"] == "1"
+
+
+def test_dispatch_artifact_check_reports_no_work_for_an_empty_expected_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    result = _worker.dispatch("artifact_check", {"expected_ids": []}, tmp_path)
+    assert result["no_work"] is True
+    assert result["completed_ids"] == []
+
+
+def test_dispatch_effect_receipt_names_its_output_with_a_receipt_suffix(tmp_path):
+    for kind in ("ledger_export", "engineering_gate", "publication", "backup"):
+        result = _worker.dispatch(kind, {"expected_ids": ["x"]}, tmp_path)
+        assert result["outputs"][0]["name"] == kind + "_receipt"
+        assert result["completed_ids"] == ["x"]
+        assert result["no_work"] is False
+
+
+
+
+# --------------------------------------------------------------------------
+# engine.v2.foundation: SystemClock's real (non-fake) clock methods, and
+# untag_nonfinite's malformed-tag fallback -- neither exercised by any
+# existing suite file (every test injects a FakeClock; every ``__nonfinite__``
+# round-trip test uses a real repr(nan)/repr(inf) string).
+# --------------------------------------------------------------------------
+
+
+def test_system_clock_now_and_monotonic_return_real_values():
+    import datetime as _dt
+
+    clock = SystemClock()
+    now = clock.now()
+    assert now.tzinfo is not None
+    assert now.tzinfo.utcoffset(now) == _dt.timedelta(0)
+    a = clock.monotonic()
+    b = clock.monotonic()
+    assert isinstance(a, float) and isinstance(b, float)
+    assert b >= a
+
+
+def test_untag_nonfinite_leaves_a_malformed_tag_as_an_ordinary_dict():
+    from engine.v2.foundation.canonical import untag_nonfinite
+
+    malformed = {"__nonfinite__": "not-a-number"}
+    assert untag_nonfinite(malformed) == {"__nonfinite__": "not-a-number"}
+    real_nan_tag = {"__nonfinite__": repr(float("nan"))}
+    import math as _math
+    assert _math.isnan(untag_nonfinite(real_nan_tag))
+
+

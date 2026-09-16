@@ -119,6 +119,154 @@ The needed follow-up is a real, isolated ``legacy_decision_replay`` run
 under ``bounded_run.py --max-rss-gb`` set well above 5.25 GiB (per AGENTS.md
 "Running jobs on this box", with no other heavy job active) to get a
 completed tree-RSS peak, not a further paper resize.
+
+v7 (2026-09-15) raises ``model_evidence`` from 4 GiB to 5.75 GiB
+(``5*GIB + 3*GIB//4`` = 6174015488 bytes). The old 4 GiB reservation was
+never a real peak, only what happened to be sampled every 30s by
+``bounded_run``'s watchdog (4.26 GiB, per a prior shadow-closeout attempt) --
+a real incident (``job_caaed30eb5d1745ce87ed22a55dbc2e3``) already hit
+``RESOURCE_LIMIT_EXCEEDED`` at a watchdog-observed 4.38 GiB against that same
+4 GiB reservation (see ``tests/test_v2_data_reference_inputs.py``'s
+``test_absent_model_evidence_cache_is_not_refused`` docstring). This pass
+re-measured with 1-1.5s PSS sampling (fine enough to catch a spike a 30s
+poll would miss) across FIVE real ``engine.dashboard.model_evidence --force``
+rebuilds in a worktree wired with real read-only data (b41bc94's chooser
+``raw``-frame fix already applied to all five): 4988.1, 5543.0, 4845.8 MiB
+before any further change, 5007.7 MiB after fix 1 below, 5149.1 MiB after
+both fixes -- all well above the old reservation and its 4.26/4.38 GiB
+priors, none of them close to each other, i.e. the true peak was never
+4 GiB, 30s sampling just never landed on it.
+
+Two real fixes went into ``engine/dashboard/model_evidence.py`` from the same
+investigation (both verified byte-identical output against the unfixed
+version on repeat forced rebuilds -- same ``n_rows``/``target_mean``/
+``target_std``/``sampled``/``inputs`` per model, so this is a memory and
+runtime change only): (1) ``_replay_trades`` streams+filters the ``trades``
+table one year at a time, the same shape ``_daily_subset`` already used for
+``daily_market`` -- isolated profiling (checkpointed RSS/PSS through just
+this load) showed the OLD ``store.read_table`` then boolean-filter shape
+peaked at 4115.5 MiB (both the ~1.9 GiB unfiltered and ~2.1 GiB filtered
+copies resident at once), the fixed version peaks at 2236.6 MiB for the same
+load; (2) ``_release_free_pages`` -- ``engine.score``'s own documented
+``malloc_trim`` pattern, not imported from there to avoid that module's
+import weight -- runs after each champion's frame is dropped, on the
+per-champion exception path, and after the trades/daily_market
+concatenations, because glibc does not hand freed arenas back to the OS on
+its own and this rebuild drops several multi-hundred-MB-to-multi-GiB frames
+in one long-lived process.
+
+Both fixes are real and worth keeping (wall time dropped from a 434s prior
+baseline to 294.8s, about -32%, and the resident floor between steps is
+lower), but they did NOT lower the single largest transient peak: the
+post-fix run (5149.1 MiB) sits inside the same 4845.8-5543.0 MiB range as
+the pre-fix runs. Isolated profiles of the two heaviest individual champion
+builds in this rebuild -- ``gate_midfill_str_runup`` and
+``gate_midfill_str_thru_forecast_analog`` (the Scorer+``FeatureContext``
+path already flagged as heavy in ``_dataset_for``'s own docstring) -- each
+independently peaked at only ~3.5-3.6 GiB, so the full run's ~5-5.5 GiB peak
+is not fully explained by any one step measured alone; judgement call
+(mine, not independently re-verified): the remainder is glibc arena growth
+compounding across the loop's several sequential large alloc/free cycles,
+which ``malloc_trim`` only partly recovers because it runs BETWEEN steps,
+not during the one still ramping up. A structural fix -- running each
+champion's dataset build in its own subprocess, so peaks cannot compound
+across the loop and the OS reclaims per-process on exit -- would very
+plausibly get this under ~3.5 GiB, but is a bigger change than this pass's
+budget covered, and is not guessed at here without a measurement behind it.
+
+5.75 GiB is ~344.6 MiB (0.336 GiB, ~6% of peak) above the highest of the
+five measured peaks (5543.0 MiB = 5812616192 bytes) and leaves ~0.85 GiB of
+margin under this policy's own ``capacity_bytes`` ceiling (host_total -
+base_reserve, ~6.60 GiB -- unchanged since v5/v6, the host itself has not
+changed). ``heavy=True`` and ``max_heavy_concurrency=1`` already keep this
+profile from ever being admitted alongside another heavy DAG job, so the
+residual risk this reservation carries is admission against LIVE headroom
+on a busy host (the same ``headroom_bytes`` constraint v6 measured for
+``legacy_score``), not a collision with a second heavy job: on this
+shared dev box, with unrelated interactive work (a coverage measurement, a
+Phase 3 browser session) also resident, live headroom was observed as low
+as ~5.0-5.1 GiB during this investigation, below 5.75 GiB -- so
+``legacy_model_evidence`` should now be expected to queue, not run
+concurrently with other memory-hungry work on THIS box, until either the
+structural fix above lands or the host gets more memory. That is a real,
+stated trade-off, not an oversight.
+
+v8 (2026-09-15) lowers ``model_evidence`` from 5.75 GiB back to 5 GiB
+(``5*GIB`` = 5368709120 bytes): v7's 5.75 GiB is not admittable on this host
+in practice, only on paper against ``capacity_bytes``. A live sample taken
+right after v7 merged (``discovery.sample_capacity`` ->
+``resources.headroom_bytes``, one coverage run active, nothing else heavy):
+host_total 7.60 GiB, available 5.91 GiB, capacity 6.60 GiB, **headroom_now
+5.41 GiB** -- below the 5.75 GiB v7 needed, so ``admits_now=False``. v6's own
+docstring already names ``headroom_bytes`` (live host-available minus
+``free_margin_bytes``) as admission's binding test and ``capacity_bytes`` as
+the wrong ceiling to check a reservation against; v7 re-made that exact
+mistake for a different profile. The result was the same failure mode v5
+caused for ``legacy_score``: not a fast ``RESOURCE_LIMIT_EXCEEDED`` kill, but
+an attempt that never gets admitted at all and queues under
+``MEMORY_HEADROOM`` indefinitely.
+
+The fix this time is structural, not a renumbering. Two changes went into
+``engine/dashboard/model_evidence.py``, both re-verified byte-identical
+against the pre-change output across two full forced rebuilds (every
+``model_evidence.json`` field equal except ``generated_at``/``elapsed_s``,
+wall-clock metadata that is expected to vary run to run -- ``fingerprint``,
+``deciles`` and every per-model block, including every ``inputs`` entry,
+were identical): (1) each champion's dataset build now runs in its own
+``multiprocessing`` ``spawn`` subprocess (``_run_isolated`` /
+``_champion_block_impl``), so nothing one champion's build allocates --
+freed-but-fragmented glibc arenas included -- can still be resident when the
+next champion's build starts; the OS reclaims the whole subprocess on exit,
+which ``gc.collect()`` plus ``malloc_trim`` inside one long-lived process
+could only approximate. (2) ``_dataset_for``'s gate branch built a
+``FeatureContext`` for the STR-THRU-forecast-analog champion by calling
+``FeatureContext.load(tickers, years=years)`` — a SECOND independent read of
+``daily_market`` filtered to the exact same tickers/years the ``daily``
+variable four lines above it had just been built from — so the same rows
+were resident twice at once; isolated, continuously-sampled (1s PSS)
+profiling of that one champion's build showed this second load was the
+single largest transient in the whole rebuild, 5.0-5.4 GiB, bigger than any
+other step alone. Building the context directly from the already-loaded
+``daily`` frame (``FeatureContext(panel=panel, daily=daily,
+calendar=trading_calendar())``) removed the duplicate read; ``daily`` is a
+strict column superset (read with no column filter) over identical rows, so
+this is the same data, not an approximation. (3) ``_champion_block_impl``
+also filtered ``_replay_trades()``'s full 982.9 MiB (every strategy, every
+year) down to just the champion's own strategy (99.95 MiB for STR-THRU) and
+released the rest immediately, rather than holding the whole table resident
+for the champion's entire build -- the previous code only applied this
+filter deep inside ``_dataset_for``, after the caller had already kept its
+own reference to the unfiltered table alive for the whole call.
+
+Re-measured the same way v7 did (1-1.2s PSS sampling of the whole descendant
+process tree, real ``engine.dashboard.model_evidence --force`` rebuilds,
+several runs, gated per AGENTS.md): three post-fix runs peaked at 4765.7,
+4866.2 and 4472.3 MiB -- the worst, 4866.2 MiB (5514162585.6 bytes, ~4.753
+GiB), is this reservation's basis. 5 GiB (5368709120 bytes) is ~253.8 MiB
+(~5.0%) above that worst measured peak -- margin in the same range as v7's
+own 6% -- and, checked against the conservative live headroom sample above
+(5.41 GiB = 5814778380.8 bytes, not the 6.60 GiB ``capacity_bytes`` ceiling),
+leaves ~0.41 GiB of real margin: ``5368709120 <= 5814778380`` admits. A fresh
+``headroom_bytes`` sample taken while finishing this pass (idle box, no other
+heavy work) read 6277255168 bytes (~5.85 GiB), giving even more room, but the
+busier 5.41 GiB figure is the one this reservation is sized against, per this
+module's own "state the conservative sample" rule (v6).
+
+This does not reach the ideal 4 GiB this pass targeted: the worst-case
+champion (STR-THRU forecast-analog gate, ``rows`` filtered to ~19k trades,
+its ``Scorer``/``AnalogMatcher`` join, and Tier-4 forecast attach) still
+peaks near 4.75-4.9 GiB on its own even fully isolated and with both
+redundant loads removed -- the isolated-champion figures in v7's docstring
+(~3.5-3.6 GiB) undercounted this champion specifically, because they used
+checkpointed (``gc.collect()``-gated) sampling, which this investigation
+found can miss a transient peak between checkpoints; continuous 1s sampling
+does not have that blind spot and is what both this measurement and the
+determinism check above used. Getting under 4 GiB would need reducing what
+that one champion holds at once during analog matching itself (e.g.
+streaming ``match_frame`` rather than materializing all ~19k matches, or
+bounding the daily-market span further), which is further profiling and
+change than this pass covers -- a real, stated follow-up, not a guess ahead
+of evidence.
 """
 from __future__ import annotations
 
@@ -130,7 +278,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-15.v6"
+POLICY_VERSION = "ops_resources.2026-09-15.v8"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -194,9 +342,17 @@ DEFAULT_POLICY = ResourcePolicy(
                         scratch_bytes=4 * GIB, heavy=True),
         # legacy_model_evidence (store_domains read) stages the legacy read
         # set through the same barrier -- scratch bumped 2026-09-14 (v4) from
-        # 1 GiB to the 1.67 GiB + headroom basis above.
-        ResourceProfile(name="model_evidence", memory_bytes=4 * GIB, cpu_count=4,
-                        scratch_bytes=4 * GIB, heavy=True),
+        # 1 GiB to the 1.67 GiB + headroom basis above. memory_bytes raised
+        # 2026-09-15 (v7) from 4 GiB to 5.75 GiB, then lowered 2026-09-15
+        # (v8) to 5 GiB once 5.75 GiB proved un-admittable against live
+        # headroom_bytes (not just capacity_bytes) and per-champion
+        # subprocess isolation plus a redundant-daily_market-load fix brought
+        # the real worst-case peak down to 4866.2 MiB -- see the module
+        # docstring's v8 entry for the full basis (three post-fix forced
+        # rebuilds, 1-1.2s PSS sampling, and the headroom_bytes sample this
+        # reservation is checked against).
+        ResourceProfile(name="model_evidence", memory_bytes=5 * GIB,
+                        cpu_count=4, scratch_bytes=4 * GIB, heavy=True),
         ResourceProfile(name="legacy_rebuild", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
         # Covers the legacy_materialize worker (engine/v2/data/legacy_materialization.py

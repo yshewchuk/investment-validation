@@ -138,7 +138,10 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
     settlement_present = settlement_wm is not None and settlement_wm["occurrence"] == session
 
     root = Path(ops_root) / "exports" / scope
-    generation_dir = export_generation(conn, root, generation=release_key, purposes=EXPORT_PURPOSES,
+    # The full ledger can grow independently of this decision receipt (for
+    # example through history imports or settlement). Its immutable export
+    # identity therefore follows the exported bytes, not the outbox key.
+    generation_dir = export_generation(conn, root, purposes=EXPORT_PURPOSES,
                                        fault=fault)
     keepalive()
     catalog_counts = _catalog_counts(conn, EXPORT_PURPOSES)
@@ -152,7 +155,7 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
     keepalive()
     receipt = {"schema_version": "ledger_export_receipt.v1.0", "scope": scope, "session": session,
                "requested_session": requested_session,
-               "generation": release_key, "counts": verified_counts,
+               "generation": generation_dir.name, "counts": verified_counts,
                "settlement": {"present": settlement_present,
                               "release_key": settlement_wm["receipt_ref"] if settlement_present
                               else None}}

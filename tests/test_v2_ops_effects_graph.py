@@ -27,6 +27,7 @@ import json
 import tarfile
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,9 +35,11 @@ from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
 from engine.v2.ledger.decisions import insert, set_authority
 from engine.v2.ledger.export import export_generation
+from engine.v2.ops import worker
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.checkpoints import register_artifact
+from engine.v2.ops.checkpoints import artifact, register_artifact
+from engine.v2.ops.cli import explain_command
 from engine.v2.ops.effects_graph import (
     EXPORT_PURPOSES,
     backup_effect,
@@ -44,7 +47,7 @@ from engine.v2.ops.effects_graph import (
     ledger_export_effect,
     publication_effect,
 )
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.input_bindings import resolve_and_record, resolve_bindings
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
@@ -54,8 +57,17 @@ from engine.v2.ops.publication import publish_local
 from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
-from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit_graph
-from tests.ops_support import DEFAULT_POLICY, FakeClock, sample
+from engine.v2.ops.submission import NamespacePolicy, get_job, job_id_for, submit, submit_graph
+from engine.v2.ops.supervisor import Service
+from tests.ops_support import (
+    DEFAULT_POLICY,
+    REGISTRY,
+    TEST_POLICY,
+    FakeClock,
+    catalog,
+    enqueue_claim,
+    sample,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -299,6 +311,94 @@ def test_ledger_export_settlement_absent_when_not_committed(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("growth", ["history", "settlement", "excluded"])
+def test_ledger_export_catalog_growth_preserves_old_generation(tmp_path, growth):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        release_key = _seed_decisions(conn, clock, scope, SESSION,
+                                      predictions=[_row("evt-1", "pred")])
+        first_claim = _submit_and_claim(
+            conn, clock, supervisor, kind="ledger_export", key="before-growth",
+            parameters=_params("ledger_export", SESSION, scope, decision_clock="before"))
+        first = ledger_export_effect(conn, store, first_claim, root, REPO, clock=clock)
+        _commit(conn, clock, first_claim, first)
+        export_root = root / "exports" / scope
+        old_generation = (export_root / "CURRENT").read_text().strip()
+        old_dir = export_root / old_generation
+        old_files = {p.relative_to(old_dir): p.read_bytes() for p in old_dir.rglob("*.jsonl")}
+        old_tar = store.verify(first[1][0][1]).read_bytes()
+        if growth == "settlement":
+            settlement_key = _seed_settlement(conn, clock, scope, SESSION,
+                                               outcomes=[_row("evt-1", "out")])
+        else:
+            purpose = "legacy_import" if growth == "history" else "research_reconstruction"
+            with transaction(conn):
+                insert(conn, logical_key="growth", decision_id="prediction:growth",
+                       payload=_row("evt-growth", "pred"), purpose=purpose, kind="prediction",
+                       validations={}, created_at=format_timestamp(clock.now()))
+
+        second_claim = _submit_and_claim(
+            conn, clock, supervisor, kind="ledger_export", key="after-growth",
+            parameters=_params("ledger_export", SESSION, scope, decision_clock="after"))
+        second = ledger_export_effect(conn, store, second_claim, root, REPO, clock=clock)
+        _commit(conn, clock, second_claim, second)
+        new_generation = (export_root / "CURRENT").read_text().strip()
+        assert (new_generation == old_generation) == (growth == "excluded")
+        assert {p.relative_to(old_dir): p.read_bytes() for p in old_dir.rglob("*.jsonl")} == old_files
+        assert store.verify(first[1][0][1]).read_bytes() == old_tar
+        assert conn.execute("SELECT receipt_ref FROM watermarks WHERE stage=? AND scope=?",
+                            ("decisions", scope)).fetchone()[0] == release_key
+        if growth == "settlement":
+            receipt = json.loads(conn.execute("SELECT receipt_json FROM outbox WHERE logical_key=?",
+                                              (settlement_key,)).fetchone()[0])
+            assert receipt["generation"] == new_generation
+            assert receipt["counts"] == {"predictions": 1, "outcomes": 1}
+        with tarfile.open(store.verify(second[1][0][1])) as archive:
+            count = sum(len(archive.extractfile(member).read().splitlines())
+                        for member in archive.getmembers() if member.isfile())
+        assert count == (1 if growth == "excluded" else 2)
+        # An identical retry still reuses the directory and exact tar artifact.
+        retry = ledger_export_effect(conn, store, second_claim, root, REPO, clock=clock)
+        assert retry[1][0][1].content_hash == second[1][0][1].content_hash
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("corruption", ["changed", "missing", "extra", "symlink"])
+def test_ledger_export_corruption_refuses_delivery_and_preserves_current(tmp_path, corruption):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
+        export_root = root / "exports" / scope
+        exported = export_generation(conn, export_root, purposes=EXPORT_PURPOSES)
+        prior = export_generation(conn, export_root, generation="prior", purposes=EXPORT_PURPOSES)
+        path = exported / "predictions" / (SESSION + ".jsonl")
+        prior_path = prior / path.relative_to(exported)
+        prior_bytes = prior_path.read_bytes()
+        if corruption == "changed":
+            path.write_bytes(b"{}\n")
+        elif corruption == "missing":
+            path.unlink()
+        elif corruption == "extra":
+            (exported / "extra.jsonl").write_bytes(b"{}\n")
+        else:
+            path.unlink()
+            path.symlink_to(prior_path)
+        claim = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="corrupt",
+                                  parameters=_params("ledger_export", SESSION, scope))
+        with pytest.raises(ValueError, match="export generation differs from catalog"):
+            ledger_export_effect(conn, store, claim, root, REPO, clock=clock)
+        assert (export_root / "CURRENT").read_text() == "prior\n"
+        assert prior_path.read_bytes() == prior_bytes
+        assert all(row[0] == "pending" for row in conn.execute("SELECT state FROM outbox"))
+        assert conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM watermarks WHERE stage=?", ("export",)).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_ledger_export_settlement_present_when_committed(tmp_path):
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
@@ -362,6 +462,7 @@ def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tm
             "AND stage='decisions'", (scope,)).fetchone()[0]
 
         export_root = root / "exports" / scope
+        export_key = export_generation(conn, tmp_path / "identity", purposes=EXPORT_PURPOSES).name
         prior_key = content_hash(["prior-generation"]).split(":")[1][:24]
         export_generation(conn, export_root, generation=prior_key, purposes=EXPORT_PURPOSES)
         current_before = (export_root / "CURRENT").read_text()
@@ -382,9 +483,9 @@ def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tm
 
         # Old CURRENT is completely untouched and still resolves.
         assert (export_root / "CURRENT").read_text() == current_before
-        assert not (export_root / release_key).exists()
+        assert not (export_root / export_key).exists()
         partials = [p for p in export_root.iterdir()
-                   if p.name.startswith("." + release_key + ".partial-")]
+                   if p.name.startswith("." + export_key + ".partial-")]
         assert len(partials) == 1
         # the outbox export/release_intent rows are untouched by the crash
         assert conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
@@ -395,18 +496,18 @@ def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tm
         result = ledger_export_effect(conn, store, second, root, REPO, clock=clock)
         _commit(conn, clock, second, result)
 
-        assert (export_root / release_key).is_dir()
-        assert (export_root / "CURRENT").read_text().strip() == release_key
+        assert (export_root / export_key).is_dir()
+        assert (export_root / "CURRENT").read_text().strip() == export_key
         # the stale partial directory is swept away on the successful retry
         assert not [p for p in export_root.iterdir()
-                    if p.name.startswith("." + release_key + ".partial-")]
+                    if p.name.startswith("." + export_key + ".partial-")]
         assert conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
                             (release_key,)).fetchone()["state"] == "delivered"
 
         # bytes match a clean export of the identical catalog state
-        clean_dir = export_generation(conn, tmp_path / "clean", generation=release_key,
+        clean_dir = export_generation(conn, tmp_path / "clean", generation=export_key,
                                       purposes=EXPORT_PURPOSES)
-        produced = export_root / release_key
+        produced = export_root / export_key
         for path in sorted(produced.rglob("*.jsonl")):
             twin = clean_dir / path.relative_to(produced)
             assert twin.read_bytes() == path.read_bytes()
@@ -423,9 +524,6 @@ def test_ledger_export_retry_after_crash_before_current_switch(tmp_path):
     try:
         scope = "shadow"
         _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
-        release_key = conn.execute(
-            "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
-            "AND stage='decisions'", (scope,)).fetchone()[0]
 
         def fault(_name):
             raise RuntimeError("crash on the only file")
@@ -435,14 +533,15 @@ def test_ledger_export_retry_after_crash_before_current_switch(tmp_path):
         with pytest.raises(RuntimeError):
             ledger_export_effect(conn, store, first, root, REPO, clock=clock, fault=fault)
         export_root = root / "exports" / scope
+        export_key = export_generation(conn, tmp_path / "identity", purposes=EXPORT_PURPOSES).name
         assert not (export_root / "CURRENT").exists()
-        assert not (export_root / release_key).exists()
+        assert not (export_root / export_key).exists()
 
         second = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="export-2",
                                    parameters=_params("ledger_export", SESSION, scope))
         result = ledger_export_effect(conn, store, second, root, REPO, clock=clock)
         _commit(conn, clock, second, result)
-        assert (export_root / "CURRENT").read_text().strip() == release_key
+        assert (export_root / "CURRENT").read_text().strip() == export_key
     finally:
         conn.close()
 
@@ -592,20 +691,24 @@ def test_security_gate_document_carries_secrets_loaded(tmp_path):
         conn.close()
 
 
-def test_publication_refused_when_store_root_has_no_env(tmp_path):
-    # store_root omitted -> falls back to repo_root (REPO), which has no
-    # .env in this worktree: zero loaded needles must fail the security
-    # gate CLOSED, not pass it open the way the old check_files-based scan
-    # did (P2-... real shadow attempt-14 evidence: a git worktree code
-    # checkout has no .env at all).
+def test_publication_refused_when_store_root_has_no_env(tmp_path, monkeypatch):
+    # store_root omitted -> falls back to repo_root. Use a fake, empty
+    # repo_root with no .env at all (importable via PYTHONPATH=REPO, so this
+    # does not depend on whether the real REPO checkout happens to have one
+    # -- it does in /root/investing-plan, it doesn't in a fresh worktree):
+    # zero loaded needles must fail the security gate CLOSED, not pass it
+    # open the way the old check_files-based scan did (P2-... real shadow
+    # attempt-14 evidence: a git worktree code checkout has no .env at all).
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    fake_repo_root = tmp_path / "repo_no_env"
+    fake_repo_root.mkdir()
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
-        assert not (REPO / ".env").exists()
         scope = "shadow"
         claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
         target = root / "releases" / scope
         with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
-            publication_effect(conn, store, claim, root, REPO, clock=clock)
+            publication_effect(conn, store, claim, root, fake_repo_root, clock=clock)
         assert release_current(target) is None
     finally:
         conn.close()
@@ -1041,3 +1144,91 @@ def test_subset_ticker_run_uses_hashed_effect_scope():
     subset_scope = {r.job.kind: r.job.parameters["effect_scope"] for r in subset}["ledger_export"]
     assert full_scope == "shadow"
     assert subset_scope.startswith("shadow:") and subset_scope != "shadow"
+
+
+# Coordinator completion failures preserve structural diagnostic evidence.
+def _finish(tmp_path, monkeypatch, raise_error):
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    service = Service(conn, tmp_path, REGISTRY, TEST_POLICY, clock=clock,
+                      code_source=Path(__file__).resolve().parents[1])
+    monkeypatch.setattr(service, "_commit_success", raise_error)
+    service._progress_state[claim.attempt_id] = object()
+    service._finish(SimpleNamespace(claim=claim), {"exit_code": 0})
+    assert claim.attempt_id not in service._progress_state
+    return service, conn, get_job(conn, claim.job_id)
+
+
+def test_completion_preserves_redacted_exception_chain(tmp_path, monkeypatch):
+    secret = "sk" + "_live_" + "".join(chr(97 + i % 26) for i in range(32))
+    env_value = "".join(chr(65 + i % 26) for i in range(28))
+    monkeypatch.setenv("COMPLETION_TEST_TOKEN", env_value)
+
+    def fail(*args):
+        try:
+            raise KeyError(secret)
+        except KeyError as cause:
+            raise ValueError(env_value) from cause
+
+    service, conn, job = _finish(tmp_path, monkeypatch, fail)
+    assert job.state == "failed"
+    assert job.failure.code == "VALIDATION_FAILED"
+    assert job.failure.retryable is False
+    assert job.failure.message == "coordinator completion raised ValueError"
+    assert job.failure.details == {}
+    assert job.failure.diagnostic_ref is not None
+    ref = artifact(conn, service.store, job.failure.diagnostic_ref)
+    details_text = service.store.read_verified(ref).decode()
+    details = json.loads(details_text)
+    assert details["exception_type"] == "ValueError"
+    assert details["causes"][0]["exception_type"] == "KeyError"
+    for item in [details, *details["causes"]]:
+        path, _, line = item["location"].rpartition(":")
+        assert path.endswith("test_v2_ops_effects_graph.py") and line.isdigit()
+    explained = explain_command(SimpleNamespace(job_id=job.job_id), conn, service.root)
+    assert explained["failure"]["diagnostic_ref"] == ref.artifact_id
+    raw = json.dumps(explained) + details_text
+    raw += "".join(row[0] for row in conn.execute(
+        "SELECT failure_json FROM attempts WHERE failure_json IS NOT NULL"))
+    assert secret not in raw and env_value not in raw
+
+
+def test_completion_preserves_typed_problem(tmp_path, monkeypatch):
+    problem = make_problem("INPUT_CHANGED", "captured inputs changed", stage="export")
+
+    def fail(*args):
+        raise OpsError(problem)
+
+    service, conn, job = _finish(tmp_path, monkeypatch, fail)
+    assert job.failure == problem
+    assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("suppressed", [False, True])
+def test_completion_honors_suppressed_context(tmp_path, monkeypatch, suppressed):
+    def fail(*args):
+        try:
+            raise KeyError("private detail")
+        except KeyError:
+            if suppressed:
+                raise RuntimeError("private detail") from None
+            raise RuntimeError("private detail")
+
+    service, conn, job = _finish(tmp_path, monkeypatch, fail)
+    details = json.loads(service.store.read_verified(
+        artifact(conn, service.store, job.failure.diagnostic_ref)))
+    assert ("causes" in details) is not suppressed
+
+
+def test_completion_diagnostic_write_failure_does_not_lose_failure(tmp_path, monkeypatch):
+    def fail(*args):
+        raise ValueError("private detail")
+
+    def no_space(*args):
+        raise OSError("private filesystem detail")
+
+    monkeypatch.setattr(worker, "_write_failure_details", no_space)
+    service, conn, job = _finish(tmp_path, monkeypatch, fail)
+    assert job.state == "failed"
+    assert job.failure.message == "coordinator completion raised ValueError"
+    assert job.failure.diagnostic_ref is None

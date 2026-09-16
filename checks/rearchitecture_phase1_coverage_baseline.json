@@ -3,6 +3,8 @@
   "suite_version": "phase1_coverage_suite.v3",
   "test_files": [
     "tests/test_diagnosis_comparator.py",
+    "tests/test_v2_dashboard_browser.py",
+    "tests/test_v2_dashboard_integration.py",
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_data_atomicity.py",
     "tests/test_v2_data_catalog.py",
@@ -15,6 +17,7 @@
     "tests/test_v2_data_manifests.py",
     "tests/test_v2_data_objects.py",
     "tests/test_v2_data_partitions.py",
+    "tests/test_v2_data_price_downloads.py",
     "tests/test_v2_data_query.py",
     "tests/test_v2_data_rebuild_rollback.py",
     "tests/test_v2_data_reference_inputs.py",
@@ -23,23 +26,35 @@
     "tests/test_v2_data_tier4_coverage.py",
     "tests/test_v2_ops_artifacts.py",
     "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
     "tests/test_v2_ops_contracts.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_decision_validation_order.py",
     "tests/test_v2_ops_diagnostics.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
     "tests/test_v2_ops_effects.py",
     "tests/test_v2_ops_effects_backup.py",
     "tests/test_v2_ops_effects_graph.py",
     "tests/test_v2_ops_engineering.py",
+    "tests/test_v2_ops_engineering_history.py",
     "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_fingerprints_code_assets.py",
+    "tests/test_v2_ops_fingerprints_model_scan.py",
     "tests/test_v2_ops_foundation.py",
+    "tests/test_v2_ops_generation_binding_lineage.py",
+    "tests/test_v2_ops_generation_effects.py",
     "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_ledger_history_import.py",
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_nightly_completion.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
     "tests/test_v2_ops_parity.py",
+    "tests/test_v2_ops_price_history.py",
     "tests/test_v2_ops_provider_admission.py",
     "tests/test_v2_ops_recovery_ownership.py",
     "tests/test_v2_ops_recovery_reboot.py",
@@ -48,20 +63,27 @@
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runner_onboarding.py",
     "tests/test_v2_ops_runtime.py",
+    "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_security_gate.py",
     "tests/test_v2_ops_serving.py",
     "tests/test_v2_ops_serving_browser.py",
     "tests/test_v2_ops_snapshot_stages.py",
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_supervised_legacy.py",
     "tests/test_v2_ops_tier4_coverage.py",
-    "tests/test_v2_serving_bridge.py"
+    "tests/test_v2_ops_worker_typed_failures.py",
+    "tests/test_v2_serving_api.py",
+    "tests/test_v2_serving_bridge.py",
+    "tests/test_v2_serving_legacy_bundle.py",
+    "tests/test_v2_serving_projections.py",
+    "tests/test_v2_serving_publication_binding.py"
   ],
-  "source_hash": "sha256:08050a98ef0b8a4e85b7c7f6ca909f0f91d7227070f97ceae8ccec0a8d0632d0",
+  "source_hash": "sha256:b9c971a639debd464d746044d77f8dbf8e777be94cdf19ffbaeaee5afda96874",
   "packages": {
     "engine.v2.contracts": {
-      "executed": 743,
-      "executable": 743,
+      "executed": 802,
+      "executable": 802,
       "files": [
         "engine/v2/contracts/__init__.py",
         "engine/v2/contracts/data.py",
@@ -74,8 +96,8 @@
       "percentage": 100.0
     },
     "engine.v2.foundation": {
-      "executed": 372,
-      "executable": 385,
+      "executed": 387,
+      "executable": 399,
       "files": [
         "engine/v2/foundation/__init__.py",
         "engine/v2/foundation/artifacts.py",
@@ -85,11 +107,11 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 96.62337662337663
+      "percentage": 96.99248120300751
     },
     "engine.v2.data": {
-      "executed": 2261,
-      "executable": 2375,
+      "executed": 2657,
+      "executable": 2774,
       "files": [
         "engine/v2/data/__init__.py",
         "engine/v2/data/catalog.py",
@@ -101,8 +123,13 @@
         "engine/v2/data/legacy_adapter.py",
         "engine/v2/data/legacy_mapping.py",
         "engine/v2/data/legacy_materialization.py",
+        "engine/v2/data/legacy_nightly_read_plan.py",
         "engine/v2/data/manifests.py",
         "engine/v2/data/objects.py",
+        "engine/v2/data/price_download_sources.py",
+        "engine/v2/data/price_history.py",
+        "engine/v2/data/price_history_query.py",
+        "engine/v2/data/price_history_table.py",
         "engine/v2/data/query.py",
         "engine/v2/data/reference_catalog.py",
         "engine/v2/data/reference_inputs.py",
@@ -113,7 +140,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 95.2
+      "percentage": 95.78226387887527
     },
     "engine.v2.features": {
       "executed": 0,
@@ -206,8 +233,8 @@
       "percentage": null
     },
     "engine.v2.ledger": {
-      "executed": 133,
-      "executable": 145,
+      "executed": 177,
+      "executable": 181,
       "files": [
         "engine/v2/ledger/__init__.py",
         "engine/v2/ledger/decisions.py",
@@ -215,7 +242,7 @@
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 91.72413793103448
+      "percentage": 97.79005524861878
     },
     "engine.v2.models.training": {
       "executed": 0,
@@ -228,25 +255,29 @@
       "percentage": null
     },
     "engine.v2.serving": {
-      "executed": 261,
-      "executable": 276,
+      "executed": 961,
+      "executable": 981,
       "files": [
         "engine/v2/serving/__init__.py",
+        "engine/v2/serving/api.py",
         "engine/v2/serving/bridge.py",
-        "engine/v2/serving/operations.py"
+        "engine/v2/serving/legacy_bundle.py",
+        "engine/v2/serving/operations.py",
+        "engine/v2/serving/projections.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 94.56521739130434
+      "percentage": 97.96126401630988
     },
     "engine.v2.ops": {
-      "executed": 4342,
-      "executable": 4997,
+      "executed": 5996,
+      "executable": 6757,
       "files": [
         "engine/v2/ops/__init__.py",
         "engine/v2/ops/__main__.py",
         "engine/v2/ops/backup.py",
         "engine/v2/ops/bootstrap.py",
+        "engine/v2/ops/capture_inputs.py",
         "engine/v2/ops/catalog.py",
         "engine/v2/ops/checkpoints.py",
         "engine/v2/ops/cli.py",
@@ -266,6 +297,7 @@
         "engine/v2/ops/generation_binding.py",
         "engine/v2/ops/health.py",
         "engine/v2/ops/input_bindings.py",
+        "engine/v2/ops/ledger_history_import.py",
         "engine/v2/ops/legacy_actions.py",
         "engine/v2/ops/legacy_adapter.py",
         "engine/v2/ops/lifecycle.py",
@@ -275,6 +307,7 @@
         "engine/v2/ops/outbox.py",
         "engine/v2/ops/parity.py",
         "engine/v2/ops/plans.py",
+        "engine/v2/ops/price_history_store.py",
         "engine/v2/ops/profiles.py",
         "engine/v2/ops/provider_budget.py",
         "engine/v2/ops/publication.py",
@@ -284,6 +317,7 @@
         "engine/v2/ops/scheduler.py",
         "engine/v2/ops/schema.py",
         "engine/v2/ops/schema_runtime.py",
+        "engine/v2/ops/session_backfill.py",
         "engine/v2/ops/session_resolution.py",
         "engine/v2/ops/snapshot_import.py",
         "engine/v2/ops/snapshot_planning.py",
@@ -295,11 +329,12 @@
         "engine/v2/ops/store_barrier.py",
         "engine/v2/ops/submission.py",
         "engine/v2/ops/supervisor.py",
-        "engine/v2/ops/worker.py"
+        "engine/v2/ops/worker.py",
+        "engine/v2/ops/worker_progress.py"
       ],
       "missing_files": [],
       "empty": false,
-      "percentage": 86.8921352811687
+      "percentage": 88.73760544620394
     },
     "engine.v2.dashboard": {
       "executed": 47,

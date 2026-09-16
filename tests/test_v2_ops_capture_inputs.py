@@ -629,3 +629,80 @@ def test_legacy_decisions_succeeds_with_empty_legacy_read_set(tmp_path):
     assert result.returncode == 0, result.stderr[-4000:]
     outcome = json.loads(result.stdout.strip().splitlines()[-1])
     assert outcome["ok"], outcome
+
+
+# --------------------------------------------------------------------------
+# Coverage-margin follow-up (2026-09-15): engine.v2.data.legacy_nightly_read_plan's
+# presence-check dispatch table -- pure functions of (spec, paths, manifest),
+# reached only through manifest_problems/_family_present in the tests above,
+# which never happens to exercise every branch of every checker. Direct,
+# real (no mocking) unit tests against the actual dispatch functions.
+# --------------------------------------------------------------------------
+
+from engine.v2.data.legacy_nightly_read_plan import (  # noqa: E402
+    _present_ledger_glob,
+    _present_price_series_bundle,
+    _present_prefixed,
+    _present_reference_calendar,
+    _present_score_context_bundle,
+    _present_single_file,
+)
+
+
+def test_present_score_context_bundle_requires_a_table_and_reference():
+    spec = {}
+    manifest_full = {"calendar_ref": {"path": "cal"}, "registry_and_model_refs": ({"path": "r"},)}
+    assert _present_score_context_bundle(
+        spec, ["data/curated/daily_market/year=2024/part-0.parquet"], manifest_full) is True
+    # No matching curated table path at all: absent even with a full reference bundle.
+    assert _present_score_context_bundle(spec, ["some/other/path.csv"], manifest_full) is False
+    # A table path present, but no reference bundle: still absent.
+    assert _present_score_context_bundle(
+        spec, ["data/curated/daily_market/year=2024/part-0.parquet"], {}) is False
+
+
+def test_present_reference_calendar_checks_the_manifest_field_only():
+    assert _present_reference_calendar({}, [], {"calendar_ref": {"path": "cal"}}) is True
+    assert _present_reference_calendar({}, [], {}) is False
+    assert _present_reference_calendar({}, [], {"calendar_ref": None}) is False
+
+
+def test_present_prefixed_matches_an_explicit_or_derived_prefix():
+    explicit = {"path_prefix": "data/raw/fetch/orats/"}
+    assert _present_prefixed(explicit, ["data/raw/fetch/orats/2026-09-10.meta.json"], {}) is True
+    assert _present_prefixed(explicit, ["data/raw/fetch/polygon/x.json"], {}) is False
+    derived = {"table": "daily_market"}
+    assert _present_prefixed(derived, ["data/curated/daily_market/year=2024/part-0.parquet"], {}) is True
+    assert _present_prefixed(derived, [], {}) is False
+
+
+def test_present_ledger_glob_matches_the_declared_directory():
+    spec = {"directory": "ledger/predictions"}
+    assert _present_ledger_glob(spec, ["ledger/predictions/2026-09-10.jsonl"], {}) is True
+    assert _present_ledger_glob(spec, ["ledger/outcomes/2026-09-10.jsonl"], {}) is False
+
+
+def test_present_single_file_is_vacuously_true_when_not_required():
+    optional = {"path": "data/features/model_evidence.json", "required": False}
+    assert _present_single_file(optional, [], {}) is True
+    required = {"path": "data/features/model_evidence.json"}
+    assert _present_single_file(required, ["data/features/model_evidence.json"], {}) is True
+    assert _present_single_file(required, ["some/other/file.json"], {}) is False
+
+
+def test_present_price_series_bundle_accepts_either_source_when_required():
+    forced_required = {"path_prefix": None, "required": True}
+    assert _present_price_series_bundle(
+        forced_required, ["earnings_predictions/data/raw/yfinance/px_AAPL.csv"], {}) is True
+    assert _present_price_series_bundle(
+        forced_required, ["data/raw/fetch/yfinance/history.body.gz"], {}) is True
+    assert _present_price_series_bundle(forced_required, ["unrelated/path.csv"], {}) is False
+
+
+def test_required_families_only_required_drops_optional_families():
+    every_family = required_families("legacy_settlement")
+    required_only = required_families("legacy_settlement", only_required=True)
+    assert set(required_only) <= set(every_family)
+    assert "ledger_outcomes" not in required_only  # required: False in FAMILIES
+    assert "ledger_outcomes" in every_family
+
