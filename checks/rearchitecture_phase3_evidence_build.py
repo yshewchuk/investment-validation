@@ -93,6 +93,19 @@ def _copy_phase2(phase2_evidence_path: Path, phase2_artifact_root: Path,
         for ref in doc.get(field) or []:
             if isinstance(ref, dict) and isinstance(ref.get("path"), str):
                 copy_one(ref["path"])
+    corpus_ref = doc.get("corpus_comparison_receipt_ref")
+    if isinstance(corpus_ref, dict) and isinstance(corpus_ref.get("path"), str):
+        corpus_path = phase2_artifact_root / corpus_ref["path"]
+        if corpus_path.is_file():
+            corpus_doc = json.loads(corpus_path.read_text())
+            diagnostic_ref = corpus_doc.get("envelope", {}).get("diagnostic_ref")
+            if isinstance(diagnostic_ref, str):
+                try:
+                    diagnostic_ref = json.loads(diagnostic_ref)
+                except ValueError:
+                    diagnostic_ref = None
+            if isinstance(diagnostic_ref, dict) and isinstance(diagnostic_ref.get("path"), str):
+                copy_one(diagnostic_ref["path"])
 
     phase2_doc_ref = _publish(phase2_evidence_path, artifact_root, "phase2/_evidence.json")
     return phase2_doc_ref, doc

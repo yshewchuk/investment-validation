@@ -451,7 +451,15 @@ def test_evidence_builder_keeps_phase2_nested_refs_at_the_manifest_root(tmp_path
     nested = b"phase2 artifact"
     (phase2_root / "nested.json").write_bytes(nested)
     nested_ref = {"path": "nested.json", "content_hash": "sha256:" + hashlib.sha256(nested).hexdigest()}
-    phase2_doc = {"snapshot_ref": nested_ref}
+    diagnostic = b"corpus binding"
+    (phase2_root / "diagnostic.json").write_bytes(diagnostic)
+    diagnostic_ref = {"path": "diagnostic.json",
+                      "content_hash": "sha256:" + hashlib.sha256(diagnostic).hexdigest()}
+    corpus = {"envelope": {"diagnostic_ref": json.dumps(diagnostic_ref)}}
+    corpus_bytes = json.dumps(corpus).encode()
+    (phase2_root / "corpus.json").write_bytes(corpus_bytes)
+    corpus_ref = {"path": "corpus.json", "content_hash": "sha256:" + hashlib.sha256(corpus_bytes).hexdigest()}
+    phase2_doc = {"snapshot_ref": nested_ref, "corpus_comparison_receipt_ref": corpus_ref}
     phase2_evidence = tmp_path / "phase2-evidence.json"
     phase2_evidence.write_text(json.dumps(phase2_doc))
     artifact_root = tmp_path / "artifacts"
@@ -460,6 +468,8 @@ def test_evidence_builder_keeps_phase2_nested_refs_at_the_manifest_root(tmp_path
 
     assert copied_doc == phase2_doc
     assert (artifact_root / nested_ref["path"]).read_bytes() == nested
+    assert (artifact_root / corpus_ref["path"]).read_bytes() == corpus_bytes
+    assert (artifact_root / diagnostic_ref["path"]).read_bytes() == diagnostic
     assert not (artifact_root / "phase2" / nested_ref["path"]).exists()
     assert (artifact_root / phase2_ref["path"]).read_bytes() == phase2_evidence.read_bytes()
 
