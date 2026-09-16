@@ -190,6 +190,83 @@ as ~5.0-5.1 GiB during this investigation, below 5.75 GiB -- so
 concurrently with other memory-hungry work on THIS box, until either the
 structural fix above lands or the host gets more memory. That is a real,
 stated trade-off, not an oversight.
+
+v8 (2026-09-15) lowers ``model_evidence`` from 5.75 GiB back to 5 GiB
+(``5*GIB`` = 5368709120 bytes): v7's 5.75 GiB is not admittable on this host
+in practice, only on paper against ``capacity_bytes``. A live sample taken
+right after v7 merged (``discovery.sample_capacity`` ->
+``resources.headroom_bytes``, one coverage run active, nothing else heavy):
+host_total 7.60 GiB, available 5.91 GiB, capacity 6.60 GiB, **headroom_now
+5.41 GiB** -- below the 5.75 GiB v7 needed, so ``admits_now=False``. v6's own
+docstring already names ``headroom_bytes`` (live host-available minus
+``free_margin_bytes``) as admission's binding test and ``capacity_bytes`` as
+the wrong ceiling to check a reservation against; v7 re-made that exact
+mistake for a different profile. The result was the same failure mode v5
+caused for ``legacy_score``: not a fast ``RESOURCE_LIMIT_EXCEEDED`` kill, but
+an attempt that never gets admitted at all and queues under
+``MEMORY_HEADROOM`` indefinitely.
+
+The fix this time is structural, not a renumbering. Two changes went into
+``engine/dashboard/model_evidence.py``, both re-verified byte-identical
+against the pre-change output across two full forced rebuilds (every
+``model_evidence.json`` field equal except ``generated_at``/``elapsed_s``,
+wall-clock metadata that is expected to vary run to run -- ``fingerprint``,
+``deciles`` and every per-model block, including every ``inputs`` entry,
+were identical): (1) each champion's dataset build now runs in its own
+``multiprocessing`` ``spawn`` subprocess (``_run_isolated`` /
+``_champion_block_impl``), so nothing one champion's build allocates --
+freed-but-fragmented glibc arenas included -- can still be resident when the
+next champion's build starts; the OS reclaims the whole subprocess on exit,
+which ``gc.collect()`` plus ``malloc_trim`` inside one long-lived process
+could only approximate. (2) ``_dataset_for``'s gate branch built a
+``FeatureContext`` for the STR-THRU-forecast-analog champion by calling
+``FeatureContext.load(tickers, years=years)`` — a SECOND independent read of
+``daily_market`` filtered to the exact same tickers/years the ``daily``
+variable four lines above it had just been built from — so the same rows
+were resident twice at once; isolated, continuously-sampled (1s PSS)
+profiling of that one champion's build showed this second load was the
+single largest transient in the whole rebuild, 5.0-5.4 GiB, bigger than any
+other step alone. Building the context directly from the already-loaded
+``daily`` frame (``FeatureContext(panel=panel, daily=daily,
+calendar=trading_calendar())``) removed the duplicate read; ``daily`` is a
+strict column superset (read with no column filter) over identical rows, so
+this is the same data, not an approximation. (3) ``_champion_block_impl``
+also filtered ``_replay_trades()``'s full 982.9 MiB (every strategy, every
+year) down to just the champion's own strategy (99.95 MiB for STR-THRU) and
+released the rest immediately, rather than holding the whole table resident
+for the champion's entire build -- the previous code only applied this
+filter deep inside ``_dataset_for``, after the caller had already kept its
+own reference to the unfiltered table alive for the whole call.
+
+Re-measured the same way v7 did (1-1.2s PSS sampling of the whole descendant
+process tree, real ``engine.dashboard.model_evidence --force`` rebuilds,
+several runs, gated per AGENTS.md): three post-fix runs peaked at 4765.7,
+4866.2 and 4472.3 MiB -- the worst, 4866.2 MiB (5514162585.6 bytes, ~4.753
+GiB), is this reservation's basis. 5 GiB (5368709120 bytes) is ~253.8 MiB
+(~5.0%) above that worst measured peak -- margin in the same range as v7's
+own 6% -- and, checked against the conservative live headroom sample above
+(5.41 GiB = 5814778380.8 bytes, not the 6.60 GiB ``capacity_bytes`` ceiling),
+leaves ~0.41 GiB of real margin: ``5368709120 <= 5814778380`` admits. A fresh
+``headroom_bytes`` sample taken while finishing this pass (idle box, no other
+heavy work) read 6277255168 bytes (~5.85 GiB), giving even more room, but the
+busier 5.41 GiB figure is the one this reservation is sized against, per this
+module's own "state the conservative sample" rule (v6).
+
+This does not reach the ideal 4 GiB this pass targeted: the worst-case
+champion (STR-THRU forecast-analog gate, ``rows`` filtered to ~19k trades,
+its ``Scorer``/``AnalogMatcher`` join, and Tier-4 forecast attach) still
+peaks near 4.75-4.9 GiB on its own even fully isolated and with both
+redundant loads removed -- the isolated-champion figures in v7's docstring
+(~3.5-3.6 GiB) undercounted this champion specifically, because they used
+checkpointed (``gc.collect()``-gated) sampling, which this investigation
+found can miss a transient peak between checkpoints; continuous 1s sampling
+does not have that blind spot and is what both this measurement and the
+determinism check above used. Getting under 4 GiB would need reducing what
+that one champion holds at once during analog matching itself (e.g.
+streaming ``match_frame`` rather than materializing all ~19k matches, or
+bounding the daily-market span further), which is further profiling and
+change than this pass covers -- a real, stated follow-up, not a guess ahead
+of evidence.
 """
 from __future__ import annotations
 
@@ -201,7 +278,7 @@ __all__ = ["DEFAULT_POLICY", "GIB", "MIB", "POLICY_VERSION", "policy_problems", 
 GIB = 1 << 30
 MIB = 1 << 20
 
-POLICY_VERSION = "ops_resources.2026-09-15.v7"
+POLICY_VERSION = "ops_resources.2026-09-15.v8"
 
 DEFAULT_POLICY = ResourcePolicy(
     version=POLICY_VERSION,
@@ -266,12 +343,15 @@ DEFAULT_POLICY = ResourcePolicy(
         # legacy_model_evidence (store_domains read) stages the legacy read
         # set through the same barrier -- scratch bumped 2026-09-14 (v4) from
         # 1 GiB to the 1.67 GiB + headroom basis above. memory_bytes raised
-        # 2026-09-15 (v7) from 4 GiB to 5.75 GiB -- see the module docstring's
-        # v7 entry for the real forced-rebuild measurements (four runs,
-        # 1-1.5s PSS sampling) this is sized against, and the two real fixes
-        # (engine/dashboard/model_evidence.py) that came out of the same
-        # investigation.
-        ResourceProfile(name="model_evidence", memory_bytes=5 * GIB + 3 * GIB // 4,
+        # 2026-09-15 (v7) from 4 GiB to 5.75 GiB, then lowered 2026-09-15
+        # (v8) to 5 GiB once 5.75 GiB proved un-admittable against live
+        # headroom_bytes (not just capacity_bytes) and per-champion
+        # subprocess isolation plus a redundant-daily_market-load fix brought
+        # the real worst-case peak down to 4866.2 MiB -- see the module
+        # docstring's v8 entry for the full basis (three post-fix forced
+        # rebuilds, 1-1.2s PSS sampling, and the headroom_bytes sample this
+        # reservation is checked against).
+        ResourceProfile(name="model_evidence", memory_bytes=5 * GIB,
                         cpu_count=4, scratch_bytes=4 * GIB, heavy=True),
         ResourceProfile(name="legacy_rebuild", memory_bytes=11 * GIB // 2, cpu_count=5,
                         scratch_bytes=20 * GIB, heavy=True, disk_heavy=True),
