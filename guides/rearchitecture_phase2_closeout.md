@@ -38,7 +38,7 @@ The 647ef5f run took 47 minutes on a quiet box.
 | Phase 2 coverage | green (`ok: true`, 0 findings) |
 | gate0 | **red** — tier-1 replay receipts are stale |
 | evidence build | **crashes** — row-cap mismatch |
-| gate2 | in progress at the time of writing |
+| gate2 | **red**, 10 findings in 395 s: `PREREQUISITE_FAILED: phase0` plus nine `MISSING_EVIDENCE` (D02, D05, D09, D10, D11, D14, D15, D16, D19), every one `reason=evidence_manifest` — a single cause, the crashed evidence build, not nine separate gaps |
 
 ## Accepted issues: real defects in legacy, not in v2
 
@@ -87,7 +87,7 @@ and parity baseline the closeout evidence rests on.
    9,123,661 rows against a 2,000,000 cap and is refused with
    `QUERY_NOT_BOUNDED`, even though the materializer accepted that same query
    during the run.
-3. **gate0 is red on stale receipts.** `tier1_real_replay` and
+3. **gate0 is red on stale receipts**, which also fails gate2's phase0 prerequisite. `tier1_real_replay` and
    `tier1_seeded_controls` refuse with "code changed since the replay ran
    (code_hash differs)". A fresh tier-1 replay is needed
    (`--max-rss-gb 6.5`), not a code change.
