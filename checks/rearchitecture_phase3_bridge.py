@@ -279,23 +279,33 @@ def build_value(clean_score_json: Path, clean_bundle_dir: Path, real_score_json:
                                             request_provenance_refs=request_provenance_refs)
     comparison_findings: list[Finding] = []
     if any(f.category == "value" for f in clean_findings.findings) or not clean_findings.ok:
-        comparison_findings.append(_mk_finding(BRIDGE_VALUE_KIND, "clean_subset_value_mismatch"))
-    comparison = _receipt(BRIDGE_VALUE_KIND, 1, "score.json:clean_subset", "bundle:clean_subset",
-                          comparison_findings, 1, code_hash=code_hash, environment_hash=environment_hash)
+        comparison_findings.append(_mk_finding(BRIDGE_VALUE_KIND, "full_population_value_mismatch"))
+    compared = clean_findings.compared_population
+    comparison = _receipt(BRIDGE_VALUE_KIND, 1, "score.json:full_population", "bundle:full_population",
+                          comparison_findings, compared, code_hash=code_hash, environment_hash=environment_hash)
 
-    real_doc = load_score_document(real_score_json)
-    real_bundle, _m2 = load_legacy_bundle(real_bundle_dir)
-    real_event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(real_doc, real_bundle))
-    _bridges2, real_findings = _run_bridges(real_doc, real_bundle, real_event_refs, snapshot_ref,
-                                            score_batch_ref="value-probe-real",
-                                            model_registry_artifact_refs=model_registry_artifact_refs,
-                                            request_provenance_refs=request_provenance_refs)
-    value_mismatches = [f for f in real_findings.findings if f.category == "value"]
+    corrupted = {ticker: [copy.deepcopy(row) for row in rows]
+                 for ticker, rows in clean_bundle.items()}
+    target = next(
+        (row for rows in corrupted.values() for row in rows
+         if isinstance(row.get("structure_params"), dict) and row["structure_params"]),
+        None,
+    )
     negative_findings: list[Finding] = []
-    if not value_mismatches:
-        negative_findings.append(_mk_finding(BRIDGE_VALUE_NEGATIVE_KIND, "known_render_defect_not_detected"))
-    negative = _receipt(BRIDGE_VALUE_NEGATIVE_KIND, 1, "score.json:relba732fb44d3a88dc2574cc99",
-                        "bundle:relba732fb44d3a88dc2574cc99", negative_findings, 1,
+    if target is None:
+        negative_findings.append(_mk_finding(BRIDGE_VALUE_NEGATIVE_KIND, "no_nested_geometry_to_corrupt"))
+    else:
+        field = next(iter(target["structure_params"]))
+        target["structure_params"][field] = 0.987654321
+        _bridges2, corrupt_findings = _run_bridges(
+            clean_doc, corrupted, clean_event_refs, snapshot_ref,
+            score_batch_ref="value-probe-corrupt",
+            model_registry_artifact_refs=model_registry_artifact_refs,
+            request_provenance_refs=request_provenance_refs)
+        if not any(f.category == "value" for f in corrupt_findings.findings):
+            negative_findings.append(_mk_finding(BRIDGE_VALUE_NEGATIVE_KIND, "geometry_corruption_not_detected"))
+    negative = _receipt(BRIDGE_VALUE_NEGATIVE_KIND, 1, "score.json:full_population",
+                        "bundle:corrupted_full_population", negative_findings, 1,
                         code_hash=code_hash, environment_hash=environment_hash, invert=True)
     return comparison, negative
 
