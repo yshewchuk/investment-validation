@@ -592,20 +592,24 @@ def test_security_gate_document_carries_secrets_loaded(tmp_path):
         conn.close()
 
 
-def test_publication_refused_when_store_root_has_no_env(tmp_path):
-    # store_root omitted -> falls back to repo_root (REPO), which has no
-    # .env in this worktree: zero loaded needles must fail the security
-    # gate CLOSED, not pass it open the way the old check_files-based scan
-    # did (P2-... real shadow attempt-14 evidence: a git worktree code
-    # checkout has no .env at all).
+def test_publication_refused_when_store_root_has_no_env(tmp_path, monkeypatch):
+    # store_root omitted -> falls back to repo_root. Use a fake, empty
+    # repo_root with no .env at all (importable via PYTHONPATH=REPO, so this
+    # does not depend on whether the real REPO checkout happens to have one
+    # -- it does in /root/investing-plan, it doesn't in a fresh worktree):
+    # zero loaded needles must fail the security gate CLOSED, not pass it
+    # open the way the old check_files-based scan did (P2-... real shadow
+    # attempt-14 evidence: a git worktree code checkout has no .env at all).
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    fake_repo_root = tmp_path / "repo_no_env"
+    fake_repo_root.mkdir()
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
-        assert not (REPO / ".env").exists()
         scope = "shadow"
         claim = _publication_setup(conn, clock, supervisor, store, scope=scope, session=SESSION)
         target = root / "releases" / scope
         with pytest.raises(OpsError, match="PUBLICATION_REFUSED"):
-            publication_effect(conn, store, claim, root, REPO, clock=clock)
+            publication_effect(conn, store, claim, root, fake_repo_root, clock=clock)
         assert release_current(target) is None
     finally:
         conn.close()
