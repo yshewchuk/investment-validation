@@ -1,16 +1,25 @@
-# Phase 3 status: branches, worktrees, receipts and gaps
+# Phase 3A status: branches, worktrees, receipts and gaps
 
-Written 2026-09-16. Phase 3 is **paused by decision** until Phase 2 closes
-(see `rearchitecture_phase2_closeout.md`). Producers and real receipts exist
-for every acceptance row; what remains is assembly and three known gaps.
+Written 2026-09-16. Phase 2 closeout is accepted and its integration branch
+has been merged into `main`. Phase 3 is active, but is **not launch-complete**:
+the fresh full-population bridge succeeds and the fresh render comparison
+finds a snapshot-boundary replay failure described below. Producers and real
+receipts exist for the earlier candidate; completion requires evidence for the
+fresh release, not a relabelled earlier receipt.
+
+Scope authority: [delivery plan](rearchitecture_delivery_plan.md) and
+[3A closeout queue](rearchitecture_phase3_parity_launch.md#11-resume-here-bounded-closeout-queue).
+This status describes the preview only. Incremental data is Phase 3B; a
+preview launch cannot close that gate. Evidence below records earlier runs;
+the Sep-16 documentation alignment did not rerun them.
 
 ## Branches and worktrees
 
 | Path | Branch | Role |
 | --- | --- | --- |
-| `/root/investing-plan` | `main` | The working checkout. **Never switch its branch.** Phase 3 commits stay off `main` until the Phase 2 final closeout. |
-| `/root/phase3-integration` | `phase3-integration` | Where all Phase 3 work merges. Branched from `main` at 96e1de0, pushed to origin. Run merges, tests and pushes for Phase 3 from here. |
-| `.claude/worktrees/agent-<id>/` | `worktree-agent-<id>` | Per-agent worktrees. Agents rebase onto `phase3-integration`, commit there, and never push; the supervisor merges. |
+| `/root/investing-plan` | `main` | The working checkout. **Never switch its branch.** Phase 2 closeout and the Phase 3 implementation branch are merged here. |
+| `/root/phase3-integration` | historical integration branch | Its accepted implementation was merged into `main` at `b1bf750`. |
+| `.claude/worktrees/agent-<id>/` | `worktree-agent-<id>` | Historical task worktrees. New work starts from current local `main` under repository worktree rules; agents never push. |
 
 Three agent worktrees still hold scratch worth keeping until Phase 3 resumes:
 
@@ -22,17 +31,19 @@ Three agent worktrees still hold scratch worth keeping until Phase 3 resumes:
 - `agent-ab8c96d6f8b7432e9` — browser scratch, the built `ui/dist` and
   `scratch/phase3/browser_receipt.py` (locked worktree).
 
-To resume: merge into `phase3-integration` from a worktree branch, then
-`git push origin phase3-integration`. Run hygiene from the main checkout,
-because a worktree has no `.env` and the secret check silently skips:
+To resume: the implementation is already merged into `main`; do not use the
+old integration branch as the baseline. Preserve scratch artifacts needed by
+the previews, integrate new task branches under the current repository rules,
+and run hygiene with the real environment source when checking a worktree:
 
-    python3 checks/repo_hygiene.py --repo-root /root/phase3-integration --all --env /root/investing-plan/.env
+    python3 checks/repo_hygiene.py --repo-root <worktree-root> --all --env /root/investing-plan/.env
 
-After Phase 2 closes, `phase3-integration` merges into `main`.
+Phase 2 is already accepted and Phase 3 integration already merged. Publication
+permissions follow the current session/repository rules, not this historical note.
 
 ## What exists
 
-`phase3-integration` is at 65c5a09. Three merges, each with real receipts
+Historical integration at `65c5a09` contained three merges with real receipts
 produced against the real attempt-20 release `relba732fb44d3a88dc2574cc99`
 in the ops root `/root/phase2-shadow-ops`:
 
@@ -86,20 +97,29 @@ v2-looking board would mean Phase 2 parity had failed.
 
 ## Known gaps
 
-1. **Full population is blocked by a legacy defect.** `render.py:1162`/`:1434`
-   round `structure_params` in `data/tickers/{T}.json`, so 77 of 121 rows fail
-   bridge value parity and `build_candidate` refuses that population. L05's
-   agree side, and L07-L09, therefore run on a real, honestly-labelled 44-row
-   subset (CAL-P, CND-P, STR-RUNUP, STR-THRU — the rows with null or empty
-   `structure_params`), and the real 77-row mismatch is used as L05's negative
-   control. Rerun those rows on the full 121 once the legacy fix lands; that
-   fix also forces a Phase 2 recapture, which is why it is deferred.
-2. **No Phase 3 coverage ratchet baseline** is committed yet; the coverage
+1. **The ticker replay-input rounding defect is fixed.** `render.py` now
+   preserves deep replay precision in ticker payloads. A fresh Phase 2 shadow
+   release `rela47b76b6843078686cd278db`, from the same pinned snapshot and
+   as-of date, passed bridge identity, mapping, and value parity across all
+   121 compared fields. The bridge negative controls correctly differ.
+2. **Fresh D19 is currently red for a real reason.** Its oracle rebuild agrees
+   with the new rendered bundle, but its separate re-score finds 11 mismatches
+   in 20 sampled rows, confined to forecast and simulation-derived fields.
+   This shows the re-score still reads mutable forecast state outside the
+   pinned snapshot. The earlier accepted D19 receipt cannot attest this new
+   release. Resolve the snapshot/replay boundary and recapture before claiming
+   P3-4 completion.
+3. **No Phase 3 coverage ratchet baseline** is committed yet; the coverage
    receipt records this as a known gap (238 tests pass, `engine.v2.serving`
    at 97.8%).
-3. **No assembled Phase 3 evidence document.** Each producer's receipts exist,
+4. **No assembled Phase 3 evidence document.** Each producer's receipts exist,
    but nothing has yet run the evidence builder over all of them, and the
    Phase 3 gate has not been run against an assembled document.
+5. **Accepted Phase 2 disposition is not represented by Phase 3 validation.**
+   The private closeout record accepts D14/D15 with the strict gate still red;
+   `_check_phase2` currently requires clean validation. P3A-C2 owns a narrow,
+   tested acceptance handoff that preserves those findings. This does not
+   excuse fresh D19 or any new discrepancy.
 
 Smaller notes: the UI ships no "withheld" state, so the stale-badge fixture is
 the closest real analogue for that case; `PreviewInput`'s
@@ -107,10 +127,11 @@ the closest real analogue for that case; `PreviewInput`'s
 and the score/render comparison receipt refs are marked `not_yet_produced`
 because no D14/D15 receipt exists for that generation.
 
-## Rough remaining effort
+## Remaining closeout order
 
-Assembling the evidence document, committing a coverage baseline and getting
-the Phase 3 gate green is on the order of 3-5 hours of agent work if the
-subset receipts are accepted as they stand. Fixing the legacy rounding defect
-first, to get full-population receipts, adds a Phase 2 recapture and rerun on
-top of that.
+Repair the replay boundary and accepted-disposition handoff, freeze one
+candidate, enforce the coverage ratchet, assemble evidence and run the Phase 3
+gate with actual strict/readiness status reported separately. Finish the real
+update/rollback runbook. Then hand off to 3B; native 4/5 and consumer 6 remain
+substantial work, as the delivery plan records. No reliable duration estimate
+exists for the replay fix until its mutable read is bounded.

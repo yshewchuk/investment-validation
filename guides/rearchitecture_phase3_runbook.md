@@ -1,20 +1,30 @@
-# Rearchitecture Phase 3 — Operator Runbook (draft)
+# Rearchitecture Phase 3A — Operator Runbook (draft)
 
 The operational companion to [Phase 3 — parity and launch](rearchitecture_phase3_parity_launch.md)
 §10 ("During implementation add `guides/rearchitecture_phase3_runbook.md`
-with exact, tested commands"). Commands below were run against this worktree
-on 2026-09-14 against SYNTHETIC inputs only (no real accepted Phase 2 release
-was available to this task). **Every step is marked UNVERIFIED against a real
-release** until P3-4 runs it end-to-end and updates this file — do not read
-"the command exists and is documented" as "the step has been proven."
+with exact, tested commands"). The command paths were first tested
+synthetically on 2026-09-14. On 2026-09-16, the real Phase 2 shadow release
+`rela47b76b6843078686cd278db` also passed the full 121-field bridge checks.
+The P3-4 end-to-end launch remains unverified because its fresh D19 replay
+check is red; do not read an existing command or an earlier receipt as proof
+that the new serving release is ready.
 
-This draft does not claim the launch is complete. The Phase 3 gate
-(`checks/rearchitecture_phase3_gate.py`) is RED today: see
+Scope is the saved-score preview only; see the
+[delivery plan](rearchitecture_delivery_plan.md) and
+[closeout queue](rearchitecture_phase3_parity_launch.md#11-resume-here-bounded-closeout-queue).
+The per-step UNVERIFIED notes below describe the original command authoring
+pass, not an assertion that no later real receipts exist. The
+[status file](rearchitecture_phase3_status.md) records those later receipts.
+P3A-C4 must verify this whole sequence on the final accepted candidate and
+replace placeholders before this becomes a completed operator handoff.
+
+This draft does not claim the launch is complete. No assembled final acceptance
+has been run. The bare Phase 3 gate is expected to be red without evidence: see
 `checks/phase3_acceptance.json` for the L01-L14 matrix it checks and
 `tests/test_checks_phase3_gate.py::test_real_repo_bare_gate_is_red_with_missing_evidence`
 for the standing proof.
 
-## 0. What exists today (2026-09-14, checked at HEAD)
+## 0. Implemented commands (original verification: 2026-09-14)
 
 - `python3 -m engine.v2.dashboard.preview` — compatibility preview launcher.
   **Exists, command verified to start/refuse correctly** (its own test suite,
@@ -52,14 +62,14 @@ for the standing proof.
 **Status: commands exist and are read-only; UNVERIFIED against a real
 accepted Phase 2 release (P3-4).**
 
-Inspect the Phase 2 catalog directly (read-only; never writes):
+Inspect the Phase 2 catalog with a SQLite read-only connection (do not use
+`open_catalog`, which can initialize/migrate a catalog):
 
 ```bash
 /usr/bin/python3 -c "
-from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.foundation import SystemClock
-conn = open_catalog('<path-to-catalog.sqlite>', clock=SystemClock())
-print(conn.execute('SELECT scope, snapshot_id FROM data_snapshot_heads').fetchall())
+import sqlite3
+conn = sqlite3.connect(\"file:/absolute/path/to/catalog.sqlite?mode=ro\", uri=True)
+print(conn.execute(\"SELECT scope, snapshot_id FROM data_snapshot_heads\").fetchall())
 "
 ```
 
@@ -188,6 +198,14 @@ with that SAME real binding document (`checks/rearchitecture_phase3_
 evidence.py`'s release-binding check refuses a `PreviewRelease` whose paired
 `binding_ref` does not name it):
 
+The manifest command below is an abbreviated shape, not a complete acceptance
+invocation: all required L-row receipts and browser/engineering/coverage/
+performance/inventory/deferred-work refs must be supplied using the existing
+builder options. P3A-C4 records the full tested invocation privately. P3A-C2
+must also represent the inherited accepted D14/D15 disposition; the current
+validator does not yet do so. Preserve strict findings and never substitute
+an old generation receipt for a fresh failing one.
+
 ```bash
 /usr/bin/python3 checks/rearchitecture_phase3_evidence_build.py \
     --artifact-root /private/phase3-artifacts \
@@ -241,12 +259,10 @@ above (guide §10).
 - A convenience CLI flag for binding `projection_binding.json` (step 3) —
   today it is the `engine.v2.ops` job-graph primitives directly, not a
   single flag on `ops plan`/`ops submit`.
-- Engineering-history evidence (`engineering_receipt_ref`, L11) — explicitly
-  left for the §5.5-2/3 health/status producer agent (separately in
-  progress per the coordinator); do not build a parallel producer here.
-- Real `comparison_receipt_refs`/`negative_control_receipt_refs`/
-  `browser_receipt_ref`/`coverage_receipt_ref`/`performance_receipt_ref`
-  producers for every remaining L01-L14 kind in `checks/phase3_acceptance.json`
-  — none exist yet; each shows up as its own `MISSING_EVIDENCE` finding from
-  `checks/rearchitecture_phase3_gate.py` today. Building those producers is
-  P3-4's remaining work, not this task's.
+- Receipt producers now exist, including engineering history, browser, coverage
+  and performance. Reuse the implementations and historical refs in the status
+  file. Remaining work is fresh same-generation acceptance, the coverage
+  ratchet, inherited-disposition handling and an assembled report, not another
+  set of parallel producers.
+- Incremental ingestion is Phase 3B. Native scoring/models, complete consumer
+  parity and official cutover are Phases 4–7; this runbook does not activate them.

@@ -46,12 +46,12 @@ runs the replacement repository and adapter in shadow until the exit gate in
 
 | Later owner/phase | Do not implement in Phase 2 |
 |---|---|
-| Phase 3 incremental data | Provider fetches, normalization changes, coverage watermarks, changed-key merges, append/correction planning, tombstones, dependency invalidation, compaction, or garbage collection. |
+| Phase 3B incremental data | Provider fetches, coverage, changed-key merges, corrections/tombstones and complete invalidation. Compaction/GC and fine-grained optimization are Phase 8C. |
 | Phase 4 scoring | Feature recipes, extracted scoring stages, new strategy or model registries, chooser extraction, structure generation, simulation, or financial calculations. |
 | Phase 5 models | Training recipes, folds, residual construction, release candidates, promotion, or rollback of champions. |
-| Phase 6 UI | Serving projections, read API, React application, or offline board export. |
-| Phase 7 live shadow | Intraday objects, entitlement probes, pre-close clocks, or live collection. |
-| Phase 8 cutover | Deleting legacy code, switching official prediction authority, or renaming `engine/v2`. |
+| Phase 3A preview / Phase 6 consumers | Initial serving/API/board-detail is 3A; complete existing UI/export and workflow parity is 6. |
+| Phase 8D live shadow | Intraday objects, entitlement probes, pre-close clocks, or live collection. |
+| Phase 7 cutover / Phase 8A cleanup | Official authority switch is 7; deleting legacy code and renaming `engine/v2` is 8A. |
 
 Do not use a Phase 2 repository commit as a disguised data correction. The
 initial snapshot is a byte-preserving registration of accepted legacy output.
@@ -1032,17 +1032,18 @@ artifact validation. All other phase exit criteria remain in force.
 
 | Concern | Owner and deadline | Boundary while deferred |
 |---|---|---|
-| A newly planned same-session run collides with old job/release identities; the nightly CLI ignores its supplied idempotency key | **Done**, commit 56d8709 (see [Phase 3 launch §5.5 item 1](rearchitecture_phase3_parity_launch.md#55-review-follow-through-for-repeatable-updates-and-live-health)) | Stage/job identity and release identity are now bound to the SAVED PLAN's own implementation/legacy-manifest/decision_clock (`nightly.py::_plan_identity`, `effects_graph.py::_generation_ref`), not only tickers/years/population/snapshot: a genuinely new same-session plan (changed code, manifest, or a fresh `plan nightly` call) submits and stages without colliding with an old (even cancelled) run's job/release rows, while retrying the identical saved plan stays idempotent. `--idempotency-key` semantics for nightly submission are documented in `guides/rearchitecture_phase1_runbook.md` §2.1. Still open, found while proving this safe (`tests/test_v2_ops_same_session_replan.py`): a second generation's own `publish_local` (CURRENT pointer) and `commit_decisions_in_transaction` effects for the SAME (scope, session) occurrence still conflict at the shared outbox watermark (`outbox.watermark`'s one-receipt-per-occurrence rule) — this refuses safely (no double-recording, no silent overwrite) rather than succeeding, so an operator must not yet actually PUBLISH or re-commit decisions for a second same-session generation; that needs its own design decision (e.g. a generation-aware publication watermark, or explicit decision supersession) this task does not make. |
-| Engineering observations do not populate `health.record_check`; live streak/history presentation is incomplete | Phase 3 launch §5.5, before live health is presented as authoritative | Keep current publication gated by its bound engineering receipt; unavailable history is unknown. |
-| Chain dependency explanation and migration of remaining manifest-backed readers/finality | Original Phase 3 incremental-data continuation, [system design §12.1](system_rearchitecture.md#121-sep-13-review-follow-through) | Chain explanation explicitly refuses; remaining readers keep the Phase 1 barrier and same-generation parity checks. |
+| Same-session retry vs new-plan identity and publication/decision effects | Implemented in the two passes recorded in [Phase 3A §5.5 item 1](rearchitecture_phase3_parity_launch.md#55-review-follow-through-for-repeatable-updates-and-live-health); final release evidence remains 3A closeout | Saved-plan retries retain identity; a new plan receives distinct job/release identity. The second-pass outbox fix supersedes the earlier open-collision warning here. Preserve old decisions and same-session supersession rules; exercise real refresh/rollback in P3A-C4. |
+| Engineering observations and live streak/history evidence | Implemented producers, final evidence in Phase 3A closeout | Keep publication gated by its bound engineering receipt; unavailable history is unknown. Do not rebuild the existing producers. |
+| Chain dependency explanation and migration of remaining manifest-backed data readers/finality | Phase 3B, [system design §12.1](system_rearchitecture.md#121-sep-13-review-follow-through) | Chain explanation explicitly refuses until implemented; remaining readers keep the Phase 1 barrier and same-generation parity checks. Model evidence belongs to 5, rendering to 6. |
 | Persisted complete fold artifacts and no fitting on scoring requests | Phase 5 models, system design §12.1 | The Phase 2 cache-miss containment/parity fix remains required; native model extraction is not pulled forward. |
-| Full health/flags/model/book screens | Remaining Phase 6 UI, system design §12.1 | Phase 3 board/detail must already show decision-relevant refusals and degradation from the accepted release. |
-| Arrow filter pushdown; removing unnecessary Scorer construction from render | [TD-10 / TD-11](rearchitecture_tech_debt.md), optional after Phase 6 | Correct filters, finite limits, and a measured safe render profile are required in Phase 2. Move an optimization into a phase if measurement makes it necessary for that phase. |
+| Full health/flags/model/book capabilities | Phase 6 consumer parity; new React replacements in Phase 8B | Phase 3A board/detail already needs decision-relevant refusals/degradation. Compatibility views must show current native output by cutover. |
+| Arrow filter pushdown; removing unnecessary Scorer construction from render | [TD-10 / TD-11](rearchitecture_tech_debt.md), Phase 8C optimization | Correct filters, finite limits, and a measured safe render profile remain required. Move optimization earlier only if measurements require it. |
 
 Refresh, validate-refresh, Tier 3/4 rebuild, missed-night backfill, and
-calibration flags remain the deliberate omissions in §9.4. The original
-incremental-data continuation owns their data-refresh migration; the initial
-dashboard consumes accepted saved artifacts and does not need those services.
+calibration flags remain deliberate omissions in §9.4. Phase 3B owns data
+refresh/finality; 4/5 own feature/model rebuild semantics; 6 wires the complete
+nightly/backfill and calibration-status consumers. The 3A preview consumes
+saved artifacts and does not implement those services.
 
 ## 13. Implementation sequence
 

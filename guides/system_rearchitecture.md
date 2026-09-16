@@ -1,6 +1,6 @@
 # System rearchitecture: one scoring contract, incremental data, reliable operation
 
-Date: 2026-09-12. Status: proposed implementation and migration guide.
+Date: 2026-09-12. Delivery sequence revised 2026-09-16 in §12.
 Review baseline: commit `68150a1`, with a clean worktree before this guide.
 
 This proposal follows a source review of the current engine, dashboard,
@@ -8,6 +8,12 @@ storage, experiment harness, checks, and recent failure reports. It is not a
 new backtest, a performance benchmark, or a certification that existing
 strategies are ready for capital. No production configuration, model, strategy,
 data, or ledger was changed for this review.
+
+For implementation assignments, start with the
+[delivery plan](rearchitecture_delivery_plan.md). It distinguishes current
+implementation, required parity work, production cutover and post-cutover
+completion. Sections 4–10 describe the target architecture; they do not make
+every extension a prerequisite for the EOD authority switch.
 
 ## 1. Recommendation
 
@@ -254,7 +260,8 @@ beside the old ones.
 
 The new tree is **`engine/v2/`**. It is written fresh against the layering
 below, never by moving a legacy file into it. Legacy `engine/` continues to run
-the board unchanged for the whole migration and is deleted at phase 8, at which
+the official board until Phase 7 cutover. It is retained for rollback and
+deleted in Phase 8A after the rollback window, at which
 point `engine/v2/` is renamed to `engine/`. That rename is a mechanical
 rewrite of import prefixes, and it is safe to do late precisely because the
 tier-0 corpus and the layer check are in place to prove it changed nothing.
@@ -547,8 +554,9 @@ when legacy is deletable. It is a far better progress measure than a phase
 number, because it cannot be satisfied by writing code that nothing uses.
 
 Adding an adapter stays possible and is deliberately not silent — a tracked
-line with a reason, visible in a diff. Removing the last one is the phase-8
-entry condition.
+line with a reason, visible in a diff. Removing the last one is the Phase 8A
+deletion condition, not the Phase 7 authority-switch gate. Phase 6 must already
+account for every remaining adapter and prove official-path parity.
 
 Carried from Phase 2 (P2-5 task 5): `engine/v2/ops/legacy_adapter.py` also
 hosts three non-legacy subprocess helpers (`verify_export_generation`,
@@ -1368,29 +1376,50 @@ from infrastructure failure, and process health does not prove causal validity.
 Run legacy/replacement paths on identical snapshots. Compare sequentially on
 this host so a parity check does not need two multi-gigabyte scorers alive.
 
-**Launch-priority update (user decision, 2026-09-13).** The table below retains
-the architectural workstreams and their full completion gates, but no longer
-requires completing incremental data, native scoring, and model migration
-before showing the initial v2 dashboard. Follow
-[Phase 3 — First dashboard with real scores](rearchitecture_phase3_parity_launch.md)
-after the Phase 2 handoff: first open its validated compatibility preview,
-then bring forward the Phase 6 read API and board/detail slice using those
-saved real scores. Defer the original Phase 3 incremental-data work and the
-remaining Phase 4–6 capabilities that do not block that launch to their own
-continuations. Preserve all full-phase gates; an initial shadow dashboard
-does not imply native scoring parity, full UI parity, or production cutover.
+**Authoritative delivery sequence, revised 2026-09-16.** The
+[delivery plan](rearchitecture_delivery_plan.md) and this table replace the
+ambiguous combination of original architectural phases and an early launch
+override. Phase 3 has two named parts: 3A closes the implemented preview;
+3B delivers the original minimum incremental-data gate. Phases 4–6 migrate
+current behavior. Phase 7 switches official EOD authority. Phase 8 finishes
+physical cleanup and adds capabilities beyond parity. Live shadow no longer
+blocks EOD cutover. The target architecture and economic contracts remain.
+
+The old Phase 7 live work is now 8D; old Phase 8 is split into 7 (cutover)
+and 8A (deletion/rename). Existing P3-0…P3-4 and L01–L14 identifiers and gate
+schemas remain unchanged and refer to 3A only. Historical receipts are not
+renumbered. Detailed guides own tasks; status files and runbooks cannot
+change scope. Older research-program `phaseN_*.md` guides use separate numbers.
 
 | Phase | Deliverable | Exit gate |
 |---|---|---|
 | 0. Baseline | Contract/artifact/screen inventory; private corpus and negative controls; **tier-0 fixture corpus and the ComparisonReceipt**; **declared layer map and `checks/import_layers.py`** | Every strategy and critical refusal reproducible; five seeded defects yield five stage-named findings in one tier-0 pass; the layer check runs green over the v2 skeleton with an empty adapter ledger |
 | 1. Operations | Catalog/supervisor wrapping existing commands; receipts and score checkpoints; **per-stage input/implementation hashes**; **`checks/code_budgets.py`, pinned linter, coverage ratchet and a README per package**; pre-commit validation | Crash/resume and competing submissions pass; no per-job CPU selection; editing one stage's implementation re-runs that stage and its descendants only; v2 budgets green at zero exemptions, the legacy-adapter ledger at or below its committed count, the nightly reporting hook-install and drift, every package README present and its consumers matching the import graph |
 | 2. Data access | Snapshot repository, immutable manifests, bounded reads, legacy adapters | Existing scores match; failed rebuild leaves active snapshot intact |
-| 3. Incremental data | Coverage watermarks, changed-key merges, dependency invalidation, correction path | No-op rewrites zero data; append/correction matches clean rebuild |
-| 4. Scoring | Registered extracted recipes, canonical score contract, engine-owned chooser data, financial logic moved from renderer | All strategies match; production imports no experiment runner |
-| 5. Models | Persisted fold artifacts, transforms/residuals, dataset recipes and evidence; atomic promotions | Zero fitting on scoring requests; exact promotion/rollback |
-| 6. UI | Read API then one screen at a time; old UI/export adapters retained | Feature inventory, lazy-load checks, phone/offline access pass |
-| 7. Live shadow | Entitlement/schema proof, snapshots, causal live features, clock-specific experiments | Live guide gates pass; no contamination; timely publication |
-| 8. Cutover | Switch consumers; delete legacy `engine/` whole; rename `engine/v2/` to `engine/`; update recovery/operations docs | Ten consecutive completed-session runs without manual resource placement; restore and compatibility evidence pass; the legacy-adapter ledger reaches zero; the rename is proved inert on the tier-0 corpus |
+| [3A. Preview](rearchitecture_phase3_parity_launch.md) | Finish saved-score bridge, read API, board/detail and repeatable shadow launch | Bound replay, full-population parity, L01–L14 evidence and explicit inherited Phase 2 disposition; no official authority change |
+| [3B. Incremental data](rearchitecture_phase3_incremental_data.md) | Coverage watermarks, changed-key merges, complete invalidation, correction path | No-op rewrites zero data partitions; append/correction/deletion matches clean rebuild; old snapshots survive failure |
+| [4. Scoring](rearchitecture_phase4_scoring.md) | Registered recipes, canonical score contract, engine-owned chooser and financial diagnostics | All existing strategies/refusals match; production imports no experiment runner; shared replay/batch kernel |
+| [5. Models](rearchitecture_phase5_models.md) | Current fold artifacts, transforms/residuals, dataset recipes, evidence and atomic deployments | Zero fitting/cache writes on scoring requests; existing training behavior and exact promotion/rollback |
+| [6. Consumer parity](rearchitecture_phase6_consumer_parity.md) | Wire nightly/research/ledger/UI/export consumers to canonical outputs; retain useful compatibility screens | Full existing capability inventory, lazy new UI, phone/offline access, restore and rehearsal pass |
+| [7. Cutover](rearchitecture_phase7_cutover.md) | Switch official EOD consumers and authority, retain old deployment for rollback | Ten qualified completed-session runs without manual placement; one writer; restore, parity and switch/rollback evidence |
+| [8. Post-cutover](rearchitecture_phase8_post_cutover.md) | 8A deletion/rename; 8B UI enhancements; 8C efficiency/generalization; 8D live shadow | Independent gates: zero adapters/inert rename; capability checks; equivalence/performance; live qualification |
+
+Minimum incremental ingestion and correct dependency invalidation land before
+cutover. Fine-grained downstream scheduling, persistent causal checkpoints and
+compaction can follow: conservatively replaying all affected descendants is
+acceptable within the admitted budget. Current frozen model artifacts and
+existing training/promotion workflows are required; a universal model framework
+is not. All existing UI/export capabilities must work, but a new React screen
+for each is optional until 8B. Generalized structure search and new valuation
+semantics from §§6.5–6.6 are extensions; unchanged existing selectors and
+simulation behavior are Phase 4 requirements.
+
+Phases can overlap at frozen interfaces: 4 contract work and 5 artifact
+preparation can start during 3B, and 6 inventory work can start immediately.
+Final native scoring acceptance needs the Phase 5 inference seam. Start the
+ten-session qualification during Phase 6 as soon as the actual integrated
+candidate qualifies; older compatibility-only runs do not count. See the
+delivery plan for evidence reuse and change-impact rules.
 
 ### 12.1 Sep-13 review follow-through
 
@@ -1403,17 +1432,17 @@ the items below into prerequisites for the initial saved-score preview.
 | Workstream | Required follow-through | Resume / acceptance boundary |
 |---|---|---|
 | Phase 3 initial dashboard | New-plan versus retry identity across nightly jobs and same-session releases; real engineering observations, unknown-night semantics, live health and stale/withheld status | [Launch guide §5.5](rearchitecture_phase3_parity_launch.md#55-review-follow-through-for-repeatable-updates-and-live-health), before P3-4 repeat-refresh and live-health acceptance; P3-0 may use an already validated candidate |
-| Original Phase 3 incremental-data continuation | Implement exact chain-query dependency explanation, explicitly binding the pinned snapshot despite `ChainQuery` not carrying one; include event/security lookup and quote fragments/columns/predicates and population bounds | Before the first chain dependency consumer. Test that advancing head cannot change an explained query, with event-based and event-free security resolution. Until then return `UNSUPPORTED_CONTRACT`; ordinary `get_chain` correctness remains Phase 2 |
-| Original Phase 3 incremental-data continuation | Migrate finality and other remaining manifest-backed read-only stages only after complete read inventories and snapshot parity; carry the per-ticker `covered_tickers` evidence and retire its legacy adapter edge when unused | As each consumer moves; never remove the cooperative barrier from unmigrated paths or certify mixed data/model generations |
+| Phase 3B incremental data | Implement exact chain-query dependency explanation, explicitly binding the pinned snapshot despite `ChainQuery` not carrying one; include event/security lookup and quote fragments/columns/predicates and population bounds | Before the first chain dependency consumer. Test that advancing head cannot change an explained query, with event-based and event-free security resolution. Until then return `UNSUPPORTED_CONTRACT`; ordinary `get_chain` correctness remains Phase 2 |
+| Phase 3B incremental data | Migrate finality and other remaining manifest-backed read-only data stages after complete read inventories and snapshot parity; carry per-ticker `covered_tickers` evidence and retire unused adapter edges | Never remove the barrier from unmigrated paths or certify mixed generations. Model evidence belongs to 5; rendering to 6 |
 | Phase 5 models | Persist complete producer/fold/transform/residual artifacts and remove fitting/cache writes from scoring requests through the native model interface | Model migration and its zero-fitting exit gate. Phase 2 must already contain cache misses and preserve parity; a cache-hit canary is not the Phase 5 proof |
-| Remaining Phase 6 UI | Complete health/flags/model/book screen parity and the rest of the feature inventory | Before full UI parity. Decision-relevant status and truthful unknown/degraded state are required in the earlier shipped board/detail slice |
+| Phase 6 consumer parity | Complete health/flags/model/book capability parity and the existing inventory through new or compatibility views | Before cutover. React replacements can wait for 8B. Decision-relevant status and truthful unknown/degraded state are required in 3A |
 
 Arrow-native filter pushdown and avoiding Scorer construction solely to
 render are optional optimizations tracked as TD-10/TD-11 in
 [the debt registry](rearchitecture_tech_debt.md). Correct filtering, accurate
 materialization bounds, and a measured safe resource profile are not deferred.
 If measured load makes an optimization a prerequisite of an earlier phase,
-move it into that phase rather than leaving it as post-Phase-6 debt.
+move it into that phase rather than leaving it as Phase 8C debt.
 
 The UI can start against frozen projections after phase 2. Shadow collection
 can begin before model readiness once its contract/quota are defined. Cutover
@@ -1439,9 +1468,10 @@ storage, scoring and models.
 
 Keep old research trees, specs/results, imports, predictions and reports intact.
 Build new catalog/data state alongside the legacy store, in the second tree
-`engine/v2/` of §4.1: legacy `engine/` runs the board unchanged throughout,
-never edited to point at v2, and is deleted whole at phase 8 rather than
-hollowed out module by module. During shadowing only
+`engine/v2/` of §4.1: legacy `engine/` remains official until Phase 7,
+then stays available as a frozen rollback deployment until Phase 8A removes
+it. New consumer adapters live on the v2 side; preserve the legacy comparison
+path. During shadowing only
 one path commits official predictions, registry changes and testing ledgers.
 Rollback restores a prior deployment/release; it does not erase historical
 facts. Necessary economic changes get separate experiments or explicit defect

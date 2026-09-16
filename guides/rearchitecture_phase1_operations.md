@@ -40,7 +40,7 @@ Implement in the order in §15. Do not start by rewriting `run_nightly`.
 | Phase 4 scoring | Do not change strategies, gates, chooser ordering, strike selection, simulations, fills, or financial rendering calculations. |
 | Phase 5 models | Do not build a second training framework or change regression/NN recipes, fold cutoffs, residual pools, or champions. |
 | Phase 6 UI | Only the minimal current-health/release shell required for operational safety; no board redesign or full lazy read API. |
-| Phase 7 live execution | Reserve capacity and retain clock/provenance fields, but do not synthesize intraday features, claim EOD models are live-compatible, or place orders. |
+| Phase 8D live shadow (formerly Phase 7) | Reserve capacity and retain clock/provenance fields, but do not synthesize intraday features, claim EOD models are live-compatible, or place orders. |
 
 Keep the legacy tree executable until the planned retirement phase. Operational
 reordering and process separation are intended changes; economic changes are

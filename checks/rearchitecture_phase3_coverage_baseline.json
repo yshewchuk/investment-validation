@@ -1,0 +1,34 @@
+{
+  "schema_version": "phase3_coverage_baseline.v1.0",
+  "suite": [
+    "tests/test_v2_serving_api.py",
+    "tests/test_v2_serving_bridge.py",
+    "tests/test_v2_serving_legacy_bundle.py",
+    "tests/test_v2_serving_projections.py",
+    "tests/test_v2_serving_publication_binding.py",
+    "tests/test_v2_dashboard_preview.py",
+    "tests/test_v2_dashboard_browser.py",
+    "tests/test_v2_dashboard_integration.py",
+    "tests/test_checks_phase3_gate.py"
+  ],
+  "packages": {
+    "engine.v2.contracts": {"executed": 802, "executable": 802},
+    "engine.v2.dashboard": {"executed": 47, "executable": 69},
+    "engine.v2.data": {"executed": 1138, "executable": 2786},
+    "engine.v2.diagnosis": {"executed": 170, "executable": 348},
+    "engine.v2.domain.generation": {"executed": 0, "executable": 0},
+    "engine.v2.domain.scenarios": {"executed": 0, "executable": 0},
+    "engine.v2.domain.simulation": {"executed": 0, "executable": 0},
+    "engine.v2.domain.valuation": {"executed": 0, "executable": 0},
+    "engine.v2.evaluation": {"executed": 0, "executable": 0},
+    "engine.v2.features": {"executed": 0, "executable": 0},
+    "engine.v2.foundation": {"executed": 322, "executable": 399},
+    "engine.v2.ledger": {"executed": 49, "executable": 181},
+    "engine.v2.models": {"executed": 0, "executable": 0},
+    "engine.v2.models.training": {"executed": 0, "executable": 0},
+    "engine.v2.ops": {"executed": 1369, "executable": 6782},
+    "engine.v2.registry": {"executed": 0, "executable": 0},
+    "engine.v2.scoring": {"executed": 0, "executable": 0},
+    "engine.v2.serving": {"executed": 959, "executable": 981}
+  }
+}

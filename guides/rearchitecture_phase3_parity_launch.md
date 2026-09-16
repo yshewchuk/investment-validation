@@ -1,6 +1,13 @@
-# Rearchitecture Phase 3 — First dashboard with real scores
+# Rearchitecture Phase 3A — Saved-score preview and parity closeout
 
-Date: 2026-09-13. Status: implementation guide; Phase 2 is still in progress.
+Date: 2026-09-13. Status: implementation guide; Phase 2 closeout was accepted
+on 2026-09-16. Phase 3 launch evidence remains in progress.
+
+Scope aligned 2026-09-16 with [system design §12](system_rearchitecture.md#12-migration-sequence-and-rollback)
+and the [delivery plan](rearchitecture_delivery_plan.md). This file owns 3A;
+[Phase 3B](rearchitecture_phase3_incremental_data.md) owns incremental data.
+Existing P3-0…P3-4 tasks, L01–L14 and Phase 3 gate/schema names remain stable
+and measure 3A only. Do not recreate the merged preview implementation.
 
 ## 1. Objective and sequencing decision
 
@@ -10,14 +17,12 @@ events/strategy board; selecting a score opens its details. Values must agree
 with the legacy board built from the **same inputs**, including refusals,
 nulls, selected structures, and forecast/gate distinctions.
 
-This guide applies the user priority of 2026-09-13: parity and something
-visible come first; work unnecessary for the initial dashboard is deferred.
-It deliberately changes the build order in
-[system_rearchitecture.md §12](system_rearchitecture.md#12-migration-sequence-and-rollback).
-The original Phase 3 incremental-data work remains required for the completed
-architecture, but is **not a prerequisite for this launch**. Pull the smallest
-read API and UI slice forward from Phase 6. Use Phase 2 scoring and rendering
-adapters until their native replacements pass parity in Phases 4 and 5.
+This guide preserves the Sep-13 early-preview priority within the unified
+Sep-16 sequence. The original incremental-data gate is now Phase 3B, required
+before cutover but not before this preview. The read API and board/detail
+slice pulled forward from Phase 6 is already implemented. Use the existing
+Phase 2 adapters until native scoring/models pass in Phases 4/5 and consumer
+wiring lands in Phase 6. This guide no longer overrides the system design.
 
 This is not the older program guide `phase3_dashboard.md`.
 
@@ -35,6 +40,33 @@ the sole official prediction, settlement, and publication authority. Scores
 produced by the unchanged legacy scorer through v2 are real scores; label the
 producer honestly. Do not call them native v2 scores or execution fills.
 
+### 1.1 Resume here: bounded closeout queue
+
+The source reviewed at `9a23bf4` already contains the preview, bridge, API,
+React board/detail, publication binding and L-row receipt producers. Sections
+4–9 remain their contracts and regression requirements, not a fresh build list.
+Use [status](rearchitecture_phase3_status.md) for artifact locations.
+
+| Task | Remaining deliverable | Exit / control |
+|---|---|---|
+| P3A-C1 Frozen replay boundary | Diagnose the fresh D19 11-of-20 sample mismatch; pin every forecast/model/residual read and preserve exact replay inputs. | Fresh same-generation D19 agrees; mutating the external latest forecast cannot change replay, and missing pinned state refuses. Keep full-population bridge parity. |
+| P3A-C2 Accepted Phase 2 handoff | Carry the already recorded D14/D15 user disposition into Phase 3 acceptance without changing Phase 2 receipts or its strict gate. | Phase 3 reports raw prerequisite findings separately from accepted readiness. Bind disposition to exact candidate/receipt/population/cause; missing refs, a different candidate or new differences still block. |
+| P3A-C3 Coverage and evidence | Commit/enforce the fixed Phase 3 coverage ratchet; assemble the existing producers on one final candidate and two retained releases. | Missing suite files, missing baseline, stale receipt and dropped rows fail. Run the existing Phase 3 gate and report its actual status, including inherited dispositions. |
+| P3A-C4 Operator handoff | Exercise projection, fenced publication, authenticated board/detail, update and rollback end to end; replace stale runbook notes with tested commands. | Usable private command/URL, true as-of, full population, evidence refs and 3B handoff. No new screen or generalized publish framework. |
+
+C2 is a known implementation gap: `_check_phase2` currently requires clean
+Phase 2 validation, while `reports/phase2_closeout/FINAL.md` records user
+acceptance with retained red D14/D15 findings. Add a narrow, auditable Phase 3
+handoff/acceptance distinction, with tests, rather than rerunning stale-price
+comparisons or silently suppressing them. The strict Phase 2 gate stays red.
+The fresh D19 failure is not covered by that disposition and must be fixed.
+Until C2 lands, record acceptance as blocked even if other L-row checks pass.
+
+Use existing producer/test files named in §§8–10; extend the relevant D19,
+Phase 3 evidence/gate and coverage tests for C1–C3. Do not recapture unchanged
+historical scoring for each UI/docs edit. Follow the delivery-plan binding
+rules and perform one final integrated evidence sweep.
+
 ## 2. Required context and starting state
 
 Read [guides/README.md](README.md) and applicable `AGENTS.md` instructions.
@@ -49,10 +81,10 @@ For each task, read the relevant design sections and source below.
 | Serving and publishing | `engine/v2/serving/operations.py`, `engine/v2/ops/publication.py` |
 | Saved payloads | `engine/v2/ops/legacy_adapter.py` scoring/render actions; `engine/dashboard/render.py` |
 
-Source inspection for this guide used commit `704c007`. Phase 2 is actively
-changing these seams: verify its completed public interfaces before wiring
-them, and record the accepted commit in the handoff. Do not copy an old
-signature from this guide over a newer accepted implementation.
+The original interface notes below were captured at `704c007`; they explain
+the implementation contracts, not current completion status. The Sep-16
+assessment used `9a23bf4`; consult §1.1 before assigning work. Verify current
+interfaces rather than copying an older signature over merged code.
 
 Verified facts at that commit:
 
@@ -82,7 +114,9 @@ Verified facts at that commit:
 Synthetic API/UI work can start while Phase 2 finishes. A real-data launch
 requires its accepted snapshot, score/render parity evidence, and locally
 published shadow release. A missing handoff is reported as missing; do not
-bypass the Phase 2 gate or call a mock-data dashboard ready.
+bypass the Phase 2 gate or call a mock-data dashboard ready. A later replay
+failure against a new bundle is also a handoff failure: do not substitute an
+older receipt merely because Phase 2 closeout was accepted.
 
 ## 3. Scope boundary
 
@@ -103,18 +137,23 @@ bypass the Phase 2 gate or call a mock-data dashboard ready.
 
 | Work | Later owner | Why initial launch does not need it | Trigger to resume |
 |---|---|---|---|
-| New provider ingestion, raw receipts, coverage watermarks, changed-key merges, automatic historical corrections/deletions | Original Phase 3 incremental-data continuation | Phase 2 can pin accepted legacy output; the UI reads saved scores | After initial dashboard acceptance; earlier only if no accepted data can be supplied |
-| Fine-grained feature/model invalidation and causal state checkpoints | Phase 3 continuation with Phases 4/5 | Recompute a whole bounded shadow score batch when its inputs change | Refresh cost becomes the measured bottleneck |
+| Current EOD provider ingestion, raw receipts, coverage watermarks, changed-key merges, corrections/deletions | Phase 3B | Phase 2 pins saved output for this preview | After 3A; before cutover |
+| Complete dependency invalidation | Phase 3B with 4/5 | Preview uses one frozen batch | Before native refresh acceptance; conservative full descendants allowed |
+| Fine-grained invalidation and causal state checkpoints | Phase 8C | Bounded complete recomputation preserves semantics | Measured refresh bottleneck |
 | Native feature/scoring/chooser extraction and full canonical `ScoreRecord` production | Phase 4 | Existing validated scorer produces the required values | Replace one compatibility boundary at a time after preview |
-| Training recipes, persisted fold/residual artifacts, promotion/rollback improvements | Phase 5 | Existing champion artifacts are pinned; no promotion is needed | Native inference migration or an independently requested model change |
-| Models, book, explorer, derivation, flags pages as new React screens; portfolio aggregates; rich payoff interactions | Remaining Phase 6 | Existing views remain accessible in the pinned legacy release | Board/detail parity passes; migrate one screen at a time |
-| Job submission, ad-hoc scoring, overrides, automatic refresh buttons, live collection | Later Phase 6/7 | Read-only scores meet initial use | Read surface accepted and command contracts implemented |
-| New offline package, phone-install flow, remote delivery, host migration | Remaining Phase 6/operations | Local private preview plus existing exports suffice | Remote rollout requested or full UI parity being accepted |
+| Current training recipes, complete fold/residual artifacts and deployment rollback | Phase 5 | Existing saved scores suffice for preview | Before native scoring and cutover acceptance |
+| Existing Models/book/flags/history/analog capabilities and portfolio totals | Phase 6 | Frozen legacy release supplies preview comparison | Before cutover, using native outputs through new or compatibility views |
+| React replacement of all screens, new explorer/derivation/payoff interactions | Phase 8B | Existing capability parity does not require redesign | After cutover |
+| Existing job/scoring/override workflows | Phase 6 | This preview is read-only | Before cutover; preserve existing access paths |
+| New refresh/what-if UI controls and live collection | Phase 8B / 8D | Adds capability beyond EOD parity | After cutover and command/clock qualification |
+| Existing phone/offline/private-delivery access | Phase 6 | Local preview is sufficient for 3A only | Before cutover |
+| New install flow, additional remote delivery or host migration | Phase 8B / operations | Not needed to preserve existing access | Separate rollout need |
 | Generalized structure search, new valuation/scenarios, strategy changes | Domain/research work | These add capabilities beyond parity | Separate implementation/experiment request |
-| Compaction, GC, alternative database engines, general frontend component framework | Post-launch optimization | Existing immutable storage and a small UI suffice | Measured constraint, not architectural completeness |
-| Delete adapters/legacy tree, rename v2, switch official decisions | Phase 8 | Shadow launch retains rollback and comparison | All relevant migration gates pass |
+| Compaction, GC, alternative databases, broad frontend framework | Phase 8B/8C | Existing immutable storage and UI suffice | Measured constraint |
+| Switch official EOD decisions/consumers | Phase 7 | Preview retains legacy authority | Native parity and session qualification pass |
+| Delete remaining adapters/legacy tree, rename v2 | Phase 8A | Retain old deployment for rollback | Cutover accepted and rollback window closed |
 
-Carried from Phase 2 into the incremental-data continuation: Phase 2 added
+Carried from Phase 2 into Phase 3B: Phase 2 added
 `covered_tickers` to legacy `engine/data/finality.py` so decision evidence
 carries genuine per-ticker finality (P2-5 task 3). When finality moves into
 `engine/v2/data`, move this per-ticker coverage computation with it and
@@ -667,6 +706,10 @@ client assets contain code only; data arrives via authenticated requests.
 
 ## 8. Build order and task boundaries
 
+Historical implementation order below; resume at §1.1. P3-0…P3-3 are largely
+merged. Re-run or extend their checks when affected, rather than rebuilding
+them. P3-4 closeout is outstanding.
+
 Each task has one deliverable and named tests. If delegated under repository
 instructions, give one task per agent, paste relevant signatures/facts, name
 owned/prohibited files, and use isolated worktrees. Do not delegate this entire
@@ -840,11 +883,14 @@ implementation before claiming completion. Use approved interpreter/resource
 policies, supervised jobs for expensive work, and progress logging throughout.
 
 Launch is complete when P3-0 and P3-4 are evidenced, the user can open the real
-board/detail, L01–L14 pass, update/rollback works, and deferred work has owners.
+board/detail, all launch-specific L01–L14 requirements pass, update/rollback
+works, and deferred work has owners. Report the inherited strict Phase 2
+findings and their exact accepted disposition separately under §1.1 C2;
+never label a red strict gate green. This closes 3A, not 3B or cutover.
 Commit source/docs at green milestones; follow the standing instruction to
 ask before pushing. Retain private evidence through the established backup.
 
-Full rearchitecture parity remains pending: the original incremental-data
-gate (no-op rewrites zero data; append/correction equals clean rebuild), native
-scoring/model gates, remaining screen/offline parity and cutover are still
-required at their later acceptance points. This launch marks none of them green.
+Full rearchitecture parity remains pending: Phase 3B incremental data,
+Phase 4/5 native scoring/models, Phase 6 consumer/offline parity and Phase 7
+cutover retain their own gates. Physical cleanup and new capabilities belong
+to Phase 8. This launch marks none of those requirements green.

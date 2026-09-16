@@ -1,0 +1,80 @@
+# Rearchitecture Phase 8 — Post-cutover completion and extensions
+
+Status: implementation plan, 2026-09-16. Authority:
+[delivery plan](rearchitecture_delivery_plan.md). These workstreams begin after
+Phase 7, independently where their dependencies allow. They do not reopen the
+EOD cutover gate. The target design remains the architectural destination.
+
+## 8A — Retire compatibility dependencies and clean up the tree
+
+Entry: cutover verified, agreed rollback window elapsed, restore/replay evidence
+retained and current consumers inventoried.
+
+1. Remove remaining compatibility/import-only adapters one at a time, preserving
+   historical artifact and CLI readability through supported formats.
+2. Prove no scheduled, official, research, replay, export or restore consumer
+   requires the old runtime. Drive the exact-symbol legacy adapter ledger to zero.
+3. Preserve a recoverable archived deployment and private artifacts. Remove the
+   legacy tree and mechanically rename `engine/v2/` to `engine/` in a separate
+   change from numerical or storage behavior.
+4. Update entrypoints, import map, READMEs, backup/restore and operator docs.
+
+Acceptance: tier-0 corpus and real replay unchanged by rename, zero legacy
+adapter edges, import/budget/hygiene/coverage checks, current consumer smoke
+checks and archived restore. A reference to an old private report is not a
+reason to delete the report. Destructive cleanup follows the authorization
+applicable when performed.
+
+## 8B — Finish new UI and interactive capabilities
+
+Migrate compatibility Models, book, health/flags, history/analog and research
+views to React one screen at a time; preserve the Phase 6 capability matrix.
+Then add new what-if/strike exploration, derivation views, job controls,
+phone-install improvements or additional delivery surfaces when wanted.
+
+Each screen consumes canonical projections with lazy fetches, release-aware
+cache keys, auth and truthful loading/error/stale states. Expensive requests
+return supervised job IDs; browser focus cannot initiate paid collection.
+Acceptance: existing capability/browser parity, bounded initial requests,
+mobile/offline regressions, access-control and cancellation tests. New financial
+results must come from registered domain/scoring operations.
+
+## 8C — Incremental efficiency and reusable research extensions
+
+Use measured bottlenecks to order exact dependency invalidation, causal state
+checkpoints, partition compaction/GC, filter pushdown, object verification cache
+or storage changes. Correct invalidation already landed in 3B/4/5; this work
+reduces recomputation, not the dependency domain.
+
+Each optimization needs same-input equivalence, no-op/change counters,
+crash/recovery controls and runtime/RSS measurements including contention.
+GC additionally proves retention for releases, experiments, ledgers and active
+readers. Consult the [debt registry](rearchitecture_tech_debt.md).
+
+Generalized generators, scenarios, valuation, training backends and richer
+dataset recipes follow the [reusable domain contracts](structure_generation_and_simulation.md).
+Preserve existing selector-resolved behavior; new search/ranking or economics
+requires a separately registered strategy/experiment with generated reports,
+fill sensitivity and normal promotion rules. Do not implicitly promote a
+different strategy through an infrastructure enhancement.
+
+## 8D — Live shadow (former Phase 7)
+
+Follow [live intraday scoring](live_intraday_scoring.md) and system design §10:
+prove provider entitlements/schema/clock first; capture immutable raw live
+responses with genuine receipt times; implement causal clock-specific features
+and frozen deployments; run shadow/paper collection with quota and deadlines.
+Keep provisional intraday objects separate from final EOD data.
+
+Acceptance requires the live guide gates, timely publication, causal provenance,
+no contamination, generated reports and shadow/paper evidence. An EOD model
+or a Phase 7 infrastructure cutover is not live model qualification. Brokerage
+execution or capital allocation retains its independent approval/go-live rules.
+
+## Completion records
+
+Each workstream has its own task inventory, acceptance report and runbook
+update; there is no single giant Phase 8 release. Core rearchitecture completion
+means parity, incremental normal operation, registered native scoring/model
+workflows and physical cleanup are evidenced. Optional new UI/research/live
+capabilities each remain separately labeled until their own gates pass.

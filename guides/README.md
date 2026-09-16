@@ -1,5 +1,10 @@
 # Build Guides — Earnings-Vol Trading Program
 
+**For the current rearchitecture, start with the
+[delivery plan](rearchitecture_delivery_plan.md).** The research-program
+sequence immediately below is historical context with separate phase numbers;
+it is not the rearchitecture assignment queue.
+
 One guide per phase of `../EARNINGS_VOL_PROGRAM_PLAN.md` (v1.3). Each guide
 tells the implementing agent: build order, architecture, contracts/schemas,
 hard constraints, acceptance tests ("how we know it works"), and known failure
@@ -8,8 +13,8 @@ modes. Read the plan first; read this file before any guide.
 **Build order is 0 → 1 → 2 → 4 → 3 → 5 → 6** (the plan's sequencing table):
 phases are numbered in the order they were specified, not built. Phase 3's
 nightly job writes the Phase 4 ledger, so Phase 4 comes first.
-**Current position: phases 0, 1, 2 and 4 complete. Phase 3 (dashboard) is the
-active phase — it reads `engine/score.py`, the report generator, and the
+**Historical research-program position: phases 0, 1, 2 and 4 complete. Phase 3
+(dashboard) was the active phase — it reads `engine/score.py`, the report generator, and the
 ledger's `health.json`, all of which now exist.**
 
 | Guide | Phase | Depends on |
@@ -43,8 +48,12 @@ ledger's `health.json`, all of which now exist.**
   exhaustive placement contracts, historical/synthetic scenarios, reusable
   valuation and accounting, time/IV what-ifs and compatibility tests.
 
-Implementation plans, one per migration phase of
-[system rearchitecture](system_rearchitecture.md) §12:
+Rearchitecture implementation plans (separate from the older research-program
+phase numbers above). Start with the
+[delivery plan and current assessment](rearchitecture_delivery_plan.md), aligned
+with [system rearchitecture §12](system_rearchitecture.md#12-migration-sequence-and-rollback).
+It owns sequencing; phase guides own tasks, status files own evidence, and
+runbooks own tested commands.
 
 - [Phase 0 — Baseline](rearchitecture_phase0_baseline.md): the tier-0 corpus,
   the ComparisonReceipt, the enforced layer map and the empty `engine/v2/`
@@ -56,15 +65,23 @@ Implementation plans, one per migration phase of
 - [Phase 2 — Data Access](rearchitecture_phase2_data_access.md): immutable
   dataset/snapshot manifests, bounded Arrow reads, exact event/chain access,
   legacy scoring adapters, and atomic rebuild/rollback acceptance gates.
-- [Phase 3 — First dashboard with real scores](rearchitecture_phase3_parity_launch.md):
-  immediate compatibility preview, then a small read API and new board/detail
-  UI over validated Phase 2 scores. Implements the Sep-13 parity-first
-  sequencing decision: incremental ingestion and native scoring/model
-  migration do not block the initial shadow dashboard. Their full migration
-  gates remain outstanding.
+- [Phase 3A — Preview closeout](rearchitecture_phase3_parity_launch.md): finish
+  the merged saved-score board/detail, frozen replay, acceptance evidence and
+  repeatable update/rollback. Existing Phase 3 gate names cover only this part.
+- [Phase 3B — Incremental data](rearchitecture_phase3_incremental_data.md):
+  no-op, append/correction/deletion, coverage/finality and complete invalidation.
+- [Phase 4 — Native scoring](rearchitecture_phase4_scoring.md): current
+  strategies/refusals, shared canonical kernel and financial diagnostics.
+- [Phase 5 — Frozen models](rearchitecture_phase5_models.md): inference without
+  fitting, current training recipes, fold/residual artifacts and deployment rollback.
+- [Phase 6 — Consumer parity](rearchitecture_phase6_consumer_parity.md): native
+  nightly, research, ledger/book, all current views and phone/offline access.
+- [Phase 7 — Cutover](rearchitecture_phase7_cutover.md): ten qualified sessions,
+  controlled official-writer switch and tested rollback.
+- [Phase 8 — Post-cutover](rearchitecture_phase8_post_cutover.md): physical
+  cleanup/rename, UI enhancements, efficiency/generalization and live shadow.
 - [Rearchitecture tech debt](rearchitecture_tech_debt.md): nice-to-haves
-  deferred until after Phase 6. Anything a later phase needs stays in its
-  own phase instead.
+  owned by Phase 8C unless a measured prerequisite moves into an earlier phase.
 
 These are design proposals. They describe explicit future changes to the
 runtime choices in convention 7 below, while retaining the research and safety

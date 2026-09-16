@@ -1,10 +1,13 @@
 # Rearchitecture tech debt
 
-Deferral rule (user decision, 2026-09-13): work that any later
-rearchitecture phase needs is finished in its own phase. Only nice-to-haves
-that can safely wait until **after Phase 6** are recorded here. Nothing on
-this list may be a prerequisite of Phases 3–6. If a phase guide comes to need
-an entry, move it into that phase and delete it here.
+Deferral rule, aligned 2026-09-16: work required by a migration phase is
+finished in that phase. Optional optimizations here are owned by
+[Phase 8C](rearchitecture_phase8_post_cutover.md), after Phase 7 cutover.
+Nothing here may be a hidden prerequisite of Phases 3–7. If measurements make
+an item necessary earlier, move it into that phase and update the
+[delivery plan](rearchitecture_delivery_plan.md). Historical Phase 7 live
+references in entries below now mean Phase 8D; after-Phase-6 optimization
+references mean Phase 8C, not an extra pre-cutover gate.
 
 Each entry: what was deferred, why it can wait, the risk while it waits, and
 what should trigger revisiting it.
@@ -36,3 +39,5 @@ The rest of the Sep-13 review is assigned in
 [Phase 3 launch §5.5](rearchitecture_phase3_parity_launch.md#55-review-follow-through-for-repeatable-updates-and-live-health),
 and [system design §12.1](system_rearchitecture.md#121-sep-13-review-follow-through).
 Those phase requirements must not be treated as optional entries on this list.
+The delivery plan and current phase guides supersede historical phase labels
+in origin notes; they do not change the technical reason each item was deferred.
