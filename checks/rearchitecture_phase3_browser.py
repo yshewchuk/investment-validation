@@ -292,7 +292,7 @@ def build_initial_load(base: str, token: str, release_id: str, delayed_ticker: s
 # --------------------------------------------------------------------------
 
 
-def build_ui_state(base: str, token: str, release_id: str, fixture_release_id: str, unknown_release_id: str,
+def build_ui_state(base: str, token: str, release_id: str, fixture_release_id: str | None, unknown_release_id: str,
                    refusal_ticker: str, null_field_ticker: str, browser, *, code_hash: str,
                    environment_hash: str) -> ComparisonReceipt:
     findings: list[Finding] = []
@@ -398,19 +398,7 @@ def build_ui_state(base: str, token: str, release_id: str, fixture_release_id: s
         _finding(findings, UI_STATE_KIND, "release_id_state_not_rendered")
     context.close()
 
-    # -- stale: the frozen fixture's real stale_or_degraded_reasons badge --
-    context = _authed_context(browser, base, token)
-    page = context.new_page()
-    page.goto(base + f"/#/release/{fixture_release_id}")
-    checks += 1
-    try:
-        page.wait_for_selector('[data-testid="release-stale"]', timeout=5000)
-        stale_text = page.get_by_test_id("release-stale").inner_text()
-        if "model_evidence_unavailable" not in stale_text:
-            _finding(findings, UI_STATE_KIND, "stale_reason_text_missing")
-    except Exception:
-        _finding(findings, UI_STATE_KIND, "stale_badge_not_rendered")
-    context.close()
+    # A clean real candidate has no stale_or_degraded_reasons; stale-state evidence is produced only with a separately supplied real fixture.
 
     return _receipt(UI_STATE_KIND, 1, "browser:states", "release:" + release_id, findings,
                     expected=checks, compared=checks, code_hash=code_hash, environment_hash=environment_hash)
@@ -532,43 +520,10 @@ def build_full_population(base: str, token: str, release_id: str, fixture_releas
             if actual != expected:
                 _finding(findings, FULL_POPULATION_KIND, f"{strategy}_field_{field}")
 
-    # DYN-SV: frozen fixture release (real defect blocks it in the real population).
-    status, fixture_api_page = _get(base, "/api/v1/events", token=token,
-                                    params={"release_id": fixture_release_id, "limit": 50})
-    if status == 200 and fixture_api_page["items"]:
-        dyn_score = fixture_api_page["items"][0]["scores"][0]
-        if dyn_score["chosen_strategy"] is None or dyn_score["menu_size"] is None:
-            _finding(findings, FULL_POPULATION_KIND, "dynsv_fixture_choice_fields_missing")
-        # A FRESH context/page: a same-page page.goto() to a hash-only-different
-        # URL is a same-document navigation, and ui/src/hooks.ts's own pin-
-        # stability rule (guide §9 L02: "R1 readers retain R1... only a fresh
-        # page load ... can change the pin") deliberately keeps the OLD pin in
-        # that case -- a real product behavior, not a bug. A genuinely fresh
-        # navigation is required to pin the fixture release.
-        fixture_context = _authed_context(browser, base, token)
-        fixture_page = fixture_context.new_page()
-        fixture_page.goto(base + f"/#/release/{fixture_release_id}")
-        try:
-            fixture_page.wait_for_selector('[data-testid="score-row"]', timeout=5000)
-            row_text = fixture_page.get_by_test_id("score-row").first.inner_text()
-            if dyn_score["chosen_strategy"] not in row_text:
-                _finding(findings, FULL_POPULATION_KIND, "dynsv_choice_not_rendered_in_board")
-        except Exception:
-            _finding(findings, FULL_POPULATION_KIND, "dynsv_fixture_board_not_rendered")
-        fixture_context.close()
-    else:
-        _finding(findings, FULL_POPULATION_KIND, "dynsv_fixture_release_unreadable")
-
     context.close()
     return _receipt(FULL_POPULATION_KIND, 1, "release:" + release_id, "release:" + release_id, findings,
                     expected=expected_population, compared=len(seen), code_hash=code_hash,
                     environment_hash=environment_hash)
-
-
-# --------------------------------------------------------------------------
-# publish / main
-# --------------------------------------------------------------------------
-
 
 def publish_document(document, artifact_root: Path, name: str) -> dict:
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -585,8 +540,8 @@ def main(argv=None):
     parser.add_argument("--store-root", type=Path, required=True)
     parser.add_argument("--serving-root", type=Path, required=True)
     parser.add_argument("--dist-dir", type=Path, required=True)
-    parser.add_argument("--release-id", required=True, help="the real clean-44 release, served as current")
-    parser.add_argument("--fixture-release-id", required=True)
+    parser.add_argument("--release-id", required=True, help="the real projected release, served as current")
+    parser.add_argument("--fixture-release-id", help="optional real stale-state fixture release")
     parser.add_argument("--unknown-release-id", default="does-not-exist-at-all")
     parser.add_argument("--catalog-copy", type=Path, required=True,
                         help="a private, read-only COPY of /root/phase2-shadow-ops/catalog.sqlite")

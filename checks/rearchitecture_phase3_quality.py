@@ -78,6 +78,8 @@ from engine.v2.diagnosis import AGREE, DIFFER, ComparisonReceipt, Envelope, Find
 from engine.v2.foundation import to_document  # noqa: E402
 
 COVERAGE_SCHEMA = "phase3_coverage.v1.0"
+BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
+BASELINE = ROOT / "checks" / "rearchitecture_phase3_coverage_baseline.json"
 UI_BUILD_KIND = "ui_build_typecheck_parity"
 SECRET_SCAN_KIND = "secret_scan_negative_control"
 
@@ -140,8 +142,44 @@ def measure_coverage(root: Path, code_hash: str) -> dict:
     return {"schema_version": COVERAGE_SCHEMA, "source_hash": code_hash, "suite": suite,
            "suite_missing": missing, "pytest_returncode": result.returncode,
            "pytest_tail": "\n".join(result.stdout.splitlines()[-15:]), "packages": packages_out,
-           "known_gap": "no committed Phase 3 coverage ratchet baseline exists yet; this is a "
-                        "real measurement without a comparison floor"}
+           "baseline_ref": BASELINE.name}
+
+
+def coverage_findings(document: dict, root: Path = ROOT) -> list[dict]:
+    """Reject a stale, partial, or lower-coverage Phase 3 measurement."""
+    findings = []
+    baseline_path = root / BASELINE.relative_to(ROOT)
+    if not baseline_path.is_file():
+        return [{"code": "COVERAGE_BASELINE_MISSING"}]
+    try:
+        baseline = json.loads(baseline_path.read_text())
+    except ValueError:
+        return [{"code": "COVERAGE_BASELINE_INVALID"}]
+    if baseline.get("schema_version") != BASELINE_SCHEMA:
+        return [{"code": "COVERAGE_BASELINE_INVALID"}]
+    expected_suite = [f for f in FIXED_SUITE if (root / f).is_file()]
+    if baseline.get("suite") != list(FIXED_SUITE):
+        return [{"code": "COVERAGE_BASELINE_INVALID"}]
+    if document.get("suite") != expected_suite or document.get("suite_missing"):
+        findings.append({"code": "COVERAGE_SUITE_DRIFT"})
+    if document.get("pytest_returncode") != 0:
+        findings.append({"code": "COVERAGE_TEST_FAILURE"})
+    packages, previous = document.get("packages"), baseline.get("packages")
+    if not isinstance(packages, dict) or set(packages) != set(previous or {}):
+        return findings + [{"code": "COVERAGE_PACKAGE_INVENTORY_DRIFT"}]
+    for name, prior in previous.items():
+        current = packages[name]
+        executed, executable = current.get("executed"), current.get("executable")
+        old_executed, old_executable = prior.get("executed"), prior.get("executable")
+        valid_counts = all(
+            type(v) is int for v in (executed, executable, old_executed, old_executable))
+        if not valid_counts or not 0 <= executed <= executable or not 0 <= old_executed <= old_executable:
+            findings.append({"code": "COVERAGE_COUNTS_INVALID", "package": name})
+        elif executable and old_executable and executed * old_executable < old_executed * executable:
+            findings.append({"code": "COVERAGE_REGRESSION", "package": name,
+                             "previous": [old_executed, old_executable],
+                             "current": [executed, executable]})
+    return findings
 
 
 # --------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from checks import rearchitecture_phase2_evidence as p2evidence
 from checks import rearchitecture_phase2_gate as p2gate
 from checks import rearchitecture_phase3_evidence as p3evidence
 from checks import rearchitecture_phase3_gate as p3gate
+from checks.rearchitecture_phase3_quality import FIXED_SUITE
 from checks.rearchitecture_phase3_gate import REGISTRY as REAL_REGISTRY_PATH
 from engine.v2.contracts import (
     DatasetVersionRef,
@@ -301,7 +302,11 @@ def valid_evidence(tmp_path, *, populate_all=True) -> tuple[dict, Path, Path]:
             "nights": [{"date": "2026-09-01", "status": "observed"}, {"date": "2026-09-02", "status": "unknown"}],
         }).encode()),
         "coverage_receipt_ref": _ref(artifact_root, "coverage_receipt.json", json.dumps({
-            "schema_version": "phase3_coverage.v1.0", "source_hash": code_hash, "packages": {},
+            "schema_version": "phase3_coverage.v1.0", "source_hash": code_hash,
+            "suite": list(FIXED_SUITE),
+            "suite_missing": [], "pytest_returncode": 0,
+            "packages": json.loads((Path(__file__).resolve().parents[1] /
+                                    "checks/rearchitecture_phase3_coverage_baseline.json").read_text())["packages"],
         }).encode()),
         "performance_receipt_ref": _ref(artifact_root, "performance_receipt.json", json.dumps({
             "api_latency_p50_ms": 120, "first_usable_page_seconds": 1.4, "bytes": 20000,
@@ -331,6 +336,41 @@ def _gate(evidence, artifact_root, root, registry_path=REAL_REGISTRY_PATH):
                        corpus_root=artifact_root.parent / "corpus", registry_path=registry_path)
 
 
+def _retained_phase2_disposition(evidence, artifact_root):
+    """Turn the synthetic Phase 2 prerequisite into the exact accepted red state."""
+    phase2_ref = evidence["phase2_acceptance_ref"]
+    phase2_doc = json.loads((artifact_root / phase2_ref["path"]).read_text())
+    for field, stale_code in (
+        ("corpus_comparison_receipt_ref", "sha256:" + "9" * 64),
+        ("comparison_receipt_ref", None),
+    ):
+        receipt_ref = phase2_doc[field]
+        receipt_path = artifact_root / receipt_ref["path"]
+        receipt = json.loads(receipt_path.read_text())
+        receipt["verdict"] = DIFFER
+        if stale_code is not None:
+            receipt["envelope"]["code_hash"] = stale_code
+        phase2_doc[field] = _ref(artifact_root, receipt_ref["path"], json.dumps(receipt).encode())
+    phase2_ref = _ref(artifact_root, "phase2/_evidence.json", json.dumps(phase2_doc).encode())
+    evidence["phase2_acceptance_ref"] = phase2_ref
+    accepted = []
+    for d_id, field in (("D14", "corpus_comparison_receipt_ref"), ("D15", "comparison_receipt_ref")):
+        receipt = json.loads((artifact_root / phase2_doc[field]["path"]).read_text())
+        population = {key: receipt["population"][key] for key in ("expected", "supported", "compared")}
+        accepted.append({"d_id": d_id, "receipt_field": field, "receipt_ref": phase2_doc[field],
+                         "population": population, "cause": "stale_legacy_price_archive"})
+    disposition = {
+        "schema_version": p3evidence.PHASE2_HANDOFF_DISPOSITION_V1,
+        "phase2_evidence_ref": phase2_ref,
+        "candidate_code_hash": phase2_doc["code_hash"],
+        "candidate_environment_hash": phase2_doc["environment_hash"],
+        "accepted_findings": accepted,
+    }
+    evidence["phase2_handoff_disposition_ref"] = _ref(
+        artifact_root, "phase2_handoff_disposition.json", json.dumps(disposition).encode())
+    return disposition
+
+
 # -- registry shape -----------------------------------------------------------
 
 def test_registry_covers_exactly_l01_through_l14():
@@ -347,6 +387,50 @@ def test_fully_valid_evidence_is_ok(tmp_path):
     assert result["findings"] == []
     assert set(result["l_rows"]) == set(ALL_L_IDS)
     assert all(row["ok"] for row in result["l_rows"].values())
+
+
+def test_exact_phase2_disposition_retains_strict_findings_but_allows_readiness(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    _retained_phase2_disposition(evidence, artifact_root)
+    result = _gate(evidence, artifact_root, root)
+    assert result["ok"] is False
+    assert result["accepted_readiness_ok"] is True
+    assert codes(result) == {"PHASE2_STRICT_FINDINGS_RETAINED"}
+    assert all(row["ok"] for row in result["l_rows"].values())
+
+
+def test_phase2_disposition_refuses_new_or_different_prerequisite_findings(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    _retained_phase2_disposition(evidence, artifact_root)
+    phase2_ref = evidence["phase2_acceptance_ref"]
+    phase2_doc = json.loads((artifact_root / phase2_ref["path"]).read_text())
+    phase2_doc["expected_population"] = 0
+    evidence["phase2_acceptance_ref"] = _ref(
+        artifact_root, "phase2/_evidence.json", json.dumps(phase2_doc).encode())
+    result = _gate(evidence, artifact_root, root)
+    assert result["accepted_readiness_ok"] is False
+    assert "PREREQUISITE_FAILED" in codes(result)
+
+
+def test_coverage_receipt_refuses_a_dropped_fixed_suite_file(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    receipt_path = artifact_root / evidence["coverage_receipt_ref"]["path"]
+    receipt = json.loads(receipt_path.read_text())
+    receipt["suite"] = receipt["suite"][:-1]
+    evidence["coverage_receipt_ref"] = _ref(artifact_root, receipt_path.name, json.dumps(receipt).encode())
+    result = _gate(evidence, artifact_root, root)
+    assert "COVERAGE_SUITE_DRIFT" in codes(result)
+    assert "L14" in l_ids_with(result, "MISSING_EVIDENCE")
+
+
+def test_coverage_receipt_refuses_a_regression(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    receipt_path = artifact_root / evidence["coverage_receipt_ref"]["path"]
+    receipt = json.loads(receipt_path.read_text())
+    receipt["packages"]["engine.v2.serving"]["executed"] -= 1
+    evidence["coverage_receipt_ref"] = _ref(artifact_root, receipt_path.name, json.dumps(receipt).encode())
+    result = _gate(evidence, artifact_root, root)
+    assert "COVERAGE_REGRESSION" in codes(result)
 
 
 # -- required fields: each missing field gives its own code -------------------

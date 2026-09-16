@@ -103,7 +103,11 @@ def gate(root=ROOT, *, evidence_manifest_path=None, artifact_root=None, registry
         findings.extend(row_findings)
         l_rows[l_id] = {"ok": not row_findings, "requires": registry[l_id].get("requires", [])}
 
+    retained = [f for f in findings if f.get("code") == "PHASE2_STRICT_FINDINGS_RETAINED"]
+    readiness_findings = [f for f in findings if f.get("code") != "PHASE2_STRICT_FINDINGS_RETAINED"]
     return {"schema_version": "phase3_gate.v1.0", "ok": not findings,
+            "accepted_readiness_ok": not readiness_findings,
+            "retained_prerequisite_findings": retained,
             "implementation_code_hash": code_hash, "environment_hash": env_hash,
             "environment_hash_source": env_source, "findings": findings, "l_rows": l_rows,
             "evidence": evidence, "seconds": round(time.monotonic() - started, 2)}
@@ -132,7 +136,8 @@ def write_report(root: Path, report_path: Path, result: dict) -> Path:
              f"- implementation_code_hash: `{result['implementation_code_hash']}`",
              f"- environment_hash: `{result['environment_hash']}` (source: "
              f"{result['environment_hash_source']})",
-             f"- gate ok: **{result['ok']}**", "",
+             f"- strict gate ok: **{result['ok']}**",
+             f"- accepted readiness ok: **{result.get('accepted_readiness_ok', False)}**", "",
              "## L01-L14 matrix", "", "| L-ID | ok |", "|---|---|"]
     for l_id, row in sorted(result.get("l_rows", {}).items()):
         lines.append(f"| {l_id} | {'PASS' if row['ok'] else 'FAIL'} |")

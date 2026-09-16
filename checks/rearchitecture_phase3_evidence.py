@@ -146,8 +146,14 @@ NEGATIVE_LIST_FIELDS = ("negative_control_receipt_refs",)
 REF_FIELDS = ("phase2_acceptance_ref", *DECODE_CLASS, *RAW_SINGLE_FIELDS, *RAW_LIST_SINGLE_FIELDS)
 LIST_REF_FIELDS = tuple(LIST_DECODE_CLASS)
 
+# Optional for a clean prerequisite. Required only when the reused strict
+# Phase 2 validator reports retained findings.
+PHASE2_HANDOFF_DISPOSITION_V1 = "phase2_handoff_disposition.v1.0"
+PHASE2_DISPOSITION_FIELD = "phase2_handoff_disposition_ref"
+
 ALL_FIELDS = frozenset((
     "schema_version", "authority_mode", *SCALAR_FIELDS, *REF_FIELDS, *LIST_REF_FIELDS,
+    PHASE2_DISPOSITION_FIELD,
 ))
 
 
@@ -281,6 +287,11 @@ def _check_coverage_receipt(doc: dict | None, implementation_code_hash: str | No
     if doc.get("source_hash") != implementation_code_hash:
         findings.append({"code": "CODE_HASH_MISMATCH", "field": field})
         field_ok[field] = False
+        return
+    from checks.rearchitecture_phase3_quality import coverage_findings
+    for finding in coverage_findings(doc):
+        findings.append({**finding, "field": field})
+        field_ok[field] = False
 
 
 def _check_verdicts_and_bindings(decoded_lists: dict[str, list[Any]], findings: list,
@@ -383,6 +394,72 @@ def _check_release_bindings(evidence: dict, artifact_root: Path, findings: list,
             field_ok[field] = False
 
 
+def _same_ref(left: Any, right: Any) -> bool:
+    return (isinstance(left, dict) and isinstance(right, dict)
+            and left.get("path") == right.get("path")
+            and left.get("content_hash") == right.get("content_hash"))
+
+
+def _check_phase2_disposition(disposition_data: bytes | None, *, phase2_ref: Any, phase2_doc: dict,
+                              artifact_root: Path, phase2_findings: list[dict]) -> bool:
+    """Validate the exact, limited Phase 2 handoff exception.
+
+    The disposition does not change the strict Phase 2 result. It can only
+    name the exact evidence document and D14/D15 receipt refs, populations,
+    and recorded stale-price cause. Any other finding remains a hard block.
+    """
+    if disposition_data is None:
+        return False
+    retained = {
+        ("VERDICT_NOT_AGREE", "corpus_comparison_receipt_ref"),
+        ("CODE_HASH_MISMATCH", "corpus_comparison_receipt_ref"),
+        ("VERDICT_NOT_AGREE", "comparison_receipt_ref"),
+    }
+    observed = {(finding.get("code"), finding.get("field")) for finding in phase2_findings}
+    if observed != retained:
+        return False
+    try:
+        disposition = json.loads(disposition_data)
+    except ValueError:
+        return False
+    if not isinstance(disposition, dict) or disposition.get("schema_version") != PHASE2_HANDOFF_DISPOSITION_V1:
+        return False
+    if not _same_ref(disposition.get("phase2_evidence_ref"), phase2_ref):
+        return False
+    if (disposition.get("candidate_code_hash") != phase2_doc.get("code_hash")
+            or disposition.get("candidate_environment_hash") != phase2_doc.get("environment_hash")):
+        return False
+    required = {
+        "D14": "corpus_comparison_receipt_ref",
+        "D15": "comparison_receipt_ref",
+    }
+    entries = disposition.get("accepted_findings")
+    if not isinstance(entries, list) or len(entries) != len(required):
+        return False
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        d_id, receipt_field = entry.get("d_id"), entry.get("receipt_field")
+        if d_id not in required or required[d_id] != receipt_field or d_id in seen:
+            return False
+        seen.add(d_id)
+        receipt_ref = phase2_doc.get(receipt_field)
+        if not _same_ref(entry.get("receipt_ref"), receipt_ref):
+            return False
+        receipt_data = _resolve(receipt_ref, artifact_root, [], f"phase2.{receipt_field}")
+        receipt = _decode(ComparisonReceipt, receipt_data, [], f"phase2.{receipt_field}") if receipt_data else None
+        population = entry.get("population")
+        if receipt is None or not isinstance(population, dict):
+            return False
+        observed = {name: getattr(receipt.population, name) for name in ("expected", "supported", "compared")}
+        if population != observed or receipt.verdict == AGREE:
+            return False
+        if entry.get("cause") != "stale_legacy_price_archive":
+            return False
+    return seen == set(required)
+
+
 def _check_phase2(evidence: dict, artifact_root: Path, corpus_root: Path | None, findings: list,
                   field_ok: dict[str, bool]) -> None:
     field = "phase2_acceptance_ref"
@@ -404,9 +481,22 @@ def _check_phase2(evidence: dict, artifact_root: Path, corpus_root: Path | None,
         phase2_doc, artifact_root=artifact_root, corpus_root=corpus_root,
         code_hash=evidence.get("source_code_hash"), environment_hash=evidence.get("source_environment_hash"))
     if not p2_document_ok or p2_findings or not all(p2_field_ok.values()):
+        disposition_data = _resolve(
+            evidence.get(PHASE2_DISPOSITION_FIELD), artifact_root, findings, PHASE2_DISPOSITION_FIELD)
+        disposition_ok = _check_phase2_disposition(
+            disposition_data, phase2_ref=evidence.get(field), phase2_doc=phase2_doc,
+            artifact_root=artifact_root, phase2_findings=p2_findings)
+        field_ok[PHASE2_DISPOSITION_FIELD] = disposition_ok
+        if disposition_ok:
+            findings.append({"code": "PHASE2_STRICT_FINDINGS_RETAINED", "prerequisite": "phase2",
+                             "phase2_findings": p2_findings})
+            return
         findings.append({"code": "PREREQUISITE_FAILED", "prerequisite": "phase2",
                          "phase2_findings": p2_findings})
         field_ok[field] = False
+    elif PHASE2_DISPOSITION_FIELD in evidence:
+        findings.append({"code": "UNEXPECTED_DISPOSITION", "field": PHASE2_DISPOSITION_FIELD})
+        field_ok[PHASE2_DISPOSITION_FIELD] = False
 
 
 def validate_evidence(evidence: dict, *, artifact_root: Path,

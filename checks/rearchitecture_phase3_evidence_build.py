@@ -113,7 +113,7 @@ def build(*, artifact_root: Path, phase2_evidence: Path | None, phase2_artifact_
          refresh_rollback_receipt: Path | None, engineering_receipt: Path | None,
          coverage_receipt: Path | None, performance_receipt: Path | None,
          view_field_inventory: Path | None, deferred_work: Path | None,
-         ui_lock: Path | None) -> dict:
+         ui_lock: Path | None, phase2_handoff_disposition: Path | None = None) -> dict:
     artifact_root.mkdir(parents=True, exist_ok=True)
     evidence: dict = {
         "schema_version": PHASE3_EVIDENCE_V1,
@@ -134,6 +134,10 @@ def build(*, artifact_root: Path, phase2_evidence: Path | None, phase2_artifact_
     elif source_code_hash and source_environment_hash:
         evidence["source_code_hash"] = source_code_hash
         evidence["source_environment_hash"] = source_environment_hash
+
+    if phase2_handoff_disposition is not None:
+        evidence["phase2_handoff_disposition_ref"] = _publish(
+            phase2_handoff_disposition, artifact_root, "phase2_handoff_disposition.json")
 
     if mapping_version:
         evidence["mapping_version"] = mapping_version
@@ -185,6 +189,8 @@ def main(argv=None):
     parser.add_argument("--phase2-artifact-root", type=Path)
     parser.add_argument("--source-code-hash")
     parser.add_argument("--source-environment-hash")
+    parser.add_argument("--phase2-handoff-disposition", type=Path,
+                        help="private disposition bound to this exact Phase 2 evidence document")
     parser.add_argument("--mapping-version")
     parser.add_argument("--preview-input", action="append", type=Path, default=[])
     parser.add_argument("--accepted-release", action="append", default=[],
@@ -214,7 +220,7 @@ def main(argv=None):
         refresh_rollback_receipt=args.refresh_rollback_receipt, engineering_receipt=args.engineering_receipt,
         coverage_receipt=args.coverage_receipt, performance_receipt=args.performance_receipt,
         view_field_inventory=args.view_field_inventory, deferred_work=args.deferred_work,
-        ui_lock=args.ui_lock)
+        ui_lock=args.ui_lock, phase2_handoff_disposition=args.phase2_handoff_disposition)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(evidence, indent=2, sort_keys=True))
     findings, field_ok, document_ok, kind_ok = validate_evidence(
