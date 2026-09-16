@@ -572,11 +572,41 @@ class Service:
         try:
             self._commit_success(running, status, launch, keepalive)
         except Exception as exc:
-            problem = exc.problem if isinstance(exc, OpsError) else make_problem(
-                "VALIDATION_FAILED", "worker output failed validation")
+            problem = (exc.problem if isinstance(exc, OpsError)
+                       else self._completion_problem(claim, exc))
             self._commit_failure(claim, status, problem)
         finally:
             self._progress_state.pop(claim.attempt_id, None)
+
+    def _completion_problem(self, claim, exc):
+        """Keep coordinator failures diagnosable without exposing exception text.
+
+        Reuse the worker catch-all redaction: class and code location only.
+        In particular, a ValueError message can contain credentials or prices.
+        Keep the existing nonretryable classification for completion failures.
+        """
+        from engine.v2.ops.worker import _generic_problem, _write_failure_details
+
+        details = dict(_generic_problem(exc).details)
+        causes, seen = [], {id(exc)}
+        cause = exc
+        while len(causes) < 8:
+            cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
+            if cause is None or id(cause) in seen:
+                break
+            seen.add(id(cause))
+            causes.append(dict(_generic_problem(cause).details))
+        if causes:
+            details["causes"] = causes
+        problem = make_problem(
+            "VALIDATION_FAILED", f"coordinator completion raised {type(exc).__name__}")
+        try:
+            _write_failure_details(self.store.staging_dir(claim.attempt_id), details)
+            return self._publish_failure_details(claim, problem)
+        except (OSError, OpsError):
+            # A failed diagnostics write must not strand an otherwise recordable
+            # failure (e.g. a full staging filesystem or scratch limit).
+            return problem
 
     def _commit_success(self, running, status, launch, keepalive):
         claim = running.claim
@@ -675,6 +705,9 @@ class Service:
             problem = make_problem(code, message)
         except (ValueError, TypeError, AttributeError):
             return None
+        return self._publish_failure_details(claim, problem)
+
+    def _publish_failure_details(self, claim, problem):
         details_path = (self.store.staging_dir(claim.attempt_id)
                         / "diagnostics" / "failure_details.json")
         if details_path.is_file():
