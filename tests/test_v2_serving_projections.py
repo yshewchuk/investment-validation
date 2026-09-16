@@ -250,6 +250,23 @@ def test_changed_bundle_gives_a_new_release_id(tmp_path):
     assert a.release_id != b.release_id
 
 
+def test_changed_verified_input_provenance_gives_a_new_release_id(tmp_path):
+    conn, store, snap = _events_snapshot(tmp_path, [_event_row("e1", "AAA", datetime(2024, 1, 5))])
+    repo = Repository(conn, store)
+    serving_conn, serving_store = _serving(tmp_path)
+    row = _row()
+    score_doc, bundle = _score_doc(rows=[row]), _bundle(_compact(row))
+
+    first = _build(_preview_input(finality_ref="fin_1"), score_doc, bundle, repository=repo, snap=snap,
+                   serving_conn=serving_conn, serving_store=serving_store)
+    second = _build(_preview_input(finality_ref="fin_2"), score_doc, bundle, repository=repo, snap=snap,
+                    serving_conn=serving_conn, serving_store=serving_store)
+
+    assert isinstance(first, PreviewRelease)
+    assert isinstance(second, PreviewRelease)
+    assert first.release_id != second.release_id
+
+
 def test_findings_failure_leaves_no_candidate_rows_and_writes_the_findings_receipt(tmp_path):
     conn, store, snap = _events_snapshot(tmp_path, [_event_row("e1", "AAA", datetime(2024, 1, 5))])
     repo = Repository(conn, store)

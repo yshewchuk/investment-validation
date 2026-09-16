@@ -303,6 +303,7 @@ def _release_id(preview_input: PreviewInput, snapshot_ref: SnapshotRef, score_do
     changed score or bundle changes it (§5.3 point 8's idempotency test)."""
     return content_hash({
         "source_release_id": preview_input.source_release_id,
+        "preview_input": to_document(preview_input),
         "score_batch_ref": preview_input.score_batch_ref,
         "bundle_manifest_ref": preview_input.bundle_manifest_ref,
         "model_registry_artifact_refs": list(preview_input.model_registry_artifact_refs),
@@ -406,6 +407,7 @@ def build_candidate(
         fault("details_written")
     manifest_ref = _publish_document(store, {
         "release_id": release_id, "source_release_id": preview_input.source_release_id,
+        "preview_input": to_document(preview_input),
         "snapshot_ref": snapshot_ref.snapshot_id, "score_batch_ref": preview_input.score_batch_ref,
         "bundle_manifest_ref": preview_input.bundle_manifest_ref,
         "event_ids": sorted({b.event_ref.event_id for b in bridges}),

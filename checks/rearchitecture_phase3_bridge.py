@@ -220,7 +220,7 @@ def build_mapping(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
     if any(f.category in mapping_categories for f in findings.findings):
         mapping_findings.append(_mk_finding(BRIDGE_MAPPING_KIND, "unexpected_mapping_finding_on_population"))
     comparison = _receipt(BRIDGE_MAPPING_KIND, 1, "build:full_population", "score_doc.expected_population",
-                          mapping_findings, findings.compared_population,
+                          mapping_findings, len(score_doc["expected_population"]),
                           code_hash=code_hash, environment_hash=environment_hash)
 
     # Negative control: corrupt a COPY of the bundle -- a duplicated join key (a display row
@@ -266,7 +266,7 @@ def build_value(score_json: Path, bundle_dir: Path, repository, snapshot_ref, *,
     comparison_findings: list[Finding] = []
     if any(f.category == "value" for f in findings.findings) or not findings.ok:
         comparison_findings.append(_mk_finding(BRIDGE_VALUE_KIND, "full_population_value_mismatch"))
-    compared = findings.compared_population
+    compared = len(score_doc["expected_population"])
     comparison = _receipt(BRIDGE_VALUE_KIND, 1, "score.json:full_population", "bundle:full_population",
                           comparison_findings, compared, code_hash=code_hash, environment_hash=environment_hash)
 
