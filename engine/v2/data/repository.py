@@ -566,11 +566,15 @@ class Repository:
         raise errors.fail("UNSUPPORTED_CONTRACT", "unrecognized query contract",
                   details={"contract": getattr(query, "schema_version", type(query).__name__)})
 
-    def _explain_data_query(self, query: DataQuery, table_name: str) -> DependencyPlan:
+    def _explain_data_query(self, query: DataQuery, table_name: str, *,
+                            query_validator=query_mod.validate_query) -> DependencyPlan:
+        # Materialization supplies its whole-table copy policy here. Structural
+        # decoding, snapshot/contract identity and the original query hash stay
+        # common; public explain_dependencies always uses the scan policy.
         validated = self._validated_query(query)
         snap = self.resolve(validated.snapshot_id)
         contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
-        query_mod.validate_query(contract, validated)
+        query_validator(contract, validated)
         surviving = [r for r in records if query_mod.fragment_may_match(r, contract, validated)]
         dependencies = tuple(
             DependencyEntry(table_name=table_name, dataset_version_ref=snap.table_versions[table_name],
