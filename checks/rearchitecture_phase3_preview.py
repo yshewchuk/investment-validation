@@ -143,7 +143,7 @@ def build_open_parity(release_root: Path, health_path: Path, *, token: str, code
     receipt_id = content_hash(["preview_open_parity", release_id, [f.finding_id for f in findings]])[7:23]
     return ComparisonReceipt(
         receipt_id=receipt_id, comparison_kind=OPEN_PARITY_KIND, tier=1,
-        left_ref="disk:" + release_id, right_ref="release:" + release_id,
+        left_ref="disk:" + release_id, right_ref="operations_release:" + release_id,
         stage_plan_ref="preview_open.v1", tolerance_policy_ref="exact_bytes.v1",
         verdict=verdict, findings=tuple(findings), population=population, envelope=envelope)
 

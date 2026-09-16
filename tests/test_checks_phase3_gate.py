@@ -28,6 +28,7 @@ import pytest
 from checks import rearchitecture_phase2_evidence as p2evidence
 from checks import rearchitecture_phase2_gate as p2gate
 from checks import rearchitecture_phase3_evidence as p3evidence
+from checks import rearchitecture_phase3_evidence_build as p3build
 from checks import rearchitecture_phase3_gate as p3gate
 from checks.rearchitecture_phase3_quality import FIXED_SUITE
 from checks.rearchitecture_phase3_gate import REGISTRY as REAL_REGISTRY_PATH
@@ -46,6 +47,7 @@ from engine.v2.contracts import (
 )
 from engine.v2.diagnosis.receipt import AGREE, DIFFER, ComparisonReceipt, Envelope, Population
 from engine.v2.foundation import to_document
+from engine.v2.ledger.decisions import outcome_generation_ref
 
 ALL_L_IDS = [f"L{i:02d}" for i in range(1, 15)]
 H = "sha256:" + "0" * 64
@@ -433,6 +435,56 @@ def test_coverage_receipt_refuses_a_regression(tmp_path):
     assert "COVERAGE_REGRESSION" in codes(result)
 
 
+@pytest.mark.parametrize(("payload", "expected"), [
+    ({"resolved_at": "2026-09-01T23:15:00Z"}, "2026-09-01"),
+    ({"settled_at": "2026-09-02T00:15:00"}, "2026-09-02"),
+    ({}, None),
+    ({"resolved_at": "not-a-timestamp"}, None),
+])
+def test_outcome_generation_ref_is_derived_only_from_a_valid_observation(payload, expected):
+    assert outcome_generation_ref(payload) == expected
+
+
+def test_evidence_builder_keeps_phase2_nested_refs_at_the_manifest_root(tmp_path):
+    phase2_root = tmp_path / "phase2_source"
+    phase2_root.mkdir()
+    nested = b"phase2 artifact"
+    (phase2_root / "nested.json").write_bytes(nested)
+    nested_ref = {"path": "nested.json", "content_hash": "sha256:" + hashlib.sha256(nested).hexdigest()}
+    phase2_doc = {"snapshot_ref": nested_ref}
+    phase2_evidence = tmp_path / "phase2-evidence.json"
+    phase2_evidence.write_text(json.dumps(phase2_doc))
+    artifact_root = tmp_path / "artifacts"
+
+    phase2_ref, copied_doc = p3build._copy_phase2(phase2_evidence, phase2_root, artifact_root)
+
+    assert copied_doc == phase2_doc
+    assert (artifact_root / nested_ref["path"]).read_bytes() == nested
+    assert not (artifact_root / "phase2" / nested_ref["path"]).exists()
+    assert (artifact_root / phase2_ref["path"]).read_bytes() == phase2_evidence.read_bytes()
+
+
+def test_evidence_builder_packages_the_browser_screenshot_with_its_rewritten_ref(tmp_path):
+    browser_root = tmp_path / "browser"
+    browser_root.mkdir()
+    screenshot = b"\x89PNG\r\n"
+    (browser_root / "browser_screenshot.png").write_bytes(screenshot)
+    screenshot_ref = {
+        "path": "browser_screenshot.png",
+        "content_hash": "sha256:" + hashlib.sha256(screenshot).hexdigest(),
+    }
+    receipt = browser_root / "browser_receipt.json"
+    receipt.write_text(json.dumps({"release_id": "REL1", "screenshot_ref": screenshot_ref}))
+    artifact_root = tmp_path / "artifacts"
+
+    receipt_ref = p3build._publish_browser_receipt(receipt, artifact_root)
+
+    packaged = json.loads((artifact_root / receipt_ref["path"]).read_text())
+    assert packaged["screenshot_ref"]["path"] == "browser_screenshot.png"
+    assert packaged["screenshot_ref"]["content_hash"] == screenshot_ref["content_hash"]
+    assert (artifact_root / packaged["screenshot_ref"]["path"]).read_bytes() == screenshot
+
+
 # -- required fields: each missing field gives its own code -------------------
 
 @pytest.mark.parametrize("field", [
@@ -576,6 +628,45 @@ def test_accepted_release_binding_naming_a_different_release_is_refused(tmp_path
     assert result["ok"] is False
 
 
+def test_compatibility_release_labels_remain_distinct_from_projection_binding(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    code_hash, env_hash = evidence["implementation_code_hash"], evidence["environment_hash"]
+    compatibility = _p3_receipt(kind="current_switch_parity", code_hash=code_hash,
+                                environment_hash=env_hash, receipt_id="recv_current_compat",
+                                right_ref="operations_release:R2")
+    evidence["comparison_receipt_refs"] = [
+        ref for ref in evidence["comparison_receipt_refs"] if json.loads(
+            (artifact_root / ref["path"]).read_text())["comparison_kind"] != "current_switch_parity"
+    ] + [_ref(artifact_root, "comparison_current_switch_parity.json", _dumps(compatibility))]
+    rollback = RollbackReceipt(
+        receipt_id="recv_compat_rollback", scope="v2_serving_preview",
+        prior_snapshot_id="R2", resulting_snapshot_id="R1-rollback",
+        prior_generation=2, resulting_generation=3, at="2026-09-01T00:00:00.000000Z")
+    evidence["refresh_rollback_receipt_ref"] = _ref(
+        artifact_root, "refresh_rollback.json", _dumps(rollback))
+
+    result = _gate(evidence, artifact_root, root)
+
+    assert result["ok"] is True, result["findings"]
+
+
+def test_projection_label_cannot_name_a_compatibility_fixture(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    bad = _p3_receipt(kind="api_pagination_parity",
+                      code_hash=evidence["implementation_code_hash"],
+                      environment_hash=evidence["environment_hash"],
+                      right_ref="release:R2-failed", receipt_id="recv_bad_release_label")
+    evidence["comparison_receipt_refs"] = [
+        ref for ref in evidence["comparison_receipt_refs"] if json.loads(
+            (artifact_root / ref["path"]).read_text())["comparison_kind"] != "api_pagination_parity"
+    ] + [_ref(artifact_root, "comparison_api_pagination_parity.json", _dumps(bad))]
+
+    result = _gate(evidence, artifact_root, root)
+
+    assert "RELEASE_BINDING_MISMATCH" in codes(result)
+    assert "L07" in l_ids_with(result, "MISSING_EVIDENCE")
+
+
 # -- single generation ----------------------------------------------------------
 
 def test_single_generation_rollback_is_refused(tmp_path):
@@ -586,6 +677,20 @@ def test_single_generation_rollback_is_refused(tmp_path):
     evidence["refresh_rollback_receipt_ref"] = _ref(artifact_root, "refresh_rollback.json", _dumps(stale))
     result = _gate(evidence, artifact_root, root)
     assert codes(result) & {"SINGLE_GENERATION"}
+    assert "L13" in l_ids_with(result, "MISSING_EVIDENCE")
+
+
+def test_rollback_receipt_requires_the_v2_serving_preview_scope(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    stale = RollbackReceipt(receipt_id="recv_refresh", scope="legacy_shadow",
+                            prior_snapshot_id="REL1", resulting_snapshot_id="REL2",
+                            prior_generation=1, resulting_generation=2,
+                            at="2026-09-01T00:00:00.000000Z")
+    evidence["refresh_rollback_receipt_ref"] = _ref(artifact_root, "refresh_rollback.json", _dumps(stale))
+
+    result = _gate(evidence, artifact_root, root)
+
+    assert "ROLLBACK_SCOPE_MISMATCH" in codes(result)
     assert "L13" in l_ids_with(result, "MISSING_EVIDENCE")
 
 

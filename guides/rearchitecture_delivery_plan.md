@@ -83,6 +83,12 @@ and presentation changes do not automatically reset the streak; a change to
 scoring, data, models, publication, authority or resource behavior does unless
 equivalence evidence establishes that the qualified path is unchanged.
 
+For Phase 3A evidence, compatibility release checks and projection binding are
+complementary: compatibility proves old release/current/rollback operations
+still work; projection binding proves the v2 API resolves the exact accepted
+PreviewRelease. A compatibility filesystem identifier must never stand in for
+a projection release identifier.
+
 Do not promise a completion date from unit-test counts. The fresh replay issue
 is unbounded until diagnosed, native migration is substantive, and ten actual
 sessions is a calendar constraint. Limit each implementation assignment to

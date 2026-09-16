@@ -844,6 +844,19 @@ because frontend code changed; invalidate checks whose inputs/implementation
 actually changed. Coverage uses the established per-package ratchet and a
 committed fixed suite, not a newly invented percentage target.
 
+Package all nested evidence bytes needed by a referenced document, including
+the browser screenshot, under the private manifest root with their content
+hashes. Preserve a Phase 2 document's nested relative paths rather than
+rewriting them: store the Phase 2 document under phase2, while copying each
+artifact it names at its original relative path.
+
+Keep two release identities explicit. A release identity is reserved for an
+accepted PreviewRelease with a real projection binding and proves the v2 API
+resolves that exact projected release. An operations release identity instead
+proves compatibility of the filesystem, current, and rollback surface. It
+cannot satisfy projection binding. A rollback receipt must still name the
+v2 serving-preview scope, advance generation, and retain distinct ids.
+
 Required new gate command after evidence producers finish:
 
 ```bash

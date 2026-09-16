@@ -340,7 +340,7 @@ def build_rollback(real_bundle_dir: Path, clean_bundle_dir: Path, *, release_roo
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "partial_release_directory_left"))
     if (release_root / "CURRENT").read_text() != current_before:
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "current_pointer_moved_on_failure"))
-    negative = _receipt(PUBLISH_FAILURE_NEGATIVE_KIND, 1, "release:R1-rollback", "release:R2-failed",
+    negative = _receipt(PUBLISH_FAILURE_NEGATIVE_KIND, 1, "operations_release:R1-rollback", "operations_release:R2-failed",
                         negative_findings, 3, code_hash=code_hash, environment_hash=environment_hash,
                         invert=True)
     return receipt, negative

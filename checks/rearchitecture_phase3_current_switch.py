@@ -126,7 +126,7 @@ def build(release_root: Path, health_path: Path, *, r1: str, r2: str, token: str
     receipt_id = content_hash(["current_switch_parity", r1, r2, [f.finding_id for f in findings]])[7:23]
     return ComparisonReceipt(
         receipt_id=receipt_id, comparison_kind=CURRENT_SWITCH_KIND, tier=1,
-        left_ref="release:" + r1, right_ref="release:" + r2,
+        left_ref="operations_release:" + r1, right_ref="operations_release:" + r2,
         stage_plan_ref="current_switch.v1", tolerance_policy_ref="exact_bytes.v1",
         verdict=verdict, findings=tuple(findings), population=population, envelope=envelope)
 

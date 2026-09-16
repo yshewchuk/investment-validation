@@ -19,9 +19,10 @@ Auto-resolved without any flag:
 - ``authority_mode`` -- always ``"shadow"`` (guide §10 fixes it).
 
 ``--phase2-evidence``/``--phase2-artifact-root`` copy Phase 2's OWN evidence
-document and every artifact it references into ``<artifact-root>/phase2/...``
-(preserving relative paths) so the Phase 3 validator's shared ``--artifact-
-root`` can resolve Phase 2's nested refs too -- see ``rearchitecture_
+document into ``<artifact-root>/phase2/_evidence.json`` and every artifact it
+references into the shared artifact root at its unchanged relative path. This
+lets the Phase 3 validator resolve Phase 2's nested refs without rewriting
+their hashes or paths -- see ``rearchitecture_
 phase3_evidence.py``'s module docstring for why no separate root field exists
 in the schema. ``--source-code-hash``/``--source-environment-hash`` default
 to the copied Phase2Evidence document's OWN declared ``code_hash``/
@@ -72,13 +73,15 @@ def _copy_phase2(phase2_evidence_path: Path, phase2_artifact_root: Path,
     ``<artifact_root>/phase2/...``, preserving relative paths. Returns
     ``(phase2_acceptance_ref, phase2_doc)``."""
     doc = json.loads(phase2_evidence_path.read_text())
-    dest_root = artifact_root / "phase2"
-
     def copy_one(rel: str) -> None:
         src = phase2_artifact_root / rel
         if not src.is_file():
             return
-        dest = dest_root / rel
+        dest = artifact_root / rel
+        try:
+            dest.resolve().relative_to(artifact_root.resolve())
+        except ValueError:
+            raise ValueError("Phase 2 artifact path escapes artifact root")
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dest)
 
@@ -93,6 +96,27 @@ def _copy_phase2(phase2_evidence_path: Path, phase2_artifact_root: Path,
 
     phase2_doc_ref = _publish(phase2_evidence_path, artifact_root, "phase2/_evidence.json")
     return phase2_doc_ref, doc
+
+
+def _publish_browser_receipt(path: Path, artifact_root: Path) -> dict:
+    data = path.read_bytes()
+    document = json.loads(data)
+    screenshot_ref = document.get("screenshot_ref") if isinstance(document, dict) else None
+    if not isinstance(screenshot_ref, dict) or not isinstance(screenshot_ref.get("path"), str):
+        return _publish(path, artifact_root, "browser_receipt_ref.json")
+    screenshot_path = (path.parent / screenshot_ref["path"]).resolve()
+    try:
+        screenshot_path.relative_to(path.parent.resolve())
+    except ValueError:
+        raise ValueError("browser screenshot path escapes receipt directory")
+    if not screenshot_path.is_file():
+        raise ValueError("browser screenshot referenced by receipt is missing")
+    screenshot = _publish(screenshot_path, artifact_root, "browser_screenshot.png")
+    document["screenshot_ref"] = screenshot
+    receipt = json.dumps(document, indent=2, sort_keys=True).encode()
+    receipt_path = artifact_root / "browser_receipt_ref.json"
+    receipt_path.write_bytes(receipt)
+    return {"path": receipt_path.name, "content_hash": "sha256:" + hashlib.sha256(receipt).hexdigest()}
 
 
 def _parse_kind_path(items: list[str]) -> list[tuple[str, Path]]:
@@ -171,7 +195,9 @@ def build(*, artifact_root: Path, phase2_evidence: Path | None, phase2_artifact_
         evidence["negative_control_receipt_refs"] = [
             _publish(path, artifact_root, f"negative_control_{kind}.json") for kind, path in negatives]
 
-    single = {"browser_receipt_ref": browser_receipt, "refresh_rollback_receipt_ref": refresh_rollback_receipt,
+    if browser_receipt is not None:
+        evidence["browser_receipt_ref"] = _publish_browser_receipt(browser_receipt, artifact_root)
+    single = {"refresh_rollback_receipt_ref": refresh_rollback_receipt,
              "engineering_receipt_ref": engineering_receipt, "coverage_receipt_ref": coverage_receipt,
              "performance_receipt_ref": performance_receipt, "view_field_inventory_ref": view_field_inventory,
              "deferred_work_ref": deferred_work}

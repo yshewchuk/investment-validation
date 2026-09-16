@@ -332,7 +332,7 @@ def _check_verdicts_and_bindings(decoded_lists: dict[str, list[Any]], findings: 
     return kind_ok
 
 
-def _check_rollback(receipt: Any, accepted_release_ids: set[str], findings: list,
+def _check_rollback(receipt: Any, _accepted_release_ids: set[str], findings: list,
                     field_ok: dict[str, bool]) -> None:
     if receipt is None:
         return
@@ -343,9 +343,8 @@ def _check_rollback(receipt: Any, accepted_release_ids: set[str], findings: list
         findings.append({"code": "SINGLE_GENERATION", "field": field})
         field_ok[field] = False
         return
-    if (receipt.prior_snapshot_id not in accepted_release_ids
-            or receipt.resulting_snapshot_id not in accepted_release_ids):
-        findings.append({"code": "RELEASE_BINDING_MISMATCH", "field": field})
+    if receipt.scope != "v2_serving_preview":
+        findings.append({"code": "ROLLBACK_SCOPE_MISMATCH", "field": field})
         field_ok[field] = False
 
 
