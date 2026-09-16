@@ -375,6 +375,18 @@ class TestReplayInputPrecision:
         assert written["requested_strike"] == 35.123456789
         assert written["exp_pnl_sim"] == pytest.approx(0.123457)
 
+    def test_a_replay_input_survives_the_ticker_payload_write_path(self, tmp_path):
+        """Ticker detail rows are bridge/replay evidence, not display-only data."""
+        width = 0.026114337940089646
+        record = _result(structure_params={"width_moneyness": width}).as_dict()
+        render_bundle(pd.DataFrame([record]), tmp_path / "bundle", as_of=AS_OF)
+
+        payload = json.loads(
+            (tmp_path / "bundle" / "data" / "tickers" / "AAA.json").read_text()
+        )
+        row = payload["events"][0]["rows"][0]
+        assert row["structure_params"]["width_moneyness"] == width
+
     def test_the_writer_still_sanitizes_what_it_no_longer_rounds(self, tmp_path):
         """Exempting a field from ROUNDING must not exempt it from JSON safety.
 

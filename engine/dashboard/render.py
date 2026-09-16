@@ -1159,7 +1159,7 @@ def _ticker_payload(
             {
                 "event_date": event_date,
                 "session": rows[0].get("session") if rows else None,
-                "rows": [_clean(r) for r in rows],
+                "rows": [_clean_deep(r) for r in rows],
             }
         )
 
@@ -1431,7 +1431,7 @@ def render_bundle(
         payload = _ticker_payload(
             ticker, by_ticker[ticker], as_of=as_of, panel=panel, trades=trades
         )
-        json_text = json.dumps(_clean(payload), sort_keys=True, default=str)
+        json_text = json.dumps(_clean_deep(payload), sort_keys=True, default=str)
         (tickers_dir / f"{ticker}.json").write_text(json_text + "\n")
         (tickers_dir / f"{ticker}.js").write_text(
             "window.TICKER_DATA = window.TICKER_DATA || {};\n"
