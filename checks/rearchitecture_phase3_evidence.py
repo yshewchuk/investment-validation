@@ -346,6 +346,60 @@ def _check_rollback(receipt: Any, _accepted_release_ids: set[str], findings: lis
     if receipt.scope != "v2_serving_preview":
         findings.append({"code": "ROLLBACK_SCOPE_MISMATCH", "field": field})
         field_ok[field] = False
+    if (receipt.prior_snapshot_id not in _accepted_release_ids
+            or receipt.resulting_snapshot_id not in _accepted_release_ids):
+        findings.append({"code": "RELEASE_BINDING_MISMATCH", "field": field})
+        field_ok[field] = False
+
+
+def _is_placeholder_ref(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return True
+    lowered = value.lower()
+    return (lowered.startswith("phase2_d") and "not_yet_produced" in lowered
+            or lowered == "sha256:" + "0" * 64)
+
+
+def _check_preview_lineage(preview_inputs: list[Any], releases: list[Any], findings: list,
+                           field_ok: dict[str, bool]) -> None:
+    field = "preview_input_refs"
+    for index, preview in enumerate(preview_inputs):
+        required = (
+            preview.source_release_manifest_ref, preview.snapshot_ref, preview.score_batch_ref,
+            preview.bundle_manifest_ref, preview.finality_ref, preview.expected_population_ref,
+            preview.score_comparison_receipt_ref, preview.render_comparison_receipt_ref,
+            *preview.score_job_input_refs, *preview.model_registry_artifact_refs,
+        )
+        if any(_is_placeholder_ref(value) for value in required):
+            findings.append({"code": "PREVIEW_INPUT_UNVERIFIED", "field": f"{field}[{index}]"})
+            field_ok[field] = False
+            continue
+        matching = [release for release in releases if (
+            release.source_release_id == preview.source_release_id
+            and release.snapshot_ref == preview.snapshot_ref
+            and release.score_batch_ref == preview.score_batch_ref
+            and release.bundle_manifest_ref == preview.bundle_manifest_ref
+            and release.model_registry_artifact_refs == preview.model_registry_artifact_refs
+            and release.source_code_hash == preview.source_code_hash
+        )]
+        if not matching:
+            findings.append({"code": "PREVIEW_RELEASE_LINEAGE_MISMATCH", "field": f"{field}[{index}]"})
+            field_ok[field] = False
+
+
+def _check_complete_population(decoded_lists: dict[str, list[Any]], population: dict | None,
+                               findings: list, field_ok: dict[str, bool]) -> None:
+    if population is None:
+        return
+    expected = population.get("compared")
+    receipts = {receipt.comparison_kind: receipt for receipt in
+                decoded_lists.get("comparison_receipt_refs", [])}
+    for kind in ("bridge_mapping_parity", "bridge_value_parity", "full_population_parity"):
+        receipt = receipts.get(kind)
+        if receipt is None or receipt.population.compared != expected:
+            findings.append({"code": "POPULATION_LINEAGE_MISMATCH",
+                             "field": f"comparison_receipt_refs.{kind}"})
+            field_ok["comparison_receipt_refs"] = False
 
 
 def _check_release_bindings(evidence: dict, artifact_root: Path, findings: list,
@@ -591,11 +645,12 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
 
     accepted_release_ids = {r.release_id for r in decoded_lists.get("accepted_release_refs", [])}
     _check_release_bindings(evidence, artifact_root, findings, field_ok)
+    _check_preview_lineage(decoded_lists.get("preview_input_refs", []),
+                           decoded_lists.get("accepted_release_refs", []), findings, field_ok)
 
-    _check_population_manifest(
-        _check_raw_dict(resolved.get("population_manifest_ref"), findings, field_ok,
-                        "population_manifest_ref", ("expected", "supported", "compared")),
-        findings, field_ok)
+    population_doc = _check_raw_dict(resolved.get("population_manifest_ref"), findings, field_ok,
+                                     "population_manifest_ref", ("expected", "supported", "compared"))
+    _check_population_manifest(population_doc, findings, field_ok)
     _check_browser_receipt(
         _check_raw_dict(resolved.get("browser_receipt_ref"), findings, field_ok,
                         "browser_receipt_ref", ("release_id", "as_of", "url", "screenshot_ref")),
@@ -621,6 +676,7 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     kind_ok = _check_verdicts_and_bindings(
         decoded_lists, findings, field_ok, code_hash=implementation_code_hash,
         environment_hash=environment_hash, accepted_release_ids=accepted_release_ids)
+    _check_complete_population(decoded_lists, population_doc, findings, field_ok)
     _check_rollback(decoded.get("refresh_rollback_receipt_ref"), accepted_release_ids, findings, field_ok)
 
     return findings, field_ok, document_ok, kind_ok

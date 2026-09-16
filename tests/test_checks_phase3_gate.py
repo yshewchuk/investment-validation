@@ -50,7 +50,7 @@ from engine.v2.foundation import to_document
 from engine.v2.ledger.decisions import outcome_generation_ref
 
 ALL_L_IDS = [f"L{i:02d}" for i in range(1, 15)]
-H = "sha256:" + "0" * 64
+H = "sha256:" + "1" * 64
 
 AGREE_KINDS = ("preview_open_parity", "current_switch_parity", "bridge_identity_parity",
               "bridge_mapping_parity", "bridge_value_parity", "publish_idempotency_parity",
@@ -321,7 +321,10 @@ def valid_evidence(tmp_path, *, populate_all=True) -> tuple[dict, Path, Path]:
     }
     if populate_all:
         comparisons = [_p3_receipt(kind=k, code_hash=code_hash, environment_hash=env_hash,
-                                   receipt_id=f"recv_{k}") for k in AGREE_KINDS]
+                                   receipt_id=f"recv_{k}",
+                                   compared=50 if k in ("bridge_mapping_parity", "bridge_value_parity",
+                                                       "full_population_parity") else 10)
+                       for k in AGREE_KINDS]
         negatives = [_p3_receipt(kind=k, code_hash=code_hash, environment_hash=env_hash, verdict=DIFFER,
                                  receipt_id=f"recv_{k}") for k in NEGATIVE_KINDS]
         evidence["comparison_receipt_refs"] = [
@@ -616,6 +619,19 @@ def test_full_population_parity_receipt_itself_zero_is_refused(tmp_path):
     assert "L12" in l_ids_with(result, "MISSING_EVIDENCE")
 
 
+def test_bridge_and_browser_evidence_must_cover_the_declared_candidate_population(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    code_hash, env_hash = evidence["implementation_code_hash"], evidence["environment_hash"]
+    partial = _p3_receipt(kind="bridge_value_parity", code_hash=code_hash, environment_hash=env_hash,
+                          compared=44, receipt_id="recv_partial_bridge")
+    evidence["comparison_receipt_refs"] = [
+        ref for ref in evidence["comparison_receipt_refs"] if json.loads(
+            (artifact_root / ref["path"]).read_text())["comparison_kind"] != "bridge_value_parity"
+    ] + [_ref(artifact_root, "comparison_bridge_value_parity.json", _dumps(partial))]
+    result = _gate(evidence, artifact_root, root)
+    assert "POPULATION_LINEAGE_MISMATCH" in codes(result)
+
+
 # -- accepted release bound to a real projection_binding.v1.0 document --------
 
 def test_accepted_release_missing_binding_ref_is_refused(tmp_path):
@@ -638,6 +654,24 @@ def test_accepted_release_binding_naming_a_different_release_is_refused(tmp_path
     assert result["ok"] is False
 
 
+def test_preview_input_placeholder_provenance_is_refused(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["bundle_manifest_ref"] = "sha256:" + "0" * 64
+    preview["score_comparison_receipt_ref"] = "phase2_d14_receipt:not_yet_produced"
+    evidence["preview_input_refs"] = [_ref(artifact_root, "preview_input.json", json.dumps(preview).encode())]
+    result = _gate(evidence, artifact_root, root)
+    assert "PREVIEW_INPUT_UNVERIFIED" in codes(result)
+
+
+def test_preview_input_must_match_an_accepted_release_lineage(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input(source_release_id="OTHER"))
+    evidence["preview_input_refs"] = [_ref(artifact_root, "preview_input.json", json.dumps(preview).encode())]
+    result = _gate(evidence, artifact_root, root)
+    assert "PREVIEW_RELEASE_LINEAGE_MISMATCH" in codes(result)
+
+
 def test_compatibility_release_labels_remain_distinct_from_projection_binding(tmp_path):
     evidence, artifact_root, root = valid_evidence(tmp_path)
     code_hash, env_hash = evidence["implementation_code_hash"], evidence["environment_hash"]
@@ -650,7 +684,7 @@ def test_compatibility_release_labels_remain_distinct_from_projection_binding(tm
     ] + [_ref(artifact_root, "comparison_current_switch_parity.json", _dumps(compatibility))]
     rollback = RollbackReceipt(
         receipt_id="recv_compat_rollback", scope="v2_serving_preview",
-        prior_snapshot_id="R2", resulting_snapshot_id="R1-rollback",
+        prior_snapshot_id="REL1", resulting_snapshot_id="REL2",
         prior_generation=2, resulting_generation=3, at="2026-09-01T00:00:00.000000Z")
     evidence["refresh_rollback_receipt_ref"] = _ref(
         artifact_root, "refresh_rollback.json", _dumps(rollback))
