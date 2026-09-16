@@ -227,14 +227,14 @@ def _oracle_worker(job_file, out_dir):
 
 
 def _selfcheck_worker(job_file, out_dir):
-    from engine.dashboard.selfcheck import selfcheck
+    from engine.dashboard.selfcheck import DEFAULT_N, selfcheck
     from engine.features import FeatureContext
     from engine.score import Scorer
 
     job = json.loads(Path(job_file).read_text())
     years = range(int(job["year_start"]), int(job["year_end"]) + 1)
-    scorer = Scorer(context=FeatureContext.load(list(job["tickers"]), years=years))
-    result = selfcheck(Path(job["bundle_dir"]), n=int(job.get("sample", 10)), scorer=scorer)
+    scorer = Scorer(context=FeatureContext.load(list(job["context_tickers"]), years=years))
+    result = selfcheck(Path(job["bundle_dir"]), n=int(job.get("sample", DEFAULT_N)), scorer=scorer)
     value = result.as_dict() if hasattr(result, "as_dict") else vars(result)
     (Path(out_dir) / "selfcheck.json").write_text(json.dumps(value, default=str))
 
@@ -425,9 +425,11 @@ def _run_oracle(*, job_spec, bound, legacy_root, scratch, max_rss_gb, repo_root)
 
 def _run_selfcheck(*, job_spec, bundle_v2, legacy_root, scratch, max_rss_gb, repo_root):
     job = {"tickers": sorted(set(job_spec.parameters["tickers"])),
+          "context_tickers": sorted(set(job_spec.parameters["context_tickers"])),
           "year_start": job_spec.parameters["year_start"],
-          "year_end": job_spec.parameters["year_end"], "bundle_dir": str(bundle_v2),
-          "sample": job_spec.parameters.get("sample", 10)}
+          "year_end": job_spec.parameters["year_end"], "bundle_dir": str(bundle_v2)}
+    if "sample" in job_spec.parameters:
+        job["sample"] = job_spec.parameters["sample"]
     job_dir = Path(scratch) / "selfcheck_job"
     job_dir.mkdir(parents=True, exist_ok=True)
     job_path = job_dir / "job.json"
