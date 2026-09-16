@@ -213,8 +213,8 @@ def test_legacy_score_and_validation_reservations_cover_the_measured_peak():
 MEASURED_READ_SET_BYTES = 1796916876
 
 
-def test_policy_version_is_v7():
-    assert POLICY_VERSION == "ops_resources.2026-09-15.v7"
+def test_policy_version_is_v8():
+    assert POLICY_VERSION == "ops_resources.2026-09-15.v8"
     assert POLICY_VERSION == DEFAULT_POLICY.version
 
 
@@ -228,13 +228,20 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
     attempt-16 peaks, then v6 lowered it to 5.25 GiB (5*GIB + GIB//4) because
     6 GiB was never admittable on this host's live headroom -- see
     profiles.py's module docstring for the full measured basis on both
-    moves. ``model_evidence`` moved once, in v7: 4 GiB -> 5.75 GiB
+    moves. ``model_evidence`` moved twice: v7 raised it 4 GiB -> 5.75 GiB
     (5*GIB + 3*GIB//4) on five real forced-rebuild peaks (4845.8-5543.0 MiB,
     1-1.5s PSS sampling) -- the old 4 GiB figure was never a measured peak,
-    only what a 30s watchdog poll happened to sample. Every other profile's
-    memory is unchanged since v4."""
+    only what a 30s watchdog poll happened to sample -- but 5.75 GiB then
+    proved un-admittable against live ``headroom_bytes`` (checked against
+    ``capacity_bytes`` instead, the wrong ceiling, the same mistake v5 made
+    for ``legacy_score``). v8 fixed the real peak instead of the ceiling:
+    per-champion subprocess isolation plus removing a redundant
+    ``daily_market`` re-read brought the measured worst case down to
+    4866.2 MiB, and lowered the reservation to 5 GiB (5*GIB) -- admittable
+    with real margin under a live 5.41 GiB headroom sample. Every other
+    profile's memory is unchanged since v4."""
     for name, old_memory_bytes in (("validation", 5 * GIB), ("legacy_score", 5 * GIB + GIB // 4),
-                                   ("model_evidence", 5 * GIB + 3 * GIB // 4), ("projection", 2 * GIB)):
+                                   ("model_evidence", 5 * GIB), ("projection", 2 * GIB)):
         profile = profile_named(DEFAULT_POLICY, name)
         assert profile.scratch_bytes >= MEASURED_READ_SET_BYTES
         assert profile.scratch_bytes == 4 * GIB
@@ -242,21 +249,23 @@ def test_scratch_admits_the_measured_read_set_for_every_staging_profile():
 
 
 # --------------------------------------------------------------------------
-# 2026-09-15 (v7): model_evidence's reservation covers the measured forced-
-# rebuild peak, not the old 30s-sampled figure.
+# 2026-09-15 (v8): model_evidence's reservation covers the measured
+# post-subprocess-isolation forced-rebuild peak, and is checked against a
+# real headroom_bytes sample, not capacity_bytes (v7 checked the latter and
+# was not actually admittable).
 # --------------------------------------------------------------------------
 
-#: The highest of five real forced-rebuild PSS peaks (1-1.5s sampling,
-#: b41bc94's chooser fix already applied to all five) -- see profiles.py's
-#: module docstring, v7 entry, for the other four and the two code fixes
-#: that came out of the same investigation.
-MEASURED_MODEL_EVIDENCE_PEAK_BYTES = int(5543.0 * (1 << 20))
+#: The highest of three post-fix forced-rebuild PSS peaks (1-1.2s sampling,
+#: per-champion subprocess isolation + the redundant daily_market-load fix
+#: both applied) -- see profiles.py's module docstring, v8 entry, for the
+#: other two and the headroom_bytes sample this reservation admits against.
+MEASURED_MODEL_EVIDENCE_PEAK_BYTES = int(4866.2 * (1 << 20))
 
 
 def test_model_evidence_reservation_covers_the_measured_peak():
     profile = profile_named(DEFAULT_POLICY, "model_evidence")
     assert profile.memory_bytes >= MEASURED_MODEL_EVIDENCE_PEAK_BYTES
-    assert profile.memory_bytes == 5 * GIB + 3 * GIB // 4
+    assert profile.memory_bytes == 5 * GIB
     assert profile.measured is False
 
 

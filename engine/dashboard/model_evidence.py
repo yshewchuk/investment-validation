@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import gc
 import json
+import multiprocessing
 import time
 from typing import Any
 
@@ -299,15 +300,31 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=())
         years = sorted(pd.to_datetime(rows["entry_date"]).dt.year.unique().tolist())
         daily = _daily_subset(rows["ticker"].unique(), years=years)
         if module is not gate:
-            # The forecast_analog rebuild constructs a Scorer for its analog
-            # join, and a Scorer's default context reads the ENTIRE
+            # The forecast_analog rebuild constructs a Scorer-like context for
+            # its analog join, and a Scorer's default context reads the ENTIRE
             # daily_market (~8.9M rows, ~6.9 GB peak) on top of everything
             # this builder already holds — two rebuilds were OOM-killed at
             # exactly that point. Bound the context to what the trades can
             # actually look up: their own tickers, their own years.
+            #
+            # This used to call FeatureContext.load(rows["ticker"].unique(),
+            # years=years), which re-reads daily_market for the SAME
+            # tickers/years `daily` above was just built from, filtered a
+            # second time. Measured 2026-09-15 (1s PSS sampling, real forced
+            # rebuild): that second read was the single largest transient
+            # peak in this champion's whole evidence build, 5.0-5.4 GiB,
+            # bigger than any other individual step including trades loading
+            # and _daily_subset combined. `daily` already carries every
+            # column FeatureContext.load's own restricted read would have
+            # (it is read with no column filter, so it is a strict superset
+            # of ORATS_FEATURES/DAILY_STATE_FIELDS) and the identical
+            # ticker/year filter, so building the context directly from it
+            # is the same data, not an approximation -- just without paying
+            # for daily_market twice.
+            from engine.calendar import trading_calendar
             from engine.features import FeatureContext
 
-            context = FeatureContext.load(rows["ticker"].unique(), years=years)
+            context = FeatureContext(panel=panel, daily=daily, calendar=trading_calendar())
             data = module.build_dataset(rows, panel=panel, daily=daily, context=context)
         else:
             data = module.build_dataset(rows, panel=panel, daily=daily)
@@ -358,14 +375,171 @@ def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=())
     return None, None, []
 
 
+def _isolated_entrypoint(func, args, kwargs, conn) -> None:
+    """Child side of :func:`_run_isolated`: call ``func`` and send back
+    ``(True, value)`` or ``(False, description)``, never letting an
+    exception escape unreported."""
+    try:
+        value = func(*args, **kwargs)
+        conn.send((True, value))
+    except Exception as exc:  # the parent decides what an isolated failure means
+        conn.send((False, f"{type(exc).__name__}: {exc}"[:300]))
+    finally:
+        conn.close()
+
+
+def _run_isolated(func, *args, **kwargs):
+    """Run ``func(*args, **kwargs)`` in a freshly spawned subprocess and
+    return ``(ok, value_or_description)``.
+
+    A long-lived process that builds and drops several multi-GiB frames in a
+    row does not return that memory to the OS the way a process EXIT does --
+    ``gc.collect()`` only frees Python's own references, and even
+    ``_release_free_pages()``'s ``malloc_trim`` is best-effort against glibc
+    arena growth that compounds across repeated large alloc/free cycles
+    (measured 2026-09-15: five real forced rebuilds in one process peaked
+    4.85-5.55 GiB PSS even after that fix, while each champion's build
+    measured only ~3.5-3.6 GiB in isolation -- see
+    ``engine/v2/ops/profiles.py``'s module docstring, v8 entry, for the
+    full basis). Running each champion in its own subprocess makes "in
+    isolation" the actual shape of the real rebuild: nothing from one
+    champion's build can still be resident, freed-but-fragmented or
+    otherwise, when the next one starts.
+
+    ``spawn`` (not the platform default ``fork`` on Linux) so the child
+    starts with an empty heap rather than a copy-on-write snapshot of
+    whatever the parent already holds.
+
+    ``func`` and every value in ``args``/``kwargs`` must be picklable
+    (importable by reference, for ``func`` -- a module-level function, not a
+    closure) and the return value must be small and picklable too: it
+    crosses back over a pipe, not shared memory.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    recv_conn, send_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_isolated_entrypoint, args=(func, args, kwargs, send_conn))
+    proc.start()
+    send_conn.close()  # the parent only reads; close its copy of the write end
+    try:
+        outcome = recv_conn.recv()
+    except EOFError:
+        outcome = (False, f"subprocess exited {proc.exitcode} without a result")
+    proc.join()
+    return outcome
+
+
+def _champion_block_impl(entry, registry) -> dict[str, Any]:
+    """One champion's evidence block. Runs inside :func:`_run_isolated`'s
+    subprocess -- loads its own panel and (only for a gate role, the only
+    role that reads it) its own trades, fresh, rather than sharing whatever
+    the caller already has loaded."""
+    from engine.features import feature_note, load_panel
+
+    panel = load_panel()
+    trades = None
+    if entry.role == "gate":
+        # _replay_trades() returns every strategy's replayed trades across
+        # every year -- 982.9 MiB measured 2026-09-15 -- but a single gate
+        # only ever trains on its own strategy's rows (STR-THRU: 99.95 MiB
+        # of that, a tenth). `_dataset_for`'s gate branch re-filters by
+        # strategy too, so filtering here and releasing the rest immediately
+        # (rather than holding the whole table resident for this champion's
+        # entire build, which runs for minutes once analog matching starts)
+        # does not change what gets trained on, only how much of the other
+        # seven strategies' trades stays resident while it happens.
+        trades = _replay_trades()
+        trades = trades[trades["strategy"] == entry.strategy].reset_index(drop=True)
+        _release_free_pages()
+
+    try:
+        data, target, _features = _dataset_for(
+            entry.role, entry.strategy, panel=panel, daily=None, trades=trades,
+            features=entry.features,
+        )
+    except Exception as exc:  # one model's dataset must not lose the others
+        return {
+            "id": entry.id, "role": entry.role, "strategy": entry.strategy,
+            "target": entry.target, "available": False,
+            "reason": f"rebuilding the training set raised {type(exc).__name__}: {exc}"[:300],
+        }
+
+    block: dict[str, Any] = {
+        "id": entry.id,
+        "role": entry.role,
+        "strategy": entry.strategy,
+        "target": entry.target,
+        "kind": _model_kind(entry, registry),
+    }
+    if data is None or not len(data) or target not in data.columns:
+        block["available"] = False
+        block["reason"] = "the training set could not be rebuilt from the store"
+        return block
+
+    block["n_rows"] = int(len(data))
+    if data.attrs.get("sampled_events"):
+        block["sampled"] = data.attrs["sampled_events"]
+    if len(data) > MAX_ROWS:
+        data = data.sample(MAX_ROWS, random_state=SAMPLE_SEED)
+        block["sampled"] = {"rows": MAX_ROWS, "of": block["n_rows"], "seed": SAMPLE_SEED}
+
+    y = pd.to_numeric(data[target], errors="coerce")
+    block["available"] = True
+    block["target_mean"] = round(float(y.mean()), 4)
+    block["target_std"] = round(float(y.std()), 4)
+    block["inputs"] = []
+    for name in entry.features:
+        if name not in data.columns:
+            block["inputs"].append(
+                {"name": name, "note": feature_note(name), "usable": False,
+                 "reason": "not present in the rebuilt training set"}
+            )
+            continue
+        stats = _feature_stats(data[name], y)
+        stats["name"] = name
+        stats["note"] = feature_note(name)
+        block["inputs"].append(stats)
+
+    # Strongest marginal relationship first, where "strongest" takes the
+    # LARGER of the monotone and the magnitude readings. Sorting on
+    # correlation alone put mean_prior_move — an 8.35 → 4.60 → 7.82 V
+    # against |move| — near the bottom of the size model's table on a
+    # Spearman of +0.013.
+    block["inputs"].sort(
+        key=lambda s: max(
+            abs(s.get("spearman") or 0.0), abs(s.get("magnitude_spearman") or 0.0)
+        ),
+        reverse=True,
+    )
+    return block
+
+
+def _champion_block(entry, registry) -> dict[str, Any]:
+    """``_champion_block_impl`` run in its own subprocess (see
+    :func:`_run_isolated`) so this champion's peak memory cannot compound
+    with any other's."""
+    ok, result = _run_isolated(_champion_block_impl, entry, registry)
+    if ok:
+        return result
+    return {
+        "id": entry.id, "role": entry.role, "strategy": entry.strategy,
+        "target": entry.target, "available": False,
+        "reason": f"rebuilding the training set raised {result}",
+    }
+
+
 def build_model_evidence(*, registry=None, force: bool = False) -> dict:
     """Per-champion input evidence, cached by artifact hash.
 
     Rebuilt only when a champion changes: the numbers describe a model's
     training set, which does not move on a nightly cadence, and the implied_t1
     dataset alone is over half a million rows.
+
+    Each champion's dataset is built in its own subprocess (see
+    :func:`_champion_block`) -- this function itself never loads a panel,
+    trades table or daily_market slice, so its own memory footprint is just
+    the registry plus whatever the champions' returned blocks weigh (small:
+    scalars, decile tables, a bounded scatter sample -- never a DataFrame).
     """
-    from engine.features import feature_note, load_panel
     from engine.models.registry import load_registry
 
     registry = registry or load_registry()
@@ -381,85 +555,9 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
     if not force and cached.get("fingerprint") == fingerprint:
         return cached
 
-    panel = load_panel()
-    daily = None  # loaded per model, filtered to the tickers it needs
-    trades = _replay_trades()
-
     models: dict[str, Any] = {}
     for entry in champions:
-        try:
-            data, target, features = _dataset_for(
-                entry.role, entry.strategy, panel=panel, daily=daily, trades=trades,
-                features=entry.features,
-            )
-        except Exception as exc:  # one model's dataset must not lose the others
-            models[entry.id] = {
-                "id": entry.id, "role": entry.role, "strategy": entry.strategy,
-                "target": entry.target, "available": False,
-                "reason": f"rebuilding the training set raised {type(exc).__name__}: {exc}"[:300],
-            }
-            # A build that raised partway through (e.g. chooser's candidate
-            # join failing on a missing input) can still have allocated a
-            # large intermediate frame before the exception -- release it the
-            # same way a successful build's is released below.
-            _release_free_pages()
-            continue
-        block: dict[str, Any] = {
-            "id": entry.id,
-            "role": entry.role,
-            "strategy": entry.strategy,
-            "target": entry.target,
-            "kind": _model_kind(entry, registry),
-        }
-        if data is None or not len(data) or target not in data.columns:
-            block["available"] = False
-            block["reason"] = "the training set could not be rebuilt from the store"
-            models[entry.id] = block
-            continue
-
-        block["n_rows"] = int(len(data))
-        if data.attrs.get("sampled_events"):
-            block["sampled"] = data.attrs["sampled_events"]
-        if len(data) > MAX_ROWS:
-            data = data.sample(MAX_ROWS, random_state=SAMPLE_SEED)
-            block["sampled"] = {"rows": MAX_ROWS, "of": block["n_rows"], "seed": SAMPLE_SEED}
-
-        y = pd.to_numeric(data[target], errors="coerce")
-        block["available"] = True
-        block["target_mean"] = round(float(y.mean()), 4)
-        block["target_std"] = round(float(y.std()), 4)
-        block["inputs"] = []
-        for name in entry.features:
-            if name not in data.columns:
-                block["inputs"].append(
-                    {"name": name, "note": feature_note(name), "usable": False,
-                     "reason": "not present in the rebuilt training set"}
-                )
-                continue
-            stats = _feature_stats(data[name], y)
-            stats["name"] = name
-            stats["note"] = feature_note(name)
-            block["inputs"].append(stats)
-
-        # Strongest marginal relationship first, where "strongest" takes the
-        # LARGER of the monotone and the magnitude readings. Sorting on
-        # correlation alone put mean_prior_move — an 8.35 → 4.60 → 7.82 V
-        # against |move| — near the bottom of the size model's table on a
-        # Spearman of +0.013.
-        block["inputs"].sort(
-            key=lambda s: max(
-                abs(s.get("spearman") or 0.0), abs(s.get("magnitude_spearman") or 0.0)
-            ),
-            reverse=True,
-        )
-        models[entry.id] = block
-        # The rebuilt sets are large and are not needed once measured. Each
-        # champion's frame is dropped here, in a loop that runs several of
-        # them back to back in one process -- plain gc.collect() frees the
-        # Python objects but glibc does not return the arenas to the OS, so
-        # RSS does not fall with them (see _release_free_pages).
-        del data, y
-        _release_free_pages()
+        models[entry.id] = _champion_block(entry, registry)
 
     out = {
         "generated_at": pd.Timestamp.now("UTC").isoformat(),

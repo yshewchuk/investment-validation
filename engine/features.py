@@ -399,9 +399,28 @@ class FeatureContext:
                     *DAILY_STATE_FIELDS.keys(),
                 }
             )
-            daily = store.read_table("daily_market", years=years, columns=columns)
-            if tickers is not None:
-                daily = daily[daily["ticker"].isin(set(tickers))]
+            # Stream per year and filter tickers before concatenating (the same
+            # shape engine/dashboard/model_evidence.py::_daily_subset uses),
+            # rather than store.read_table(...) then a boolean filter, which
+            # holds the full years-wide, ALL-ticker frame and its ticker-
+            # filtered copy in memory at once. Measured 2026-09-15: a bounded
+            # context for one gate's trades (2,454 tickers) peaked the caller
+            # at 5049.8 MiB PSS with the old shape, 1s-sampled -- the single
+            # largest transient in that champion's whole evidence rebuild,
+            # bigger than anything a per-checkpoint (post-gc) measurement had
+            # caught before. ``tickers=None`` (no filter) still streams, so a
+            # caller that wants every ticker pays the same total work either
+            # way, just spread across smaller frames instead of one big one.
+            wanted = set(tickers) if tickers is not None else None
+            kept = []
+            for _, frame in store.iter_table("daily_market", years=years, columns=columns):
+                chunk = frame[frame["ticker"].isin(wanted)] if wanted is not None else frame
+                if len(chunk):
+                    kept.append(chunk)
+            daily = (
+                pd.concat(kept, ignore_index=True) if kept
+                else store.read_table("daily_market", years=[], columns=columns)
+            )
             daily = daily.sort_values(["ticker", "date"]).reset_index(drop=True)
         return cls(panel=panel, daily=daily, calendar=trading_calendar())
 
