@@ -1,5 +1,31 @@
 # Phase 2 closeout: status, blockers and what remains
 
+## Current closeout execution (2026-09-16)
+
+The handoff below is preserved as the starting record. Follow the final
+execution record at `reports/phase2_closeout/FINAL.md` for the frozen candidate,
+test results, receipt paths, gate findings and any remaining sign-off decision.
+That private record is written after validation so recording the results does
+not change the source hash to which the receipts bind.
+
+The closeout fixes address immutable export identity, coordinator failure
+diagnostics and materialization dependency evidence. Export generations follow
+their captured contents while existing generations remain immutable; evidence
+planning uses the existing whole-table materialization policy without relaxing
+public query limits. Corpus receipt dependencies are packaged with the receipt.
+The ordinary and seeded Tier-1 replays both pass all 20 cases; the seeded run
+also detects all four planted defects.
+
+D14 remains the previously accepted, historical explained difference. D15
+requires a fresh comparison and an explicit disposition if the known legacy
+price-source differences remain. Neither receipt is changed to claim agreement.
+The final run also supplies the evidence artifact root explicitly to gate2.
+
+Public pushes are pending explicit approval after automatic approval review
+rejected a direct push to `origin/main`. Local validation can proceed.
+
+## Original handoff
+
 Written 2026-09-16 against `main` at 647ef5f. Companion to
 `rearchitecture_phase2_data_access.md` (the D-item definitions) and
 `rearchitecture_tech_debt.md` (post-Phase-6 nice-to-haves).
