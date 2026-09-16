@@ -67,3 +67,50 @@ def test_abandoned_claim_is_recovered_and_stale_worker_is_fenced(tmp_path):
                         claim_token=first["claim_token"], clock=clock)
     finally:
         other.close()
+
+
+@pytest.mark.parametrize("corruption", ["changed", "missing", "extra", "symlink"])
+def test_content_export_refuses_corruption_without_switching_current(tmp_path, corruption):
+    conn, clock, _ = catalog(tmp_path)
+    try:
+        with transaction(conn):
+            set_authority(conn, None, "catalog", "2026-09-12T00:00:00Z")
+            insert(conn, logical_key="k", decision_id="prediction:r1",
+                   payload={"row_id": "r1", "as_of": "2026-09-12"}, purpose="shadow",
+                   kind="prediction", validations={}, created_at="2026-09-12T00:00:00Z")
+        root = tmp_path / "compat"
+        exported = export_generation(conn, root)
+        export_generation(conn, root, generation="prior")
+        path = exported / "predictions" / "2026-09-12.jsonl"
+        if corruption == "changed":
+            path.write_bytes(b"{}\n")
+        elif corruption == "missing":
+            path.unlink()
+        elif corruption == "extra":
+            (exported / "extra.jsonl").write_bytes(b"{}\n")
+        else:
+            path.unlink()
+            path.symlink_to(root / "prior" / "predictions" / "2026-09-12.jsonl")
+        with pytest.raises(ValueError, match="export generation differs from catalog"):
+            export_generation(conn, root)
+        assert (root / "CURRENT").read_text() == "prior\n"
+    finally:
+        conn.close()
+
+
+def test_explicit_export_name_refuses_catalog_growth(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    try:
+        root = tmp_path / "compat"
+        original = export_generation(conn, root, generation="fixed")
+        with transaction(conn):
+            set_authority(conn, None, "catalog", "2026-09-12T00:00:00Z")
+            insert(conn, logical_key="k", decision_id="prediction:r1",
+                   payload={"row_id": "r1", "as_of": "2026-09-12"}, purpose="shadow",
+                   kind="prediction", validations={}, created_at="2026-09-12T00:00:00Z")
+        with pytest.raises(ValueError, match="export generation differs from catalog"):
+            export_generation(conn, root, generation="fixed")
+        assert list(original.iterdir()) == []
+        assert export_generation(conn, root) != original
+    finally:
+        conn.close()

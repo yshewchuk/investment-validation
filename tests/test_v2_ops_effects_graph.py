@@ -299,6 +299,60 @@ def test_ledger_export_settlement_absent_when_not_committed(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("growth", ["history", "settlement", "excluded"])
+def test_ledger_export_catalog_growth_preserves_old_generation(tmp_path, growth):
+    conn, clock, supervisor, store, root = _open(tmp_path)
+    try:
+        scope = "shadow"
+        release_key = _seed_decisions(conn, clock, scope, SESSION,
+                                      predictions=[_row("evt-1", "pred")])
+        first_claim = _submit_and_claim(
+            conn, clock, supervisor, kind="ledger_export", key="before-growth",
+            parameters=_params("ledger_export", SESSION, scope, decision_clock="before"))
+        first = ledger_export_effect(conn, store, first_claim, root, REPO, clock=clock)
+        _commit(conn, clock, first_claim, first)
+        export_root = root / "exports" / scope
+        old_generation = (export_root / "CURRENT").read_text().strip()
+        old_dir = export_root / old_generation
+        old_files = {p.relative_to(old_dir): p.read_bytes() for p in old_dir.rglob("*.jsonl")}
+        old_tar = store.verify(first[1][0][1]).read_bytes()
+        if growth == "settlement":
+            settlement_key = _seed_settlement(conn, clock, scope, SESSION,
+                                               outcomes=[_row("evt-1", "out")])
+        else:
+            purpose = "legacy_import" if growth == "history" else "research_reconstruction"
+            with transaction(conn):
+                insert(conn, logical_key="growth", decision_id="prediction:growth",
+                       payload=_row("evt-growth", "pred"), purpose=purpose, kind="prediction",
+                       validations={}, created_at=format_timestamp(clock.now()))
+
+        second_claim = _submit_and_claim(
+            conn, clock, supervisor, kind="ledger_export", key="after-growth",
+            parameters=_params("ledger_export", SESSION, scope, decision_clock="after"))
+        second = ledger_export_effect(conn, store, second_claim, root, REPO, clock=clock)
+        _commit(conn, clock, second_claim, second)
+        new_generation = (export_root / "CURRENT").read_text().strip()
+        assert (new_generation == old_generation) == (growth == "excluded")
+        assert {p.relative_to(old_dir): p.read_bytes() for p in old_dir.rglob("*.jsonl")} == old_files
+        assert store.verify(first[1][0][1]).read_bytes() == old_tar
+        assert conn.execute("SELECT receipt_ref FROM watermarks WHERE stage=? AND scope=?",
+                            ("decisions", scope)).fetchone()[0] == release_key
+        if growth == "settlement":
+            receipt = json.loads(conn.execute("SELECT receipt_json FROM outbox WHERE logical_key=?",
+                                              (settlement_key,)).fetchone()[0])
+            assert receipt["generation"] == new_generation
+            assert receipt["counts"] == {"predictions": 1, "outcomes": 1}
+        with tarfile.open(store.verify(second[1][0][1])) as archive:
+            count = sum(len(archive.extractfile(member).read().splitlines())
+                        for member in archive.getmembers() if member.isfile())
+        assert count == (1 if growth == "excluded" else 2)
+        # An identical retry still reuses the directory and exact tar artifact.
+        retry = ledger_export_effect(conn, store, second_claim, root, REPO, clock=clock)
+        assert retry[1][0][1].content_hash == second[1][0][1].content_hash
+    finally:
+        conn.close()
+
+
 def test_ledger_export_settlement_present_when_committed(tmp_path):
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
@@ -362,6 +416,7 @@ def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tm
             "AND stage='decisions'", (scope,)).fetchone()[0]
 
         export_root = root / "exports" / scope
+        export_key = export_generation(conn, tmp_path / "identity", purposes=EXPORT_PURPOSES).name
         prior_key = content_hash(["prior-generation"]).split(":")[1][:24]
         export_generation(conn, export_root, generation=prior_key, purposes=EXPORT_PURPOSES)
         current_before = (export_root / "CURRENT").read_text()
@@ -382,9 +437,9 @@ def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tm
 
         # Old CURRENT is completely untouched and still resolves.
         assert (export_root / "CURRENT").read_text() == current_before
-        assert not (export_root / release_key).exists()
+        assert not (export_root / export_key).exists()
         partials = [p for p in export_root.iterdir()
-                   if p.name.startswith("." + release_key + ".partial-")]
+                   if p.name.startswith("." + export_key + ".partial-")]
         assert len(partials) == 1
         # the outbox export/release_intent rows are untouched by the crash
         assert conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
@@ -395,18 +450,18 @@ def test_ledger_export_resumes_after_partial_failure_without_catalog_conflict(tm
         result = ledger_export_effect(conn, store, second, root, REPO, clock=clock)
         _commit(conn, clock, second, result)
 
-        assert (export_root / release_key).is_dir()
-        assert (export_root / "CURRENT").read_text().strip() == release_key
+        assert (export_root / export_key).is_dir()
+        assert (export_root / "CURRENT").read_text().strip() == export_key
         # the stale partial directory is swept away on the successful retry
         assert not [p for p in export_root.iterdir()
-                    if p.name.startswith("." + release_key + ".partial-")]
+                    if p.name.startswith("." + export_key + ".partial-")]
         assert conn.execute("SELECT state FROM outbox WHERE kind='export' AND logical_key=?",
                             (release_key,)).fetchone()["state"] == "delivered"
 
         # bytes match a clean export of the identical catalog state
-        clean_dir = export_generation(conn, tmp_path / "clean", generation=release_key,
+        clean_dir = export_generation(conn, tmp_path / "clean", generation=export_key,
                                       purposes=EXPORT_PURPOSES)
-        produced = export_root / release_key
+        produced = export_root / export_key
         for path in sorted(produced.rglob("*.jsonl")):
             twin = clean_dir / path.relative_to(produced)
             assert twin.read_bytes() == path.read_bytes()
@@ -423,9 +478,6 @@ def test_ledger_export_retry_after_crash_before_current_switch(tmp_path):
     try:
         scope = "shadow"
         _seed_decisions(conn, clock, scope, SESSION, predictions=[_row("evt-1", "pred")])
-        release_key = conn.execute(
-            "SELECT receipt_ref FROM watermarks WHERE pipeline='nightly' AND scope=? "
-            "AND stage='decisions'", (scope,)).fetchone()[0]
 
         def fault(_name):
             raise RuntimeError("crash on the only file")
@@ -435,14 +487,15 @@ def test_ledger_export_retry_after_crash_before_current_switch(tmp_path):
         with pytest.raises(RuntimeError):
             ledger_export_effect(conn, store, first, root, REPO, clock=clock, fault=fault)
         export_root = root / "exports" / scope
+        export_key = export_generation(conn, tmp_path / "identity", purposes=EXPORT_PURPOSES).name
         assert not (export_root / "CURRENT").exists()
-        assert not (export_root / release_key).exists()
+        assert not (export_root / export_key).exists()
 
         second = _submit_and_claim(conn, clock, supervisor, kind="ledger_export", key="export-2",
                                    parameters=_params("ledger_export", SESSION, scope))
         result = ledger_export_effect(conn, store, second, root, REPO, clock=clock)
         _commit(conn, clock, second, result)
-        assert (export_root / "CURRENT").read_text().strip() == release_key
+        assert (export_root / "CURRENT").read_text().strip() == export_key
     finally:
         conn.close()
 
