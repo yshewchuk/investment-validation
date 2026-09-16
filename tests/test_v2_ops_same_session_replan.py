@@ -305,6 +305,13 @@ def test_generation_ref_distinguishes_plans_and_falls_back_when_absent():
                        input_bindings={"legacy_manifest.json": "art_m1"})
     assert effects_graph._generation_ref(gen1) == effects_graph._generation_ref(gen1_retry)
     assert effects_graph._generation_ref(gen1) != effects_graph._generation_ref(gen2)
+    with_projection_a = claim(deployment="shadow:impl-1", decision_clock="2026-09-10T00:00:00.000000Z",
+                              input_bindings={"legacy_manifest.json": "art_m1",
+                                              "projection_binding.json": "art_projection_a"})
+    with_projection_b = claim(deployment="shadow:impl-1", decision_clock="2026-09-10T00:00:00.000000Z",
+                              input_bindings={"legacy_manifest.json": "art_m1",
+                                              "projection_binding.json": "art_projection_b"})
+    assert effects_graph._generation_ref(with_projection_a) != effects_graph._generation_ref(with_projection_b)
 
 
 # --------------------------------------------------------------------------

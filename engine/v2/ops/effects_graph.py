@@ -300,11 +300,12 @@ def _generation_ref(claim):
     params = claim.spec.parameters
     deployment = params.get("deployment") or ""
     decision_clock = params.get("decision_clock") or ""
-    manifest = (params.get("input_bindings") or {}).get("legacy_manifest.json") or ""
+    input_bindings = params.get("input_bindings") or {}
+    manifest = input_bindings.get("legacy_manifest.json") or ""
     if not (deployment or decision_clock or manifest):
         return ""
     return content_hash({"deployment": deployment, "decision_clock": decision_clock,
-                         "manifest": manifest})
+                         "manifest": manifest, "input_bindings": input_bindings})
 
 
 def _bind_release_intent(conn, scope, session, release_id, *, clock):
