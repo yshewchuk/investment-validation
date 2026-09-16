@@ -64,6 +64,29 @@ SAMPLE_SEED = 7
 SCATTER_POINTS = 300
 
 
+def _release_free_pages() -> None:
+    """Hand memory Python has finished with back to the OS.
+
+    Same technique and rationale as ``engine.score._release_free_pages``
+    (not imported from there to avoid pulling that module's own weight into
+    this one): glibc keeps freed heap in its own arenas rather than
+    returning it, so a step that allocates a gigabyte and drops it stays a
+    gigabyte of RSS. This rebuild's champions run sequentially in one
+    process — chooser, two gate variants, iv_crush, implied_t1, runup_move,
+    size — each dropping a multi-hundred-MB-to-multi-GB training frame, so
+    the fragmentation compounds across the loop rather than resetting per
+    model. Best-effort; a platform without ``malloc_trim`` is slightly
+    fatter, not broken.
+    """
+    import ctypes
+
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def evidence_path() -> "paths.Path":
     return paths.FEATURES / "model_evidence.json"
 
@@ -175,6 +198,42 @@ def _scatter_sample(xs: pd.Series, ys: pd.Series) -> list[list[float]]:
     return [[round(float(a), 4), round(float(b), 4)] for a, b in zip(sx, sy)]
 
 
+def _replay_trades() -> pd.DataFrame:
+    """``trades`` filtered to ``engine.replay`` provenance, one year at a time.
+
+    ``store.read_table("trades")`` reads and concatenates every partition
+    (~526k rows / 18 columns, ~1.9 GB) BEFORE the provenance filter ever
+    drops a row, then the boolean-mask filter builds a second, near-full-size
+    frame (~506k rows survive — provenance excludes only ~4%) while the first
+    is still reachable through the coercion pandas does internally. Measured
+    2026-09-15 on three real forced ``--force`` rebuilds, 1-1.5s PSS sampling:
+    this was the single largest step in the whole rebuild, peaking the tree at
+    4.1-4.99 GiB PSS in the FIRST 20-45 seconds — before any model's dataset
+    build even starts — because the reassignment frees the old frame at the
+    Python level but glibc does not hand freed arenas back to the OS before
+    the next allocation, so PSS does not drop with it (confirmed with a
+    standalone profile: the same two-frame read+filter step, isolated, showed
+    the identical jump from ~1.9 GiB to ~4.1 GiB PSS). Streaming per year and
+    filtering each partition before concatenating — the same shape
+    :func:`_daily_subset` already uses for ``daily_market`` below — keeps only
+    one year's raw partition and the growing filtered result live at once, so
+    the unfiltered and filtered copies of the whole table never coexist.
+    """
+    from engine.data import store
+    from engine.data.schemas import coerce, empty_frame
+
+    kept = []
+    for _, frame in store.iter_table("trades"):
+        chunk = frame[frame["provenance"].astype(str) == "engine.replay"]
+        if len(chunk):
+            kept.append(chunk)
+    if not kept:
+        return empty_frame("trades")
+    out = coerce(pd.concat(kept, ignore_index=True), "trades")
+    _release_free_pages()
+    return out
+
+
 def _daily_subset(tickers, years=None) -> pd.DataFrame:
     """``daily_market`` for a bounded set of tickers, one partition at a time.
 
@@ -193,7 +252,9 @@ def _daily_subset(tickers, years=None) -> pd.DataFrame:
             kept.append(chunk)
     if not kept:
         return pd.DataFrame()
-    return pd.concat(kept, ignore_index=True)
+    out = pd.concat(kept, ignore_index=True)
+    _release_free_pages()
+    return out
 
 
 def _dataset_for(role: str, strategy: str, *, panel, daily, trades, features=()):
@@ -304,7 +365,6 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
     training set, which does not move on a nightly cadence, and the implied_t1
     dataset alone is over half a million rows.
     """
-    from engine.data import store
     from engine.features import feature_note, load_panel
     from engine.models.registry import load_registry
 
@@ -323,8 +383,7 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
 
     panel = load_panel()
     daily = None  # loaded per model, filtered to the tickers it needs
-    trades = store.read_table("trades")
-    trades = trades[trades["provenance"].astype(str) == "engine.replay"]
+    trades = _replay_trades()
 
     models: dict[str, Any] = {}
     for entry in champions:
@@ -339,6 +398,11 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
                 "target": entry.target, "available": False,
                 "reason": f"rebuilding the training set raised {type(exc).__name__}: {exc}"[:300],
             }
+            # A build that raised partway through (e.g. chooser's candidate
+            # join failing on a missing input) can still have allocated a
+            # large intermediate frame before the exception -- release it the
+            # same way a successful build's is released below.
+            _release_free_pages()
             continue
         block: dict[str, Any] = {
             "id": entry.id,
@@ -389,9 +453,13 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
             reverse=True,
         )
         models[entry.id] = block
-        # The rebuilt sets are large and are not needed once measured.
+        # The rebuilt sets are large and are not needed once measured. Each
+        # champion's frame is dropped here, in a loop that runs several of
+        # them back to back in one process -- plain gc.collect() frees the
+        # Python objects but glibc does not return the arenas to the OS, so
+        # RSS does not fall with them (see _release_free_pages).
         del data, y
-        gc.collect()
+        _release_free_pages()
 
     out = {
         "generated_at": pd.Timestamp.now("UTC").isoformat(),
