@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
 """L03/L04/L05 evidence producers -- guide §9 rows L03-L05 / §5.3.
 
-Real ``build_bridges`` runs over real Phase 2 data (attempt-20 release
-``relba732fb44d3a88dc2574cc99``, catalog/store at ``/root/phase2-shadow-ops``,
-snapshot ``snap_6ae7348848e4d27486823eb0a9baceff``). No mocks: every input is
-either the real ``score.json``/rendered bundle on disk, or a deliberate
-in-memory corruption of a copy for a negative control.
-
-**Known real defect, worked around by scope, not by loosening the check**
-(root-caused against this exact population): ``engine/dashboard/render.py``
-lines ~1162/1434 (``_ticker_payload``) call the naive ``_clean()`` (no
-``REPLAY_INPUT_FIELDS`` exemption) when writing ``data/tickers/{T}.json``,
-unlike ``board.json``'s path through ``_write_pair``->``_clean_deep`` (fixed
-in ``6b9d5cf``). ``structure_params`` therefore arrives rounded to 6dp on
-77 of the real population's 121 rows (7 of 8 multi-leg strategies) --
-confirmed on live data, e.g. engine ``0.048328042477830555`` vs display
-``0.048328``. This is legacy render, outside ``engine/v2``; not fixed here
-(coordinator decision 2026-09-15). ``--clean-score-json``/``--clean-bundle-dir``
-are a REAL subset of the SAME population restricted to the strategies whose
-``structure_params`` is null/empty (CAL-P, CND-P, STR-RUNUP, STR-THRU --
-44 of 121 rows), confirmed defect-free by direct measurement; used for every
-AGREE-side comparison below. ``--real-score-json``/``--real-bundle-dir`` (the
-full, unfiltered population) is used ONLY as ``bridge_value_negative_control``
-'s real, honestly-labelled fault.
+Real ``build_bridges`` runs over one retained Phase 2 score document and its
+matching rendered bundle. No mocks: every input is either the complete real
+population on disk, or a deliberate in-memory corruption of a copy for a
+negative control. The legacy renderer now preserves replay-input precision in
+ticker payloads, so every AGREE-side receipt covers the complete candidate
+population. A release with a rounded display field is rejected, never reduced
+to a passing subset.
 
 L03 ``bridge_identity_parity``: two independent ``build_bridges`` runs over
-identical clean-subset content produce the SAME ``score_id`` set (a pure
+identical full-population content produce the SAME ``score_id`` set (a pure
 function of ``engine_record``/pinned refs -- ``bridge._build_bridge`` never
 reads a clock); a run with a changed ``score_batch_ref`` (a real pinned
 dependency) produces a DIFFERENT set; a real ``LegacyScoreBridge`` round-trips
@@ -37,7 +22,7 @@ recorded only when a malformed document is WRONGLY accepted (a validation
 bypass), so ``verdict=DIFFER`` (no findings) means "every malformed case was
 correctly refused" (safe), and ``verdict=AGREE`` would mean a bypass fired.
 
-L04 ``bridge_mapping_parity``: the clean subset's real ``ProjectionFindings``
+L04 ``bridge_mapping_parity``: the full population's real ``ProjectionFindings``
 funnel (planned/rendered main+ladder counted separately, matched==compared,
 zero missing/unplanned/duplicate/identity/unresolved_event findings).
 ``bridge_mapping_negative_control``: a duplicated join key and an unmapped
@@ -46,11 +31,11 @@ independent :class:`~engine.v2.contracts.Finding` in one ``build_bridges``
 call -- standard convention (a finding here directly means the corruption was
 caught, so ``verdict=DIFFER`` when both are found).
 
-L05 ``bridge_value_parity``: the clean subset agrees on every full-precision
-field, zero ``value``-category findings. ``bridge_value_negative_control``:
-the REAL unfiltered population's real 77 ``VALUE_MISMATCH`` findings (the
-render defect above) -- standard convention, ``verdict=DIFFER`` when the
-mismatch is caught.
+L05 ``bridge_value_parity``: the complete source population agrees on every
+full-precision field, with zero ``value``-category findings.
+``bridge_value_negative_control`` changes one numeric ``structure_params``
+field in a copied display row. It is ``DIFFER`` only when the bridge reports
+that precision mutation.
 """
 from __future__ import annotations
 
@@ -233,15 +218,16 @@ def build_mapping(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
         mapping_findings.append(_mk_finding(BRIDGE_MAPPING_KIND, "matched_ne_compared"))
     mapping_categories = {"missing", "unplanned", "duplicate", "identity", "unresolved_event"}
     if any(f.category in mapping_categories for f in findings.findings):
-        mapping_findings.append(_mk_finding(BRIDGE_MAPPING_KIND, "unexpected_mapping_finding_on_clean_subset"))
-    comparison = _receipt(BRIDGE_MAPPING_KIND, 1, "build:clean_subset", "score_doc.expected_population",
-                          mapping_findings, 4, code_hash=code_hash, environment_hash=environment_hash)
+        mapping_findings.append(_mk_finding(BRIDGE_MAPPING_KIND, "unexpected_mapping_finding_on_population"))
+    comparison = _receipt(BRIDGE_MAPPING_KIND, 1, "build:full_population", "score_doc.expected_population",
+                          mapping_findings, findings.compared_population,
+                          code_hash=code_hash, environment_hash=environment_hash)
 
     # Negative control: corrupt a COPY of the bundle -- a duplicated join key (a display row
     # cloned) and an unmapped event date -- and confirm build_bridges independently reports both.
     corrupted = {ticker: [dict(row) for row in rows] for ticker, rows in bundle_rows_by_ticker.items()}
     tickers_with_rows = [t for t, rows in corrupted.items() if rows]
-    assert len(tickers_with_rows) >= 2, "clean subset must span at least two tickers to corrupt independently"
+    assert len(tickers_with_rows) >= 2, "population must span at least two tickers to corrupt independently"
     dup_ticker, unmapped_ticker = tickers_with_rows[0], tickers_with_rows[1]
     corrupted[dup_ticker].append(dict(corrupted[dup_ticker][0]))  # duplicate join key
     corrupted[unmapped_ticker][0] = {**corrupted[unmapped_ticker][0], "event_date": "1999-01-01"}
@@ -255,7 +241,7 @@ def build_mapping(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
         negative_findings.append(_mk_finding(BRIDGE_MAPPING_NEGATIVE_KIND, "duplicate_key_not_detected"))
     if "unresolved_event" not in categories_seen:
         negative_findings.append(_mk_finding(BRIDGE_MAPPING_NEGATIVE_KIND, "unmapped_event_not_detected"))
-    negative = _receipt(BRIDGE_MAPPING_NEGATIVE_KIND, 1, "build:clean_subset", "build:corrupted_subset",
+    negative = _receipt(BRIDGE_MAPPING_NEGATIVE_KIND, 1, "build:full_population", "build:corrupted_population",
                         negative_findings, 2, code_hash=code_hash, environment_hash=environment_hash,
                         invert=True)
     return comparison, negative
@@ -266,39 +252,53 @@ def build_mapping(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
 # --------------------------------------------------------------------------
 
 
-def build_value(clean_score_json: Path, clean_bundle_dir: Path, real_score_json: Path, real_bundle_dir: Path,
-                repository, snapshot_ref, *, model_registry_artifact_refs: tuple[str, ...],
+def build_value(score_json: Path, bundle_dir: Path, repository, snapshot_ref, *,
+                model_registry_artifact_refs: tuple[str, ...],
                 request_provenance_refs: tuple[str, ...], code_hash: str,
                 environment_hash: str) -> tuple[ComparisonReceipt, ComparisonReceipt]:
-    clean_doc = load_score_document(clean_score_json)
-    clean_bundle, _m1 = load_legacy_bundle(clean_bundle_dir)
-    clean_event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(clean_doc, clean_bundle))
-    _bridges, clean_findings = _run_bridges(clean_doc, clean_bundle, clean_event_refs, snapshot_ref,
-                                            score_batch_ref="value-probe-clean",
+    score_doc = load_score_document(score_json)
+    bundle, _manifest = load_legacy_bundle(bundle_dir)
+    event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(score_doc, bundle))
+    _bridges, findings = _run_bridges(score_doc, bundle, event_refs, snapshot_ref,
+                                      score_batch_ref="value-probe",
                                             model_registry_artifact_refs=model_registry_artifact_refs,
                                             request_provenance_refs=request_provenance_refs)
     comparison_findings: list[Finding] = []
-    if any(f.category == "value" for f in clean_findings.findings) or not clean_findings.ok:
+    if any(f.category == "value" for f in findings.findings) or not findings.ok:
         comparison_findings.append(_mk_finding(BRIDGE_VALUE_KIND, "full_population_value_mismatch"))
-    compared = clean_findings.compared_population
+    compared = findings.compared_population
     comparison = _receipt(BRIDGE_VALUE_KIND, 1, "score.json:full_population", "bundle:full_population",
                           comparison_findings, compared, code_hash=code_hash, environment_hash=environment_hash)
 
-    real_doc = load_score_document(real_score_json)
-    real_bundle, _m2 = load_legacy_bundle(real_bundle_dir)
-    real_event_refs = resolve_event_refs(repository, snapshot_ref, _pairs(real_doc, real_bundle))
-    _real_bridges, real_findings = _run_bridges(
-        real_doc, real_bundle, real_event_refs, snapshot_ref,
-        score_batch_ref="value-probe-real-unfiltered",
+    corrupted = copy.deepcopy(bundle)
+    altered = False
+    for rows in corrupted.values():
+        for row in rows:
+            params = row.get("structure_params")
+            if isinstance(params, dict):
+                for key, value in params.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        params[key] = value + 0.000001
+                        altered = True
+                        break
+            if altered:
+                break
+        if altered:
+            break
+    if not altered:
+        raise RuntimeError("full population contains no numeric structure_params field to corrupt")
+    _corrupt_bridges, corrupt_findings = _run_bridges(
+        score_doc, corrupted, event_refs, snapshot_ref,
+        score_batch_ref="value-probe-corrupt",
         model_registry_artifact_refs=model_registry_artifact_refs,
         request_provenance_refs=request_provenance_refs)
     negative_findings: list[Finding] = []
-    value_mismatches = [finding for finding in real_findings.findings if finding.category == "value"]
-    if len(value_mismatches) != 77:
+    value_mismatches = [finding for finding in corrupt_findings.findings if finding.category == "value"]
+    if not value_mismatches:
         negative_findings.append(_mk_finding(
-            BRIDGE_VALUE_NEGATIVE_KIND, "expected_77_real_precision_mismatches_not_detected"))
+            BRIDGE_VALUE_NEGATIVE_KIND, "precision_mutation_not_detected"))
     negative = _receipt(BRIDGE_VALUE_NEGATIVE_KIND, 1, "score.json:full_population",
-                        "bundle:real_unfiltered_population", negative_findings, 77,
+                        "bundle:precision_mutation", negative_findings, 1,
                         code_hash=code_hash, environment_hash=environment_hash, invert=True)
     return comparison, negative
 
@@ -313,10 +313,8 @@ def publish(receipt: ComparisonReceipt, artifact_root: Path, name: str) -> dict:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--clean-score-json", type=Path, required=True)
-    parser.add_argument("--clean-bundle-dir", type=Path, required=True)
-    parser.add_argument("--real-score-json", type=Path, required=True)
-    parser.add_argument("--real-bundle-dir", type=Path, required=True)
+    parser.add_argument("--score-json", type=Path, required=True)
+    parser.add_argument("--bundle-dir", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--store-root", type=Path, required=True)
     parser.add_argument("--snapshot-id", required=True)
@@ -330,15 +328,15 @@ def main(argv=None):
     conn, repository, snapshot_ref = _open_repository(args.catalog, args.store_root, args.snapshot_id)
     try:
         identity, malformed = build_identity(
-            args.clean_score_json, args.clean_bundle_dir, repository, snapshot_ref,
+            args.score_json, args.bundle_dir, repository, snapshot_ref,
             model_registry_artifact_refs=tuple(args.model_refs),
             request_provenance_refs=tuple(args.provenance_refs), code_hash=code_hash, environment_hash=env_hash)
         mapping, mapping_negative = build_mapping(
-            args.clean_score_json, args.clean_bundle_dir, repository, snapshot_ref,
+            args.score_json, args.bundle_dir, repository, snapshot_ref,
             model_registry_artifact_refs=tuple(args.model_refs),
             request_provenance_refs=tuple(args.provenance_refs), code_hash=code_hash, environment_hash=env_hash)
         value, value_negative = build_value(
-            args.clean_score_json, args.clean_bundle_dir, args.real_score_json, args.real_bundle_dir,
+            args.score_json, args.bundle_dir,
             repository, snapshot_ref, model_registry_artifact_refs=tuple(args.model_refs),
             request_provenance_refs=tuple(args.provenance_refs), code_hash=code_hash, environment_hash=env_hash)
     finally:

@@ -10,12 +10,10 @@ browser. Every input is real: this script never builds data itself -- the
 caller passes an ALREADY-INDEXED real ``serving.sqlite`` (built by
 ``scratch/phase3/build_index.py``, not committed) containing:
 
-* the real attempt-20 clean-44 subset (``--release-id``) -- the same
-  defect-free CAL-P/CND-P/STR-RUNUP/STR-THRU population
-  ``checks/rearchitecture_phase3_bridge.py``/``rearchitecture_phase3_
-  publish.py`` already established (44 of 121 rows; the other 77 are
-  blocked by the known ``engine/dashboard/render.py`` ``structure_params``
-  rounding defect, out of scope here per the coordinator's instruction);
+* a real complete candidate release (``--release-id``) and the exact saved
+  source score document (``--expected-score-json``). The browser check derives
+  its expected population from that independent source document, never from
+  the release API it is checking;
 * a small, HONESTLY-LABELED frozen fixture release (``--fixture-release-id``)
   covering one real, defect-free DYN-SV row and a real ``stale_or_degraded_
   reasons`` demonstration -- see ``scratch/phase3/build_index.py``'s module
@@ -54,11 +52,12 @@ history`` over a REAL ops catalog copy: one real observed night
 window genuinely ``unknown`` -- no fabricated pass, matching guide §9's
 "missing nights/history stay unknown."
 
-L12 ``full_population_parity``: paginates the real clean-44 release end to
+L12 ``full_population_parity``: paginates the real complete release end to
 end through the real UI and diffs every rendered row's ticker/event date/
 strategy/verdict/refusal-reason/driver-forecast/market-implied-move/
 entry-premium/expected-return exactly against the real API's own JSON for
-that release -- the full 44-row shipped population, not a sample. Also one
+that release, while separately proving the API population equals the source
+score document. Also one
 ``GET /api/v1/scores/{id}`` -> ``score-detail`` field-row spot check each
 for STR-THRU, STR-RUNUP and a real refusal row (drawn from the real
 clean-44 subset) and one for the frozen fixture's DYN-SV row (menu_size/
@@ -432,9 +431,23 @@ def build_engineering_receipt(catalog_path: Path, session: str) -> dict:
 # --------------------------------------------------------------------------
 
 
+def _source_population_keys(score_document: dict) -> set[str]:
+    expected = score_document.get("expected_population")
+    if not isinstance(expected, list) or not expected or not all(isinstance(key, str) and key for key in expected):
+        raise ValueError("expected score document has no usable expected_population")
+    if len(expected) != len(set(expected)):
+        raise ValueError("expected score document has duplicate expected_population keys")
+    return set(expected)
+
+
+def _api_population_key(score: dict) -> str:
+    return "|".join((str(score["ticker"]), str(score["strategy"]), str(score["event_date"])))
+
+
 def build_full_population(base: str, token: str, release_id: str, fixture_release_id: str,
                           str_thru_ticker: str, str_runup_ticker: str, refusal_ticker: str,
-                          browser, *, code_hash: str, environment_hash: str) -> ComparisonReceipt:
+                          browser, *, expected_score_document: dict, code_hash: str,
+                          environment_hash: str) -> ComparisonReceipt:
     findings: list[Finding] = []
 
     status, full = _get(base, "/api/v1/events", token=token, params={"release_id": release_id, "limit": 200})
@@ -444,7 +457,13 @@ def build_full_population(base: str, token: str, release_id: str, fixture_releas
     for item in full["items"]:
         for score in item["scores"]:
             api_scores[score["score_id"]] = {**score, "ticker": item["ticker"], "event_date": item["event_date"]}
-    expected_population = len(api_scores)
+    source_population = _source_population_keys(expected_score_document)
+    api_population = {_api_population_key(score) for score in api_scores.values()}
+    for key in sorted(source_population - api_population):
+        _finding(findings, FULL_POPULATION_KIND, "source_row_missing_from_api_" + key)
+    for key in sorted(api_population - source_population):
+        _finding(findings, FULL_POPULATION_KIND, "api_row_missing_from_source_" + key)
+    expected_population = len(source_population)
 
     context = _authed_context(browser, base, token)
     page = context.new_page()
@@ -541,6 +560,8 @@ def main(argv=None):
     parser.add_argument("--serving-root", type=Path, required=True)
     parser.add_argument("--dist-dir", type=Path, required=True)
     parser.add_argument("--release-id", required=True, help="the real projected release, served as current")
+    parser.add_argument("--expected-score-json", required=True, type=Path,
+                        help="saved source score.json defining the independent full population")
     parser.add_argument("--fixture-release-id", help="optional real stale-state fixture release")
     parser.add_argument("--unknown-release-id", default="does-not-exist-at-all")
     parser.add_argument("--catalog-copy", type=Path, required=True,
@@ -555,6 +576,7 @@ def main(argv=None):
     parser.add_argument("--token", required=True)
     parser.add_argument("--artifact-root", type=Path, required=True)
     args = parser.parse_args(argv)
+    expected_score_document = json.loads(args.expected_score_json.read_text())
 
     code_hash = source_hash(source_files(ROOT))
     env_hash, _source = _environment_hash(ROOT)
@@ -575,7 +597,8 @@ def main(argv=None):
                     environment_hash=env_hash)
                 full_population = build_full_population(
                     base, args.token, args.release_id, args.fixture_release_id, args.str_thru_ticker,
-                    args.str_runup_ticker, args.refusal_ticker, browser, code_hash=code_hash,
+                    args.str_runup_ticker, args.refusal_ticker, browser,
+                    expected_score_document=expected_score_document, code_hash=code_hash,
                     environment_hash=env_hash)
             finally:
                 browser.close()
