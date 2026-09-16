@@ -47,6 +47,20 @@ def _fake_env_root(tmp_path) -> Path:
     return root
 
 
+def _fake_repo_root(tmp_path, dirname, env_line) -> Path:
+    """A ``repo_root`` distinct from ``REPO`` and carrying its own fake
+    ``.env``, so tests can prove *which* checkout's secrets get read
+    without any assumption about whether the real ``REPO`` checkout (this
+    worktree, or a real working copy that does have one) has a ``.env`` of
+    its own. Importable via ``PYTHONPATH=REPO`` (set by the caller with
+    ``monkeypatch``), not by copying ``checks/``/``engine/`` in.
+    """
+    root = tmp_path / dirname
+    root.mkdir()
+    (root / ".env").write_text(env_line)
+    return root
+
+
 def test_a_declared_render_file_over_1mb_passes(tmp_path):
     env_root = _fake_env_root(tmp_path)
     bundle = _bundle_tar(tmp_path, {"bundle/data/models.json": b"x" * 2_000_000})
@@ -64,14 +78,20 @@ def test_an_undeclared_file_over_1mb_refuses(tmp_path):
     assert any(v[1] == "oversize" for v in result["violations"])
 
 
-def test_env_is_read_from_env_root_not_repo_root(tmp_path):
-    # REPO (this worktree) has no .env; env_root does. A clean small bundle
-    # must still see the env_root's needles, proving repo_root is only the
-    # importable code checkout, never where secrets come from.
-    assert not (REPO / ".env").exists()
+def test_env_is_read_from_env_root_not_repo_root(tmp_path, monkeypatch):
+    # repo_root gets its OWN fake .env, with a secret value distinct from
+    # env_root's -- this holds regardless of whether the real checkout at
+    # REPO happens to have a .env (it does in /root/investing-plan, it
+    # doesn't in a fresh worktree). Plant repo_root's secret value in the
+    # bundle: if the scan ever read repo_root's .env instead of (or besides)
+    # env_root's, that would be flagged as a leaked secret and this test
+    # would catch it.
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    repo_root = _fake_repo_root(tmp_path, "repo_with_env",
+                                 "REPO_ROOT_SECRET=made-up-repo-root-secret-0000\n")
     env_root = _fake_env_root(tmp_path)
-    bundle = _bundle_tar(tmp_path, {"bundle/index.html": b"<html>clean</html>"})
-    result = run_security_scan(bundle, REPO, env_root)
+    bundle = _bundle_tar(tmp_path, {"bundle/index.html": b"made-up-repo-root-secret-0000"})
+    result = run_security_scan(bundle, repo_root, env_root)
     assert result["ok"] is True, result["violations"]
     assert result["secrets_loaded"] >= 1
 
@@ -86,14 +106,19 @@ def test_missing_env_at_env_root_fails_closed(tmp_path):
     assert any(v[1] == "no-secrets-loaded" for v in result["violations"])
 
 
-def test_env_root_defaults_to_repo_root_when_omitted(tmp_path):
-    # No env_root passed at all -- falls back to repo_root, which for this
-    # worktree has no .env, so this still fails closed rather than silently
-    # scanning with zero needles.
-    bundle = _bundle_tar(tmp_path, {"bundle/index.html": b"<html>clean</html>"})
-    result = run_security_scan(bundle, REPO)
+def test_env_root_defaults_to_repo_root_when_omitted(tmp_path, monkeypatch):
+    # No env_root passed at all -- falls back to repo_root. Use a fake
+    # repo_root with its own known .env (rather than REPO, whose .env state
+    # varies between a worktree and the real checkout) and prove the
+    # fallback actually reads it: plant repo_root's secret value in the
+    # bundle and confirm it gets flagged.
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    repo_root = _fake_repo_root(tmp_path, "repo_with_env",
+                                 "REPO_ROOT_SECRET=made-up-repo-root-secret-0000\n")
+    bundle = _bundle_tar(tmp_path, {"bundle/index.html": b"made-up-repo-root-secret-0000"})
+    result = run_security_scan(bundle, repo_root)
     assert result["ok"] is False
-    assert result["secrets_loaded"] == 0
+    assert any(v[1] == "secret" for v in result["violations"])
 
 
 def test_a_planted_needle_inside_a_declared_file_still_refuses(tmp_path):
