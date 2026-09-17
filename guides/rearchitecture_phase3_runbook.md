@@ -45,6 +45,8 @@ can turn green. Do not substitute historical receipt ids or hand-written logs.
 /usr/bin/python3 tools/v2_dashboard_publish.py --verify-sequence --root OPS --store-root SECRET_ROOT \
   --source-publication-job A_SOURCE --projection-binding A_BINDING --b-source-publication-job B_SOURCE \
   --b-projection-binding B_BINDING --operation-id proof --sequence-log publication-log.json
+/usr/bin/python3 checks/rearchitecture_phase3_publish.py --publication-catalog OPS/catalog.sqlite \
+  --publication-store-root OPS <other-required-checker-inputs>
 ```
 
 ## 0. Implemented commands (original verification: 2026-09-14)
