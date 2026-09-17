@@ -32,6 +32,22 @@ _FROZEN_OUTPUTS = frozenset(
     for outputs in _FROZEN_ROLE_OUTPUTS.values()
     for output in outputs
 )
+_RUNUP_BASE_DAYS = 14.0
+_RUNUP_RAW_NAMES = frozenset({
+    "prediction", "pred_runup_abs_move_d14", "runup_move_d14",
+    "runup_move_raw_d14",
+})
+_RUNUP_FINAL_NAMES = frozenset({
+    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
+    "runup_move_sd",
+})
+_RUNUP_DERIVED_FIELDS = frozenset({
+    "runup_move_raw_d14", "runup_move_raw_d14_p10",
+    "runup_move_raw_d14_p90", "runup_move_raw_d14_sd",
+    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
+    "runup_move_sd", "runup_move_days", "runup_move_scale",
+    "runup_move_provenance",
+})
 
 
 def _value_fields(values: Mapping[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
@@ -54,6 +70,21 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
     features, null_masks = _feature_fields(values)
     reasons = tuple(values.get("flags") or ())
     diagnostics = financial_diagnostics(values)
+    forecasts = _value_fields(values, ("driver_prediction", "forecast_abs_move",
+                                        "runup_move_prediction", "exp_pnl_sim",
+                                        "chooser_score"))
+    forecasts.update({key: values[key] for key in (
+        "runup_move_raw_d14", "runup_move_days", "runup_move_scale",
+        "runup_move_provenance",
+    ) if key in values})
+    uncertainty = _value_fields(
+        values, ("model_p10", "model_p90", "forecast_p10", "forecast_p90"),
+    )
+    uncertainty.update({key: values[key] for key in (
+        "runup_move_raw_d14_p10", "runup_move_raw_d14_p90",
+        "runup_move_raw_d14_sd", "runup_move_p10", "runup_move_p90",
+        "runup_move_sd",
+    ) if key in values})
     return dict(
         score_id="pending",
         canonical_request=to_document(request),
@@ -68,9 +99,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         legs=tuple(values.get("legs") or ()),
         entry_exit_plan=_value_fields(values, ("entry_date", "exit_date", "quote_date", "expiry")),
         quote_provenance=_value_fields(values, ("quote_date", "quote_age_sessions", "fill")),
-        forecasts=_value_fields(values, ("driver_prediction", "forecast_abs_move",
-                                         "runup_move_prediction", "exp_pnl_sim", "chooser_score")),
-        uncertainty=_value_fields(values, ("model_p10", "model_p90", "forecast_p10", "forecast_p90")),
+        forecasts=forecasts,
+        uncertainty=uncertainty,
         residual_state_ref=request.residual_state_ref,
         analog_state_ref=request.analog_state_ref,
         payoff_state_ref=request.calibration_state_ref,
@@ -131,6 +161,8 @@ def _apply_frozen_predictions(values: dict[str, Any], result, release,
 
 
 def _frozen_outputs(result, binding) -> dict[str, float]:
+    if getattr(result, "status", None) != "READY":
+        return {}
     names = tuple(getattr(result, "output_names", ()) or ())
     predictions = tuple(getattr(result, "predictions", ()) or ())
     row = tuple(predictions[0]) if predictions else ()
@@ -144,6 +176,125 @@ def _frozen_outputs(result, binding) -> dict[str, float]:
         if output is not None:
             outputs[output] = value
     return outputs
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if isfinite(number) else None
+
+
+def _metadata(sources, names):
+    for source in sources:
+        for name in names:
+            value = (source.get(name) if isinstance(source, Mapping)
+                     else getattr(source, name, None))
+            if value is not None:
+                return value
+    return None
+
+
+def _runup_days(request: ScoreRequest, fields: Mapping[str, Any],
+                base: NativeScoreInputs) -> float | None:
+    model_inputs = base.features.get("model_inputs")
+    sources = (
+        request.geometry_override or {}, request.contract_override or {}, fields,
+        base.context, base.features,
+        model_inputs if isinstance(model_inputs, Mapping) else {},
+    )
+    return _finite_number(_metadata(sources, ("days_before_print",)))
+
+
+def _runup_interval(result, named: Mapping[str, Any]) -> tuple[float | None, ...]:
+    direct = tuple(_finite_number(named.get(name)) for name in ("p10", "p90", "sd"))
+    if any(value is not None for value in direct):
+        return direct
+    interval = _metadata(
+        (result,), ("prediction_interval", "prediction_intervals", "interval", "intervals"),
+    )
+    if isinstance(interval, (tuple, list)) and len(interval) == 1:
+        interval = interval[0]
+    if not isinstance(interval, (tuple, list)):
+        return (None, None, None)
+    values = tuple(_finite_number(value) for value in interval[:3])
+    return (*values, *(None for _ in range(3 - len(values))))
+
+
+def _member_hashes(binding, tokens: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        member.content_hash
+        for member in (getattr(binding, "members", ()) or ())
+        if any(token in str(getattr(member, "name", "")).lower() for token in tokens)
+    )
+
+
+def _runup_prediction_parts(result, binding):
+    if getattr(result, "status", None) != "READY":
+        return None, {}, ()
+    names = tuple(getattr(result, "output_names", ()) or
+                  getattr(binding, "output_names", ()) or ())
+    predictions = tuple(getattr(result, "predictions", ()) or ())
+    row = tuple(predictions[0]) if predictions else ()
+    if any(name in _RUNUP_FINAL_NAMES for name in names):
+        return None, {}, ("PRETRANSFORMED_FROZEN_OUTPUT:runup_move",)
+    named = dict(zip(names, row))
+    raw = next((_finite_number(named[name]) for name in _RUNUP_RAW_NAMES
+                if name in named), None)
+    if raw is None and len(row) == 1 and (not names or names[0] not in _RUNUP_FINAL_NAMES):
+        raw = _finite_number(row[0])
+    if raw is None:
+        return None, {}, ("NONFINITE_FORECAST_OUTPUT:runup_move_prediction",)
+    return raw, named, ()
+
+
+def _runup_state(result, binding, inference_request, raw, named, days, scale):
+    raw_p10, raw_p90, raw_sd = _runup_interval(result, named)
+    state: dict[str, Any] = {
+        "runup_move_raw_d14": raw,
+        "runup_move_prediction": max(raw, 0.0) * scale,
+        "runup_move_days": days,
+        "runup_move_scale": scale,
+    }
+    for key, value in (
+        ("runup_move_raw_d14_p10", raw_p10),
+        ("runup_move_raw_d14_p90", raw_p90),
+        ("runup_move_raw_d14_sd", raw_sd),
+        ("runup_move_p10", None if raw_p10 is None else max(raw_p10, 0.0) * scale),
+        ("runup_move_p90", None if raw_p90 is None else max(raw_p90, 0.0) * scale),
+        ("runup_move_sd", None if raw_sd is None else raw_sd * scale),
+    ):
+        if value is not None:
+            state[key] = value
+    sources = (result, inference_request, binding)
+    state["runup_move_provenance"] = {
+        "release_id": getattr(result, "release_id", None),
+        "binding_id": getattr(binding, "binding_id", None),
+        "model_id": getattr(result, "model_id", None),
+        "fold": _metadata(sources, ("fold_start", "forecast_fold", "fold_id")),
+        "calibration_ref": _metadata(
+            sources, ("calibration_ref", "calibration_state_ref", "calibration_id"),
+        ),
+        "artifact_hashes": tuple(getattr(result, "artifact_hashes", ()) or ()),
+        "interval_artifact_hashes": _member_hashes(binding, ("residual", "interval")),
+        "calibration_artifact_hashes": _member_hashes(binding, ("calibration",)),
+        "raw_horizon_days": _RUNUP_BASE_DAYS,
+        "final_horizon_days": days,
+    }
+    return state
+
+
+def _runup_frozen_output(result, binding, inference_request,
+                         days: float | None) -> tuple[dict[str, float], dict[str, Any], tuple[str, ...]]:
+    raw, named, errors = _runup_prediction_parts(result, binding)
+    if raw is None:
+        return {}, {}, errors
+    if days is None or days < 0.0:
+        return {}, {}, ("INVALID_RUNUP_HORIZON",)
+    scale = days / _RUNUP_BASE_DAYS
+    state = _runup_state(result, binding, inference_request, raw, named, days, scale)
+    return {"runup_move_prediction": state["runup_move_prediction"]}, state, ()
 
 
 def _frozen_role_outputs(binding) -> frozenset[str]:
@@ -160,7 +311,7 @@ def _frozen_role_outputs(binding) -> frozenset[str]:
 def _without_frozen_recipes(base_forecast, bindings) -> dict[str, Any]:
     owned_forecast = _FROZEN_OUTPUTS | {
         "forecast_p10", "forecast_p90", "forecast_sd",
-    }
+    } | _RUNUP_DERIVED_FIELDS
     forecast = {
         key: value for key, value in base_forecast.items()
         if key not in owned_forecast
@@ -177,6 +328,13 @@ def _without_frozen_recipes(base_forecast, bindings) -> dict[str, Any]:
     return forecast
 
 
+def _without_runup_derived(block: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value for key, value in block.items()
+        if key not in _RUNUP_DERIVED_FIELDS
+    }
+
+
 def _frozen_binding(release, result, inference_request):
     binding_id = getattr(inference_request, "binding_id", None)
     binding = next((item for item in getattr(release, "bindings", ())
@@ -190,7 +348,50 @@ def _frozen_binding(release, result, inference_request):
     )
 
 
-def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings, request) -> NativeScoreInputs:
+def _frozen_result_state(result, binding, inference_request, days):
+    role = str(getattr(binding, "role", ""))
+    role_name = role.split(":", 1)[0]
+    if role_name == "runup_move":
+        outputs, state, role_flags = _runup_frozen_output(
+            result, binding, inference_request, days,
+        )
+    else:
+        outputs = _frozen_outputs(result, binding)
+        state, role_flags = {}, ()
+    gate_result = (result, binding) if role_name == "gate" else None
+    return (
+        role_name, outputs, state, tuple(role_flags),
+        tuple(getattr(result, "artifact_hashes", ()) or ()), gate_result,
+    )
+
+
+def _collect_frozen_results(results, bindings, inference_requests, days):
+    outputs = {}
+    state = {}
+    flags = []
+    artifact_hashes = []
+    required_roles = []
+    gate_result = None
+    for result, binding, inference_request in zip(
+        results, bindings, inference_requests, strict=True,
+    ):
+        role_name, role_outputs, result_state, role_flags, hashes, current_gate = (
+            _frozen_result_state(result, binding, inference_request, days)
+        )
+        outputs.update(role_outputs)
+        state.update(result_state)
+        flags.extend(role_flags)
+        flags.extend(getattr(result, "reason_codes", ()) or ())
+        artifact_hashes.extend(hashes)
+        if role_name in {"driver", "size", "implied_t1", "runup_move", "iv_crush"}:
+            required_roles.append(role_name)
+        if current_gate is not None:
+            gate_result = current_gate
+    return outputs, state, flags, artifact_hashes, required_roles, gate_result
+
+
+def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
+                          inference_requests, request) -> NativeScoreInputs:
     supplied = fields.get("_native_inputs")
     if isinstance(supplied, NativeScoreInputs):
         base = supplied
@@ -203,25 +404,21 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings, request)
                      "spot", "session", "as_of")
     context = {key: fields[key] for key in context_names if key in fields}
     context.setdefault("strategy", request.strategy_version)
-    features = dict(base.features)
+    days = _runup_days(request, fields, base)
+    context = {key: value for key, value in {**base.context, **context}.items()
+               if key not in _RUNUP_DERIVED_FIELDS}
+    features = {key: value for key, value in base.features.items()
+                if key not in _RUNUP_DERIVED_FIELDS}
     features.update({key: fields[key] for key in ("model_inputs", "implied_move",
                                                    "spot", "pre_iv30")
                      if key in fields})
+    if days is not None:
+        features["days_before_print"] = days
     outputs = {}
-    flags = []
-    artifact_hashes = []
-    required_roles = []
-    gate_result = None
-    for result, binding in zip(results, bindings, strict=True):
-        outputs.update(_frozen_outputs(result, binding))
-        flags.extend(getattr(result, "reason_codes", ()) or ())
-        artifact_hashes.extend(getattr(result, "artifact_hashes", ()) or ())
-        role = str(getattr(binding, "role", ""))
-        role_name = role.split(":", 1)[0]
-        if role_name in {"driver", "size", "implied_t1", "runup_move", "iv_crush"}:
-            required_roles.append(role_name)
-        if role_name == "gate":
-            gate_result = (result, binding)
+    outputs, result_state, flags, artifact_hashes, required_roles, gate_result = (
+        _collect_frozen_results(results, bindings, inference_requests, days)
+    )
+    context.update(result_state)
     release_id = getattr(results[0], "release_id", request.deployment_id)
     binding_ids = tuple(binding.binding_id for binding in bindings)
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
@@ -244,8 +441,18 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings, request)
                 "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
                 "threshold": fields.get("gate_threshold"),
             })
-    return replace(base, context={**base.context, **context, "flags": flags},
-                   features=features, forecast=forecast, gate=gate, source_ref=source)
+    return replace(
+        base,
+        context={**context, "flags": flags},
+        features=features,
+        forecast=forecast,
+        analogs=_without_runup_derived(base.analogs),
+        simulation=_without_runup_derived(base.simulation),
+        gate=_without_runup_derived(gate),
+        chooser=_without_runup_derived(base.chooser),
+        diagnostics=_without_runup_derived(base.diagnostics),
+        source_ref=source,
+    )
 
 
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
@@ -258,7 +465,9 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
         _frozen_binding(release, result, item)
         for result, item in zip(results, requests, strict=True)
     )
-    inputs = _frozen_native_inputs(fields, results, bindings, request)
+    inputs = _frozen_native_inputs(
+        fields, results, bindings, requests, request,
+    )
     record = score_one(request, inputs)
     artifact_hashes = tuple(dict.fromkeys(
         hash_value
