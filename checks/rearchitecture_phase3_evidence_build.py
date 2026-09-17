@@ -142,9 +142,46 @@ def _parse_kind_path(items: list[str]) -> list[tuple[str, Path]]:
     return out
 
 
+def _publish_preview_proof(preview_path: Path, provenance_path: Path, artifact_root: Path, index: int) -> dict:
+    """Package verifier-produced bytes, not an unresolvable provenance claim."""
+    provenance = json.loads(provenance_path.read_text())
+    if not isinstance(provenance, dict) or provenance.get("schema_version") != "phase3_source_provenance.v1.0":
+        raise ValueError("preview provenance has an unsupported schema")
+    rewritten = dict(provenance)
+    for group in ("artifact_files",):
+        items = provenance.get(group)
+        if not isinstance(items, dict):
+            raise ValueError(f"preview provenance is missing {group}")
+        copied = {}
+        for name, ref in items.items():
+            if not isinstance(ref, dict) or not isinstance(ref.get("path"), str):
+                raise ValueError(f"preview provenance has invalid {group}.{name}")
+            source = (provenance_path.parent / ref["path"]).resolve()
+            source.relative_to(provenance_path.parent.resolve())
+            copied[name] = _publish(source, artifact_root, f"preview_source_{index}_{name}{source.suffix}")
+        rewritten[group] = copied
+    for name in ("score_comparison_receipt", "render_comparison_receipt"):
+        ref = provenance.get(name)
+        if not isinstance(ref, dict) or not isinstance(ref.get("path"), str):
+            raise ValueError(f"preview provenance is missing {name}")
+        source = (provenance_path.parent / ref["path"]).resolve()
+        source.relative_to(provenance_path.parent.resolve())
+        rewritten[name] = _publish(source, artifact_root, f"preview_source_{index}_{name}.json")
+    ref = _publish(preview_path, artifact_root, f"preview_input_{index}.json")
+    ref["verification_ref"] = _publish_bytes(rewritten, artifact_root, f"preview_source_{index}_provenance.json")
+    return ref
+
+
+def _publish_bytes(document: dict, artifact_root: Path, name: str) -> dict:
+    data = json.dumps(document, indent=2, sort_keys=True).encode()
+    dest = artifact_root / name
+    dest.write_bytes(data)
+    return {"path": name, "content_hash": "sha256:" + hashlib.sha256(data).hexdigest()}
+
+
 def build(*, artifact_root: Path, phase2_evidence: Path | None, phase2_artifact_root: Path | None,
          source_code_hash: str | None, source_environment_hash: str | None,
-         mapping_version: str | None, preview_inputs: list[Path], accepted_releases: list[str],
+         mapping_version: str | None, preview_inputs: list[Path], preview_provenances: list[Path], accepted_releases: list[str],
          population_manifest: Path | None, comparison_receipts: list[str],
          negative_control_receipts: list[str], browser_receipt: Path | None,
          refresh_rollback_receipt: Path | None, engineering_receipt: Path | None,
@@ -180,8 +217,11 @@ def build(*, artifact_root: Path, phase2_evidence: Path | None, phase2_artifact_
         evidence["mapping_version"] = mapping_version
 
     if preview_inputs:
+        if len(preview_inputs) != len(preview_provenances):
+            raise ValueError("every preview input needs one verifier-produced provenance file")
         evidence["preview_input_refs"] = [
-            _publish(p, artifact_root, f"preview_input_{i}.json") for i, p in enumerate(preview_inputs)]
+            _publish_preview_proof(p, preview_provenances[i], artifact_root, i)
+            for i, p in enumerate(preview_inputs)]
     if accepted_releases:
         # RELEASE_PATH=BINDING_PATH: each accepted release binds to its own
         # real projection_binding.v1.0 document (P3-1c, coordinator
@@ -232,6 +272,7 @@ def main(argv=None):
                         help="private disposition bound to this exact Phase 2 evidence document")
     parser.add_argument("--mapping-version")
     parser.add_argument("--preview-input", action="append", type=Path, default=[])
+    parser.add_argument("--preview-provenance", action="append", type=Path, default=[])
     parser.add_argument("--accepted-release", action="append", default=[],
                         metavar="RELEASE_PATH=BINDING_PATH",
                         help="a PreviewRelease document and its own real projection_binding.v1.0 "
@@ -253,7 +294,8 @@ def main(argv=None):
         artifact_root=args.artifact_root, phase2_evidence=args.phase2_evidence,
         phase2_artifact_root=args.phase2_artifact_root, source_code_hash=args.source_code_hash,
         source_environment_hash=args.source_environment_hash, mapping_version=args.mapping_version,
-        preview_inputs=args.preview_input, accepted_releases=args.accepted_release,
+        preview_inputs=args.preview_input, preview_provenances=args.preview_provenance,
+        accepted_releases=args.accepted_release,
         population_manifest=args.population_manifest, comparison_receipts=args.comparison_receipt,
         negative_control_receipts=args.negative_control_receipt, browser_receipt=args.browser_receipt,
         refresh_rollback_receipt=args.refresh_rollback_receipt, engineering_receipt=args.engineering_receipt,

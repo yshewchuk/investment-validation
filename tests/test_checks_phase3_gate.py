@@ -218,7 +218,7 @@ def valid_phase2_evidence(artifact_root: Path, root: Path) -> dict:
 def _preview_input(source_release_id="SRC1") -> PreviewInput:
     obj = ObjectRef(kind="legacy_snapshot", object_id="obj_legacy", content_hash=H, byte_size=10)
     return PreviewInput(
-        source_release_id=source_release_id, source_release_manifest_ref=H, snapshot_ref=H,
+        source_release_id=source_release_id, source_release_manifest_ref="synthetic_release_manifest", snapshot_ref=H,
         legacy_snapshot_object_ref=obj, score_batch_ref=H, score_job_input_refs=(H,),
         bundle_manifest_ref=H, model_registry_artifact_refs=(H,), model_evidence_ref=None,
         finality_ref=H, expected_population_ref=H, score_comparison_receipt_ref=H,
@@ -670,6 +670,44 @@ def test_preview_input_must_match_an_accepted_release_lineage(tmp_path):
     evidence["preview_input_refs"] = [_ref(artifact_root, "preview_input.json", json.dumps(preview).encode())]
     result = _gate(evidence, artifact_root, root)
     assert "PREVIEW_RELEASE_LINEAGE_MISMATCH" in codes(result)
+
+
+def test_real_preview_requires_portable_verified_source_proof(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["source_release_manifest_ref"] = H
+    evidence["preview_input_refs"] = [_ref(artifact_root, "preview_input.json", json.dumps(preview).encode())]
+    result = _gate(evidence, artifact_root, root)
+    assert "ARTIFACT_MISSING" in codes(result)
+    assert result["ok"] is False
+
+
+def test_real_preview_rejects_corrupt_portable_source_proof(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["source_release_manifest_ref"] = H
+    ref = _ref(artifact_root, "preview_input.json", json.dumps(preview).encode())
+    ref["verification_ref"] = {"path": "missing_proof.json", "content_hash": H}
+    evidence["preview_input_refs"] = [ref]
+    result = _gate(evidence, artifact_root, root)
+    assert "ARTIFACT_MISSING" in codes(result)
+    assert result["ok"] is False
+
+
+def test_real_preview_rejects_source_proof_for_another_release(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["source_release_manifest_ref"] = H
+    ref = _ref(artifact_root, "preview_input.json", json.dumps(preview).encode())
+    ref["verification_ref"] = _ref(artifact_root, "wrong_proof.json", json.dumps({
+        "schema_version": "phase3_source_provenance.v1.0", "release_id": "OTHER",
+        "release_manifest_hash": H, "bundle_manifest_ref": H,
+        "score_job_input_refs": [H], "model_registry_artifact_refs": [H],
+        "artifact_files": {}}).encode())
+    evidence["preview_input_refs"] = [ref]
+    result = _gate(evidence, artifact_root, root)
+    assert "PREVIEW_PROOF_LINEAGE_MISMATCH" in codes(result)
+    assert result["ok"] is False
 
 
 def test_compatibility_release_labels_remain_distinct_from_projection_binding(tmp_path):
