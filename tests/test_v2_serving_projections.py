@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import hashlib
 import json
+import dataclasses
 from datetime import datetime
 from pathlib import Path
 
@@ -478,11 +479,36 @@ def test_cli_runs_end_to_end_on_tmp_dirs(tmp_path, capsys):
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()
     (bundle_dir / "AAA.json").write_text(json.dumps([_compact(row)]))
+    def digest(data):
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+    score_bytes = score_path.read_bytes()
+    receipt = ComparisonReceipt(receipt_id="r", comparison_kind="score_record_parity", tier=1,
+        left_ref="left", right_ref="right", stage_plan_ref="p", tolerance_policy_ref="t",
+        verdict="agree", population=Population(expected=1, supported=1, compared=1), envelope=Envelope())
+    score_receipt = json.dumps(to_document(receipt)).encode()
+    render_receipt = json.dumps(to_document(dataclasses.replace(receipt, comparison_kind="render_bundle_parity"))).encode()
+    preview = dataclasses.replace(_preview_input(), score_batch_ref=digest(score_bytes),
+        finality_ref=digest(b"finality"), model_evidence_ref=digest(b"models"),
+        score_comparison_receipt_ref=digest(score_receipt), render_comparison_receipt_ref=digest(render_receipt))
     preview_input_path = tmp_path / "preview_input.json"
-    preview_input_path.write_text(json.dumps(to_document(_preview_input())))
+    preview_input_path.write_text(json.dumps(to_document(preview)))
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "score.json").write_bytes(score_receipt)
+    (receipts / "render.json").write_bytes(render_receipt)
+    proof_path = tmp_path / "source_provenance.json"
+    proof_path.write_text(json.dumps({"schema_version": "phase3_source_provenance.v1.0",
+        "release_id": preview.source_release_id, "release_manifest_hash": preview.source_release_manifest_ref,
+        "bundle_manifest_ref": preview.bundle_manifest_ref,
+        "score_artifact": {"content_hash": preview.score_batch_ref}, "snapshot_artifact": {},
+        "materialization_request_artifact": {}, "finality_artifact": {"content_hash": preview.finality_ref},
+        "model_evidence_artifact": {"content_hash": preview.model_evidence_ref},
+        "score_comparison_receipt": {"path": "receipts/score.json", "content_hash": preview.score_comparison_receipt_ref},
+        "render_comparison_receipt": {"path": "receipts/render.json", "content_hash": preview.render_comparison_receipt_ref}}))
 
     exit_code = main([
         "--preview-input", str(preview_input_path),
+        "--source-provenance", str(proof_path),
         "--score-json", str(score_path),
         "--bundle-dir", str(bundle_dir),
         "--bundle-format", "flat",

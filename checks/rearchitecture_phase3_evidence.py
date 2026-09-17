@@ -396,11 +396,6 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
     """Resolve the portable verifier proof carried beside each preview input."""
     for index, preview in enumerate(preview_inputs):
         item = evidence.get("preview_input_refs", [])[index]
-        # Test-only symbolic source identities predate portable retained
-        # artifacts. A real delivered release manifest is content-addressed
-        # and therefore cannot omit this proof.
-        if not preview.source_release_manifest_ref.startswith("sha256:"):
-            continue
         proof_data = _resolve(item.get("verification_ref") if isinstance(item, dict) else None,
                               artifact_root, findings, f"preview_input_refs[{index}].verification_ref")
         if proof_data is None:

@@ -192,13 +192,10 @@ def main(argv: list[str] | None = None) -> int:
         bundle_manifest_ref = content_hash(bundle_manifest)
         preview_input = dataclasses.replace(preview_input, bundle_manifest_ref=bundle_manifest_ref)
 
-    # Synthetic unit fixtures use symbolic refs. Real Phase 2 releases always
-    # carry a content hash, and therefore must supply the verifier proof.
-    if preview_input.source_release_manifest_ref.startswith("sha256:"):
-        if args.source_provenance is None:
-            raise ValueError("real source releases require --source-provenance")
-        _verify_source_provenance(preview_input, args.source_provenance,
-                                  score_path=args.score_json, bundle_manifest_ref=bundle_manifest_ref)
+    if args.source_provenance is None:
+        raise ValueError("projection requires --source-provenance")
+    _verify_source_provenance(preview_input, args.source_provenance,
+                              score_path=args.score_json, bundle_manifest_ref=bundle_manifest_ref)
 
     clock = SystemClock()
     catalog_conn = open_catalog(args.catalog, clock=clock)
