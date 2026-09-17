@@ -25,9 +25,9 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+The package exposes deterministic native geometry and quote pricing.
 
-<!-- public-interface: none -->
+<!-- public-interface: DISABLED, STRATEGIES, Geometry, GeometryRefusal, NativeLeg, PricedLeg, Pricing, PricingRefusal, generate, price -->
 
 ## Consumers
 
@@ -35,16 +35,16 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+engine.v2.scoring imports the generator and pricing functions for native
+geometry and same-input comparisons.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.scoring -->
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+generate("STR-THRU", {"spot": 100, "forecast_abs_move": 6,
+"expiry": "2026-10-01"}) creates immutable legs. price then applies the
+declared worst-to-best fill alpha to explicit bid/ask quotes.
 
 ## Testing
 

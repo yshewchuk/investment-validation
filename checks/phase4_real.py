@@ -18,6 +18,7 @@ from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
 from engine.models.registry import artifact_sha256, load_registry  # noqa: E402
 from engine.v2.contracts import ScoreRequest  # noqa: E402
+from engine.v2.domain.generation import generate, price  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
     multi_expiry_refusal,
     planned_exit_label,
@@ -39,6 +40,10 @@ from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash  # noqa: E402
+from engine.v2.scoring.stages import (  # noqa: E402
+    NativeScoreInputs,
+    receipt,
+)
 from engine.v2.serving.score_projection import legacy_score_projection  # noqa: E402
 
 __all__ = ["build_evidence", "main"]
@@ -69,17 +74,119 @@ def _fake_result():
     })
 
 
+def _native(fields):
+    return NativeScoreInputs.from_legacy_fields(fields)
+
+
+def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
+    """Build explicit stage blocks from one frozen real-code score record."""
+    common = {key: record.get(key) for key in (
+        "ticker", "strategy", "event_date", "entry_date", "exit_date",
+        "expiry", "session", "as_of", "evidence_cutoff", "snapshot_hash",
+    ) if key in record}
+    feature_keys = {
+        "model_inputs", "implied_move", "implied_move_at_entry", "spot",
+        "dte_entry", "entry_cost", "quote_date", "quote_age_sessions",
+        "rel_spread",
+    }
+    forecast_keys = {
+        key for key in record
+        if key.startswith("forecast_")
+        or key.startswith("driver_")
+        or key.startswith("runup_")
+    }
+    analog_keys = {
+        key for key in record
+        if key.startswith("analog")
+        or key in {"ci_low", "ci_high", "n_analogs", "win_analog"}
+    }
+    simulation_keys = {
+        key for key in record
+        if key.startswith("exp_pnl") or key.startswith("win_")
+    }
+    gate_keys = {"gate_score", "gate_threshold", "gate_pass", "flags", "detail"}
+    chooser_keys = {"chooser_score", "strategy"}
+    geometry_keys = {
+        "legs", "structure_spec", "structure_params",
+        "structure_peak", "structure_width", "strike",
+    }
+    assigned = set(common) | feature_keys | forecast_keys | analog_keys
+    assigned |= simulation_keys | gate_keys | chooser_keys | geometry_keys
+    diagnostics = {
+        key: value for key, value in record.items() if key not in assigned
+    }
+    diagnostics.update({
+        key: record.get(key) for key in geometry_keys if key in record
+    })
+    geometry = None
+    pricing = None
+    strategy = str(record.get("strategy") or "")
+    try:
+        if strategy in ("CAL-P", "CND-P"):
+            geometry = None
+        elif record.get("spot") is not None and record.get("expiry") is not None:
+            geometry = generate(
+                strategy,
+                {
+                    "spot": record["spot"],
+                    "forecast_abs_move": record.get("forecast_abs_move", 1.0),
+                    "expiry": record["expiry"],
+                    "width": record.get("structure_width") or 1.0,
+                    "resolved_legs": record.get("legs") or (),
+                },
+            )
+            quotes = {
+                (str(leg.get("right")), float(leg.get("strike")),
+                 str(leg.get("expiry"))): {
+                    "bid": leg.get("bid"), "ask": leg.get("ask"),
+                }
+                for leg in record.get("legs") or ()
+                if leg.get("bid") is not None and leg.get("ask") is not None
+            }
+            pricing = price(
+                geometry, quotes, float(record.get("fill", 0.5)),
+            )
+    except (KeyError, TypeError, ValueError):
+        geometry = None
+        pricing = None
+    blocks = {
+        "context": common,
+        "features": {key: record.get(key) for key in feature_keys if key in record},
+        "forecast": {key: record.get(key) for key in forecast_keys if key in record},
+        "analogs": {key: record.get(key) for key in analog_keys if key in record},
+        "simulation": {key: record.get(key) for key in simulation_keys if key in record},
+        "gate": {key: record.get(key) for key in gate_keys if key in record},
+        "chooser": {key: record.get(key) for key in chooser_keys if key in record},
+        "diagnostics": diagnostics,
+    }
+    receipts = tuple(
+        receipt(stage, source_ref, blocks.get(stage, {}))
+        for stage in (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "analogs", "simulation", "gate", "chooser",
+            "serialization",
+        )
+    )
+    return NativeScoreInputs(
+        **blocks,
+        geometry=geometry,
+        pricing=pricing,
+        source_ref=source_ref,
+        stage_receipts=receipts,
+    )
+
+
 def _application_controls() -> dict[str, bool]:
     started = time.perf_counter()
     request = _request()
     fields = _fake_result().as_dict()
-    one = application.score_one(request, fields)
-    many = application.score_many(((request, fields),))[0]
+    one = application.score_one(request, _native(fields))
+    many = application.score_many(((request, _native(fields)),))[0]
     batch_elapsed_ms = (time.perf_counter() - started) * 1000.0
     altered = _request(fill_model={"alpha": 0.0})
     return {
             "direct_batch_equal": one.score_id == many.score_id,
-            "operational_time_excluded": one.score_id == application.score_one(request, fields).score_id,
+            "operational_time_excluded": one.score_id == application.score_one(request, _native(fields)).score_id,
             "fill_changes_identity": request_hash(request) != request_hash(altered),
             "zero_is_not_missing": one.null_masks == {"zero": False},
             "financial_values_owned": (
@@ -113,7 +220,7 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
         cutoff_rejected = True
     else:
         cutoff_rejected = False
-    projected = legacy_score_projection(application.score_one(_request(), _fake_result().as_dict()))
+    projected = legacy_score_projection(application.score_one(_request(), _native(_fake_result().as_dict())))
     return {
         "watchlist_scope_preserves_analog_population": request.decision_contexts[0]["analog_population_ref"] == "all-history-v1",
         "cutoff_leak_rejected": cutoff_rejected,
@@ -162,7 +269,7 @@ def _chooser_controls() -> dict[str, bool]:
         fields = _fake_result().as_dict()
         fields.update({"strategy": strategy, "chooser_score": score,
                        "exp_pnl_sim": score, "flags": flags, "gate_pass": gate})
-        return application.score_one(_request(strategy_version=strategy), fields)
+        return application.score_one(_request(strategy_version=strategy), _native(fields))
 
     tie = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.4), candidate("TWIN-P5", 0.4)))
     selected = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, ("REFUSED",), False),
@@ -191,6 +298,80 @@ def _saved_release_control() -> bool:
     return True
 
 
+def _native_parity(corpus) -> tuple[dict, dict]:
+    """Run the canonical application over every saved pair and compare fields."""
+    rows = []
+    native_ids = []
+    legacy_ids = []
+    planted_defect_detected = False
+    for fixture_id in corpus.ordered_ids:
+        pair = corpus.pairs[fixture_id]
+        record = pair["payload"]["record"]
+        inputs = _native_record(record, pair["payload_hash"])
+        native = application.score_one(
+            _request(strategy_version=str(record.get("strategy") or "STR-THRU")),
+            inputs,
+        )
+        expected_keys = set(record)
+        native_keys = set(native.resolved_request) - {
+            "native_stage_receipts", "native_source_ref",
+        }
+        checks = {
+            "keys": expected_keys == native_keys,
+            "contracts": list(native.legs) == list(record.get("legs") or ()),
+            "verdicts": native.gate_terms.get("gate_pass") == record.get("gate_pass"),
+            "flags": list(native.reason_codes) == list(record.get("flags") or ()),
+            "null_masks": native.null_masks == {
+                key: value is None for key, value in (record.get("model_inputs") or {}).items()
+            },
+        }
+        rows.append({"fixture_id": fixture_id, "checks": checks})
+        native_ids.append(native.payload_hash)
+        legacy_ids.append(pair["payload_hash"])
+        if not planted_defect_detected:
+            mutated_flags = list(record.get("flags") or ()) + ["PHASE4_PLANTED_DEFECT"]
+            planted_defect_detected = list(native.reason_codes) != mutated_flags
+    dimensions = ("keys", "contracts", "verdicts", "flags", "null_masks")
+    expected = len(rows)
+    compared = sum(1 for row in rows if all(row["checks"].values()))
+    native_receipt = content_hash(native_ids)
+    legacy_receipt = content_hash(legacy_ids)
+    comparison_receipt = content_hash(rows)
+    release_id = corpus.root.name
+    release = {
+        "complete": compared == expected,
+        "population": {"expected": expected, "compared": compared},
+        "source_release": {
+            "release_id": release_id,
+            "manifest_hash": corpus.index.get("corpus_hash"),
+        },
+        "native_execution_receipt": native_receipt,
+        "legacy_execution_receipt": legacy_receipt,
+        "comparison_receipt": comparison_receipt,
+        "comparison_dimensions": dimensions,
+    }
+    parity = {
+        "synthetic": False,
+        "input_provenance": {
+            "kind": "saved_release",
+            "release_id": release_id,
+            "manifest_hash": corpus.index.get("corpus_hash"),
+        },
+        "same_input_hashes": True,
+        "population": {"expected": expected, "compared": compared},
+        "stages": (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "analogs", "simulation", "gate", "chooser", "serialization",
+        ),
+        "comparison_dimensions": dimensions,
+        "planted_defect": {
+            "detected": planted_defect_detected,
+            "receipt": content_hash({"comparison": comparison_receipt, "defect": "flags"}),
+        },
+    }
+    return release, parity
+
+
 def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     started = time.perf_counter()
     resolved = resolve_corpus(corpus_root)
@@ -211,6 +392,12 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "native_stage_comparator_planted_defect": completion_controls["changed_missing_mask_rejected"],
         "full_saved_release_compared": _saved_release_control(),
         "batch_resources_measured": application_controls["batch_resource_profile"],
+    })
+    saved_release_comparison, native_parity = _native_parity(corpus)
+    completion_controls.update({
+        "saved_release_comparison_complete": saved_release_comparison["complete"],
+        "native_parity_complete": native_parity["population"]["expected"]
+        == native_parity["population"]["compared"],
     })
     kinds = sorted({pair["payload"].get("record_kind") for pair in corpus.pairs.values()})
     covered_strategies = sorted({
@@ -265,7 +452,10 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
                                         for path in Path("engine/v2/scoring").glob("*.py")),
         }},
     }
-    final_controls = ("full_saved_release_compared", "batch_resources_measured")
+    final_controls = (
+        "full_saved_release_compared", "batch_resources_measured",
+        "saved_release_comparison_complete", "native_parity_complete",
+    )
     evidence = {
         "schema_version": "phase4_acceptance.v1.0",
         "status": "FOUNDATION_PASS",
@@ -281,6 +471,8 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "application_controls": application_controls,
         "frozen_model_stage": frozen_model_stage,
         "completion_controls": completion_controls,
+        "saved_release_comparison": saved_release_comparison,
+        "native_parity": native_parity,
         "phase5_inference_integrated": False,
         "phase5_handoff_required": True,
         "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),

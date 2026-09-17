@@ -6,6 +6,8 @@ Phase 4 shared scoring application. Numerical execution remains behind the
 declared compatibility seam until the Phase 5 inference artifacts are ready.
 """
 
+from engine.v2.domain.generation import Geometry as _Geometry  # noqa: F401
+from engine.v2.domain.generation import Pricing as _Pricing  # noqa: F401
 from engine.v2.scoring.application import (
     replay,
     score_batch,
@@ -21,8 +23,10 @@ from engine.v2.scoring.identity import (
     request_hash,
     score_id,
 )
+from engine.v2.scoring.stages import STAGE_NAMES, NativeScoreInputs, StageReceipt
 
 __all__ = [
     "canonical_request", "dependency_hash", "financial_diagnostics",
+    "NativeScoreInputs", "STAGE_NAMES", "StageReceipt",
     "replay", "request_hash", "score_batch", "score_event", "score_frozen", "score_id", "score_many", "score_one",
 ]

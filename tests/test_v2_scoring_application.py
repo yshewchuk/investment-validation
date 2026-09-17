@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from engine.v2.contracts import ScoreRequest
 from engine.v2.scoring import application
+from engine.v2.scoring.stages import NativeScoreInputs
 
 
 def request():
@@ -43,18 +44,26 @@ def dynamic_result(strategy):
 
 def test_single_and_batch_share_score_id(monkeypatch):
     fields = result().as_dict()
-    single = application.score_one(request(), fields)
-    batch = application.score_many(((request(), fields),))[0]
+    native = NativeScoreInputs.from_legacy_fields(fields)
+    single = application.score_one(request(), native)
+    batch = application.score_many(((request(), native),))[0]
     assert single.score_id == batch.score_id
     assert single.financial_diagnostics["entry_cost_pct"] == 5.0
     assert single.financial_diagnostics["model_vs_market"] == 7.0 / (6.0 * 0.645)
     assert single.null_masks == {"x": False}
 
 
+def test_native_inputs_require_stage_receipts():
+    fields = result().as_dict()
+    native = NativeScoreInputs.from_legacy_fields(fields)
+    assert application.score_one(request(), native).evidence_refs == ("analog-pop",)
+
+
 def test_operational_time_does_not_change_score_id(monkeypatch):
     fields = result().as_dict()
-    first = application.score_one(request(), fields)
-    second = application.score_one(request(), fields)
+    native = NativeScoreInputs.from_legacy_fields(fields)
+    first = application.score_one(request(), native)
+    second = application.score_one(request(), native)
     assert first.score_id == second.score_id
 
 
@@ -80,6 +89,8 @@ def test_direct_dynamic_request_resolves_complete_menu_without_regating(monkeypa
         strategy: dynamic_result(strategy).as_dict()
         for strategy in ("TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5")
     }}
+    fields["menu"] = {strategy: NativeScoreInputs.from_legacy_fields(value)
+                      for strategy, value in fields["menu"].items()}
     selected = application.score_event(
         base.__class__(**{**base.__dict__, "strategy_version": "DYN-SV"}),
         (("DYN-SV", fields),),

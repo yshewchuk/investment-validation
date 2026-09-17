@@ -11,6 +11,7 @@ from engine.v2.registry import DYNAMIC_MENU, default_registry
 
 from .financial import financial_diagnostics
 from .identity import dependency_hash, with_score_id
+from .stages import NativeScoreInputs, assemble_native_values
 
 __all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
@@ -102,20 +103,20 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     return _record_values(request, values, fields)
 
 
-def score_one(request: ScoreRequest, legacy_fields: Mapping[str, Any]) -> ScoreRecord:
-    """Score one native stage payload through the shared canonical application."""
-    values = legacy_fields.get("native_values", legacy_fields)
-    if not isinstance(values, Mapping):
-        raise TypeError("native_values must be a mapping")
-    return _record_values(request, values, legacy_fields)
+def score_one(request: ScoreRequest, inputs: NativeScoreInputs) -> ScoreRecord:
+    """Emit one record after all explicitly owned native stages completed."""
+    if not isinstance(inputs, NativeScoreInputs):
+        raise TypeError("score_one requires NativeScoreInputs; use the explicit legacy adapter for comparisons")
+    values = assemble_native_values(inputs)
+    return _record_values(request, values, values)
 
 
-def score_many(requests: Iterable[tuple[ScoreRequest, Mapping[str, Any]]]) -> tuple[ScoreRecord, ...]:
+def score_many(requests: Iterable[tuple[ScoreRequest, NativeScoreInputs]]) -> tuple[ScoreRecord, ...]:
     """Batch scoring uses the same one-request kernel and preserves order."""
     return tuple(score_one(request, fields) for request, fields in requests)
 
 
-def score_batch(batch: ScoreBatch, fields_by_request: Mapping[str, Mapping[str, Any]]) -> tuple[ScoreRecord, ...]:
+def score_batch(batch: ScoreBatch, fields_by_request: Mapping[str, NativeScoreInputs]) -> tuple[ScoreRecord, ...]:
     """Score a declared batch while preserving request order and identity."""
     return score_many((request, fields_by_request[request.event_id]) for request in batch.requests)
 

@@ -30,7 +30,7 @@ underscore convention, and an import of a name absent from this list fails
 temporary legacy adapter; `financial` owns diagnostics; `identity` owns
 content-addressed request identities.
 
-<!-- public-interface: application, compatibility, financial, identity, canonical_request, dependency_hash, financial_diagnostics, request_hash, replay, score_batch, score_event, score_frozen, score_id, score_many, score_one -->
+<!-- public-interface: application, compatibility, financial, identity, stages, canonical_request, dependency_hash, financial_diagnostics, request_hash, replay, score_batch, score_event, score_frozen, score_id, score_many, score_one, NativeScoreInputs, STAGE_NAMES, StageReceipt -->
 
 ## Consumers
 
@@ -44,8 +44,10 @@ _Nothing yet — no package imports this one. The first importer is added here i
 
 ## Usage
 
-The application takes a ScoreRequest and explicit legacy request fields for
-the compatibility backend; single and batch calls share one kernel.
+The application takes a ScoreRequest and NativeScoreInputs. Every score must
+carry context, feature, forecast, geometry, pricing, analog, simulation, gate,
+chooser and serialization receipts. Legacy scoring remains available only
+through the explicit compatibility module for comparison.
 
 ## Testing
 

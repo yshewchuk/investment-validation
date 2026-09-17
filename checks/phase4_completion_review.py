@@ -17,6 +17,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.phase4_native_audit import audit as native_audit  # noqa: E402
 from engine.v2.contracts import ScoreRecord  # noqa: E402
 
 __all__ = ["review", "main"]
@@ -225,6 +226,18 @@ def _acceptance_blocker(root: Path, evidence: dict[str, Any]) -> Blocker | None:
     )
 
 
+def _native_audit_blocker(root: Path, evidence: dict[str, Any]) -> Blocker | None:
+    result = native_audit(root, evidence)
+    if result["ok"]:
+        return None
+    return _blocker(
+        "P4-B09", "Final acceptance",
+        "Independent native-scoring audit rejected the acceptance package.",
+        list(result["finding_ids"]),
+        ["typed native stage execution", "population-complete same-input receipts"],
+    )
+
+
 def review(root: Path, evidence: dict[str, Any]) -> dict[str, Any]:
     """Return concrete completion blockers for the supplied foundation evidence."""
     candidates = (
@@ -236,6 +249,7 @@ def review(root: Path, evidence: dict[str, Any]) -> dict[str, Any]:
         _financial_blocker(root, evidence),
         _handoff_blocker(root, evidence),
         _acceptance_blocker(root, evidence),
+        _native_audit_blocker(root, evidence),
     )
     blockers = [candidate for candidate in candidates if candidate is not None]
     return {
