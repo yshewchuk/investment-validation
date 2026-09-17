@@ -9,7 +9,6 @@ from engine.v2.features import default_feature_registry
 from engine.v2.foundation import from_document, to_document
 from engine.v2.registry import DYNAMIC_MENU, default_registry
 
-from .compatibility import score_legacy_request
 from .financial import financial_diagnostics
 from .identity import dependency_hash, with_score_id
 
@@ -104,9 +103,11 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
 
 
 def score_one(request: ScoreRequest, legacy_fields: Mapping[str, Any]) -> ScoreRecord:
-    """Score one request through the shared canonical application."""
-    result = score_legacy_request(request, legacy_fields)
-    return _record(request, result, legacy_fields)
+    """Score one native stage payload through the shared canonical application."""
+    values = legacy_fields.get("native_values", legacy_fields)
+    if not isinstance(values, Mapping):
+        raise TypeError("native_values must be a mapping")
+    return _record_values(request, values, legacy_fields)
 
 
 def score_many(requests: Iterable[tuple[ScoreRequest, Mapping[str, Any]]]) -> tuple[ScoreRecord, ...]:

@@ -66,7 +66,7 @@ def _native_kernel_blocker(root: Path) -> Blocker | None:
     app = _source(root, "engine/v2/scoring/application.py")
     compatibility = _source(root, "engine/v2/scoring/compatibility.py")
     delegates = "score_legacy_request(request, legacy_fields)" in app
-    constructs_legacy = "Scorer()" in compatibility
+    constructs_legacy = delegates and "Scorer()" in compatibility
     if not delegates and not constructs_legacy:
         return None
     return _blocker(

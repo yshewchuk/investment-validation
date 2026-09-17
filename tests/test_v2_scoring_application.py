@@ -42,8 +42,7 @@ def dynamic_result(strategy):
 
 
 def test_single_and_batch_share_score_id(monkeypatch):
-    monkeypatch.setattr(application, "score_legacy_request", lambda request, fields: result())
-    fields = {"ticker": "AAA", "event_date": "2026-09-16", "as_of": None}
+    fields = result().as_dict()
     single = application.score_one(request(), fields)
     batch = application.score_many(((request(), fields),))[0]
     assert single.score_id == batch.score_id
@@ -53,8 +52,7 @@ def test_single_and_batch_share_score_id(monkeypatch):
 
 
 def test_operational_time_does_not_change_score_id(monkeypatch):
-    monkeypatch.setattr(application, "score_legacy_request", lambda request, fields: result())
-    fields = {"ticker": "AAA", "event_date": "2026-09-16", "as_of": None}
+    fields = result().as_dict()
     first = application.score_one(request(), fields)
     second = application.score_one(request(), fields)
     assert first.score_id == second.score_id
@@ -77,13 +75,9 @@ def test_frozen_inference_path_does_not_call_legacy_backend():
 
 
 def test_direct_dynamic_request_resolves_complete_menu_without_regating(monkeypatch):
-    monkeypatch.setattr(
-        application, "score_legacy_request",
-        lambda request, fields: dynamic_result(request.strategy_version),
-    )
     base = request()
     fields = {"menu": {
-        strategy: {"ticker": "AAA", "event_date": "2026-09-16", "as_of": None}
+        strategy: dynamic_result(strategy).as_dict()
         for strategy in ("TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5")
     }}
     selected = application.score_event(

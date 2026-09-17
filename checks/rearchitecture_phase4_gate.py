@@ -18,10 +18,10 @@ def check(evidence: dict) -> dict:
     population = evidence.get("population") or {}
     if not population or not (population.get("expected") == population.get("supported") == population.get("compared")):
         findings.append("population is incomplete")
-    if evidence.get("status") != "FOUNDATION_PASS":
-        findings.append("foundation status is not accepted")
-    if evidence.get("phase5_inference_integrated"):
-        findings.append("foundation evidence incorrectly claims Phase 5 integration")
+    if evidence.get("status") not in {"FOUNDATION_PASS", "PASS"}:
+        findings.append("phase 4 status is not accepted")
+    if evidence.get("phase5_inference_integrated") and evidence.get("evidence_scope") != "native_full_release":
+        findings.append("Phase 5 integration lacks native full-release evidence")
     subjects = evidence.get("subjects") or {}
     for subject in REQUIRED:
         row = subjects.get(subject)

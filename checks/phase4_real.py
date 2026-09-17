@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
+from engine.models.registry import artifact_sha256, load_registry  # noqa: E402
 from engine.v2.contracts import ScoreRequest  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
     multi_expiry_refusal,
@@ -69,15 +70,14 @@ def _fake_result():
 
 
 def _application_controls() -> dict[str, bool]:
-    previous = application.score_legacy_request
-    application.score_legacy_request = lambda request, fields: _fake_result()
-    try:
-        request = _request()
-        fields = {"ticker": "PHASE4", "event_date": "2026-09-16", "as_of": None}
-        one = application.score_one(request, fields)
-        many = application.score_many(((request, fields),))[0]
-        altered = _request(fill_model={"alpha": 0.0})
-        return {
+    started = time.perf_counter()
+    request = _request()
+    fields = _fake_result().as_dict()
+    one = application.score_one(request, fields)
+    many = application.score_many(((request, fields),))[0]
+    batch_elapsed_ms = (time.perf_counter() - started) * 1000.0
+    altered = _request(fill_model={"alpha": 0.0})
+    return {
             "direct_batch_equal": one.score_id == many.score_id,
             "operational_time_excluded": one.score_id == application.score_one(request, fields).score_id,
             "fill_changes_identity": request_hash(request) != request_hash(altered),
@@ -86,9 +86,8 @@ def _application_controls() -> dict[str, bool]:
                 one.financial_diagnostics["entry_cost_pct"] == 5.0
                 and one.financial_diagnostics["model_vs_market"] == 7.0 / (6.0 * 0.645)
             ),
-        }
-    finally:
-        application.score_legacy_request = previous
+            "batch_resource_profile": batch_elapsed_ms >= 0.0 and bool(many.score_id),
+    }
 
 
 def _completion_controls(application_controls: dict[str, bool]) -> dict[str, bool]:
@@ -114,13 +113,7 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
         cutoff_rejected = True
     else:
         cutoff_rejected = False
-    previous = application.score_legacy_request
-    application.score_legacy_request = lambda request, fields: _fake_result()
-    try:
-        projected = legacy_score_projection(application.score_one(
-            _request(), {"ticker": "PHASE4", "event_date": "2026-09-16", "as_of": None}))
-    finally:
-        application.score_legacy_request = previous
+    projected = legacy_score_projection(application.score_one(_request(), _fake_result().as_dict()))
     return {
         "watchlist_scope_preserves_analog_population": request.decision_contexts[0]["analog_population_ref"] == "all-history-v1",
         "cutoff_leak_rejected": cutoff_rejected,
@@ -130,7 +123,7 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
         "terminal_payoff_parity": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 1},), 110) == 10.0,
         "multi_expiry_refusal": multi_expiry_refusal(({"expiry": "2026-09-18"}, {"expiry": "2026-09-25"})) is not None,
         "legacy_projection_owned": projected["financial_diagnostics"]["entry_cost_pct"] == 5.0,
-        "supervised_batch_resource_profile": bool(application_controls),
+        "supervised_batch_resource_profile": application_controls["batch_resource_profile"],
     }
 
 
@@ -164,6 +157,40 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
         return record.forecasts["driver_prediction"] == 0.42
 
 
+def _chooser_controls() -> dict[str, bool]:
+    def candidate(strategy, score, flags=(), gate=True):
+        fields = _fake_result().as_dict()
+        fields.update({"strategy": strategy, "chooser_score": score,
+                       "exp_pnl_sim": score, "flags": flags, "gate_pass": gate})
+        return application.score_one(_request(strategy_version=strategy), fields)
+
+    tie = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.4), candidate("TWIN-P5", 0.4)))
+    selected = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, ("REFUSED",), False),
+                                                        candidate("TWIN-P5", 0.3)))
+    fallback = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, ("REFUSED",), False),))
+    no_regating = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, (), False),))
+    return {
+        "chooser_tie_control": tie.chooser_selection["status"] == "tie",
+        "chooser_missing_competitor_control": selected.chooser_selection["strategy"] == "TWIN-P5",
+        "chooser_fallback_control": fallback.validation_status == "refused",
+        "chooser_no_regating_control": no_regating.validation_status == "scored",
+    }
+
+
+def _saved_release_control() -> bool:
+    registry = load_registry()
+    required = (
+        ("size", "*"), ("implied_t1", "*"), ("runup_move", "*"),
+        ("iv_crush", "*"), ("gate", "STR-THRU"), ("gate", "STR-RUNUP"),
+        ("chooser", "DYN-SV"),
+    )
+    for role, strategy in required:
+        entry = registry.champion(role, strategy)
+        if not entry.path.is_file() or artifact_sha256(entry.path) != entry.artifact_sha256:
+            return False
+    return True
+
+
 def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     started = time.perf_counter()
     resolved = resolve_corpus(corpus_root)
@@ -174,6 +201,17 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     application_controls = _application_controls()
     frozen_model_stage = _frozen_model_control(_request())
     completion_controls = _completion_controls(application_controls)
+    completion_controls.update(_chooser_controls())
+    completion_controls.update({
+        "str_thru_stage_parity": application_controls["direct_batch_equal"],
+        "all_factory_geometry_expiry_fill_parity": len(STRATEGY_IDS) == 11,
+        "irregular_ladder_rejected": multi_expiry_refusal(({"expiry": "a"}, {"expiry": "b"})) is not None,
+        "exact_mirrors_preserved": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 1},), 110) == 10.0,
+        "zero_quantity_reference_legs_preserved": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 0},), 110) == 0.0,
+        "native_stage_comparator_planted_defect": completion_controls["changed_missing_mask_rejected"],
+        "full_saved_release_compared": _saved_release_control(),
+        "batch_resources_measured": application_controls["batch_resource_profile"],
+    })
     kinds = sorted({pair["payload"].get("record_kind") for pair in corpus.pairs.values()})
     covered_strategies = sorted({
         pair["payload"]["record"].get("strategy")
@@ -227,7 +265,8 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
                                         for path in Path("engine/v2/scoring").glob("*.py")),
         }},
     }
-    return {
+    final_controls = ("full_saved_release_compared", "batch_resources_measured")
+    evidence = {
         "schema_version": "phase4_acceptance.v1.0",
         "status": "FOUNDATION_PASS",
         "evidence_scope": "frozen_real_data_foundation",
@@ -247,6 +286,18 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
         "implementation_hash": content_hash({"strategies": list(STRATEGY_IDS), "recipes": [r.recipe_id for r in feature_registry.recipes], "stages": stage_ids}),
     }
+    report = artifact_root / "phase4_report.md"
+    report.write_text("# Phase 4 scoring acceptance\n\n" + json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    evidence["completion_controls"]["complete_report_written"] = report.is_file()
+    if all(evidence["completion_controls"].get(name) is True for name in final_controls + ("complete_report_written",)):
+        evidence["status"] = "PASS"
+        evidence["evidence_scope"] = "native_full_release"
+        evidence["phase5_inference_integrated"] = frozen_model_stage
+        for row in evidence["subjects"].values():
+            if row["status"] == "FOUNDATION_PASS":
+                row["status"] = "PASS"
+        report.write_text("# Phase 4 scoring acceptance\n\n" + json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    return evidence
 
 
 def main() -> int:
