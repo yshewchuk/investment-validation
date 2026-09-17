@@ -23,6 +23,28 @@ has been run. The bare Phase 3 gate is expected to be red without evidence: see
 `tests/test_checks_phase3_gate.py::test_real_repo_bare_gate_is_red_with_missing_evidence`
 for the standing proof.
 
+## Current P3A verification sequence (pending real rebuild)
+
+The historical fenced drills and synthetic receipts document implementation
+coverage only; they are not acceptance proof. A real rebuild under
+`/tmp/phase3a-supervised-proof` must create fresh verified inputs, A/B
+projection bindings, and the final private gate package before this status
+can turn green. Do not substitute historical receipt ids or hand-written logs.
+
+```bash
+/usr/bin/python3 tools/v2_dashboard_verified_input.py --catalog OPS/catalog.sqlite \
+  --store-root OPS --release-id RELEASE --score-artifact-id SCORE --bundle-artifact-id BUNDLE \
+  --bundle-dir BUNDLE_DIR --snapshot-artifact-id SNAPSHOT --materialization-request-artifact-id REQUEST \
+  --finality-artifact-id FINALITY --model-evidence-artifact-id EVIDENCE \
+  --score-comparison-receipt-ref D15 --render-comparison-receipt-ref D19 --output preview_input.json
+/usr/bin/python3 tools/v2_dashboard_project.py --preview-input preview_input.json --source-provenance source_provenance.json \
+  --score-json SCORE_JSON --bundle-dir BUNDLE_DIR --snapshot-id SNAPSHOT --catalog OPS/catalog.sqlite \
+  --store-root OPS --serving-root SERVING_ROOT --requested-as-of SESSION --resolved-as-of SESSION
+/usr/bin/python3 tools/v2_dashboard_publish.py --verify-sequence --root OPS --store-root SECRET_ROOT \
+  --source-publication-job A_SOURCE --projection-binding A_BINDING --b-source-publication-job B_SOURCE \
+  --b-projection-binding B_BINDING --operation-id proof --sequence-log publication-log.json
+```
+
 ## 0. Implemented commands (original verification: 2026-09-14)
 
 - `python3 -m engine.v2.dashboard.preview` — compatibility preview launcher.

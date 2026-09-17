@@ -27,8 +27,10 @@ not copied receipts from an earlier candidate. In particular it contains:
   finality, model evidence, and comparison references match the accepted
   Phase 2 handoff.
 - Two distinct projection generations, A and B, from that input boundary.
-  A real fenced operations sequence published A, then B, then a fresh
-  rollback operation release bound to A. The retained operations releases are
+  Historical fenced operations records published A, then B, then a fresh
+  rollback operation release bound to A. They are historical evidence, not
+  a current acceptance result; fresh real rebuild verification is pending.
+  The retained operations releases are
   `relacf1e9f45f4d9a96edb3081a`, `rel2a1ae238cdb90e3c80779db6`, and
   `rel7ed9da6817b9bb580b95afce`; the last is the current pointer.
 - Browser evidence through the real API chain: operations `CURRENT`, that
