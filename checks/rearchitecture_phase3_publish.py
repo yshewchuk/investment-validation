@@ -59,7 +59,7 @@ from engine.v2.foundation import (  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.checkpoints import artifact  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
-from engine.v2.ops.publication import materialize  # noqa: E402
+from engine.v2.ops.publication import materialize, _gate_is_bound  # noqa: E402
 from engine.v2.ops.effects_graph import _generation_ref  # noqa: E402
 from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
@@ -236,6 +236,10 @@ def _verified_release(conn, store, release_id: str) -> dict:
         if gate.get("ok") is not True or gate.get("receipt_ref") != ref.content_hash or \
                 payload.get("kind") != kind or payload.get("status") != "passed":
             raise RuntimeError("durable gate bytes do not substantiate release")
+    files = {name: from_document(ArtifactRef, value) for name, value in manifest["files"].items()}
+    binding = content_hash({"release_id": release_id, "occurrence": manifest["occurrence"], "files": files})
+    if not all(_gate_is_bound(kind, gate, binding, store) for kind, gate in gates.items()):
+        raise RuntimeError("gate input hash is not bound to this release manifest")
     return manifest
 
 
@@ -307,7 +311,7 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
                     for record in (first, second, rollback)]
     if any(row is None or not row["published_at"] or not row["delivered_at"] for row in catalog_rows):
         raise RuntimeError("catalog release delivery is incomplete")
-    if [row["expected_current"] for row in catalog_rows] != [None, first["ops_release_id"], second["ops_release_id"]]:
+    if [row["expected_current"] for row in catalog_rows[1:]] != [first["ops_release_id"], second["ops_release_id"]]:
         raise RuntimeError("catalog expected_current does not prove A to B to A")
     if not catalog_rows[0]["delivered_at"] <= catalog_rows[1]["delivered_at"] <= catalog_rows[2]["delivered_at"]:
         raise RuntimeError("catalog delivery is not chronological")
