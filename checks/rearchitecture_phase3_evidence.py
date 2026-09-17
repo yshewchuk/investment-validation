@@ -482,7 +482,10 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
             manifest = json.loads(manifest_data) if manifest_data else None
             spec = json.loads(spec_data) if spec_data else None
             bundle_id = proof.get("bundle_artifact", {}).get("artifact_id")
-            if (not isinstance(manifest, dict) or content_hash(manifest) != preview.source_release_manifest_ref
+            typed_manifest = dict(manifest) if isinstance(manifest, dict) else {}
+            typed_manifest["files"] = {name: from_document(ArtifactRef, ref)
+                                       for name, ref in typed_manifest.get("files", {}).items()}
+            if (not isinstance(manifest, dict) or content_hash(typed_manifest) != preview.source_release_manifest_ref
                     or manifest.get("files", {}).get("bundle.tar", {}).get("artifact_id") != bundle_id
                     or not isinstance(spec, dict) or spec.get("implementation_ref") != preview.source_code_hash
                     or spec.get("environment_ref") != preview.source_environment_hash

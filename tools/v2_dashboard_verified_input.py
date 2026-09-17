@@ -158,7 +158,10 @@ def main(argv: list[str] | None = None) -> int:
         render_ref, render_bytes = _artifact(conn, store, args.render_artifact_id, schema="legacy_action.v1.0")
         if args.render_artifact_id != args.bundle_artifact_id:
             raise ValueError("render output is not the delivered bundle artifact")
-        if content_hash(manifest) != release_row["manifest_hash"]:
+        typed_manifest = dict(manifest)
+        typed_manifest["files"] = {name: from_document(ArtifactRef, ref)
+                                   for name, ref in manifest.get("files", {}).items()}
+        if content_hash(typed_manifest) != release_row["manifest_hash"]:
             raise ValueError("source release manifest hash does not match retained manifest")
         expected_kinds = ((args.score_artifact_id, "legacy_score"),
                           (args.finality_artifact_id, "legacy_finality"),
