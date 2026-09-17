@@ -136,23 +136,18 @@ def test_retained_publication_runs_through_real_service(tmp_path):
         commit_attempt(conn, source_claim.attempt_id, source_claim.fence, Outcome(True, "verified_dead"), clock=clock)
         projection = store.publish_bytes(json.dumps({"projection_release_id": "projection-a"}).encode(), schema_ref="projection_binding.v1.0")
         register_artifact(conn, projection, None, clock)
-        receipt = submit_retained_publication(conn, store, registry=registry(),
-            policy=NamespacePolicy({"operator": frozenset({"shadow", "smoke"})}), clock=clock,
-            source_job_id=source.job_id, projection_binding_ref=projection.artifact_id,
-            operation_id="service-a")
-        service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock, code_source=REPO,
-                          store_root=FAKE_STORE_ROOT)
-        service.start()
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            service.tick()
-            state = get_job(conn, receipt.job_id).state
-            if state in ("succeeded", "failed"):
-                break
-            time.sleep(0.05)
-        assert get_job(conn, receipt.job_id).state == "succeeded"
-        attempt = conn.execute("SELECT fence,state FROM attempts WHERE job_id=?", (receipt.job_id,)).fetchone()
-        assert attempt["fence"] == 1 and attempt["state"] == "succeeded"
-        assert release_current(tmp_path / "releases" / scope) is not None
+        projection_b = store.publish_bytes(json.dumps({"projection_release_id": "projection-b"}).encode(), schema_ref="projection_binding.v1.0")
+        register_artifact(conn, projection_b, None, clock)
+        from tools.v2_dashboard_publish import main as publish_main
+        log = tmp_path / "publication-log.json"
+        assert publish_main(["--root", str(tmp_path), "--catalog", str(tmp_path / "ops.sqlite"),
+                             "--store-root", str(FAKE_STORE_ROOT), "--source-publication-job", source.job_id,
+                             "--projection-binding", projection.artifact_id, "--operation-id", "service-a",
+                             "--verify-sequence", "--b-source-publication-job", source.job_id,
+                             "--b-projection-binding", projection_b.artifact_id, "--sequence-log", str(log)]) == 0
+        from checks.rearchitecture_phase3_publish import build_fenced_rollback
+        rollback, negative = build_fenced_rollback(log, tmp_path / "releases" / scope, tmp_path / "failure",
+            catalog_path=tmp_path / "ops.sqlite", store_root=tmp_path, code_hash="test", environment_hash="test")
+        assert rollback.resulting_snapshot_id == "projection-a" and negative.verdict == "differ"
     finally:
         conn.close()

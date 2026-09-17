@@ -75,6 +75,7 @@ def submit_retained_publication(conn, store, *, registry, policy: NamespacePolic
     spec_doc = json.loads(source_spec["spec_json"])
     parameters = dict(spec_doc["parameters"])
     parameters["input_bindings"] = bindings
+    parameters["deployment"] = str(parameters.get("deployment") or "retained") + ":" + operation_id
     refs = tuple(sorted(set(spec_doc["input_refs"]) | {item.artifact_id for item in retained.values()} |
                         {projection.artifact_id, operation.artifact_id}))
     key = "retained-publication:" + content_hash({
