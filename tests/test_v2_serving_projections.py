@@ -9,6 +9,8 @@ bridge.py`` — never a real panel, a real renderer, or ``engine.v2.ops``.
 from __future__ import annotations
 
 import sys
+import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -24,8 +26,9 @@ from engine.v2.contracts import (  # noqa: E402
     Problem,
 )
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.foundation import ArtifactStore  # noqa: E402
+from engine.v2.foundation import ArtifactStore, to_document  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
+from engine.v2.diagnosis.receipt import ComparisonReceipt, Envelope, Population  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     commit_tables,
@@ -495,3 +498,43 @@ def test_cli_runs_end_to_end_on_tmp_dirs(tmp_path, capsys):
     assert out["ok"] is True
     assert "release_id" in out
     assert out["findings"]["ok"] is True
+
+
+def test_verified_source_provenance_rejects_swapped_score_and_wrong_receipt_kind(tmp_path):
+    """The coordinator must not accept caller-selected score/receipt files."""
+    from tools.v2_dashboard_project import _verify_source_provenance
+
+    def digest(data):
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    score = b"{\"expected_population\": [], \"ladder\": [], \"rows\": []}"
+    score_path = tmp_path / "score.json"
+    score_path.write_bytes(score)
+    receipt = ComparisonReceipt(receipt_id="r1", comparison_kind="score_record_parity", tier=1,
+                                left_ref="left", right_ref="right", stage_plan_ref="plan",
+                                tolerance_policy_ref="tol", verdict="agree",
+                                population=Population(expected=1, supported=1, compared=1), envelope=Envelope())
+    receipt_bytes = json.dumps(to_document(receipt)).encode()
+    preview = _preview_input(source_release_manifest_ref=digest(b"release"), score_batch_ref=digest(score),
+                             finality_ref=digest(b"finality"), model_evidence_ref=digest(b"models"),
+                             score_comparison_receipt_ref=digest(receipt_bytes),
+                             render_comparison_receipt_ref=digest(receipt_bytes))
+    receipt_dir = tmp_path / "receipts"
+    receipt_dir.mkdir()
+    (receipt_dir / "score_comparison.json").write_bytes(receipt_bytes)
+    (receipt_dir / "render_comparison.json").write_bytes(receipt_bytes)
+    proof = {"schema_version": "phase3_source_provenance.v1.0", "release_id": preview.source_release_id,
+             "release_manifest_hash": preview.source_release_manifest_ref, "bundle_manifest_ref": "bundle",
+             "score_artifact": {"content_hash": preview.score_batch_ref},
+             "snapshot_artifact": {}, "materialization_request_artifact": {},
+             "finality_artifact": {"content_hash": preview.finality_ref},
+             "model_evidence_artifact": {"content_hash": preview.model_evidence_ref},
+             "score_comparison_receipt": {"path": "receipts/score_comparison.json", "content_hash": digest(receipt_bytes)},
+             "render_comparison_receipt": {"path": "receipts/render_comparison.json", "content_hash": digest(receipt_bytes)}}
+    proof_path = tmp_path / "source_provenance.json"
+    proof_path.write_text(json.dumps(proof))
+    with pytest.raises(ValueError, match="render_comparison_receipt"):
+        _verify_source_provenance(preview, proof_path, score_path=score_path, bundle_manifest_ref="bundle")
+    score_path.write_bytes(b"{}")
+    with pytest.raises(ValueError, match="score json"):
+        _verify_source_provenance(preview, proof_path, score_path=score_path, bundle_manifest_ref="bundle")

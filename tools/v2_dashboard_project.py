@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import PreviewInput, PreviewRelease, Problem  # noqa: E402
+from engine.v2.diagnosis.receipt import ComparisonReceipt  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import (  # noqa: E402
     ArtifactStore,
@@ -64,6 +66,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--preview-input", required=True, type=Path,
                         help="PreviewInput document (JSON)")
+    parser.add_argument("--source-provenance", type=Path,
+                        help="verifier-produced source_provenance.json paired with preview input")
     parser.add_argument("--score-json", required=True, type=Path,
                         help="saved score.json (expected_population/rows/ladder)")
     parser.add_argument("--bundle-dir", required=True, type=Path,
@@ -100,6 +104,55 @@ def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     return bundle
 
 
+def _sha256(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _verify_source_provenance(preview: PreviewInput, path: Path, *, score_path: Path,
+                              bundle_manifest_ref: str) -> None:
+    """Refuse detached score/bundle inputs at the real coordinator boundary.
+
+    The verifier has already used ArtifactStore.read_verified against the
+    Phase 2 store. This second check binds the files delivered to this command
+    to that retained proof, rather than allowing a caller to swap either one
+    after the verifier ran.
+    """
+    doc = json.loads(path.read_text())
+    if not isinstance(doc, dict) or doc.get("schema_version") != "phase3_source_provenance.v1.0":
+        raise ValueError("source provenance has an unsupported schema")
+    if doc.get("release_id") != preview.source_release_id or \
+            doc.get("release_manifest_hash") != preview.source_release_manifest_ref:
+        raise ValueError("source provenance does not bind this source release")
+    refs = {name: doc.get(name) for name in ("score_artifact", "snapshot_artifact",
+            "materialization_request_artifact", "finality_artifact", "model_evidence_artifact")}
+    if any(not isinstance(ref, dict) for ref in refs.values()):
+        raise ValueError("source provenance has missing retained artifact refs")
+    if refs["score_artifact"].get("content_hash") != preview.score_batch_ref or \
+            refs["finality_artifact"].get("content_hash") != preview.finality_ref or \
+            refs["model_evidence_artifact"].get("content_hash") != preview.model_evidence_ref:
+        raise ValueError("source provenance and preview artifact bindings disagree")
+    if _sha256(score_path.read_bytes()) != refs["score_artifact"].get("content_hash"):
+        raise ValueError("score json is not the verified score artifact")
+    if doc.get("bundle_manifest_ref") != bundle_manifest_ref:
+        raise ValueError("bundle directory is not the verified delivered bundle")
+    for name, expected_kind, expected_ref in (
+            ("score_comparison_receipt", "score_record_parity", preview.score_comparison_receipt_ref),
+            ("render_comparison_receipt", "render_bundle_parity", preview.render_comparison_receipt_ref)):
+        ref = doc.get(name)
+        if not isinstance(ref, dict) or not isinstance(ref.get("path"), str):
+            raise ValueError(f"source provenance is missing {name}")
+        receipt_path = (path.parent / ref["path"]).resolve()
+        try:
+            receipt_path.relative_to(path.parent.resolve())
+        except ValueError:
+            raise ValueError(f"{name} escapes source provenance directory")
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = from_document(ComparisonReceipt, json.loads(receipt_bytes))
+        if _sha256(receipt_bytes) != expected_ref or ref.get("content_hash") != expected_ref \
+                or receipt.comparison_kind != expected_kind:
+            raise ValueError(f"{name} does not bind the verified preview input")
+
+
 def _result_document(result: PreviewRelease | Problem, conn) -> dict:
     if isinstance(result, Problem):
         return {"ok": False, "problem": to_document(result)}
@@ -127,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     preview_input = from_document(PreviewInput, json.loads(args.preview_input.read_text()))
     score_doc = load_score_document(args.score_json)
 
+    bundle_manifest_ref = preview_input.bundle_manifest_ref
     if args.bundle_format == "flat":
         bundle_rows_by_ticker = _load_flat_bundle(args.bundle_dir)
     else:
@@ -135,8 +189,16 @@ def main(argv: list[str] | None = None) -> int:
         # whatever bundle_manifest_ref the caller's PreviewInput happened to
         # declare — a changed byte anywhere in the bundle must change the
         # release id (§5.3 point 8's idempotency/change-detection test).
-        preview_input = dataclasses.replace(
-            preview_input, bundle_manifest_ref=content_hash(bundle_manifest))
+        bundle_manifest_ref = content_hash(bundle_manifest)
+        preview_input = dataclasses.replace(preview_input, bundle_manifest_ref=bundle_manifest_ref)
+
+    # Synthetic unit fixtures use symbolic refs. Real Phase 2 releases always
+    # carry a content hash, and therefore must supply the verifier proof.
+    if preview_input.source_release_manifest_ref.startswith("sha256:"):
+        if args.source_provenance is None:
+            raise ValueError("real source releases require --source-provenance")
+        _verify_source_provenance(preview_input, args.source_provenance,
+                                  score_path=args.score_json, bundle_manifest_ref=bundle_manifest_ref)
 
     clock = SystemClock()
     catalog_conn = open_catalog(args.catalog, clock=clock)
