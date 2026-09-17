@@ -420,6 +420,10 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
         if not isinstance(bindings, dict) or not isinstance(proof.get("render_attempt_id"), str):
             findings.append({"code": "PREVIEW_PROOF_RENDER_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
             field_ok["preview_input_refs"] = False
+        score_bindings = proof.get("score_attempt_bindings")
+        if not isinstance(score_bindings, dict) or not isinstance(proof.get("score_attempt_id"), str):
+            findings.append({"code": "PREVIEW_PROOF_SCORE_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
         expected = {"score_artifact": ("score", preview.score_batch_ref, "legacy_action.v1.0"),
                     "bundle_artifact": ("bundle", None, "legacy_action.v1.0"),
                     "snapshot_artifact": ("snapshot", None, "snapshot_ref.v1.0"),
@@ -450,6 +454,13 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                                  "model_evidence.json": proof.get("model_evidence_artifact", {}).get("artifact_id")}
             if any(bindings.get(name) != artifact_id for name, artifact_id in required_bindings.items()):
                 findings.append({"code": "PREVIEW_PROOF_RENDER_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+                field_ok["preview_input_refs"] = False
+        if isinstance(score_bindings, dict):
+            required_score = {"snapshot_ref.json": proof.get("snapshot_artifact", {}).get("artifact_id"),
+                              "materialization_request.json": proof.get("materialization_request_artifact", {}).get("artifact_id"),
+                              "finality.json": proof.get("finality_artifact", {}).get("artifact_id")}
+            if any(score_bindings.get(name) != artifact_id for name, artifact_id in required_score.items()):
+                findings.append({"code": "PREVIEW_PROOF_SCORE_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
                 field_ok["preview_input_refs"] = False
         try:
             score_doc = json.loads(artifact_bytes["score"])

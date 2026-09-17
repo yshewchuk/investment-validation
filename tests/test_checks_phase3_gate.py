@@ -287,6 +287,10 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     proof["render_attempt_bindings"] = {"score.json": proof["score_artifact"]["artifact_id"],
         "finality.json": proof["finality_artifact"]["artifact_id"],
         "model_evidence.json": proof["model_evidence_artifact"]["artifact_id"]}
+    proof["score_attempt_id"] = "att_score"
+    proof["score_attempt_bindings"] = {"snapshot_ref.json": proof["snapshot_artifact"]["artifact_id"],
+        "materialization_request.json": proof["materialization_request_artifact"]["artifact_id"],
+        "finality.json": proof["finality_artifact"]["artifact_id"]}
     proof["score_comparison_receipt"] = _ref(artifact_root, "proof_d15", score_receipt_bytes)
     proof["render_comparison_receipt"] = _ref(artifact_root, "proof_d19", render_receipt_bytes)
     ref = _ref(artifact_root, "preview_input.json", _dumps(preview))
