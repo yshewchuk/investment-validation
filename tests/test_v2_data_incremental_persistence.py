@@ -73,7 +73,7 @@ def test_supervised_refresh_without_staged_input_is_truthful_failure(tmp_path):
     assert document["coverage_advanced"] is False
 
 
-def test_supervised_refresh_with_explicit_empty_input_remains_noop(tmp_path):
+def test_supervised_refresh_with_explicit_empty_input_fails_closed(tmp_path):
     (tmp_path / "incremental_refresh_input.json").write_text("{}")
     result = data_incremental.run_incremental_refresh(
         RefreshParameters(
@@ -84,9 +84,10 @@ def test_supervised_refresh_with_explicit_empty_input_remains_noop(tmp_path):
         ),
         tmp_path,
     )
-    assert result["status"] == "noop"
-    assert result["completed_ids"] == ["request-1"]
+    assert result["status"] == "failed"
+    assert result["completed_ids"] == []
     assert result["coverage_advanced"] is False
+    assert result["candidate_snapshot_id"] is None
 
 
 def _frozen_revision(row, raw_id, revision_id, *, deleted=False, spot=None):

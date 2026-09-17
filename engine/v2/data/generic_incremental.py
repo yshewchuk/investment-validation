@@ -39,6 +39,7 @@ __all__ = [
     "GenericTableCandidate",
     "build_generic_table_candidate",
     "commit_generic_table_candidate",
+    "decode_row",
     "load_generic_revisions",
 ]
 
@@ -80,7 +81,11 @@ def build_generic_table_candidate(
     retained = tuple(item for item in retained
                      if item.candidate.logical_key in incoming_keys)
     prior_records = _table_records(parent, prior_manifest)
-    affected = _affected_partitions(contract, (*retained, *incoming))
+    prior_partitions = _locate_prior_partitions(
+        store, prior_records, contract, incoming,
+    )
+    affected = frozenset((*_affected_partitions(contract, (*retained, *incoming)),
+                          *prior_partitions))
     prior_rows = _load_rows(store, prior_records, contract, partitions=affected)
     merge = tables.merge_table_rows(contract, prior_rows, retained, incoming)
     if merge.changes:
@@ -172,7 +177,7 @@ def load_generic_revisions(conn, table_name: str, contract: TableContract | None
             })
             payload = None if row["row_json"] is None else json.loads(row["row_json"])
             if payload is not None and contract is not None:
-                payload = _decode_row(contract, payload)
+                payload = decode_row(contract, payload)
         except (DocumentError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise errors.fail("MANIFEST_CORRUPT", "generic revision audit row is malformed") from exc
         revisions.append(tables.GenericRevision(
@@ -181,7 +186,8 @@ def load_generic_revisions(conn, table_name: str, contract: TableContract | None
     return tuple(revisions)
 
 
-def _decode_row(contract, payload):
+def decode_row(contract, payload):
+    """Restore contract-native date values after a JSON transport."""
     row = dict(payload)
     for column in contract.columns:
         value = row.get(column.name)
@@ -193,6 +199,80 @@ def _decode_row(contract, payload):
         elif column.physical_type == "date32":
             row[column.name] = date.fromisoformat(str(value)[:10])
     return row
+
+
+def _unresolved_revisions(incoming):
+    return {
+        item.candidate.logical_key: item for item in incoming
+        if not item.deleted and item.row is not None and not item.partition_key
+    }
+
+
+def _logical_key_values(unresolved, contract):
+    decoded = {}
+    for logical_key in unresolved:
+        try:
+            values = json.loads(logical_key)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "generic revision logical key is malformed") from exc
+        if not isinstance(values, list) or len(values) != len(contract.primary_key):
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "generic revision logical key is malformed")
+        decoded[logical_key] = tuple(values)
+    return decoded
+
+
+def _search_prior_fragment(store, record, contract, unresolved, key_values):
+    candidates = {
+        key: values for key, values in key_values.items()
+        if record.primary_key_min <= values <= record.primary_key_max
+    }
+    if not candidates:
+        return {}
+    path = objects.verify_object_path(store, record.object_ref)
+    columns = list(dict.fromkeys((*contract.primary_key, *contract.partition_columns)))
+    found = {}
+    for logical_key in candidates:
+        revision = unresolved[logical_key]
+        filters = [(name, "=", revision.row[name]) for name in contract.primary_key]
+        try:
+            rows = pq.read_table(path, columns=columns, filters=filters).to_pylist()
+        except (OSError, ValueError, pa.ArrowException) as exc:
+            raise errors.fail("OBJECT_CORRUPT",
+                              "parent fragment could not be searched") from exc
+        for row in rows:
+            candidate = dict(revision.row)
+            candidate.update(row)
+            if tables.logical_key_for_row(contract, candidate) == logical_key:
+                found.setdefault(logical_key, set()).add(record.partition_key)
+    return found
+
+
+def _merge_prior_partitions(found, matches):
+    for logical_key, partitions in matches.items():
+        found.setdefault(logical_key, set()).update(partitions)
+
+
+def _locate_prior_partitions(store, records, contract, incoming):
+    """Find persisted partitions for live revisions lacking an old partition."""
+    unresolved = _unresolved_revisions(incoming)
+    if not unresolved:
+        return frozenset()
+    key_values = _logical_key_values(unresolved, contract)
+    found = {}
+    for record in records:
+        _merge_prior_partitions(
+            found, _search_prior_fragment(
+                store, record, contract, unresolved, key_values))
+    partitions = set()
+    for matches in found.values():
+        if len(matches) > 1:
+            raise errors.fail(
+                "MANIFEST_CORRUPT",
+                "parent table contains a logical key in multiple partitions")
+        partitions.update(matches)
+    return frozenset(partitions)
 
 
 def _contract(parent, table_name):

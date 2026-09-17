@@ -14,10 +14,11 @@ import json
 import resource
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,12 +26,14 @@ sys.path.insert(0, str(ROOT))
 
 from checks import rearchitecture_phase3b as gate  # noqa: E402
 from engine.v2.contracts import (  # noqa: E402
+    CapacitySample,
     ChainQuery,
     CoverageKey,
     CoverageOutcome,
     DataQuery,
     KeyPredicate,
     RevisionCandidate,
+    SubmitRequest,
     TableContract,
     TableContractRef,
     TimeInterval,
@@ -56,13 +59,19 @@ from engine.v2.foundation import (  # noqa: E402
     DocumentError,
     SystemClock,
     content_hash,
+    format_timestamp,
     from_document,
     to_document,
 )
 from engine.v2.ops import finality as v2_finality  # noqa: E402
 from engine.v2.ops import incremental_data as ops_data  # noqa: E402
+from engine.v2.ops import provider_budget  # noqa: E402
 from engine.v2.ops.incremental_data import RefreshParameters  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.ops.profiles import DEFAULT_POLICY  # noqa: E402
+from engine.v2.ops.recovery import begin_epoch  # noqa: E402
+from engine.v2.ops.scheduler import Supervisor, claim_next  # noqa: E402
+from engine.v2.ops.submission import KindRegistry, NamespacePolicy, submit  # noqa: E402
 
 TABLES = (
     "securities", "earnings_events", "daily_market", "option_chains",
@@ -235,19 +244,67 @@ def _revisions(contract, rows, table_name):
     return tuple(revisions)
 
 
-def _base_revisions(contract, rows, table_name):
-    revisions = []
-    for index, row in enumerate(rows):
-        key = incremental_tables.logical_key_for_row(contract, row)
-        revisions.append(incremental_tables.GenericRevision(
-            candidate=RevisionCandidate(
-                revision_id=table_name + "-base-" + str(index), logical_key=key,
-                source="frozen-curated", source_priority=0, finality="final",
-                revision_ordinal=1, received_at="2026-09-16T00:00:00Z",
-                content_hash=incremental_tables.revision_hash(
-                    logical_key=key, row=row, deleted=False)),
-            row=dict(row), deleted=False, partition_key=_partition(contract, row)))
-    return tuple(revisions)
+def _clean_rebuild_rows(contract, rows, revisions):
+    """Apply acceptance revisions without calling the incremental merge."""
+    rebuilt = {
+        incremental_tables.logical_key_for_row(contract, row): dict(row)
+        for row in rows
+    }
+    for revision in revisions:
+        key = revision.candidate.logical_key
+        if revision.deleted:
+            rebuilt.pop(key, None)
+        elif revision.row is not None:
+            rebuilt[key] = dict(revision.row)
+    return tuple(sorted(
+        rebuilt.values(),
+        key=lambda row: tuple((row[name] is not None, row[name])
+                              for name in contract.primary_key),
+    ))
+
+
+def _sorted_rows(contract, rows):
+    return tuple(sorted(
+        (dict(row) for row in rows),
+        key=lambda row: tuple((row[name] is not None, row[name])
+                              for name in contract.primary_key),
+    ))
+
+
+def _reopen_persisted_table(conn, store, snapshot, contract):
+    """Reopen every manifest member and exercise the downstream scan API."""
+    resolved = Repository(conn).resolve_full(snapshot.snapshot_id)
+    manifest = resolved.table_manifests[contract.table_name]
+    fragment_ids = {item.fragment_id for item in manifest.fragment_refs}
+    records = tuple(item for item in resolved.records
+                    if item.fragment_id in fragment_ids)
+    persisted = _sorted_rows(
+        contract, generic_incremental._load_rows(store, records, contract))
+    first_key = contract.primary_key[0]
+    values = tuple(sorted({row[first_key] for row in persisted}))
+    if not values:
+        return persisted, ()
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id,
+        table_contract_ref=snapshot.table_versions[contract.table_name].table_contract_ref,
+        columns=tuple(column.name for column in contract.columns),
+        key_filter=(KeyPredicate(column=first_key, operator="in", values=values),),
+        time_interval=None, order_by=contract.primary_key,
+        max_batch_rows=max(1, min(256, len(persisted))),
+        max_result_rows=max(1, len(persisted)),
+    )
+    downstream = []
+    for batch in Repository(conn, store=store).scan(query, table_name=contract.table_name):
+        downstream.extend(batch.to_pylist())
+    return persisted, _sorted_rows(contract, downstream)
+
+
+def _persist_clean_rebuild(store, contract, rows):
+    artifact = store.publish_bytes(
+        generic_incremental._parquet_bytes(contract, rows),
+        schema_ref="phase3b_clean_rebuild.v1.0")
+    reopened = pq.read_table(pa.BufferReader(store.read_verified(artifact))).to_pylist()
+    return artifact, _sorted_rows(contract, reopened)
 
 
 def _table_runs(conn, store, contracts, parent, base_rows, clock):
@@ -260,8 +317,7 @@ def _table_runs(conn, store, contracts, parent, base_rows, clock):
         revisions = _revisions(contract, rows, table_name)
         coverage = _coverage(contract, revisions, receipt)
         resolved = Repository(conn).resolve_full(parent.snapshot_id)
-        clean = incremental_tables.merge_table_rows(
-            contract, (), _base_revisions(contract, rows, table_name), revisions)
+        clean_rows = _clean_rebuild_rows(contract, rows, revisions)
         candidate = build_generic_table_candidate(
             resolved, store, table_name, revisions, coverage=coverage,
             parent_snapshot_id=parent.snapshot_id)
@@ -289,6 +345,12 @@ def _table_runs(conn, store, contracts, parent, base_rows, clock):
             fence=generation + 1)
         generation += 1
         parent = Repository(conn).resolve(commit.resulting_head_snapshot_id)
+        persisted_rows, downstream_rows = _reopen_persisted_table(
+            conn, store, parent, contract)
+        clean_artifact, reopened_clean_rows = _persist_clean_rebuild(
+            store, contract, clean_rows)
+        persisted_equal = persisted_rows == reopened_clean_rows
+        downstream_equal = downstream_rows == reopened_clean_rows
         replay_parent = Repository(conn).resolve_full(parent.snapshot_id)
         replay = build_generic_table_candidate(
             replay_parent, store, table_name, revisions, coverage=coverage,
@@ -305,7 +367,11 @@ def _table_runs(conn, store, contracts, parent, base_rows, clock):
             "rows_before": len(rows), "changes": [item.revision_kind for item in candidate.merge.changes],
             "changed_partitions": list(candidate.merge.changed_partitions),
             "rows_after": len(candidate.merge.rows), "no_op_rewrites": replay.rewritten_partitions,
-            "rebuild_equal": candidate.merge.rows == clean.rows,
+            "rebuild_equal": persisted_equal and downstream_equal,
+            "persisted_rows_equal": persisted_equal,
+            "downstream_results_equal": downstream_equal,
+            "clean_rebuild_artifact_hash": clean_artifact.content_hash,
+            "clean_rebuild_rows": len(reopened_clean_rows),
             "retry_idempotent": not replay.merge.changes,
             "no_op_committed": replay_commit.status == "committed",
         }
@@ -337,6 +403,107 @@ def _contract_metrics(contracts):
         else:
             controls[name] = False
     return {"roundtrips": roundtrips, "refusals": refusals, "controls": controls}
+
+
+class _AcceptanceClock:
+    def now(self):
+        return datetime(2026, 9, 17, tzinfo=timezone.utc)
+
+    def monotonic(self):
+        return 0.0
+
+
+def _acceptance_acquisition_controls(conn, snapshot):
+    """Execute empty-response admission and account-wide quota exclusion."""
+    clock = _AcceptanceClock()
+    empty_unit = ops_data.RefreshUnit(
+        request_id="phase3b-empty", table_name="daily_market",
+        partition_key="2026-09-17", expected_keys=("MISSING",))
+    empty_plan = ops_data.plan_refresh(
+        snapshot, (empty_unit,), cached_outcomes={},
+        provider_account="phase3b-empty-account", max_attempts=1)
+    empty = ops_data.classify_response(
+        200, ("MISSING",), empty_keys=("MISSING",),
+        request_id=empty_unit.request_id, receipt_ref="phase3b-empty-receipt",
+        raw_hash=content_hash({"phase3b": "legitimate-empty"}))
+    omitted = ops_data.classify_response(
+        200, ("MISSING",), request_id=empty_unit.request_id,
+        receipt_ref="phase3b-omitted-receipt",
+        raw_hash=content_hash({"phase3b": "unclassified-empty"}))
+    empty_admission = ops_data.admit_candidate_commit(empty_plan, (empty,))
+    omitted_admission = ops_data.admit_candidate_commit(empty_plan, (omitted,))
+    empty_distinguished = bool(
+        empty.kind == "empty"
+        and ops_data.coverage_complete(empty)
+        and ops_data.retry_action(empty) == "stop"
+        and empty_admission.admitted
+        and omitted.kind == "partial"
+        and not omitted_admission.admitted
+    )
+
+    account = "phase3b-shared-quota"
+    provider_budget.configure_account(
+        conn, account, "phase3b-generation", remaining=10, live_reserve=1)
+    registry = KindRegistry((ops_data.refresh_job_kind(),))
+    policy = NamespacePolicy({"phase3b-acceptance": frozenset({"shadow"})})
+    for index in range(2):
+        unit = ops_data.RefreshUnit(
+            request_id="phase3b-quota-" + str(index),
+            table_name="daily_market", partition_key="2026-09-17",
+            expected_keys=("Q" + str(index),))
+        plan = ops_data.plan_refresh(
+            snapshot, (unit,), cached_outcomes={}, provider_account=account,
+            max_attempts=1)
+        spec = ops_data.refresh_job_spec(
+            plan, implementation_ref="phase3b-acceptance",
+            environment_ref="phase3b-acceptance", output_namespace="shadow")
+        submit(conn, registry, policy, SubmitRequest(
+            namespace="shadow", idempotency_key="phase3b-quota-" + str(index),
+            principal="phase3b-acceptance", job=spec), clock=clock)
+    epoch = begin_epoch(
+        conn, clock=clock, boot_id="phase3b-acceptance", pid=1)
+    supervisor = Supervisor(epoch, "phase3b-acceptance")
+    sample = CapacitySample(
+        sampled_at=format_timestamp(clock.now()),
+        allowed_cpu_ids=tuple(range(12)),
+        host_total_bytes=16 << 30, host_available_bytes=15 << 30,
+        container_limit_bytes=None, container_current_bytes=None,
+        swap_total_bytes=0, swap_free_bytes=0, disk_free_bytes=100 << 30,
+        executor_mode="fake", containment="none")
+    first_claim = claim_next(
+        conn, policy=DEFAULT_POLICY, sample=sample, supervisor=supervisor,
+        clock=clock, registry=registry)
+    second_claim = claim_next(
+        conn, policy=DEFAULT_POLICY, sample=sample, supervisor=supervisor,
+        clock=clock, registry=registry)
+    reservation = conn.execute(
+        "SELECT reserved_calls, used_calls FROM provider_reservations "
+        "WHERE account = ? AND released_at IS NULL", (account,)).fetchone()
+    queued = conn.execute(
+        "SELECT queue_reason_json FROM jobs WHERE kind = 'incremental_refresh' "
+        "AND state = 'queued' AND queue_reason_json IS NOT NULL").fetchall()
+    queue_codes = {
+        json.loads(row["queue_reason_json"]).get("code") for row in queued
+    }
+    quota_shared = bool(
+        first_claim is not None
+        and second_claim is None
+        and reservation is not None
+        and tuple(reservation) == (1, 0)
+        and "PROVIDER_BUDGET" in queue_codes
+    )
+    return {
+        "empty_distinguished": empty_distinguished,
+        "empty_kind": empty.kind,
+        "omitted_empty_kind": omitted.kind,
+        "empty_commit_admitted": bool(empty_admission.admitted),
+        "omitted_empty_commit_admitted": bool(omitted_admission.admitted),
+        "quota_shared": quota_shared,
+        "quota_first_claimed": first_claim is not None,
+        "quota_second_claimed": second_claim is not None,
+        "quota_queue_codes": sorted(queue_codes),
+        "quota_reservation": None if reservation is None else list(reservation),
+    }
 
 
 def _cache_metrics(conn, store, snapshot, base_rows, clock, run_root):
@@ -434,11 +601,12 @@ def _cache_metrics(conn, store, snapshot, base_rows, clock, run_root):
     if result["status"] != "complete" or not result["coverage_advanced"]:
         raise AssertionError("actual incremental acquisition did not complete")
     refreshed = Repository(conn).resolve(result["candidate_snapshot_id"])
+    controls = _acceptance_acquisition_controls(conn, refreshed)
     return refreshed, {
         "planned_requests": 2, "cache_hits": int(replay_raw.cache_hit),
         "provider_calls_saved": int(replay_raw.cache_hit), "provider_calls": 1,
         "same_input_uses_cache": replay_raw.cache_hit,
-        "empty_distinguished": True, "quota_shared": True,
+        **controls,
         "actual_worker_status": result["status"],
         "coverage_advanced": bool(result["coverage_advanced"]),
         "normalization_cache_hit": bool(replay_normalization.cache_hit),
@@ -470,6 +638,52 @@ def _conflict_refused(contract, revision):
     except DataError as exc:
         return exc.code == "IDENTITY_CONFLICT"
     return False
+
+
+def _finality_metrics(session_date):
+    """Exercise native finality without supplying a market-wide override."""
+    daily_only = "PHASE3B_DAILY_ONLY"
+    chain_only = "PHASE3B_CHAIN_ONLY"
+    matched_daily = pd.DataFrame(({"ticker": daily_only, "date": session_date},))
+    matched_chain = pd.DataFrame(({"ticker": daily_only, "obs_date": session_date},))
+    matched = v2_finality.session_finality(
+        session_date, (daily_only,),
+        frames={"daily_market": matched_daily, "option_chains": matched_chain})
+    expected_matched_final = bool(
+        matched.market_wide
+        and matched.daily_share >= v2_finality.MIN_FINAL_DAILY_SHARE
+        and matched.chain_share >= v2_finality.MIN_FINAL_CHAIN_SHARE)
+    matched_consistent = bool(
+        matched.daily_share == 1.0
+        and matched.chain_share == 1.0
+        and matched.covered == 1
+        and matched.is_final == expected_matched_final)
+
+    split = v2_finality.session_finality(
+        session_date, (daily_only, chain_only),
+        frames={
+            "daily_market": matched_daily,
+            "option_chains": pd.DataFrame(
+                ({"ticker": chain_only, "obs_date": session_date},)),
+        })
+    split_coverage_refused = bool(
+        not split.is_final
+        and split.daily_share < 1.0
+        and split.chain_share < 1.0
+    )
+    return {
+        "native_behavior_valid": matched_consistent and split_coverage_refused,
+        "market_wide_observed": bool(matched.market_wide),
+        "matched_is_final": bool(matched.is_final),
+        "matched_daily_share": float(matched.daily_share),
+        "matched_chain_share": float(matched.chain_share),
+        "matched_covered": int(matched.covered),
+        "split_is_final": bool(split.is_final),
+        "split_daily_share": float(split.daily_share),
+        "split_chain_share": float(split.chain_share),
+        "split_covered": int(split.covered),
+        "split_coverage_refused": split_coverage_refused,
+    }
 
 
 def _subject_results(contracts, table_results, parent, fault_observed, counters,
@@ -614,28 +828,9 @@ def run(artifact_root):
     runtime_ms = round((time.monotonic() - started) * 1000)
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
     chain_frame = pd.DataFrame(base_rows["option_chains"])
-    finality_ticker = str(chain_frame.iloc[0]["ticker"])
     finality_date = str(chain_frame.iloc[0]["obs_date"])[:10]
-    finality_daily_rows = []
-    daily_paths = sorted((ROOT / "data" / "curated" / "daily_market").glob(
-        "year=*/part-*.parquet"))
-    for path in daily_paths:
-        table = pq.read_table(path, columns=["ticker", "date"])
-        for row in table.to_pylist():
-            if (str(row["ticker"]) == finality_ticker and
-                    str(row["date"])[:10] == finality_date):
-                finality_daily_rows.append(row)
-    finality_chain = chain_frame[chain_frame["ticker"].astype(str) == finality_ticker].copy()
-    finality_daily = pd.DataFrame(finality_daily_rows)
-    finality_tickers = [finality_ticker] if finality_daily_rows else []
-    finality_result = v2_finality.session_finality(
-        finality_date, finality_tickers,
-        frames={"daily_market": finality_daily, "option_chains": finality_chain},
-        market_wide=True)
-    finality_native = bool(finality_result.is_final and
-                           finality_result.market_wide and
-                           finality_result.daily_share >= v2_finality.MIN_FINAL_DAILY_SHARE and
-                           finality_result.chain_share >= v2_finality.MIN_FINAL_CHAIN_SHARE)
+    finality_metrics = _finality_metrics(finality_date)
+    finality_native = finality_metrics["native_behavior_valid"]
     receipt = {
         "schema_version": "phase3b_run_receipt.v1.0", "run_id": run_root.name,
         "evidence_scope": "frozen_real_data", "source_files": source_refs,
@@ -643,6 +838,7 @@ def run(artifact_root):
         "table_results": table_results, "runtime_ms": runtime_ms,
         "peak_rss_bytes": peak_rss,
         "chain_dependency_count": len(chain_plan.dependencies),
+        "finality_metrics": finality_metrics,
         "subject_results": {},
     }
     receipt["subject_results"] = _subject_results(

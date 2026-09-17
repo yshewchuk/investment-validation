@@ -999,8 +999,8 @@ def run_incremental_refresh(parameters, root):
     binding = document.get("catalog_path")
     if not binding:
         result = {
-            **base, "completed_ids": list(parameters.expected_ids),
-            "status": "noop", "coverage_advanced": False,
+            **base, "completed_ids": [],
+            "status": "failed", "coverage_advanced": False,
             "candidate_snapshot_id": None,
         }
         return _write_refresh_result(root, result)
@@ -1057,14 +1057,15 @@ def run_incremental_refresh(parameters, root):
 
 
 def _run_generic_refresh(conn, store, parent, document, parameters, table_name, clock, root):
-    revisions = tuple(_generic_revision_from_document(item)
+    contract = next(item for item in parent.contracts
+                    if item.table_name == table_name)
+    revisions = tuple(_generic_revision_from_document(item, contract)
                       for item in document.get("generic_revisions", ()))
     coverage = from_document(CompletedCoverage, document["coverage"])
     candidate = generic_incremental.build_generic_table_candidate(
         parent, store, table_name, revisions, coverage=coverage,
         retained=generic_incremental.load_generic_revisions(
-            conn, table_name, next(item for item in parent.contracts
-                                   if item.table_name == table_name)),
+            conn, table_name, contract),
         parent_snapshot_id=parameters.parent_snapshot_id)
     fault_point = document.get("fault_point")
 
@@ -1090,11 +1091,14 @@ def _run_generic_refresh(conn, store, parent, document, parameters, table_name, 
     return _write_refresh_result(root, result)
 
 
-def _generic_revision_from_document(document):
+def _generic_revision_from_document(document, contract):
     try:
         candidate = from_document(RevisionCandidate, document["candidate"])
+        row = document.get("row")
+        if row is not None:
+            row = generic_incremental.decode_row(contract, row)
         return incremental_tables.GenericRevision(
-            candidate=candidate, row=document.get("row"),
+            candidate=candidate, row=row,
             deleted=bool(document.get("deleted", False)),
             partition_key=document.get("partition_key"))
     except (KeyError, TypeError, ValueError) as exc:
