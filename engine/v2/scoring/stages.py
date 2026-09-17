@@ -204,14 +204,30 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
                       flags: list[str]) -> dict[str, Any]:
     block = inputs.forecast
     output: dict[str, Any] = {}
+    declared = False
     if block.get("driver_name") is not None:
         output["driver_name"] = str(block["driver_name"])
+    frozen = block.get("frozen_outputs")
+    if frozen is not None:
+        if not isinstance(frozen, Mapping) or not block.get("artifact_hashes"):
+            _add_flag(flags, "INVALID_FROZEN_INFERENCE")
+        else:
+            declared = True
+            for field, raw in frozen.items():
+                if field not in _FORECAST_OUTPUTS:
+                    _add_flag(flags, f"UNKNOWN_FROZEN_OUTPUT:{field}")
+                    continue
+                value = _finite(raw)
+                if value is None:
+                    _add_flag(flags, f"NONFINITE_FORECAST_OUTPUT:{field}")
+                else:
+                    output[field] = value
+
     models = block.get("models", {})
     if not isinstance(models, Mapping):
         _add_flag(flags, "INVALID_FORECAST_MODELS")
         return output
     facts = _facts(inputs, values)
-    declared = False
     for field in _FORECAST_OUTPUTS:
         spec = models.get(field, block.get(field))
         if spec is None:
@@ -301,6 +317,12 @@ def _resolve_geometry(inputs: NativeScoreInputs, name: str,
 
 
 def _quote_map(inputs: NativeScoreInputs, name: str) -> dict:
+    declared = inputs.context.get("quotes")
+    if isinstance(declared, Mapping):
+        return dict(declared)
+    declared = inputs.features.get("quotes")
+    if isinstance(declared, Mapping):
+        return dict(declared)
     if inputs.pricing is not None:
         quotes = {(leg.right, leg.strike, leg.expiry): {"bid": leg.bid, "ask": leg.ask}
                   for leg in inputs.pricing.legs}
@@ -634,7 +656,15 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
     block = inputs.gate
     output: dict[str, Any] = {}
     recipe = block.get("recipe")
-    if block.get("model") is not None:
+    if block.get("frozen_score") is not None:
+        score = _finite(block.get("frozen_score"))
+        threshold = _finite(block.get("threshold"))
+        if score is None or threshold is None or not block.get("artifact_hashes"):
+            _add_flag(flags, "INVALID_FROZEN_GATE")
+            return output
+        output.update({"gate_score": score, "gate_threshold": threshold,
+                       "gate_pass": score >= threshold})
+    elif block.get("model") is not None:
         model = block["model"]
         if not isinstance(model, Mapping):
             _add_flag(flags, "INVALID_GATE_MODEL")

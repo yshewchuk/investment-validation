@@ -228,7 +228,11 @@ def test_frozen_inference_preserves_refusals_roles_and_verified_artifacts():
     )
 
     assert record.forecasts["forecast_abs_move"] == pytest.approx(0.42)
-    assert record.forecasts["driver_prediction"] == pytest.approx(0.77)
-    assert record.reason_codes == ("UNVALIDATED_STRUCTURE",)
+    assert record.forecasts["driver_prediction"] is None
+    assert "UNVALIDATED_STRUCTURE" in record.reason_codes
+    assert "MISSING_FORECAST_OUTPUT:driver" in record.reason_codes
+    assert "MISSING_SIMULATION_INPUT" in record.reason_codes
+    assert "MISSING_GATE_INPUT" in record.reason_codes
+    assert "MISSING_EXPIRY" in record.reason_codes
     assert record.validation_status == "refused"
     assert record.model_artifact_ids == ("sha256:verified",)

@@ -524,7 +524,10 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
 def _frozen_model_control(request: ScoreRequest) -> bool:
     payload = json.dumps({
         "schema_version": "linear_estimator.v1.0", "feature_order": ["x"],
-        "outputs": [{"name": "prediction", "intercept": 0.0, "coefficients": [1.0]}],
+        "outputs": [
+            {"name": "forecast_abs_move", "intercept": 0.0, "coefficients": [1.0]},
+            {"name": "pred_iv_crush", "intercept": -20.0, "coefficients": [0.0]},
+        ],
     }, sort_keys=True).encode()
     with tempfile.TemporaryDirectory(prefix="phase4-frozen-") as root:
         directory = Path(root)
@@ -534,22 +537,64 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
             content_hash="sha256:" + hashlib.sha256(payload).hexdigest(),
         )
         binding = ModelBinding(
-            binding_id="size", model_id="size-v1", role="size", strategy_id="*",
+            binding_id="forecast", model_id="forecast-v1", role="forecast", strategy_id="*",
             decision_clock_id=request.decision_clock_id, adapter="json-linear.v1",
-            feature_order=("x",), output_names=("prediction",), members=(member,),
+            feature_order=("x",),
+            output_names=("forecast_abs_move", "pred_iv_crush"),
+            members=(member,),
         )
         release = ModelRelease(release_id="release-v1", deployment_id=request.deployment_id,
                                bindings=(binding,))
         inference_request = InferenceRequest(
-            release_id="release-v1", binding_id="size", feature_order=("x",), rows=((0.42,),))
+            release_id="release-v1", binding_id="forecast",
+            feature_order=("x",), rows=((0.42,),))
+        context = {
+            "ticker": "PHASE4", "strategy": "STR-THRU",
+            "event_date": "2026-09-16", "entry_date": "2026-09-16",
+            "exit_date": "2026-09-17", "expiry": "2026-09-18",
+            "spot": 100.0,
+        }
+        geometry = generate(
+            "STR-THRU", {**context, "forecast_abs_move": 0.42},
+        )
+        quotes = {
+            (leg.right, leg.strike, leg.expiry): {"bid": 1.0, "ask": 3.0}
+            for leg in geometry.legs
+        }
+        pricing = price(geometry, quotes, 0.5)
+        receipts = tuple(
+            receipt(stage, "frozen-control", {})
+            for stage in (
+                "resolve_context", "features", "forecast", "geometry",
+                "pricing", "analogs", "simulation", "gate", "chooser",
+                "serialization",
+            )
+        )
+        native_inputs = NativeScoreInputs(
+            context=context,
+            features={"model_inputs": {"x": 0.42}},
+            forecast={},
+            geometry=geometry,
+            pricing=pricing,
+            analogs={},
+            simulation={"terminal_spots": (100.0, 110.0)},
+            gate={
+                "model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
+                "threshold": 0.0,
+            },
+            chooser={},
+            diagnostics={},
+            source_ref="frozen-control",
+            stage_receipts=receipts,
+        )
         record = application.score_frozen(
             request, FrozenInference(directory), release, inference_request,
-            {"spot": 100.0, "entry_cost": 5.0, "implied_move": 6.0,
-             "driver_name": "abs_move", "legs": [], "model_inputs": {},
-             "payoff": {}, "fill": 0.5},
+            {"_native_inputs": native_inputs},
         )
         return (record.forecasts["forecast_abs_move"] == 0.42
-                and record.forecasts.get("driver_prediction") is None
+                and record.resolved_request["pred_iv_crush"] == -20.0
+                and record.validation_status == "scored"
+                and record.gate_terms["gate_pass"] is True
                 and record.model_artifact_ids == (member.content_hash,))
 
 
@@ -557,7 +602,8 @@ def _chooser_controls() -> dict[str, bool]:
     def candidate(strategy, score, flags=(), gate=True):
         fields = _fake_result().as_dict()
         fields.update({"strategy": strategy, "chooser_score": score,
-                       "exp_pnl_sim": score, "flags": flags, "gate_pass": gate})
+                       "exp_pnl_sim": score, "flags": flags, "gate_pass": gate,
+                       "width": 4.0})
         return application.score_one(_request(strategy_version=strategy), _native(fields))
 
     tie = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.4), candidate("TWIN-P5", 0.4)))

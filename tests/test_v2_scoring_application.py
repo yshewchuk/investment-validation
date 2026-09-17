@@ -101,7 +101,8 @@ def test_frozen_inference_path_does_not_call_legacy_backend():
          "legs": [], "flags": [], "model_inputs": {}, "payoff": {}, "fill": 0.5},
     )
     assert record.forecasts["driver_prediction"] == 0.42
-    assert record.validation_status == "scored"
+    assert record.validation_status == "refused"
+    assert record.readiness == "refused"
 
 
 def test_direct_dynamic_request_resolves_complete_menu_without_regating(monkeypatch):

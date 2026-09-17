@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 from math import isfinite
+from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 from engine.v2.contracts import ReplayReceipt, ScoreBatch, ScoreRecord, ScoreRequest
@@ -116,20 +117,89 @@ def _apply_frozen_predictions(values: dict[str, Any], result, release,
         values[output] = prediction
 
 
+def _frozen_outputs(result, binding) -> dict[str, float]:
+    names = tuple(getattr(result, "output_names", ()) or ())
+    predictions = tuple(getattr(result, "predictions", ()) or ())
+    row = tuple(predictions[0]) if predictions else ()
+    role_targets = {
+        "size": "forecast_abs_move", "implied_t1": "driver_prediction",
+        "runup_move": "runup_move_prediction", "iv_crush": "pred_iv_crush",
+        "fair_value": "model_fair_pct",
+    }
+    allowed = {
+        "driver_prediction", "forecast_abs_move", "runup_move_prediction",
+        "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
+    }
+    role = str(getattr(binding, "role", ""))
+    target = role_targets.get(role.split(":", 1)[0])
+    outputs = {}
+    for index, value in enumerate(row):
+        name = names[index] if index < len(names) else None
+        output = name if name in allowed else target if len(row) == 1 else None
+        if output is not None:
+            outputs[output] = value
+    return outputs
+
+
+def _frozen_native_inputs(fields: Mapping[str, Any], result, binding, request) -> NativeScoreInputs:
+    supplied = fields.get("_native_inputs")
+    if isinstance(supplied, NativeScoreInputs):
+        base = supplied
+    else:
+        raw = {key: value for key, value in fields.items()
+               if key not in {"_native_inputs", "scorer"}}
+        base = NativeScoreInputs.from_legacy_fields(raw)
+    context_names = ("ticker", "strategy", "event_date",
+                     "entry_date", "exit_date", "expiry",
+                     "spot", "session", "as_of")
+    context = {key: fields[key] for key in context_names if key in fields}
+    context.setdefault("strategy", request.strategy_version)
+    features = dict(base.features)
+    features.update({key: fields[key] for key in ("model_inputs", "implied_move",
+                                                   "spot", "pre_iv30")
+                     if key in fields})
+    role = str(getattr(binding, "role", ""))
+    outputs = _frozen_outputs(result, binding)
+    predictions = tuple(getattr(result, "predictions", ()) or ())
+    row = tuple(predictions[0]) if predictions else ()
+    source = f"frozen:{getattr(result, "release_id", request.deployment_id)}:{binding.binding_id}"
+    flags = tuple(getattr(result, "reason_codes", ()) or ())
+    owned_forecast = {"driver_prediction", "forecast_abs_move", "runup_move_prediction",
+                      "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
+                      "forecast_p10", "forecast_p90", "forecast_sd"}
+    forecast = {key: value for key, value in base.forecast.items()
+                if key not in owned_forecast}
+    forecast.update({"frozen_outputs": outputs, "artifact_hashes": tuple(getattr(result, "artifact_hashes", ()) or ()),
+                     "binding_id": binding.binding_id, "model_id": getattr(result, "model_id", None),
+                     "required_roles": (role,) if role in {"size", "implied_t1", "runup_move", "iv_crush"} else ()})
+    gate = dict(base.gate)
+    if role == "gate" and row:
+        gate.update({"frozen_score": row[0], "artifact_hashes": tuple(getattr(result, "artifact_hashes", ()) or ()),
+                     "threshold": fields.get("gate_threshold")})
+    return replace(base, context={**base.context, **context, "flags": flags},
+                   features=features, forecast=forecast, gate=gate, source_ref=source)
+
+
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
                  fields: Mapping[str, Any]) -> ScoreRecord:
-    """Score the model stage from an explicitly verified frozen release."""
+    """Run verified inference through the canonical native scoring graph."""
     result = inference.infer(release, inference_request)
-    values = dict(fields)
-    values.setdefault("model_inputs", {})
+    binding = next((item for item in getattr(release, "bindings", ())
+                    if item.binding_id == getattr(inference_request, "binding_id", None)), None)
+    if binding is None:
+        binding = SimpleNamespace(binding_id=getattr(result, "binding_id", "frozen-binding"), role="implied_t1",
+                                  output_names=tuple(getattr(result, "output_names", ()) or ()))
+    if binding is None:
+        raise ValueError("frozen inference binding is unavailable")
+    inputs = _frozen_native_inputs(fields, result, binding, request)
+    record = score_one(request, inputs)
+    record = replace(record, model_artifact_ids=tuple(getattr(result, "artifact_hashes", ()) or ()),
+                     evidence_refs=tuple(dict.fromkeys((*request.dependency_refs,
+                                                         getattr(result, "release_id", request.deployment_id), binding.binding_id))))
     if result.status != "READY":
-        values["flags"] = tuple(dict.fromkeys((*tuple(values.get("flags") or ()),
-                                               *tuple(result.reason_codes))))
-        values["detail"] = result.detail or "model release is not ready"
-    else:
-        _apply_frozen_predictions(values, result, release, inference_request)
-    values["_model_artifact_ids"] = tuple(result.artifact_hashes)
-    return _record_values(request, values, fields)
+        record = replace(record, reason_codes=tuple(dict.fromkeys((*record.reason_codes, *tuple(getattr(result, "reason_codes", ()) or ())))),
+                         validation_status="refused", readiness="refused")
+    return with_score_id(record)
 
 
 def score_one(request: ScoreRequest, inputs: NativeScoreInputs) -> ScoreRecord:
