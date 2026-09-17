@@ -7,6 +7,7 @@ from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.domain.generation import Pricing, generate, price
 from engine.v2.registry import DYNAMIC_MENU
 from engine.v2.scoring import application
+from engine.v2.scoring.identity import request_hash
 from engine.v2.scoring.stages import NativeScoreInputs, STAGE_NAMES, StageReceipt
 
 
@@ -48,6 +49,102 @@ def _native(strategy="STR-THRU", *, chooser_score=0.2, exp_pnl=0.1,
         chooser={"chooser_score": chooser_score}, diagnostics={"flags": ()},
         source_ref="fixture", stage_receipts=receipts,
     )
+
+
+def _override_native(strategy="STR-THRU"):
+    fields = {
+        "ticker": "AAA", "strategy": strategy, "event_date": "2026-09-16",
+        "entry_date": "2026-09-16", "exit_date": "2026-09-17",
+        "expiry": "2026-09-18", "spot": 100.0, "entry_cost": 3.0,
+        "driver_name": "abs_move", "driver_prediction": 7.0,
+        "forecast_abs_move": 7.0, "model_inputs": {}, "flags": (),
+    }
+    priced_legs = []
+    for strike in (100.0, 105.0):
+        geometry = generate(strategy, {**fields, "strike": strike})
+        quotes = {
+            (leg.right, leg.strike, leg.expiry): {"bid": 1.0, "ask": 2.0}
+            for leg in geometry.legs
+        }
+        priced_legs.extend(price(geometry, quotes, 0.5).legs)
+    inputs = NativeScoreInputs.from_legacy_fields(fields)
+    return replace(
+        inputs,
+        pricing=Pricing(strategy, 100.0, 0.0, tuple(priced_legs)),
+    )
+
+
+@pytest.mark.parametrize("override_field", ["contract_override", "geometry_override"])
+def test_request_overrides_regenerate_and_reprice_selected_contracts(override_field):
+    request = replace(_request(), **{override_field: {"strike": 105.0}})
+    record = application.score_one(request, _override_native())
+
+    assert {leg["strike"] for leg in record.selected_contracts} == {105.0}
+    assert {leg["strike"] for leg in record.legs} == {105.0}
+    assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(3.0)
+    assert record.validation_status == "scored"
+
+
+def test_invalid_geometry_override_preserves_native_refusal():
+    request = replace(
+        _request("TWIN-P"),
+        geometry_override={"width": 0.0},
+    )
+    record = application.score_one(request, _override_native("TWIN-P"))
+
+    assert record.validation_status == "refused"
+    assert "ZERO_WIDTH" in record.reason_codes
+    assert record.selected_contracts == ()
+
+
+def test_batch_uses_full_request_identity_and_rejects_ambiguous_legacy_keys():
+    first = replace(_request(), geometry_override={"strike": 100.0})
+    second = replace(_request(), geometry_override={"strike": 105.0})
+    batch = ScoreBatch(batch_id="b1", requests=(first, second), population_ref="p1")
+    inputs = _override_native()
+
+    records = application.score_batch(batch, {
+        request_hash(first): inputs,
+        request_hash(second): inputs,
+    })
+
+    assert [{leg["strike"] for leg in record.selected_contracts}
+            for record in records] == [{100.0}, {105.0}]
+    with pytest.raises(KeyError, match="ambiguous event/strategy"):
+        application.score_batch(
+            batch, {(first.event_id, first.strategy_version): inputs},
+        )
+    with pytest.raises(KeyError, match="ambiguous legacy event-only"):
+        application.score_batch(batch, {first.event_id: inputs})
+
+
+def test_dynamic_requires_simulation_before_ranking_and_preserves_flags():
+    no_simulation = application.score_one(
+        _request("TWIN-P"),
+        replace(
+            _native("TWIN-P", chooser_score=0.9, exp_pnl=None),
+            source_ref="compatibility-input",
+        ),
+    )
+    eligible = application.score_one(
+        _request("TWIN-P5"),
+        replace(
+            _native(
+                "TWIN-P5", chooser_score=0.2, exp_pnl=0.1,
+                flags=("ADVISORY",),
+            ),
+            source_ref="compatibility-input",
+        ),
+    )
+
+    chosen = application._choose_dynamic(
+        _request("DYN-SV"), (no_simulation, eligible),
+    )
+
+    assert chosen.chooser_selection["strategy"] == "TWIN-P5"
+    assert chosen.chooser_selection["ranking_key"] == "chooser_score"
+    assert chosen.chooser_selection["menu_size"] == 1
+    assert chosen.reason_codes == ("ADVISORY",)
 
 
 def test_score_one_executes_pricing_and_owns_refusal_lineage_and_receipts():

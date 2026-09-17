@@ -1,7 +1,9 @@
 """Shared single, event and batch Phase 4 scoring application."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
+from math import isfinite
 from typing import Any, Iterable, Mapping
 
 from engine.v2.contracts import ReplayReceipt, ScoreBatch, ScoreRecord, ScoreRequest
@@ -10,7 +12,7 @@ from engine.v2.foundation import from_document, to_document
 from engine.v2.registry import DYNAMIC_MENU, default_registry
 
 from .financial import financial_diagnostics
-from .identity import dependency_hash, with_score_id
+from .identity import dependency_hash, request_hash, with_score_id
 from .stages import NativeScoreInputs, assemble_native_values
 
 __all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
@@ -133,6 +135,7 @@ def score_one(request: ScoreRequest, inputs: NativeScoreInputs) -> ScoreRecord:
     """Emit one record after all explicitly owned native stages completed."""
     if not isinstance(inputs, NativeScoreInputs):
         raise TypeError("score_one requires NativeScoreInputs; use the explicit legacy adapter for comparisons")
+    inputs = _with_request_overrides(request, inputs)
     values = assemble_native_values(
         inputs, strategy=request.strategy_version, fill_model=request.fill_model,
     )
@@ -145,18 +148,56 @@ def score_many(requests: Iterable[tuple[ScoreRequest, NativeScoreInputs]]) -> tu
     return tuple(score_one(request, fields) for request, fields in requests)
 
 
+def _with_request_overrides(request: ScoreRequest,
+                            inputs: NativeScoreInputs) -> NativeScoreInputs:
+    """Route request-owned geometry through native generation and pricing."""
+    if request.contract_override is None and request.geometry_override is None:
+        return inputs
+    geometry_override = dict(request.geometry_override or {})
+    contract_override = dict(request.contract_override or {})
+    for alias in ("legs", "contracts", "selected_contracts"):
+        if alias in contract_override and "resolved_legs" not in contract_override:
+            contract_override["resolved_legs"] = contract_override.pop(alias)
+    overrides = {**geometry_override, **contract_override}
+    return replace(
+        inputs,
+        context={**inputs.context, **overrides},
+        forecast={**inputs.forecast, **overrides},
+        # A pre-resolved geometry would otherwise overwrite the request fields.
+        # Pricing remains the quote inventory and is recomputed by the stage.
+        geometry=None,
+    )
+
+
 def score_batch(batch: ScoreBatch, fields_by_request: Mapping[Any, NativeScoreInputs]) -> tuple[ScoreRecord, ...]:
     """Score a declared batch while preserving request order and identity."""
-    counts = {request.event_id: sum(item.event_id == request.event_id for item in batch.requests)
-              for request in batch.requests}
+    event_counts = Counter(request.event_id for request in batch.requests)
+    pair_counts = Counter((request.event_id, request.strategy_version)
+                          for request in batch.requests)
 
     def inputs_for(request: ScoreRequest) -> NativeScoreInputs:
-        key = (request.event_id, request.strategy_version)
-        if key in fields_by_request:
-            return fields_by_request[key]
-        if counts[request.event_id] == 1 and request.event_id in fields_by_request:
+        identity = request_hash(request)
+        if identity in fields_by_request:
+            return fields_by_request[identity]
+        pair = (request.event_id, request.strategy_version)
+        if pair in fields_by_request:
+            if pair_counts[pair] > 1:
+                raise KeyError(
+                    f"ambiguous event/strategy batch key {pair!r}; "
+                    f"use request hash {identity!r}"
+                )
+            return fields_by_request[pair]
+        if request.event_id in fields_by_request:
+            if event_counts[request.event_id] > 1:
+                raise KeyError(
+                    f"ambiguous legacy event-only batch key {request.event_id!r}; "
+                    f"use request hash {identity!r}"
+                )
             return fields_by_request[request.event_id]
-        raise KeyError(f"missing batch inputs for event/strategy {key!r}")
+        raise KeyError(
+            f"missing batch inputs for request hash {identity!r} "
+            f"or event/strategy {pair!r}"
+        )
 
     return score_many((request, inputs_for(request)) for request in batch.requests)
 
@@ -200,10 +241,19 @@ def score_event(event_request: ScoreRequest, strategies: Iterable[tuple[str, Map
 
 
 def _choose_dynamic(request: ScoreRequest, candidates: tuple[ScoreRecord, ...]) -> ScoreRecord:
-    key = ("chooser_score" if any(record.forecasts.get("chooser_score") is not None
-                                  for record in candidates) else "exp_pnl_sim")
-    eligible = [(float(record.forecasts[key]), key, record) for record in candidates
-                if record.forecasts.get(key) is not None]
+    def metric(record: ScoreRecord, name: str) -> float | None:
+        try:
+            value = float(record.forecasts.get(name))
+        except (TypeError, ValueError):
+            return None
+        return value if isfinite(value) else None
+
+    simulated = tuple(record for record in candidates
+                      if metric(record, "exp_pnl_sim") is not None)
+    key = ("chooser_score" if any(metric(record, "chooser_score") is not None
+                                  for record in simulated) else "exp_pnl_sim")
+    eligible = [(metric(record, key), key, record) for record in simulated
+                if metric(record, key) is not None]
     if not eligible:
         base = candidates[0]
         selection = {"status": "no_eligible_candidate", "menu_size": len(candidates)}
@@ -213,7 +263,8 @@ def _choose_dynamic(request: ScoreRequest, candidates: tuple[ScoreRecord, ...]) 
                            "strategy": r.canonical_request.get("strategy_version"),
                            "score_id": r.score_id,
                        } for r in candidates), chooser_selection=selection,
-                       validation_status="refused", reason_codes=("NO_CHOOSER_CANDIDATE",)))
+                       validation_status="refused", reason_codes=tuple(dict.fromkeys(
+                           (*base.reason_codes, "NO_CHOOSER_CANDIDATE")))))
     eligible.sort(key=lambda item: item[0], reverse=True)
     best_value, key, best = eligible[0]
     tied = [item for item in eligible if item[0] == best_value]
@@ -222,7 +273,7 @@ def _choose_dynamic(request: ScoreRequest, candidates: tuple[ScoreRecord, ...]) 
         "strategy": best.canonical_request.get("strategy_version"),
         "ranking_key": key,
         "value": best_value,
-        "menu_size": len(candidates),
+        "menu_size": len(eligible),
     }
     return with_score_id(replace(best, canonical_request={**best.canonical_request,
                     "strategy_version": "DYN-SV"},
