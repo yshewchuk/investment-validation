@@ -35,36 +35,39 @@ def _run_sequence(conn, root, store_root, clock, items, log_path):
                       clock=clock, code_source=ROOT, store_root=store_root)
     service.start()
     records = []
-    for label, source, binding, operation in items:
-        receipt = submit_retained_publication(conn, store, registry=registry(), policy=policy, clock=clock,
-            source_job_id=source, projection_binding_ref=binding, operation_id=operation)
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            service.tick()
-            row = conn.execute("SELECT state FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
-            if row and row[0] in ("succeeded", "failed", "blocked", "cancelled"):
-                break
-            time.sleep(0.1)
-        if row is None or row[0] != "succeeded":
-            detail = conn.execute("SELECT state,failure_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
-            raise RuntimeError("sequence publication did not succeed: " + str(dict(detail) if detail else None))
-        job = conn.execute("SELECT spec_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
-        spec = json.loads(job["spec_json"])
-        finality_id = spec["parameters"]["input_bindings"]["finality.json"]
-        session = json.loads(store.read_verified(artifact(conn, store, finality_id)))["date"]
-        scope = spec["parameters"].get("effect_scope") or spec["output_namespace"]
-        generation = _generation_ref(SimpleNamespace(spec=SimpleNamespace(parameters=spec["parameters"])))
-        release_id = "rel" + content_hash([scope, session, generation]).split(":")[1][:24]
-        release = conn.execute("SELECT release_id,manifest_json,published_at,delivered_at FROM releases "
-                               "WHERE release_id=? AND delivered_at IS NOT NULL", (release_id,)).fetchone()
-        if release is None:
-            raise RuntimeError("sequence publication has no durable delivered release")
-        projection = json.loads(store.read_verified(artifact(conn, store, binding)))["projection_release_id"]
-        records.append({"label": label, "publication_job_id": receipt.job_id,
-                        "projection_release_id": projection, "ops_release_id": release["release_id"],
-                        "published_at": release["published_at"], "delivered_at": release["delivered_at"]})
-        print(json.dumps({"event": "publication_sequence_progress", "label": label,
-                          "job_id": receipt.job_id, "release_id": release["release_id"]}), flush=True)
+    try:
+        for label, source, binding, operation in items:
+            receipt = submit_retained_publication(conn, store, registry=registry(), policy=policy, clock=clock,
+                source_job_id=source, projection_binding_ref=binding, operation_id=operation)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                service.tick()
+                row = conn.execute("SELECT state FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
+                if row and row[0] in ("succeeded", "failed", "blocked", "cancelled"):
+                    break
+                time.sleep(0.1)
+            if row is None or row[0] != "succeeded":
+                detail = conn.execute("SELECT state,failure_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
+                raise RuntimeError("sequence publication did not succeed: " + str(dict(detail) if detail else None))
+            job = conn.execute("SELECT spec_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
+            spec = json.loads(job["spec_json"])
+            finality_id = spec["parameters"]["input_bindings"]["finality.json"]
+            session = json.loads(store.read_verified(artifact(conn, store, finality_id)))["date"]
+            scope = spec["parameters"].get("effect_scope") or spec["output_namespace"]
+            generation = _generation_ref(SimpleNamespace(spec=SimpleNamespace(parameters=spec["parameters"])))
+            release_id = "rel" + content_hash([scope, session, generation]).split(":")[1][:24]
+            release = conn.execute("SELECT release_id,manifest_json,published_at,delivered_at FROM releases "
+                                   "WHERE release_id=? AND delivered_at IS NOT NULL", (release_id,)).fetchone()
+            if release is None:
+                raise RuntimeError("sequence publication has no durable delivered release")
+            projection = json.loads(store.read_verified(artifact(conn, store, binding)))["projection_release_id"]
+            records.append({"label": label, "publication_job_id": receipt.job_id,
+                            "projection_release_id": projection, "ops_release_id": release["release_id"],
+                            "published_at": release["published_at"], "delivered_at": release["delivered_at"]})
+            print(json.dumps({"event": "publication_sequence_progress", "label": label,
+                            "job_id": receipt.job_id, "release_id": release["release_id"]}), flush=True)
+    finally:
+        service.close()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(json.dumps({"update": records[:2], "rollback": records[2]}, sort_keys=True))
 
