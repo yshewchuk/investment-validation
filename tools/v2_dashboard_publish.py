@@ -11,12 +11,15 @@ import argparse
 import json
 import sys
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.foundation import ArtifactStore, SystemClock, to_document
+from engine.v2.foundation import content_hash
+from engine.v2.ops.effects_graph import _generation_ref
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.publication_submit import submit_retained_publication
@@ -45,10 +48,15 @@ def _run_sequence(conn, root, store_root, clock, items, log_path):
         if row is None or row[0] != "succeeded":
             detail = conn.execute("SELECT state,failure_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
             raise RuntimeError("sequence publication did not succeed: " + str(dict(detail) if detail else None))
-        releases = conn.execute("SELECT release_id,manifest_json,published_at,delivered_at FROM releases "
-                                "WHERE delivered_at IS NOT NULL ORDER BY delivered_at DESC").fetchall()
-        release = next((row for row in releases if json.loads(row["manifest_json"]).get("files", {}).get(
-            "projection_binding.json", {}).get("artifact_id") == binding), None)
+        job = conn.execute("SELECT spec_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
+        spec = json.loads(job["spec_json"])
+        finality_id = spec["parameters"]["input_bindings"]["finality.json"]
+        session = json.loads(store.read_verified(artifact(conn, store, finality_id)))["date"]
+        scope = spec["parameters"].get("effect_scope") or spec["output_namespace"]
+        generation = _generation_ref(SimpleNamespace(spec=SimpleNamespace(parameters=spec["parameters"])))
+        release_id = "rel" + content_hash([scope, session, generation]).split(":")[1][:24]
+        release = conn.execute("SELECT release_id,manifest_json,published_at,delivered_at FROM releases "
+                               "WHERE release_id=? AND delivered_at IS NOT NULL", (release_id,)).fetchone()
         if release is None:
             raise RuntimeError("sequence publication has no durable delivered release")
         projection = json.loads(store.read_verified(artifact(conn, store, binding)))["projection_release_id"]
