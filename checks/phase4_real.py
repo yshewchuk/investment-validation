@@ -54,7 +54,7 @@ from engine.v2.models import (  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
-from engine.v2.scoring.identity import request_hash  # noqa: E402
+from engine.v2.scoring.identity import request_hash, score_id  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
     StageReceipt,
@@ -1059,7 +1059,50 @@ def _verified_runtime_receipts(native) -> tuple[dict[str, str], ...]:
     missing = set(_REQUIRED_TRACE_STAGES) - seen
     if missing:
         raise _TraceError(f"execution: missing stages {sorted(missing)}")
+    if not receipts or receipts[-1]["stage"] != "serialization":
+        raise _TraceError("execution: serialization receipt is not final")
     return tuple(receipts)
+
+
+def _verify_runtime_execution(
+    verified: Mapping[str, Any], native,
+) -> tuple[tuple[dict[str, str], ...], dict[str, str]]:
+    runtime_receipts = _verified_runtime_receipts(native)
+    runtime_required = tuple(
+        row for row in runtime_receipts
+        if row["stage"] in _REQUIRED_TRACE_STAGES
+    )
+    captured = verified["captured_receipts"]
+    if tuple(row["stage"] for row in runtime_required) != tuple(
+        row["stage"] for row in captured
+    ):
+        raise _TraceError("execution: captured stage order mismatch")
+    for expected, actual in zip(captured, runtime_required):
+        stage = expected["stage"]
+        for field in ("input_hash", "output_hash", "owner"):
+            if actual[field] != expected[field]:
+                raise _TraceError(
+                    f"execution.{stage}.{field}: captured runtime mismatch"
+                )
+
+    canonical_request = to_document(verified["request"])
+    if to_document(native.canonical_request) != canonical_request:
+        raise _TraceError("execution.identity.canonical_request: mismatch")
+    expected_request_hash = content_hash(canonical_request)
+    if native.request_hash != expected_request_hash:
+        raise _TraceError("execution.identity.request_hash: mismatch")
+    expected_score_id = score_id(native)
+    if native.score_id != expected_score_id:
+        raise _TraceError("execution.identity.score_id: mismatch")
+    if native.payload_hash != expected_score_id:
+        raise _TraceError("execution.identity.payload_hash: mismatch")
+    identities = {
+        "serialization_hash": runtime_required[-1]["output_hash"],
+        "payload_hash": native.payload_hash,
+        "request_hash": native.request_hash,
+        "score_id": native.score_id,
+    }
+    return runtime_receipts, identities
 
 
 def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
@@ -1147,6 +1190,7 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
             f"{sorted(set(_REQUIRED_TRACE_STAGES) - set(stage_rows))}"
         )
     receipts = []
+    captured_receipts = []
     for stage in _REQUIRED_TRACE_STAGES:
         row = stage_rows[stage]
         if not isinstance(row, Mapping) or set(row) != {
@@ -1166,6 +1210,12 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
             stage=stage, input_hash=row["input_hash"],
             output_hash=row["output_hash"], owner=row["owner"],
         ))
+        captured_receipts.append({
+            "stage": stage,
+            "input_hash": row["input_hash"],
+            "output_hash": row["output_hash"],
+            "owner": row["owner"],
+        })
 
     geometry_doc = resolved_inputs["geometry"]
     pricing_doc = resolved_inputs["pricing"]
@@ -1199,6 +1249,7 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         "input_hash": shared_hash,
         "trace_hash": trace_hash,
         "captured_stages": tuple(_REQUIRED_TRACE_STAGES),
+        "captured_receipts": tuple(captured_receipts),
     }
 
 
@@ -1225,7 +1276,9 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             native = application.score_one(
                 verified["request"], verified["inputs"],
             )
-            runtime_receipts = _verified_runtime_receipts(native)
+            runtime_receipts, runtime_identities = _verify_runtime_execution(
+                verified, native,
+            )
         except Exception as exc:
             dispositions["incomparable"] += 1
             rows.append({
@@ -1284,6 +1337,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "same_input_hash": verified["input_hash"],
             "trace_hash": verified["trace_hash"],
             "runtime_receipts": runtime_receipts,
+            "runtime_identities": runtime_identities,
             "checks": checks,
             "numeric_findings": {
                 name: result["finding_fields"] for name, result in numeric.items()

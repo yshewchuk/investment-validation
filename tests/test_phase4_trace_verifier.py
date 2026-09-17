@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -9,6 +10,7 @@ from checks.tier0_corpus import Corpus
 from engine.v2.contracts import SCORE_REQUEST_V1
 from engine.v2.foundation import content_hash
 from engine.v2.scoring.identity import request_hash
+from engine.v2.scoring.identity import with_score_id
 
 
 def _request_document():
@@ -115,6 +117,22 @@ def _resign(pair):
     pair["payload"]["input_trace_hash"] = trace["trace_hash"]
 
 
+def _native_with_captured_receipts(pair, tmp_path):
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    native = phase4_real.application.score_one(
+        verified["request"], verified["inputs"],
+    )
+    receipts = tuple({
+        "stage": stage,
+        "input_hash": row["input_hash"],
+        "output_hash": row["output_hash"],
+        "owner": row["owner"],
+    } for stage, row in pair["payload"]["input_trace"]["stages"].items())
+    resolved = dict(native.resolved_request)
+    resolved["native_stage_receipts"] = receipts
+    return with_score_id(replace(native, resolved_request=resolved))
+
+
 def test_complete_trace_reconstructs_exact_request_and_inputs(tmp_path):
     pair = _pair(tmp_path)
 
@@ -136,6 +154,56 @@ def test_stage_hash_mismatch_is_incomparable(tmp_path):
 
     with pytest.raises(phase4_real._TraceError, match="content hash mismatch"):
         phase4_real._verified_trace_bundle(pair, tmp_path)
+
+
+def test_runtime_receipts_and_final_identities_are_verified(tmp_path):
+    pair = _pair(tmp_path)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    native = _native_with_captured_receipts(pair, tmp_path)
+
+    receipts, identities = phase4_real._verify_runtime_execution(
+        verified, native,
+    )
+
+    assert receipts[-1]["stage"] == "serialization"
+    assert identities == {
+        "serialization_hash": receipts[-1]["output_hash"],
+        "payload_hash": native.payload_hash,
+        "request_hash": native.request_hash,
+        "score_id": native.score_id,
+    }
+
+
+def test_resigned_captured_stage_receipt_mismatch_is_incomparable(
+    tmp_path, monkeypatch,
+):
+    pair = _pair(tmp_path)
+    native = _native_with_captured_receipts(pair, tmp_path)
+    forecast = pair["payload"]["input_trace"]["stages"]["forecast"]
+    forecast["output"] = {"stage": "forecast", "value": 2}
+    forecast["output_hash"] = content_hash(forecast["output"])
+    _resign(pair)
+    called = False
+
+    def score_one(*args, **kwargs):
+        nonlocal called
+        called = True
+        return native
+
+    monkeypatch.setattr(phase4_real.application, "score_one", score_one)
+    corpus = Corpus(
+        root=tmp_path,
+        index={"corpus_hash": content_hash({"release": 1})},
+        pairs={"pair-1": pair},
+    )
+
+    release, parity = phase4_real._native_parity(corpus)
+
+    assert called is True
+    assert release["population"]["compared"] == 0
+    assert release["population"]["incomparable"] == 1
+    assert "execution.forecast.output_hash" in release["dispositions"][0]["reason"]
+    assert parity["complete"] is False
 
 
 @pytest.mark.parametrize(
