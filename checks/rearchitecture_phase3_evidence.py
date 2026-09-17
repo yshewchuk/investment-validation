@@ -473,7 +473,8 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                             if source is None:
                                 raise ValueError("unreadable bundle member")
                             target.write_bytes(source.read())
-                    _rows, manifest = load_legacy_bundle(root)
+                    bundle_root = root / "bundle" if (root / "bundle").is_dir() else root
+                    _rows, manifest = load_legacy_bundle(bundle_root)
                 if content_hash(manifest) != preview.bundle_manifest_ref:
                     raise ValueError("bundle manifest mismatch")
             except (OSError, tarfile.TarError, ValueError):

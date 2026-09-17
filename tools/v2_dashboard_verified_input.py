@@ -88,7 +88,8 @@ def _bundle_manifest_from_artifact(data: bytes) -> dict:
                 if source is None:
                     raise ValueError("delivered bundle member is unreadable")
                 destination.write_bytes(source.read())
-        _rows, manifest = load_legacy_bundle(root)
+        bundle_root = root / "bundle" if (root / "bundle").is_dir() else root
+        _rows, manifest = load_legacy_bundle(bundle_root)
         return manifest
 
 
