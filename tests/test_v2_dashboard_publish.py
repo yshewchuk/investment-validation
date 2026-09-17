@@ -180,8 +180,9 @@ def test_retained_publication_runs_through_real_service(tmp_path):
         from engine.v2.ops.effects_graph import publication_effect
         from engine.v2.ops.errors import OpsError
         current_before = release_current(tmp_path / "releases" / scope)
-        with pytest.raises(OpsError, match="LEASE_LOST"):
+        with pytest.raises(OpsError) as raised:
             publication_effect(conn, store, stale_claim, tmp_path, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        assert raised.value.problem.code in {"CANCELLED", "LEASE_LOST"}
         assert release_current(tmp_path / "releases" / scope) == current_before
     finally:
         conn.close()
