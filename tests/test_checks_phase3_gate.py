@@ -51,7 +51,7 @@ from engine.v2.contracts import (
     TableContractRef,
 )
 from engine.v2.diagnosis.receipt import AGREE, DIFFER, ComparisonReceipt, Envelope, Population
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import content_hash, from_document, to_document
 from engine.v2.ledger.decisions import outcome_generation_ref
 
 ALL_L_IDS = [f"L{i:02d}" for i in range(1, 15)]
@@ -253,9 +253,12 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     bundle = stream.getvalue()
     bundle_manifest = {"data/board.json": digest(board)}
     score_ref, finality_ref, model_ref = digest(score), digest(finality), digest(models)
-    release_manifest = {"files": {"bundle.tar": {"artifact_id": "art_bundle"}}}
+    release_manifest = {"files": {"bundle.tar": to_document(ArtifactRef(
+        artifact_id="art_bundle", content_hash=digest(bundle), schema_ref="legacy_action.v1.0",
+        byte_size=len(bundle), storage_key="objects/bundle"))}}
     score_spec = {"implementation_ref": H, "environment_ref": H, "input_refs": ["input_proof"]}
-    preview_base = dict(source_release_id=source_release_id, source_release_manifest_ref=content_hash(release_manifest),
+    typed_release_manifest = {"files": {"bundle.tar": from_document(ArtifactRef, release_manifest["files"]["bundle.tar"])}}
+    preview_base = dict(source_release_id=source_release_id, source_release_manifest_ref=content_hash(typed_release_manifest),
         snapshot_ref=snapshot.snapshot_id, legacy_snapshot_object_ref=obj, score_batch_ref=score_ref,
         score_job_input_refs=("input_proof",), bundle_manifest_ref=content_hash(bundle_manifest),
         model_registry_artifact_refs=("registry_proof",), model_evidence_ref=model_ref,
