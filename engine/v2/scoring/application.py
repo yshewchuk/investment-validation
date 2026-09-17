@@ -141,7 +141,20 @@ def _frozen_outputs(result, binding) -> dict[str, float]:
     return outputs
 
 
-def _frozen_native_inputs(fields: Mapping[str, Any], result, binding, request) -> NativeScoreInputs:
+def _frozen_binding(release, result, inference_request):
+    binding_id = getattr(inference_request, "binding_id", None)
+    binding = next((item for item in getattr(release, "bindings", ())
+                    if item.binding_id == binding_id), None)
+    if binding is not None:
+        return binding
+    return SimpleNamespace(
+        binding_id=getattr(result, "binding_id", "frozen-binding"),
+        role="implied_t1",
+        output_names=tuple(getattr(result, "output_names", ()) or ()),
+    )
+
+
+def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings, request) -> NativeScoreInputs:
     supplied = fields.get("_native_inputs")
     if isinstance(supplied, NativeScoreInputs):
         base = supplied
@@ -158,24 +171,46 @@ def _frozen_native_inputs(fields: Mapping[str, Any], result, binding, request) -
     features.update({key: fields[key] for key in ("model_inputs", "implied_move",
                                                    "spot", "pre_iv30")
                      if key in fields})
-    role = str(getattr(binding, "role", ""))
-    outputs = _frozen_outputs(result, binding)
-    predictions = tuple(getattr(result, "predictions", ()) or ())
-    row = tuple(predictions[0]) if predictions else ()
-    source = f"frozen:{getattr(result, "release_id", request.deployment_id)}:{binding.binding_id}"
-    flags = tuple(getattr(result, "reason_codes", ()) or ())
+    outputs = {}
+    flags = []
+    artifact_hashes = []
+    required_roles = []
+    gate_result = None
+    for result, binding in zip(results, bindings, strict=True):
+        outputs.update(_frozen_outputs(result, binding))
+        flags.extend(getattr(result, "reason_codes", ()) or ())
+        artifact_hashes.extend(getattr(result, "artifact_hashes", ()) or ())
+        role = str(getattr(binding, "role", ""))
+        if role in {"size", "implied_t1", "runup_move", "iv_crush"}:
+            required_roles.append(role)
+        if role == "gate":
+            gate_result = (result, binding)
+    release_id = getattr(results[0], "release_id", request.deployment_id)
+    binding_ids = tuple(binding.binding_id for binding in bindings)
+    source = f"frozen:{release_id}:{','.join(binding_ids)}"
     owned_forecast = {"driver_prediction", "forecast_abs_move", "runup_move_prediction",
                       "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
                       "forecast_p10", "forecast_p90", "forecast_sd"}
     forecast = {key: value for key, value in base.forecast.items()
                 if key not in owned_forecast}
-    forecast.update({"frozen_outputs": outputs, "artifact_hashes": tuple(getattr(result, "artifact_hashes", ()) or ()),
-                     "binding_id": binding.binding_id, "model_id": getattr(result, "model_id", None),
-                     "required_roles": (role,) if role in {"size", "implied_t1", "runup_move", "iv_crush"} else ()})
+    forecast.update({
+        "frozen_outputs": outputs,
+        "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
+        "binding_id": binding_ids[0],
+        "binding_ids": binding_ids,
+        "model_id": getattr(results[0], "model_id", None),
+        "required_roles": tuple(dict.fromkeys(required_roles)),
+    })
     gate = dict(base.gate)
-    if role == "gate" and row:
-        gate.update({"frozen_score": row[0], "artifact_hashes": tuple(getattr(result, "artifact_hashes", ()) or ()),
-                     "threshold": fields.get("gate_threshold")})
+    if gate_result is not None:
+        result, _ = gate_result
+        row = tuple(getattr(result, "predictions", ()) or ())
+        if row:
+            gate.update({
+                "frozen_score": row[0][0],
+                "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
+                "threshold": fields.get("gate_threshold"),
+            })
     return replace(base, context={**base.context, **context, "flags": flags},
                    features=features, forecast=forecast, gate=gate, source_ref=source)
 
@@ -183,21 +218,35 @@ def _frozen_native_inputs(fields: Mapping[str, Any], result, binding, request) -
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
                  fields: Mapping[str, Any]) -> ScoreRecord:
     """Run verified inference through the canonical native scoring graph."""
-    result = inference.infer(release, inference_request)
-    binding = next((item for item in getattr(release, "bindings", ())
-                    if item.binding_id == getattr(inference_request, "binding_id", None)), None)
-    if binding is None:
-        binding = SimpleNamespace(binding_id=getattr(result, "binding_id", "frozen-binding"), role="implied_t1",
-                                  output_names=tuple(getattr(result, "output_names", ()) or ()))
-    if binding is None:
-        raise ValueError("frozen inference binding is unavailable")
-    inputs = _frozen_native_inputs(fields, result, binding, request)
+    requests = (tuple(inference_request) if isinstance(inference_request, (tuple, list))
+                else (inference_request,))
+    results = tuple(inference.infer(release, item) for item in requests)
+    bindings = tuple(
+        _frozen_binding(release, result, item)
+        for result, item in zip(results, requests, strict=True)
+    )
+    inputs = _frozen_native_inputs(fields, results, bindings, request)
     record = score_one(request, inputs)
-    record = replace(record, model_artifact_ids=tuple(getattr(result, "artifact_hashes", ()) or ()),
+    artifact_hashes = tuple(dict.fromkeys(
+        hash_value
+        for result in results
+        for hash_value in (getattr(result, "artifact_hashes", ()) or ())
+    ))
+    release_ids = tuple(dict.fromkeys(
+        getattr(result, "release_id", request.deployment_id)
+        for result in results
+    ))
+    binding_ids = tuple(binding.binding_id for binding in bindings)
+    record = replace(record, model_artifact_ids=artifact_hashes,
                      evidence_refs=tuple(dict.fromkeys((*request.dependency_refs,
-                                                         getattr(result, "release_id", request.deployment_id), binding.binding_id))))
-    if result.status != "READY":
-        record = replace(record, reason_codes=tuple(dict.fromkeys((*record.reason_codes, *tuple(getattr(result, "reason_codes", ()) or ())))),
+                                                         *release_ids, *binding_ids))))
+    reasons = tuple(
+        reason
+        for result in results
+        for reason in (getattr(result, "reason_codes", ()) or ())
+    )
+    if any(getattr(result, "status", None) != "READY" for result in results):
+        record = replace(record, reason_codes=tuple(dict.fromkeys((*record.reason_codes, *reasons))),
                          validation_status="refused", readiness="refused")
     return with_score_id(record)
 
