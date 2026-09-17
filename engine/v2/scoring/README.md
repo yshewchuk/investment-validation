@@ -49,6 +49,34 @@ carry context, feature, forecast, geometry, pricing, analog, simulation, gate,
 chooser and serialization receipts. Legacy scoring remains available only
 through the explicit compatibility module for comparison.
 
+## Feature-change contract
+
+Before implementing a new or changed scoring stage, declare its authoritative
+inputs, outputs, ownership, units, missing-data and refusal behavior, and
+provenance. Emit the bounded Phase 4 checkpoint at the boundary that owns the
+result:
+
+- model feature vector, missing mask and model identity;
+- selected legs and entry cost;
+- simulation horizon, capital denominator, residual-population identity, draw
+  count and seed;
+- gate inputs; and
+- DYN-SV candidate eligibility and ranking values when applicable.
+
+Use the opt-in `engine.score.Phase4TraceCollector` for source-bound evidence.
+Real captures use
+`tools.phase4_checkpoint_sink.DiskCheckpointSink`, stream one per-case file,
+and keep only compact indexes in memory. Do not retain the full corpus or full
+DataFrames for tracing.
+
+Add a focused regression test and a planted-defect test for every checkpointed
+output. Include direct, batch and shuffled-input cases where relevant. Legacy
+outputs are expected results only: never supply them as native inputs or weaken
+an acceptance check to fit a fixture. Exhaustive internal tracing is optional;
+the acceptance evidence remains bounded checkpoints and full final-record
+parity. Code review must verify that the default path is unchanged when tracing
+is disabled.
+
 ## Testing
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no

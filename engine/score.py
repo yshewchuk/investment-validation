@@ -39,7 +39,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -343,11 +343,27 @@ class Phase4TraceCollector:
     """
 
     schema_version = "phase4_legacy_trace.v1.0"
+    checkpoint_schema_version = "phase4_legacy_diagnostic_checkpoint.v1.0"
+    _checkpoint_names = frozenset((
+        "features", "selection_pricing", "simulation", "gate_inputs", "dyn_sv",
+    ))
 
-    def __init__(self) -> None:
+    def __init__(self, *, retain_full_trace: bool = True,
+                 content_hasher: Callable[[Any], str] | None = None) -> None:
         self.request: dict[str, Any] | None = None
         self.stages: dict[str, dict[str, Any]] = {}
         self.status = "pending"
+        self.disposition: dict[str, Any] = {"status": "pending", "flags": []}
+        self._checkpoint_groups: dict[str, Any] = {}
+        self.retain_full_trace = bool(retain_full_trace)
+        self._content_hasher = content_hasher
+
+    def _hash(self, value: Any) -> str:
+        if self._content_hasher is None:
+            raise ValueError(
+                "phase 4 diagnostic checkpoints require an injected content hasher"
+            )
+        return self._content_hasher(value)
 
     @staticmethod
     def _document(value: Any) -> Any:
@@ -371,22 +387,104 @@ class Phase4TraceCollector:
     def begin(self, request: ScoreRequest) -> None:
         self.request = self._document(asdict(request))
 
+    def _checkpoint(self, name: str, value: Mapping[str, Any]) -> None:
+        """Retain one bounded, JSON-safe value from an execution boundary."""
+        if name not in self._checkpoint_names:
+            raise ValueError(f"unsupported phase 4 checkpoint group: {name}")
+        if name in self._checkpoint_groups:
+            raise ValueError(f"phase 4 checkpoint recorded twice: {name}")
+        self._checkpoint_groups[name] = self._document(value)
+
+    def capture_features(self, feature_vector: Mapping[str, Any],
+                         model_identity: Mapping[str, Any], *,
+                         role: str = "driver") -> None:
+        vector = self._document(feature_vector)
+        group = self._checkpoint_groups.setdefault("features", {
+            "feature_vector": {},
+            "missing_mask": {},
+            "model_identity": {},
+        })
+        if role in group["feature_vector"]:
+            raise ValueError(f"phase 4 feature role recorded twice: {role}")
+        group["feature_vector"][role] = vector
+        group["missing_mask"][role] = {
+            str(name): value is None for name, value in vector.items()
+        }
+        group["model_identity"][role] = self._document(model_identity)
+
+    def capture_selection_pricing(self, selected_legs: Sequence[Mapping[str, Any]],
+                                  entry_cost: float) -> None:
+        self._checkpoint("selection_pricing", {
+            "selected_legs": self._document(selected_legs),
+            "entry_cost": float(entry_cost),
+        })
+
+    def capture_simulation(self, *, horizon: Mapping[str, Any],
+                           capital_denominator: float, evidence: Mapping[str, Any]) -> None:
+        """Record simulation identity without retaining residual rows or paths."""
+        draw = evidence.get("residual_draw", {})
+        population = (
+            draw.get("fallback_indices", [])
+            if draw.get("fallback_used")
+            else draw.get("eligible_indices", [])
+        )
+        residual_identity = {
+            "cutoff": draw.get("cutoff"),
+            "cutoff_index": draw.get("cutoff_index"),
+            "bucket_count": draw.get("bucket_count"),
+            "bucket_index": draw.get("bucket_index"),
+            "fallback_used": bool(draw.get("fallback_used", False)),
+            "population_hash": self._hash(self._document(population)),
+            "selected_rows_hash": self._hash(
+                self._document(evidence.get("residual_rows", []))
+            ),
+        }
+        self._checkpoint("simulation", {
+            "horizon": self._document(horizon),
+            "capital_denominator": float(capital_denominator),
+            "residual_population_identity": residual_identity,
+            "draw_count": int(evidence["draw_count"]),
+            "seed": int(evidence["seed"]),
+        })
+
+    def capture_gate_inputs(self, value: Mapping[str, Any]) -> None:
+        self._checkpoint("gate_inputs", value)
+
+    def capture_dyn_sv(self, *, eligibility: Mapping[str, Any],
+                       ranking: Mapping[str, Any] | Sequence[Any]) -> None:
+        self._checkpoint("dyn_sv", {
+            "eligibility": eligibility,
+            "ranking": ranking,
+        })
+
     def record(self, stage: str, inputs: Any, output: Any, *,
                status: str = "completed") -> None:
         if stage in self.stages:
             raise ValueError(f"phase 4 trace stage recorded twice: {stage}")
-        self.stages[stage] = {
-            "status": status,
-            "input": self._document(inputs),
-            "output": self._document(output),
-        }
+        entry = {"status": status}
+        if self.retain_full_trace:
+            entry.update({
+                "input": self._document(inputs),
+                "output": self._document(output),
+            })
+        self.stages[stage] = entry
 
     def not_reached(self, stage: str, reason: str) -> None:
         if stage not in self.stages:
             self.record(stage, {}, {"reason": reason}, status="not_reached")
 
     def finish(self, result: "ScoreResult") -> None:
-        self.status = "refused" if result.flags else "completed"
+        if result.flags:
+            self.status = "refused"
+        elif result.scored or result.gate_pass is not None:
+            self.status = "completed"
+        else:
+            self.status = "missing_output"
+        self.disposition = {
+            "status": self.status,
+            "flags": self._document(result.flags),
+            "detail": result.detail,
+        }
         self.record(
             "serialization",
             {"request": self.request, "stage_names": tuple(self.stages)},
@@ -400,6 +498,21 @@ class Phase4TraceCollector:
             "status": self.status,
             "request": self._document(self.request),
             "stages": self._document(self.stages),
+        }
+
+    def diagnostic_checkpoint(self) -> dict[str, Any]:
+        """Return bounded contract groups with canonical content hashes."""
+        checkpoints = {
+            name: {
+                "value": self._document(value),
+                "content_hash": self._hash(value),
+            }
+            for name, value in self._checkpoint_groups.items()
+        }
+        return {
+            "schema_version": self.checkpoint_schema_version,
+            "disposition": self._document(self.disposition),
+            "checkpoints": checkpoints,
         }
 
 
@@ -1020,6 +1133,7 @@ class Scorer:
         )
         if trace is not None:
             result._phase4_trace_requested = True
+            result._phase4_checkpoint_collector = trace
 
         beaten = superseded_by(request.strategy)
         if beaten is not None:
@@ -1113,6 +1227,8 @@ class Scorer:
 
         # -- the live chain: entry cost, strike, and the moneyness label ----
         self._price_entry(request, structure, result, chain_index)
+        if trace is not None and result.legs and result.entry_cost is not None:
+            trace.capture_selection_pricing(result.legs, result.entry_cost)
         self._trace_phase4(
             trace,
             "geometry",
@@ -1812,6 +1928,17 @@ class Scorer:
             )
             for name in artifact.features
         }
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            collector.capture_features(
+                result.model_inputs,
+                {
+                    "model_id": entry.id,
+                    "role": driver,
+                    "input_as_of": result.model_input_as_of,
+                },
+                role=driver,
+            )
 
         missing = [f for f in artifact.features if f not in features.columns]
         if missing:
@@ -1940,6 +2067,24 @@ class Scorer:
             )
             for name in all_features
         }
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            for role, entry, artifact in (
+                ("implied_t1", implied_entry, implied_artifact),
+                ("runup_move", move_entry, move_artifact),
+            ):
+                collector.capture_features(
+                    {
+                        name: result.model_inputs[name]
+                        for name in artifact.features
+                    },
+                    {
+                        "model_id": entry.id,
+                        "role": role,
+                        "input_as_of": result.model_input_as_of,
+                    },
+                    role=role,
+                )
         missing = [name for name in all_features if name not in features.columns]
         if missing:
             result.flag("MISSING_FEATURES")
@@ -2221,6 +2366,24 @@ class Scorer:
         # for the layers that DO need them; it deduplicates its own flags, and
         # the second call is what the gate and analog layers see.
         features = self._features(request, result)
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            collector.capture_features(
+                {
+                    name: (
+                        float(features[name].iloc[0])
+                        if name in features.columns and pd.notna(features[name].iloc[0])
+                        else None
+                    )
+                    for name in served.features
+                },
+                {
+                    "model_id": served.model_id,
+                    "role": "forecast_sizing",
+                    "fold_start": served.fold_start,
+                },
+                role="forecast_sizing",
+            )
         missing = [f for f in served.features if f not in features.columns]
         if missing:
             result.flag("NO_FORECAST")
@@ -2279,6 +2442,14 @@ class Scorer:
                for term in rule.terms for need in term.needs):
             facts.update(self._simulated_pnl(request, result, features))
         verdict = rule.evaluate(facts)
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            collector.capture_gate_inputs({
+                "kind": "entry_rule",
+                "rule_identity": f"entry-rule:{rule.strategy}",
+                "facts": facts,
+                "terms": verdict.terms,
+            })
         result.model_versions["gate"] = f"entry-rule:{rule.strategy}"
         result.gate_pass = verdict.passed
         if verdict.passed is None:
@@ -2489,6 +2660,21 @@ class Scorer:
             selection = evidence.get("residual_draw", {}).get("selected_indices", [])
             evidence["residual_rows"] = pool.evidence_rows(selection)
             result._phase4_simulation_evidence = evidence
+            collector = getattr(result, "_phase4_checkpoint_collector", None)
+            if (
+                collector is not None
+                and simulated is not None
+                and evidence.get("status") == "completed"
+            ):
+                collector.capture_simulation(
+                    horizon={
+                        "exit_date": result.exit_date,
+                        "expiry": result.expiry,
+                        "dte_exit": dte_exit,
+                    },
+                    capital_denominator=result.entry_cost,
+                    evidence=evidence,
+                )
         return simulated
 
     def _simulated_pnl(self, request, result, features=None) -> dict:
@@ -2646,6 +2832,17 @@ class Scorer:
             result.detail = f"{result.detail}; {note}" if result.detail else note
             return
         result.gate_score = float(artifact.predict(X)[0])
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            collector.capture_gate_inputs({
+                "kind": "model",
+                "model_identity": entry.id,
+                "feature_vector": {
+                    name: float(value)
+                    for name, value in zip(artifact.features, X[0])
+                },
+                "threshold": entry.threshold,
+            })
         result.gate_threshold = entry.threshold
         if entry.threshold is not None:
             result.gate_pass = bool(result.gate_score >= entry.threshold)
@@ -2723,6 +2920,16 @@ class Scorer:
             frame = self._chooser_frame(request, result, features,
                                         artifact.features)
         except Exception as exc:  # a board must not die on one row
+            collector = getattr(result, "_phase4_checkpoint_collector", None)
+            if collector is not None:
+                collector.capture_dyn_sv(
+                    eligibility={
+                        "eligible": False,
+                        "candidate_strategy": request.strategy,
+                        "reason": "chooser_frame_error",
+                    },
+                    ranking=[],
+                )
             result.detail = (f"{result.detail}; chooser unavailable: {exc}"
                              if result.detail
                              else f"chooser unavailable: {exc}")
@@ -2731,6 +2938,16 @@ class Scorer:
         if not all(np.isfinite(v) for v in vector):
             absent = [name for name, v in zip(artifact.features, vector)
                       if not np.isfinite(v)]
+            collector = getattr(result, "_phase4_checkpoint_collector", None)
+            if collector is not None:
+                collector.capture_dyn_sv(
+                    eligibility={
+                        "eligible": False,
+                        "candidate_strategy": request.strategy,
+                        "missing_features": absent,
+                    },
+                    ranking=[],
+                )
             result.flag("CHOOSER_MISSING_FEATURES")
             note = f"chooser {entry.id}: non-finite {absent}"
             result.detail = f"{result.detail}; {note}" if result.detail else note
@@ -2739,6 +2956,23 @@ class Scorer:
         result.chooser_score = float(
             artifact.model.predict(np.asarray([vector], dtype=float))[0]
         )
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            collector.capture_dyn_sv(
+                eligibility={
+                    "eligible": True,
+                    "candidate_strategy": request.strategy,
+                    "missing_features": [],
+                },
+                ranking={
+                    "model_identity": entry.id,
+                    "feature_vector": {
+                        name: float(value)
+                        for name, value in zip(artifact.features, vector)
+                    },
+                    "score": result.chooser_score,
+                },
+            )
 
     def _chooser_frame(self, request, result, features, wanted
                       ) -> dict[str, float]:

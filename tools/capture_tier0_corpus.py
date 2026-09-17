@@ -329,15 +329,18 @@ def _score(scorer, request, *, index=None) -> tuple[dict, dict, float, dict]:
     started = time.monotonic()
     as_of = request.as_of if request.as_of is not None else request.chain_as_of
     try:
-        trace = score_mod.Phase4TraceCollector()
+        trace = score_mod.Phase4TraceCollector(
+            retain_full_trace=False, content_hasher=content_hash,
+        )
         result = (scorer.score(request, chain_index=index, trace=trace) if index is not None
                   else scorer.score(request, trace=trace))
     except score_mod.UNSCORABLE as exc:
         result = score_mod.unscorable_result(
             request, as_of=as_of, snapshot=scorer.snapshot, exc=exc
         )
+        trace.finish(result)
     raw = result.as_dict()
-    return raw, jsonable(raw), time.monotonic() - started, trace.document()
+    return raw, jsonable(raw), time.monotonic() - started, trace.diagnostic_checkpoint()
 
 
 def _candidate(request, raw: dict | None, record: dict, took: float, *,
