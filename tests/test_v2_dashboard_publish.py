@@ -167,5 +167,21 @@ def test_retained_publication_runs_through_real_service(tmp_path):
             build_fenced_rollback(log, tmp_path / "releases" / scope, tmp_path / "failure",
                 catalog_path=tmp_path / "ops.sqlite", store_root=tmp_path, code_hash="test", environment_hash="test")
         conn.execute("UPDATE releases SET manifest_json=? WHERE release_id=?", (original_manifest, first_id))
+        stale = submit_retained_publication(conn, store, registry=registry(),
+            policy=NamespacePolicy({"operator": frozenset({"shadow", "smoke"})}), clock=clock,
+            source_job_id=source.job_id, projection_binding_ref=projection.artifact_id,
+            operation_id="cancelled-fence")
+        stale_claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock), supervisor=supervisor,
+                                 clock=clock, registry=registry())
+        from engine.v2.ops.input_bindings import resolve_and_record
+        resolve_and_record(conn, store, stale_claim)
+        from engine.v2.ops.lifecycle import request_cancel
+        request_cancel(conn, stale.job_id, stale_claim.attempt_id, clock=clock)
+        from engine.v2.ops.effects_graph import publication_effect
+        from engine.v2.ops.errors import OpsError
+        current_before = release_current(tmp_path / "releases" / scope)
+        with pytest.raises(OpsError, match="LEASE_LOST"):
+            publication_effect(conn, store, stale_claim, tmp_path, REPO, clock=clock, store_root=FAKE_STORE_ROOT)
+        assert release_current(tmp_path / "releases" / scope) == current_before
     finally:
         conn.close()
