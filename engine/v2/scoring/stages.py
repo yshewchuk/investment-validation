@@ -1,9 +1,13 @@
 """Explicit inputs and receipts for the native scoring execution graph."""
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Mapping
+
+import numpy as np
+from scipy.stats import norm
 
 from engine.v2.domain.generation import Geometry, Pricing, generate, price
 from engine.v2.domain.valuation import terminal_payoff
@@ -89,13 +93,36 @@ _PRICING_OUTPUTS = frozenset({
 })
 _FORECAST_OUTPUTS = frozenset({
     "driver_prediction", "forecast_abs_move", "runup_move_prediction",
+    "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
     "forecast_p10", "forecast_p90", "forecast_sd",
 })
-_SIMULATION_OUTPUTS = frozenset({"exp_pnl_sim", "win_sim"})
+_SIMULATION_OUTPUTS = frozenset({
+    "exp_pnl_sim", "win_sim", "sim_p10", "sim_p90", "pool_n",
+})
 _GATE_OUTPUTS = frozenset({"gate_score", "gate_threshold", "gate_pass"})
+_FINANCIAL_OUTPUTS = frozenset({
+    "entry_cost_pct", "model_vs_market", "fair_premium_pct",
+    "premium_vs_fair", "cost_over_width", "terminal_payoff",
+    "planned_exit", "payoff_horizon", "payoff_refusal",
+    "exp_pnl_model", "win_model", "exp_pnl_analog", "win_analog",
+    "implied_move", "driver_name", "payoff", "strike",
+    "entry_date", "exit_date", "expiry",
+})
 _OWNED_OUTPUTS = (
     _PRICING_OUTPUTS | _FORECAST_OUTPUTS | _SIMULATION_OUTPUTS | _GATE_OUTPUTS
 )
+_DIAGNOSTIC_PROTECTED = _OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
+_ROLE_OUTPUTS = {
+    "driver": ("driver_prediction",),
+    "size": ("forecast_abs_move",),
+    "runup_move": ("runup_move_prediction",),
+    "iv_crush": ("pred_iv_crush", "pred_iv_crush_30"),
+    "fair_value": ("model_fair_pct",),
+}
+_SIM_DRAWS = 4000
+_SIM_MIN_POOL = 250
+_SIM_MIN_VOL = 0.01
+_SIM_MIN_SPOT_FRACTION = 1e-4
 
 
 def _merge_stage(values: dict[str, Any], block: Mapping[str, Any]) -> None:
@@ -146,6 +173,33 @@ def _linear(spec: Mapping[str, Any], facts: Mapping[str, Any],
     return value
 
 
+def _required_forecast_roles(inputs: NativeScoreInputs) -> tuple[str, ...]:
+    raw = inputs.forecast.get("required_roles") or ()
+    roles = [str(raw)] if isinstance(raw, str) else [str(item) for item in raw]
+    if inputs.forecast.get("driver_name") is not None and "driver" not in roles:
+        roles.append("driver")
+    planned = (
+        inputs.simulation.get("mode") == "planned_exit"
+        or inputs.simulation.get("residuals") is not None
+    )
+    if planned:
+        for role in ("size", "iv_crush"):
+            if role not in roles:
+                roles.append(role)
+    return tuple(roles)
+
+
+def _validate_forecast_roles(inputs: NativeScoreInputs,
+                             output: Mapping[str, Any],
+                             flags: list[str]) -> None:
+    for role in _required_forecast_roles(inputs):
+        fields = _ROLE_OUTPUTS.get(role)
+        if fields is None:
+            _add_flag(flags, f"UNKNOWN_FORECAST_ROLE:{role}")
+        elif not any(output.get(field) is not None for field in fields):
+            _add_flag(flags, f"MISSING_FORECAST_OUTPUT:{role}")
+
+
 def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
                       flags: list[str]) -> dict[str, Any]:
     block = inputs.forecast
@@ -170,7 +224,8 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
             output[field] = _linear(spec, facts, "forecast")
         except ValueError as exc:
             _add_flag(flags, exc)
-    if not declared and not output:
+    _validate_forecast_roles(inputs, output, flags)
+    if not declared:
         _add_flag(flags, "MISSING_FORECAST_INPUT")
     values.update(output)
     return output
@@ -270,6 +325,31 @@ def _resolve_pricing(inputs: NativeScoreInputs, name: str, geometry: Geometry,
         return Pricing(name, geometry.spot, 0.0, (), str(exc))
 
 
+def _publish_pricing(values: dict[str, Any], geometry: Geometry,
+                     pricing: Pricing, alpha: float) -> None:
+    legs = pricing.legs or geometry.legs
+    values.update({
+        "spot": geometry.spot,
+        "structure_width": geometry.width,
+        "entry_cost": (
+            pricing.entry_cost if pricing.refusal is None else None
+        ),
+        "fill": alpha,
+        "legs": tuple(vars(leg) for leg in legs),
+        "selected_contracts": tuple(vars(leg) for leg in geometry.legs),
+    })
+
+
+def _merge_diagnostics(values: dict[str, Any],
+                       block: Mapping[str, Any]) -> dict[str, Any]:
+    output = {
+        key: value for key, value in block.items()
+        if key not in _DIAGNOSTIC_PROTECTED and key != "flags"
+    }
+    values.update(output)
+    return output
+
+
 def _simulation_spots(block: Mapping[str, Any],
                       flags: list[str]) -> tuple[float, ...] | None:
     raw_spots = block.get("terminal_spots")
@@ -321,6 +401,184 @@ def _simulation_cutoff(block: Mapping[str, Any], output: dict[str, Any],
         output["pnl_cutoff"] = cutoff
 
 
+def _remaining_dte(values: Mapping[str, Any]) -> float | None:
+    expiry = values.get("expiry")
+    exit_date = values.get("exit_date")
+    if expiry is None or exit_date is None:
+        return None
+    try:
+        difference = (
+            np.datetime64(str(expiry)[:10])
+            - np.datetime64(str(exit_date)[:10])
+        )
+        return float(difference / np.timedelta64(1, "D"))
+    except ValueError:
+        return None
+
+
+def _black_scholes_put(spot: np.ndarray, strike: float, years: float,
+                       vol: np.ndarray) -> np.ndarray:
+    volatility = np.maximum(np.asarray(vol, dtype=float), _SIM_MIN_VOL)
+    if years <= 0.0:
+        return np.maximum(float(strike) - spot, 0.0)
+    sigma_time = volatility * np.sqrt(years)
+    d1 = (
+        np.log(spot / float(strike))
+        + 0.5 * volatility ** 2 * years
+    ) / sigma_time
+    return (
+        float(strike) * norm.cdf(-(d1 - sigma_time))
+        - spot * norm.cdf(-d1)
+    )
+
+
+def _residual_arrays(raw: Any) -> tuple[np.ndarray, ...]:
+    rows: list[tuple[np.datetime64, float, float, float]] = []
+    for item in raw or ():
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            event_date = np.datetime64(str(item["event_date"]))
+            prediction = float(item["pred_abs_move"])
+            move = float(item["err_move"])
+            crush = float(item["err_crush"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if np.isnat(event_date) or not all(
+            isfinite(value) for value in (prediction, move, crush)
+        ):
+            continue
+        rows.append((event_date, prediction, move, crush))
+    rows.sort(key=lambda item: item[0])
+    if not rows:
+        empty = np.empty(0, dtype=float)
+        return np.empty(0, dtype="datetime64[D]"), empty, empty, empty
+    return (
+        np.asarray([item[0] for item in rows]),
+        np.asarray([item[1] for item in rows], dtype=float),
+        np.asarray([item[2] for item in rows], dtype=float),
+        np.asarray([item[3] for item in rows], dtype=float),
+    )
+
+
+def _draw_residuals(block: Mapping[str, Any], event_date: Any,
+                    prediction: float, key: str,
+                    flags: list[str]) -> tuple[Any, ...] | None:
+    dates, predicted, move, crush = _residual_arrays(block.get("residuals"))
+    try:
+        cutoff = np.datetime64(str(event_date))
+    except ValueError:
+        _add_flag(flags, "INVALID_SIMULATION_EVENT_DATE")
+        return None
+    end = int(np.searchsorted(dates, cutoff, side="left"))
+    if end < _SIM_MIN_POOL:
+        _add_flag(flags, "INSUFFICIENT_SIMULATION_POOL")
+        return None
+    edges = np.quantile(
+        predicted[:end], np.linspace(0.0, 1.0, 11)[1:-1],
+    )
+    bucket = int(np.searchsorted(edges, prediction, side="right"))
+    rows = np.flatnonzero(
+        np.searchsorted(edges, predicted[:end], side="right") == bucket
+    )
+    if rows.size < _SIM_MIN_POOL:
+        rows = np.arange(end)
+    try:
+        draws = int(block.get("draws", _SIM_DRAWS))
+    except (TypeError, ValueError):
+        draws = 0
+    if draws <= 0:
+        _add_flag(flags, "INVALID_SIMULATION_DRAWS")
+        return None
+    seed = int.from_bytes(
+        hashlib.sha256(f"{key}|{event_date}".encode()).digest()[:8], "big",
+    )
+    rng = np.random.default_rng(seed)
+    chosen = rows[rng.integers(0, rows.size, size=draws)]
+    return move[chosen], crush[chosen], rng, end
+
+
+def _planned_parameters(block: Mapping[str, Any], values: Mapping[str, Any],
+                        flags: list[str]) -> tuple[Any, ...] | None:
+    parameters = {
+        "spot": values.get("spot"),
+        "entry_cost": values.get("entry_cost"),
+        "pre_iv30": block.get("pre_iv30", values.get("pre_iv30")),
+        "pred_abs_move": values.get("forecast_abs_move"),
+        "pred_iv_crush": values.get(
+            "pred_iv_crush", values.get("pred_iv_crush_30"),
+        ),
+        "dte_exit": block.get("dte_exit", _remaining_dte(values)),
+    }
+    missing = [
+        name for name, value in parameters.items() if _finite(value) is None
+    ]
+    event_date = block.get("event_date", values.get("event_date"))
+    if event_date is None:
+        missing.append("event_date")
+    if block.get("residuals") is None:
+        missing.append("residuals")
+    for name in missing:
+        _add_flag(flags, f"MISSING_SIMULATION_INPUT:{name}")
+    if missing:
+        return None
+    numeric = tuple(float(parameters[name]) for name in (
+        "spot", "entry_cost", "pre_iv30", "pred_abs_move",
+        "pred_iv_crush", "dte_exit",
+    ))
+    if numeric[2] <= 0.0 or numeric[1] <= 0.0 or numeric[5] < 0.0:
+        _add_flag(flags, "INVALID_SIMULATION_INPUT")
+        return None
+    return (*numeric, event_date)
+
+
+def _planned_exit_simulation(
+    block: Mapping[str, Any],
+    values: Mapping[str, Any],
+    pricing: Pricing,
+    key: str,
+    flags: list[str],
+) -> dict[str, Any]:
+    parameters = _planned_parameters(block, values, flags)
+    if parameters is None or not pricing.legs:
+        if not pricing.legs:
+            _add_flag(flags, "MISSING_SIMULATION_INPUT:exit_legs")
+        return {}
+    spot, entry_cost, pre_iv30, move_forecast, crush_forecast, dte, event_date = parameters
+    sampled = _draw_residuals(
+        block, event_date, move_forecast, key, flags,
+    )
+    if sampled is None:
+        return {}
+    err_move, err_crush, rng, pool_n = sampled
+    move = np.maximum(move_forecast + err_move, 0.0)
+    crush = crush_forecast + err_crush
+    sign = rng.choice((-1.0, 1.0), size=move.size)
+    spot_exit = spot * np.maximum(
+        1.0 + sign * move / 100.0, _SIM_MIN_SPOT_FRACTION,
+    )
+    vol_exit = (pre_iv30 / 100.0) * (1.0 + crush / 100.0)
+    value = np.zeros(move.size)
+    for leg in pricing.legs:
+        if not isfinite(float(leg.strike)) or float(leg.quantity) == 0.0:
+            continue
+        side = 1.0 if str(leg.side).lower() == "buy" else -1.0
+        value += (
+            side * float(leg.quantity)
+            * _black_scholes_put(
+                spot_exit, float(leg.strike), dte / 365.0, vol_exit,
+            )
+        )
+    returns = (value - entry_cost) / entry_cost
+    return {
+        "exp_pnl_sim": float(np.mean(returns)),
+        "win_sim": float(np.mean(returns > 0.0)),
+        "sim_p10": float(np.quantile(returns, 0.10)),
+        "sim_p90": float(np.quantile(returns, 0.90)),
+        "pool_n": int(pool_n),
+    }
+
+
 def _execute_simulation(
     inputs: NativeScoreInputs,
     values: dict[str, Any],
@@ -330,6 +588,17 @@ def _execute_simulation(
 ) -> dict[str, Any]:
     block = inputs.simulation
     output: dict[str, Any] = {}
+    planned = (
+        block.get("mode") == "planned_exit"
+        or block.get("residuals") is not None
+    )
+    if planned:
+        output = _planned_exit_simulation(
+            block, values, pricing, geometry.strategy, flags,
+        )
+        _simulation_cutoff(block, output, flags)
+        values.update(output)
+        return output
     spots = _simulation_spots(block, flags)
     if spots is None:
         return output
@@ -443,9 +712,16 @@ def _append_late_stages(
         for stage, block in (
             ("chooser", inputs.chooser), ("diagnostics", inputs.diagnostics),
         ):
-            _merge_stage(values, block)
-            output = {key: value for key, value in block.items()
-                      if key not in _OWNED_OUTPUTS and key != "flags"}
+            output = (
+                _merge_diagnostics(values, block)
+                if stage == "diagnostics"
+                else {
+                    key: value for key, value in block.items()
+                    if key not in _OWNED_OUTPUTS and key != "flags"
+                }
+            )
+            if stage != "diagnostics":
+                values.update(output)
             executed.append(receipt(
                 stage, {"prior": executed[-1].output_hash}, output,
             ))
@@ -477,18 +753,16 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     )
     executed.append(receipt("pricing", {"geometry": geometry, "quotes": quotes,
                                          "fill_alpha": alpha}, pricing))
+    _publish_pricing(values, geometry, pricing, alpha)
     _append_late_stages(
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
     )
     for refusal in (geometry.refusal, pricing.refusal):
         if refusal:
             _add_flag(flags, refusal)
-    legs = pricing.legs or geometry.legs
-    values.update({"spot": geometry.spot, "structure_width": geometry.width,
-                   "entry_cost": pricing.entry_cost if pricing.refusal is None else None,
-                   "fill": alpha, "legs": tuple(vars(leg) for leg in legs),
-                   "selected_contracts": tuple(vars(leg) for leg in geometry.legs),
-                   "flags": tuple(flags), "native_source_ref": inputs.source_ref})
+    _publish_pricing(values, geometry, pricing, alpha)
+    values.update({"flags": tuple(flags),
+                   "native_source_ref": inputs.source_ref})
     executed.append(receipt("serialization", values, values))
     values["native_stage_receipts"] = tuple({"stage": item.stage,
         "input_hash": item.input_hash, "output_hash": item.output_hash,

@@ -1,5 +1,9 @@
+from dataclasses import replace
+
+import pandas as pd
 import pytest
 
+from engine import pnl_sim
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
 from engine.v2.scoring import application
@@ -73,6 +77,7 @@ def _native() -> NativeScoreInputs:
             "exp_pnl_sim": 999.0,
             "gate_pass": False,
             "entry_cost": 999.0,
+            "model_fair_pct": 999.0,
         },
         source_ref="typed-native-fixture",
         stage_receipts=receipts,
@@ -106,3 +111,154 @@ def test_empty_compatibility_input_refuses_missing_essentials():
     assert record.readiness == "refused"
     assert "MISSING_SPOT" in record.reason_codes
     assert record.financial_diagnostics["entry_cost_pct"] is None
+
+
+def _residuals() -> list[dict]:
+    dates = pd.date_range("2024-01-01", periods=300, freq="D")
+    return [
+        {
+            "event_date": str(day.date()),
+            "pred_abs_move": 4.0 + index % 20 / 10.0,
+            "err_move": (index % 11 - 5) / 4.0,
+            "err_crush": float(index % 9 - 4),
+        }
+        for index, day in enumerate(dates)
+    ]
+
+
+def _planned_native() -> NativeScoreInputs:
+    base = _native()
+    context = {
+        **base.context,
+        "event_date": "2026-09-16",
+        "exit_date": "2026-09-09",
+    }
+    forecast = {
+        **base.forecast,
+        "models": {
+            **base.forecast["models"],
+            "pred_iv_crush": {"intercept": -20.0, "coefficients": {}},
+            "model_fair_pct": {"intercept": 4.6, "coefficients": {}},
+        },
+    }
+    return replace(
+        base,
+        context=context,
+        forecast=forecast,
+        simulation={
+            "mode": "planned_exit",
+            "pre_iv30": 40.0,
+            "residuals": _residuals(),
+        },
+    )
+
+
+def test_planned_exit_simulation_matches_legacy_kernel_and_is_deterministic():
+    inputs = _planned_native()
+    request = _request(0.5)
+    first = application.score_one(request, inputs)
+    second = application.score_one(request, inputs)
+    priced = price(
+        inputs.geometry,
+        {
+            (leg.right, leg.strike, leg.expiry): {
+                "bid": leg.bid,
+                "ask": leg.ask,
+            }
+            for leg in inputs.pricing.legs
+        },
+        0.5,
+    )
+    history = pd.DataFrame(_residuals())
+    expected = pnl_sim.expected_pnl(
+        exit_legs=[
+            {
+                "strike": leg.strike,
+                "qty": leg.quantity,
+                "side": "sell" if leg.side == "buy" else "buy",
+            }
+            for leg in priced.legs
+        ],
+        spot=100.0,
+        entry_cost=priced.entry_cost,
+        pre_iv30=40.0,
+        pred_abs_move=7.0,
+        pred_iv_crush=-20.0,
+        dte_exit=9.0,
+        event_date="2026-09-16",
+        pool=pnl_sim.ResidualPool(history),
+        key="STR-THRU",
+    )
+
+    assert first.forecasts["exp_pnl_sim"] == pytest.approx(
+        expected["exp_pnl_sim"],
+    )
+    assert first.resolved_request["win_sim"] == pytest.approx(
+        expected["win_sim"],
+    )
+    assert first.resolved_request["sim_p10"] == pytest.approx(
+        expected["sim_p10"],
+    )
+    assert first.resolved_request["sim_p90"] == pytest.approx(
+        expected["sim_p90"],
+    )
+    assert first.resolved_request["pool_n"] == expected["pool_n"]
+    assert first.forecasts == second.forecasts
+    assert first.resolved_request["sim_p10"] == second.resolved_request["sim_p10"]
+
+
+def test_planned_exit_missing_inputs_refuse_without_fabricated_outputs():
+    inputs = _planned_native()
+    inputs = replace(
+        inputs,
+        simulation={"mode": "planned_exit", "pre_iv30": 40.0},
+    )
+
+    record = application.score_one(_request(), inputs)
+
+    assert record.validation_status == "refused"
+    assert "MISSING_SIMULATION_INPUT:residuals" in record.reason_codes
+    assert record.forecasts["exp_pnl_sim"] is None
+
+
+def test_driver_name_without_driver_output_refuses():
+    inputs = replace(
+        _native(),
+        forecast={"driver_name": "abs_move"},
+    )
+
+    record = application.score_one(_request(), inputs)
+
+    assert record.validation_status == "refused"
+    assert "MISSING_FORECAST_OUTPUT:driver" in record.reason_codes
+    assert record.forecasts["driver_prediction"] is None
+
+
+def test_pricing_is_published_before_gate_and_diagnostics_cannot_replace_fair_value():
+    base = _planned_native()
+    inputs = replace(
+        base,
+        gate={
+            "model": {
+                "intercept": 4.0,
+                "coefficients": {"entry_cost": -1.0},
+            },
+            "threshold": 0.0,
+        },
+    )
+
+    worst = application.score_one(_request(0.0), inputs)
+    best = application.score_one(_request(1.0), inputs)
+
+    assert worst.gate_terms == {
+        "gate_score": -2.0,
+        "gate_threshold": 0.0,
+        "gate_pass": False,
+    }
+    assert best.gate_terms == {
+        "gate_score": 2.0,
+        "gate_threshold": 0.0,
+        "gate_pass": True,
+    }
+    assert worst.financial_diagnostics["fair_premium_pct"] == pytest.approx(4.6)
+    assert best.financial_diagnostics["fair_premium_pct"] == pytest.approx(4.6)
