@@ -99,7 +99,10 @@ L01-L14 matrix against ``checks/phase3_acceptance.json`` -- see
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -107,8 +110,9 @@ from checks.rearchitecture_phase2_evidence import PHASE2_EVIDENCE_V1, validate_e
 from engine.v2.contracts import ArtifactRef, ObjectRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: F401
 from engine.v2.data.documents import decode_document
 from engine.v2.diagnosis.receipt import AGREE, ComparisonReceipt
-from engine.v2.foundation import DocumentError, from_document
+from engine.v2.foundation import DocumentError, content_hash, from_document
 from engine.v2.serving.projections import PROJECTION_BINDING_V1
+from engine.v2.serving.legacy_bundle import load_legacy_bundle
 
 PHASE3_EVIDENCE_V1 = "phase3_evidence.v1.0"
 AUTHORITY_MODE = "shadow"
@@ -437,6 +441,28 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                     or (expected_hash is not None and artifact.content_hash != expected_hash):
                 findings.append({"code": "PREVIEW_PROOF_ARTIFACT_MISMATCH",
                                  "field": f"preview_input_refs[{index}].{metadata_name}"})
+                field_ok["preview_input_refs"] = False
+        bundle_ref = files.get("bundle") if isinstance(files, dict) else None
+        bundle_bytes = _resolve(bundle_ref, artifact_root, findings, f"preview_input_refs[{index}].bundle")
+        if bundle_bytes is not None:
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    with tarfile.open(fileobj=io.BytesIO(bundle_bytes), mode="r:*") as archive:
+                        for member in archive.getmembers():
+                            target = (root / member.name).resolve()
+                            if not member.isfile() or root not in target.parents:
+                                raise ValueError("unsafe bundle member")
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            source = archive.extractfile(member)
+                            if source is None:
+                                raise ValueError("unreadable bundle member")
+                            target.write_bytes(source.read())
+                    _rows, manifest = load_legacy_bundle(root)
+                if content_hash(manifest) != preview.bundle_manifest_ref:
+                    raise ValueError("bundle manifest mismatch")
+            except (OSError, tarfile.TarError, ValueError):
+                findings.append({"code": "PREVIEW_PROOF_BUNDLE_MISMATCH", "field": f"preview_input_refs[{index}].bundle"})
                 field_ok["preview_input_refs"] = False
         for name, kind, expected_ref, job_field in (("score_comparison_receipt", "score_record_parity", preview.score_comparison_receipt_ref, "score_job_id"),
                                                      ("render_comparison_receipt", "render_bundle_parity", preview.render_comparison_receipt_ref, "render_job_id")):
