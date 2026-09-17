@@ -151,6 +151,19 @@ def test_worker_dispatch_invokes_data_callback_and_returns_bounded_manifest(
     assert set(result) == {"outputs", "completed_ids", "no_work"}
 
 
+def test_actual_worker_refuses_missing_refresh_input_without_completing_ids(tmp_path):
+    with pytest.raises(OpsError) as caught:
+        worker.dispatch("incremental_refresh", _parameters(), tmp_path)
+    assert caught.value.code == "WORKER_FAILED"
+
+    document = json.loads(
+        (tmp_path / incremental_data.REFRESH_RESULT_PATH).read_text())
+    assert document["status"] == "failed"
+    assert document["completed_ids"] == []
+    assert document["coverage_advanced"] is False
+    assert document["candidate_snapshot_id"] is None
+
+
 @pytest.mark.parametrize(
     ("status", "code"),
     [

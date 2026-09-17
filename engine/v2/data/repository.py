@@ -601,16 +601,33 @@ class Repository:
             event_ref = snapshot_ref.table_versions.get("earnings_events")
             if event_ref is None:
                 raise errors.fail("CONTRACT_MISMATCH", "snapshot has no earnings_events table")
+            event_columns = (
+                "event_id", "ticker", "event_date", "session", "session_src",
+                "date_agree", "date_conflict", "event_cluster_id",
+            )
             event_query = DataQuery(
                 snapshot_id=snapshot_ref.snapshot_id,
                 table_contract_ref=event_ref.table_contract_ref,
-                columns=("event_id", "ticker", "event_date", "session",
-                         "session_src", "event_cluster_id"),
+                columns=event_columns,
                 key_filter=(KeyPredicate(column="event_id", operator="eq",
                                          values=(query.event_ref.event_id,)),),
                 order_by=("event_id",), max_batch_rows=1000, max_result_rows=1000)
             dependencies.extend(self._explain_data_query(
                 event_query, "earnings_events").dependencies)
+            event_rows = []
+            for batch in self.scan(event_query, table_name="earnings_events"):
+                event_rows.extend(batch.to_pylist())
+            if event_rows and event_rows[0].get("event_cluster_id") is not None:
+                cluster_query = DataQuery(
+                    snapshot_id=snapshot_ref.snapshot_id,
+                    table_contract_ref=event_ref.table_contract_ref,
+                    columns=("event_id", "ticker", "event_cluster_id"),
+                    key_filter=(KeyPredicate(
+                        column="ticker", operator="eq",
+                        values=(event_rows[0]["ticker"],)),),
+                    order_by=("event_id",), max_batch_rows=1000, max_result_rows=1000)
+                dependencies.extend(self._explain_data_query(
+                    cluster_query, "earnings_events").dependencies)
         chain_ref = snapshot_ref.table_versions.get("option_chains")
         if chain_ref is None:
             raise errors.fail("CONTRACT_MISMATCH", "snapshot has no option_chains table")

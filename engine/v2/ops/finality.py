@@ -60,7 +60,8 @@ def _exact_share(table: str, column: str, stamp: pd.Timestamp, wanted: set[str],
     return len(carried & got) / len(carried), len(carried)
 
 
-def _native_session_finality(value, tickers: Iterable[str], *, frames=None):
+def _native_session_finality(value, tickers: Iterable[str], *, frames=None,
+                              market_wide=None):
     stamp = pd.Timestamp(value).normalize()
     wanted = {str(item) for item in tickers if item is not None and str(item)}
     frames = frames or {}
@@ -69,7 +70,8 @@ def _native_session_finality(value, tickers: Iterable[str], *, frames=None):
     chain_share, chain_covered = _exact_share(
         "option_chains", "obs_date", stamp, wanted, frames.get("option_chains"))
     covered = min(daily_covered, chain_covered)
-    market_wide = _market_wide_complete(stamp)
+    if market_wide is None:
+        market_wide = _market_wide_complete(stamp)
     final = bool(wanted) and covered > 0 and market_wide \
         and daily_share >= MIN_FINAL_DAILY_SHARE \
         and chain_share >= MIN_FINAL_CHAIN_SHARE
@@ -91,12 +93,13 @@ def _native_session_finality(value, tickers: Iterable[str], *, frames=None):
         tickers=len(wanted), covered=int(covered))
 
 
-def session_finality(value, tickers: Iterable[str], *, frames=None):
+def session_finality(value, tickers: Iterable[str], *, frames=None, market_wide=None):
     compatibility = _legacy_compatibility("session_finality", _native_session_finality)
     if compatibility is not _native_session_finality:
         result = compatibility(value, tickers, frames=frames)
         return SessionFinality(**result.as_dict())
-    return _native_session_finality(value, tickers, frames=frames)
+    return _native_session_finality(value, tickers, frames=frames,
+                                    market_wide=market_wide)
 
 
 def _native_resolve_final_session(requested, tickers, *, calendar, max_sessions=15):

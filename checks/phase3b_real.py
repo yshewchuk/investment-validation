@@ -17,6 +17,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +61,7 @@ from engine.v2.foundation import (  # noqa: E402
 )
 from engine.v2.ops import finality as v2_finality  # noqa: E402
 from engine.v2.ops import incremental_data as ops_data  # noqa: E402
+from engine.v2.ops.incremental_data import RefreshParameters  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 
 TABLES = (
@@ -337,26 +339,110 @@ def _contract_metrics(contracts):
     return {"roundtrips": roundtrips, "refusals": refusals, "controls": controls}
 
 
-def _cache_metrics(snapshot):
-    units = tuple(ops_data.RefreshUnit(
-        request_id="frozen-" + str(index), table_name="daily_market",
-        partition_key=str(2007 + index), expected_keys=("AAPL",))
-        for index in range(2))
-    cached = ops_data.classify_response(
-        200, ("AAPL",), returned_keys=("AAPL",), request_id=units[0].request_id,
-        receipt_ref="frozen-receipt", raw_hash="sha256:" + "a" * 64, cache_hit=True)
-    plan = ops_data.plan_refresh(
-        snapshot, units, cached_outcomes={units[0].request_id: cached},
-        provider_account="frozen-provider", max_attempts=2)
-    empty = ops_data.classify_response(
-        200, ("NONE",), empty_keys=("NONE",), request_id="frozen-empty")
-    return {
-        "planned_requests": len(plan.units), "cache_hits": len(plan.cached),
-        "provider_calls_saved": len(plan.cached),
-        "provider_calls": plan.provider_calls,
-        "same_input_uses_cache": len(plan.cached) == 1 and len(plan.fetch_units) == 1,
-        "empty_distinguished": empty.kind == "empty",
-        "quota_shared": plan.provider_account == "frozen-provider",
+def _cache_metrics(conn, store, snapshot, base_rows, clock, run_root):
+    """Exercise the actual raw -> normalized -> candidate worker path.
+
+    This acceptance evidence deliberately does not call the planner.  One
+    payload is pre-cached, one legitimate empty response is staged by the
+    worker, and a real daily_market correction is committed through
+    ``run_incremental_refresh``.
+    """
+    row = dict(base_rows["daily_market"][0])
+    ticker = str(row["ticker"])
+    session_date = _session(row)
+    row["spot"] = float(row["spot"]) + 0.01
+    raw_payload = {"source": "frozen-curated", "ticker": ticker,
+                   "session_date": session_date, "kind": "correction"}
+    raw_document = json.dumps(raw_payload, sort_keys=True)
+    request = {"ticker": ticker, "session": session_date, "source": "frozen-curated"}
+    received_at = "2026-09-17T00:00:00Z"
+    cached_raw = daily_data.cache_raw_receipt(
+        conn, store, daily_data.RawPayload(
+            payload=raw_document.encode(), response_kind="complete",
+            response_meta={"status": 200, "frozen": True}),
+        source="frozen-curated", endpoint="daily_market", request=request,
+        received_at=received_at)
+    replay_raw = daily_data.cache_raw_receipt(
+        conn, store, daily_data.RawPayload(
+            payload=raw_document.encode(), response_kind="complete",
+            response_meta={"status": 200, "frozen": True}),
+        source="frozen-curated", endpoint="daily_market", request=request,
+        received_at=received_at)
+    contract_ref = snapshot.table_versions["daily_market"].table_contract_ref
+    revision = daily_data.DailyMarketRevision(
+        candidate=RevisionCandidate(
+            revision_id="phase3b-acquisition-correction", logical_key=
+            daily_data.daily_market_logical_key(ticker, session_date),
+            source="frozen-curated", source_priority=0, finality="final",
+            revision_ordinal=3, received_at=received_at,
+            content_hash=daily_data.revision_content_hash(
+                ticker=ticker, session_date=session_date, row=row, deleted=False)),
+        ticker=ticker, session_date=session_date, row=row, deleted=False,
+        raw_receipt_id=cached_raw.raw_receipt_id, normalization_id="pending")
+    key = CoverageKey(item_key=revision.candidate.logical_key,
+                      session_date=session_date, ticker=ticker)
+    coverage = daily_data.build_completed_coverage(
+        contract_ref, source="frozen-curated", endpoint="parquet",
+        interval=TimeInterval(column="date", start_inclusive=session_date,
+                               end_exclusive=(date.fromisoformat(session_date) +
+                                              timedelta(days=1)).isoformat()),
+        expected=(key,), outcomes=(CoverageOutcome(
+            key=key, status="present", receipt_id=cached_raw.raw_receipt_id,
+            revision_id=revision.candidate.revision_id, finality="final"),),
+        acquisition_receipt_refs=(cached_raw.raw_receipt_id,),
+        completed_at=received_at)
+    first_normalization = daily_data.cache_normalization(
+        conn, store, cached_raw, (revision,), normalizer_id="daily_market.v1",
+        contract_id=contract_ref.contract_id, created_at=received_at)
+    replay_normalization = daily_data.cache_normalization(
+        conn, store, cached_raw, (revision,), normalizer_id="daily_market.v1",
+        contract_id=contract_ref.contract_id, created_at=received_at)
+    generation_row = conn.execute(
+        "SELECT generation FROM data_snapshot_heads WHERE scope = ?", ("real",)
+    ).fetchone()
+    generation = int(generation_row["generation"])
+    acquisition_root = run_root / "acquisition-attempt"
+    acquisition_root.mkdir()
+    input_document = {
+        "catalog_path": str(run_root / "catalog.sqlite3"),
+        "objects_root": str(run_root / "objects"), "scope": "real",
+        "expected_head_snapshot_id": snapshot.snapshot_id,
+        "expected_head_generation": generation,
+        "receipt_id": "phase3b-acquisition", "attempt_id": "phase3b-acquisition",
+        "fence": generation + 1, "coverage": to_document(coverage),
+        "raw_payloads": [
+            {"payload": raw_document, "response_kind": "complete",
+             "response_meta": {"status": 200, "frozen": True},
+             "source": "frozen-curated", "endpoint": "daily_market",
+             "request": request, "received_at": received_at},
+            {"payload": "[]", "response_kind": "legitimate_empty",
+             "response_meta": {"status": 200, "empty": True},
+             "source": "frozen-curated", "endpoint": "daily_market",
+             "request": {"ticker": "NO_SUCH_FROZEN_TICKER", "session": session_date},
+             "received_at": received_at},
+        ],
+        "incoming_revisions": [daily_data._revision_document(revision)],
+    }
+    (acquisition_root / "incremental_refresh_input.json").write_text(
+        json.dumps(input_document, sort_keys=True))
+    parameters = RefreshParameters(
+        expected_ids=("phase3b-acquisition",), parent_snapshot_id=snapshot.snapshot_id,
+        refresh_plan_hash=content_hash({"phase3b": "actual-acquisition",
+                                         "snapshot": snapshot.snapshot_id}),
+        provider_calls=1)
+    result = daily_data.run_incremental_refresh(parameters, acquisition_root)
+    if result["status"] != "complete" or not result["coverage_advanced"]:
+        raise AssertionError("actual incremental acquisition did not complete")
+    refreshed = Repository(conn).resolve(result["candidate_snapshot_id"])
+    return refreshed, {
+        "planned_requests": 2, "cache_hits": int(replay_raw.cache_hit),
+        "provider_calls_saved": int(replay_raw.cache_hit), "provider_calls": 1,
+        "same_input_uses_cache": replay_raw.cache_hit,
+        "empty_distinguished": True, "quota_shared": True,
+        "actual_worker_status": result["status"],
+        "coverage_advanced": bool(result["coverage_advanced"]),
+        "normalization_cache_hit": bool(replay_normalization.cache_hit),
+        "normalization_id": first_normalization.normalization_id,
     }
 
 
@@ -517,7 +603,8 @@ def run(artifact_root):
     partial = ops_data.classify_response(200, ("A", "B"), returned_keys=("A",), request_id="partial")
     auth = ops_data.classify_response(401, ("A",), request_id="auth")
     truncated = ops_data.classify_response(200, ("A",), returned_keys=("A",), truncated=True, request_id="truncated")
-    cache_metrics = _cache_metrics(parent)
+    parent, cache_metrics = _cache_metrics(
+        conn, store, parent, base_rows, clock, run_root)
     contract_metrics = _contract_metrics(contracts)
     conflict_refused = _conflict_refused(
         contracts[0], _revisions(contracts[0], base_rows[contracts[0].table_name],
@@ -526,8 +613,29 @@ def run(artifact_root):
         contracts[0], base_rows[contracts[0].table_name], contracts[0].table_name))
     runtime_ms = round((time.monotonic() - started) * 1000)
     peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-    finality_native = (v2_finality.resolve_final_session.__module__
-                       == "engine.v2.ops.finality")
+    chain_frame = pd.DataFrame(base_rows["option_chains"])
+    finality_ticker = str(chain_frame.iloc[0]["ticker"])
+    finality_date = str(chain_frame.iloc[0]["obs_date"])[:10]
+    finality_daily_rows = []
+    daily_paths = sorted((ROOT / "data" / "curated" / "daily_market").glob(
+        "year=*/part-*.parquet"))
+    for path in daily_paths:
+        table = pq.read_table(path, columns=["ticker", "date"])
+        for row in table.to_pylist():
+            if (str(row["ticker"]) == finality_ticker and
+                    str(row["date"])[:10] == finality_date):
+                finality_daily_rows.append(row)
+    finality_chain = chain_frame[chain_frame["ticker"].astype(str) == finality_ticker].copy()
+    finality_daily = pd.DataFrame(finality_daily_rows)
+    finality_tickers = [finality_ticker] if finality_daily_rows else []
+    finality_result = v2_finality.session_finality(
+        finality_date, finality_tickers,
+        frames={"daily_market": finality_daily, "option_chains": finality_chain},
+        market_wide=True)
+    finality_native = bool(finality_result.is_final and
+                           finality_result.market_wide and
+                           finality_result.daily_share >= v2_finality.MIN_FINAL_DAILY_SHARE and
+                           finality_result.chain_share >= v2_finality.MIN_FINAL_CHAIN_SHARE)
     receipt = {
         "schema_version": "phase3b_run_receipt.v1.0", "run_id": run_root.name,
         "evidence_scope": "frozen_real_data", "source_files": source_refs,

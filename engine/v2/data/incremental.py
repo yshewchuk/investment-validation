@@ -984,16 +984,25 @@ def commit_daily_market_candidate(conn: Any, store: ArtifactStore,
 
 def run_incremental_refresh(parameters, root):
     path = root / "incremental_refresh_input.json"
-    document = json.loads(path.read_text()) if path.is_file() else {}
-    binding = document.get("catalog_path")
     base = {
         "parent_snapshot_id": parameters.parent_snapshot_id,
         "refresh_plan_hash": parameters.refresh_plan_hash,
-        "completed_ids": list(parameters.expected_ids),
     }
+    if not path.is_file():
+        result = {
+            **base, "completed_ids": [], "status": "failed",
+            "coverage_advanced": False, "candidate_snapshot_id": None,
+        }
+        return _write_refresh_result(root, result)
+
+    document = json.loads(path.read_text())
+    binding = document.get("catalog_path")
     if not binding:
-        result = {**base, "status": "noop", "coverage_advanced": False,
-                  "candidate_snapshot_id": None}
+        result = {
+            **base, "completed_ids": list(parameters.expected_ids),
+            "status": "noop", "coverage_advanced": False,
+            "candidate_snapshot_id": None,
+        }
         return _write_refresh_result(root, result)
 
     catalog_path = binding
@@ -1038,7 +1047,8 @@ def run_incremental_refresh(parameters, root):
             attempt_id=document.get("attempt_id"),
             fence=int(document.get("fence", 1)), fault=fault)
         result = {
-            **base, "status": "complete", "coverage_advanced": True,
+            **base, "completed_ids": list(parameters.expected_ids),
+            "status": "complete", "coverage_advanced": True,
             "candidate_snapshot_id": receipt.resulting_head_snapshot_id,
         }
         return _write_refresh_result(root, result)

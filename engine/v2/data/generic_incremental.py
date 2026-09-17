@@ -7,7 +7,7 @@ same immutable-object, manifest, and atomic-head protocol used by
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any, Callable, Sequence
 
@@ -83,6 +83,13 @@ def build_generic_table_candidate(
     affected = _affected_partitions(contract, (*retained, *incoming))
     prior_rows = _load_rows(store, prior_records, contract, partitions=affected)
     merge = tables.merge_table_rows(contract, prior_rows, retained, incoming)
+    if merge.changes:
+        merge = replace(
+            merge,
+            changed_partitions=tuple(sorted(
+                set(merge.changed_partitions) | set(affected)
+            )),
+        )
     ref = prior_manifest.dataset_version_ref.table_contract_ref
     new_records, new_objects = _write_partitions(
         store, contract, ref, merge, coverage)
@@ -95,7 +102,9 @@ def build_generic_table_candidate(
         source_priority_version=parent.snapshot.source_priority_version,
         finality_receipt_refs=parent.snapshot.finality_receipt_refs,
         parent_snapshot_id=parent_snapshot_id or parent.snapshot.snapshot_id)
-    records = _replace_records(parent, prior_records, new_records)
+    records = _replace_records(
+        parent, prior_records, new_records, merge.changed_partitions,
+    )
     objects_by_id = {item.object_id: item for item in parent.objects}
     objects_by_id.update({item.object_id: item for item in new_objects})
     changeset = _changeset(snapshot, prior_manifest, manifest, ref, coverage, merge)
@@ -211,11 +220,13 @@ def _load_rows(store, records, contract, *, partitions=None):
 def _affected_partitions(contract, revisions):
     if not revisions:
         return frozenset()
-    return frozenset(
-        _partition(contract, revision.row) if not revision.deleted
-        else revision.partition_key
-        for revision in revisions
-    )
+    partitions = set()
+    for revision in revisions:
+        if revision.partition_key:
+            partitions.add(revision.partition_key)
+        if not revision.deleted and revision.row is not None:
+            partitions.add(_partition(contract, revision.row))
+    return frozenset(partitions)
 
 
 def _write_partitions(store, contract, contract_ref, merge, coverage):
@@ -257,8 +268,8 @@ def _replace_manifest(prior, contract_ref, prior_records, new_records, merge, co
         partition_logical_hashes=hashes)
 
 
-def _replace_records(parent, prior_records, new_records):
-    changed = {item.partition_key for item in new_records}
+def _replace_records(parent, prior_records, new_records, changed_partitions):
+    changed = set(changed_partitions)
     replaced_ids = {item.fragment_id for item in prior_records
                     if item.partition_key in changed}
     kept = [item for item in parent.records if item.fragment_id not in replaced_ids]

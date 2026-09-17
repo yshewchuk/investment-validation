@@ -53,7 +53,28 @@ def test_raw_receipt_is_cache_first_and_idempotent(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM data_objects").fetchone()[0] == 0
 
 
-def test_supervised_refresh_without_staged_input_is_explicit_noop(tmp_path):
+def test_supervised_refresh_without_staged_input_is_truthful_failure(tmp_path):
+    result = data_incremental.run_incremental_refresh(
+        RefreshParameters(
+            expected_ids=("request-1",),
+            parent_snapshot_id="nonexistent-snapshot",
+            refresh_plan_hash="sha256:" + "a" * 64,
+            provider_calls=0,
+        ),
+        tmp_path,
+    )
+    assert result["status"] == "failed"
+    assert result["completed_ids"] == []
+    assert result["coverage_advanced"] is False
+    assert result["candidate_snapshot_id"] is None
+    document = json.loads((tmp_path / "incremental_refresh_result.json").read_text())
+    assert document["status"] == "failed"
+    assert document["completed_ids"] == []
+    assert document["coverage_advanced"] is False
+
+
+def test_supervised_refresh_with_explicit_empty_input_remains_noop(tmp_path):
+    (tmp_path / "incremental_refresh_input.json").write_text("{}")
     result = data_incremental.run_incremental_refresh(
         RefreshParameters(
             expected_ids=("request-1",),
@@ -64,10 +85,8 @@ def test_supervised_refresh_without_staged_input_is_explicit_noop(tmp_path):
         tmp_path,
     )
     assert result["status"] == "noop"
+    assert result["completed_ids"] == ["request-1"]
     assert result["coverage_advanced"] is False
-    document = json.loads((tmp_path / "incremental_refresh_result.json").read_text())
-    assert document["status"] == "noop"
-    assert document["coverage_advanced"] is False
 
 
 def _frozen_revision(row, raw_id, revision_id, *, deleted=False, spot=None):

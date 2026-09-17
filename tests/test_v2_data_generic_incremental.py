@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -7,6 +8,7 @@ from engine.v2.contracts import (
     CoverageKey,
     CoverageOutcome,
     RevisionCandidate,
+    EventRef,
     TableContract,
     TableContractRef,
     TimeInterval,
@@ -55,6 +57,9 @@ def test_generic_earnings_events_candidate_commits_atomically(tmp_path):
 
     corrected = dict(base_rows[0])
     corrected["session"] = "BMO" if corrected["session"] != "BMO" else "AMC"
+    corrected["event_date"] = datetime(
+        corrected["event_date"].year + 1, 1, 2)
+    corrected["year"] = corrected["event_date"].year
     key = incremental_tables.logical_key_for_row(contract, corrected)
     candidate = RevisionCandidate(
         revision_id="event-correction", logical_key=key, source="frozen",
@@ -64,11 +69,11 @@ def test_generic_earnings_events_candidate_commits_atomically(tmp_path):
             logical_key=key, row=corrected, deleted=False))
     revision = incremental_tables.GenericRevision(
         candidate=candidate, row=corrected, partition_key="1996")
-    coverage_key = CoverageKey(item_key=key, session_date="1996-01-01", ticker=corrected["ticker"])
+    coverage_key = CoverageKey(item_key=key, session_date="1997-01-02", ticker=corrected["ticker"])
     coverage = daily_incremental.build_completed_coverage(
         contract_ref, source="frozen", endpoint="parquet",
-        interval=TimeInterval(column="event_date", start_inclusive="1996-01-01",
-                               end_exclusive="1997-01-01"),
+        interval=TimeInterval(column="event_date", start_inclusive="1997-01-02",
+                               end_exclusive="1998-01-01"),
         expected=(coverage_key,), outcomes=(CoverageOutcome(
             key=coverage_key, status="present", receipt_id=receipt_ref,
             revision_id="event-correction", finality="final"),),
@@ -93,6 +98,13 @@ def test_generic_earnings_events_candidate_commits_atomically(tmp_path):
         receipt_id="generic-retry", attempt_id="generic-retry-attempt", fence=2)
     assert committed.resulting_head_snapshot_id == candidate_table.snapshot.snapshot_id
     assert Repository(conn).resolve(committed.resulting_head_snapshot_id) == candidate_table.snapshot
+    moved = Repository(conn, store).get_event(
+        EventRef(
+            event_id=corrected["event_id"],
+            calendar_revision=candidate_table.snapshot.table_versions[
+                "earnings_events"].dataset_version_id),
+        candidate_table.snapshot)
+    assert moved.scheduled_event_date == "1997-01-02"
     replay_parent = Repository(conn).resolve_full(committed.resulting_head_snapshot_id)
     retained = generic_incremental.load_generic_revisions(conn, "earnings_events", contract)
     replay = generic_incremental.build_generic_table_candidate(
