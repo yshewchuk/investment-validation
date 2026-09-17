@@ -44,6 +44,36 @@ def _producer_kind(conn, artifact_id: str) -> str:
     return rows[0]["kind"]
 
 
+def _producer_job(conn, artifact_id: str) -> str:
+    rows = conn.execute(
+        "SELECT DISTINCT jobs.job_id FROM attempt_outputs JOIN attempts USING(attempt_id) JOIN jobs USING(job_id) "
+        "WHERE attempt_outputs.artifact_id = ? AND attempts.state = 'succeeded' AND jobs.state = 'succeeded'",
+        (artifact_id,)).fetchall()
+    if len(rows) != 1:
+        raise ValueError(f"{artifact_id}: no unique succeeded producer job")
+    return rows[0]["job_id"]
+
+
+def _require_render_chain(conn, render_job_id: str, render_artifact_id: str, *, score_artifact_id: str,
+                          finality_artifact_id: str, model_artifact_id: str) -> None:
+    row = conn.execute("SELECT kind, state, spec_json FROM jobs WHERE job_id = ?", (render_job_id,)).fetchone()
+    if row is None or row["kind"] != "legacy_render" or row["state"] != "succeeded":
+        raise ValueError("render job is not a succeeded legacy_render job")
+    output = conn.execute(
+        "SELECT artifact_id FROM attempt_outputs JOIN attempts USING(attempt_id) WHERE attempts.job_id = ? "
+        "AND attempts.state = 'succeeded' AND name = 'legacy_render'", (render_job_id,)).fetchall()
+    if {item["artifact_id"] for item in output} != {render_artifact_id}:
+        raise ValueError("render artifact is not the succeeded render job output")
+    bindings = json.loads(row["spec_json"]).get("parameters", {}).get("input_bindings", {})
+    expected = {"score.json": _producer_job(conn, score_artifact_id),
+                "finality.json": _producer_job(conn, finality_artifact_id),
+                "model_evidence.json": _producer_job(conn, model_artifact_id)}
+    for name, job_id in expected.items():
+        binding = bindings.get(name)
+        if not isinstance(binding, str) or binding.split("#", 1)[0] != job_id:
+            raise ValueError(f"render job is not bound to the recorded {name} producer")
+
+
 def _bundle_manifest_from_artifact(data: bytes) -> dict:
     """Read the delivered tar without trusting caller supplied bundle bytes."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{artifact_id}: wrong producer kind")
         if _producer_kind(conn, args.render_artifact_id) != "legacy_render":
             raise ValueError("render artifact has the wrong producer kind")
+        _require_render_chain(conn, args.render_job_id, args.render_artifact_id,
+                              score_artifact_id=args.score_artifact_id,
+                              finality_artifact_id=args.finality_artifact_id,
+                              model_artifact_id=args.model_evidence_artifact_id)
         if manifest.get("files", {}).get("bundle.tar", {}).get("artifact_id") != args.bundle_artifact_id:
             raise ValueError("source bundle is not the delivered release bundle")
         _bundle_rows, bundle_manifest = load_legacy_bundle(args.bundle_dir)

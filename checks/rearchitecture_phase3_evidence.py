@@ -107,7 +107,7 @@ from pathlib import Path
 from typing import Any
 
 from checks.rearchitecture_phase2_evidence import PHASE2_EVIDENCE_V1, validate_evidence as validate_phase2_evidence
-from engine.v2.contracts import ArtifactRef, ObjectRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: F401
+from engine.v2.contracts import ArtifactRef, LegacyMaterializationRequest, ObjectRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: F401
 from engine.v2.data.documents import decode_document
 from engine.v2.diagnosis.receipt import AGREE, ComparisonReceipt
 from engine.v2.foundation import DocumentError, content_hash, from_document
@@ -429,6 +429,7 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                     "model_evidence_artifact": ("model_evidence", preview.model_evidence_ref, "legacy_action.v1.0"),
                     "render_artifact": ("render", None, "legacy_action.v1.0")}
         files = proof.get("artifact_files")
+        artifact_bytes = {}
         for metadata_name, (file_name, expected_hash, schema) in expected.items():
             meta, file_ref = proof.get(metadata_name), files.get(file_name) if isinstance(files, dict) else None
             data = _resolve(file_ref, artifact_root, findings, f"preview_input_refs[{index}].{file_name}")
@@ -442,6 +443,20 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                 findings.append({"code": "PREVIEW_PROOF_ARTIFACT_MISMATCH",
                                  "field": f"preview_input_refs[{index}].{metadata_name}"})
                 field_ok["preview_input_refs"] = False
+            else:
+                artifact_bytes[file_name] = data
+        try:
+            score_doc = json.loads(artifact_bytes["score"])
+            snapshot_raw = json.loads(artifact_bytes["snapshot"])
+            request = from_document(LegacyMaterializationRequest, json.loads(artifact_bytes["request"]))
+            if (content_hash(score_doc.get("expected_population")) != preview.expected_population_ref
+                    or snapshot_raw.get("snapshot_id") != preview.snapshot_ref
+                    or request.snapshot_ref.snapshot_id != preview.snapshot_ref
+                    or tuple(request.registry_and_model_refs) != preview.model_registry_artifact_refs):
+                raise ValueError("source artifact bindings disagree")
+        except (KeyError, TypeError, ValueError, DocumentError, json.JSONDecodeError):
+            findings.append({"code": "PREVIEW_PROOF_CONTENT_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
         bundle_ref = files.get("bundle") if isinstance(files, dict) else None
         bundle_bytes = _resolve(bundle_ref, artifact_root, findings, f"preview_input_refs[{index}].bundle")
         if bundle_bytes is not None:
