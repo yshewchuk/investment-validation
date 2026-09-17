@@ -5,7 +5,7 @@ The operational companion to [Phase 3 — parity and launch](rearchitecture_phas
 with exact, tested commands"). The command paths were first tested
 synthetically on 2026-09-14. The current real source is Phase 2 release
 `reld9a81e6ded7f45c13b5afe21`; its saved-score source population is 111.
-Fresh D19 receipts are green. Do not use an earlier candidate, subset, or
+Fresh source-bound D15/D19 receipts are pending rebuild. Do not use an earlier candidate, subset, or
 receipt as proof for a new serving generation.
 
 Scope is the saved-score preview only; see the
@@ -36,9 +36,11 @@ can turn green. Do not substitute historical receipt ids or hand-written logs.
   --store-root OPS --release-id RELEASE --score-artifact-id SCORE --bundle-artifact-id BUNDLE \
   --bundle-dir BUNDLE_DIR --snapshot-artifact-id SNAPSHOT --materialization-request-artifact-id REQUEST \
   --finality-artifact-id FINALITY --model-evidence-artifact-id EVIDENCE \
-  --score-comparison-receipt-ref D15 --render-comparison-receipt-ref D19 --output preview_input.json
+  --score-comparison-receipt-ref D15_REF --render-comparison-receipt-ref D19_REF \
+  --score-comparison-receipt D15_PATH --render-comparison-receipt D19_PATH \
+  --render-job-id RENDER_JOB --render-artifact-id BUNDLE --output preview_input.json
 /usr/bin/python3 tools/v2_dashboard_project.py --preview-input preview_input.json --source-provenance source_provenance.json \
-  --score-json SCORE_JSON --bundle-dir BUNDLE_DIR --snapshot-id SNAPSHOT --catalog OPS/catalog.sqlite \
+  --score-json SCORE_JSON --bundle-dir BUNDLE_DIR --bundle-format legacy --snapshot-id SNAPSHOT --catalog OPS/catalog.sqlite \
   --store-root OPS --serving-root SERVING_ROOT --requested-as-of SESSION --resolved-as-of SESSION
 /usr/bin/python3 tools/v2_dashboard_publish.py --verify-sequence --root OPS --store-root SECRET_ROOT \
   --source-publication-job A_SOURCE --projection-binding A_BINDING --b-source-publication-job B_SOURCE \
