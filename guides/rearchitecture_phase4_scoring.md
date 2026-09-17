@@ -73,13 +73,44 @@ parity and no experiment imports. Every new comparator needs a planted defect.
 These future tests/gate are deliverables, not existing executable commands.
 
 Use the existing tier-0 corpus for fast stage checks and sequential real-code
-comparisons for final acceptance. Compare full populations, keys, contracts,
-verdicts, flags and null masks; use only existing declared numeric tolerances.
+comparisons for final acceptance. Compare the complete saved-release
+population record by record, including refusals and missing outputs: request
+membership, duplicates and missing rows; contracts, quantities, expiries and
+execution dates; readiness, refusals, gates and chooser selections; nulls
+versus zero; and full-precision forecasts, costs, simulation and financial
+diagnostics using only existing declared tolerances. Check separately that
+displayed rounding matches the canonical values. Legacy results belong only on
+the expected-results side: native execution must calculate its own selection,
+pricing, forecasts, simulation, gates and final records from the same frozen
+request, data, models, residual/calibration state and configuration.
+
+The saved release has one hash-verified manifest for shared frozen resources;
+cases reference those resources rather than duplicating them. A fixed,
+representative diagnostic corpus records only these hash-verified checkpoints:
+model feature vector, missing mask and model identity; selected legs and entry
+cost; simulation horizon, denominator, residual-population identity, draw
+count and seed; gate inputs; and DYN-SV eligibility/ranking where applicable.
+The diagnostic corpus explicitly covers every declared strategy and the
+pre-expiry, multi-expiry, debit/credit, missing-input, override, tie,
+fallback, and frozen-inference-through-canonical-application branches. Missing
+checkpoint or executable inputs are an explicit incomparable disposition,
+never a successful comparison. Each checkpoint comparator needs a deliberately
+introduced defect that it rejects.
+
+Exhaustive internal stage tracing is optional. It may help diagnose a mismatch,
+but Phase 4 does not require serializing every internal operation or making
+legacy and native internal layouts identical. It does require full saved-release
+final-record parity, independent native calculation, the diagnostic corpus,
+and focused regressions for planned-exit valuation, authoritative pricing in
+gates, required forecasts, overrides, financial-output ownership, ladder
+refusals, frozen inference, direct-versus-batch equality and shuffled input.
 Record any inherited disposition separately from new results.
 
 Handoff: canonical API and fixtures, strategy/deployment inventory, native
 score artifacts, legacy-format projection mapping, dependency declarations,
 remaining adapter inventory and measured batch resource profile. Phase 4 is
-complete only with Phase 5 inference integrated and existing economic behavior
+complete only when Phase 5 inference is integrated, the complete saved release
+has no unexplained behavioral or numerical mismatch, the bounded diagnostic
+corpus and its defect controls pass, and existing economic behavior is
 accounted for. Phase 6 owns switching workflow consumers, not rebuilding this
 kernel.
