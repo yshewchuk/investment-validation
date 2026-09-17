@@ -10,6 +10,7 @@ import math
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,7 +102,7 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
     analog_keys = {
         key for key in record
         if key.startswith("analog")
-        or key in {"ci_low", "ci_high", "n_analogs", "win_analog"}
+        or key in {"ci_low", "ci_high", "n_analogs"}
     }
     simulation_keys = {
         key for key in record
@@ -155,11 +156,11 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
     blocks = {
         "context": common,
         "features": {key: record.get(key) for key in feature_keys if key in record},
-        "forecast": {key: record.get(key) for key in forecast_keys if key in record},
+        "forecast": {},
         "analogs": {key: record.get(key) for key in analog_keys if key in record},
-        "simulation": {key: record.get(key) for key in simulation_keys if key in record},
-        "gate": {key: record.get(key) for key in gate_keys if key in record},
-        "chooser": {key: record.get(key) for key in chooser_keys if key in record},
+        "simulation": {},
+        "gate": {},
+        "chooser": {},
         "diagnostics": diagnostics,
     }
     receipts = tuple(
@@ -177,6 +178,82 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
         source_ref=source_ref,
         stage_receipts=receipts,
     )
+
+
+def _numerical_independence_control() -> dict[str, bool]:
+    """Poison supplied stage outputs so preservation cannot certify parity."""
+    legacy = _fake_result().as_dict()
+    legacy.update({"forecast_abs_move": 8.0, "exp_pnl_sim": 0.25})
+    clean = _native_record(legacy, "phase4-independent-numerical-input")
+    poisoned = replace(
+        clean,
+        forecast={"driver_prediction": 991.0, "forecast_abs_move": 992.0},
+        simulation={"exp_pnl_sim": 993.0},
+        gate={"gate_score": 994.0, "gate_threshold": 995.0,
+              "gate_pass": False},
+    )
+    scored = application.score_one(_request(), poisoned)
+    preservation_only = (
+        scored.forecasts.get("driver_prediction") == 991.0
+        and scored.forecasts.get("forecast_abs_move") == 992.0
+    )
+    independently_recomputed = (
+        scored.forecasts.get("driver_prediction") == legacy["driver_prediction"]
+        and scored.forecasts.get("forecast_abs_move") == legacy["forecast_abs_move"]
+        and scored.forecasts.get("exp_pnl_sim") == legacy["exp_pnl_sim"]
+        and scored.gate_terms.get("gate_score") == legacy["gate_score"]
+        and scored.gate_terms.get("gate_pass") is legacy["gate_pass"]
+        and not preservation_only
+    )
+    return {
+        "copied_outputs_absent": (
+            not clean.forecast and not clean.simulation and not clean.gate
+            and not clean.chooser
+        ),
+        "preservation_only_detected": preservation_only,
+        "preservation_only_rejected": not preservation_only,
+        "independent_recomputation": independently_recomputed,
+    }
+
+
+def _factory_structure_controls() -> dict[str, bool]:
+    """Exercise generated CND-PS geometry instead of payoff placeholders."""
+    base = {"spot": 100.0, "width": 4.0,
+            "forecast_abs_move": 8.0, "expiry": "2026-10-01"}
+    geometry = generate("CND-PS", base)
+    legs = {leg.name: leg for leg in geometry.legs}
+    exact_mirrors = (
+        set(legs) == {"atm", "up1", "dn1", "up2", "dn2"}
+        and legs["up1"].strike + legs["dn1"].strike == 2.0 * legs["atm"].strike
+        and legs["up2"].strike + legs["dn2"].strike == 2.0 * legs["atm"].strike
+    )
+    malformed = generate("CND-PS", {
+        **base,
+        "resolved_legs": (
+            {"name": "atm", "right": "P", "side": "buy", "quantity": 0,
+             "strike": 100.0},
+            {"name": "up1", "right": "P", "side": "sell", "quantity": 1,
+             "strike": 104.0},
+            {"name": "dn1", "right": "P", "side": "sell", "quantity": 1,
+             "strike": 95.0},
+            {"name": "up2", "right": "P", "side": "buy", "quantity": 1,
+             "strike": 108.0},
+            {"name": "dn2", "right": "P", "side": "buy", "quantity": 1,
+             "strike": 92.0},
+        ),
+    })
+    malformed_legs = {leg.name: leg for leg in malformed.legs}
+    malformed_is_exact = (
+        malformed_legs["up1"].strike + malformed_legs["dn1"].strike
+        == 2.0 * malformed_legs["atm"].strike
+    )
+    return {
+        "irregular_ladder_rejected": not malformed_is_exact,
+        "exact_mirrors_preserved": exact_mirrors,
+        "zero_quantity_reference_legs_preserved": (
+            legs["atm"].quantity == 0.0 and legs["atm"].side == "buy"
+        ),
+    }
 
 
 def _application_controls() -> dict[str, bool]:
@@ -712,14 +789,20 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     frozen_model_stage = _frozen_model_control(_request())
     completion_controls = _completion_controls(application_controls)
     completion_controls.update(_chooser_controls())
+    numerical_independence = _numerical_independence_control()
+    factory_structure_controls = _factory_structure_controls()
     saved_release_comparison, native_parity = _native_parity(corpus)
     factory_parity = _factory_parity(corpus)
     completion_controls.update({
         "str_thru_stage_parity": application_controls["direct_batch_equal"],
         "all_factory_geometry_expiry_fill_parity": factory_parity["complete"],
-        "irregular_ladder_rejected": multi_expiry_refusal(({"expiry": "a"}, {"expiry": "b"})) is not None,
-        "exact_mirrors_preserved": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 1},), 110) == 10.0,
-        "zero_quantity_reference_legs_preserved": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 0},), 110) == 0.0,
+        **factory_structure_controls,
+        "native_outputs_independently_recomputed":
+            numerical_independence["independent_recomputation"],
+        "preservation_only_detected":
+            numerical_independence["preservation_only_detected"],
+        "preservation_only_rejected":
+            numerical_independence["preservation_only_rejected"],
         "native_stage_comparator_planted_defect": native_parity["planted_defect"]["detected"],
         "numeric_forecast_corruption_rejected": native_parity["planted_defect"]["controls"]["forecasts"],
         "simulation_corruption_rejected": native_parity["planted_defect"]["controls"]["simulation"],
@@ -764,6 +847,8 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
             "str_thru_corpus_present": "STR-THRU" in covered_strategies,
             "shared_kernel": application_controls["direct_batch_equal"],
             "numeric_forecast_parity": native_parity["dimension_agreement"]["forecasts"],
+            "native_outputs_independently_recomputed":
+                numerical_independence["independent_recomputation"],
         }},
         "P4-05": {"status": "PASS", "controls": {
             "all_factory_rows_in_corpus": set(covered_strategies) >= set(STRATEGY_IDS),
@@ -798,6 +883,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "financial_diagnostic_corruption_rejected",
         "factory_geometry_corruption_rejected", "factory_expiry_corruption_rejected",
         "factory_fill_corruption_rejected",
+        "native_outputs_independently_recomputed", "preservation_only_rejected",
     )
     evidence = {
         "schema_version": "phase4_acceptance.v1.0",
@@ -817,6 +903,8 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "saved_release_comparison": saved_release_comparison,
         "native_parity": native_parity,
         "factory_parity": factory_parity,
+        "numerical_independence": numerical_independence,
+        "factory_structure_controls": factory_structure_controls,
         "phase5_inference_integrated": False,
         "phase5_handoff_required": True,
         "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
