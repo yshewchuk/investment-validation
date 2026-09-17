@@ -169,9 +169,17 @@ def request_from_dict(data: dict) -> score_mod.ScoreRequest:
 
 def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
               *, record_kind: str, duration: float,
+              legacy_trace: dict | None = None,
               relations: dict | None = None, notes: str = "") -> dict:
     payload: dict[str, Any] = {"request": request, "record": record,
                                "record_kind": record_kind}
+    if legacy_trace is not None:
+        # This is the source execution trace, not a Phase 4 acceptance bundle.
+        # Acceptance requires a typed request, sidecars, and native receipts;
+        # publication records the current disposition explicitly so an
+        # incomplete trace cannot be mistaken for a completed one.
+        payload["legacy_trace"] = legacy_trace
+        payload["trace_disposition"] = "incomplete"
     if relations:
         payload["relations"] = relations
     return {
@@ -311,7 +319,7 @@ def _boundary_events(as_of: pd.Timestamp, per_kind: int, calendar) -> pd.DataFra
     return pd.concat([year, month]).drop_duplicates("event_id").reset_index(drop=True)
 
 
-def _score(scorer, request, *, index=None) -> tuple[dict, dict, float]:
+def _score(scorer, request, *, index=None) -> tuple[dict, dict, float, dict]:
     """``(raw as_dict, jsonable record, seconds)`` through ``Scorer.score``.
 
     The raw row is kept for the chooser frame: ``dynamic_short_vol`` reads the
@@ -321,22 +329,24 @@ def _score(scorer, request, *, index=None) -> tuple[dict, dict, float]:
     started = time.monotonic()
     as_of = request.as_of if request.as_of is not None else request.chain_as_of
     try:
-        result = (scorer.score(request, chain_index=index) if index is not None
-                  else scorer.score(request))
+        trace = score_mod.Phase4TraceCollector()
+        result = (scorer.score(request, chain_index=index, trace=trace) if index is not None
+                  else scorer.score(request, trace=trace))
     except score_mod.UNSCORABLE as exc:
         result = score_mod.unscorable_result(
             request, as_of=as_of, snapshot=scorer.snapshot, exc=exc
         )
     raw = result.as_dict()
-    return raw, jsonable(raw), time.monotonic() - started
+    return raw, jsonable(raw), time.monotonic() - started, trace.document()
 
 
 def _candidate(request, raw: dict | None, record: dict, took: float, *,
                kind: str = "score_result", frame: str | None = None,
-               relations: dict | None = None) -> dict:
+               relations: dict | None = None, legacy_trace: dict | None = None) -> dict:
     return {"request": request if isinstance(request, dict) else request_to_dict(request),
             "raw": raw, "record": record, "duration": took, "kind": kind,
-            "frame": frame, "relations": relations or {}}
+            "frame": frame, "relations": relations or {},
+            "legacy_trace": legacy_trace}
 
 
 def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
@@ -367,8 +377,9 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
                 event_date=pd.Timestamp(row.event_date), session=str(row.session),
                 fill=MID, quote_max_age_sessions=quote_max_age, chain_as_of=as_of,
             )
-            raw, record, took = _score(scorer, request, index=index)
-            out.append(_candidate(request, raw, record, took, frame="forward"))
+            raw, record, took, trace = _score(scorer, request, index=index)
+            out.append(_candidate(request, raw, record, took, frame="forward",
+                                  legacy_trace=trace))
     return out
 
 
@@ -393,12 +404,13 @@ def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
                 session=str(row["session"]), fill=MID, chain_as_of=as_of,
             )
             try:
-                raw, record, took = _score(scorer, request)
+                raw, record, took, trace = _score(scorer, request)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 print(f"[corpus]   skipped {row['ticker']} {strategy}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
                 continue
-            out.append(_candidate(request, raw, record, took, frame="boundary"))
+            out.append(_candidate(request, raw, record, took, frame="boundary",
+                                  legacy_trace=trace))
     return out
 
 
@@ -411,12 +423,12 @@ def _rescore(scorer, source: dict, label: str, **changes) -> dict | None:
     """
     request = replace(request_from_dict(source["request"]), **changes)
     try:
-        raw, record, took = _score(scorer, request)
+        raw, record, took, trace = _score(scorer, request)
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         print(f"[corpus]   {label} skip {request.ticker} {request.strategy}: "
               f"{type(exc).__name__}: {exc}", flush=True)
         return None
-    return _candidate(request, raw, record, took)
+    return _candidate(request, raw, record, took, legacy_trace=trace)
 
 
 def _anchor_strike(record: dict) -> float | None:
@@ -651,6 +663,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         pair = make_pair(
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
             record_kind=cand["kind"], duration=cand["duration"],
+            legacy_trace=cand.get("legacy_trace"),
             relations=cand.get("relations"),
         )
         text = json.dumps(pair, indent=2, sort_keys=True) + "\n"
@@ -660,6 +673,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "request_hash": pair["request_hash"],
             "record_kind": cand["kind"],
             "covers": pair["covers"],
+            "trace_disposition": pair["payload"].get("trace_disposition", "absent"),
         }
 
     missing = sorted(set(required_axes()) - set(index))

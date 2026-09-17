@@ -47,6 +47,24 @@ def test_draw_evidence_preserves_samples_and_records_exact_indices() -> None:
     np.testing.assert_array_equal(observed[1], history.loc[selected, "err_crush"])
 
 
+def test_evidence_rows_bind_selected_indices_to_exact_residual_values() -> None:
+    history = _history(600)
+    pool = ResidualPool(history, buckets=2)
+    evidence: dict = {}
+    pool.draw("2022-01-01", 3.0, 4, np.random.default_rng(17), evidence=evidence)
+
+    rows = pool.evidence_rows(evidence["selected_indices"])
+
+    assert len(rows) == 4
+    assert rows[0]["event_date"].startswith("2020-")
+    assert rows[0]["err_move"] == history.loc[evidence["selected_indices"][0], "err_move"]
+
+
+def test_evidence_rows_reject_unknown_selection_index() -> None:
+    with np.testing.assert_raises(IndexError):
+        ResidualPool(_history(300)).evidence_rows([300])
+
+
 def test_draw_evidence_records_bucket_fallback_population() -> None:
     pool = ResidualPool(_history(300), buckets=10)
     evidence: dict = {}

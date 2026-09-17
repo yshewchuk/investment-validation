@@ -129,6 +129,29 @@ class ResidualPool:
     def before(self, cutoff) -> int:
         return int(np.searchsorted(self._dates, np.datetime64(pd.Timestamp(cutoff)), "left"))
 
+    def evidence_rows(self, indices=None) -> list[dict]:
+        """JSON-safe residual rows for an explicit evidence selection.
+
+        This is intentionally separate from :meth:draw so ordinary simulation
+        does not allocate row dictionaries. A trace caller must supply the
+        exact indices emitted by draw evidence; an invalid index is a caller
+        error rather than an opportunity to silently trim provenance.
+        """
+        if indices is None:
+            indices = range(len(self._dates))
+        rows = []
+        for index in indices:
+            if not isinstance(index, (int, np.integer)) or not 0 <= int(index) < len(self):
+                raise IndexError(f"residual evidence index out of range: {index!r}")
+            i = int(index)
+            rows.append({
+                "event_date": pd.Timestamp(self._dates[i]).isoformat(),
+                "pred_abs_move": float(self._pred[i]),
+                "err_move": float(self._move[i]),
+                "err_crush": float(self._crush[i]),
+            })
+        return rows
+
     def draw(self, cutoff, prediction: float, n: int, rng, *, evidence: dict | None = None):
         """Draw paired residuals, optionally recording the exact selection path.
 

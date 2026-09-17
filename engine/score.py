@@ -103,6 +103,7 @@ from engine.structures import (
 __all__ = [
     "ScoreRequest",
     "ScoreResult",
+    "Phase4TraceCollector",
     "Scorer",
     "score",
     "score_calendar",
@@ -331,6 +332,75 @@ class ScoreRequest:
             ),
         ]
         return "|".join(parts)
+
+
+class Phase4TraceCollector:
+    """Opt-in capture of legacy scoring inputs and outcomes.
+
+    The collector is inert unless supplied to Scorer.score. It retains
+    JSON-safe defensive copies only; it does not participate in model
+    selection, random draws, pricing, or result serialization.
+    """
+
+    schema_version = "phase4_legacy_trace.v1.0"
+
+    def __init__(self) -> None:
+        self.request: dict[str, Any] | None = None
+        self.stages: dict[str, dict[str, Any]] = {}
+        self.status = "pending"
+
+    @staticmethod
+    def _document(value: Any) -> Any:
+        from engine.jsonio import json_safe
+
+        if isinstance(value, pd.DataFrame):
+            return Phase4TraceCollector._document(value.to_dict("records"))
+        if isinstance(value, pd.Series):
+            return Phase4TraceCollector._document(value.to_dict())
+        if hasattr(value, "__dataclass_fields__"):
+            return Phase4TraceCollector._document(asdict(value))
+        if isinstance(value, Mapping):
+            return {
+                str(key): Phase4TraceCollector._document(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [Phase4TraceCollector._document(item) for item in value]
+        return json_safe(value)
+
+    def begin(self, request: ScoreRequest) -> None:
+        self.request = self._document(asdict(request))
+
+    def record(self, stage: str, inputs: Any, output: Any, *,
+               status: str = "completed") -> None:
+        if stage in self.stages:
+            raise ValueError(f"phase 4 trace stage recorded twice: {stage}")
+        self.stages[stage] = {
+            "status": status,
+            "input": self._document(inputs),
+            "output": self._document(output),
+        }
+
+    def not_reached(self, stage: str, reason: str) -> None:
+        if stage not in self.stages:
+            self.record(stage, {}, {"reason": reason}, status="not_reached")
+
+    def finish(self, result: "ScoreResult") -> None:
+        self.status = "refused" if result.flags else "completed"
+        self.record(
+            "serialization",
+            {"request": self.request, "stage_names": tuple(self.stages)},
+            result.as_dict(),
+            status=self.status,
+        )
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "request": self._document(self.request),
+            "stages": self._document(self.stages),
+        }
 
 
 @dataclass
@@ -918,7 +988,29 @@ class Scorer:
 
     # -- the call ----------------------------------------------------------
 
-    def score(self, request: ScoreRequest, *, chain_index: ChainIndex | None = None) -> ScoreResult:
+    def _finish_phase4_trace(self, trace: Phase4TraceCollector | None,
+                             result: ScoreResult, reason: str = "") -> ScoreResult:
+        if trace is None:
+            return result
+        for stage in (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "analogs", "simulation", "gate", "chooser",
+        ):
+            trace.not_reached(stage, reason or "score ended before stage")
+        trace.finish(result)
+        result._phase4_trace = trace.document()
+        return result
+
+    @staticmethod
+    def _trace_phase4(trace: Phase4TraceCollector | None, stage: str,
+                      inputs: Any, output: Any) -> None:
+        if trace is not None:
+            trace.record(stage, inputs, output)
+
+    def score(self, request: ScoreRequest, *, chain_index: ChainIndex | None = None,
+              trace: Phase4TraceCollector | None = None) -> ScoreResult:
+        if trace is not None:
+            trace.begin(request)
         result = ScoreResult(
             ticker=request.ticker,
             strategy=request.strategy,
@@ -926,6 +1018,8 @@ class Scorer:
             fill_alpha=request.fill.alpha,
             snapshot_hash=self.snapshot,
         )
+        if trace is not None:
+            result._phase4_trace_requested = True
 
         beaten = superseded_by(request.strategy)
         if beaten is not None:
@@ -941,7 +1035,7 @@ class Scorer:
                 f"({beaten.evidence})"
                 + (f" — {beaten.notes}" if beaten.notes else "")
             )
-            return result
+            return self._finish_phase4_trace(trace, result, "superseded strategy")
         if request.strategy in DISABLED_STRATEGIES:
             # Carry the event identity even though nothing is scored. The row
             # still appears on the board, and one with a blank date reads as a
@@ -951,7 +1045,7 @@ class Scorer:
                 result.session = request.session
             result.flag("UNVALIDATED_STRUCTURE")
             result.detail = DISABLED_STRATEGIES[request.strategy]
-            return result
+            return self._finish_phase4_trace(trace, result, "disabled strategy")
         if request.strategy not in STRUCTURES:
             raise KeyError(f"unknown strategy {request.strategy!r}")
 
@@ -989,6 +1083,19 @@ class Scorer:
         )
         if self.calendar.is_projected(window.exit_date):
             result.flag("PROJECTED_CALENDAR")
+        self._trace_phase4(
+            trace,
+            "resolve_context",
+            {"request": request, "snapshot": self.snapshot},
+            {
+                "event_date": event_date,
+                "session": session,
+                "entry_date": result.entry_date,
+                "exit_date": result.exit_date,
+                "decision_date": result.as_of,
+                "evidence_cutoff": result.evidence_cutoff,
+            },
+        )
 
         # -- the shape, for a structure whose shape comes from a forecast ---
         # Before pricing, which is the whole point: the strikes cannot be
@@ -1002,13 +1109,52 @@ class Scorer:
             request, structure = self._size_from_forecast(
                 request, result, structure, size=not request.structure_params)
             if structure is None:
-                return result
+                return self._finish_phase4_trace(trace, result, "forecast sizing refused")
 
         # -- the live chain: entry cost, strike, and the moneyness label ----
         self._price_entry(request, structure, result, chain_index)
+        self._trace_phase4(
+            trace,
+            "geometry",
+            {"request": request, "structure": structure},
+            {
+                "structure_spec": result.structure_spec,
+                "structure_params": result.structure_params,
+                "strike": result.strike,
+                "expiry": result.expiry,
+                "legs": result.legs,
+                "flags": result.flags,
+            },
+        )
+        self._trace_phase4(
+            trace,
+            "pricing",
+            {
+                "quote_date": result.quote_date,
+                "eligible_contracts": getattr(result, "_entry_rows", None),
+                "fill_alpha": request.fill.alpha,
+            },
+            {
+                "entry_cost": result.entry_cost,
+                "spot": result.spot,
+                "rel_spread": result.rel_spread,
+                "legs": result.legs,
+                "flags": result.flags,
+            },
+        )
 
         # -- features ------------------------------------------------------
         features = self._features(request, result)
+        self._trace_phase4(
+            trace,
+            "features",
+            {
+                "request": request,
+                "decision_date": result.as_of,
+                "evidence_cutoff": result.evidence_cutoff,
+            },
+            features,
+        )
 
         # Carried before the layers run: every layer reads this frame, and two
         # of them already used `im` internally without ever surfacing it.
@@ -1044,10 +1190,59 @@ class Scorer:
                 f"{result.spot:.2f} — above the {BAD_QUOTE_COST_PCT:.0f}% "
                 "bad-quote ceiling; not scored"
             )
-            return result
+            return self._finish_phase4_trace(trace, result, "bad quote")
         self._score_model(request, result, features)
+        self._trace_phase4(
+            trace,
+            "forecast",
+            {"model_inputs": result.model_inputs, "model_versions": result.model_versions},
+            {
+                "driver_name": result.driver_name,
+                "driver_prediction": result.driver_prediction,
+                "forecast_abs_move": result.forecast_abs_move,
+                "forecast_p10": result.forecast_p10,
+                "forecast_p90": result.forecast_p90,
+                "forecast_sd": result.forecast_sd,
+                "runup_move_prediction": result.runup_move_prediction,
+                "flags": result.flags,
+            },
+        )
         self._score_analogs(request, result, features)
+        self._trace_phase4(
+            trace,
+            "analogs",
+            {"request_key": request.key(), "evidence_cutoff": result.evidence_cutoff},
+            {
+                "summary": result.analog_buckets,
+                "evidence": getattr(result, "_phase4_analog_evidence", None),
+            },
+        )
         self._score_gate(request, result, features)
+        self._trace_phase4(
+            trace,
+            "simulation",
+            {
+                "event_date": result.event_date,
+                "exit_date": result.exit_date,
+                "evidence": getattr(result, "_phase4_simulation_evidence", None),
+            },
+            {
+                "exp_pnl_sim": result.exp_pnl_sim,
+                "win_sim": result.win_sim,
+                "flags": result.flags,
+            },
+        )
+        self._trace_phase4(
+            trace,
+            "gate",
+            {"features": features, "model_versions": result.model_versions},
+            {
+                "gate_score": result.gate_score,
+                "gate_threshold": result.gate_threshold,
+                "gate_pass": result.gate_pass,
+                "flags": result.flags,
+            },
+        )
         self._compare_layers(result)
         # The chooser score sits AFTER the gate so exp_pnl_sim, the analog
         # stats and the flags are all populated — every input it reads is a
@@ -1055,7 +1250,17 @@ class Scorer:
         # would be a second answer to the same question.
         if request.strategy in DYNAMIC_MENU:
             self._score_chooser(request, result, features)
-        return result
+        self._trace_phase4(
+            trace,
+            "chooser",
+            {"strategy": request.strategy, "event_date": result.event_date},
+            {
+                "chooser_score": result.chooser_score,
+                "model_versions": result.model_versions,
+                "flags": result.flags,
+            },
+        )
+        return self._finish_phase4_trace(trace, result)
 
     # -- pieces ------------------------------------------------------------
 
@@ -1895,6 +2100,9 @@ class Scorer:
             alpha=request.fill.alpha,
             as_of=result.evidence_cutoff,
             request_key=request.key(),
+            evidence_hook=(
+                lambda evidence: setattr(result, "_phase4_analog_evidence", evidence)
+            ) if hasattr(result, "_phase4_trace_requested") else None,
         )
         result.exp_pnl_analog = analogs.mean
         result.win_analog = analogs.win_rate
@@ -2263,7 +2471,8 @@ class Scorer:
         dte_exit = None
         if result.expiry is not None and result.exit_date is not None:
             dte_exit = float((pd.Timestamp(result.expiry) - pd.Timestamp(result.exit_date)).days)
-        return pnl_sim.expected_pnl(
+        evidence = {} if hasattr(result, "_phase4_trace_requested") else None
+        simulated = pnl_sim.expected_pnl(
             exit_legs=exit_legs,
             spot=result.spot,
             entry_cost=result.entry_cost,
@@ -2274,7 +2483,13 @@ class Scorer:
             event_date=result.event_date,
             pool=pool,
             key=request.strategy,
+            evidence=evidence,
         )
+        if evidence is not None:
+            selection = evidence.get("residual_draw", {}).get("selected_indices", [])
+            evidence["residual_rows"] = pool.evidence_rows(selection)
+            result._phase4_simulation_evidence = evidence
+        return simulated
 
     def _simulated_pnl(self, request, result, features=None) -> dict:
         """``exp_pnl_sim`` and the trailing bar it must clear, or an empty dict.
