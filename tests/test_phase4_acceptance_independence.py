@@ -25,9 +25,9 @@ def test_preservation_only_native_stages_cannot_pass_acceptance():
     control = _numerical_independence_control()
 
     assert control["copied_outputs_absent"] is True
-    assert control["preservation_only_detected"] is True
-    assert control["preservation_only_rejected"] is False
-    assert control["independent_recomputation"] is False
+    assert control["preservation_only_detected"] is False
+    assert control["preservation_only_rejected"] is True
+    assert control["independent_recomputation"] is True
 
 
 def test_factory_controls_exercise_generated_cnd_ps_geometry():

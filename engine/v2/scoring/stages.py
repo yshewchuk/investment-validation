@@ -157,10 +157,12 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
         _add_flag(flags, "INVALID_FORECAST_MODELS")
         return output
     facts = _facts(inputs, values)
+    declared = False
     for field in _FORECAST_OUTPUTS:
         spec = models.get(field, block.get(field))
         if spec is None:
             continue
+        declared = True
         if not isinstance(spec, Mapping):
             _add_flag(flags, f"UNOWNED_FORECAST_OUTPUT:{field}")
             continue
@@ -168,6 +170,8 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
             output[field] = _linear(spec, facts, "forecast")
         except ValueError as exc:
             _add_flag(flags, exc)
+    if not declared and not output:
+        _add_flag(flags, "MISSING_FORECAST_INPUT")
     values.update(output)
     return output
 
@@ -270,9 +274,13 @@ def _simulation_spots(block: Mapping[str, Any],
                       flags: list[str]) -> tuple[float, ...] | None:
     raw_spots = block.get("terminal_spots")
     if raw_spots is None:
+        declared = False
         for field in _SIMULATION_OUTPUTS:
             if block.get(field) is not None:
+                declared = True
                 _add_flag(flags, f"UNOWNED_SIMULATION_OUTPUT:{field}")
+        if not declared:
+            _add_flag(flags, "MISSING_SIMULATION_INPUT")
         return None
     try:
         spots = tuple(float(item) for item in raw_spots)
@@ -376,9 +384,13 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
     elif recipe is not None:
         _add_flag(flags, f"UNSUPPORTED_GATE_RECIPE:{recipe}")
     else:
+        declared = False
         for field in _GATE_OUTPUTS:
             if block.get(field) is not None:
+                declared = True
                 _add_flag(flags, f"UNOWNED_GATE_OUTPUT:{field}")
+        if not declared:
+            _add_flag(flags, "MISSING_GATE_INPUT")
         return output
     values.update(output)
     return output

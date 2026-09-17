@@ -103,5 +103,6 @@ def test_empty_compatibility_input_refuses_missing_essentials():
     )
 
     assert record.validation_status == "refused"
+    assert record.readiness == "refused"
     assert "MISSING_SPOT" in record.reason_codes
     assert record.financial_diagnostics["entry_cost_pct"] is None

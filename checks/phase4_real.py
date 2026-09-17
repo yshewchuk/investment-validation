@@ -183,26 +183,62 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
 def _numerical_independence_control() -> dict[str, bool]:
     """Poison supplied stage outputs so preservation cannot certify parity."""
     legacy = _fake_result().as_dict()
-    legacy.update({"forecast_abs_move": 8.0, "exp_pnl_sim": 0.25})
     clean = _native_record(legacy, "phase4-independent-numerical-input")
-    poisoned = replace(
+    geometry = generate(
+        "STR-THRU",
+        {"spot": 100.0, "forecast_abs_move": 7.0,
+         "expiry": "2026-09-18"},
+    )
+    quotes = {
+        (leg.right, leg.strike, leg.expiry): {"bid": 1.0, "ask": 3.0}
+        for leg in geometry.legs
+    }
+    pricing = price(geometry, quotes, 0.5)
+    executable = replace(
         clean,
+        geometry=geometry,
+        pricing=pricing,
+        forecast={
+            "driver_name": "abs_move",
+            "models": {
+                "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+                "forecast_abs_move": {"intercept": 7.0, "coefficients": {}},
+            },
+        },
+        simulation={
+            "terminal_spots": (95.0, 105.0),
+            "weights": (0.5, 0.5),
+            "capital_at_risk": 1.0,
+        },
+        gate={
+            "model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
+            "threshold": 0.0,
+        },
+    )
+    request = _request()
+    expected = application.score_one(request, executable)
+    poisoned = replace(
+        executable,
         forecast={"driver_prediction": 991.0, "forecast_abs_move": 992.0},
         simulation={"exp_pnl_sim": 993.0},
         gate={"gate_score": 994.0, "gate_threshold": 995.0,
               "gate_pass": False},
     )
-    scored = application.score_one(_request(), poisoned)
+    scored = application.score_one(request, poisoned)
     preservation_only = (
         scored.forecasts.get("driver_prediction") == 991.0
         and scored.forecasts.get("forecast_abs_move") == 992.0
     )
     independently_recomputed = (
-        scored.forecasts.get("driver_prediction") == legacy["driver_prediction"]
-        and scored.forecasts.get("forecast_abs_move") == legacy["forecast_abs_move"]
-        and scored.forecasts.get("exp_pnl_sim") == legacy["exp_pnl_sim"]
-        and scored.gate_terms.get("gate_score") == legacy["gate_score"]
-        and scored.gate_terms.get("gate_pass") is legacy["gate_pass"]
+        expected.validation_status == "scored"
+        and expected.forecasts.get("driver_prediction") == 7.0
+        and expected.forecasts.get("forecast_abs_move") == 7.0
+        and expected.forecasts.get("exp_pnl_sim") == 1.0
+        and expected.gate_terms == {"gate_score": 1.0,
+                                    "gate_threshold": 0.0,
+                                    "gate_pass": True}
+        and expected.financial_diagnostics.get("entry_cost_pct") == 4.0
+        and scored.validation_status == "refused"
         and not preservation_only
     )
     return {

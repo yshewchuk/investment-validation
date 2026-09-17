@@ -159,12 +159,17 @@ def test_score_one_executes_pricing_and_owns_refusal_lineage_and_receipts():
 
 
 def test_dynamic_uses_one_ranking_rule_and_does_not_veto_flagged_candidate():
-    scored = application.score_one(_request("TWIN-P"),
-                                   _native("TWIN-P", chooser_score=0.2,
-                                           exp_pnl=0.1, flags=("ADVISORY",)))
-    unscored = application.score_one(_request("TWIN-P5"),
-                                     _native("TWIN-P5", chooser_score=None,
-                                             exp_pnl=0.9))
+    scored = application.score_one(
+        _request("TWIN-P"),
+        replace(_native("TWIN-P", chooser_score=0.2,
+                        exp_pnl=0.1, flags=("ADVISORY",)),
+                source_ref="compatibility-input"),
+    )
+    unscored = application.score_one(
+        _request("TWIN-P5"),
+        replace(_native("TWIN-P5", chooser_score=None, exp_pnl=0.9),
+                source_ref="compatibility-input"),
+    )
     chosen = application._choose_dynamic(_request("DYN-SV"), (scored, unscored))
 
     assert chosen.chooser_selection["strategy"] == "TWIN-P"
@@ -185,7 +190,7 @@ def test_batch_keys_inputs_by_event_and_strategy():
     assert [record.canonical_request["strategy_version"] for record in records] == [
         "STR-THRU", "STR-RUNUP",
     ]
-    with pytest.raises(KeyError, match="event/strategy"):
+    with pytest.raises(KeyError, match="ambiguous legacy event-only"):
         application.score_batch(batch, {first.event_id: _native("STR-THRU")})
 
 
