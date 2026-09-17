@@ -465,11 +465,11 @@ def build_render_comparison_receipt(*, root, render_job, legacy_root, max_rss_gb
         conn.close()
     return _finish_receipt(file_receipt, ok, oracle_proc, selfcheck_ok, selfcheck_report,
                            selfcheck_proc, repo_root=repo_root, snapshot_id=snapshot_id,
-                           manifest_hash=manifest_hash)
+                           manifest_hash=manifest_hash, render_job=render_job)
 
 
 def _finish_receipt(file_receipt, oracle_ok, oracle_proc, selfcheck_ok, selfcheck_report,
-                    selfcheck_proc, *, repo_root, snapshot_id, manifest_hash):
+                    selfcheck_proc, *, repo_root, snapshot_id, manifest_hash, render_job):
     findings, problems = file_receipt.findings, list(file_receipt.problems)
     if not oracle_ok:
         problems.append(problem(
@@ -489,7 +489,10 @@ def _finish_receipt(file_receipt, oracle_ok, oracle_proc, selfcheck_ok, selfchec
     envelope = dataclasses.replace(receipt.envelope, code_hash=code_hash,
                                    environment_hash=env_hash, snapshot_id=snapshot_id,
                                    snapshot_manifest_hash=manifest_hash)
-    return dataclasses.replace(receipt, envelope=envelope)
+    # D19 is evidence about this committed render attempt, not an anonymous
+    # replay label.  The Phase 3 verifier binds this exact job to its retained
+    # output and dependencies.
+    return dataclasses.replace(receipt, envelope=envelope, right_ref=render_job)
 
 
 def publish_receipt(receipt: ComparisonReceipt, artifact_root):

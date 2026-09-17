@@ -18,9 +18,12 @@ fields.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import dataclasses
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -33,10 +36,12 @@ from checks import rearchitecture_phase3_gate as p3gate
 from checks.rearchitecture_phase3_quality import FIXED_SUITE
 from checks.rearchitecture_phase3_gate import REGISTRY as REAL_REGISTRY_PATH
 from engine.v2.contracts import (
+    ArtifactRef,
     DatasetVersionRef,
     DependencyEntry,
     DependencyPlan,
     FragmentRef,
+    LegacyMaterializationRequest,
     ObjectRef,
     PreviewInput,
     PreviewRelease,
@@ -46,7 +51,7 @@ from engine.v2.contracts import (
     TableContractRef,
 )
 from engine.v2.diagnosis.receipt import AGREE, DIFFER, ComparisonReceipt, Envelope, Population
-from engine.v2.foundation import to_document
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.ledger.decisions import outcome_generation_ref
 
 ALL_L_IDS = [f"L{i:02d}" for i in range(1, 15)]
@@ -218,11 +223,84 @@ def valid_phase2_evidence(artifact_root: Path, root: Path) -> dict:
 def _preview_input(source_release_id="SRC1") -> PreviewInput:
     obj = ObjectRef(kind="legacy_snapshot", object_id="obj_legacy", content_hash=H, byte_size=10)
     return PreviewInput(
-        source_release_id=source_release_id, source_release_manifest_ref=H, snapshot_ref=H,
+        source_release_id=source_release_id, source_release_manifest_ref="synthetic_release_manifest", snapshot_ref=H,
         legacy_snapshot_object_ref=obj, score_batch_ref=H, score_job_input_refs=(H,),
         bundle_manifest_ref=H, model_registry_artifact_refs=(H,), model_evidence_ref=None,
         finality_ref=H, expected_population_ref=H, score_comparison_receipt_ref=H,
         render_comparison_receipt_ref=H, source_code_hash=H, source_environment_hash=H)
+
+
+def _portable_preview(artifact_root, *, source_release_id="SRC1"):
+    def digest(data):
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+    snapshot = SnapshotRef(snapshot_id="snap_proof", manifest_hash=H, table_versions={},
+                           calendar_version="cal", source_priority_version="prio",
+                           finality_receipt_refs=(), knowledge_mode_by_table={})
+    obj = ObjectRef(kind="legacy_snapshot", object_id="obj_proof", content_hash=H, byte_size=1)
+    request = LegacyMaterializationRequest(request_hash=H, snapshot_ref=snapshot,
+        legacy_snapshot_object_ref=obj, direct_scope={}, evidence_scope={}, table_queries={},
+        registry_and_model_refs=("registry_proof",), calendar_refs=(), legacy_layout_version="v1",
+        expected_population={}, observation_ceiling="2026-01-01T00:00:00.000000Z")
+    score = json.dumps({"rows": [], "ladder": [], "expected_population": []}).encode()
+    finality, models = b"{}", b"{}"
+    snapshot_bytes, request_bytes = _dumps(snapshot), _dumps(request)
+    board = json.dumps({"as_of": "2026-01-01", "n_rows": 0, "rows": []}).encode()
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        info = tarfile.TarInfo("bundle/data/board.json")
+        info.size = len(board)
+        archive.addfile(info, io.BytesIO(board))
+    bundle = stream.getvalue()
+    bundle_manifest = {"data/board.json": digest(board)}
+    score_ref, finality_ref, model_ref = digest(score), digest(finality), digest(models)
+    release_manifest = {"files": {"bundle.tar": {"artifact_id": "art_bundle"}}}
+    score_spec = {"implementation_ref": H, "environment_ref": H, "input_refs": ["input_proof"]}
+    preview_base = dict(source_release_id=source_release_id, source_release_manifest_ref=content_hash(release_manifest),
+        snapshot_ref=snapshot.snapshot_id, legacy_snapshot_object_ref=obj, score_batch_ref=score_ref,
+        score_job_input_refs=("input_proof",), bundle_manifest_ref=content_hash(bundle_manifest),
+        model_registry_artifact_refs=("registry_proof",), model_evidence_ref=model_ref,
+        finality_ref=finality_ref, expected_population_ref=content_hash([]), source_code_hash=H,
+        source_environment_hash=H)
+    score_receipt = ComparisonReceipt(receipt_id="d15", comparison_kind="score_record_parity", tier=1,
+        left_ref="legacy", right_ref="job_score", stage_plan_ref="p", tolerance_policy_ref="t",
+        verdict=AGREE, population=Population(expected=1, supported=1, compared=1),
+        envelope=Envelope(snapshot_id=snapshot.snapshot_id))
+    render_receipt = ComparisonReceipt(receipt_id="d19", comparison_kind="render_bundle_parity", tier=1,
+        left_ref="legacy", right_ref="job_render", stage_plan_ref="p", tolerance_policy_ref="t",
+        verdict=AGREE, population=Population(expected=1, supported=1, compared=1),
+        envelope=Envelope(snapshot_id=snapshot.snapshot_id))
+    score_receipt_bytes, render_receipt_bytes = _dumps(score_receipt), _dumps(render_receipt)
+    preview = PreviewInput(**preview_base, score_comparison_receipt_ref=digest(score_receipt_bytes),
+                           render_comparison_receipt_ref=digest(render_receipt_bytes))
+    files = {"score": score, "bundle": bundle, "snapshot": snapshot_bytes, "request": request_bytes,
+             "finality": finality, "model_evidence": models, "render": b"{}",
+             "release_manifest": json.dumps(release_manifest).encode(), "score_spec": json.dumps(score_spec).encode()}
+    artifact_ids = {"score_artifact": ("score", "legacy_action.v1.0"), "bundle_artifact": ("bundle", "legacy_action.v1.0"),
+        "snapshot_artifact": ("snapshot", "snapshot_ref.v1.0"), "materialization_request_artifact": ("request", "legacy_materialization_request.v1.0"),
+        "finality_artifact": ("finality", "legacy_action.v1.0"), "model_evidence_artifact": ("model_evidence", "legacy_action.v1.0"), "render_artifact": ("render", "legacy_action.v1.0")}
+    proof = {"schema_version": "phase3_source_provenance.v1.0", "release_id": source_release_id,
+        "release_manifest_hash": preview.source_release_manifest_ref, "bundle_manifest_ref": preview.bundle_manifest_ref,
+        "score_job_input_refs": list(preview.score_job_input_refs), "model_registry_artifact_refs": list(preview.model_registry_artifact_refs),
+        "score_job_id": "job_score", "render_job_id": "job_render", "artifact_files": {}}
+    for name, data in files.items(): proof["artifact_files"][name] = _ref(artifact_root, f"proof_{name}", data)
+    for name, (file_name, schema) in artifact_ids.items():
+        data = files[file_name]
+        proof[name] = to_document(ArtifactRef(artifact_id=f"art_{file_name}", content_hash=digest(data), schema_ref=schema, byte_size=len(data), storage_key=f"objects/{file_name}"))
+    proof["render_attempt_id"] = "att_render"
+    proof["render_attempt_bindings"] = {"score.json": proof["score_artifact"]["artifact_id"],
+        "finality.json": proof["finality_artifact"]["artifact_id"],
+        "model_evidence.json": proof["model_evidence_artifact"]["artifact_id"]}
+    proof["score_attempt_id"] = "att_score"
+    proof["score_attempt_bindings"] = {"snapshot_ref.json": proof["snapshot_artifact"]["artifact_id"],
+        "materialization_request.json": proof["materialization_request_artifact"]["artifact_id"],
+        "finality.json": proof["finality_artifact"]["artifact_id"]}
+    proof["release_manifest"] = release_manifest
+    proof["score_spec"] = score_spec
+    proof["score_comparison_receipt"] = _ref(artifact_root, "proof_d15", score_receipt_bytes)
+    proof["render_comparison_receipt"] = _ref(artifact_root, "proof_d19", render_receipt_bytes)
+    ref = _ref(artifact_root, "preview_input.json", _dumps(preview))
+    ref["verification_ref"] = _ref(artifact_root, "proof.json", json.dumps(proof).encode())
+    return preview, ref
 
 
 def _accepted_release(release_id, *, source_release_id="SRC1") -> PreviewRelease:
@@ -277,6 +355,16 @@ def valid_evidence(tmp_path, *, populate_all=True) -> tuple[dict, Path, Path]:
 
     phase2_doc = valid_phase2_evidence(artifact_root, root)
     phase2_ref = _ref(artifact_root, "phase2/_evidence.json", json.dumps(phase2_doc).encode())
+    preview, preview_ref = _portable_preview(artifact_root)
+    def release_ref(release_id, name):
+        release = dataclasses.replace(_accepted_release(release_id), source_release_id=preview.source_release_id,
+            snapshot_ref=preview.snapshot_ref, score_batch_ref=preview.score_batch_ref,
+            bundle_manifest_ref=preview.bundle_manifest_ref,
+            model_registry_artifact_refs=preview.model_registry_artifact_refs,
+            source_code_hash=preview.source_code_hash)
+        ref = _ref(artifact_root, f"{name}.json", _dumps(release))
+        ref["binding_ref"] = _ref(artifact_root, f"{name}_binding.json", json.dumps(_projection_binding(release)).encode())
+        return ref
 
     evidence: dict = {
         "schema_version": p3evidence.PHASE3_EVIDENCE_V1, "authority_mode": "shadow",
@@ -285,10 +373,10 @@ def valid_evidence(tmp_path, *, populate_all=True) -> tuple[dict, Path, Path]:
         "phase2_acceptance_ref": phase2_ref,
         "source_code_hash": phase2_doc["code_hash"], "source_environment_hash": phase2_doc["environment_hash"],
         "mapping_version": "legacy_score_bridge.v1.0",
-        "preview_input_refs": [_ref(artifact_root, "preview_input.json", _dumps(_preview_input()))],
+        "preview_input_refs": [preview_ref],
         "accepted_release_refs": [
-            _accepted_release_ref(artifact_root, "REL1", "release_1"),
-            _accepted_release_ref(artifact_root, "REL2", "release_2"),
+            release_ref("REL1", "release_1"),
+            release_ref("REL2", "release_2"),
         ],
         "population_manifest_ref": _ref(artifact_root, "population_manifest.json",
                                         json.dumps({"expected": 100, "supported": 80, "compared": 50}).encode()),
@@ -670,6 +758,44 @@ def test_preview_input_must_match_an_accepted_release_lineage(tmp_path):
     evidence["preview_input_refs"] = [_ref(artifact_root, "preview_input.json", json.dumps(preview).encode())]
     result = _gate(evidence, artifact_root, root)
     assert "PREVIEW_RELEASE_LINEAGE_MISMATCH" in codes(result)
+
+
+def test_real_preview_requires_portable_verified_source_proof(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["source_release_manifest_ref"] = H
+    evidence["preview_input_refs"] = [_ref(artifact_root, "preview_input.json", json.dumps(preview).encode())]
+    result = _gate(evidence, artifact_root, root)
+    assert "ARTIFACT_MISSING" in codes(result)
+    assert result["ok"] is False
+
+
+def test_real_preview_rejects_corrupt_portable_source_proof(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["source_release_manifest_ref"] = H
+    ref = _ref(artifact_root, "preview_input.json", json.dumps(preview).encode())
+    ref["verification_ref"] = {"path": "missing_proof.json", "content_hash": H}
+    evidence["preview_input_refs"] = [ref]
+    result = _gate(evidence, artifact_root, root)
+    assert "ARTIFACT_MISSING" in codes(result)
+    assert result["ok"] is False
+
+
+def test_real_preview_rejects_source_proof_for_another_release(tmp_path):
+    evidence, artifact_root, root = valid_evidence(tmp_path)
+    preview = to_document(_preview_input())
+    preview["source_release_manifest_ref"] = H
+    ref = _ref(artifact_root, "preview_input.json", json.dumps(preview).encode())
+    ref["verification_ref"] = _ref(artifact_root, "wrong_proof.json", json.dumps({
+        "schema_version": "phase3_source_provenance.v1.0", "release_id": "OTHER",
+        "release_manifest_hash": H, "bundle_manifest_ref": H,
+        "score_job_input_refs": [H], "model_registry_artifact_refs": [H],
+        "artifact_files": {}}).encode())
+    evidence["preview_input_refs"] = [ref]
+    result = _gate(evidence, artifact_root, root)
+    assert "PREVIEW_PROOF_LINEAGE_MISMATCH" in codes(result)
+    assert result["ok"] is False
 
 
 def test_compatibility_release_labels_remain_distinct_from_projection_binding(tmp_path):

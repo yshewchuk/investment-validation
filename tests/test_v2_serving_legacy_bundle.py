@@ -14,6 +14,8 @@ real on-disk shape.
 from __future__ import annotations
 
 import json
+import hashlib
+import dataclasses
 import os
 import shutil
 import sys
@@ -31,6 +33,7 @@ from engine.jsonio import json_safe  # noqa: E402
 from engine.score import ScoreResult  # noqa: E402
 from engine.v2.contracts import EventRef, ObjectRef, PreviewInput  # noqa: E402
 from engine.v2.foundation import content_hash, to_document  # noqa: E402
+from engine.v2.diagnosis.receipt import ComparisonReceipt, Envelope, Population  # noqa: E402
 from engine.v2.serving.bridge import build_bridges  # noqa: E402
 from engine.v2.serving.legacy_bundle import (  # noqa: E402
     LegacyBundleError,
@@ -605,11 +608,37 @@ def test_cli_end_to_end_legacy_format_and_byte_change_moves_release_id(tmp_path,
         {"rows": [row], "ladder": [],
          "expected_population": [f"{row['ticker']}|{row['strategy']}|{row['event_date']}"]}))
     preview_input_path = tmp_path / "preview_input.json"
-    preview_input_path.write_text(json.dumps(to_document(_preview_input())))
+    def digest(data):
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+    receipt = ComparisonReceipt(receipt_id="r", comparison_kind="score_record_parity", tier=1,
+        left_ref="left", right_ref="right", stage_plan_ref="p", tolerance_policy_ref="t",
+        verdict="agree", population=Population(expected=1, supported=1, compared=1), envelope=Envelope())
+    score_receipt = json.dumps(to_document(receipt)).encode()
+    render_receipt = json.dumps(to_document(dataclasses.replace(receipt, comparison_kind="render_bundle_parity"))).encode()
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    (receipts / "score.json").write_bytes(score_receipt)
+    (receipts / "render.json").write_bytes(render_receipt)
+    proof_path = tmp_path / "source_provenance.json"
 
     def run(serving_name: str) -> dict:
+        _rows, manifest = load_legacy_bundle(bundle_root)
+        preview = dataclasses.replace(_preview_input(), score_batch_ref=digest(score_path.read_bytes()),
+            bundle_manifest_ref=content_hash(manifest), finality_ref=digest(b"finality"),
+            model_evidence_ref=digest(b"models"), score_comparison_receipt_ref=digest(score_receipt),
+            render_comparison_receipt_ref=digest(render_receipt))
+        preview_input_path.write_text(json.dumps(to_document(preview)))
+        proof_path.write_text(json.dumps({"schema_version": "phase3_source_provenance.v1.0",
+            "release_id": preview.source_release_id, "release_manifest_hash": preview.source_release_manifest_ref,
+            "bundle_manifest_ref": preview.bundle_manifest_ref,
+            "score_artifact": {"content_hash": preview.score_batch_ref}, "snapshot_artifact": {},
+            "materialization_request_artifact": {}, "finality_artifact": {"content_hash": preview.finality_ref},
+            "model_evidence_artifact": {"content_hash": preview.model_evidence_ref},
+            "score_comparison_receipt": {"path": "receipts/score.json", "content_hash": preview.score_comparison_receipt_ref},
+            "render_comparison_receipt": {"path": "receipts/render.json", "content_hash": preview.render_comparison_receipt_ref}}))
         exit_code = cli_main([
             "--preview-input", str(preview_input_path),
+            "--source-provenance", str(proof_path),
             "--score-json", str(score_path),
             "--bundle-dir", str(bundle_root),
             "--bundle-format", "legacy",

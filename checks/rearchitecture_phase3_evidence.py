@@ -99,16 +99,20 @@ L01-L14 matrix against ``checks/phase3_acceptance.json`` -- see
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from checks.rearchitecture_phase2_evidence import PHASE2_EVIDENCE_V1, validate_evidence as validate_phase2_evidence
-from engine.v2.contracts import ObjectRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: F401
+from engine.v2.contracts import ArtifactRef, LegacyMaterializationRequest, ObjectRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: F401
 from engine.v2.data.documents import decode_document
 from engine.v2.diagnosis.receipt import AGREE, ComparisonReceipt
-from engine.v2.foundation import DocumentError
+from engine.v2.foundation import DocumentError, content_hash, from_document
 from engine.v2.serving.projections import PROJECTION_BINDING_V1
+from engine.v2.serving.legacy_bundle import load_legacy_bundle
 
 PHASE3_EVIDENCE_V1 = "phase3_evidence.v1.0"
 AUTHORITY_MODE = "shadow"
@@ -387,6 +391,142 @@ def _check_preview_lineage(preview_inputs: list[Any], releases: list[Any], findi
             field_ok[field] = False
 
 
+def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_root: Path,
+                         findings: list, field_ok: dict[str, bool]) -> None:
+    """Resolve the portable verifier proof carried beside each preview input."""
+    for index, preview in enumerate(preview_inputs):
+        item = evidence.get("preview_input_refs", [])[index]
+        proof_data = _resolve(item.get("verification_ref") if isinstance(item, dict) else None,
+                              artifact_root, findings, f"preview_input_refs[{index}].verification_ref")
+        if proof_data is None:
+            field_ok["preview_input_refs"] = False
+            continue
+        try:
+            proof = json.loads(proof_data)
+        except ValueError:
+            proof = None
+        if not isinstance(proof, dict) or proof.get("schema_version") != "phase3_source_provenance.v1.0":
+            findings.append({"code": "PREVIEW_PROOF_INVALID", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
+            continue
+        if (proof.get("release_id") != preview.source_release_id
+                or proof.get("release_manifest_hash") != preview.source_release_manifest_ref
+                or proof.get("bundle_manifest_ref") != preview.bundle_manifest_ref
+                or tuple(proof.get("score_job_input_refs", ())) != preview.score_job_input_refs
+                or tuple(proof.get("model_registry_artifact_refs", ())) != preview.model_registry_artifact_refs):
+            findings.append({"code": "PREVIEW_PROOF_LINEAGE_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
+        bindings = proof.get("render_attempt_bindings")
+        if not isinstance(bindings, dict) or not isinstance(proof.get("render_attempt_id"), str):
+            findings.append({"code": "PREVIEW_PROOF_RENDER_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
+        score_bindings = proof.get("score_attempt_bindings")
+        if not isinstance(score_bindings, dict) or not isinstance(proof.get("score_attempt_id"), str):
+            findings.append({"code": "PREVIEW_PROOF_SCORE_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
+        expected = {"score_artifact": ("score", preview.score_batch_ref, "legacy_action.v1.0"),
+                    "bundle_artifact": ("bundle", None, "legacy_action.v1.0"),
+                    "snapshot_artifact": ("snapshot", None, "snapshot_ref.v1.0"),
+                    "materialization_request_artifact": ("request", None, "legacy_materialization_request.v1.0"),
+                    "finality_artifact": ("finality", preview.finality_ref, "legacy_action.v1.0"),
+                    "model_evidence_artifact": ("model_evidence", preview.model_evidence_ref, "legacy_action.v1.0"),
+                    "render_artifact": ("render", None, "legacy_action.v1.0")}
+        files = proof.get("artifact_files")
+        artifact_bytes = {}
+        for metadata_name, (file_name, expected_hash, schema) in expected.items():
+            meta, file_ref = proof.get(metadata_name), files.get(file_name) if isinstance(files, dict) else None
+            data = _resolve(file_ref, artifact_root, findings, f"preview_input_refs[{index}].{file_name}")
+            try:
+                artifact = from_document(ArtifactRef, meta)
+            except (DocumentError, TypeError):
+                artifact = None
+            if artifact is None or artifact.schema_ref != schema or data is None \
+                    or file_ref.get("content_hash") != artifact.content_hash \
+                    or (expected_hash is not None and artifact.content_hash != expected_hash):
+                findings.append({"code": "PREVIEW_PROOF_ARTIFACT_MISMATCH",
+                                 "field": f"preview_input_refs[{index}].{metadata_name}"})
+                field_ok["preview_input_refs"] = False
+            else:
+                artifact_bytes[file_name] = data
+        if isinstance(bindings, dict):
+            required_bindings = {"score.json": proof.get("score_artifact", {}).get("artifact_id"),
+                                 "finality.json": proof.get("finality_artifact", {}).get("artifact_id"),
+                                 "model_evidence.json": proof.get("model_evidence_artifact", {}).get("artifact_id")}
+            if any(bindings.get(name) != artifact_id for name, artifact_id in required_bindings.items()):
+                findings.append({"code": "PREVIEW_PROOF_RENDER_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+                field_ok["preview_input_refs"] = False
+        if isinstance(score_bindings, dict):
+            required_score = {"snapshot_ref.json": proof.get("snapshot_artifact", {}).get("artifact_id"),
+                              "materialization_request.json": proof.get("materialization_request_artifact", {}).get("artifact_id"),
+                              "finality.json": proof.get("finality_artifact", {}).get("artifact_id")}
+            if any(score_bindings.get(name) != artifact_id for name, artifact_id in required_score.items()):
+                findings.append({"code": "PREVIEW_PROOF_SCORE_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+                field_ok["preview_input_refs"] = False
+        try:
+            score_doc = json.loads(artifact_bytes["score"])
+            snapshot_raw = json.loads(artifact_bytes["snapshot"])
+            request = from_document(LegacyMaterializationRequest, json.loads(artifact_bytes["request"]))
+            if (content_hash(score_doc.get("expected_population")) != preview.expected_population_ref
+                    or snapshot_raw.get("snapshot_id") != preview.snapshot_ref
+                    or request.snapshot_ref.snapshot_id != preview.snapshot_ref
+                    or tuple(request.registry_and_model_refs) != preview.model_registry_artifact_refs):
+                raise ValueError("source artifact bindings disagree")
+        except (KeyError, TypeError, ValueError, DocumentError, json.JSONDecodeError):
+            findings.append({"code": "PREVIEW_PROOF_CONTENT_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
+        try:
+            manifest_data = _resolve(files.get("release_manifest"), artifact_root, findings,
+                                     f"preview_input_refs[{index}].release_manifest")
+            spec_data = _resolve(files.get("score_spec"), artifact_root, findings,
+                                 f"preview_input_refs[{index}].score_spec")
+            manifest = json.loads(manifest_data) if manifest_data else None
+            spec = json.loads(spec_data) if spec_data else None
+            bundle_id = proof.get("bundle_artifact", {}).get("artifact_id")
+            if (not isinstance(manifest, dict) or content_hash(manifest) != preview.source_release_manifest_ref
+                    or manifest.get("files", {}).get("bundle.tar", {}).get("artifact_id") != bundle_id
+                    or not isinstance(spec, dict) or spec.get("implementation_ref") != preview.source_code_hash
+                    or spec.get("environment_ref") != preview.source_environment_hash
+                    or tuple(spec.get("input_refs", ())) != preview.score_job_input_refs):
+                raise ValueError("release/spec mismatch")
+        except (ValueError, TypeError, json.JSONDecodeError):
+            findings.append({"code": "PREVIEW_PROOF_RELEASE_OR_SPEC_MISMATCH",
+                             "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
+        bundle_ref = files.get("bundle") if isinstance(files, dict) else None
+        bundle_bytes = _resolve(bundle_ref, artifact_root, findings, f"preview_input_refs[{index}].bundle")
+        if bundle_bytes is not None:
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    with tarfile.open(fileobj=io.BytesIO(bundle_bytes), mode="r:*") as archive:
+                        for member in archive.getmembers():
+                            target = (root / member.name).resolve()
+                            if not member.isfile() or root not in target.parents:
+                                raise ValueError("unsafe bundle member")
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            source = archive.extractfile(member)
+                            if source is None:
+                                raise ValueError("unreadable bundle member")
+                            target.write_bytes(source.read())
+                    bundle_root = root / "bundle" if (root / "bundle").is_dir() else root
+                    _rows, manifest = load_legacy_bundle(bundle_root)
+                if content_hash(manifest) != preview.bundle_manifest_ref:
+                    raise ValueError("bundle manifest mismatch")
+            except (OSError, tarfile.TarError, ValueError):
+                findings.append({"code": "PREVIEW_PROOF_BUNDLE_MISMATCH", "field": f"preview_input_refs[{index}].bundle"})
+                field_ok["preview_input_refs"] = False
+        for name, kind, expected_ref, job_field in (("score_comparison_receipt", "score_record_parity", preview.score_comparison_receipt_ref, "score_job_id"),
+                                                     ("render_comparison_receipt", "render_bundle_parity", preview.render_comparison_receipt_ref, "render_job_id")):
+            data = _resolve(proof.get(name), artifact_root, findings, f"preview_input_refs[{index}].{name}")
+            receipt = _decode(ComparisonReceipt, data, findings, f"preview_input_refs[{index}].{name}") if data else None
+            if receipt is None or proof.get(name, {}).get("content_hash") != expected_ref \
+                    or receipt.comparison_kind != kind or receipt.verdict != AGREE \
+                    or receipt.envelope.snapshot_id != preview.snapshot_ref \
+                    or receipt.right_ref != proof.get(job_field):
+                findings.append({"code": "PREVIEW_PROOF_RECEIPT_MISMATCH", "field": f"preview_input_refs[{index}].{name}"})
+                field_ok["preview_input_refs"] = False
+
+
 def _check_complete_population(decoded_lists: dict[str, list[Any]], population: dict | None,
                                findings: list, field_ok: dict[str, bool]) -> None:
     if population is None:
@@ -647,6 +787,8 @@ def validate_evidence(evidence: dict, *, artifact_root: Path,
     _check_release_bindings(evidence, artifact_root, findings, field_ok)
     _check_preview_lineage(decoded_lists.get("preview_input_refs", []),
                            decoded_lists.get("accepted_release_refs", []), findings, field_ok)
+    _check_preview_proofs(evidence, decoded_lists.get("preview_input_refs", []), artifact_root,
+                          findings, field_ok)
 
     population_doc = _check_raw_dict(resolved.get("population_manifest_ref"), findings, field_ok,
                                      "population_manifest_ref", ("expected", "supported", "compared"))
