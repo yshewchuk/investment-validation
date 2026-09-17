@@ -63,6 +63,7 @@ def _run_sequence(conn, root, store_root, clock, items, log_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--catalog", type=Path, default=None)
     parser.add_argument("--store-root", type=Path, default=None)
     parser.add_argument("--source-publication-job", required=True)
     parser.add_argument("--projection-binding", required=True)
@@ -73,7 +74,7 @@ def main(argv=None):
     parser.add_argument("--sequence-log", type=Path)
     args = parser.parse_args(argv)
     clock = SystemClock()
-    conn = open_catalog(args.root / "catalog.sqlite", clock=clock)
+    conn = open_catalog(args.catalog or args.root / "catalog.sqlite", clock=clock)
     try:
         if args.verify_sequence:
             if not args.b_source_publication_job or not args.b_projection_binding or not args.sequence_log:

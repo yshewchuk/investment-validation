@@ -134,7 +134,7 @@ def test_retained_publication_runs_through_real_service(tmp_path):
         from engine.v2.ops.input_bindings import resolve_and_record
         resolve_and_record(conn, store, source_claim)
         commit_attempt(conn, source_claim.attempt_id, source_claim.fence, Outcome(True, "verified_dead"), clock=clock)
-        projection = store.publish_bytes(b"projection-service", schema_ref="projection_binding.v1.0")
+        projection = store.publish_bytes(json.dumps({"projection_release_id": "projection-a"}).encode(), schema_ref="projection_binding.v1.0")
         register_artifact(conn, projection, None, clock)
         receipt = submit_retained_publication(conn, store, registry=registry(),
             policy=NamespacePolicy({"operator": frozenset({"shadow", "smoke"})}), clock=clock,
