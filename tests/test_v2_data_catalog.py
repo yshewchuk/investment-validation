@@ -189,6 +189,8 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
         ("data", 5, "import_reference_inputs"), ("data", 6, "import_reference_input_fold"),
         ("data", 7, "price_captures"), ("data", 8, "receipt_lineage"),
         ("data", 9, "price_captures_contract_scope"),
+        ("data", 10, "incremental_eod_controls"),
+        ("data", 11, "generic_incremental_revisions"),
     ]
     ops_versions = {r[0] for r in conn.execute(
         "SELECT version FROM schema_versions WHERE owner = 'ops'")}
@@ -442,7 +444,7 @@ def test_head_update_to_next_generation_succeeds(tmp_path):
 
 def test_head_update_skipping_generation_rejected(tmp_path):
     conn, clock = catalog(tmp_path)
-    ids = build_chain(conn, clock, scope="shadow")
+    build_chain(conn, clock, scope="shadow")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "UPDATE data_snapshot_heads SET generation = 3, updated_at = ? WHERE scope = 'shadow'",
@@ -451,7 +453,7 @@ def test_head_update_skipping_generation_rejected(tmp_path):
 
 def test_head_update_reusing_generation_rejected(tmp_path):
     conn, clock = catalog(tmp_path)
-    ids = build_chain(conn, clock, scope="shadow")
+    build_chain(conn, clock, scope="shadow")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "UPDATE data_snapshot_heads SET generation = 1, updated_at = ? WHERE scope = 'shadow'",
@@ -460,7 +462,7 @@ def test_head_update_reusing_generation_rejected(tmp_path):
 
 def test_head_update_changing_scope_rejected(tmp_path):
     conn, clock = catalog(tmp_path)
-    ids = build_chain(conn, clock, scope="shadow")
+    build_chain(conn, clock, scope="shadow")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "UPDATE data_snapshot_heads SET scope = 'other', generation = 2, updated_at = ? "
@@ -469,7 +471,7 @@ def test_head_update_changing_scope_rejected(tmp_path):
 
 def test_head_update_missing_snapshot_rejected(tmp_path):
     conn, clock = catalog(tmp_path)
-    ids = build_chain(conn, clock, scope="shadow")
+    build_chain(conn, clock, scope="shadow")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "UPDATE data_snapshot_heads SET snapshot_id = 'no-such-snapshot', generation = 2, "

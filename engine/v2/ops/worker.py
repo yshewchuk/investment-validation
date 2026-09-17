@@ -138,6 +138,9 @@ def _generic_problem(exc: BaseException):
 
 def dispatch(worker, parameters, root, *, envelope=None):
     envelope = envelope or {}
+    if worker == "incremental_refresh":
+        from engine.v2.ops.incremental_data import run_refresh_worker
+        return run_refresh_worker(parameters, root)
     if worker == "legacy_materialize":
         from engine.v2.ops.materialization_worker import run_materialize
         return run_materialize(parameters, root, envelope)

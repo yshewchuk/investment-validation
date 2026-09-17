@@ -628,10 +628,135 @@ _V9 = (
     "CREATE INDEX data_price_captures_contract ON data_price_captures(contract_id, ticker)",
 )
 
+# --------------------------------------------------------------------------
+# v10 — Phase 3B incremental EOD control records (never edit v1-v9 above)
+# --------------------------------------------------------------------------
+#
+# Raw and normalized objects are immutable ArtifactStore objects. Their refs
+# are recorded before publication of a candidate snapshot, which makes an
+# interrupted run resumable without making incomplete coverage visible.
+# Coverage, revision winners, and changesets are inserted by
+# catalog.commit_snapshot's record_references callback and therefore become
+# visible in the same transaction as the manifest and head generation.
+_V10 = (
+    f"""CREATE TABLE data_raw_receipts (
+        raw_receipt_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        raw_hash TEXT NOT NULL,
+        artifact_ref_json TEXT NOT NULL,
+        response_kind TEXT NOT NULL CHECK (response_kind IN
+            ('complete', 'legitimate_empty', 'partial', 'failed', 'auth_failed',
+             'rate_limited', 'delayed', 'unavailable')),
+        request_json TEXT NOT NULL,
+        response_meta_json TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        CHECK ({_hash_check('request_hash')}),
+        CHECK ({_hash_check('raw_hash')}),
+        CHECK ({_json_check('artifact_ref_json')}),
+        CHECK ({_json_check('request_json')}),
+        CHECK ({_json_check('response_meta_json')}),
+        UNIQUE (source, endpoint, request_hash, raw_hash)
+    ) STRICT""",
+    "CREATE INDEX data_raw_receipts_request ON data_raw_receipts(source, endpoint, request_hash, received_at)",
+    *_immutable_triggers("data_raw_receipts"),
+    f"""CREATE TABLE data_normalizations (
+        normalization_id TEXT PRIMARY KEY,
+        raw_hash TEXT NOT NULL,
+        normalizer_id TEXT NOT NULL,
+        contract_id TEXT NOT NULL REFERENCES data_contracts(contract_id),
+        normalized_hash TEXT NOT NULL,
+        artifact_ref_json TEXT NOT NULL,
+        row_count INTEGER NOT NULL CHECK (row_count >= 0),
+        created_at TEXT NOT NULL,
+        CHECK ({_hash_check('raw_hash')}),
+        CHECK ({_hash_check('normalized_hash')}),
+        CHECK ({_json_check('artifact_ref_json')}),
+        UNIQUE (raw_hash, normalizer_id, contract_id)
+    ) STRICT""",
+    *_immutable_triggers("data_normalizations"),
+    f"""CREATE TABLE data_snapshot_coverage (
+        snapshot_id TEXT NOT NULL REFERENCES data_snapshots(snapshot_id),
+        table_name TEXT NOT NULL,
+        coverage_id TEXT NOT NULL,
+        import_receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        coverage_hash TEXT NOT NULL,
+        coverage_json TEXT NOT NULL,
+        PRIMARY KEY (snapshot_id, table_name, coverage_id),
+        CHECK ({_hash_check('coverage_hash')}),
+        CHECK ({_json_check('coverage_json')})
+    ) STRICT""",
+    "CREATE INDEX data_snapshot_coverage_receipt ON data_snapshot_coverage(import_receipt_id)",
+    *_immutable_triggers("data_snapshot_coverage"),
+    f"""CREATE TABLE data_daily_market_revisions (
+        revision_id TEXT PRIMARY KEY,
+        import_receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        raw_receipt_id TEXT NOT NULL REFERENCES data_raw_receipts(raw_receipt_id),
+        normalization_id TEXT NOT NULL REFERENCES data_normalizations(normalization_id),
+        ticker TEXT NOT NULL,
+        session_date TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_priority INTEGER NOT NULL,
+        finality_rank INTEGER NOT NULL CHECK (finality_rank IN (0, 1)),
+        revision_number INTEGER NOT NULL CHECK (revision_number >= 0),
+        deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+        row_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK ({_hash_check('row_hash')}),
+        UNIQUE (raw_receipt_id, normalization_id, ticker, session_date)
+    ) STRICT""",
+    "CREATE INDEX data_daily_market_revisions_key ON data_daily_market_revisions(ticker, session_date, source_priority, finality_rank, revision_number)",
+    *_immutable_triggers("data_daily_market_revisions"),
+    f"""CREATE TABLE data_changesets (
+        changeset_id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL REFERENCES data_snapshots(snapshot_id),
+        import_receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        table_name TEXT NOT NULL,
+        old_dataset_version_id TEXT,
+        new_dataset_version_id TEXT NOT NULL,
+        changeset_hash TEXT NOT NULL,
+        changeset_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK ({_hash_check('changeset_hash')}),
+        CHECK ({_json_check('changeset_json')})
+    ) STRICT""",
+    "CREATE INDEX data_changesets_snapshot ON data_changesets(snapshot_id, table_name)",
+    *_immutable_triggers("data_changesets"),
+)
+
+# --------------------------------------------------------------------------
+# v11 - retained revisions for every generic incremental table
+# --------------------------------------------------------------------------
+_V11 = (
+    f"""CREATE TABLE data_table_revisions (
+        revision_id TEXT PRIMARY KEY,
+        import_receipt_id TEXT NOT NULL REFERENCES data_import_receipts(receipt_id),
+        table_name TEXT NOT NULL,
+        logical_key TEXT NOT NULL,
+        partition_key TEXT,
+        source TEXT NOT NULL,
+        source_priority INTEGER NOT NULL,
+        finality_rank INTEGER NOT NULL CHECK (finality_rank IN (0, 1)),
+        revision_number INTEGER NOT NULL CHECK (revision_number >= 0),
+        deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+        row_json TEXT,
+        row_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CHECK ({_hash_check('row_hash')}),
+        CHECK ({_json_check('row_json')}),
+        UNIQUE (table_name, revision_id)
+    ) STRICT""",
+    "CREATE INDEX data_table_revisions_key ON data_table_revisions(table_name, logical_key, source_priority, finality_rank, revision_number)",
+    *_immutable_triggers("data_table_revisions"),
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
              (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
              (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6),
              (7, "price_captures", _V7), (8, "receipt_lineage", _V8),
-             (9, "price_captures_contract_scope", _V9))
+             (9, "price_captures_contract_scope", _V9),
+             (10, "incremental_eod_controls", _V10),
+             (11, "generic_incremental_revisions", _V11))

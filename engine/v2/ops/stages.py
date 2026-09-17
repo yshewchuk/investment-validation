@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
 from engine.v2.ops.errors import fail
+from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
 
 
@@ -181,6 +182,7 @@ def input_mode_problems(job, params):
 
 def registry():
     kinds = [
+        refresh_job_kind(),
         JobKind(
             name="artifact_check", worker="artifact_check", parameters=CheckParameters,
             resource_classes=frozenset({"delivery"}), effects=("staged",),
@@ -255,8 +257,7 @@ def registry():
             resource_classes=frozenset({profiles[action]}),
             effects=("staged",), retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="legacy_action.v1.0",
-            namespaces=frozenset({"shadow", "smoke"}),
-            validate=input_mode_problems,
+            namespaces=frozenset({"shadow", "smoke"}), validate=input_mode_problems,
             store_domains=(("legacy_store", "read"),)))
     return KindRegistry(kinds)
 

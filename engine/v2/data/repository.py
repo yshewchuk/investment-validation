@@ -116,6 +116,7 @@ from engine.v2.contracts.data import (
     EarningsEvent,
     EventRef,
     FragmentRecord,
+    KeyPredicate,
     ObjectRef,
     SnapshotRef,
     TableContract,
@@ -544,7 +545,8 @@ class Repository:
     # ----------------------------------------------------------------------
 
     def explain_dependencies(self, query: DataQuery | ChainQuery, *,
-                             table_name: str | None = None) -> DependencyPlan:
+                             table_name: str | None = None,
+                             snapshot_ref: SnapshotRef | None = None) -> DependencyPlan:
         """§5.5: names the exact snapshot, dataset versions, fragments,
         columns, predicates, and estimated/maximum rows a query would touch.
         Recipe/invalidation planning is Phase 3/4 — refused as
@@ -560,11 +562,77 @@ class Repository:
                           details={"contract": DATA_QUERY_V1})
             return self._explain_data_query(query, table_name)
         if isinstance(query, ChainQuery):
-            raise errors.fail("UNSUPPORTED_CONTRACT",
-                      "dependency planning for a chain query is not supported in Phase 2",
-                      details={"contract": CHAIN_QUERY_V1})
+            if snapshot_ref is None:
+                raise errors.fail(
+                    "UNSUPPORTED_CONTRACT",
+                    "chain dependency planning requires a pinned snapshot_ref",
+                    details={"contract": CHAIN_QUERY_V1})
+            return self._explain_chain_query(query, snapshot_ref)
         raise errors.fail("UNSUPPORTED_CONTRACT", "unrecognized query contract",
                   details={"contract": getattr(query, "schema_version", type(query).__name__)})
+
+    def _explain_chain_query(self, query: ChainQuery,
+                             snapshot_ref: SnapshotRef) -> DependencyPlan:
+        """Explain the complete chain read set at one immutable snapshot.
+
+        A chain lookup reads the security mapping, optionally the event row,
+        and the quote fragments for the resolved ticker/session.  Build the
+        same bounded ``DataQuery`` shapes used by the chain reader so the
+        explanation is independently checkable and remains pinned to the
+        caller's snapshot.
+        """
+        if snapshot_ref.snapshot_id != self.resolve(snapshot_ref.snapshot_id).snapshot_id:
+            raise errors.fail("STALE_EXPECTATION", "chain explanation snapshot is not resolvable")
+        if "securities" not in snapshot_ref.table_versions:
+            raise errors.fail("CONTRACT_MISMATCH", "snapshot has no securities table")
+        ticker, _security_id = chains._resolve_ticker(self, query, snapshot_ref)
+        dependencies = []
+        security_ref = snapshot_ref.table_versions["securities"].table_contract_ref
+        security_query = DataQuery(
+            snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=security_ref,
+            columns=("ticker", "year"),
+            key_filter=(KeyPredicate(column="year", operator="eq",
+                                     values=(int(str(query.session_date)[:4]),)),),
+            order_by=("ticker", "year"), max_batch_rows=50000,
+            max_result_rows=2000000)
+        dependencies.extend(self._explain_data_query(
+            security_query, "securities").dependencies)
+        if query.event_ref is not None:
+            event_ref = snapshot_ref.table_versions.get("earnings_events")
+            if event_ref is None:
+                raise errors.fail("CONTRACT_MISMATCH", "snapshot has no earnings_events table")
+            event_query = DataQuery(
+                snapshot_id=snapshot_ref.snapshot_id,
+                table_contract_ref=event_ref.table_contract_ref,
+                columns=("event_id", "ticker", "event_date", "session",
+                         "session_src", "event_cluster_id"),
+                key_filter=(KeyPredicate(column="event_id", operator="eq",
+                                         values=(query.event_ref.event_id,)),),
+                order_by=("event_id",), max_batch_rows=1000, max_result_rows=1000)
+            dependencies.extend(self._explain_data_query(
+                event_query, "earnings_events").dependencies)
+        chain_ref = snapshot_ref.table_versions.get("option_chains")
+        if chain_ref is None:
+            raise errors.fail("CONTRACT_MISMATCH", "snapshot has no option_chains table")
+        chain_query = DataQuery(
+            snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=chain_ref.table_contract_ref,
+            columns=("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask",
+                     "mid", "iv", "delta", "volume", "open_interest", "bid_size",
+                     "ask_size", "src", "src_file", "quote_repaired"),
+            key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
+                        KeyPredicate(column="obs_date", operator="eq",
+                                     values=(query.session_date,))),
+            order_by=("ticker", "obs_date", "expiry", "strike", "right"),
+            max_batch_rows=min(50000, query.max_contracts),
+            max_result_rows=query.max_contracts)
+        dependencies.extend(self._explain_data_query(
+            chain_query, "option_chains").dependencies)
+        return DependencyPlan(
+            request_hash=content_hash({
+                "chain_query": to_document(query),
+                "snapshot_id": snapshot_ref.snapshot_id,
+                "dependencies": [to_document(item) for item in dependencies],
+            }), snapshot_ref=snapshot_ref, dependencies=tuple(dependencies))
 
     def _explain_data_query(self, query: DataQuery, table_name: str, *,
                             query_validator=query_mod.validate_query) -> DependencyPlan:

@@ -5,12 +5,23 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
+from engine.data.finality import covered_tickers as _legacy_covered_tickers
+from engine.data.finality import resolve_final_session as _legacy_resolve_final_session
+from engine.data.finality import session_finality as _legacy_session_finality
 from engine.v2.foundation import safe_relative_path
 from engine.v2.ops import worker_progress
 from engine.v2.ops.decision_replay import score_row_id as _score_row_id
 from engine.v2.ops.errors import fail
+from engine.v2.ops.finality import covered_tickers, resolve_final_session, session_finality
+
+_LEGACY_FINALITY_ORIGINALS = {
+    "session_finality": _legacy_session_finality,
+    "resolve_final_session": _legacy_resolve_final_session,
+    "covered_tickers": _legacy_covered_tickers,
+}
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
            "invoke_price_refresh", "invoke_score_calendar", "iter_raw_fetch_cache",
@@ -50,6 +61,39 @@ def iter_raw_fetch_cache(root: Path | str, source: str):
     """
     from engine.data.fetch import iter_cached
     return iter_cached(source, root=Path(root) / "data" / "raw" / "fetch")
+
+
+def finality_compatibility(name, native):
+    """Expose the legacy finality seam to the native v2 implementation."""
+    legacy = sys.modules["engine.data.finality"]
+    original = _LEGACY_FINALITY_ORIGINALS[name]
+    current = getattr(legacy, name)
+    return current if original is not None and current is not original else native
+
+
+def finality_market_wide_complete(stamp) -> bool:
+    """Read the legacy ORATS cache used by the finality barrier."""
+    from engine.data.fetch import iter_cached
+
+    target = str(stamp.date())
+    found = set()
+    for entry in iter_cached("orats"):
+        if entry.endpoint in {"hist/summaries", "hist/cores"} \
+                and str(entry.params.get("tradeDate")) == target \
+                and int(entry.meta.get("status", 0)) == 200:
+            found.add(entry.endpoint)
+    return found == {"hist/summaries", "hist/cores"}
+
+
+def finality_coverage_frame(table: str, column: str, stamp):
+    """Read bounded legacy coverage columns for native finality."""
+    from engine.data.store import read_table
+
+    try:
+        return read_table(table, years=sorted({stamp.year - 1, stamp.year}),
+                          columns=["ticker", column])
+    except (FileNotFoundError, KeyError, OSError, ValueError):
+        return None
 
 
 def _digest(path: Path) -> str:
@@ -312,8 +356,6 @@ def _cross_check_finality_against_materialization(parameters, result, materializ
     """
     import pandas as pd
 
-    from engine.data.finality import session_finality
-
     stamp = pd.Timestamp(result.date)
     frames = {
         "daily_market": _materialized_curated_frame(materialization_root, "daily_market",
@@ -336,7 +378,6 @@ def _cross_check_finality_against_materialization(parameters, result, materializ
 
 def _action_finality(parameters, root, cross_check=None):
     from engine.calendar import trading_calendar
-    from engine.data.finality import covered_tickers, resolve_final_session
 
     # P2-C03: v1 never falls back to the requested date when no session
     # qualifies (engine/dashboard/nightly.py:1223-1232 stops the run); the

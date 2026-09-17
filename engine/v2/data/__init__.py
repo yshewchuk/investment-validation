@@ -18,6 +18,25 @@ fragment/dataset-version/snapshot builders and verifiers (phase-2 guide
 from __future__ import annotations
 
 from engine.v2.data.documents import decode_document, loads_document
+from engine.v2.data.eod_inventory import (
+    CURRENT_EOD_INVENTORY,
+    EODDataset,
+    inventory_by_name,
+    inventory_document,
+    validate_inventory,
+)
+from engine.v2.data.event_revisions import (
+    EventRevision,
+    apply_event_revision,
+    event_revision_candidate,
+    resolve_event_identity,
+)
+from engine.v2.data.generic_incremental import (
+    GenericTableCandidate,
+    build_generic_table_candidate,
+    commit_generic_table_candidate,
+    load_generic_revisions,
+)
 from engine.v2.data.legacy_mapping import build_legacy_mapping
 from engine.v2.data.manifests import (
     dataset_manifest,
@@ -31,15 +50,28 @@ from engine.v2.data.manifests import (
 )
 
 __all__ = [
+    "CURRENT_EOD_INVENTORY",
+    "EODDataset",
+    "EventRevision",
+    "GenericTableCandidate",
+    "apply_event_revision",
     "build_legacy_mapping",
+    "build_generic_table_candidate",
+    "commit_generic_table_candidate",
+    "load_generic_revisions",
     "dataset_manifest",
     "decode_document",
+    "event_revision_candidate",
     "fragment_record",
     "fragment_ref",
+    "inventory_by_name",
+    "inventory_document",
     "loads_document",
+    "resolve_event_identity",
     "snapshot_ref",
     "table_contract_hash",
     "verify_dataset_manifest",
     "verify_fragment_record",
     "verify_snapshot_ref",
+    "validate_inventory",
 ]
