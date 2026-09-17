@@ -149,5 +149,23 @@ def test_retained_publication_runs_through_real_service(tmp_path):
         rollback, negative = build_fenced_rollback(log, tmp_path / "releases" / scope, tmp_path / "failure",
             catalog_path=tmp_path / "ops.sqlite", store_root=tmp_path, code_hash="test", environment_hash="test")
         assert rollback.resulting_snapshot_id == "projection-a" and negative.verdict == "differ"
+        document = json.loads(log.read_text())
+        original_log = log.read_text()
+        document["update"][0]["publication_job_id"] = source.job_id
+        log.write_text(json.dumps(document))
+        with pytest.raises(RuntimeError, match="does not deterministically produce release"):
+            build_fenced_rollback(log, tmp_path / "releases" / scope, tmp_path / "failure",
+                catalog_path=tmp_path / "ops.sqlite", store_root=tmp_path, code_hash="test", environment_hash="test")
+        log.write_text(original_log)
+        first_id, second_id = document["update"][0]["ops_release_id"], document["update"][1]["ops_release_id"]
+        original_manifest = conn.execute("SELECT manifest_json FROM releases WHERE release_id=?", (first_id,)).fetchone()[0]
+        second_manifest = json.loads(conn.execute("SELECT manifest_json FROM releases WHERE release_id=?", (second_id,)).fetchone()[0])
+        tampered = json.loads(original_manifest)
+        tampered["gates"]["decision"] = second_manifest["gates"]["decision"]
+        conn.execute("UPDATE releases SET manifest_json=? WHERE release_id=?", (json.dumps(tampered), first_id))
+        with pytest.raises(RuntimeError, match="gate input hash"):
+            build_fenced_rollback(log, tmp_path / "releases" / scope, tmp_path / "failure",
+                catalog_path=tmp_path / "ops.sqlite", store_root=tmp_path, code_hash="test", environment_hash="test")
+        conn.execute("UPDATE releases SET manifest_json=? WHERE release_id=?", (original_manifest, first_id))
     finally:
         conn.close()
