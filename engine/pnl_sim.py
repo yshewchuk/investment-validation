@@ -129,9 +129,33 @@ class ResidualPool:
     def before(self, cutoff) -> int:
         return int(np.searchsorted(self._dates, np.datetime64(pd.Timestamp(cutoff)), "left"))
 
-    def draw(self, cutoff, prediction: float, n: int, rng):
+    def draw(self, cutoff, prediction: float, n: int, rng, *, evidence: dict | None = None):
+        """Draw paired residuals, optionally recording the exact selection path.
+
+        ``evidence`` is a caller-owned sink.  Keeping it ``None`` preserves the
+        original allocation and random-number path; the lists below are built
+        only for explicit evidence capture.
+        """
         end = self.before(cutoff)
         if end < MIN_POOL:
+            if evidence is not None:
+                evidence.clear()
+                evidence.update({
+                    "schema_version": "residual_draw_evidence.v1",
+                    "status": "refused",
+                    "refusal": "THIN_RESIDUAL_POOL",
+                    "cutoff": pd.Timestamp(cutoff).isoformat(),
+                    "cutoff_index": end,
+                    "prediction": float(prediction),
+                    "bucket_count": self._buckets,
+                    "bucket_index": None,
+                    "bucket_edges": [],
+                    "causal_indices": list(range(end)),
+                    "eligible_indices": [],
+                    "fallback_used": False,
+                    "fallback_indices": [],
+                    "selected_indices": [],
+                })
             return np.empty(0), np.empty(0)
         pred = self._pred[:end]
         # Deciles from the pool that exists AT THIS CUTOFF, never the whole
@@ -139,9 +163,29 @@ class ResidualPool:
         edges = np.quantile(pred, np.linspace(0, 1, self._buckets + 1)[1:-1])
         index = int(np.searchsorted(edges, prediction, side="right"))
         rows = np.flatnonzero(np.searchsorted(edges, pred, side="right") == index)
-        if rows.size < MIN_POOL:
+        eligible = rows
+        fallback_used = rows.size < MIN_POOL
+        if fallback_used:
             rows = np.arange(end)
         chosen = rows[rng.integers(0, rows.size, size=n)]
+        if evidence is not None:
+            evidence.clear()
+            evidence.update({
+                "schema_version": "residual_draw_evidence.v1",
+                "status": "selected",
+                "refusal": None,
+                "cutoff": pd.Timestamp(cutoff).isoformat(),
+                "cutoff_index": end,
+                "prediction": float(prediction),
+                "bucket_count": self._buckets,
+                "bucket_index": index,
+                "bucket_edges": edges.tolist(),
+                "causal_indices": list(range(end)),
+                "eligible_indices": eligible.tolist(),
+                "fallback_used": fallback_used,
+                "fallback_indices": rows.tolist() if fallback_used else [],
+                "selected_indices": chosen.tolist(),
+            })
         return self._move[chosen], self._crush[chosen]
 
 
@@ -158,6 +202,7 @@ def expected_pnl(
     pool: ResidualPool,
     key: str = "",
     draws: int = DRAWS,
+    evidence: dict | None = None,
 ) -> dict | None:
     """Expected return, win probability and band, or ``None`` if unsimulable.
 
@@ -166,22 +211,55 @@ def expected_pnl(
     rejected. Collapsing "we could not tell" into "no" is how a data gap becomes
     a silent permanent decline that looks like a decision.
     """
+    if evidence is not None:
+        evidence.clear()
+        evidence.update({
+            "schema_version": "expected_pnl_evidence.v1",
+            "status": "pending",
+            "refusal": None,
+            "event_date": pd.Timestamp(event_date).isoformat(),
+            "draw_count": int(draws),
+        })
     if not exit_legs:
+        if evidence is not None:
+            evidence.update({"status": "refused", "refusal": "MISSING_EXIT_LEGS"})
         return None
     values = (spot, entry_cost, pre_iv30, pred_abs_move, pred_iv_crush, dte_exit)
     if not all(v is not None and np.isfinite(v) for v in values):
+        if evidence is not None:
+            evidence.update({"status": "refused", "refusal": "NONFINITE_INPUT"})
         return None
     if pre_iv30 <= 0 or entry_cost <= 0 or dte_exit < 0:
+        if evidence is not None:
+            evidence.update({"status": "refused", "refusal": "INVALID_INPUT"})
         return None
 
     # SHA-256, not hash(): Python salts string hashing per process, and the
     # first implementation drew different samples on every run — 7 events and
     # 0.26pp of mean apart, which is this estimator's noise floor.
-    rng = np.random.default_rng(
-        int.from_bytes(hashlib.sha256(f"{key}|{event_date}".encode()).digest()[:8], "big")
-    )
-    err_move, err_crush = pool.draw(event_date, pred_abs_move, draws, rng)
+    seed_material = f"{key}|{event_date}"
+    seed = int.from_bytes(hashlib.sha256(seed_material.encode()).digest()[:8], "big")
+    rng = np.random.default_rng(seed)
+    if evidence is None:
+        err_move, err_crush = pool.draw(event_date, pred_abs_move, draws, rng)
+    else:
+        draw_evidence = {}
+        err_move, err_crush = pool.draw(
+            event_date,
+            pred_abs_move,
+            draws,
+            rng,
+            evidence=draw_evidence,
+        )
+        evidence.update({
+            "seed": seed,
+            "seed_algorithm": "sha256-first-8-bytes-big-endian",
+            "seed_material": seed_material,
+            "residual_draw": draw_evidence,
+        })
     if err_move.size == 0:
+        if evidence is not None:
+            evidence.update({"status": "refused", "refusal": "THIN_RESIDUAL_POOL"})
         return None
 
     move = np.maximum(pred_abs_move + err_move, 0.0)
@@ -204,13 +282,16 @@ def expected_pnl(
         value += side * qty * black_scholes_put(spot_exit, float(strike), dte_exit / 365.0, vol_exit)
 
     ret = (value - entry_cost) / entry_cost
-    return {
+    result = {
         "exp_pnl_sim": float(np.mean(ret)),
         "win_sim": float(np.mean(ret > 0)),
         "sim_p10": float(np.quantile(ret, 0.10)),
         "sim_p90": float(np.quantile(ret, 0.90)),
         "pool_n": int(pool.before(event_date)),
     }
+    if evidence is not None:
+        evidence.update({"status": "completed", "refusal": None})
+    return result
 
 
 #: Where the gate's trailing history lives. Model OUTPUT, like Tier 4, so it

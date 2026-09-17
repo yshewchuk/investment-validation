@@ -30,7 +30,9 @@ byte for byte, on any machine.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -43,9 +45,12 @@ __all__ = [
     "MONEYNESS_BANDS",
     "AnalogSet",
     "AnalogMatcher",
+    "AnalogEvidenceHook",
     "bucket_frame",
     "match_frame",
 ]
+
+AnalogEvidenceHook = Callable[[dict[str, Any]], None]
 
 #: Below this, an empirical distribution is an anecdote. The guide's threshold.
 MIN_ANALOGS = 30
@@ -209,6 +214,139 @@ def _empty(strategy: str, alpha: float, buckets: dict, widened: int, dropped,
     )
 
 
+def _json_value(value):
+    """Return a detached, JSON-safe representation of an evidence value."""
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_json_value(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return _json_value(value.item())
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.isoformat()
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _evidence_rows(frame: pd.DataFrame) -> dict[str, Any]:
+    """Copy rows and assign deterministic identities for one evidence block."""
+    rows = []
+    occurrences: dict[str, int] = {}
+    for source_index, series in frame.iterrows():
+        values = _json_value(series.to_dict())
+        identity_payload = {
+            "source_index": _json_value(source_index),
+            "values": values,
+        }
+        encoded = json.dumps(
+            identity_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        occurrence = occurrences.get(digest, 0)
+        occurrences[digest] = occurrence + 1
+        row_id = f"sha256:{digest}:{occurrence}"
+        rows.append({
+            "row_id": row_id,
+            "source_index": identity_payload["source_index"],
+            "values": values,
+        })
+    return {
+        "row_ids": [row["row_id"] for row in rows],
+        "rows": rows,
+    }
+
+
+class _AnalogMatchEvidence:
+    """Collect opt-in matching evidence without affecting the default path."""
+
+    def __init__(
+        self,
+        *,
+        hook: AnalogEvidenceHook,
+        strategy: str,
+        alpha: float,
+        snapshot: str,
+        cutoff,
+        request_key: str,
+        bucket_query: dict,
+        population: pd.DataFrame,
+    ):
+        self.hook = hook
+        self.strategy = strategy
+        self.alpha = alpha
+        self.snapshot = snapshot
+        self.cutoff = (
+            pd.Timestamp(cutoff).normalize().isoformat() if cutoff is not None else None
+        )
+        self.request_key = request_key
+        self.bucket_query = _json_value(bucket_query)
+        self.population = _evidence_rows(population)
+        self.causal = None
+        self.effective_bucket_query = None
+        self.causal_implied_edges = None
+        self.widening_steps: list[dict[str, Any]] = []
+
+    def set_causal(
+        self,
+        pool: pd.DataFrame,
+        bucket_query: dict,
+        implied_edges: tuple[float, float] | None,
+    ) -> None:
+        self.causal = _evidence_rows(pool)
+        self.effective_bucket_query = _json_value(bucket_query)
+        self.causal_implied_edges = _json_value(implied_edges)
+
+    def add_step(
+        self,
+        active: list[str] | tuple[str, ...],
+        dropped: list[str] | tuple[str, ...],
+        matched: pd.DataFrame,
+        *,
+        accepted: bool,
+    ) -> None:
+        block = _evidence_rows(matched)
+        self.widening_steps.append({
+            "step": len(self.widening_steps),
+            "active_dimensions": list(active),
+            "dropped_dimensions": list(dropped),
+            "row_ids": block["row_ids"],
+            "count": len(block["row_ids"]),
+            "accepted": accepted,
+        })
+
+    def emit(self, matched: pd.DataFrame, result: AnalogSet) -> None:
+        numeric_returns = pd.to_numeric(matched.get("ret"), errors="coerce")
+        finite = np.isfinite(numeric_returns.to_numpy(dtype=float))
+        contributing = matched.loc[finite]
+        self.hook({
+            "schema_version": "analog_match_evidence.v1",
+            "strategy": self.strategy,
+            "alpha": self.alpha,
+            "snapshot": self.snapshot,
+            "cutoff": self.cutoff,
+            "request_key": self.request_key,
+            "bucket_query": self.bucket_query,
+            "effective_bucket_query": self.effective_bucket_query,
+            "causal_implied_edges": self.causal_implied_edges,
+            "population": self.population,
+            "causal": self.causal,
+            "widening_steps": self.widening_steps,
+            "selected": _evidence_rows(matched),
+            "contributing": _evidence_rows(contributing),
+            "result": result.as_dict(),
+        })
+
+
 # --------------------------------------------------------------------------
 # the matcher
 # --------------------------------------------------------------------------
@@ -298,8 +436,16 @@ class AnalogMatcher:
         min_analogs: int = MIN_ANALOGS,
         bootstrap: int = 2000,
         request_key: str = "",
+        evidence_hook: AnalogEvidenceHook | None = None,
     ) -> AnalogSet:
-        """Matched returns, widening the buckets until there are enough."""
+        """Matched returns, widening the buckets until there are enough.
+
+        ``evidence_hook`` is opt-in and receives one self-contained evidence
+        document after a successful match. Default callers take the existing
+        path and allocate no row evidence. Every row in the document is a
+        defensive, JSON-safe copy, so evidence consumers cannot mutate the
+        matcher's cached populations.
+        """
         key = (strategy, round(float(alpha), 4))
         base = self._pools.get(key)
         if base is None:
@@ -309,6 +455,20 @@ class AnalogMatcher:
             ]
             self._pools[key] = base
         pool = base
+        evidence = (
+            _AnalogMatchEvidence(
+                hook=evidence_hook,
+                strategy=strategy,
+                alpha=float(alpha),
+                snapshot=self.snapshot,
+                cutoff=as_of,
+                request_key=request_key,
+                bucket_query=buckets,
+                population=base,
+            )
+            if evidence_hook is not None else None
+        )
+        causal_edges = None
         if as_of is not None:
             # Closed strictly before the decision: a trade still open on the day
             # we decide has not yet told us anything about how it went. The
@@ -348,6 +508,9 @@ class AnalogMatcher:
                 buckets = dict(buckets)
                 buckets["implied_tercile"] = _bucket([ratio], edges,
                                                      ("low", "mid", "high"))[0]
+            causal_edges = edges
+        if evidence is not None:
+            evidence.set_causal(pool, buckets, causal_edges)
 
         # A dimension with no value cannot match on, and must be COUNTED as
         # dropped rather than quietly skipped. The loop below used to `continue`
@@ -371,12 +534,17 @@ class AnalogMatcher:
             # Matching on zero dimensions would return the strategy's base
             # rate wearing an empty bucket label, the exact lie this layer was
             # rewritten to stop telling; the honest answer is an empty match.
-            return self._summarize(
+            result = self._summarize(
                 self.trades.iloc[0:0], strategy, alpha, buckets, 0,
                 list(unavailable), bootstrap=bootstrap,
                 min_analogs=min_analogs, request_key=request_key,
                 unavailable=tuple(unavailable),
             )
+            if evidence is not None:
+                empty = self.trades.iloc[0:0]
+                evidence.add_step((), unavailable, empty, accepted=True)
+                evidence.emit(empty, result)
+            return result
 
         active = [d for d in ("mcap_bucket", *WIDENING_ORDER) if d not in unavailable]
         dropped: list[str] = list(unavailable)
@@ -389,12 +557,18 @@ class AnalogMatcher:
                 mask &= (pool[dimension] == want).to_numpy()
             matched = pool[mask]
             remaining = [d for d in WIDENING_ORDER if d not in dropped]
-            if len(matched) >= min_analogs or not remaining:
-                return self._summarize(
+            accepted = len(matched) >= min_analogs or not remaining
+            if evidence is not None:
+                evidence.add_step(active, dropped, matched, accepted=accepted)
+            if accepted:
+                result = self._summarize(
                     matched, strategy, alpha, buckets, len(dropped), dropped,
                     bootstrap=bootstrap, min_analogs=min_analogs,
                     request_key=request_key, unavailable=tuple(unavailable),
                 )
+                if evidence is not None:
+                    evidence.emit(matched, result)
+                return result
             drop = remaining[0]
             active.remove(drop)
             dropped.append(drop)
