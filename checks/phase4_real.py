@@ -13,6 +13,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -31,7 +32,7 @@ from engine.structures import (  # noqa: E402
     price_structure,
 )
 from engine.v2.contracts import ScoreRequest  # noqa: E402
-from engine.v2.domain.generation import generate, price  # noqa: E402
+from engine.v2.domain.generation import Geometry, Pricing, generate, price  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
     multi_expiry_refusal,
     planned_exit_label,
@@ -43,7 +44,7 @@ from engine.v2.features import (  # noqa: E402
     FeatureContextPlanner,
     default_feature_registry,
 )
-from engine.v2.foundation import content_hash, to_document  # noqa: E402
+from engine.v2.foundation import content_hash, from_document, to_document  # noqa: E402
 from engine.v2.models import (  # noqa: E402
     FrozenInference,
     InferenceRequest,
@@ -56,6 +57,7 @@ from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
+    StageReceipt,
     receipt,
 )
 from engine.v2.serving.score_projection import legacy_score_projection  # noqa: E402
@@ -903,12 +905,311 @@ def _contract_projection(legs) -> tuple[dict, ...]:
     } for leg in legs or ())
 
 
+_TRACE_SCHEMA = "phase4_input_trace.v1.0"
+_REQUIRED_TRACE_STAGES = (
+    "resolve_context", "features", "forecast", "geometry", "pricing",
+    "analogs", "simulation", "gate", "chooser", "serialization",
+)
+_TRACE_KEYS = frozenset({
+    "schema_version", "request", "request_hash", "shared_inputs",
+    "shared_input_hash", "native_input_hash", "native_inputs",
+    "native_inputs_hash", "stages", "resources", "trace_hash", "metadata",
+})
+_NATIVE_INPUT_KEYS = frozenset({
+    "context", "features", "forecast", "geometry", "pricing", "analogs",
+    "simulation", "gate", "chooser", "diagnostics", "source_ref",
+})
+
+
+class _TraceError(ValueError):
+    pass
+
+
+def _require_hash(value: Any, label: str) -> str:
+    if (not isinstance(value, str) or not value.startswith("sha256:")
+            or len(value) != 71):
+        raise _TraceError(f"{label}: invalid sha256")
+    return value
+
+
+def _verify_content(value: Any, expected: Any, label: str) -> str:
+    expected_hash = _require_hash(expected, label)
+    actual = content_hash(value)
+    if actual != expected_hash:
+        raise _TraceError(f"{label}: content hash mismatch")
+    return actual
+
+
+def _resource_path(root: Path, relative: Any) -> Path:
+    if not isinstance(relative, str) or not relative.strip():
+        raise _TraceError("resource.path: missing")
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError as exc:
+        raise _TraceError("resource.path: escapes release root") from exc
+    if not candidate.is_file():
+        raise _TraceError(f"resource.path: missing {relative}")
+    return candidate
+
+
+def _verified_resources(root: Path, rows: Any) -> dict[str, Any]:
+    if not isinstance(rows, list):
+        raise _TraceError("resources: expected list")
+    resources: dict[str, Any] = {}
+    refs: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise _TraceError(f"resources[{index}]: expected object")
+        unknown = set(row) - {
+            "resource_id", "ref", "kind", "path", "sha256", "content_hash",
+            "document",
+        }
+        if unknown:
+            raise _TraceError(
+                f"resources[{index}]: unknown fields {sorted(unknown)}"
+            )
+        resource_id = row.get("resource_id")
+        ref = row.get("ref")
+        kind = row.get("kind")
+        if not isinstance(resource_id, str) or not resource_id.strip():
+            raise _TraceError(f"resources[{index}].resource_id: missing")
+        if resource_id in resources:
+            raise _TraceError(f"resources[{index}].resource_id: duplicate")
+        if not isinstance(ref, str) or not ref.strip() or ref in refs:
+            raise _TraceError(f"resources[{index}].ref: missing or duplicate")
+        if kind not in {"artifact", "sidecar"}:
+            raise _TraceError(f"resources[{index}].kind: unsupported")
+        document = row.get("document")
+        if "path" in row:
+            path = _resource_path(root, row["path"])
+            raw = path.read_bytes()
+            actual_sha = "sha256:" + hashlib.sha256(raw).hexdigest()
+            if actual_sha != _require_hash(
+                row.get("sha256"), f"resources[{index}].sha256"
+            ):
+                raise _TraceError(f"resources[{index}].sha256: mismatch")
+            if kind == "sidecar":
+                try:
+                    document = json.loads(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise _TraceError(
+                        f"resources[{index}]: sidecar is not JSON"
+                    ) from exc
+        elif kind == "artifact":
+            raise _TraceError(f"resources[{index}]: artifact path required")
+        elif "document" not in row:
+            raise _TraceError(f"resources[{index}]: sidecar content required")
+        if kind == "sidecar":
+            _verify_content(
+                document, row.get("content_hash"),
+                f"resources[{index}].content_hash",
+            )
+        resources[resource_id] = document
+        refs.add(ref)
+    resources["__refs__"] = refs
+    return resources
+
+
+def _resolve_resource_refs(value: Any, resources: Mapping[str, Any]) -> Any:
+    if isinstance(value, Mapping):
+        if set(value) == {"$resource"}:
+            resource_id = value["$resource"]
+            if not isinstance(resource_id, str) or resource_id not in resources:
+                raise _TraceError(f"native_inputs: unknown resource {resource_id!r}")
+            resolved = resources[resource_id]
+            if resolved is None:
+                raise _TraceError(
+                    f"native_inputs: binary artifact {resource_id!r} is not data"
+                )
+            return copy.deepcopy(resolved)
+        return {
+            str(key): _resolve_resource_refs(item, resources)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_resolve_resource_refs(item, resources) for item in value]
+    return value
+
+
+def _verified_runtime_receipts(native) -> tuple[dict[str, str], ...]:
+    raw = native.resolved_request.get("native_stage_receipts")
+    if not isinstance(raw, (list, tuple)):
+        raise _TraceError("execution: native stage receipts missing")
+    receipts = []
+    seen = set()
+    for index, row in enumerate(raw):
+        if not isinstance(row, Mapping):
+            raise _TraceError(f"execution.receipts[{index}]: malformed")
+        stage = row.get("stage")
+        if stage in seen or not isinstance(stage, str):
+            raise _TraceError(f"execution.receipts[{index}]: duplicate stage")
+        _require_hash(row.get("input_hash"), f"execution.{stage}.input_hash")
+        _require_hash(row.get("output_hash"), f"execution.{stage}.output_hash")
+        owner = row.get("owner")
+        if not isinstance(owner, str) or not owner.strip():
+            raise _TraceError(f"execution.{stage}.owner: missing")
+        seen.add(stage)
+        receipts.append({
+            "stage": stage,
+            "input_hash": row["input_hash"],
+            "output_hash": row["output_hash"],
+            "owner": owner,
+        })
+    missing = set(_REQUIRED_TRACE_STAGES) - seen
+    if missing:
+        raise _TraceError(f"execution: missing stages {sorted(missing)}")
+    return tuple(receipts)
+
+
+def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
+    payload = pair.get("payload")
+    if not isinstance(payload, Mapping):
+        raise _TraceError("pair.payload: missing")
+    trace = payload.get("input_trace")
+    if not isinstance(trace, Mapping):
+        raise _TraceError("input_trace: missing")
+    unknown = set(trace) - _TRACE_KEYS
+    if unknown:
+        raise _TraceError(f"input_trace: unknown fields {sorted(unknown)}")
+    if trace.get("schema_version") != _TRACE_SCHEMA:
+        raise _TraceError(
+            f"input_trace.schema_version: expected {_TRACE_SCHEMA}"
+        )
+    trace_body = {key: value for key, value in trace.items()
+                  if key != "trace_hash"}
+    trace_hash = _verify_content(
+        trace_body, trace.get("trace_hash"), "input_trace.trace_hash"
+    )
+    if payload.get("input_trace_hash") != trace_hash:
+        raise _TraceError("pair.input_trace_hash: mismatch")
+
+    saved_request = payload.get("request")
+    if not isinstance(saved_request, Mapping) or trace.get("request") != saved_request:
+        raise _TraceError("input_trace.request: not the exact saved request")
+    request = from_document(ScoreRequest, dict(saved_request))
+    computed_request_hash = request_hash(request)
+    if trace.get("request_hash") != computed_request_hash:
+        raise _TraceError("input_trace.request_hash: mismatch")
+
+    shared_inputs = trace.get("shared_inputs")
+    if not isinstance(shared_inputs, Mapping):
+        raise _TraceError("input_trace.shared_inputs: missing")
+    if shared_inputs.get("request") != saved_request:
+        raise _TraceError("input_trace.shared_inputs.request: mismatch")
+    shared_hash = _verify_content(
+        shared_inputs, trace.get("shared_input_hash"),
+        "input_trace.shared_input_hash",
+    )
+    if payload.get("legacy_input_hash") != shared_hash:
+        raise _TraceError("pair.legacy_input_hash: mismatch")
+    if trace.get("native_input_hash") != shared_hash:
+        raise _TraceError("input_trace.native_input_hash: mismatch")
+
+    resources = _verified_resources(release_root, trace.get("resources"))
+    request_refs = {
+        *request.dependency_refs, *request.model_artifact_refs,
+        *(
+            value for value in (
+                request.residual_state_ref, request.analog_state_ref,
+                request.calibration_state_ref,
+            ) if value is not None
+        ),
+    }
+    missing_refs = request_refs - resources["__refs__"]
+    if missing_refs:
+        raise _TraceError(
+            f"resources: missing request refs {sorted(missing_refs)}"
+        )
+
+    raw_inputs = trace.get("native_inputs")
+    if not isinstance(raw_inputs, Mapping):
+        raise _TraceError("input_trace.native_inputs: missing")
+    unknown_inputs = set(raw_inputs) - _NATIVE_INPUT_KEYS
+    missing_inputs = _NATIVE_INPUT_KEYS - set(raw_inputs)
+    if unknown_inputs or missing_inputs:
+        raise _TraceError(
+            "input_trace.native_inputs: "
+            f"unknown={sorted(unknown_inputs)}, missing={sorted(missing_inputs)}"
+        )
+    resolved_inputs = _resolve_resource_refs(raw_inputs, resources)
+    _verify_content(
+        resolved_inputs, trace.get("native_inputs_hash"),
+        "input_trace.native_inputs_hash",
+    )
+
+    stage_rows = trace.get("stages")
+    if not isinstance(stage_rows, Mapping):
+        raise _TraceError("input_trace.stages: missing")
+    if set(stage_rows) != set(_REQUIRED_TRACE_STAGES):
+        raise _TraceError(
+            "input_trace.stages: incomplete "
+            f"{sorted(set(_REQUIRED_TRACE_STAGES) - set(stage_rows))}"
+        )
+    receipts = []
+    for stage in _REQUIRED_TRACE_STAGES:
+        row = stage_rows[stage]
+        if not isinstance(row, Mapping) or set(row) != {
+            "input", "output", "input_hash", "output_hash", "owner",
+        }:
+            raise _TraceError(f"input_trace.stages.{stage}: malformed")
+        _verify_content(
+            row["input"], row["input_hash"], f"input_trace.stages.{stage}.input"
+        )
+        _verify_content(
+            row["output"], row["output_hash"],
+            f"input_trace.stages.{stage}.output",
+        )
+        if not isinstance(row["owner"], str) or not row["owner"].strip():
+            raise _TraceError(f"input_trace.stages.{stage}.owner: missing")
+        receipts.append(StageReceipt(
+            stage=stage, input_hash=row["input_hash"],
+            output_hash=row["output_hash"], owner=row["owner"],
+        ))
+
+    geometry_doc = resolved_inputs["geometry"]
+    pricing_doc = resolved_inputs["pricing"]
+    geometry = (
+        None if geometry_doc is None
+        else from_document(Geometry, geometry_doc, path="$.native_inputs.geometry")
+    )
+    pricing = (
+        None if pricing_doc is None
+        else from_document(Pricing, pricing_doc, path="$.native_inputs.pricing")
+    )
+    blocks = {
+        key: resolved_inputs[key]
+        for key in (
+            "context", "features", "forecast", "analogs", "simulation",
+            "gate", "chooser", "diagnostics",
+        )
+    }
+    if any(not isinstance(value, Mapping) for value in blocks.values()):
+        raise _TraceError("input_trace.native_inputs: stage blocks must be objects")
+    if resolved_inputs["source_ref"] != shared_hash:
+        raise _TraceError("input_trace.native_inputs.source_ref: mismatch")
+    inputs = NativeScoreInputs(
+        **blocks, geometry=geometry, pricing=pricing,
+        source_ref=resolved_inputs["source_ref"],
+        stage_receipts=tuple(receipts),
+    )
+    return {
+        "request": request,
+        "inputs": inputs,
+        "input_hash": shared_hash,
+        "trace_hash": trace_hash,
+        "captured_stages": tuple(_REQUIRED_TRACE_STAGES),
+    }
+
+
 def _native_parity(corpus) -> tuple[dict, dict]:
-    """Run the canonical application over every saved pair and compare fields."""
+    """Compare only complete, hash-verified traces from the saved release."""
     rows = []
     native_ids = []
     legacy_ids = []
-    planted_defect_detected = False
+    dispositions = {"compared": 0, "refused_as_expected": 0, "incomparable": 0}
+    runtime_stage_counts = {stage: 0 for stage in _REQUIRED_TRACE_STAGES}
+    flag_defect_detected = False
     numeric_negative_controls = {
         "forecasts": False,
         "simulation": False,
@@ -918,11 +1219,26 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     for fixture_id in corpus.ordered_ids:
         pair = corpus.pairs[fixture_id]
         record = pair["payload"]["record"]
-        inputs = _native_record(record, pair["payload_hash"])
-        native = application.score_one(
-            _request(strategy_version=str(record.get("strategy") or "STR-THRU")),
-            inputs,
-        )
+        legacy_ids.append(pair["payload_hash"])
+        try:
+            verified = _verified_trace_bundle(pair, corpus.root)
+            native = application.score_one(
+                verified["request"], verified["inputs"],
+            )
+            runtime_receipts = _verified_runtime_receipts(native)
+        except Exception as exc:
+            dispositions["incomparable"] += 1
+            rows.append({
+                "fixture_id": fixture_id,
+                "disposition": "incomparable",
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+            continue
+        dispositions["compared"] += 1
+        for stage in {
+            item["stage"] for item in runtime_receipts
+        } & set(_REQUIRED_TRACE_STAGES):
+            runtime_stage_counts[stage] += 1
         expected_keys = set(record)
         native_keys = set(native.resolved_request) - {
             "native_stage_receipts", "native_source_ref",
@@ -964,33 +1280,58 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                     break
         rows.append({
             "fixture_id": fixture_id,
+            "disposition": "compared",
+            "same_input_hash": verified["input_hash"],
+            "trace_hash": verified["trace_hash"],
+            "runtime_receipts": runtime_receipts,
             "checks": checks,
             "numeric_findings": {
                 name: result["finding_fields"] for name, result in numeric.items()
             },
         })
         native_ids.append(native.payload_hash)
-        legacy_ids.append(pair["payload_hash"])
-        if not planted_defect_detected:
+        if not flag_defect_detected:
             mutated_flags = list(record.get("flags") or ()) + ["PHASE4_PLANTED_DEFECT"]
-            planted_defect_detected = list(native.reason_codes) != mutated_flags
+            flag_defect_detected = list(native.reason_codes) != mutated_flags
     dimensions = (
         "keys", "contracts", "verdicts", "flags", "null_masks",
         "forecasts", "simulation", "financial_diagnostics",
     )
-    expected = len(rows)
-    agreed = sum(1 for row in rows if all(row["checks"].values()))
+    expected = len(corpus.ordered_ids)
+    compared_rows = [row for row in rows if row["disposition"] == "compared"]
+    compared = len(compared_rows)
+    agreed = sum(1 for row in compared_rows if all(row["checks"].values()))
     dimension_agreement = {
-        dimension: all(row["checks"][dimension] for row in rows)
+        dimension: (
+            compared == expected and expected > 0
+            and all(row["checks"][dimension] for row in compared_rows)
+        )
         for dimension in dimensions
     }
     native_receipt = content_hash(native_ids)
     legacy_receipt = content_hash(legacy_ids)
     comparison_receipt = content_hash(rows)
     release_id = corpus.root.name
+    same_input_hashes = (
+        compared == expected and expected > 0
+        and all(row.get("same_input_hash") for row in compared_rows)
+    )
+    covered_stages = tuple(
+        stage for stage in _REQUIRED_TRACE_STAGES
+        if runtime_stage_counts[stage] == expected and expected > 0
+    )
+    complete = (
+        compared == expected and dispositions["incomparable"] == 0
+        and agreed == expected and all(dimension_agreement.values())
+        and same_input_hashes
+        and set(covered_stages) == set(_REQUIRED_TRACE_STAGES)
+    )
     release = {
-        "complete": agreed == expected,
-        "population": {"expected": expected, "compared": expected, "agreed": agreed},
+        "complete": complete,
+        "population": {
+            "expected": expected, "compared": compared, "agreed": agreed,
+            **dispositions,
+        },
         "source_release": {
             "release_id": release_id,
             "manifest_hash": corpus.index.get("corpus_hash"),
@@ -1002,6 +1343,11 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "dimension_agreement": dimension_agreement,
         "numeric_coverage": numeric_coverage,
         "numeric_negative_controls": numeric_negative_controls,
+        "dispositions": tuple({
+            "fixture_id": row["fixture_id"],
+            "disposition": row["disposition"],
+            **({"reason": row["reason"]} if "reason" in row else {}),
+        } for row in rows),
     }
     parity = {
         "synthetic": False,
@@ -1010,23 +1356,31 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "release_id": release_id,
             "manifest_hash": corpus.index.get("corpus_hash"),
         },
-        "same_input_hashes": True,
-        "population": {"expected": expected, "compared": expected, "agreed": agreed},
-        "stages": (
-            "resolve_context", "features", "forecast", "geometry", "pricing",
-            "analogs", "simulation", "gate", "chooser", "serialization",
-        ),
+        "same_input_hashes": same_input_hashes,
+        "population": {
+            "expected": expected, "compared": compared, "agreed": agreed,
+            **dispositions,
+        },
+        "stages": covered_stages,
+        "stage_coverage": runtime_stage_counts,
         "comparison_dimensions": dimensions,
         "dimension_agreement": dimension_agreement,
         "planted_defect": {
-            "detected": planted_defect_detected and all(numeric_negative_controls.values()),
-            "controls": {"flags": planted_defect_detected, **numeric_negative_controls},
+            "detected": (
+                compared == expected and flag_defect_detected
+                and all(numeric_negative_controls.values())
+            ),
+            "controls": {
+                "flags": flag_defect_detected, **numeric_negative_controls,
+            },
             "receipt": content_hash({
                 "comparison": comparison_receipt,
-                "defects": {"flags": planted_defect_detected, **numeric_negative_controls},
+                "defects": {
+                    "flags": flag_defect_detected, **numeric_negative_controls,
+                },
             }),
         },
-        "complete": agreed == expected,
+        "complete": complete,
     }
     return release, parity
 
