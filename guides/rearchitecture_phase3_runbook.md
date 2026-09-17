@@ -256,11 +256,27 @@ independently servable); UNVERIFIED against a real release by this task.**
 Do not delete original artifacts or decisions when performing any of the
 above (guide §10).
 
+### Retained-input serving publication (supervised)
+
+After the verified projection tool has registered `projection_binding.json`,
+submit a fresh, immutable publication job. The source publication must
+already be succeeded; it supplies retained finality, bundle, selfcheck and
+engineering bindings. This command only submits work:
+
+```
+/usr/bin/python3 tools/v2_dashboard_publish.py --root /private/ops \
+  --source-publication-job job_SOURCE --projection-binding art_BINDING \
+  --operation-id publish-a
+/usr/bin/python3 -m engine.v2.ops.cli --root /private/ops serve --once
+```
+
+Repeat the identical `--operation-id` to retrieve the same job. To roll A
+back after B, pass A retained projection binding with a new operation id
+(for example `rollback-a-001`), then run the supervisor command again. Do
+not update a source job, attempt, lease, fence, release or `CURRENT` by hand.
+
 ## Deferred / not this task
 
-- A convenience CLI flag for binding `projection_binding.json` (step 3) —
-  today it is the `engine.v2.ops` job-graph primitives directly, not a
-  single flag on `ops plan`/`ops submit`.
 - Receipt producers now exist, including engineering history, browser, coverage
   and performance. Reuse the implementations and historical refs in the status
   file. Remaining work is fresh same-generation acceptance, the coverage
