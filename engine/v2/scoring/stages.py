@@ -115,9 +115,21 @@ _DIAGNOSTIC_PROTECTED = _OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
 _ROLE_OUTPUTS = {
     "driver": ("driver_prediction",),
     "size": ("forecast_abs_move",),
+    "implied_t1": ("driver_prediction",),
     "runup_move": ("runup_move_prediction",),
     "iv_crush": ("pred_iv_crush", "pred_iv_crush_30"),
     "fair_value": ("model_fair_pct",),
+}
+_STRATEGY_FORECAST_ROLES = {
+    "STR-THRU": ("driver",),
+    "STR-RUNUP": ("implied_t1", "runup_move"),
+    "TWIN-P": ("size",),
+    "TWIN-P5": ("size",),
+    "CND-PS": ("size",),
+    "BFLY-P": ("size",),
+    "BFLY-P5": ("size",),
+    "RAMP7": ("size",),
+    "CTR5": ("size",),
 }
 _SIM_DRAWS = 4000
 _SIM_MIN_POOL = 250
@@ -173,11 +185,22 @@ def _linear(spec: Mapping[str, Any], facts: Mapping[str, Any],
     return value
 
 
-def _required_forecast_roles(inputs: NativeScoreInputs) -> tuple[str, ...]:
+def _required_forecast_roles(
+    inputs: NativeScoreInputs,
+    strategy: str | None,
+) -> tuple[str, ...]:
+    source = strategy
+    if source is None and inputs.geometry is not None:
+        source = inputs.geometry.strategy
+    if source is None:
+        source = inputs.context.get("strategy")
+    name = str(source or "").split("@", 1)[0]
+    roles = list(_STRATEGY_FORECAST_ROLES.get(name, ()))
     raw = inputs.forecast.get("required_roles") or ()
-    roles = [str(raw)] if isinstance(raw, str) else [str(item) for item in raw]
-    if inputs.forecast.get("driver_name") is not None and "driver" not in roles:
-        roles.append("driver")
+    declared = [str(raw)] if isinstance(raw, str) else [str(item) for item in raw]
+    for role in declared:
+        if role not in roles:
+            roles.append(role)
     planned = (
         inputs.simulation.get("mode") == "planned_exit"
         or inputs.simulation.get("residuals") is not None
@@ -191,42 +214,59 @@ def _required_forecast_roles(inputs: NativeScoreInputs) -> tuple[str, ...]:
 
 def _validate_forecast_roles(inputs: NativeScoreInputs,
                              output: Mapping[str, Any],
-                             flags: list[str]) -> None:
-    for role in _required_forecast_roles(inputs):
+                             flags: list[str],
+                             strategy: str | None,
+                             invalid_fields: set[str]) -> None:
+    for role in _required_forecast_roles(inputs, strategy):
         fields = _ROLE_OUTPUTS.get(role)
         if fields is None:
             _add_flag(flags, f"UNKNOWN_FORECAST_ROLE:{role}")
-        elif not any(output.get(field) is not None for field in fields):
+        elif any(output.get(field) is not None for field in fields):
+            continue
+        elif not any(field in invalid_fields for field in fields):
             _add_flag(flags, f"MISSING_FORECAST_OUTPUT:{role}")
 
 
-def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
-                      flags: list[str]) -> dict[str, Any]:
-    block = inputs.forecast
-    output: dict[str, Any] = {}
-    declared = False
-    if block.get("driver_name") is not None:
-        output["driver_name"] = str(block["driver_name"])
+def _execute_frozen_forecast(
+    block: Mapping[str, Any],
+    output: dict[str, Any],
+    invalid_fields: set[str],
+    flags: list[str],
+) -> bool:
     frozen = block.get("frozen_outputs")
-    if frozen is not None:
-        if not isinstance(frozen, Mapping) or not block.get("artifact_hashes"):
-            _add_flag(flags, "INVALID_FROZEN_INFERENCE")
+    if frozen is None:
+        return False
+    if not isinstance(frozen, Mapping) or not block.get("artifact_hashes"):
+        _add_flag(flags, "INVALID_FROZEN_INFERENCE")
+        return False
+    for field, raw in frozen.items():
+        if field not in _FORECAST_OUTPUTS:
+            _add_flag(flags, f"UNKNOWN_FROZEN_OUTPUT:{field}")
+            continue
+        if raw is None:
+            continue
+        value = _finite(raw)
+        if value is None:
+            invalid_fields.add(field)
+            _add_flag(flags, f"NONFINITE_FORECAST_OUTPUT:{field}")
         else:
-            declared = True
-            for field, raw in frozen.items():
-                if field not in _FORECAST_OUTPUTS:
-                    _add_flag(flags, f"UNKNOWN_FROZEN_OUTPUT:{field}")
-                    continue
-                value = _finite(raw)
-                if value is None:
-                    _add_flag(flags, f"NONFINITE_FORECAST_OUTPUT:{field}")
-                else:
-                    output[field] = value
+            output[field] = value
+    return True
 
+
+def _execute_local_forecast(
+    inputs: NativeScoreInputs,
+    block: Mapping[str, Any],
+    values: Mapping[str, Any],
+    output: dict[str, Any],
+    invalid_fields: set[str],
+    flags: list[str],
+) -> bool:
     models = block.get("models", {})
     if not isinstance(models, Mapping):
         _add_flag(flags, "INVALID_FORECAST_MODELS")
-        return output
+        return False
+    declared = False
     facts = _facts(inputs, values)
     for field in _FORECAST_OUTPUTS:
         spec = models.get(field, block.get(field))
@@ -239,9 +279,28 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
         try:
             output[field] = _linear(spec, facts, "forecast")
         except ValueError as exc:
+            invalid_fields.add(field)
             _add_flag(flags, exc)
-    _validate_forecast_roles(inputs, output, flags)
-    if not declared:
+    return declared
+
+
+def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
+                      flags: list[str], strategy: str | None) -> dict[str, Any]:
+    block = inputs.forecast
+    output: dict[str, Any] = {}
+    invalid_fields: set[str] = set()
+    if block.get("driver_name") is not None:
+        output["driver_name"] = str(block["driver_name"])
+    frozen_declared = _execute_frozen_forecast(
+        block, output, invalid_fields, flags,
+    )
+    local_declared = _execute_local_forecast(
+        inputs, block, values, output, invalid_fields, flags,
+    )
+    _validate_forecast_roles(
+        inputs, output, flags, strategy, invalid_fields,
+    )
+    if not (frozen_declared or local_declared):
         _add_flag(flags, "MISSING_FORECAST_INPUT")
     values.update(output)
     return output
@@ -251,6 +310,7 @@ def _initial_values(
     inputs: NativeScoreInputs,
     flags: list[str],
     compatibility: bool,
+    strategy: str | None,
 ) -> tuple[dict[str, Any], list[StageReceipt], Any]:
     values: dict[str, Any] = {}
     blocks = (inputs.context, inputs.features, inputs.forecast, inputs.analogs,
@@ -269,7 +329,9 @@ def _initial_values(
         values.update(inputs.forecast)
         forecast_output = dict(inputs.forecast)
     else:
-        forecast_output = _execute_forecast(inputs, values, flags)
+        forecast_output = _execute_forecast(
+            inputs, values, flags, strategy,
+        )
     executed.append(receipt("forecast", prior, forecast_output))
     return values, executed, legacy_cost
 
@@ -768,7 +830,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     is_compatibility = inputs.source_ref == "compatibility-input"
     flags: list[str] = []
     values, executed, legacy_cost = _initial_values(
-        inputs, flags, is_compatibility,
+        inputs, flags, is_compatibility, strategy,
     )
     name = _strategy_name(inputs, strategy, values)
     geometry_inputs, geometry = _resolve_geometry(inputs, name, values)
