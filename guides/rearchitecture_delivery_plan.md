@@ -53,13 +53,13 @@ research program and do not schedule this migration.
 | Phase 2 accepted with explained D14/D15 differences; strict gate remains red | Private `reports/phase2_closeout/FINAL.md`, candidate `f0e631a` | Preserve the acceptance and the original red receipts. No repeated attempt to make stale legacy prices agree. |
 | Preview, serving bridge/API, React board/detail and receipt producers merged | `b1bf750`; `engine/v2/serving/`, `ui/`, Phase 3 checks | Finish acceptance; do not rebuild these components. |
 | Replay precision fixed; fresh bridge comparison succeeds | `f8b22d9`, `9a23bf4`, [status](rearchitecture_phase3_status.md) | Retain the full-population fix; an old subset is not acceptance. |
-| Fresh D19 replay reports 11 mismatches in 20 sampled rows | Current Phase 3 status handoff | Repair and prove the frozen forecast/model boundary before accepting this release. Earlier D19 cannot attest it. |
+| Fresh D19 replay is green | Current Phase 3 status handoff | Retain the frozen replay boundary and bind evidence to the current candidate; earlier receipts still cannot attest a new release. |
 | Coverage baseline and assembled Phase 3 evidence missing | `rearchitecture_phase3_quality.py`, current status | Close these once on the final candidate. |
 | Phase 3 prerequisite validator requires clean Phase 2 validation | `rearchitecture_phase3_evidence.py::_check_phase2` | Represent the existing user disposition without changing the strict Phase 2 gate or fabricating agreement. |
 | Native features/scoring/models are still skeletons | Package READMEs and `__init__.py` files | Preview readiness is not evidence that native migration is nearly complete. |
 
-Next tasks, in order: (1) bound the replay defect and acceptance-disposition
-handoff; (2) freeze one candidate, assemble 3A evidence and finish its runbook;
+Next tasks, in order: (1) freeze the provenance-correct candidate and assemble
+3A evidence; (2) finish its runbook and final gate;
 (3) implement 3B by dataset slice; (4) migrate one complete strategy through
 4/5, then extend over the fixed inventory; (5) wire all consumers in 6;
 (6) complete the session qualification and switch in 7. Continue safe

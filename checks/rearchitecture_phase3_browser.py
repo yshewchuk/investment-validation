@@ -104,9 +104,18 @@ FORBIDDEN_INITIAL_SUBSTRINGS = ("/scores", "/api/v1/operations", "/api/v1/releas
 
 
 def _mk_app(serving_db: Path, store_root: Path, serving_root: Path, dist_dir: Path, token: str,
-           current_release_id: str):
-    app = create_app(serving_db=str(serving_db), store_root=str(store_root), serving_root=str(serving_root),
-                     token=token, resolver=lambda: current_release_id)
+           current_release_id: str, publication_root: Path | None = None):
+    # A pinned resolver is useful for isolated stale-state fixtures.  Launch
+    # evidence, however, must traverse the fenced publisher CURRENT pointer
+    # and its bound projection_binding.json.  Otherwise a browser green run
+    # would prove only a supplied release id, not the published generation.
+    kwargs = dict(serving_db=str(serving_db), store_root=str(store_root), serving_root=str(serving_root),
+                  token=token)
+    if publication_root is None:
+        kwargs["resolver"] = lambda: current_release_id
+    else:
+        kwargs["publication_root"] = str(publication_root)
+    app = create_app(**kwargs)
     # StaticFiles mount added ONLY here, after every /api/v1/... route is
     # already registered -- see module docstring; mirrors tests/
     # test_v2_dashboard_integration.py's own _serve_ui exactly.
@@ -540,8 +549,14 @@ def build_full_population(base: str, token: str, release_id: str, fixture_releas
                 _finding(findings, FULL_POPULATION_KIND, f"{strategy}_field_{field}")
 
     context.close()
+    # The browser renders both main scores and the two ladder entries.  The
+    # launch population is the independently saved semantic source key set,
+    # so duplicate UI score ids for one key must not inflate the receipt
+    # population.  All rendered ids are still checked above; this count binds
+    # the receipt to the same 111-key unit used by bridge mapping/value parity.
+    compared_population = len(source_population & api_population)
     return _receipt(FULL_POPULATION_KIND, 1, "release:" + release_id, "release:" + release_id, findings,
-                    expected=expected_population, compared=len(seen), code_hash=code_hash,
+                    expected=expected_population, compared=compared_population, code_hash=code_hash,
                     environment_hash=environment_hash)
 
 def publish_document(document, artifact_root: Path, name: str) -> dict:
@@ -560,6 +575,9 @@ def main(argv=None):
     parser.add_argument("--serving-root", type=Path, required=True)
     parser.add_argument("--dist-dir", type=Path, required=True)
     parser.add_argument("--release-id", required=True, help="the real projected release, served as current")
+    parser.add_argument("--publication-root", type=Path,
+                        help="fenced publisher release scope; required for launch evidence so CURRENT and "
+                             "projection_binding.json are resolved by the real API path")
     parser.add_argument("--expected-score-json", required=True, type=Path,
                         help="saved source score.json defining the independent full population")
     parser.add_argument("--fixture-release-id", help="optional real stale-state fixture release")
@@ -581,7 +599,8 @@ def main(argv=None):
     code_hash = source_hash(source_files(ROOT))
     env_hash, _source = _environment_hash(ROOT)
 
-    app = _mk_app(args.serving_db, args.store_root, args.serving_root, args.dist_dir, args.token, args.release_id)
+    app = _mk_app(args.serving_db, args.store_root, args.serving_root, args.dist_dir, args.token,
+                  args.release_id, args.publication_root)
     server, thread, base = _start(app)
     try:
         from playwright.sync_api import sync_playwright

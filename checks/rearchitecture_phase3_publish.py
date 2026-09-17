@@ -2,12 +2,10 @@
 """L06/L13 evidence producers -- guide §9 rows L06/L13 / §5.3 point 8, §5.4.
 
 Real ``build_candidate`` writes into a private scratch ``serving.sqlite`` +
-object store this process owns (never a shared/live root), over the real
-attempt-20 population (clean subset -- see ``rearchitecture_phase3_bridge.py``
-'s module docstring for why: the known legacy render defect on
-``structure_params`` is out of scope here too). Every ``PreviewInput`` ref is
-a real Phase 2 catalog artifact id/hash (``/root/phase2-shadow-ops``), not a
-fabricated one.
+object store this process owns (never a shared/live root), over the complete
+saved-score population. Every ``PreviewInput`` ref comes from the exact
+verified input document that built the fenced candidate; there are no
+fallback release ids or fabricated references.
 
 L06 ``publish_idempotency_parity``: (1) two ``build_candidate`` calls over
 IDENTICAL content into the same serving store produce the same
@@ -23,22 +21,14 @@ on its own pinned ``ArtifactRef`` (real hash check, real bytes) refuses it,
 while an uncorrupted sibling object and the release's index row remain
 readable.
 
-L13 ``refresh_rollback_receipt_ref``: a private release-root (never a
-shared/live one) sequences real, byte-distinct release content
-R1 (attempt-20's own real bundle) -> R2 (the clean subset's real bundle,
-genuinely different bytes) -> back to R1, verified via a real
-``create_server`` HTTP round trip at each step (same mechanism
-``rearchitecture_phase3_current_switch.py`` uses). The ``RollbackReceipt``
-records the LAST move (R2 -> republished-R1), ``scope="v2_serving_preview"``
-matching the schema's own repurposing for Phase 3 (confirmed against
-``tests/test_checks_phase3_gate.py``'s fixture, which uses release ids in
-``prior_snapshot_id``/``resulting_snapshot_id`` under this same scope
-string). ``publish_failure_negative_control``: a "failed R2" republish
-carries an ``ArtifactRef`` whose declared hash does not match its real
-object bytes; the real ``engine.v2.ops.publication.materialize`` +
-``ArtifactStore.verify`` path refuses it (``ArtifactError``/``OpsError``,
-never silently accepted), no partial release directory is left under
-``releases/``, and CURRENT still resolves to R1.
+L13 ``refresh_rollback_receipt_ref`` verifies the durable result of the real
+fenced publisher: two distinct validated projection generations A -> B,
+followed by a fresh published operation release that binds A again. The
+receipt names the actual projection release ids. The producer re-reads the
+real CURRENT pointer and the rollback release binding; it does not create
+directories or write CURRENT itself. ``publish_failure_negative_control``
+still invokes the real materializer with a deliberately incorrect artifact
+hash and proves it leaves no partial release or pointer mutation.
 """
 from __future__ import annotations
 
@@ -46,11 +36,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
-import shutil
 import sys
-import threading
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +44,7 @@ sys.path.insert(0, str(ROOT))
 
 from checks.rearchitecture_phase1_gate import source_files, source_hash  # noqa: E402
 from checks.rearchitecture_phase2_gate import environment_hash as _environment_hash  # noqa: E402
-from engine.v2.contracts import ArtifactRef, ObjectRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: E402
+from engine.v2.contracts import ArtifactRef, PreviewInput, PreviewRelease, RollbackReceipt  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.diagnosis import AGREE, DIFFER, ComparisonReceipt, Envelope, Finding, Population  # noqa: E402
 from engine.v2.diagnosis import content_hash as receipt_content_hash  # noqa: E402
@@ -67,7 +53,6 @@ from engine.v2.foundation import (  # noqa: E402
     ArtifactStore,
     SystemClock,
     content_hash,
-    format_timestamp,
     from_document,
     to_document,
 )
@@ -75,7 +60,7 @@ from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.publication import materialize  # noqa: E402
 from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
-from engine.v2.serving.projections import build_candidate, connect, ensure_schema  # noqa: E402
+from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
 PUBLISH_IDEMPOTENCY_KIND = "publish_idempotency_parity"
 PUBLISH_CORRUPTION_NEGATIVE_KIND = "publish_corruption_negative_control"
@@ -111,29 +96,14 @@ def _table_counts(conn) -> dict[str, int]:
     return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in _INDEX_TABLES}
 
 
-def _preview_input(*, bundle_manifest_ref: str, score_batch_ref: str, score_comparison_receipt_ref: str,
-                   render_comparison_receipt_ref: str, source_code_hash: str,
-                   source_environment_hash: str) -> PreviewInput:
-    """Every ref is a real Phase 2 artifact from the attempt-20 population
-    (fetched from ``/root/phase2-shadow-ops/catalog.sqlite``), not fabricated."""
-    return PreviewInput(
-        source_release_id="relba732fb44d3a88dc2574cc99",
-        source_release_manifest_ref="sha256:a022c490df6fb2f09e314fcb190d1be9b0207cc497986fbd5a617a863fb1d8a2",
-        snapshot_ref="snap_6ae7348848e4d27486823eb0a9baceff",
-        legacy_snapshot_object_ref=ObjectRef(
-            kind="legacy_snapshot", object_id="art_5a4bf96123a308d91fdd791d7dd9d666",
-            content_hash="sha256:51cc817230b7a6af574a3811e39140835eaf6efa21e976fbdace7dd593683f79",
-            byte_size=4496),
-        score_batch_ref=score_batch_ref,
-        score_job_input_refs=("art_5a4bf96123a308d91fdd791d7dd9d666", "art_3b98d02f7bb33932da2c998ad5a86ca3"),
-        bundle_manifest_ref=bundle_manifest_ref,
-        model_registry_artifact_refs=("art_334b2cc86b5738ca2fbd73324819b5b1",),
-        model_evidence_ref="art_334b2cc86b5738ca2fbd73324819b5b1",
-        finality_ref="art_7d2363233946b9f506e716a52bb46c89",
-        expected_population_ref=content_hash(["attempt-20-clean-subset-expected-population"]),
-        score_comparison_receipt_ref=score_comparison_receipt_ref,
-        render_comparison_receipt_ref=render_comparison_receipt_ref,
-        source_code_hash=source_code_hash, source_environment_hash=source_environment_hash)
+def load_preview_input(path: Path) -> PreviewInput:
+    """Decode the exact verified input that built the published candidates.
+
+    This deliberately has no fallback constants.  A new Phase 2 handoff must
+    supply its own immutable input document rather than inheriting references
+    from a previous release.
+    """
+    return from_document(PreviewInput, json.loads(path.read_text()))
 
 
 # --------------------------------------------------------------------------
@@ -142,24 +112,17 @@ def _preview_input(*, bundle_manifest_ref: str, score_batch_ref: str, score_comp
 
 
 def build_publish(clean_score_json: Path, clean_bundle_dir: Path, repository, snapshot_ref, *,
-                  serving_root: Path, score_comparison_receipt_ref: str, render_comparison_receipt_ref: str,
-                  code_hash: str, environment_hash: str) -> tuple[ComparisonReceipt, ComparisonReceipt]:
+                  preview_input: PreviewInput, serving_root: Path, code_hash: str,
+                  environment_hash: str) -> tuple[ComparisonReceipt, ComparisonReceipt]:
     clock = SystemClock()
     score_doc = load_score_document(clean_score_json)
     bundle_rows_by_ticker, bundle_manifest = load_legacy_bundle(clean_bundle_dir)
-    bundle_manifest_ref = content_hash(bundle_manifest)
 
     serving_root.mkdir(parents=True, exist_ok=True)
     store = ArtifactStore(serving_root / "objects")
     conn = connect(str(serving_root / "serving.sqlite"), clock=clock)
     findings: list[Finding] = []
     try:
-        preview_input = _preview_input(
-            bundle_manifest_ref=bundle_manifest_ref, score_batch_ref="art_8214c99d5f38a64ea9bd5dc62d323d72",
-            score_comparison_receipt_ref=score_comparison_receipt_ref,
-            render_comparison_receipt_ref=render_comparison_receipt_ref,
-            source_code_hash=code_hash, source_environment_hash=environment_hash)
-
         result1 = build_candidate(preview_input, score_doc, bundle_rows_by_ticker, repository=repository,
                                   snapshot_ref=snapshot_ref, store=store, conn=conn,
                                   requested_as_of="2026-09-10", resolved_as_of="2026-09-10", clock=clock)
@@ -180,7 +143,7 @@ def build_publish(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
         # A second, content-distinct candidate that aborts mid-sequence (after the
         # findings object is durable, before the index transaction) leaves no
         # partial release row; a bare retry of the SAME content then succeeds.
-        retry_input = dataclasses.replace(preview_input, score_batch_ref="art_8214c99d5f38a64ea9bd5dc62d323d72#retry")
+        retry_input = dataclasses.replace(preview_input, score_batch_ref=preview_input.score_batch_ref + "#retry")
         aborted = {"hit": False}
 
         def _fault(point: str) -> None:
@@ -246,103 +209,72 @@ def build_publish(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
 # --------------------------------------------------------------------------
 
 
-def _start(release_root: Path, health_path: Path, token: str):
-    from engine.v2.serving.operations import create_server
-    server = create_server(("127.0.0.1", 0), token=token, health_path=health_path, release_root=release_root)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread, f"http://127.0.0.1:{server.server_port}"
+def _valid_release_record(record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    required = ("projection_release_id", "ops_release_id", "published_at", "delivered_at", "manifest")
+    if any(not isinstance(record.get(key), str) or not record[key] for key in required[:-1]):
+        return False
+    manifest = record.get("manifest")
+    gates = manifest.get("gates") if isinstance(manifest, dict) else None
+    return isinstance(gates, dict) and set(gates) == {"decision", "projection", "security", "engineering"} and all(
+        isinstance(gate, dict) and gate.get("ok") is True and isinstance(gate.get("receipt_ref"), str)
+        and gate["receipt_ref"].startswith("sha256:") for gate in gates.values())
 
 
-def _stop(server, thread) -> None:
-    server.shutdown()
-    thread.join(timeout=5)
-    server.server_close()
+def build_fenced_rollback(publication_log: Path, publication_root: Path, failure_root: Path, *,
+                          code_hash: str, environment_hash: str) -> tuple[RollbackReceipt, ComparisonReceipt]:
+    """Verify a real fenced A -> B -> A publication record.
 
-
-def _get(base: str, path: str, token: str) -> tuple[int, bytes]:
-    request = urllib.request.Request(base + path)
-    request.add_header("Authorization", "Bearer " + token)
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-
-
-def _write_current(release_root: Path, release_id: str) -> None:
-    (release_root / "CURRENT").write_text(release_id + "\n")
-
-
-def build_rollback(real_bundle_dir: Path, clean_bundle_dir: Path, *, release_root: Path, health_path: Path,
-                   token: str, code_hash: str, environment_hash: str
-                   ) -> tuple[RollbackReceipt, ComparisonReceipt]:
-    """R1 (real attempt-20 bundle) -> R2 (clean-subset bundle, genuinely
-    different real bytes) -> rollback republish of R1's content, sequenced
-    through a private ``release-root`` this process fully owns, verified via
-    the same real ``create_server`` HTTP round trip L02 uses."""
-    clock = SystemClock()
-    releases_dir = release_root / "releases"
-    releases_dir.mkdir(parents=True, exist_ok=True)
-    if not (releases_dir / "R1").exists():
-        shutil.copytree(real_bundle_dir, releases_dir / "R1")
-    if not (releases_dir / "R2").exists():
-        shutil.copytree(clean_bundle_dir, releases_dir / "R2")
-    rollback_target = releases_dir / "R1-rollback"
-    if rollback_target.exists():
-        shutil.rmtree(rollback_target)
-    shutil.copytree(releases_dir / "R1", rollback_target)
-    health_path.write_text(json.dumps({"ok": True, "current": None}))
-
-    findings: list[Finding] = []
-    generation = 0
-    server, thread, base = _start(release_root, health_path, token)
-    try:
-        for release_id in ("R1", "R2", "R1-rollback"):
-            _write_current(release_root, release_id)
-            generation += 1
-            resolved = json.loads(_get(base, "/release/current.json", token)[1]).get("release_id")
-            if resolved != release_id:
-                findings.append(_mk_finding("refresh_rollback", f"resolve_after_{release_id}"))
-        status, r1_after = _get(base, "/release/R1-rollback/data/board.json", token)
-        status_orig, r1_before = _get(base, "/release/R1/data/board.json", token)
-        if status != 200 or status_orig != 200 or r1_after != r1_before:
-            findings.append(_mk_finding("refresh_rollback", "rollback_content_matches_r1"))
-        status, _ = _get(base, "/release/R2/data/board.json", token)
-        if status != 200:
-            findings.append(_mk_finding("refresh_rollback", "r2_history_retained"))
-    finally:
-        _stop(server, thread)
-
-    if findings:
-        raise RuntimeError(f"real R1->R2->R1 exercise did not verify cleanly: {findings}")
+    The publisher, not this receipt producer, creates release directories and
+    atomically advances CURRENT.  This function only validates the returned
+    operations manifests and the durable pointer/binding they produced.
+    """
+    document = json.loads(publication_log.read_text())
+    updates = document.get("update") if isinstance(document, dict) else None
+    rollback = document.get("rollback") if isinstance(document, dict) else None
+    if not isinstance(updates, list) or len(updates) != 2 or not all(_valid_release_record(row) for row in updates) \
+            or not _valid_release_record(rollback):
+        raise RuntimeError("publication log does not contain verified fenced update records")
+    first, second = updates
+    if first["projection_release_id"] == second["projection_release_id"] \
+            or rollback["projection_release_id"] != first["projection_release_id"] \
+            or len({first["ops_release_id"], second["ops_release_id"], rollback["ops_release_id"]}) != 3:
+        raise RuntimeError("publication record is not a distinct A to B to A sequence")
+    current_path = publication_root / "CURRENT"
+    binding_path = publication_root / "releases" / rollback["ops_release_id"] / "projection_binding.json"
+    if current_path.read_text().strip() != rollback["ops_release_id"] or not binding_path.is_file():
+        raise RuntimeError("fenced publisher current pointer does not name the rollback generation")
+    binding = json.loads(binding_path.read_text())
+    if binding.get("projection_release_id") != first["projection_release_id"]:
+        raise RuntimeError("rollback publication binding does not name the first projection")
 
     receipt = RollbackReceipt(
-        receipt_id="recv_" + receipt_content_hash(["refresh_rollback", "R2", "R1-rollback"])[7:23],
-        scope="v2_serving_preview", prior_snapshot_id="R2", resulting_snapshot_id="R1-rollback",
-        prior_generation=2, resulting_generation=3, at=format_timestamp(clock.now()))
+        receipt_id="recv_" + receipt_content_hash(["fenced_rollback", second["projection_release_id"],
+                                                     first["projection_release_id"]])[7:23],
+        scope="v2_serving_preview", prior_snapshot_id=second["projection_release_id"],
+        resulting_snapshot_id=first["projection_release_id"], prior_generation=2, resulting_generation=3,
+        at=rollback["delivered_at"])
 
-    # Negative control: a "failed R2" republish whose declared ArtifactRef hash does
-    # not match its real bytes -- the real materialize()+ArtifactStore.verify path
-    # must refuse it, leaving CURRENT (and releases/) exactly as before.
-    scratch_store = ArtifactStore(release_root / "failure_objects")
-    good_bytes = (releases_dir / "R2" / "data" / "board.json").read_bytes()
-    good_ref = scratch_store.publish_bytes(good_bytes, schema_ref="release_asset.v1.0")
+    failure_root.mkdir(parents=True, exist_ok=True)
+    scratch_store = ArtifactStore(failure_root / "objects")
+    good_ref = scratch_store.publish_bytes(b"phase3-fenced-publish-negative-control", schema_ref="release_asset.v1.0")
     corrupted_ref = dataclasses.replace(good_ref, content_hash="sha256:" + "0" * 64)
-    current_before = (release_root / "CURRENT").read_text()
+    current_before = current_path.read_text()
     negative_findings: list[Finding] = []
     try:
-        materialize(scratch_store, release_root / "failure_target", "R2-failed", {"data/board.json": corrupted_ref})
+        materialize(scratch_store, failure_root / "target", "failed-generation",
+                    {"data/projection_binding.json": corrupted_ref})
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "corrupted_manifest_was_accepted"))
     except (ArtifactError, OpsError):
         pass
-    if (release_root / "failure_target" / "releases" / "R2-failed").exists():
+    if (failure_root / "target" / "releases" / "failed-generation").exists():
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "partial_release_directory_left"))
-    if (release_root / "CURRENT").read_text() != current_before:
-        negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "current_pointer_moved_on_failure"))
-    negative = _receipt(PUBLISH_FAILURE_NEGATIVE_KIND, 1, "operations_release:R1-rollback", "operations_release:R2-failed",
-                        negative_findings, 3, code_hash=code_hash, environment_hash=environment_hash,
-                        invert=True)
+    if current_path.read_text() != current_before:
+        negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "published_current_pointer_moved"))
+    negative = _receipt(PUBLISH_FAILURE_NEGATIVE_KIND, 1, "operations_release:" + rollback["ops_release_id"],
+                        "operations_release:failed-generation", negative_findings, 3,
+                        code_hash=code_hash, environment_hash=environment_hash, invert=True)
     return receipt, negative
 
 
@@ -358,25 +290,24 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clean-score-json", type=Path, required=True)
     parser.add_argument("--clean-bundle-dir", type=Path, required=True)
-    parser.add_argument("--real-bundle-dir", type=Path, required=True)
+    parser.add_argument("--preview-input", type=Path, required=True,
+                        help="the verified input document used for the published candidate")
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--store-root", type=Path, required=True)
     parser.add_argument("--snapshot-id", required=True)
-    parser.add_argument("--score-comparison-receipt", type=Path, required=True,
-                        help="a real ComparisonReceipt file (e.g. bridge_value_parity.json) whose "
-                             "content hash pins score_comparison_receipt_ref")
-    parser.add_argument("--render-comparison-receipt", type=Path, required=True)
     parser.add_argument("--serving-root", type=Path, required=True, help="private scratch serving store/db")
-    parser.add_argument("--release-root", type=Path, required=True, help="private scratch release root")
-    parser.add_argument("--health-path", type=Path, required=True)
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--publication-log", type=Path, required=True,
+                        help="record emitted by the real fenced A to B to A publication runner")
+    parser.add_argument("--publication-root", type=Path, required=True,
+                        help="fenced publisher scope root containing CURRENT and immutable releases")
+    parser.add_argument("--failure-root", type=Path, required=True,
+                        help="private target for the failed-publication negative control")
     parser.add_argument("--artifact-root", type=Path, required=True)
     args = parser.parse_args(argv)
 
     code_hash = source_hash(source_files(ROOT))
     env_hash, _source = _environment_hash(ROOT)
-    score_ref = "sha256:" + hashlib.sha256(args.score_comparison_receipt.read_bytes()).hexdigest()
-    render_ref = "sha256:" + hashlib.sha256(args.render_comparison_receipt.read_bytes()).hexdigest()
+    preview_input = load_preview_input(args.preview_input)
 
     clock = SystemClock()
     conn = open_catalog(args.catalog, clock=clock)
@@ -386,14 +317,14 @@ def main(argv=None):
     try:
         publish_receipt, publish_negative = build_publish(
             args.clean_score_json, args.clean_bundle_dir, repository, snapshot_ref,
-            serving_root=args.serving_root, score_comparison_receipt_ref=score_ref,
-            render_comparison_receipt_ref=render_ref, code_hash=code_hash, environment_hash=env_hash)
+            preview_input=preview_input, serving_root=args.serving_root,
+            code_hash=code_hash, environment_hash=env_hash)
     finally:
         conn.close()
 
-    rollback_receipt, failure_negative = build_rollback(
-        args.real_bundle_dir, args.clean_bundle_dir, release_root=args.release_root,
-        health_path=args.health_path, token=args.token, code_hash=code_hash, environment_hash=env_hash)
+    rollback_receipt, failure_negative = build_fenced_rollback(
+        args.publication_log, args.publication_root, args.failure_root,
+        code_hash=code_hash, environment_hash=env_hash)
 
     out = {}
     for kind, (doc, name) in {

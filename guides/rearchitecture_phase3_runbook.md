@@ -1,13 +1,12 @@
-# Rearchitecture Phase 3A — Operator Runbook (draft)
+# Rearchitecture Phase 3A — Operator Runbook
 
 The operational companion to [Phase 3 — parity and launch](rearchitecture_phase3_parity_launch.md)
 §10 ("During implementation add `guides/rearchitecture_phase3_runbook.md`
 with exact, tested commands"). The command paths were first tested
-synthetically on 2026-09-14. On 2026-09-16, the real Phase 2 shadow release
-`rela47b76b6843078686cd278db` also passed the full 121-field bridge checks.
-The P3-4 end-to-end launch remains unverified because its fresh D19 replay
-check is red; do not read an existing command or an earlier receipt as proof
-that the new serving release is ready.
+synthetically on 2026-09-14. The current real source is Phase 2 release
+`reld9a81e6ded7f45c13b5afe21`; its saved-score source population is 111.
+Fresh D19 receipts are green. Do not use an earlier candidate, subset, or
+receipt as proof for a new serving generation.
 
 Scope is the saved-score preview only; see the
 [delivery plan](rearchitecture_delivery_plan.md) and
@@ -15,8 +14,8 @@ Scope is the saved-score preview only; see the
 The per-step UNVERIFIED notes below describe the original command authoring
 pass, not an assertion that no later real receipts exist. The
 [status file](rearchitecture_phase3_status.md) records those later receipts.
-P3A-C4 must verify this whole sequence on the final accepted candidate and
-replace placeholders before this becomes a completed operator handoff.
+P3A-C4 has exercised the real fenced A → B → A sequence. The final gate
+package remains the completion authority for this runbook.
 
 This draft does not claim the launch is complete. No assembled final acceptance
 has been run. The bare Phase 3 gate is expected to be red without evidence: see
@@ -161,8 +160,9 @@ binding the projection is additive, never required.
 
 ## 4. Start the compatibility preview and the read API
 
-**Status: launchers exist and are verified synthetically; UNVERIFIED against
-a real published release (P3-4).**
+**Status: the read API has been exercised through a real fenced publication
+pointer. Use the scope-root argument below; omitting it intentionally leaves
+current-release resolution unavailable.**
 
 ```bash
 set -a; source .env; set +a   # never print $V2_DASHBOARD_TOKEN
@@ -184,9 +184,10 @@ ever includes the token (`engine/v2/dashboard/preview.py`,
 
 ## 5. Project the next accepted release; publish after validation
 
-**Status: the projection half (step 2) and the publish half (step 3) both
-exist and are verified synthetically. UNVERIFIED end-to-end against a real
-accepted Phase 2 release by this task.**
+**Status: projection and publication have been exercised end to end against
+the verified Phase 2 source. A fresh update uses a distinct projection
+generation; a rollback republishes the retained target through the fenced
+effect and never copies release directories or writes `CURRENT` directly.**
 
 Repeat step 2 against the newly accepted Phase 2 release or the next
 validated shadow generation, using `--requested-as-of`/`--resolved-as-of`

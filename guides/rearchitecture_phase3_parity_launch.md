@@ -49,7 +49,7 @@ Use [status](rearchitecture_phase3_status.md) for artifact locations.
 
 | Task | Remaining deliverable | Exit / control |
 |---|---|---|
-| P3A-C1 Frozen replay boundary | Diagnose the fresh D19 11-of-20 sample mismatch; pin every forecast/model/residual read and preserve exact replay inputs. | Fresh same-generation D19 agrees; mutating the external latest forecast cannot change replay, and missing pinned state refuses. Keep full-population bridge parity. |
+| P3A-C1 Frozen replay boundary | Resolved: pin forecast/model/residual reads and preserve exact replay inputs. | Fresh same-generation D19 agrees; mutating the external latest forecast cannot change replay, and missing pinned state refuses. Keep full-population bridge parity. |
 | P3A-C2 Accepted Phase 2 handoff | Carry the already recorded D14/D15 user disposition into Phase 3 acceptance without changing Phase 2 receipts or its strict gate. | Phase 3 reports raw prerequisite findings separately from accepted readiness. Bind disposition to exact candidate/receipt/population/cause; missing refs, a different candidate or new differences still block. |
 | P3A-C3 Coverage and evidence | Commit/enforce the fixed Phase 3 coverage ratchet; assemble the existing producers on one final candidate and two retained releases. | Missing suite files, missing baseline, stale receipt and dropped rows fail. Run the existing Phase 3 gate and report its actual status, including inherited dispositions. |
 | P3A-C4 Operator handoff | Exercise projection, fenced publication, authenticated board/detail, update and rollback end to end; replace stale runbook notes with tested commands. | Usable private command/URL, true as-of, full population, evidence refs and 3B handoff. No new screen or generalized publish framework. |
@@ -59,8 +59,9 @@ Phase 2 validation, while `reports/phase2_closeout/FINAL.md` records user
 acceptance with retained red D14/D15 findings. Add a narrow, auditable Phase 3
 handoff/acceptance distinction, with tests, rather than rerunning stale-price
 comparisons or silently suppressing them. The strict Phase 2 gate stays red.
-The fresh D19 failure is not covered by that disposition and must be fixed.
-Until C2 lands, record acceptance as blocked even if other L-row checks pass.
+The fresh D19 issue is resolved by current green receipts. The disposition
+does not excuse any new mismatch; record acceptance only after the final
+candidate package passes every required L-row check.
 
 Use existing producer/test files named in §§8–10; extend the relevant D19,
 Phase 3 evidence/gate and coverage tests for C1–C3. Do not recapture unchanged
