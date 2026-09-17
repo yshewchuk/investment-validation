@@ -97,6 +97,7 @@ FIXED_SUITE = (
     "tests/test_v2_dashboard_browser.py",
     "tests/test_v2_dashboard_integration.py",
     "tests/test_checks_phase3_gate.py",
+    "tests/test_v2_dashboard_publish.py",
 )
 
 

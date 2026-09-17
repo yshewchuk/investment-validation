@@ -15,8 +15,8 @@ bridge, API, and browser checks use that same 111-key population. The two
 ladder rows are validated separately and are not substituted for source-score
 population evidence.
 
-Fresh D19 receipts are green. Earlier notes that replay remained red are
-historical and must not be used to block or justify this candidate.
+Fresh source-bound D15/D19 receipts and the rebuilt acceptance package are pending.
+Historical receipts are not proof for this candidate.
 
 ## Launch evidence being assembled
 
@@ -27,10 +27,12 @@ not copied receipts from an earlier candidate. In particular it contains:
   finality, model evidence, and comparison references match the accepted
   Phase 2 handoff.
 - Two distinct projection generations, A and B, from that input boundary.
-  A real fenced operations sequence published A, then B, then a fresh
-  rollback operation release bound to A. The retained operations releases are
+  Historical fenced operations records published A, then B, then a fresh
+  rollback operation release bound to A. They are historical evidence, not
+  a current acceptance result; fresh real rebuild verification is pending.
+  The retained operations releases are
   `relacf1e9f45f4d9a96edb3081a`, `rel2a1ae238cdb90e3c80779db6`, and
-  `rel7ed9da6817b9bb580b95afce`; the last is the current pointer.
+  `rel7ed9da6817b9bb580b95afce`; the last was the historical drill pointer.
 - Browser evidence through the real API chain: operations `CURRENT`, that
   release's `projection_binding.json`, then the serving index. It independently
   compares the complete source population rather than treating an API result

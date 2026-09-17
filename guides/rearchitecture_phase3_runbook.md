@@ -5,7 +5,7 @@ The operational companion to [Phase 3 — parity and launch](rearchitecture_phas
 with exact, tested commands"). The command paths were first tested
 synthetically on 2026-09-14. The current real source is Phase 2 release
 `reld9a81e6ded7f45c13b5afe21`; its saved-score source population is 111.
-Fresh D19 receipts are green. Do not use an earlier candidate, subset, or
+Fresh source-bound D15/D19 receipts are pending rebuild. Do not use an earlier candidate, subset, or
 receipt as proof for a new serving generation.
 
 Scope is the saved-score preview only; see the
@@ -22,6 +22,32 @@ has been run. The bare Phase 3 gate is expected to be red without evidence: see
 `checks/phase3_acceptance.json` for the L01-L14 matrix it checks and
 `tests/test_checks_phase3_gate.py::test_real_repo_bare_gate_is_red_with_missing_evidence`
 for the standing proof.
+
+## Current P3A verification sequence (pending real rebuild)
+
+The historical fenced drills and synthetic receipts document implementation
+coverage only; they are not acceptance proof. A real rebuild under
+`/tmp/phase3a-supervised-proof` must create fresh verified inputs, A/B
+projection bindings, and the final private gate package before this status
+can turn green. Do not substitute historical receipt ids or hand-written logs.
+
+```bash
+/usr/bin/python3 tools/v2_dashboard_verified_input.py --catalog OPS/catalog.sqlite \
+  --store-root OPS --release-id RELEASE --score-artifact-id SCORE --bundle-artifact-id BUNDLE \
+  --bundle-dir BUNDLE_DIR --snapshot-artifact-id SNAPSHOT --materialization-request-artifact-id REQUEST \
+  --finality-artifact-id FINALITY --model-evidence-artifact-id EVIDENCE \
+  --score-comparison-receipt-ref D15_REF --render-comparison-receipt-ref D19_REF \
+  --score-comparison-receipt D15_PATH --render-comparison-receipt D19_PATH \
+  --render-job-id RENDER_JOB --render-artifact-id BUNDLE --output preview_input.json
+/usr/bin/python3 tools/v2_dashboard_project.py --preview-input preview_input.json --source-provenance source_provenance.json \
+  --score-json SCORE_JSON --bundle-dir BUNDLE_DIR --bundle-format legacy --snapshot-id SNAPSHOT --catalog OPS/catalog.sqlite \
+  --store-root OPS --serving-root SERVING_ROOT --requested-as-of SESSION --resolved-as-of SESSION
+/usr/bin/python3 tools/v2_dashboard_publish.py --verify-sequence --root OPS --store-root SECRET_ROOT \
+  --source-publication-job A_SOURCE --projection-binding A_BINDING --b-source-publication-job B_SOURCE \
+  --b-projection-binding B_BINDING --operation-id proof --sequence-log publication-log.json
+/usr/bin/python3 checks/rearchitecture_phase3_publish.py --publication-catalog OPS/catalog.sqlite \
+  --publication-store-root OPS <other-required-checker-inputs>
+```
 
 ## 0. Implemented commands (original verification: 2026-09-14)
 

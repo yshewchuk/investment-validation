@@ -9,7 +9,8 @@
     "tests/test_v2_dashboard_preview.py",
     "tests/test_v2_dashboard_browser.py",
     "tests/test_v2_dashboard_integration.py",
-    "tests/test_checks_phase3_gate.py"
+    "tests/test_checks_phase3_gate.py",
+    "tests/test_v2_dashboard_publish.py"
   ],
   "packages": {
     "engine.v2.contracts": {"executed": 802, "executable": 802},
