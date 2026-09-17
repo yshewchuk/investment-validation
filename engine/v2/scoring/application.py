@@ -19,6 +19,19 @@ from .stages import NativeScoreInputs, assemble_native_values
 __all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
 _FEATURE_REGISTRY = default_feature_registry()
+_FROZEN_ROLE_OUTPUTS = {
+    "driver": ("driver_prediction",),
+    "size": ("forecast_abs_move",),
+    "implied_t1": ("driver_prediction",),
+    "runup_move": ("runup_move_prediction",),
+    "iv_crush": ("pred_iv_crush", "pred_iv_crush_30"),
+    "fair_value": ("model_fair_pct",),
+}
+_FROZEN_OUTPUTS = frozenset(
+    output
+    for outputs in _FROZEN_ROLE_OUTPUTS.values()
+    for output in outputs
+)
 
 
 def _value_fields(values: Mapping[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
@@ -121,24 +134,47 @@ def _frozen_outputs(result, binding) -> dict[str, float]:
     names = tuple(getattr(result, "output_names", ()) or ())
     predictions = tuple(getattr(result, "predictions", ()) or ())
     row = tuple(predictions[0]) if predictions else ()
-    role_targets = {
-        "size": "forecast_abs_move", "implied_t1": "driver_prediction",
-        "runup_move": "runup_move_prediction", "iv_crush": "pred_iv_crush",
-        "fair_value": "model_fair_pct",
-    }
-    allowed = {
-        "driver_prediction", "forecast_abs_move", "runup_move_prediction",
-        "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
-    }
     role = str(getattr(binding, "role", ""))
-    target = role_targets.get(role.split(":", 1)[0])
+    role_outputs = _FROZEN_ROLE_OUTPUTS.get(role.split(":", 1)[0], ())
+    target = role_outputs[0] if role_outputs else None
     outputs = {}
     for index, value in enumerate(row):
         name = names[index] if index < len(names) else None
-        output = name if name in allowed else target if len(row) == 1 else None
+        output = name if name in _FROZEN_OUTPUTS else target if len(row) == 1 else None
         if output is not None:
             outputs[output] = value
     return outputs
+
+
+def _frozen_role_outputs(binding) -> frozenset[str]:
+    """Return every local recipe owned by one requested frozen binding."""
+    role = str(getattr(binding, "role", "")).split(":", 1)[0]
+    outputs = set(_FROZEN_ROLE_OUTPUTS.get(role, ()))
+    outputs.update(
+        name for name in (getattr(binding, "output_names", ()) or ())
+        if name in _FROZEN_OUTPUTS
+    )
+    return frozenset(outputs)
+
+
+def _without_frozen_recipes(base_forecast, bindings) -> dict[str, Any]:
+    owned_forecast = _FROZEN_OUTPUTS | {
+        "forecast_p10", "forecast_p90", "forecast_sd",
+    }
+    forecast = {
+        key: value for key, value in base_forecast.items()
+        if key not in owned_forecast
+    }
+    frozen_recipe_outputs = frozenset().union(
+        *(_frozen_role_outputs(binding) for binding in bindings),
+    )
+    models = forecast.get("models")
+    if isinstance(models, Mapping):
+        forecast["models"] = {
+            name: spec for name, spec in models.items()
+            if name not in frozen_recipe_outputs
+        }
+    return forecast
 
 
 def _frozen_binding(release, result, inference_request):
@@ -181,18 +217,15 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings, request)
         flags.extend(getattr(result, "reason_codes", ()) or ())
         artifact_hashes.extend(getattr(result, "artifact_hashes", ()) or ())
         role = str(getattr(binding, "role", ""))
-        if role in {"size", "implied_t1", "runup_move", "iv_crush"}:
-            required_roles.append(role)
-        if role == "gate":
+        role_name = role.split(":", 1)[0]
+        if role_name in {"driver", "size", "implied_t1", "runup_move", "iv_crush"}:
+            required_roles.append(role_name)
+        if role_name == "gate":
             gate_result = (result, binding)
     release_id = getattr(results[0], "release_id", request.deployment_id)
     binding_ids = tuple(binding.binding_id for binding in bindings)
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
-    owned_forecast = {"driver_prediction", "forecast_abs_move", "runup_move_prediction",
-                      "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
-                      "forecast_p10", "forecast_p90", "forecast_sd"}
-    forecast = {key: value for key, value in base.forecast.items()
-                if key not in owned_forecast}
+    forecast = _without_frozen_recipes(base.forecast, bindings)
     forecast.update({
         "frozen_outputs": outputs,
         "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
@@ -282,6 +315,9 @@ def _with_request_overrides(request: ScoreRequest,
     return replace(
         inputs,
         context={**inputs.context, **overrides},
+        # Features merge after context in the native graph. Repeating the
+        # request values here gives the explicit request final precedence.
+        features={**inputs.features, **overrides},
         forecast={**inputs.forecast, **overrides},
         # A pre-resolved geometry would otherwise overwrite the request fields.
         # Pricing remains the quote inventory and is recomputed by the stage.

@@ -1,0 +1,223 @@
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from engine.v2.contracts import ScoreRequest
+from engine.v2.domain.generation import Pricing, generate, price
+from engine.v2.scoring import application
+from engine.v2.scoring.stages import NativeScoreInputs, STAGE_NAMES, StageReceipt
+
+
+def _request(**changes):
+    request = ScoreRequest(
+        event_id="evt-canonical",
+        calendar_revision="cal-1",
+        strategy_version="STR-THRU",
+        deployment_id="dep-1",
+        decision_clock_id="entry-close",
+        requested_decision_at="2026-09-16",
+        snapshot_id="snap-1",
+        mode="replay",
+        fill_model={"alpha": 0.5},
+    )
+    return replace(request, **changes)
+
+
+def _receipts():
+    return tuple(
+        StageReceipt(stage, "declared-input", "declared-output")
+        for stage in STAGE_NAMES
+        if stage != "diagnostics"
+    )
+
+
+def _override_inputs():
+    context = {
+        "ticker": "AAA",
+        "strategy": "STR-THRU",
+        "event_date": "2026-09-16",
+        "entry_date": "2026-09-16",
+        "exit_date": "2026-09-17",
+        "expiry": "2026-09-18",
+        "spot": 100.0,
+        "strike": 95.0,
+    }
+    features = {
+        "strike": 100.0,
+        "model_inputs": {"strike": 100.0},
+    }
+    forecast = {
+        "models": {
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+        },
+    }
+    stale_geometry = generate("STR-THRU", {**context, "strike": 95.0})
+    priced_legs = []
+    for strike, bid, ask in (
+        (95.0, 0.5, 1.5),
+        (100.0, 1.0, 2.0),
+        (105.0, 2.0, 4.0),
+        (110.0, 3.0, 6.0),
+    ):
+        geometry = generate("STR-THRU", {**context, "strike": strike})
+        quotes = {
+            (leg.right, leg.strike, leg.expiry): {"bid": bid, "ask": ask}
+            for leg in geometry.legs
+        }
+        priced_legs.extend(price(geometry, quotes, 0.5).legs)
+    pricing = Pricing("STR-THRU", 100.0, 0.0, tuple(priced_legs))
+    return NativeScoreInputs(
+        context=context,
+        features=features,
+        forecast=forecast,
+        geometry=stale_geometry,
+        pricing=pricing,
+        analogs={},
+        simulation={},
+        gate={},
+        chooser={},
+        diagnostics={},
+        source_ref="typed-native-fixture",
+        stage_receipts=_receipts(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_changes", "expected_strike", "expected_cost"),
+    (
+        ({"geometry_override": {"strike": 105.0}}, 105.0, 6.0),
+        ({"contract_override": {"strike": 110.0}}, 110.0, 9.0),
+    ),
+)
+def test_request_overrides_beat_context_features_and_reprice(
+    request_changes, expected_strike, expected_cost,
+):
+    record = application.score_one(
+        _request(**request_changes),
+        _override_inputs(),
+    )
+
+    assert {leg["strike"] for leg in record.selected_contracts} == {
+        expected_strike,
+    }
+    assert {leg["strike"] for leg in record.legs} == {expected_strike}
+    assert record.resolved_request["entry_cost"] == pytest.approx(expected_cost)
+    assert record.financial_diagnostics["entry_cost_pct"] == pytest.approx(
+        expected_cost,
+    )
+
+
+def _frozen_fields():
+    base = _override_inputs()
+    return {
+        "_native_inputs": replace(
+            base,
+            geometry=None,
+            forecast={
+                "driver_name": "abs_move",
+                "models": {
+                    "driver_prediction": {
+                        "intercept": 99.0,
+                        "coefficients": {},
+                    },
+                    "forecast_abs_move": {
+                        "intercept": 88.0,
+                        "coefficients": {},
+                    },
+                },
+            },
+        ),
+    }
+
+
+def _release():
+    return SimpleNamespace(
+        release_id="release-1",
+        bindings=(
+            SimpleNamespace(
+                binding_id="driver-binding",
+                role="implied_t1",
+                output_names=("prediction",),
+            ),
+            SimpleNamespace(
+                binding_id="size-binding",
+                role="size",
+                output_names=("prediction",),
+            ),
+        ),
+    )
+
+
+def _inference_requests():
+    return (
+        SimpleNamespace(binding_id="driver-binding"),
+        SimpleNamespace(binding_id="size-binding"),
+    )
+
+
+class _Frozen:
+    def infer(self, release, inference_request):
+        values = {
+            "driver-binding": 0.77,
+            "size-binding": 0.42,
+        }
+        return SimpleNamespace(
+            status="READY",
+            release_id=release.release_id,
+            binding_id=inference_request.binding_id,
+            model_id=f"model-{inference_request.binding_id}",
+            output_names=("prediction",),
+            predictions=((values[inference_request.binding_id],),),
+            artifact_hashes=(f"sha256:{inference_request.binding_id}",),
+            reason_codes=(),
+        )
+
+
+def test_score_frozen_preserves_role_outputs_over_local_recipes():
+    record = application.score_frozen(
+        _request(),
+        _Frozen(),
+        _release(),
+        _inference_requests(),
+        _frozen_fields(),
+    )
+
+    assert record.forecasts["driver_prediction"] == pytest.approx(0.77)
+    assert record.forecasts["forecast_abs_move"] == pytest.approx(0.42)
+    assert record.model_artifact_ids == (
+        "sha256:driver-binding",
+        "sha256:size-binding",
+    )
+
+
+def test_score_frozen_artifact_mismatch_refuses_without_local_fallback():
+    class ArtifactMismatch(_Frozen):
+        def infer(self, release, inference_request):
+            if inference_request.binding_id == "driver-binding":
+                return SimpleNamespace(
+                    status="MODEL_NOT_READY",
+                    release_id=release.release_id,
+                    binding_id=inference_request.binding_id,
+                    model_id="model-driver-binding",
+                    output_names=("prediction",),
+                    predictions=(),
+                    artifact_hashes=("sha256:driver-binding",),
+                    reason_codes=("ARTIFACT_INVALID",),
+                )
+            return super().infer(release, inference_request)
+
+    record = application.score_frozen(
+        _request(),
+        ArtifactMismatch(),
+        _release(),
+        _inference_requests(),
+        _frozen_fields(),
+    )
+
+    assert record.forecasts["driver_prediction"] is None
+    assert record.forecasts["forecast_abs_move"] == pytest.approx(0.42)
+    assert "ARTIFACT_INVALID" in record.reason_codes
+    assert "MISSING_FORECAST_OUTPUT:implied_t1" in record.reason_codes
+    assert record.validation_status == "refused"
+    assert record.readiness == "refused"
