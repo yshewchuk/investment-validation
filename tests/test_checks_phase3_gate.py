@@ -247,6 +247,10 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     board = json.dumps({"as_of": "2026-01-01", "n_rows": 0, "rows": []}).encode()
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as archive:
+        for name in ("bundle", "bundle/data", "bundle/data/tickers"):
+            directory = tarfile.TarInfo(name)
+            directory.type = tarfile.DIRTYPE
+            archive.addfile(directory)
         info = tarfile.TarInfo("bundle/data/board.json")
         info.size = len(board)
         archive.addfile(info, io.BytesIO(board))

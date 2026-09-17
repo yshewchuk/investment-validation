@@ -106,7 +106,12 @@ def _bundle_manifest_from_artifact(data: bytes) -> dict:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
             for member in archive.getmembers():
                 destination = (root / member.name).resolve()
-                if not member.isfile() or root not in destination.parents:
+                if root not in destination.parents:
+                    raise ValueError("delivered bundle contains an unsafe member")
+                if member.isdir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
                     raise ValueError("delivered bundle contains an unsafe member")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 source = archive.extractfile(member)
