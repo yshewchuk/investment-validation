@@ -55,7 +55,7 @@ def _producer_job(conn, artifact_id: str) -> str:
 
 
 def _require_render_chain(conn, render_job_id: str, render_artifact_id: str, *, score_artifact_id: str,
-                          finality_artifact_id: str, model_artifact_id: str) -> None:
+                          finality_artifact_id: str, model_artifact_id: str) -> dict:
     row = conn.execute("SELECT kind, state, spec_json FROM jobs WHERE job_id = ?", (render_job_id,)).fetchone()
     if row is None or row["kind"] != "legacy_render" or row["state"] != "succeeded":
         raise ValueError("render job is not a succeeded legacy_render job")
@@ -64,14 +64,17 @@ def _require_render_chain(conn, render_job_id: str, render_artifact_id: str, *, 
         "AND attempts.state = 'succeeded' AND name = 'legacy_render'", (render_job_id,)).fetchall()
     if {item["artifact_id"] for item in output} != {render_artifact_id}:
         raise ValueError("render artifact is not the succeeded render job output")
-    bindings = json.loads(row["spec_json"]).get("parameters", {}).get("input_bindings", {})
-    expected = {"score.json": _producer_job(conn, score_artifact_id),
-                "finality.json": _producer_job(conn, finality_artifact_id),
-                "model_evidence.json": _producer_job(conn, model_artifact_id)}
-    for name, job_id in expected.items():
-        binding = bindings.get(name)
-        if not isinstance(binding, str) or binding.split("#", 1)[0] != job_id:
-            raise ValueError(f"render job is not bound to the recorded {name} producer")
+    attempts = conn.execute("SELECT attempt_id FROM attempts WHERE job_id = ? AND state = 'succeeded'",
+                            (render_job_id,)).fetchall()
+    expected = {"score.json": score_artifact_id, "finality.json": finality_artifact_id,
+                "model_evidence.json": model_artifact_id}
+    for attempt in attempts:
+        rows = conn.execute("SELECT name, artifact_id FROM attempt_input_bindings WHERE attempt_id = ?",
+                            (attempt["attempt_id"],)).fetchall()
+        bindings = {item["name"]: item["artifact_id"] for item in rows}
+        if all(bindings.get(name) == artifact_id for name, artifact_id in expected.items()):
+            return {"attempt_id": attempt["attempt_id"], "bindings": bindings}
+    raise ValueError("render attempt does not record the supplied score/finality/model artifacts")
 
 
 def _bundle_manifest_from_artifact(data: bytes) -> dict:
@@ -139,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{artifact_id}: wrong producer kind")
         if _producer_kind(conn, args.render_artifact_id) != "legacy_render":
             raise ValueError("render artifact has the wrong producer kind")
-        _require_render_chain(conn, args.render_job_id, args.render_artifact_id,
+        render_chain = _require_render_chain(conn, args.render_job_id, args.render_artifact_id,
                               score_artifact_id=args.score_artifact_id,
                               finality_artifact_id=args.finality_artifact_id,
                               model_artifact_id=args.model_evidence_artifact_id)
@@ -208,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
             "render_artifact": to_document(render_ref),
             "score_job_id": score_job["job_id"],
             "render_job_id": args.render_job_id,
+            "render_attempt_id": render_chain["attempt_id"],
+            "render_attempt_bindings": render_chain["bindings"],
             "bundle_artifact_bytes_hash": _sha256(bundle_bytes),
             "bundle_manifest_ref": content_hash(bundle_manifest),
             "score_job_input_refs": list(score_spec["input_refs"]),

@@ -283,6 +283,10 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     for name, (file_name, schema) in artifact_ids.items():
         data = files[file_name]
         proof[name] = to_document(ArtifactRef(artifact_id=f"art_{file_name}", content_hash=digest(data), schema_ref=schema, byte_size=len(data), storage_key=f"objects/{file_name}"))
+    proof["render_attempt_id"] = "att_render"
+    proof["render_attempt_bindings"] = {"score.json": proof["score_artifact"]["artifact_id"],
+        "finality.json": proof["finality_artifact"]["artifact_id"],
+        "model_evidence.json": proof["model_evidence_artifact"]["artifact_id"]}
     proof["score_comparison_receipt"] = _ref(artifact_root, "proof_d15", score_receipt_bytes)
     proof["render_comparison_receipt"] = _ref(artifact_root, "proof_d19", render_receipt_bytes)
     ref = _ref(artifact_root, "preview_input.json", _dumps(preview))

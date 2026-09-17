@@ -416,6 +416,10 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                 or tuple(proof.get("model_registry_artifact_refs", ())) != preview.model_registry_artifact_refs):
             findings.append({"code": "PREVIEW_PROOF_LINEAGE_MISMATCH", "field": f"preview_input_refs[{index}]"})
             field_ok["preview_input_refs"] = False
+        bindings = proof.get("render_attempt_bindings")
+        if not isinstance(bindings, dict) or not isinstance(proof.get("render_attempt_id"), str):
+            findings.append({"code": "PREVIEW_PROOF_RENDER_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
         expected = {"score_artifact": ("score", preview.score_batch_ref, "legacy_action.v1.0"),
                     "bundle_artifact": ("bundle", None, "legacy_action.v1.0"),
                     "snapshot_artifact": ("snapshot", None, "snapshot_ref.v1.0"),
@@ -440,6 +444,13 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                 field_ok["preview_input_refs"] = False
             else:
                 artifact_bytes[file_name] = data
+        if isinstance(bindings, dict):
+            required_bindings = {"score.json": proof.get("score_artifact", {}).get("artifact_id"),
+                                 "finality.json": proof.get("finality_artifact", {}).get("artifact_id"),
+                                 "model_evidence.json": proof.get("model_evidence_artifact", {}).get("artifact_id")}
+            if any(bindings.get(name) != artifact_id for name, artifact_id in required_bindings.items()):
+                findings.append({"code": "PREVIEW_PROOF_RENDER_BINDING_MISMATCH", "field": f"preview_input_refs[{index}]"})
+                field_ok["preview_input_refs"] = False
         try:
             score_doc = json.loads(artifact_bytes["score"])
             snapshot_raw = json.loads(artifact_bytes["snapshot"])
