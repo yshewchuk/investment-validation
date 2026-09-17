@@ -7,12 +7,16 @@ the only path that calls ``publication_effect`` and advances ``CURRENT``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import content_hash
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.errors import fail
+from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.input_bindings import recorded_bindings
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.submission import NamespacePolicy, get_job, submit
 
 __all__ = ["submit_retained_publication"]
@@ -58,7 +62,8 @@ def submit_retained_publication(conn, store, *, registry, policy: NamespacePolic
         "projection_binding_ref": projection.artifact_id,
         "operation_id": operation_id,
     }, sort_keys=True).encode(), schema_ref="retained_publication_operation.v1.0")
-    register_artifact(conn, operation, None, clock)
+    with transaction(conn):
+        register_artifact(conn, operation, None, clock)
 
     bindings = {name: item.artifact_id for name, item in retained.items()}
     bindings["projection_binding.json"] = projection.artifact_id
@@ -75,8 +80,11 @@ def submit_retained_publication(conn, store, *, registry, policy: NamespacePolic
     key = "retained-publication:" + content_hash({
         "source": source_job_id, "projection": projection.artifact_id, "operation": operation_id,
     }).split(":", 1)[1][:32]
-    job = JobSpec(kind="publication", implementation_ref=spec_doc["implementation_ref"],
-                  spec_hash=None, environment_ref=spec_doc["environment_ref"], parameters=parameters,
+    profile = profile_named(DEFAULT_POLICY, "delivery")
+    threads = profile.thread_count or profile.cpu_count
+    job = JobSpec(kind="publication",
+                  implementation_ref=content_hash(worker_source_manifest(Path(__file__).resolve().parents[3])),
+                  spec_hash=None, environment_ref=content_hash(environment_identity(threads)), parameters=parameters,
                   input_refs=refs, dependency_job_ids=(source_job_id,), output_namespace=source.namespace,
                   resource_class="delivery", retry_policy_ref="bounded",
                   checkpoint_contract_ref="effect_receipt.v1.0")

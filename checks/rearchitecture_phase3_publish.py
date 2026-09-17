@@ -212,18 +212,34 @@ def build_publish(clean_score_json: Path, clean_bundle_dir: Path, repository, sn
 def _valid_release_record(record: object) -> bool:
     if not isinstance(record, dict):
         return False
-    required = ("projection_release_id", "ops_release_id", "published_at", "delivered_at", "manifest")
-    if any(not isinstance(record.get(key), str) or not record[key] for key in required[:-1]):
-        return False
-    manifest = record.get("manifest")
-    gates = manifest.get("gates") if isinstance(manifest, dict) else None
-    return isinstance(gates, dict) and set(gates) == {"decision", "projection", "security", "engineering"} and all(
-        isinstance(gate, dict) and gate.get("ok") is True and isinstance(gate.get("receipt_ref"), str)
-        and gate["receipt_ref"].startswith("sha256:") for gate in gates.values())
+    required = ("projection_release_id", "ops_release_id", "published_at", "delivered_at")
+    return all(isinstance(record.get(key), str) and record[key] for key in required)
+
+
+def _verified_release(conn, store, release_id: str) -> dict:
+    row = conn.execute("SELECT manifest_json,published_at,delivered_at FROM releases WHERE release_id=?",
+                       (release_id,)).fetchone()
+    if row is None or not row["published_at"] or not row["delivered_at"]:
+        raise RuntimeError("publication catalog has no delivered release")
+    manifest = json.loads(row["manifest_json"])
+    gates = manifest.get("gates")
+    if not isinstance(gates, dict) or set(gates) != {"decision", "projection", "security", "engineering"}:
+        raise RuntimeError("durable release has incomplete gates")
+    for kind, gate in gates.items():
+        try:
+            ref = from_document(ArtifactRef, gate["receipt_artifact"])
+            payload = json.loads(store.read_verified(ref))
+        except (ArtifactError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("durable gate artifact is unreadable") from exc
+        if gate.get("ok") is not True or gate.get("receipt_ref") != ref.content_hash or \
+                payload.get("kind") != kind or payload.get("status") != "passed":
+            raise RuntimeError("durable gate bytes do not substantiate release")
+    return manifest
 
 
 def build_fenced_rollback(publication_log: Path, publication_root: Path, failure_root: Path, *,
-                          code_hash: str, environment_hash: str) -> tuple[RollbackReceipt, ComparisonReceipt]:
+                          catalog_path: Path, store_root: Path, code_hash: str,
+                          environment_hash: str) -> tuple[RollbackReceipt, ComparisonReceipt]:
     """Verify a real fenced A -> B -> A publication record.
 
     The publisher, not this receipt producer, creates release directories and
@@ -249,6 +265,21 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
     if binding.get("projection_release_id") != first["projection_release_id"]:
         raise RuntimeError("rollback publication binding does not name the first projection")
 
+    conn = open_catalog(catalog_path, clock=SystemClock())
+    store = ArtifactStore(store_root)
+    try:
+        manifests = [_verified_release(conn, store, row["ops_release_id"])
+                     for row in (first, second, rollback)]
+        attempts = conn.execute(
+            "SELECT DISTINCT a.attempt_id FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
+            "WHERE j.kind=publication AND a.state=succeeded").fetchall()
+        if len(attempts) < 3:
+            raise RuntimeError("catalog lacks three distinct completed publication attempts")
+    finally:
+        conn.close()
+    if manifests[2].get("files", {}).get("projection_binding.json") is None:
+        raise RuntimeError("rollback release lacks a retained projection binding")
+
     receipt = RollbackReceipt(
         receipt_id="recv_" + receipt_content_hash(["fenced_rollback", second["projection_release_id"],
                                                      first["projection_release_id"]])[7:23],
@@ -263,12 +294,12 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
     current_before = current_path.read_text()
     negative_findings: list[Finding] = []
     try:
-        materialize(scratch_store, failure_root / "target", "failed-generation",
+        materialize(scratch_store, publication_root, "failed-generation",
                     {"data/projection_binding.json": corrupted_ref})
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "corrupted_manifest_was_accepted"))
     except (ArtifactError, OpsError):
         pass
-    if (failure_root / "target" / "releases" / "failed-generation").exists():
+    if (publication_root / "releases" / "failed-generation").exists():
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "partial_release_directory_left"))
     if current_path.read_text() != current_before:
         negative_findings.append(_mk_finding(PUBLISH_FAILURE_NEGATIVE_KIND, "published_current_pointer_moved"))
@@ -300,6 +331,10 @@ def main(argv=None):
                         help="record emitted by the real fenced A to B to A publication runner")
     parser.add_argument("--publication-root", type=Path, required=True,
                         help="fenced publisher scope root containing CURRENT and immutable releases")
+    parser.add_argument("--publication-catalog", type=Path, required=True,
+                        help="catalog containing the delivered publication release records")
+    parser.add_argument("--publication-store-root", type=Path, required=True,
+                        help="artifact root used to verify durable gate receipt bytes")
     parser.add_argument("--failure-root", type=Path, required=True,
                         help="private target for the failed-publication negative control")
     parser.add_argument("--artifact-root", type=Path, required=True)
@@ -324,6 +359,7 @@ def main(argv=None):
 
     rollback_receipt, failure_negative = build_fenced_rollback(
         args.publication_log, args.publication_root, args.failure_root,
+        catalog_path=args.publication_catalog, store_root=args.publication_store_root,
         code_hash=code_hash, environment_hash=env_hash)
 
     out = {}
