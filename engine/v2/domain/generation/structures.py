@@ -139,9 +139,16 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
         strike = _number(inputs.get("strike", spot), "strike")
         legs = (NativeLeg("call", "C", "buy", 1.0, strike, expiry),
                 NativeLeg("put", "P", "buy", 1.0, strike, expiry))
+    elif strategy == "CND-PS":
+        legs = (
+            NativeLeg("atm", "P", "buy", 0.0, spot, expiry),
+            NativeLeg("up1", "P", "sell", 1.0, spot + width, expiry),
+            NativeLeg("dn1", "P", "sell", 1.0, spot - width, expiry),
+            NativeLeg("up2", "P", "buy", 1.0, spot + 2.0 * width, expiry),
+            NativeLeg("dn2", "P", "buy", 1.0, spot - 2.0 * width, expiry),
+        )
     else:
         patterns = {
-            "CND-PS": ((1, -1.0), (2, 1.0)),
             "TWIN-P": ((0, 2.0), (1, -1.0), (2, -1.0), (4, 1.0)),
             "TWIN-P5": ((0, 2.0), (1, -2.0), (3, 1.0)),
             "BFLY-P": ((0, -2.0), (1, 1.0)),

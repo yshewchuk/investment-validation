@@ -24,6 +24,31 @@ def test_native_factories_preserve_mirrored_ladders_and_quantity_balance():
         assert all((2 * result.spot - strike) in strikes for strike in strikes)
 
 
+def test_fresh_cnd_ps_matches_legacy_five_leg_shape():
+    geometry = generate("CND-PS", _inputs())
+
+    assert [leg.name for leg in geometry.legs] == ["atm", "up1", "dn1", "up2", "dn2"]
+    assert [leg.quantity for leg in geometry.legs] == [0.0, 1.0, 1.0, 1.0, 1.0]
+    assert [leg.side for leg in geometry.legs] == ["buy", "sell", "sell", "buy", "buy"]
+    assert [leg.strike for leg in geometry.legs] == [100.0, 104.0, 96.0, 108.0, 92.0]
+    assert geometry.legs[1].strike + geometry.legs[2].strike == 2 * geometry.spot
+    assert geometry.legs[3].strike + geometry.legs[4].strike == 2 * geometry.spot
+
+
+def test_fresh_cnd_ps_atm_reference_prices_with_zero_cash_flow():
+    geometry = generate("CND-PS", _inputs())
+    quotes = {
+        (leg.right, leg.strike, leg.expiry): {"bid": 1.0, "ask": 3.0}
+        for leg in geometry.legs
+    }
+
+    priced = price(geometry, quotes, 0.5)
+
+    assert priced.legs[0].name == "atm"
+    assert priced.legs[0].fill == 2.0
+    assert priced.legs[0].cash_flow == 0.0
+
+
 def test_straddle_pricing_is_deterministic_and_fill_aware():
     geometry = generate("STR-THRU", _inputs())
     quotes = {
