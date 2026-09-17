@@ -504,7 +504,12 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
                     with tarfile.open(fileobj=io.BytesIO(bundle_bytes), mode="r:*") as archive:
                         for member in archive.getmembers():
                             target = (root / member.name).resolve()
-                            if not member.isfile() or root not in target.parents:
+                            if root not in target.parents:
+                                raise ValueError("unsafe bundle member")
+                            if member.isdir():
+                                target.mkdir(parents=True, exist_ok=True)
+                                continue
+                            if not member.isfile():
                                 raise ValueError("unsafe bundle member")
                             target.parent.mkdir(parents=True, exist_ok=True)
                             source = archive.extractfile(member)
