@@ -237,6 +237,21 @@ def _verified_release(conn, store, release_id: str) -> dict:
     return manifest
 
 
+def _projection_id(store, manifest: dict) -> str:
+    files = manifest.get("files", {})
+    raw = files.get("projection_binding.json")
+    if raw is None:
+        raise RuntimeError("durable release lacks projection binding")
+    try:
+        binding = json.loads(store.read_verified(from_document(ArtifactRef, raw)))
+    except (ArtifactError, TypeError, ValueError) as exc:
+        raise RuntimeError("projection binding bytes are unreadable") from exc
+    value = binding.get("projection_release_id")
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("projection binding has no release identity")
+    return value
+
+
 def build_fenced_rollback(publication_log: Path, publication_root: Path, failure_root: Path, *,
                           catalog_path: Path, store_root: Path, code_hash: str,
                           environment_hash: str) -> tuple[RollbackReceipt, ComparisonReceipt]:
@@ -270,15 +285,15 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
     try:
         manifests = [_verified_release(conn, store, row["ops_release_id"])
                      for row in (first, second, rollback)]
-        attempts = conn.execute(
-            "SELECT DISTINCT a.attempt_id FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
-            "WHERE j.kind=publication AND a.state=succeeded").fetchall()
-        if len(attempts) < 3:
-            raise RuntimeError("catalog lacks three distinct completed publication attempts")
     finally:
         conn.close()
-    if manifests[2].get("files", {}).get("projection_binding.json") is None:
-        raise RuntimeError("rollback release lacks a retained projection binding")
+    projections = [_projection_id(store, manifest) for manifest in manifests]
+    if projections != [first["projection_release_id"], second["projection_release_id"],
+                       first["projection_release_id"]] or projections[0] == projections[1]:
+        raise RuntimeError("durable projection bindings are not an A to B to A chain")
+    delivered = [row["delivered_at"] for row in (first, second, rollback)]
+    if not delivered[0] <= delivered[1] <= delivered[2]:
+        raise RuntimeError("publication log is not chronological")
 
     receipt = RollbackReceipt(
         receipt_id="recv_" + receipt_content_hash(["fenced_rollback", second["projection_release_id"],
