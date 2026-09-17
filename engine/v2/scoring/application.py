@@ -47,8 +47,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         clock_id=request.decision_clock_id,
         snapshot_ref=request.snapshot_id,
         dependency_hash=dependency_hash({"refs": request.dependency_refs}),
-        model_artifact_ids=tuple(request.model_artifact_refs),
-        selected_contracts=tuple(values.get("legs") or ()),
+        model_artifact_ids=tuple(values.get("_model_artifact_ids") or request.model_artifact_refs),
+        selected_contracts=tuple(values.get("selected_contracts") or values.get("legs") or ()),
         legs=tuple(values.get("legs") or ()),
         entry_exit_plan=_value_fields(values, ("entry_date", "exit_date", "quote_date", "expiry")),
         quote_provenance=_value_fields(values, ("quote_date", "quote_age_sessions", "fill")),
@@ -85,6 +85,34 @@ def _record_values(request: ScoreRequest, values: Mapping[str, Any],
     return with_score_id(ScoreRecord(**_record_payload(request, values, legacy_fields)))
 
 
+def _apply_frozen_predictions(values: dict[str, Any], result, release,
+                              inference_request) -> None:
+    binding_id = getattr(result, "binding_id", None) or getattr(
+        inference_request, "binding_id", None)
+    binding = next((item for item in getattr(release, "bindings", ())
+                    if item.binding_id == binding_id), None)
+    names = tuple(getattr(result, "output_names", ()) or
+                  (getattr(binding, "output_names", ()) if binding else ()))
+    predictions = tuple(result.predictions[0])
+    role = str(getattr(binding, "role", ""))
+    targets = {
+        "size": "forecast_abs_move", "implied_t1": "driver_prediction",
+        "runup_move": "runup_move_prediction", "gate": "gate_score",
+        "chooser": "chooser_score",
+    }
+    target = targets.get(role, targets.get(role.split(":", 1)[0]))
+    allowed = {"driver_prediction", "forecast_abs_move", "runup_move_prediction",
+               "gate_score", "chooser_score"}
+    for index, prediction in enumerate(predictions):
+        named = names[index] if index < len(names) else None
+        output = named if named in allowed else target if len(predictions) == 1 else None
+        if output is None and len(predictions) == 1 and not role and not names:
+            output = "driver_prediction"
+        if output is None:
+            raise ValueError(f"unmapped frozen inference output for role {role!r}")
+        values[output] = prediction
+
+
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
                  fields: Mapping[str, Any]) -> ScoreRecord:
     """Score the model stage from an explicitly verified frozen release."""
@@ -92,14 +120,12 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     values = dict(fields)
     values.setdefault("model_inputs", {})
     if result.status != "READY":
-        values["flags"] = tuple(result.reason_codes)
+        values["flags"] = tuple(dict.fromkeys((*tuple(values.get("flags") or ()),
+                                               *tuple(result.reason_codes))))
         values["detail"] = result.detail or "model release is not ready"
     else:
-        values["driver_prediction"] = result.predictions[0][0]
-        values["forecast_abs_move"] = result.predictions[0][0]
-        values["model_artifact_ids"] = result.artifact_hashes
-        values["flags"] = ()
-        values["detail"] = ""
+        _apply_frozen_predictions(values, result, release, inference_request)
+    values["_model_artifact_ids"] = tuple(result.artifact_hashes)
     return _record_values(request, values, fields)
 
 
@@ -107,7 +133,10 @@ def score_one(request: ScoreRequest, inputs: NativeScoreInputs) -> ScoreRecord:
     """Emit one record after all explicitly owned native stages completed."""
     if not isinstance(inputs, NativeScoreInputs):
         raise TypeError("score_one requires NativeScoreInputs; use the explicit legacy adapter for comparisons")
-    values = assemble_native_values(inputs)
+    values = assemble_native_values(
+        inputs, strategy=request.strategy_version, fill_model=request.fill_model,
+    )
+    values["_model_artifact_ids"] = tuple(request.model_artifact_refs)
     return _record_values(request, values, values)
 
 
@@ -116,9 +145,20 @@ def score_many(requests: Iterable[tuple[ScoreRequest, NativeScoreInputs]]) -> tu
     return tuple(score_one(request, fields) for request, fields in requests)
 
 
-def score_batch(batch: ScoreBatch, fields_by_request: Mapping[str, NativeScoreInputs]) -> tuple[ScoreRecord, ...]:
+def score_batch(batch: ScoreBatch, fields_by_request: Mapping[Any, NativeScoreInputs]) -> tuple[ScoreRecord, ...]:
     """Score a declared batch while preserving request order and identity."""
-    return score_many((request, fields_by_request[request.event_id]) for request in batch.requests)
+    counts = {request.event_id: sum(item.event_id == request.event_id for item in batch.requests)
+              for request in batch.requests}
+
+    def inputs_for(request: ScoreRequest) -> NativeScoreInputs:
+        key = (request.event_id, request.strategy_version)
+        if key in fields_by_request:
+            return fields_by_request[key]
+        if counts[request.event_id] == 1 and request.event_id in fields_by_request:
+            return fields_by_request[request.event_id]
+        raise KeyError(f"missing batch inputs for event/strategy {key!r}")
+
+    return score_many((request, inputs_for(request)) for request in batch.requests)
 
 
 def replay(score_id: str, records: Mapping[str, ScoreRecord], legacy_fields: Mapping[str, Any]) -> tuple[ScoreRecord, ReplayReceipt]:
@@ -151,21 +191,19 @@ def score_event(event_request: ScoreRequest, strategies: Iterable[tuple[str, Map
                 for member, member_fields in menu.items()
             )
             flat = tuple(item for group in candidates for item in group)
-            return (_choose_dynamic(event_request, flat),) if flat else ()
+            if flat:
+                requests.append((_choose_dynamic(event_request, flat), None))
+            continue
         requests.append((replace(event_request, strategy_version=spec.strategy_id), fields))
-    return score_many(requests)
+    return tuple(item if fields is None else score_one(item, fields)
+                 for item, fields in requests)
 
 
 def _choose_dynamic(request: ScoreRequest, candidates: tuple[ScoreRecord, ...]) -> ScoreRecord:
-    eligible = []
-    for record in candidates:
-        value = record.forecasts.get("chooser_score")
-        key = "chooser_score"
-        if value is None:
-            value = record.forecasts.get("exp_pnl_sim")
-            key = "exp_pnl_sim"
-        if value is not None and record.validation_status != "refused":
-            eligible.append((float(value), key, record))
+    key = ("chooser_score" if any(record.forecasts.get("chooser_score") is not None
+                                  for record in candidates) else "exp_pnl_sim")
+    eligible = [(float(record.forecasts[key]), key, record) for record in candidates
+                if record.forecasts.get(key) is not None]
     if not eligible:
         base = candidates[0]
         selection = {"status": "no_eligible_candidate", "menu_size": len(candidates)}

@@ -6,7 +6,7 @@ foundation, registry, features and scoring packages respectively.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 __all__ = [
     "DEPLOYMENT_SPEC_V1", "FEATURE_FRAME_V1", "FEATURE_RECIPE_V1",
@@ -26,6 +26,38 @@ FEATURE_FRAME_V1 = "feature_frame.v1.0"
 
 ScoreMode = Literal["research", "replay", "shadow", "serving"]
 ValidationStatus = Literal["promoted", "tracked", "disabled", "historical"]
+
+
+class _FrozenDict(dict):
+    """A recursively immutable dict that remains JSON/dataclass compatible."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        source = dict(*args, **kwargs)
+        dict.__init__(self, ((key, _deep_freeze(value)) for key, value in source.items()))
+
+    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError("ScoreRecord mappings are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, _FrozenDict):
+        return value
+    if isinstance(value, Mapping):
+        return _FrozenDict(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deep_freeze(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -119,6 +151,17 @@ class ScoreRecord:
     validation_receipt_refs: tuple[str, ...] = ()
     operational_envelope: dict[str, Any] | None = None
     schema_version: str = SCORE_RECORD_V1
+
+    def __post_init__(self) -> None:
+        for name in (
+            "canonical_request", "resolved_request", "event_ref",
+            "selected_contracts", "legs", "entry_exit_plan", "quote_provenance",
+            "forecasts", "uncertainty", "feature_values", "null_masks",
+            "gate_terms", "chooser_candidates", "chooser_selection",
+            "financial_diagnostics", "requested_payoff_views",
+            "operational_envelope",
+        ):
+            object.__setattr__(self, name, _deep_freeze(getattr(self, name)))
 
 
 @dataclass(frozen=True, kw_only=True)

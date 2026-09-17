@@ -17,7 +17,10 @@ def _safe_root(tmp_path: Path) -> Path:
 
 
 def _complete_evidence() -> dict:
-    dimensions = ["keys", "contracts", "verdicts", "flags", "null_masks"]
+    dimensions = [
+        "keys", "contracts", "verdicts", "flags", "null_masks",
+        "forecasts", "simulation", "financial_diagnostics",
+    ]
     stages = [
         "resolve_context", "features", "forecast", "geometry", "pricing",
         "analogs", "simulation", "gate", "chooser", "serialization",
@@ -73,6 +76,18 @@ def test_rejects_hash_only_saved_release_claim(tmp_path):
 
     assert result["finding_ids"] == ["P4N-002"]
     assert result["ok"] is False
+
+
+def test_rejects_saved_release_without_numeric_dimensions(tmp_path):
+    evidence = _complete_evidence()
+    evidence["saved_release_comparison"]["comparison_dimensions"] = [
+        "keys", "contracts", "verdicts", "flags", "null_masks",
+    ]
+
+    result = audit(_safe_root(tmp_path), evidence)
+
+    assert result["finding_ids"] == ["P4N-002"]
+    assert "financial_diagnostics" in " ".join(result["findings"][0]["facts"])
 
 
 def test_rejects_synthetic_parity_even_with_green_controls(tmp_path):

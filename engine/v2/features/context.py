@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 from engine.v2.contracts import FeatureFrame, FeatureRequest
@@ -14,6 +15,21 @@ __all__ = ["FeatureContextPlanner", "FeatureContextError"]
 
 class FeatureContextError(ValueError):
     """A feature request violates its registered population or cutoff."""
+
+
+def _causal_timestamp(value: Any, label: str) -> datetime:
+    if value is None or not str(value).strip():
+        raise FeatureContextError(f"{label} timestamp is required")
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise FeatureContextError(f"{label} timestamp is invalid") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise FeatureContextError(f"{label} timestamp must be timezone-aware")
+    return stamp.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -69,9 +85,9 @@ class FeatureContextPlanner:
             context = contexts.get(event_id)
             if context is None:
                 raise FeatureContextError(f"row {index} is outside requested events")
-            observed = row.get("observed_at")
-            cutoff = context.get("decision_at")
-            if observed is not None and cutoff is not None and str(observed) > str(cutoff):
+            observed = _causal_timestamp(row.get("observed_at"), f"row {index} observed_at")
+            cutoff = _causal_timestamp(context.get("decision_at"), f"row {index} decision cutoff")
+            if observed > cutoff:
                 raise FeatureContextError(f"row {index} observes after decision cutoff")
         null_masks = tuple({column: row.get(column) is None for column in columns} for row in values)
         values_hash = content_hash({"columns": columns, "rows": values})

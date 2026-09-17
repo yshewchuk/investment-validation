@@ -20,6 +20,12 @@ def check(evidence: dict) -> dict:
         findings.append("population is incomplete")
     if evidence.get("status") not in {"FOUNDATION_PASS", "PASS"}:
         findings.append("phase 4 status is not accepted")
+    parity = evidence.get("native_parity") or {}
+    if not parity.get("complete"):
+        findings.append("native saved-release parity is incomplete")
+    factory = evidence.get("factory_parity") or {}
+    if not factory.get("complete"):
+        findings.append("factory geometry/expiry/fill parity is incomplete")
     if evidence.get("phase5_inference_integrated") and evidence.get("evidence_scope") != "native_full_release":
         findings.append("Phase 5 integration lacks native full-release evidence")
     subjects = evidence.get("subjects") or {}

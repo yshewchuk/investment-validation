@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 
+import pytest
+
 from engine.v2.contracts import ScoreRequest
 from engine.v2.scoring import application
+from engine.v2.scoring.identity import score_id
 from engine.v2.scoring.stages import NativeScoreInputs
 
 
@@ -65,6 +68,24 @@ def test_operational_time_does_not_change_score_id(monkeypatch):
     first = application.score_one(request(), native)
     second = application.score_one(request(), native)
     assert first.score_id == second.score_id
+
+
+def test_score_record_is_deeply_immutable_and_hash_stays_bound():
+    fields = result().as_dict()
+    fields["model_inputs"] = {"x": {"nested": 1.0}}
+    native = NativeScoreInputs.from_legacy_fields(fields)
+    record = application.score_one(request(), native)
+    original_hash = record.payload_hash
+
+    with pytest.raises(TypeError, match="immutable"):
+        record.forecasts["driver_prediction"] = 99.0
+    with pytest.raises(TypeError, match="immutable"):
+        record.resolved_request["model_inputs"]["x"]["nested"] = 99.0
+
+    fields["model_inputs"]["x"]["nested"] = 99.0
+    assert record.feature_values["x"]["nested"] == 1.0
+    assert record.payload_hash == original_hash
+    assert score_id(record) == original_hash
 
 
 def test_frozen_inference_path_does_not_call_legacy_backend():

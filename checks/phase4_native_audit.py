@@ -17,6 +17,7 @@ __all__ = ["audit", "main"]
 
 REQUIRED_DIMENSIONS = frozenset({
     "keys", "contracts", "verdicts", "flags", "null_masks",
+    "forecasts", "simulation", "financial_diagnostics",
 })
 REQUIRED_STAGES = frozenset({
     "resolve_context", "features", "forecast", "geometry", "pricing",

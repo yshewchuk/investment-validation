@@ -41,3 +41,20 @@ def test_missing_quote_is_a_truthful_refusal():
     geometry = generate("STR-THRU", _inputs())
     with pytest.raises(ValueError, match="MISSING_QUOTE"):
         price(geometry, {}, 0.5)
+
+
+def test_resolved_contracts_replace_theoretical_width_with_traded_spacing():
+    inputs = {
+        **_inputs(),
+        "width": 2.0,
+        "resolved_legs": (
+            {"name": "down1", "right": "P", "side": "buy", "quantity": 1,
+             "strike": 95.0},
+            {"name": "atm", "right": "P", "side": "sell", "quantity": 2,
+             "strike": 100.0},
+            {"name": "up1", "right": "P", "side": "buy", "quantity": 1,
+             "strike": 105.0},
+        ),
+    }
+    geometry = generate("BFLY-P", inputs)
+    assert geometry.width == 5.0

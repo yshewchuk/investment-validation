@@ -1,6 +1,7 @@
 """Financial values owned by scoring, independent of display formatting."""
 from __future__ import annotations
 
+from math import exp, fsum, log
 from typing import Any, Mapping
 
 from engine.v2.domain.valuation import multi_expiry_refusal, planned_exit_label
@@ -36,17 +37,45 @@ def _model_vs_market(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> 
             and implied not in (None, 0, 0.0)):
         diagnostics["model_vs_market"] = (
             float(driver) / (float(implied) * ORATS_EMOVE_FACTOR))
+def _runup_fair_premium(record: Mapping[str, Any]) -> float | None:
+    coefficients = (record.get("payoff") or {}).get("coefficients") or {}
+    driver = record.get("driver_prediction")
+    move = record.get("runup_move_prediction")
+    spot = record.get("spot")
+    strike = record.get("strike")
+    names = ("intercept", "implied_move", "abs_moneyness",
+             "moneyness_sq_div10", "signed_moneyness",
+             "implied_x_abs_moneyness_div10")
+    if (driver is None or move is None or spot in (None, 0, 0.0)
+            or strike in (None, 0, 0.0)
+            or any(name not in coefficients for name in names)):
+        return None
+    values = []
+    for direction in (-1.0, 1.0):
+        exit_spot = float(spot) * exp(direction * float(move) / 100.0)
+        money = 100.0 * log(exit_spot / float(strike))
+        absolute = abs(money)
+        terms = (1.0, float(driver), absolute, money * money / 10.0,
+                 money, float(driver) * absolute / 10.0)
+        values.append(fsum(float(coefficients[name]) * term
+                           for name, term in zip(names, terms)))
+    return max(0.0, fsum(values) / len(values) * 100.0)
+
+
 def _fair_premium(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> None:
     driver = record.get("driver_prediction")
     payoff = record.get("payoff") or {}
     if record.get("model_fair_pct") is not None:
-        diagnostics["fair_premium_pct"] = record.get("model_fair_pct")
+        value = record.get("model_fair_pct")
+    elif payoff.get("kind") == "runup_payoff_surface":
+        value = _runup_fair_premium(record)
     elif driver is not None and payoff.get("intercept") is not None \
             and payoff.get("slope") is not None:
-        diagnostics["fair_premium_pct"] = max(
-            0.0, (float(payoff["intercept"]) + float(payoff["slope"]) * float(driver)) * 100.0)
+        value = max(0.0, (float(payoff["intercept"])
+                          + float(payoff["slope"]) * float(driver)) * 100.0)
     else:
-        diagnostics["fair_premium_pct"] = None
+        value = None
+    diagnostics["fair_premium_pct"] = value
 def _premium_and_width(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> None:
     fair = diagnostics["fair_premium_pct"]
     cost = record.get("entry_cost")

@@ -79,6 +79,19 @@ def _expiry(inputs: Mapping[str, Any]) -> str:
     return str(expiry)
 
 
+def _resolved_width(legs: tuple[NativeLeg, ...]) -> float:
+    """Derive the traded spacing from resolved contracts."""
+    by_name = {leg.name: leg.strike for leg in legs}
+    if "atm" in by_name and "up1" in by_name:
+        return abs(by_name["up1"] - by_name["atm"])
+    strikes = sorted({leg.strike for leg in legs})
+    spacings = tuple(
+        right - left for left, right in zip(strikes, strikes[1:])
+        if right > left
+    )
+    return min(spacings) if spacings else 0.0
+
+
 def _put_ladder(strategy: str, spot: float, width: float, expiry: str,
                 pattern: tuple[tuple[int, float], ...]) -> tuple[NativeLeg, ...]:
     legs: list[NativeLeg] = []
@@ -121,7 +134,7 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
             float(leg["strike"]),
             str(leg.get("expiry", expiry)),
         ) for index, leg in enumerate(resolved))
-        return Geometry(strategy, spot, width, legs)
+        return Geometry(strategy, spot, _resolved_width(legs), legs)
     if strategy in {"STR-THRU", "STR-RUNUP"}:
         strike = _number(inputs.get("strike", spot), "strike")
         legs = (NativeLeg("call", "C", "buy", 1.0, strike, expiry),

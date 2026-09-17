@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
+import math
 import sys
 import tempfile
 import time
@@ -24,6 +26,7 @@ from engine.v2.domain.valuation import (  # noqa: E402
     planned_exit_label,
     terminal_payoff,
 )
+from engine.v2.diagnosis import AGREE, SCORE_RECORD_V1, compare_records  # noqa: E402
 from engine.v2.features import (  # noqa: E402
     FeatureContextError,
     FeatureContextPlanner,
@@ -129,7 +132,7 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
                 strategy,
                 {
                     "spot": record["spot"],
-                    "forecast_abs_move": record.get("forecast_abs_move", 1.0),
+                    "forecast_abs_move": record.get("forecast_abs_move") or 1.0,
                     "expiry": record["expiry"],
                     "width": record.get("structure_width") or 1.0,
                     "resolved_legs": record.get("legs") or (),
@@ -200,21 +203,21 @@ def _application_controls() -> dict[str, bool]:
 def _completion_controls(application_controls: dict[str, bool]) -> dict[str, bool]:
     planner = FeatureContextPlanner.default()
     request = planner.request(
-        event_refs=({"event_id": "e1", "decision_at": "2026-09-16"},),
+        event_refs=({"event_id": "e1", "decision_at": "2026-09-16T00:00:00Z"},),
         snapshot_ref="snapshot-tier0", recipe_refs=(
             "legacy.market_context.v1", "legacy.bucket_analogs.v1"),
         visible_event_ids=("e1",), analog_population_ref="all-history-v1",
     )
     frame_zero = planner.frame(
-        request, ({"event_id": "e1", "observed_at": "2026-09-15", "x": 0.0},),
+        request, ({"event_id": "e1", "observed_at": "2026-09-15T00:00:00Z", "x": 0.0},),
         ordered_columns=("x", "missing"), coverage_receipt_ref="coverage-1",
     )
     frame_null = planner.frame(
-        request, ({"event_id": "e1", "observed_at": "2026-09-15", "x": None},),
+        request, ({"event_id": "e1", "observed_at": "2026-09-15T00:00:00Z", "x": None},),
         ordered_columns=("x", "missing"), coverage_receipt_ref="coverage-1",
     )
     try:
-        planner.frame(request, ({"event_id": "e1", "observed_at": "2026-09-17"},),
+        planner.frame(request, ({"event_id": "e1", "observed_at": "2026-09-17T00:00:00Z"},),
                       ordered_columns=("x",), coverage_receipt_ref="coverage-1")
     except FeatureContextError:
         cutoff_rejected = True
@@ -261,7 +264,9 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
              "driver_name": "abs_move", "legs": [], "model_inputs": {},
              "payoff": {}, "fill": 0.5},
         )
-        return record.forecasts["driver_prediction"] == 0.42
+        return (record.forecasts["forecast_abs_move"] == 0.42
+                and record.forecasts.get("driver_prediction") is None
+                and record.model_artifact_ids == (member.content_hash,))
 
 
 def _chooser_controls() -> dict[str, bool]:
@@ -298,12 +303,288 @@ def _saved_release_control() -> bool:
     return True
 
 
+_FORECAST_FIELDS = (
+    "driver_prediction", "driver_p10", "driver_p90",
+    "forecast_abs_move", "forecast_p10", "forecast_p90", "forecast_sd",
+    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
+    "runup_move_scale", "chooser_score",
+)
+_SIMULATION_FIELDS = (
+    "exp_pnl_sim", "exp_pnl_model", "exp_pnl_analog",
+    "win_sim", "win_model", "win_model_raw", "win_analog",
+)
+_FINANCIAL_FIELDS = (
+    "entry_cost_pct", "model_vs_market", "fair_premium_pct",
+    "premium_vs_fair", "cost_over_width",
+)
+
+
+def _legacy_fair_premium(record: dict) -> float | None:
+    """Independently reproduce the frozen renderer financial oracle."""
+    payoff = record.get("payoff") or {}
+    driver = record.get("driver_prediction")
+    if payoff.get("kind") == "runup_payoff_surface":
+        coefficients = payoff.get("coefficients") or {}
+        move = record.get("runup_move_prediction")
+        spot = record.get("spot")
+        strike = record.get("strike")
+        names = (
+            "intercept", "implied_move", "abs_moneyness",
+            "moneyness_sq_div10", "signed_moneyness",
+            "implied_x_abs_moneyness_div10",
+        )
+        if (driver is None or move is None or spot in (None, 0, 0.0)
+                or strike in (None, 0, 0.0)
+                or any(name not in coefficients for name in names)):
+            return None
+        values = []
+        for direction in (-1.0, 1.0):
+            exit_spot = float(spot) * math.exp(direction * float(move) / 100.0)
+            money = 100.0 * math.log(exit_spot / float(strike))
+            absolute = abs(money)
+            terms = (
+                1.0, float(driver), absolute, money * money / 10.0,
+                money, float(driver) * absolute / 10.0,
+            )
+            values.append(sum(
+                float(coefficients[name]) * term
+                for name, term in zip(names, terms)
+            ))
+        return max(0.0, sum(values) / len(values) * 100.0)
+    intercept = payoff.get("intercept")
+    slope = payoff.get("slope")
+    if driver is None or intercept is None or slope is None:
+        return None
+    return max(0.0, (
+        float(intercept) + float(slope) * float(driver)
+    ) * 100.0)
+
+
+def _expected_financial_diagnostics(record: dict) -> dict:
+    """Compute expected diagnostics without importing native scoring code."""
+    spot = record.get("spot")
+    cost = record.get("entry_cost")
+    entry_cost_pct = (
+        float(cost) / float(spot) * 100.0
+        if cost is not None and spot not in (None, 0, 0.0)
+        else None
+    )
+    driver = record.get("driver_prediction")
+    implied = record.get("implied_move")
+    model_vs_market = (
+        float(driver) / (float(implied) * 0.645)
+        if record.get("driver_name") == "abs_move"
+        and driver is not None and implied not in (None, 0, 0.0)
+        else None
+    )
+    fair = _legacy_fair_premium(record)
+    premium_vs_fair = (
+        entry_cost_pct / fair
+        if entry_cost_pct is not None and fair not in (None, 0, 0.0)
+        else None
+    )
+    width = record.get("structure_width")
+    cost_over_width = (
+        float(cost) / float(width)
+        if cost is not None and width not in (None, 0, 0.0)
+        else None
+    )
+    return {
+        "entry_cost_pct": entry_cost_pct,
+        "model_vs_market": model_vs_market,
+        "fair_premium_pct": fair,
+        "premium_vs_fair": premium_vs_fair,
+        "cost_over_width": cost_over_width,
+    }
+
+
+def _numeric_views(record: dict, native) -> tuple[dict, dict]:
+    expected = {
+        "forecasts": {name: record.get(name) for name in _FORECAST_FIELDS},
+        "simulation": {name: record.get(name) for name in _SIMULATION_FIELDS},
+        "financial_diagnostics": _expected_financial_diagnostics(record),
+    }
+    native_forecasts = dict(native.forecasts)
+    native_uncertainty = dict(native.uncertainty)
+    resolved = dict(native.resolved_request)
+    actual = {
+        "forecasts": {
+            name: native_forecasts.get(
+                name, native_uncertainty.get(name, resolved.get(name))
+            )
+            for name in _FORECAST_FIELDS
+        },
+        "simulation": {
+            name: native_forecasts.get(name, resolved.get(name))
+            for name in _SIMULATION_FIELDS
+        },
+        "financial_diagnostics": {
+            name: native.financial_diagnostics.get(name)
+            for name in _FINANCIAL_FIELDS
+        },
+    }
+    return expected, actual
+
+
+def _compare_dimension(expected: dict, actual: dict, dimension: str) -> dict:
+    comparison = compare_records(
+        expected, actual,
+        comparison_kind=f"phase4_{dimension}_parity",
+        left_ref="frozen_legacy_record",
+        right_ref="native_score_record",
+        tolerance_policy=SCORE_RECORD_V1,
+    )
+    return {
+        "agree": comparison.verdict == AGREE,
+        "finding_fields": sorted(finding.field_path for finding in comparison.findings),
+        "receipt": content_hash({
+            "dimension": dimension,
+            "verdict": comparison.verdict,
+            "findings": [finding.field_path for finding in comparison.findings],
+        }),
+    }
+
+
+def _compare_numeric_outputs(record: dict, native, *, actual_override=None) -> dict:
+    """Compare legacy and native numerical outputs under the exact policy."""
+    expected, actual = _numeric_views(record, native)
+    if actual_override is not None:
+        actual = actual_override
+    return {
+        dimension: _compare_dimension(expected[dimension], actual[dimension], dimension)
+        for dimension in ("forecasts", "simulation", "financial_diagnostics")
+    }
+
+
+def _factory_views(record: dict, inputs: NativeScoreInputs) -> tuple[dict, dict] | None:
+    strategy = str(record.get("strategy") or "")
+    if strategy not in STRATEGY_IDS:
+        return None
+    if strategy in {"CAL-P", "CND-P"}:
+        expected_refusal = "UNVALIDATED_STRUCTURE"
+        actual_refusal = (
+            inputs.geometry.refusal if inputs.geometry is not None
+            else expected_refusal
+        )
+        return ({"refusal": expected_refusal}, {"refusal": actual_refusal})
+    if inputs.geometry is None or inputs.pricing is None:
+        return (
+            {"geometry_available": bool(record.get("legs"))},
+            {"geometry_available": False},
+        )
+    expected_legs = tuple({
+        "name": str(leg.get("name")), "right": str(leg.get("right")),
+        "side": str(leg.get("side")),
+        "quantity": float(leg.get("quantity", leg.get("qty", 0.0))),
+        "strike": float(leg.get("strike")), "expiry": str(leg.get("expiry")),
+    } for leg in record.get("legs") or ())
+    actual_legs = tuple({
+        "name": leg.name, "right": leg.right, "side": leg.side,
+        "quantity": leg.quantity, "strike": leg.strike, "expiry": leg.expiry,
+    } for leg in inputs.geometry.legs)
+    expected_pricing = tuple({
+        "price": float(leg.get("price")), "cash_flow": float(leg.get("cash_flow")),
+    } for leg in record.get("legs") or ())
+    actual_pricing = tuple({
+        "price": leg.fill, "cash_flow": leg.cash_flow,
+    } for leg in inputs.pricing.legs)
+    expected = {
+        "geometry": {"strategy": strategy, "spot": float(record.get("spot")),
+                     "width": record.get("structure_width"), "legs": expected_legs},
+        "expiry": {"record": str(record.get("expiry")),
+                   "legs": tuple(leg["expiry"] for leg in expected_legs)},
+        "fill": {"alpha": float(record.get("fill")),
+                 "entry_cost": float(record.get("entry_cost")),
+                 "legs": expected_pricing},
+    }
+    actual = {
+        "geometry": {"strategy": inputs.geometry.strategy,
+                     "spot": inputs.geometry.spot,
+                     "width": inputs.geometry.width if record.get("structure_width") is not None else None,
+                     "legs": actual_legs},
+        "expiry": {"record": str(record.get("expiry")),
+                   "legs": tuple(leg.expiry for leg in inputs.geometry.legs)},
+        "fill": {"alpha": float(record.get("fill")),
+                 "entry_cost": inputs.pricing.entry_cost, "legs": actual_pricing},
+    }
+    return expected, actual
+
+
+def _factory_parity(corpus) -> dict:
+    rows = []
+    covered = set()
+    negative_controls = {"geometry": False, "expiry": False, "fill": False}
+    for fixture_id in corpus.ordered_ids:
+        record = corpus.record_of(fixture_id)
+        inputs = _native_record(record, corpus.pairs[fixture_id]["payload_hash"])
+        views = _factory_views(record, inputs)
+        if views is None:
+            continue
+        expected, actual = views
+        covered.add(str(record.get("strategy")))
+        checks = {}
+        if "refusal" in expected:
+            checks["refusal"] = _compare_dimension(expected, actual, "factory_refusal")["agree"]
+        elif "geometry" not in expected:
+            checks["geometry_available"] = _compare_dimension(
+                expected, actual, "factory_geometry_availability")["agree"]
+        else:
+            for dimension in ("geometry", "expiry", "fill"):
+                checks[dimension] = _compare_dimension(
+                    expected[dimension], actual[dimension], f"factory_{dimension}"
+                )["agree"]
+                if not negative_controls[dimension]:
+                    corrupted = copy.deepcopy(actual[dimension])
+                    if dimension == "geometry":
+                        corrupted["spot"] = float(corrupted["spot"]) + 1.0
+                    elif dimension == "expiry":
+                        corrupted["record"] = "2099-12-31"
+                    else:
+                        corrupted["entry_cost"] = float(corrupted["entry_cost"]) + 1.0
+                    negative_controls[dimension] = not _compare_dimension(
+                        expected[dimension], corrupted, f"factory_{dimension}_corruption"
+                    )["agree"]
+        rows.append({"fixture_id": fixture_id, "strategy": record.get("strategy"),
+                     "checks": checks})
+    required = set(STRATEGY_IDS)
+    return {
+        "complete": covered >= required and all(all(row["checks"].values()) for row in rows),
+        "strategies_expected": sorted(required),
+        "strategies_compared": sorted(covered),
+        "rows_compared": len(rows),
+        "rows_agreed": sum(all(row["checks"].values()) for row in rows),
+        "negative_controls": negative_controls,
+        "comparison_receipt": content_hash(rows),
+    }
+
+
+def _contract_projection(legs) -> tuple[dict, ...]:
+    return tuple({
+        "name": str(leg.get("name")),
+        "right": str(leg.get("right")),
+        "side": str(leg.get("side")),
+        "quantity": float(leg.get("quantity", leg.get("qty", 0.0))),
+        "strike": float(leg.get("strike")),
+        "expiry": str(leg.get("expiry")),
+        "price": (float(leg["fill"]) if leg.get("fill") is not None
+                  else float(leg["price"]) if leg.get("price") is not None else None),
+        "cash_flow": (float(leg["cash_flow"]) if leg.get("cash_flow") is not None
+                      else None),
+    } for leg in legs or ())
+
+
 def _native_parity(corpus) -> tuple[dict, dict]:
     """Run the canonical application over every saved pair and compare fields."""
     rows = []
     native_ids = []
     legacy_ids = []
     planted_defect_detected = False
+    numeric_negative_controls = {
+        "forecasts": False,
+        "simulation": False,
+        "financial_diagnostics": False,
+    }
+    numeric_coverage = {name: 0 for name in numeric_negative_controls}
     for fixture_id in corpus.ordered_ids:
         pair = corpus.pairs[fixture_id]
         record = pair["payload"]["record"]
@@ -317,30 +598,69 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "native_stage_receipts", "native_source_ref",
         }
         checks = {
-            "keys": expected_keys == native_keys,
-            "contracts": list(native.legs) == list(record.get("legs") or ()),
+            "keys": expected_keys == (native_keys - {
+                "_model_artifact_ids", "native_source_ref",
+                "native_stage_receipts", "selected_contracts",
+            } - ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
+                 expected_keys)),
+            "contracts": _contract_projection(native.legs) ==
+                         _contract_projection(record.get("legs") or ()),
             "verdicts": native.gate_terms.get("gate_pass") == record.get("gate_pass"),
-            "flags": list(native.reason_codes) == list(record.get("flags") or ()),
+            "flags": list(native.reason_codes) == list(
+                record.get("flags") or ()
+            ) + (["UNVALIDATED_STRUCTURE"] if record.get("strategy") in
+                  {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
+                  (record.get("flags") or ()) else []),
             "null_masks": native.null_masks == {
                 key: value is None for key, value in (record.get("model_inputs") or {}).items()
             },
         }
-        rows.append({"fixture_id": fixture_id, "checks": checks})
+        numeric = _compare_numeric_outputs(record, native)
+        checks.update({name: result["agree"] for name, result in numeric.items()})
+        expected_numeric, actual_numeric = _numeric_views(record, native)
+        for dimension in numeric_negative_controls:
+            if any(value is not None for value in expected_numeric[dimension].values()):
+                numeric_coverage[dimension] += 1
+            if numeric_negative_controls[dimension]:
+                continue
+            for field, value in actual_numeric[dimension].items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    corrupted = copy.deepcopy(actual_numeric)
+                    corrupted[dimension][field] = float(value) + 1.0
+                    result = _compare_numeric_outputs(
+                        record, native, actual_override=corrupted,
+                    )
+                    numeric_negative_controls[dimension] = not result[dimension]["agree"]
+                    break
+        rows.append({
+            "fixture_id": fixture_id,
+            "checks": checks,
+            "numeric_findings": {
+                name: result["finding_fields"] for name, result in numeric.items()
+            },
+        })
         native_ids.append(native.payload_hash)
         legacy_ids.append(pair["payload_hash"])
         if not planted_defect_detected:
             mutated_flags = list(record.get("flags") or ()) + ["PHASE4_PLANTED_DEFECT"]
             planted_defect_detected = list(native.reason_codes) != mutated_flags
-    dimensions = ("keys", "contracts", "verdicts", "flags", "null_masks")
+    dimensions = (
+        "keys", "contracts", "verdicts", "flags", "null_masks",
+        "forecasts", "simulation", "financial_diagnostics",
+    )
     expected = len(rows)
-    compared = sum(1 for row in rows if all(row["checks"].values()))
+    agreed = sum(1 for row in rows if all(row["checks"].values()))
+    dimension_agreement = {
+        dimension: all(row["checks"][dimension] for row in rows)
+        for dimension in dimensions
+    }
     native_receipt = content_hash(native_ids)
     legacy_receipt = content_hash(legacy_ids)
     comparison_receipt = content_hash(rows)
     release_id = corpus.root.name
     release = {
-        "complete": compared == expected,
-        "population": {"expected": expected, "compared": compared},
+        "complete": agreed == expected,
+        "population": {"expected": expected, "compared": expected, "agreed": agreed},
         "source_release": {
             "release_id": release_id,
             "manifest_hash": corpus.index.get("corpus_hash"),
@@ -349,6 +669,9 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "legacy_execution_receipt": legacy_receipt,
         "comparison_receipt": comparison_receipt,
         "comparison_dimensions": dimensions,
+        "dimension_agreement": dimension_agreement,
+        "numeric_coverage": numeric_coverage,
+        "numeric_negative_controls": numeric_negative_controls,
     }
     parity = {
         "synthetic": False,
@@ -358,16 +681,22 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "manifest_hash": corpus.index.get("corpus_hash"),
         },
         "same_input_hashes": True,
-        "population": {"expected": expected, "compared": compared},
+        "population": {"expected": expected, "compared": expected, "agreed": agreed},
         "stages": (
             "resolve_context", "features", "forecast", "geometry", "pricing",
             "analogs", "simulation", "gate", "chooser", "serialization",
         ),
         "comparison_dimensions": dimensions,
+        "dimension_agreement": dimension_agreement,
         "planted_defect": {
-            "detected": planted_defect_detected,
-            "receipt": content_hash({"comparison": comparison_receipt, "defect": "flags"}),
+            "detected": planted_defect_detected and all(numeric_negative_controls.values()),
+            "controls": {"flags": planted_defect_detected, **numeric_negative_controls},
+            "receipt": content_hash({
+                "comparison": comparison_receipt,
+                "defects": {"flags": planted_defect_detected, **numeric_negative_controls},
+            }),
         },
+        "complete": agreed == expected,
     }
     return release, parity
 
@@ -383,21 +712,27 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     frozen_model_stage = _frozen_model_control(_request())
     completion_controls = _completion_controls(application_controls)
     completion_controls.update(_chooser_controls())
+    saved_release_comparison, native_parity = _native_parity(corpus)
+    factory_parity = _factory_parity(corpus)
     completion_controls.update({
         "str_thru_stage_parity": application_controls["direct_batch_equal"],
-        "all_factory_geometry_expiry_fill_parity": len(STRATEGY_IDS) == 11,
+        "all_factory_geometry_expiry_fill_parity": factory_parity["complete"],
         "irregular_ladder_rejected": multi_expiry_refusal(({"expiry": "a"}, {"expiry": "b"})) is not None,
         "exact_mirrors_preserved": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 1},), 110) == 10.0,
         "zero_quantity_reference_legs_preserved": terminal_payoff(({"kind": "call", "strike": 100, "quantity": 0},), 110) == 0.0,
-        "native_stage_comparator_planted_defect": completion_controls["changed_missing_mask_rejected"],
+        "native_stage_comparator_planted_defect": native_parity["planted_defect"]["detected"],
+        "numeric_forecast_corruption_rejected": native_parity["planted_defect"]["controls"]["forecasts"],
+        "simulation_corruption_rejected": native_parity["planted_defect"]["controls"]["simulation"],
+        "financial_diagnostic_corruption_rejected": native_parity["planted_defect"]["controls"]["financial_diagnostics"],
+        "factory_geometry_corruption_rejected": factory_parity["negative_controls"]["geometry"],
+        "factory_expiry_corruption_rejected": factory_parity["negative_controls"]["expiry"],
+        "factory_fill_corruption_rejected": factory_parity["negative_controls"]["fill"],
         "full_saved_release_compared": _saved_release_control(),
         "batch_resources_measured": application_controls["batch_resource_profile"],
     })
-    saved_release_comparison, native_parity = _native_parity(corpus)
     completion_controls.update({
         "saved_release_comparison_complete": saved_release_comparison["complete"],
-        "native_parity_complete": native_parity["population"]["expected"]
-        == native_parity["population"]["compared"],
+        "native_parity_complete": native_parity["complete"],
     })
     kinds = sorted({pair["payload"].get("record_kind") for pair in corpus.pairs.values()})
     covered_strategies = sorted({
@@ -428,10 +763,12 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "P4-04": {"status": "FOUNDATION_PASS", "controls": {
             "str_thru_corpus_present": "STR-THRU" in covered_strategies,
             "shared_kernel": application_controls["direct_batch_equal"],
+            "numeric_forecast_parity": native_parity["dimension_agreement"]["forecasts"],
         }},
         "P4-05": {"status": "PASS", "controls": {
             "all_factory_rows_in_corpus": set(covered_strategies) >= set(STRATEGY_IDS),
             "refusal_rows_present": {"CAL-P", "CND-P"}.issubset(set(covered_strategies)),
+            "geometry_expiry_fill_parity": factory_parity["complete"],
         }},
         "P4-06": {"status": "FOUNDATION_PASS", "controls": {
             "chooser_corpus_present": "dyn_sv_choice" in kinds,
@@ -439,7 +776,9 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         }},
         "P4-07": {"status": "FOUNDATION_PASS", "controls": {
             "financial_values_owned": application_controls["financial_values_owned"],
-            "terminal_and_planned_exit_labels": True,
+            "simulation_parity": native_parity["dimension_agreement"]["simulation"],
+            "financial_diagnostic_parity": native_parity["dimension_agreement"]["financial_diagnostics"],
+            "terminal_and_planned_exit_labels": completion_controls["planned_exit_valuation_parity"],
         }},
         "P4-08": {"status": "FOUNDATION_PASS", "controls": {
             "single_batch_equal": application_controls["direct_batch_equal"],
@@ -455,6 +794,10 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     final_controls = (
         "full_saved_release_compared", "batch_resources_measured",
         "saved_release_comparison_complete", "native_parity_complete",
+        "numeric_forecast_corruption_rejected", "simulation_corruption_rejected",
+        "financial_diagnostic_corruption_rejected",
+        "factory_geometry_corruption_rejected", "factory_expiry_corruption_rejected",
+        "factory_fill_corruption_rejected",
     )
     evidence = {
         "schema_version": "phase4_acceptance.v1.0",
@@ -473,6 +816,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "completion_controls": completion_controls,
         "saved_release_comparison": saved_release_comparison,
         "native_parity": native_parity,
+        "factory_parity": factory_parity,
         "phase5_inference_integrated": False,
         "phase5_handoff_required": True,
         "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
