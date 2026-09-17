@@ -294,6 +294,15 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
     delivered = [row["delivered_at"] for row in (first, second, rollback)]
     if not delivered[0] <= delivered[1] <= delivered[2]:
         raise RuntimeError("publication log is not chronological")
+    for record in (first, second, rollback):
+        job_id = record.get("publication_job_id")
+        if not isinstance(job_id, str):
+            raise RuntimeError("publication log lacks durable producing job identity")
+        attempt = conn.execute("SELECT a.attempt_id FROM attempts a JOIN jobs j ON j.job_id=a.job_id "
+                               "WHERE a.job_id=? AND j.kind=? AND a.state=? ORDER BY a.attempt_number DESC LIMIT 1",
+                               (job_id, "publication", "succeeded")).fetchone()
+        if attempt is None:
+            raise RuntimeError("release producing publication attempt was not completed")
 
     receipt = RollbackReceipt(
         receipt_id="recv_" + receipt_content_hash(["fenced_rollback", second["projection_release_id"],
