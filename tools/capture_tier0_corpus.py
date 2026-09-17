@@ -71,6 +71,7 @@ from engine.data import store  # noqa: E402
 from engine.fills import MID  # noqa: E402
 from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
+from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 
 SCHEMA_VERSION = "tier0_pair.v1.1"
 INDEX_VERSION = "tier0_corpus.v1.1"
@@ -660,6 +661,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         shutil.rmtree(tmp)
     pairs_dir = tmp / "pairs"
     pairs_dir.mkdir(parents=True)
+    checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
 
     manifest_pairs = {}
     for cand in chosen:
@@ -678,6 +680,19 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "covers": pair["covers"],
             "trace_disposition": pair["payload"].get("trace_disposition", "absent"),
         }
+        checkpoint = cand.get("legacy_trace")
+        if checkpoint is not None:
+            checkpoint_sink.write_case(
+                cand["fixture_id"],
+                {
+                    "case_id": cand["fixture_id"],
+                    "request": pair["payload"]["request"],
+                    "strategy": pair["payload"]["record"].get("strategy"),
+                    "covers": pair["covers"],
+                    "record_kind": cand["kind"],
+                    "checkpoint": checkpoint,
+                },
+            )
 
     missing = sorted(set(required_axes()) - set(index))
     doc = {
@@ -699,6 +714,13 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             {k: v["payload_hash"] for k, v in sorted(manifest_pairs.items())}
         ),
     }
+    checkpoint_sink.finalize({
+        "release_id": out_dir.name,
+        "source_snapshot": snapshot,
+        "coverage": doc["coverage"],
+        "status": "diagnostic_only",
+    })
+    doc["diagnostic_checkpoint_manifest"] = "checkpoints/manifest.json"
     (tmp / "INDEX.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
     if out_dir.exists():
         shutil.rmtree(out_dir)
