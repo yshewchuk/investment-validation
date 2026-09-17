@@ -46,18 +46,34 @@ def _coverage_frame(table: str, column: str, stamp: pd.Timestamp):
     return legacy_adapter.finality_coverage_frame(table, column, stamp)
 
 
-def _exact_share(table: str, column: str, stamp: pd.Timestamp, wanted: set[str], frame=None):
+def _coverage_sets(table: str, column: str, stamp: pd.Timestamp,
+                   wanted: set[str], frame=None) -> tuple[set[str], set[str]]:
+    """Return requested tickers carried at all and present on the target date.
+
+    Session finality combines the carried sets from both tables before
+    calculating either share. A ticker carried by only one table therefore
+    remains in the shared denominator and counts as missing from the other.
+    """
     if not wanted:
-        return 0.0, 0
+        return set(), set()
     frame = frame if frame is not None else _coverage_frame(table, column, stamp)
-    if frame is None or frame.empty or column not in frame:
-        return 0.0, 0
+    if frame is None or frame.empty or column not in frame or "ticker" not in frame:
+        return set(), set()
     carried = wanted & set(frame["ticker"].dropna().astype(str))
     if not carried:
-        return 0.0, 0
+        return set(), set()
     dates = pd.to_datetime(frame[column], errors="coerce").dt.normalize()
     got = set(frame.loc[dates == stamp, "ticker"].dropna().astype(str))
-    return len(carried & got) / len(carried), len(carried)
+    return carried, carried & got
+
+
+def _shared_coverage(daily_carried: set[str], daily_exact: set[str],
+                     chain_carried: set[str], chain_exact: set[str]):
+    carried = daily_carried | chain_carried
+    if not carried:
+        return 0.0, 0.0, 0
+    covered = len(carried)
+    return len(daily_exact) / covered, len(chain_exact) / covered, covered
 
 
 def _native_session_finality(value, tickers: Iterable[str], *, frames=None,
@@ -65,11 +81,12 @@ def _native_session_finality(value, tickers: Iterable[str], *, frames=None,
     stamp = pd.Timestamp(value).normalize()
     wanted = {str(item) for item in tickers if item is not None and str(item)}
     frames = frames or {}
-    daily_share, daily_covered = _exact_share(
+    daily_carried, daily_exact = _coverage_sets(
         "daily_market", "date", stamp, wanted, frames.get("daily_market"))
-    chain_share, chain_covered = _exact_share(
+    chain_carried, chain_exact = _coverage_sets(
         "option_chains", "obs_date", stamp, wanted, frames.get("option_chains"))
-    covered = min(daily_covered, chain_covered)
+    daily_share, chain_share, covered = _shared_coverage(
+        daily_carried, daily_exact, chain_carried, chain_exact)
     if market_wide is None:
         market_wide = _market_wide_complete(stamp)
     final = bool(wanted) and covered > 0 and market_wide \
