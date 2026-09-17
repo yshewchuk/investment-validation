@@ -282,11 +282,8 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
 
     conn = open_catalog(catalog_path, clock=SystemClock())
     store = ArtifactStore(store_root)
-    try:
-        manifests = [_verified_release(conn, store, row["ops_release_id"])
-                     for row in (first, second, rollback)]
-    finally:
-        conn.close()
+    manifests = [_verified_release(conn, store, row["ops_release_id"])
+                 for row in (first, second, rollback)]
     projections = [_projection_id(store, manifest) for manifest in manifests]
     if projections != [first["projection_release_id"], second["projection_release_id"],
                        first["projection_release_id"]] or projections[0] == projections[1]:
@@ -303,6 +300,7 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
                                (job_id, "publication", "succeeded")).fetchone()
         if attempt is None:
             raise RuntimeError("release producing publication attempt was not completed")
+    conn.close()
 
     receipt = RollbackReceipt(
         receipt_id="recv_" + receipt_content_hash(["fenced_rollback", second["projection_release_id"],

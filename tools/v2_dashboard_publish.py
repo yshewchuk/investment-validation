@@ -25,11 +25,11 @@ from engine.v2.ops.submission import NamespacePolicy
 from engine.v2.ops.supervisor import Service
 
 
-def _run_sequence(conn, root, clock, items, log_path):
+def _run_sequence(conn, root, store_root, clock, items, log_path):
     policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
     store = ArtifactStore(root)
     service = Service(conn, root, registry(), __import__("engine.v2.ops.profiles", fromlist=["DEFAULT_POLICY"]).DEFAULT_POLICY,
-                      clock=clock, code_source=ROOT, store_root=ROOT)
+                      clock=clock, code_source=ROOT, store_root=store_root)
     service.start()
     records = []
     for label, source, binding, operation in items:
@@ -44,8 +44,10 @@ def _run_sequence(conn, root, clock, items, log_path):
             time.sleep(0.1)
         if row is None or row[0] != "succeeded":
             raise RuntimeError("sequence publication did not succeed")
-        release = conn.execute("SELECT release_id,manifest_json,published_at,delivered_at FROM releases "
-                               "WHERE delivered_at IS NOT NULL ORDER BY delivered_at DESC LIMIT 1").fetchone()
+        releases = conn.execute("SELECT release_id,manifest_json,published_at,delivered_at FROM releases "
+                                "WHERE delivered_at IS NOT NULL ORDER BY delivered_at DESC").fetchall()
+        release = next((row for row in releases if json.loads(row["manifest_json"]).get("files", {}).get(
+            "projection_binding.json", {}).get("artifact_id") == binding), None)
         if release is None:
             raise RuntimeError("sequence publication has no durable delivered release")
         projection = json.loads(store.read_verified(artifact(conn, store, binding)))["projection_release_id"]
@@ -61,6 +63,7 @@ def _run_sequence(conn, root, clock, items, log_path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--store-root", type=Path, default=None)
     parser.add_argument("--source-publication-job", required=True)
     parser.add_argument("--projection-binding", required=True)
     parser.add_argument("--operation-id", required=True)
@@ -75,7 +78,9 @@ def main(argv=None):
         if args.verify_sequence:
             if not args.b_source_publication_job or not args.b_projection_binding or not args.sequence_log:
                 parser.error("--verify-sequence needs B source, B binding and --sequence-log")
-            _run_sequence(conn, args.root, clock, (("a", args.source_publication_job,
+            if args.store_root is None:
+                parser.error("--verify-sequence requires --store-root")
+            _run_sequence(conn, args.root, args.store_root, clock, (("a", args.source_publication_job,
                 args.projection_binding, args.operation_id), ("b", args.b_source_publication_job,
                 args.b_projection_binding, args.operation_id + "-b"), ("rollback", args.source_publication_job,
                 args.projection_binding, args.operation_id + "-rollback")), args.sequence_log)
