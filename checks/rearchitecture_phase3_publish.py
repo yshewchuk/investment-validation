@@ -57,8 +57,10 @@ from engine.v2.foundation import (  # noqa: E402
     to_document,
 )
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.ops.checkpoints import artifact  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.publication import materialize  # noqa: E402
+from engine.v2.ops.effects_graph import _generation_ref  # noqa: E402
 from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
 
@@ -237,6 +239,18 @@ def _verified_release(conn, store, release_id: str) -> dict:
     return manifest
 
 
+def _job_release_id(conn, store, job_id: str) -> str:
+    row = conn.execute("SELECT spec_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+    if row is None:
+        raise RuntimeError("publication job is absent")
+    spec = json.loads(row["spec_json"])
+    params = spec["parameters"]
+    finality = json.loads(store.read_verified(artifact(conn, store, params["input_bindings"]["finality.json"])))
+    scope = params.get("effect_scope") or spec["output_namespace"]
+    generation = _generation_ref(type("Claim", (), {"spec": type("Spec", (), {"parameters": params})()})())
+    return "rel" + content_hash([scope, finality["date"], generation]).split(":")[1][:24]
+
+
 def _projection_id(store, manifest: dict) -> str:
     files = manifest.get("files", {})
     raw = files.get("projection_binding.json")
@@ -288,9 +302,15 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
     if projections != [first["projection_release_id"], second["projection_release_id"],
                        first["projection_release_id"]] or projections[0] == projections[1]:
         raise RuntimeError("durable projection bindings are not an A to B to A chain")
-    delivered = [row["delivered_at"] for row in (first, second, rollback)]
-    if not delivered[0] <= delivered[1] <= delivered[2]:
-        raise RuntimeError("publication log is not chronological")
+    catalog_rows = [conn.execute("SELECT expected_current,published_at,delivered_at FROM releases WHERE release_id=?",
+                                 (record["ops_release_id"],)).fetchone()
+                    for record in (first, second, rollback)]
+    if any(row is None or not row["published_at"] or not row["delivered_at"] for row in catalog_rows):
+        raise RuntimeError("catalog release delivery is incomplete")
+    if [row["expected_current"] for row in catalog_rows] != [None, first["ops_release_id"], second["ops_release_id"]]:
+        raise RuntimeError("catalog expected_current does not prove A to B to A")
+    if not catalog_rows[0]["delivered_at"] <= catalog_rows[1]["delivered_at"] <= catalog_rows[2]["delivered_at"]:
+        raise RuntimeError("catalog delivery is not chronological")
     for record in (first, second, rollback):
         job_id = record.get("publication_job_id")
         if not isinstance(job_id, str):
@@ -300,6 +320,8 @@ def build_fenced_rollback(publication_log: Path, publication_root: Path, failure
                                (job_id, "publication", "succeeded")).fetchone()
         if attempt is None:
             raise RuntimeError("release producing publication attempt was not completed")
+        if _job_release_id(conn, store, job_id) != record["ops_release_id"]:
+            raise RuntimeError("named publication job does not deterministically produce release")
     conn.close()
 
     receipt = RollbackReceipt(
