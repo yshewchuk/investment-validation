@@ -59,7 +59,7 @@ failure rather than a stale sentence.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
 - engine/v2/serving — safe immutable release paths and health timestamps.
 
-<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving -->
+<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring -->
 
 ## Usage
 

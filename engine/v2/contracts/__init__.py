@@ -141,6 +141,25 @@ from engine.v2.contracts.operations import (
     ResourcePolicy,
     ResourceProfile,
 )
+from engine.v2.contracts.scoring import (
+    DEPLOYMENT_SPEC_V1,
+    FEATURE_FRAME_V1,
+    FEATURE_RECIPE_V1,
+    FEATURE_REQUEST_V1,
+    SCORE_RECORD_V1,
+    SCORE_REQUEST_V1,
+    STRATEGY_SPEC_V1,
+    DeploymentSpec,
+    EventScoreRequest,
+    FeatureFrame,
+    FeatureRecipe,
+    FeatureRequest,
+    ReplayReceipt,
+    ScoreBatch,
+    ScoreRecord,
+    ScoreRequest,
+    StrategySpec,
+)
 from engine.v2.contracts.serving import (
     EVENT_PAGE_ITEM_V1,
     EVENT_PAGE_V1,
@@ -190,6 +209,9 @@ __all__ = [
     "SNAPSHOT_IMPORT_RECEIPT_V1", "SNAPSHOT_IMPORT_REQUEST_V1", "SNAPSHOT_REF_V1",
     "STAGE_RESULT_V1", "STAGE_SPEC_V1", "SUBMIT_REQUEST_V1",
     "TABLE_CONTRACT_REF_V1", "TABLE_CONTRACT_V1", "TIME_INTERVAL_V1",
+    "DEPLOYMENT_SPEC_V1", "FEATURE_FRAME_V1", "FEATURE_RECIPE_V1",
+    "FEATURE_REQUEST_V1", "SCORE_RECORD_V1", "SCORE_REQUEST_V1",
+    "STRATEGY_SPEC_V1",
     "AcquisitionReceipt", "ArtifactRef", "AttemptReceipt", "AttemptState",
     "CancellationReceipt", "ChangeSet",
     "CapacitySample", "ChainMember", "ChainQuery", "ChainSnapshot",
@@ -213,4 +235,7 @@ __all__ = [
     "SnapshotImportReceipt", "SnapshotImportRequest", "SnapshotRef",
     "StageResult", "StageSpec", "SubmitRequest", "TableContract",
     "TableContractRef", "TimeInterval",
+    "DeploymentSpec", "FeatureFrame", "FeatureRecipe", "FeatureRequest",
+    "EventScoreRequest", "ReplayReceipt", "ScoreBatch", "ScoreRecord",
+    "ScoreRequest", "StrategySpec",
 ]

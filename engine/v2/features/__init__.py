@@ -1,9 +1,6 @@
-"""Feature engine registered transforms and their causal dependencies
+"""Feature recipes and causal context registration for Phase 4 scoring."""
 
-Layer 2 of `system_rearchitecture.md` §4.1. Replaces `features.py`, `data/features/panel.py`, `data/features/tier4.py`.
+from engine.v2.features.context import FeatureContextError, FeatureContextPlanner
+from engine.v2.features.recipes import FeatureRegistry, default_feature_registry
 
-Empty by construction: phase 0 writes no production logic
-(`guides/rearchitecture_phase0_baseline.md` §10). See ``README.md`` for what
-this package will own, what it deliberately will not, and which packages may
-import it.
-"""
+__all__ = ["FeatureContextError", "FeatureContextPlanner", "FeatureRegistry", "default_feature_registry"]

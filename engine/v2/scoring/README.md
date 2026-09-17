@@ -26,9 +26,11 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+`application` provides the shared scoring kernel; `compatibility` is the
+temporary legacy adapter; `financial` owns diagnostics; `identity` owns
+content-addressed request identities.
 
-<!-- public-interface: none -->
+<!-- public-interface: application, compatibility, financial, identity, canonical_request, dependency_hash, financial_diagnostics, request_hash, replay, score_batch, score_event, score_frozen, score_id, score_many, score_one -->
 
 ## Consumers
 
@@ -42,10 +44,8 @@ _Nothing yet — no package imports this one. The first importer is added here i
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+The application takes a ScoreRequest and explicit legacy request fields for
+the compatibility backend; single and batch calls share one kernel.
 
 ## Testing
 

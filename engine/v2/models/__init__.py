@@ -1,9 +1,64 @@
-"""Model inference registry, artifact loading, inference adapters
+"""Frozen model contracts, verified loading, and read-only inference."""
 
-Layer 3 of `system_rearchitecture.md` §4.1. Replaces `models/registry.py`, `artifact loading and inference adapters`.
+from .adapters import (
+    AdapterError,
+    InferenceAdapter,
+    JoblibEstimatorAdapter,
+    JsonLinearAdapter,
+    RuntimeFitForbidden,
+    default_adapters,
+)
+from .contracts import (
+    MODEL_NOT_READY,
+    MODEL_READY,
+    ArtifactMember,
+    InferenceRequest,
+    InferenceResult,
+    ModelBinding,
+    ModelRelease,
+    PredictionFrame,
+)
+from .loader import FrozenInference
 
-Empty by construction: phase 0 writes no production logic
-(`guides/rearchitecture_phase0_baseline.md` §10). See ``README.md`` for what
-this package will own, what it deliberately will not, and which packages may
-import it.
-"""
+__all__ = [
+    "AdapterError",
+    "ArtifactMember",
+    "FrozenInference",
+    "InferenceAdapter",
+    "InferenceRequest",
+    "InferenceResult",
+    "JoblibEstimatorAdapter",
+    "JsonLinearAdapter",
+    "MODEL_NOT_READY",
+    "MODEL_READY",
+    "ModelBinding",
+    "ModelRelease",
+    "PredictionFrame",
+    "RuntimeFitForbidden",
+    "default_adapters",
+]
+from engine.v2.models.releases import (
+    ARTIFACT_INVENTORY_MEMBER_V1,
+    MODEL_ARTIFACT_INVENTORY_V1,
+    MODEL_RELEASE_REFUSAL,
+    MODEL_RELEASE_V1,
+    RELEASE_BINDING_V1,
+    RELEASE_REQUIREMENT_V1,
+    ArtifactInventoryMember,
+    ModelArtifactInventory,
+    ModelReleaseInventory,
+    ModelReleaseRefusal,
+    ReleaseBinding,
+    ReleaseIssue,
+    ReleaseRequirement,
+    release_issues,
+    require_complete_release,
+)
+
+__all__ += [
+    "ARTIFACT_INVENTORY_MEMBER_V1", "MODEL_ARTIFACT_INVENTORY_V1",
+    "MODEL_RELEASE_REFUSAL", "MODEL_RELEASE_V1", "RELEASE_BINDING_V1",
+    "RELEASE_REQUIREMENT_V1", "ArtifactInventoryMember", "ModelArtifactInventory",
+    "ModelReleaseInventory", "ModelReleaseRefusal", "ReleaseBinding", "ReleaseIssue",
+    "ReleaseRequirement", "release_issues", "require_complete_release",
+]

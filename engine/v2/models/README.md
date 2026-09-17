@@ -25,9 +25,14 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+ArtifactMember, ModelBinding, ModelRelease, InferenceRequest, InferenceResult,
+PredictionFrame,
+FrozenInference, the inference adapters, ModelArtifactInventory,
+ArtifactInventoryMember, ReleaseBinding, ReleaseRequirement,
+ModelReleaseInventory, ReleaseIssue, ModelReleaseRefusal, release_issues,
+require_complete_release, and their constants.
 
-<!-- public-interface: none -->
+<!-- public-interface: AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1 -->
 
 ## Consumers
 
@@ -41,10 +46,9 @@ _Nothing yet — no package imports this one. The first importer is added here i
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+Call require_complete_release before loading any artifact. It checks complete
+role/strategy/clock bindings, exact feature order, and each binding required
+estimator, transform, residual and calibration members.
 
 ## Testing
 

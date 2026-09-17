@@ -26,9 +26,10 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+`recipes` provides `FeatureRegistry` and `default_feature_registry`; `context`
+provides `FeatureContextPlanner` and causal `FeatureFrame` construction.
 
-<!-- public-interface: none -->
+<!-- public-interface: recipes, FeatureRegistry, default_feature_registry -->
 
 ## Consumers
 
@@ -36,9 +37,9 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+`engine/v2/scoring` resolves feature scopes and recipe identities before scoring.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.scoring -->
 
 ## Usage
 
