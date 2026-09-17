@@ -14,12 +14,22 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
+from engine.fills import MID  # noqa: E402
 from engine.models.registry import artifact_sha256, load_registry  # noqa: E402
+from engine.pnl_sim import ResidualPool, expected_pnl  # noqa: E402
+from engine.structures import (  # noqa: E402
+    ChainSnapshot,
+    STRUCTURES,
+    StructureError,
+    price_structure,
+)
 from engine.v2.contracts import ScoreRequest  # noqa: E402
 from engine.v2.domain.generation import generate, price  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
@@ -263,32 +273,193 @@ def _factory_structure_controls() -> dict[str, bool]:
         and legs["up1"].strike + legs["dn1"].strike == 2.0 * legs["atm"].strike
         and legs["up2"].strike + legs["dn2"].strike == 2.0 * legs["atm"].strike
     )
-    malformed = generate("CND-PS", {
-        **base,
-        "resolved_legs": (
-            {"name": "atm", "right": "P", "side": "buy", "quantity": 0,
-             "strike": 100.0},
-            {"name": "up1", "right": "P", "side": "sell", "quantity": 1,
-             "strike": 104.0},
-            {"name": "dn1", "right": "P", "side": "sell", "quantity": 1,
-             "strike": 95.0},
-            {"name": "up2", "right": "P", "side": "buy", "quantity": 1,
-             "strike": 108.0},
-            {"name": "dn2", "right": "P", "side": "buy", "quantity": 1,
-             "strike": 92.0},
-        ),
-    })
-    malformed_legs = {leg.name: leg for leg in malformed.legs}
-    malformed_is_exact = (
-        malformed_legs["up1"].strike + malformed_legs["dn1"].strike
-        == 2.0 * malformed_legs["atm"].strike
+    spot = 68.98
+    obs = pd.Timestamp("2026-09-04")
+    expiry = pd.Timestamp("2026-09-18")
+    rows = []
+    strike = 40.0
+    while strike <= 100.0 + 1e-9:
+        for right in ("C", "P"):
+            intrinsic = (max(strike - spot, 0.0) if right == "P"
+                         else max(spot - strike, 0.0))
+            rows.append({
+                "ticker": "KEN", "obs_date": obs, "expiry": expiry,
+                "dte": 14, "strike": round(strike, 4), "right": right,
+                "bid": round(intrinsic + 1.5, 4),
+                "ask": round(intrinsic + 2.5, 4),
+                "iv": 0.6, "delta": -0.5 if right == "P" else 0.5,
+                "spot": spot,
+            })
+        strike += 5.0
+    snapshot = ChainSnapshot(
+        ticker="KEN", obs_date=obs, event_date=pd.Timestamp("2026-09-07"),
+        rows=pd.DataFrame(rows), spot=spot, session="AMC",
     )
+    try:
+        price_structure(
+            STRUCTURES["CND-PS"](width_moneyness=0.014593), snapshot, MID,
+        )
+    except StructureError as exc:
+        production_refusal = (
+            "too coarse" in str(exc)
+            and "up1 and up2" in str(exc)
+            and "dn1 and dn2" in str(exc)
+        )
+    else:
+        production_refusal = False
     return {
-        "irregular_ladder_rejected": not malformed_is_exact,
+        "irregular_ladder_rejected": production_refusal,
         "exact_mirrors_preserved": exact_mirrors,
         "zero_quantity_reference_legs_preserved": (
             legs["atm"].quantity == 0.0 and legs["atm"].side == "buy"
         ),
+    }
+
+
+def _simulation_acceptance_controls() -> dict[str, object]:
+    """Compare independently executed native and legacy simulation recipes."""
+    residuals = tuple({
+        "event_date": str(day.date()), "pred_abs_move": 5.0,
+        "err_move": 0.0, "err_crush": 0.0,
+    } for day in pd.date_range("2025-01-01", periods=300))
+    residual_hash = content_hash(residuals)
+    forecast_recipe = {
+        "driver_name": "abs_move",
+        "required_roles": ("size", "iv_crush"),
+        "models": {
+            "forecast_abs_move": {"intercept": 5.0, "coefficients": {}},
+            "pred_iv_crush": {"intercept": -25.0, "coefficients": {}},
+        },
+    }
+    gate_recipe = {
+        "model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
+        "threshold": 0.0,
+    }
+    artifact_refs = (
+        "forecast:" + content_hash(forecast_recipe),
+        "gate:" + content_hash(gate_recipe),
+    )
+    geometry = generate("CND-PS", {
+        "spot": 100.0, "forecast_abs_move": 5.0, "width": 4.0,
+        "expiry": "2026-10-17",
+    })
+    quotes = {
+        (leg.right, leg.strike, leg.expiry): {
+            "bid": 1.0 if leg.side == "buy" else 0.2,
+            "ask": 2.0 if leg.side == "buy" else 0.4,
+        }
+        for leg in geometry.legs
+    }
+    history = pd.DataFrame(residuals)
+    history["event_date"] = pd.to_datetime(history["event_date"])
+    pool = ResidualPool(history)
+    comparisons = {}
+    binding_checks = []
+    binding_details = []
+    for dte in (0, 30):
+        exit_date = str((pd.Timestamp("2026-10-17") - pd.Timedelta(days=dte)).date())
+        for alpha in (0.0, 1.0):
+            pricing = price(geometry, quotes, alpha)
+            simulation_recipe = {
+                "mode": "planned_exit", "pre_iv30": 40.0,
+                "dte_exit": dte, "event_date": "2026-09-17",
+                "residuals": residuals, "draws": 4000,
+            }
+            recipe = {
+                "schema_version": "phase4.acceptance_recipe.v1",
+                "geometry": to_document(geometry),
+                "quotes": tuple({
+                    "right": right, "strike": strike, "expiry": expiry_value,
+                    **quote,
+                } for (right, strike, expiry_value), quote in sorted(quotes.items())),
+                "forecast": forecast_recipe,
+                "simulation": simulation_recipe,
+                "gate": gate_recipe,
+                "fill_alpha": alpha,
+            }
+            recipe_hash = content_hash(recipe)
+            source_ref = "recipe:" + recipe_hash
+            base = _native_record({
+                **_fake_result().as_dict(),
+                "strategy": "CND-PS", "spot": 100.0,
+                "event_date": "2026-09-17", "exit_date": exit_date,
+                "expiry": "2026-10-17", "pre_iv30": 40.0,
+            }, source_ref)
+            inputs = replace(
+                base, geometry=geometry, pricing=pricing,
+                forecast=forecast_recipe, simulation=simulation_recipe,
+                gate=gate_recipe,
+            )
+            request = _request(
+                strategy_version="CND-PS", fill_model={"alpha": alpha},
+                dependency_refs=(source_ref, "residuals:" + residual_hash),
+                model_artifact_refs=artifact_refs,
+            )
+            native = application.score_one(request, inputs)
+            exit_legs = tuple({
+                "strike": leg.strike, "qty": leg.quantity,
+                "side": "sell" if leg.side == "buy" else "buy",
+            } for leg in geometry.legs)
+            legacy = expected_pnl(
+                exit_legs=exit_legs, spot=100.0,
+                entry_cost=pricing.entry_cost, pre_iv30=40.0,
+                pred_abs_move=5.0, pred_iv_crush=-25.0, dte_exit=dte,
+                event_date="2026-09-17", pool=pool, key="CND-PS", draws=4000,
+            )
+            key = f"dte_{dte}_alpha_{alpha:.1f}"
+            comparisons[key] = {
+                "native": native.forecasts.get("exp_pnl_sim"),
+                "legacy": None if legacy is None else legacy["exp_pnl_sim"],
+                "entry_cost": native.financial_diagnostics.get("entry_cost_pct"),
+                "gate_score": native.gate_terms.get("gate_score"),
+                "gate_threshold": native.gate_terms.get("gate_threshold"),
+                "gate_pass": native.gate_terms.get("gate_pass"),
+            }
+            binding = {
+                "artifact_refs": native.model_artifact_ids == artifact_refs,
+                "dependency_refs": native.evidence_refs == tuple(request.dependency_refs),
+                "source_dependency": inputs.source_ref == request.dependency_refs[0],
+                "recipe_hash": inputs.source_ref == "recipe:" + content_hash(recipe),
+            }
+            binding_details.append(binding)
+            binding_checks.append(all(binding.values()))
+    expiry = [comparisons[f"dte_0_alpha_{alpha:.1f}"] for alpha in (0.0, 1.0)]
+    pre_expiry = [comparisons[f"dte_30_alpha_{alpha:.1f}"] for alpha in (0.0, 1.0)]
+    expiry_parity = all(
+        row["native"] is not None and row["legacy"] is not None
+        and math.isclose(row["native"], row["legacy"], abs_tol=1e-12)
+        for row in expiry
+    )
+    pre_expiry_parity = all(
+        row["native"] is not None and row["legacy"] is not None
+        and math.isclose(row["native"], row["legacy"], abs_tol=1e-12)
+        for row in pre_expiry
+    )
+    strict_gate = all(
+        row["native"] is not None
+        and row["gate_score"] == row["native"]
+        and row["gate_threshold"] == 0.0
+        and row["gate_pass"] is (row["native"] >= 0.0)
+        for row in (*expiry, *pre_expiry)
+    )
+    return {
+        "expiry_parity": expiry_parity,
+        "pre_expiry_parity": pre_expiry_parity,
+        "material_time_value": all(
+            abs(before["native"] - at_expiry["native"]) > 0.1
+            for before, at_expiry in zip(pre_expiry, expiry)
+        ),
+        "fill_propagation": (
+            expiry[0]["entry_cost"] != expiry[1]["entry_cost"]
+            and expiry[0]["native"] != expiry[1]["native"]
+            and pre_expiry[0]["native"] != pre_expiry[1]["native"]
+        ),
+        "executable_recipe_binding": all(binding_checks),
+        "strict_gate_semantics": strict_gate,
+        "artifact_refs": artifact_refs,
+        "residual_hash": residual_hash,
+        "comparisons": comparisons,
+        "binding_details": tuple(binding_details),
     }
 
 
@@ -827,6 +998,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     completion_controls.update(_chooser_controls())
     numerical_independence = _numerical_independence_control()
     factory_structure_controls = _factory_structure_controls()
+    simulation_acceptance = _simulation_acceptance_controls()
     saved_release_comparison, native_parity = _native_parity(corpus)
     factory_parity = _factory_parity(corpus)
     completion_controls.update({
@@ -835,6 +1007,12 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         **factory_structure_controls,
         "native_outputs_independently_recomputed":
             numerical_independence["independent_recomputation"],
+        "simulation_expiry_parity": simulation_acceptance["expiry_parity"],
+        "simulation_pre_expiry_parity": simulation_acceptance["pre_expiry_parity"],
+        "simulation_material_time_value": simulation_acceptance["material_time_value"],
+        "simulation_fill_propagation": simulation_acceptance["fill_propagation"],
+        "executable_recipe_binding": simulation_acceptance["executable_recipe_binding"],
+        "strict_gate_semantics": simulation_acceptance["strict_gate_semantics"],
         "preservation_only_detected":
             numerical_independence["preservation_only_detected"],
         "preservation_only_rejected":
@@ -885,6 +1063,11 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
             "numeric_forecast_parity": native_parity["dimension_agreement"]["forecasts"],
             "native_outputs_independently_recomputed":
                 numerical_independence["independent_recomputation"],
+            "expiry_simulation_parity": simulation_acceptance["expiry_parity"],
+            "pre_expiry_simulation_parity": simulation_acceptance["pre_expiry_parity"],
+            "material_time_value": simulation_acceptance["material_time_value"],
+            "fill_propagation": simulation_acceptance["fill_propagation"],
+            "strict_gate_semantics": simulation_acceptance["strict_gate_semantics"],
         }},
         "P4-05": {"status": "PASS", "controls": {
             "all_factory_rows_in_corpus": set(covered_strategies) >= set(STRATEGY_IDS),
@@ -898,12 +1081,18 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "P4-07": {"status": "FOUNDATION_PASS", "controls": {
             "financial_values_owned": application_controls["financial_values_owned"],
             "simulation_parity": native_parity["dimension_agreement"]["simulation"],
+            "independent_simulation_parity": (
+                simulation_acceptance["expiry_parity"]
+                and simulation_acceptance["pre_expiry_parity"]
+            ),
             "financial_diagnostic_parity": native_parity["dimension_agreement"]["financial_diagnostics"],
             "terminal_and_planned_exit_labels": completion_controls["planned_exit_valuation_parity"],
         }},
         "P4-08": {"status": "FOUNDATION_PASS", "controls": {
             "single_batch_equal": application_controls["direct_batch_equal"],
             "replay_identity_pinned": application_controls["operational_time_excluded"],
+            "executable_recipe_binding":
+                simulation_acceptance["executable_recipe_binding"],
         }},
         "P4-09": {"status": "PASS", "controls": {
             "no_training_import": all("engine.v2.models.training" not in path.read_text()
@@ -920,6 +1109,9 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "factory_geometry_corruption_rejected", "factory_expiry_corruption_rejected",
         "factory_fill_corruption_rejected",
         "native_outputs_independently_recomputed", "preservation_only_rejected",
+        "simulation_expiry_parity", "simulation_pre_expiry_parity",
+        "simulation_material_time_value", "simulation_fill_propagation",
+        "executable_recipe_binding", "strict_gate_semantics",
     )
     evidence = {
         "schema_version": "phase4_acceptance.v1.0",
@@ -941,6 +1133,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "factory_parity": factory_parity,
         "numerical_independence": numerical_independence,
         "factory_structure_controls": factory_structure_controls,
+        "simulation_acceptance": simulation_acceptance,
         "phase5_inference_integrated": False,
         "phase5_handoff_required": True,
         "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),

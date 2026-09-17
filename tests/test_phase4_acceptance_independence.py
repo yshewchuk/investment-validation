@@ -3,6 +3,7 @@ from checks.phase4_real import (
     _fake_result,
     _native_record,
     _numerical_independence_control,
+    _simulation_acceptance_controls,
 )
 
 
@@ -36,3 +37,20 @@ def test_factory_controls_exercise_generated_cnd_ps_geometry():
         "exact_mirrors_preserved": True,
         "zero_quantity_reference_legs_preserved": True,
     }
+
+
+def test_independent_simulation_covers_horizon_fill_and_recipe_binding():
+    control = _simulation_acceptance_controls()
+
+    assert control["expiry_parity"] is True
+    assert control["pre_expiry_parity"] is True
+    assert control["material_time_value"] is True
+    assert control["fill_propagation"] is True
+    assert control["executable_recipe_binding"] is True
+    assert control["strict_gate_semantics"] is True
+    assert len(control["artifact_refs"]) == 2
+    assert control["residual_hash"].startswith("sha256:")
+
+    comparisons = control["comparisons"]
+    assert comparisons["dte_0_alpha_0.0"]["entry_cost"] != comparisons["dte_0_alpha_1.0"]["entry_cost"]
+    assert comparisons["dte_30_alpha_0.0"]["native"] != comparisons["dte_0_alpha_0.0"]["native"]
