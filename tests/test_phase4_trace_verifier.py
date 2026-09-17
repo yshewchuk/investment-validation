@@ -138,11 +138,143 @@ def test_stage_hash_mismatch_is_incomparable(tmp_path):
         phase4_real._verified_trace_bundle(pair, tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("label", "stage", "block", "corruption"),
+    (
+        ("context", "resolve_context", "output",
+         {"decision_cutoff": "2026-09-18T20:00:00Z"}),
+        ("features", "features", "output",
+         {"model_inputs": {"spot": 999.0}}),
+        ("forecast role", "forecast", "input",
+         {"role": "unverified-driver", "artifact_ref": "model:corrupt"}),
+        ("contracts", "geometry", "input",
+         {"eligible_contracts_ref": "contracts:corrupt"}),
+        ("geometry", "geometry", "output",
+         {"width": 25.0, "selected_contracts": ["wrong-contract"]}),
+        ("quotes", "pricing", "input",
+         {"quotes_ref": "quotes:corrupt", "fill_model": {"alpha": 1.0}}),
+        ("pricing", "pricing", "output", {"entry_cost": 999.0}),
+        ("analog population", "analogs", "input",
+         {"population_hash": "sha256:" + "0" * 64}),
+        ("residual population", "simulation", "input",
+         {"residual_ref": "residual:corrupt"}),
+        ("exit horizon", "simulation", "input",
+         {"exit_date": "2026-09-18", "remaining_dte": 0}),
+        ("gate", "gate", "output",
+         {"gate_score": 0.0, "gate_pass": False}),
+        ("chooser", "chooser", "output",
+         {"selected_strategy": "CND-PS"}),
+        ("serialization", "serialization", "output",
+         {"payload_hash": "sha256:" + "0" * 64}),
+    ),
+)
+def test_each_trace_stage_and_financial_input_corruption_is_rejected(
+    tmp_path, label, stage, block, corruption,
+):
+    pair = _pair(tmp_path)
+    pair["payload"]["input_trace"]["stages"][stage][block] = corruption
+    _resign(pair)
+
+    message = rf"input_trace\.stages\.{stage}\.{block}: content hash mismatch"
+    with pytest.raises(phase4_real._TraceError, match=message):
+        phase4_real._verified_trace_bundle(pair, tmp_path)
+
+
+def _add_resource(pair, tmp_path, *, resource_id, ref, kind, raw):
+    path = f"{resource_id}.bin" if kind == "artifact" else f"{resource_id}.json"
+    content_digest = None
+    if kind == "sidecar":
+        content_digest = content_hash(json.loads(raw))
+    (tmp_path / path).write_bytes(raw)
+    resource = {
+        "resource_id": resource_id,
+        "ref": ref,
+        "kind": kind,
+        "path": path,
+        "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+    }
+    if content_digest is not None:
+        resource["content_hash"] = content_digest
+    pair["payload"]["input_trace"]["resources"].append(resource)
+    _resign(pair)
+    return path, len(pair["payload"]["input_trace"]["resources"]) - 1
+
+
+@pytest.mark.parametrize(
+    ("label", "resource_id", "ref", "kind", "raw"),
+    (
+        ("contracts", "contracts", "contracts:1", "sidecar",
+         b"""[{"contract":"AAA260918C00100000","strike":100.0}]"""),
+        ("quotes", "quotes", "quotes:1", "sidecar",
+         b"""[{"ask":3.0,"bid":2.0,"contract":"AAA260918C00100000"}]"""),
+        ("analog population", "analogs", "analog:1", "sidecar",
+         b"""[{"event_id":"analog-1","return":0.12}]"""),
+        ("residual population", "residual_copy", "residual:copy", "sidecar",
+         b"""[{"err_crush":-0.02,"err_move":0.1,"event_date":"2025-01-01","pred_abs_move":0.07}]"""),
+        ("forecast artifact", "driver_model", "model:driver:1", "artifact",
+         b"frozen-driver-artifact"),
+    ),
+)
+def test_each_resource_class_byte_corruption_is_rejected(
+    tmp_path, label, resource_id, ref, kind, raw,
+):
+    pair = _pair(tmp_path)
+    path, resource_index = _add_resource(
+        pair, tmp_path, resource_id=resource_id, ref=ref, kind=kind, raw=raw,
+    )
+    (tmp_path / path).write_bytes(b"poisoned-resource")
+
+    with pytest.raises(
+        phase4_real._TraceError,
+        match=rf"resources\[{resource_index}\]\.sha256: mismatch",
+    ):
+        phase4_real._verified_trace_bundle(pair, tmp_path)
+
+
+def test_saved_request_corruption_is_incomparable_before_execution(
+    tmp_path, monkeypatch,
+):
+    pair = _pair(tmp_path)
+    trace = pair["payload"]["input_trace"]
+    trace["request"] = copy.deepcopy(trace["request"])
+    trace["request"]["event_id"] = "event-corrupt"
+    _resign(pair)
+    called = False
+
+    def forbidden(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("score_one must not run")
+
+    monkeypatch.setattr(phase4_real.application, "score_one", forbidden)
+    corpus = Corpus(
+        root=tmp_path,
+        index={"corpus_hash": content_hash({"release": 1})},
+        pairs={"pair-1": pair},
+    )
+    release, parity = phase4_real._native_parity(corpus)
+
+    assert called is False
+    assert release["population"]["compared"] == 0
+    assert release["population"]["incomparable"] == 1
+    assert "not the exact saved request" in release["dispositions"][0]["reason"]
+    assert parity["complete"] is False
+
+
 def test_sidecar_byte_hash_mismatch_is_incomparable(tmp_path):
     pair = _pair(tmp_path)
     (tmp_path / "residuals.json").write_text("[]")
 
     with pytest.raises(phase4_real._TraceError, match="sha256: mismatch"):
+        phase4_real._verified_trace_bundle(pair, tmp_path)
+
+
+def test_resource_path_escape_is_incomparable(tmp_path):
+    pair = _pair(tmp_path)
+    pair["payload"]["input_trace"]["resources"][0]["path"] = "../outside.json"
+    _resign(pair)
+
+    with pytest.raises(phase4_real._TraceError, match="escapes release root"):
         phase4_real._verified_trace_bundle(pair, tmp_path)
 
 
@@ -170,6 +302,7 @@ def test_trace_free_release_never_executes_or_completes(tmp_path, monkeypatch):
     assert release["complete"] is False
     assert release["population"]["compared"] == 0
     assert release["population"]["incomparable"] == 1
+    assert "input_trace: missing" in release["dispositions"][0]["reason"]
     assert parity["same_input_hashes"] is False
     assert parity["stages"] == ()
     assert parity["complete"] is False
