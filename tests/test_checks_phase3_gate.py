@@ -253,7 +253,9 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     bundle = stream.getvalue()
     bundle_manifest = {"data/board.json": digest(board)}
     score_ref, finality_ref, model_ref = digest(score), digest(finality), digest(models)
-    preview_base = dict(source_release_id=source_release_id, source_release_manifest_ref=digest(b"release"),
+    release_manifest = {"files": {"bundle.tar": {"artifact_id": "art_bundle"}}}
+    score_spec = {"implementation_ref": H, "environment_ref": H, "input_refs": ["input_proof"]}
+    preview_base = dict(source_release_id=source_release_id, source_release_manifest_ref=content_hash(release_manifest),
         snapshot_ref=snapshot.snapshot_id, legacy_snapshot_object_ref=obj, score_batch_ref=score_ref,
         score_job_input_refs=("input_proof",), bundle_manifest_ref=content_hash(bundle_manifest),
         model_registry_artifact_refs=("registry_proof",), model_evidence_ref=model_ref,
@@ -271,7 +273,8 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     preview = PreviewInput(**preview_base, score_comparison_receipt_ref=digest(score_receipt_bytes),
                            render_comparison_receipt_ref=digest(render_receipt_bytes))
     files = {"score": score, "bundle": bundle, "snapshot": snapshot_bytes, "request": request_bytes,
-             "finality": finality, "model_evidence": models, "render": b"{}"}
+             "finality": finality, "model_evidence": models, "render": b"{}",
+             "release_manifest": json.dumps(release_manifest).encode(), "score_spec": json.dumps(score_spec).encode()}
     artifact_ids = {"score_artifact": ("score", "legacy_action.v1.0"), "bundle_artifact": ("bundle", "legacy_action.v1.0"),
         "snapshot_artifact": ("snapshot", "snapshot_ref.v1.0"), "materialization_request_artifact": ("request", "legacy_materialization_request.v1.0"),
         "finality_artifact": ("finality", "legacy_action.v1.0"), "model_evidence_artifact": ("model_evidence", "legacy_action.v1.0"), "render_artifact": ("render", "legacy_action.v1.0")}
@@ -291,6 +294,8 @@ def _portable_preview(artifact_root, *, source_release_id="SRC1"):
     proof["score_attempt_bindings"] = {"snapshot_ref.json": proof["snapshot_artifact"]["artifact_id"],
         "materialization_request.json": proof["materialization_request_artifact"]["artifact_id"],
         "finality.json": proof["finality_artifact"]["artifact_id"]}
+    proof["release_manifest"] = release_manifest
+    proof["score_spec"] = score_spec
     proof["score_comparison_receipt"] = _ref(artifact_root, "proof_d15", score_receipt_bytes)
     proof["render_comparison_receipt"] = _ref(artifact_root, "proof_d19", render_receipt_bytes)
     ref = _ref(artifact_root, "preview_input.json", _dumps(preview))

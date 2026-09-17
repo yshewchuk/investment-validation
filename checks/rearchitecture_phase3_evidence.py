@@ -474,6 +474,24 @@ def _check_preview_proofs(evidence: dict, preview_inputs: list[Any], artifact_ro
         except (KeyError, TypeError, ValueError, DocumentError, json.JSONDecodeError):
             findings.append({"code": "PREVIEW_PROOF_CONTENT_MISMATCH", "field": f"preview_input_refs[{index}]"})
             field_ok["preview_input_refs"] = False
+        try:
+            manifest_data = _resolve(files.get("release_manifest"), artifact_root, findings,
+                                     f"preview_input_refs[{index}].release_manifest")
+            spec_data = _resolve(files.get("score_spec"), artifact_root, findings,
+                                 f"preview_input_refs[{index}].score_spec")
+            manifest = json.loads(manifest_data) if manifest_data else None
+            spec = json.loads(spec_data) if spec_data else None
+            bundle_id = proof.get("bundle_artifact", {}).get("artifact_id")
+            if (not isinstance(manifest, dict) or content_hash(manifest) != preview.source_release_manifest_ref
+                    or manifest.get("files", {}).get("bundle.tar", {}).get("artifact_id") != bundle_id
+                    or not isinstance(spec, dict) or spec.get("implementation_ref") != preview.source_code_hash
+                    or spec.get("environment_ref") != preview.source_environment_hash
+                    or tuple(spec.get("input_refs", ())) != preview.score_job_input_refs):
+                raise ValueError("release/spec mismatch")
+        except (ValueError, TypeError, json.JSONDecodeError):
+            findings.append({"code": "PREVIEW_PROOF_RELEASE_OR_SPEC_MISMATCH",
+                             "field": f"preview_input_refs[{index}]"})
+            field_ok["preview_input_refs"] = False
         bundle_ref = files.get("bundle") if isinstance(files, dict) else None
         bundle_bytes = _resolve(bundle_ref, artifact_root, findings, f"preview_input_refs[{index}].bundle")
         if bundle_bytes is not None:

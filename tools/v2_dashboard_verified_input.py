@@ -156,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
         finality_ref, finality_bytes = _artifact(conn, store, args.finality_artifact_id, schema="legacy_action.v1.0")
         model_evidence_ref, model_evidence_bytes = _artifact(conn, store, args.model_evidence_artifact_id, schema="legacy_action.v1.0")
         render_ref, render_bytes = _artifact(conn, store, args.render_artifact_id, schema="legacy_action.v1.0")
+        if args.render_artifact_id != args.bundle_artifact_id:
+            raise ValueError("render output is not the delivered bundle artifact")
+        if content_hash(manifest) != release_row["manifest_hash"]:
+            raise ValueError("source release manifest hash does not match retained manifest")
         expected_kinds = ((args.score_artifact_id, "legacy_score"),
                           (args.finality_artifact_id, "legacy_finality"),
                           (args.model_evidence_artifact_id, "legacy_model_evidence"))
@@ -241,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
             "render_attempt_bindings": render_chain["bindings"],
             "bundle_artifact_bytes_hash": _sha256(bundle_bytes),
             "bundle_manifest_ref": content_hash(bundle_manifest),
+            "release_manifest": manifest,
+            "score_spec": score_spec,
             "score_job_input_refs": list(score_spec["input_refs"]),
             "model_registry_artifact_refs": list(request["registry_and_model_refs"]),
             "score_comparison_receipt": {"path": "receipts/score_comparison.json",
@@ -255,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
                 "finality": {"path": "artifacts/finality.json", "content_hash": finality_ref.content_hash},
                 "model_evidence": {"path": "artifacts/model_evidence.json", "content_hash": model_evidence_ref.content_hash},
                 "render": {"path": "artifacts/render.json", "content_hash": render_ref.content_hash},
+                "release_manifest": {"path": "artifacts/release_manifest.json", "content_hash": _sha256(json.dumps(manifest, sort_keys=True).encode())},
+                "score_spec": {"path": "artifacts/score_spec.json", "content_hash": _sha256(json.dumps(score_spec, sort_keys=True).encode())},
             },
             "expected_population": len(score_doc["expected_population"]),
         }
@@ -272,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
                        ("model_evidence", model_evidence_bytes), ("render", render_bytes)):
         suffix = ".tar" if name == "bundle" else ".json"
         (artifact_dir / f"{name}{suffix}").write_bytes(data)
+    (artifact_dir / "release_manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+    (artifact_dir / "score_spec.json").write_text(json.dumps(score_spec, sort_keys=True))
     args.output.write_text(json.dumps(to_document(preview), indent=2, sort_keys=True) + "\n")
     args.output.with_name("source_provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"preview_input": str(args.output), "provenance": str(args.output.with_name("source_provenance.json")), "population": provenance["expected_population"]}))
