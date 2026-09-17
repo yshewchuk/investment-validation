@@ -906,6 +906,7 @@ def _contract_projection(legs) -> tuple[dict, ...]:
 
 
 _TRACE_SCHEMA = "phase4_input_trace.v1.0"
+_TRANSLATION_SCHEMA = "phase4_input_translation.v1.0"
 _REQUIRED_TRACE_STAGES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
     "analogs", "simulation", "gate", "chooser", "serialization",
@@ -913,7 +914,8 @@ _REQUIRED_TRACE_STAGES = (
 _TRACE_KEYS = frozenset({
     "schema_version", "request", "request_hash", "shared_inputs",
     "shared_input_hash", "native_input_hash", "native_inputs",
-    "native_inputs_hash", "stages", "resources", "trace_hash", "metadata",
+    "native_inputs_hash", "input_translation", "stages", "resources",
+    "trace_hash", "metadata",
 })
 _NATIVE_INPUT_KEYS = frozenset({
     "context", "features", "forecast", "geometry", "pricing", "analogs",
@@ -938,6 +940,126 @@ def _verify_content(value: Any, expected: Any, label: str) -> str:
     if actual != expected_hash:
         raise _TraceError(f"{label}: content hash mismatch")
     return actual
+
+
+def _leaf_values(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple, Any]:
+    if isinstance(value, Mapping):
+        if not value:
+            return {path: {}}
+        leaves = {}
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise _TraceError("input_translation: object keys must be strings")
+            leaves.update(_leaf_values(value[key], path + (key,)))
+        return leaves
+    if isinstance(value, list):
+        if not value:
+            return {path: []}
+        leaves = {}
+        for index, item in enumerate(value):
+            leaves.update(_leaf_values(item, path + (index,)))
+        return leaves
+    return {path: value}
+
+
+def _translation_path(value: Any, label: str) -> tuple[Any, ...]:
+    if not isinstance(value, list) or not value:
+        raise _TraceError(f"{label}: expected nonempty path")
+    path = []
+    for segment in value:
+        if isinstance(segment, str):
+            if not segment:
+                raise _TraceError(f"{label}: empty path segment")
+        elif type(segment) is int:
+            if segment < 0:
+                raise _TraceError(f"{label}: negative list index")
+        else:
+            raise _TraceError(f"{label}: invalid path segment")
+        path.append(segment)
+    return tuple(path)
+
+
+def _verified_translation(
+    translation: Any,
+    shared_inputs: Mapping[str, Any],
+    shared_hash: str,
+    saved_request: Mapping[str, Any],
+    resolved_inputs: Mapping[str, Any],
+    native_hash: str,
+) -> str:
+    if not isinstance(translation, Mapping):
+        raise _TraceError("input_trace.input_translation: missing")
+    expected_keys = {
+        "schema_version", "shared_input_hash", "native_input_hash",
+        "mappings", "derived", "translation_hash",
+    }
+    if set(translation) != expected_keys:
+        raise _TraceError("input_trace.input_translation: malformed")
+    if translation.get("schema_version") != _TRANSLATION_SCHEMA:
+        raise _TraceError(
+            f"input_translation.schema_version: expected {_TRANSLATION_SCHEMA}"
+        )
+    body = {
+        key: value for key, value in translation.items()
+        if key != "translation_hash"
+    }
+    translation_hash = _verify_content(
+        body, translation.get("translation_hash"),
+        "input_translation.translation_hash",
+    )
+    if translation.get("shared_input_hash") != shared_hash:
+        raise _TraceError("input_translation.shared_input_hash: mismatch")
+    if translation.get("native_input_hash") != native_hash:
+        raise _TraceError("input_translation.native_input_hash: mismatch")
+
+    native_document = {
+        "request": saved_request,
+        "native_inputs": {
+            key: value for key, value in resolved_inputs.items()
+            if key != "source_ref"
+        },
+    }
+    shared_leaves = _leaf_values(shared_inputs)
+    native_leaves = _leaf_values(native_document)
+    mappings = translation.get("mappings")
+    if not isinstance(mappings, list):
+        raise _TraceError("input_translation.mappings: expected list")
+    shared_paths = set()
+    native_paths = set()
+    for index, row in enumerate(mappings):
+        label = f"input_translation.mappings[{index}]"
+        if not isinstance(row, Mapping) or set(row) != {
+            "shared_path", "native_path", "value_hash",
+        }:
+            raise _TraceError(f"{label}: malformed")
+        shared_path = _translation_path(row["shared_path"], f"{label}.shared_path")
+        native_path = _translation_path(row["native_path"], f"{label}.native_path")
+        if shared_path in shared_paths or native_path in native_paths:
+            raise _TraceError(f"{label}: duplicate path")
+        if shared_path not in shared_leaves or native_path not in native_leaves:
+            raise _TraceError(f"{label}: path is not a document leaf")
+        shared_value = shared_leaves[shared_path]
+        native_value = native_leaves[native_path]
+        value_hash = _verify_content(
+            shared_value, row.get("value_hash"), f"{label}.value_hash",
+        )
+        if content_hash(native_value) != value_hash:
+            raise _TraceError(f"{label}: translated values differ")
+        shared_paths.add(shared_path)
+        native_paths.add(native_path)
+    if shared_paths != set(shared_leaves) or native_paths != set(native_leaves):
+        raise _TraceError("input_translation.mappings: leaf coverage mismatch")
+
+    expected_derived = [{
+        "native_path": ["native_inputs", "source_ref"],
+        "operation": "shared_input_hash",
+        "value_hash": content_hash(shared_hash),
+    }]
+    if translation.get("derived") != expected_derived:
+        raise _TraceError("input_translation.derived: mismatch")
+    if resolved_inputs.get("source_ref") != shared_hash:
+        raise _TraceError("input_trace.native_inputs.source_ref: mismatch")
+    return translation_hash
 
 
 def _resource_path(root: Path, relative: Any) -> Path:
@@ -1146,8 +1268,6 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     )
     if payload.get("legacy_input_hash") != shared_hash:
         raise _TraceError("pair.legacy_input_hash: mismatch")
-    if trace.get("native_input_hash") != shared_hash:
-        raise _TraceError("input_trace.native_input_hash: mismatch")
 
     resources = _verified_resources(release_root, trace.get("resources"))
     request_refs = {
@@ -1176,9 +1296,15 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
             f"unknown={sorted(unknown_inputs)}, missing={sorted(missing_inputs)}"
         )
     resolved_inputs = _resolve_resource_refs(raw_inputs, resources)
-    _verify_content(
+    native_hash = _verify_content(
         resolved_inputs, trace.get("native_inputs_hash"),
         "input_trace.native_inputs_hash",
+    )
+    if trace.get("native_input_hash") != native_hash:
+        raise _TraceError("input_trace.native_input_hash: mismatch")
+    translation_hash = _verified_translation(
+        trace.get("input_translation"), shared_inputs, shared_hash,
+        saved_request, resolved_inputs, native_hash,
     )
 
     stage_rows = trace.get("stages")
@@ -1247,10 +1373,26 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         "request": request,
         "inputs": inputs,
         "input_hash": shared_hash,
+        "native_input_hash": native_hash,
+        "translation_hash": translation_hash,
+        "same_input_receipt": content_hash({
+            "shared_input_hash": shared_hash,
+            "native_input_hash": native_hash,
+            "translation_hash": translation_hash,
+        }),
         "trace_hash": trace_hash,
         "captured_stages": tuple(_REQUIRED_TRACE_STAGES),
         "captured_receipts": tuple(captured_receipts),
     }
+
+
+def _release_population(corpus) -> tuple[tuple[str, ...], int, bool]:
+    declared = corpus.index.get("pairs")
+    if isinstance(declared, Mapping):
+        ids = tuple(sorted(str(fixture_id) for fixture_id in declared))
+        return ids, len(ids), True
+    ids = tuple(corpus.ordered_ids)
+    return ids, len(ids), False
 
 
 def _native_parity(corpus) -> tuple[dict, dict]:
@@ -1267,7 +1409,27 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "financial_diagnostics": False,
     }
     numeric_coverage = {name: 0 for name in numeric_negative_controls}
-    for fixture_id in corpus.ordered_ids:
+    declared_ids, expected, manifest_bound = _release_population(corpus)
+    loaded_ids = set(corpus.ordered_ids)
+    declared_set = set(declared_ids)
+    fixture_ids = sorted(declared_set | loaded_ids)
+    for fixture_id in fixture_ids:
+        if manifest_bound and fixture_id not in declared_set:
+            dispositions["incomparable"] += 1
+            rows.append({
+                "fixture_id": fixture_id,
+                "disposition": "incomparable",
+                "reason": "release manifest: undeclared pair file",
+            })
+            continue
+        if fixture_id not in loaded_ids:
+            dispositions["incomparable"] += 1
+            rows.append({
+                "fixture_id": fixture_id,
+                "disposition": "incomparable",
+                "reason": "release manifest: declared pair file missing",
+            })
+            continue
         pair = corpus.pairs[fixture_id]
         record = pair["payload"]["record"]
         legacy_ids.append(pair["payload_hash"])
@@ -1334,7 +1496,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         rows.append({
             "fixture_id": fixture_id,
             "disposition": "compared",
-            "same_input_hash": verified["input_hash"],
+            "same_input_hash": verified["same_input_receipt"],
             "trace_hash": verified["trace_hash"],
             "runtime_receipts": runtime_receipts,
             "runtime_identities": runtime_identities,
@@ -1351,7 +1513,6 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "keys", "contracts", "verdicts", "flags", "null_masks",
         "forecasts", "simulation", "financial_diagnostics",
     )
-    expected = len(corpus.ordered_ids)
     compared_rows = [row for row in rows if row["disposition"] == "compared"]
     compared = len(compared_rows)
     agreed = sum(1 for row in compared_rows if all(row["checks"].values()))
@@ -1384,7 +1545,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "complete": complete,
         "population": {
             "expected": expected, "compared": compared, "agreed": agreed,
-            **dispositions,
+            "manifest_bound": manifest_bound, **dispositions,
         },
         "source_release": {
             "release_id": release_id,
@@ -1413,7 +1574,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "same_input_hashes": same_input_hashes,
         "population": {
             "expected": expected, "compared": compared, "agreed": agreed,
-            **dispositions,
+            "manifest_bound": manifest_bound, **dispositions,
         },
         "stages": covered_stages,
         "stage_coverage": runtime_stage_counts,

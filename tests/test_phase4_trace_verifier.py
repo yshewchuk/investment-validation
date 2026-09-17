@@ -53,13 +53,41 @@ def _stage_rows():
     return rows
 
 
+def _translation(shared_inputs, native_inputs):
+    native_document = {
+        "request": shared_inputs["request"],
+        "native_inputs": {
+            key: value for key, value in native_inputs.items()
+            if key != "source_ref"
+        },
+    }
+    shared_leaves = phase4_real._leaf_values(shared_inputs)
+    native_leaves = phase4_real._leaf_values(native_document)
+    assert shared_leaves == native_leaves
+    mappings = [{
+        "shared_path": list(path),
+        "native_path": list(path),
+        "value_hash": content_hash(value),
+    } for path, value in sorted(shared_leaves.items(), key=lambda item: repr(item[0]))]
+    body = {
+        "schema_version": phase4_real._TRANSLATION_SCHEMA,
+        "shared_input_hash": content_hash(shared_inputs),
+        "native_input_hash": content_hash(native_inputs),
+        "mappings": mappings,
+        "derived": [{
+            "native_path": ["native_inputs", "source_ref"],
+            "operation": "shared_input_hash",
+            "value_hash": content_hash(content_hash(shared_inputs)),
+        }],
+    }
+    return {**body, "translation_hash": content_hash(body)}
+
+
 def _pair(tmp_path):
     request_doc = _request_document()
     residuals = [{"event_date": "2025-01-01", "err_move": 0.1}]
     raw = json.dumps(residuals, sort_keys=True).encode()
     (tmp_path / "residuals.json").write_bytes(raw)
-    shared_inputs = {"request": request_doc, "source_rows": ["row-1"]}
-    shared_hash = content_hash(shared_inputs)
     native_inputs = {
         "context": {"strategy": "STR-THRU"},
         "features": {"model_inputs": {}},
@@ -71,8 +99,17 @@ def _pair(tmp_path):
         "gate": {},
         "chooser": {},
         "diagnostics": {},
-        "source_ref": shared_hash,
+        "source_ref": "pending",
     }
+    shared_inputs = {
+        "request": request_doc,
+        "native_inputs": {
+            key: copy.deepcopy(value) for key, value in native_inputs.items()
+            if key != "source_ref"
+        },
+    }
+    shared_hash = content_hash(shared_inputs)
+    native_inputs["source_ref"] = shared_hash
     traced_inputs = copy.deepcopy(native_inputs)
     traced_inputs["simulation"]["residuals"] = {"$resource": "residuals"}
     trace = {
@@ -83,9 +120,10 @@ def _pair(tmp_path):
         ),
         "shared_inputs": shared_inputs,
         "shared_input_hash": shared_hash,
-        "native_input_hash": shared_hash,
+        "native_input_hash": content_hash(native_inputs),
         "native_inputs": traced_inputs,
         "native_inputs_hash": content_hash(native_inputs),
+        "input_translation": _translation(shared_inputs, native_inputs),
         "stages": _stage_rows(),
         "resources": [{
             "resource_id": "residuals",
@@ -142,9 +180,75 @@ def test_complete_trace_reconstructs_exact_request_and_inputs(tmp_path):
     assert verified["input_hash"] == pair["payload"]["legacy_input_hash"]
     assert verified["inputs"].source_ref == verified["input_hash"]
     assert verified["inputs"].simulation["residuals"][0]["err_move"] == 0.1
+    assert verified["translation_hash"].startswith("sha256:")
     assert tuple(receipt.stage for receipt in verified["inputs"].stage_receipts) == (
         phase4_real._REQUIRED_TRACE_STAGES
     )
+
+
+def test_repeated_shared_hash_over_different_native_document_is_rejected(tmp_path):
+    pair = _pair(tmp_path)
+    trace = pair["payload"]["input_trace"]
+    trace["shared_inputs"] = {
+        "request": copy.deepcopy(trace["request"]),
+        "source_rows": ["row-1"],
+    }
+    shared_hash = content_hash(trace["shared_inputs"])
+    trace["shared_input_hash"] = shared_hash
+    trace["native_input_hash"] = shared_hash
+    trace["native_inputs"]["source_ref"] = shared_hash
+    native_inputs = copy.deepcopy(trace["native_inputs"])
+    native_inputs["simulation"]["residuals"] = [{
+        "event_date": "2025-01-01", "err_move": 0.1,
+    }]
+    trace["native_inputs_hash"] = content_hash(native_inputs)
+    pair["payload"]["legacy_input_hash"] = shared_hash
+    _resign(pair)
+
+    with pytest.raises(
+        phase4_real._TraceError,
+        match="input_trace.native_input_hash: mismatch",
+    ):
+        phase4_real._verified_trace_bundle(pair, tmp_path)
+
+
+def test_structurally_different_documents_cannot_claim_complete_translation(
+    tmp_path,
+):
+    pair = _pair(tmp_path)
+    trace = pair["payload"]["input_trace"]
+    trace["shared_inputs"] = {
+        "request": copy.deepcopy(trace["request"]),
+        "source_rows": ["row-1"],
+    }
+    shared_hash = content_hash(trace["shared_inputs"])
+    trace["shared_input_hash"] = shared_hash
+    trace["native_inputs"]["source_ref"] = shared_hash
+    native_inputs = copy.deepcopy(trace["native_inputs"])
+    native_inputs["simulation"]["residuals"] = [{
+        "event_date": "2025-01-01", "err_move": 0.1,
+    }]
+    native_hash = content_hash(native_inputs)
+    trace["native_input_hash"] = native_hash
+    trace["native_inputs_hash"] = native_hash
+    pair["payload"]["legacy_input_hash"] = shared_hash
+    translation = trace["input_translation"]
+    translation["shared_input_hash"] = shared_hash
+    translation["native_input_hash"] = native_hash
+    translation["mappings"] = [{
+        "shared_path": ["request", "event_id"],
+        "native_path": ["request", "event_id"],
+        "value_hash": content_hash(trace["request"]["event_id"]),
+    }]
+    translation["derived"][0]["value_hash"] = content_hash(shared_hash)
+    translation["translation_hash"] = content_hash({
+        key: value for key, value in translation.items()
+        if key != "translation_hash"
+    })
+    _resign(pair)
+
+    with pytest.raises(phase4_real._TraceError, match="leaf coverage mismatch"):
+        phase4_real._verified_trace_bundle(pair, tmp_path)
 
 
 def test_stage_hash_mismatch_is_incomparable(tmp_path):
@@ -397,4 +501,39 @@ def test_verified_bundle_is_passed_to_canonical_execution(tmp_path, monkeypatch)
     assert seen[0][0].event_id == "event-1"
     assert seen[0][1].source_ref == pair["payload"]["legacy_input_hash"]
     assert release["population"]["incomparable"] == 1
+    assert parity["complete"] is False
+
+
+def test_expected_population_comes_from_release_manifest_members(tmp_path):
+    corpus = Corpus(
+        root=tmp_path,
+        index={
+            "corpus_hash": content_hash({"release": 1}),
+            "pairs": {
+                "pair-1": {"payload_hash": content_hash({"pair": 1})},
+                "pair-2": {"payload_hash": content_hash({"pair": 2})},
+            },
+        },
+        pairs={},
+    )
+
+    release, parity = phase4_real._native_parity(corpus)
+
+    assert release["population"] == {
+        "expected": 2,
+        "agreed": 0,
+        "manifest_bound": True,
+        "compared": 0,
+        "refused_as_expected": 0,
+        "incomparable": 2,
+    }
+    assert [row["fixture_id"] for row in release["dispositions"]] == [
+        "pair-1", "pair-2",
+    ]
+    assert all(
+        "declared pair file missing" in row["reason"]
+        for row in release["dispositions"]
+    )
+    assert parity["population"]["expected"] == 2
+    assert parity["population"]["manifest_bound"] is True
     assert parity["complete"] is False
