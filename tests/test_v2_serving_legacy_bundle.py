@@ -621,12 +621,14 @@ def test_cli_end_to_end_legacy_format_and_byte_change_moves_release_id(tmp_path,
     (receipts / "render.json").write_bytes(render_receipt)
     proof_path = tmp_path / "source_provenance.json"
 
-    def run(serving_name: str) -> dict:
+    def run(serving_name: str, *, wrong_manifest=False) -> dict:
         _rows, manifest = load_legacy_bundle(bundle_root)
         preview = dataclasses.replace(_preview_input(), score_batch_ref=digest(score_path.read_bytes()),
             bundle_manifest_ref=content_hash(manifest), finality_ref=digest(b"finality"),
             model_evidence_ref=digest(b"models"), score_comparison_receipt_ref=digest(score_receipt),
             render_comparison_receipt_ref=digest(render_receipt))
+        if wrong_manifest:
+            preview = dataclasses.replace(preview, bundle_manifest_ref="sha256:" + "0" * 64)
         preview_input_path.write_text(json.dumps(to_document(preview)))
         proof_path.write_text(json.dumps({"schema_version": "phase3_source_provenance.v1.0",
             "release_id": preview.source_release_id, "release_manifest_hash": preview.source_release_manifest_ref,
@@ -656,6 +658,8 @@ def test_cli_end_to_end_legacy_format_and_byte_change_moves_release_id(tmp_path,
     first = run("serving_out_1")
     assert first["ok"] is True
     assert first["findings"]["ok"] is True
+    with pytest.raises(ValueError, match="does not bind the supplied bundle"):
+        run("serving_out_wrong", wrong_manifest=True)
 
     ticker_path = bundle_root / "data" / "tickers" / "AAA.json"
     payload = json.loads(ticker_path.read_text())

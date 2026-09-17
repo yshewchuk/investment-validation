@@ -37,7 +37,6 @@ predate the real adapter; it leaves ``--preview-input``'s own
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import hashlib
 import json
 import sys
@@ -190,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         # declare — a changed byte anywhere in the bundle must change the
         # release id (§5.3 point 8's idempotency/change-detection test).
         bundle_manifest_ref = content_hash(bundle_manifest)
-        preview_input = dataclasses.replace(preview_input, bundle_manifest_ref=bundle_manifest_ref)
+        if preview_input.bundle_manifest_ref != bundle_manifest_ref:
+            raise ValueError("preview input does not bind the supplied bundle directory")
 
     if args.source_provenance is None:
         raise ValueError("projection requires --source-provenance")
