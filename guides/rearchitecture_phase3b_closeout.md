@@ -9,8 +9,8 @@ and the verified gap list in
 
 **This record closes five items — R3B-1, R3B-2, R3B-4, R3B-5, R3B-8 — the
 acceptance-evidence and documentation slice. It does not close Phase 3B as a
-whole.** R3B-3 (nightly integration unwired), R3B-6 (`STALE_EXPECTATION`
-unregistered) and R3B-7 (a failing finality-coverage test) remain open and are
+whole.** R3B-3 (nightly integration unwired) and R3B-7 (a failing
+finality-coverage test) remain open and are
 out of scope for this record; see "What remains" below. Per
 `rearchitecture_phase3_incremental_data.md`, "Phase 3 as a whole closes only
 when 3A and 3B have separate completed records" — this is 3B's record for the
@@ -138,10 +138,10 @@ claims `production_acceptance`.
 | ID | Item | Why it is not here |
 |---|---|---|
 | R3B-3 | `incremental_refresh` is registered but no nightly plan or CLI path submits it (`plans.py` `NIGHTLY_GRAPH` "refresh" still runs the legacy adapter) | Requires wiring a supervised nightly candidate — implementation work, out of this remediation's scope (deliverables were R3B-1/2/4/5/8 only) |
-| R3B-6 | `STALE_EXPECTATION` is raised (`engine/v2/data/repository.py:585`) but unregistered against `DATA_FAILURE_CODES`; fails on `main` | Excluded from this task's brief; a separate fix |
+| R3B-6 | FIXED on this branch after this record was drafted: `STALE_EXPECTATION` registered in `DATA_FAILURE_CODES` (`engine/v2/contracts/data.py`), `tests/test_v2_data_contracts.py` green. Still red on `main`. | Closed |
 | R3B-7 | `test_action_finality_writes_a_coverage_output_from_monkeypatched_frames` fails on `main` (`covered_tickers: []` vs expected `['AAA']`) | Excluded from this task's brief; a separate fix |
 
-Phase 3B is **not** fully closed while R3B-3, R3B-6 and R3B-7 remain open.
+Phase 3B is **not** fully closed while R3B-3 and R3B-7 remain open.
 This record closes the acceptance-evidence and documentation slice honestly:
 the gate passes on bounded-scope evidence, the scope limitation and the
 whole-file-rewrite semantics are recorded rather than papered over, and the
