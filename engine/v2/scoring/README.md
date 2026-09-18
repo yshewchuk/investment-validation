@@ -38,9 +38,14 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+`engine.v2.models.training` (P5-4, `training/payoff.py`) imports
+`native_payoff`'s pure fitting math (`fit_payoff_line`,
+`fit_runup_payoff_surface`) to build a payoff-calibration artifact from
+causal source rows -- the one place besides this package's own
+compatibility path that fitting math runs, and it is layer 6 importing
+layer 5 (strictly lower), never the reverse.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.models.training -->
 
 ## Usage
 

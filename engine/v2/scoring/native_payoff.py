@@ -35,6 +35,19 @@ FOURTH (engine/score.py:2385-2421).
 the pure math as literal, cited functions rather than importing
 ``engine.payoff``/``engine.models.registry``. Tests MAY import the legacy
 modules to pin parity; this module must not.
+
+P5-4: ``fit_payoff_line`` and ``fit_runup_payoff_surface`` are the last
+inline-fitting paths standing after P5-2 rigged every legacy one to fail.
+Both open with ``engine.v2.models.no_fit.forbid_fitting`` -- the v2-native
+guard, layer 3 and strictly below this module's layer 5 -- so a
+``no_fit_guard()`` block makes either raise ``RuntimeFitForbidden`` exactly
+as ``engine.payoff.fit_payoff``/``fit_runup_payoff`` already do under the
+legacy guard. ``engine/v2/models/training/payoff.py`` (layer 6, the layer
+allowed to fit) calls these same two functions to build a frozen
+``PayoffLineArtifact``/``PayoffSurfaceArtifact``
+(``engine.v2.models.payoff_artifact``); ``stages.py``'s model stage reads
+that artifact's coefficients/residuals directly when a bundle declares one,
+and never calls either function in that path.
 """
 from __future__ import annotations
 
@@ -42,6 +55,8 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+from engine.v2.models.no_fit import forbid_fitting
 
 __all__ = [
     "MIN_TRADES", "MAX_RESIDUALS", "RESIDUAL_SEED", "DECILES", "MIN_POOL",
@@ -95,6 +110,7 @@ def fit_payoff_line(
     the fit. Returns ``None`` (mirroring ``PayoffError``) when fewer than
     ``min_trades`` rows survive filtering.
     """
+    forbid_fitting("engine.v2.scoring.native_payoff.fit_payoff_line")
     cutoff = _parse_day(before) if before is not None else None
     driver: list[float] = []
     spot: list[float] = []
@@ -348,6 +364,7 @@ def fit_runup_payoff_surface(
     :func:`fit_payoff_line` applies. Returns ``None`` (mirroring
     ``PayoffError``) when fewer than ``min_trades`` rows survive filtering.
     """
+    forbid_fitting("engine.v2.scoring.native_payoff.fit_runup_payoff_surface")
     cutoff = _parse_day(before) if before is not None else None
     implied: list[float] = []
     spot_entry: list[float] = []

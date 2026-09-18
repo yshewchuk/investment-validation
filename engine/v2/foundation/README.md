@@ -58,9 +58,11 @@ failure rather than a stale sentence.
 - engine/v2/ops — content identity, safe artifact storage, typed decoding and clocks.
 - engine/v2/ledger — canonical append-only payloads and durable export paths.
 - engine/v2/serving — safe immutable release paths and health timestamps.
-- engine/v2/models — `content_hash`, `to_document`/`from_document`, `fsync_directory`
-  and `Clock`/`SystemClock`/`format_timestamp` for staged-release manifests and
-  the atomic deployment pointer (P5-5).
+- engine/v2/models — `canonical_json`/`content_hash` (P5-4) to identify and
+  verify payoff-calibration artifacts; `content_hash`, `to_document`/
+  `from_document`, `fsync_directory` and `Clock`/`SystemClock`/
+  `format_timestamp` for staged-release manifests and the atomic deployment
+  pointer (P5-5).
 
 <!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models -->
 

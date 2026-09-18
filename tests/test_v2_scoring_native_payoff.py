@@ -684,3 +684,364 @@ def test_runup_poisoned_model_block_answers_are_not_preserved():
     assert record.resolved_request.get("win_model") != 0.0
     assert "UNOWNED_MODEL_OUTPUT" in record.reason_codes
     assert record.validation_status == "refused"
+
+
+# ---------------------------------------------------------------------------
+# P5-4: the frozen payoff-calibration artifact path
+#
+# guides/rearchitecture_phase5_models.md P5-4 acceptance: artifact-path
+# exp_pnl_model/win_model identical to the inline path on the same rows and
+# seed; under the v2 guard, the inline path raises and the artifact path
+# succeeds; a missing artifact gives MODEL_NOT_READY; a tampered hash is
+# refused; causality (a post-cutoff row cannot enter a fold's artifact).
+# ---------------------------------------------------------------------------
+
+from engine.v2.models.no_fit import RuntimeFitForbidden, no_fit_guard  # noqa: E402
+from engine.v2.models.payoff_artifact import (  # noqa: E402
+    PayoffArtifactError,
+    PayoffArtifactLoader,
+    PayoffArtifactRef,
+    serialize_payoff_artifact,
+)
+from engine.v2.models.training.payoff import (  # noqa: E402
+    build_payoff_line_artifact,
+    build_payoff_surface_artifact,
+)
+
+
+def test_artifact_path_matches_inline_path_same_rows_and_seed():
+    artifact = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        min_trades=2,
+    )
+    bundle = _bundle(
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=artifact,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_request(), inputs)
+
+    # Same closed-form answer as the inline-fit control
+    # (test_model_number_computed_from_answer_free_inputs): the artifact
+    # carries the identical line/residuals, so the simulation -- same driver,
+    # pool, seed, draw count -- must land on the exact same numbers.
+    assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+    assert record.resolved_request["win_model"] == pytest.approx(1.0)
+    assert "NO_PAYOFF_MAP" not in record.reason_codes
+    assert "MODEL_NOT_READY" not in record.reason_codes
+    assert record.validation_status == "scored"
+
+
+def test_artifact_path_matches_inline_path_arbitrary_sample():
+    """A less degenerate sample: the artifact and inline paths must still
+    agree bit for bit, not merely on a closed-form special case."""
+    trades = _synthetic_trades(300, seed=11)
+    rows = _rows_from_trades(trades)
+    cutoff = str(trades["exit_date"].iloc[250].date())
+
+    inline_bundle = _bundle(
+        payoff_recipe={"before": cutoff, "seed": 7, "draw_count": 500},
+        payoff_source_rows=rows,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    inline_record = application.score_one(
+        _request(), build_native_score_inputs(inline_bundle),
+    )
+
+    artifact = build_payoff_line_artifact(
+        rows, strategy="STR-THRU", driver="abs_move", alpha=0.5, before=cutoff,
+    )
+    artifact_bundle = _bundle(
+        payoff_artifact_recipe={"before": cutoff, "seed": 7, "draw_count": 500},
+        payoff_artifact=artifact,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    artifact_record = application.score_one(
+        _request(), build_native_score_inputs(artifact_bundle),
+    )
+
+    assert artifact_record.resolved_request["exp_pnl_model"] == pytest.approx(
+        inline_record.resolved_request["exp_pnl_model"], rel=1e-12,
+    )
+    assert artifact_record.resolved_request["win_model"] == pytest.approx(
+        inline_record.resolved_request["win_model"], rel=1e-12,
+    )
+
+
+def test_runup_artifact_path_matches_inline_path_same_rows_and_seed():
+    artifact = build_payoff_surface_artifact(
+        _GOOD_RUNUP_PAYOFF_ROWS, alpha=0.5, min_trades=2,
+    )
+    bundle = _runup_bundle(
+        payoff_recipe={}, payoff_source_rows=(),
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=artifact,
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+    assert record.resolved_request["win_model"] == pytest.approx(1.0)
+    assert "NO_PAYOFF_MAP" not in record.reason_codes
+    assert "MODEL_NOT_READY" not in record.reason_codes
+    assert record.validation_status == "scored"
+
+
+def test_artifact_path_causal_cutoff_excludes_a_post_cutoff_row():
+    """A row dated on/after the fit cutoff cannot enter the artifact --
+    proven both on the artifact's own fields and on the score it produces."""
+    future_row = {"driver": 5.0, "spot_entry": 100.0, "exit_value": 999.0,
+                  "exit_date": "2026-09-20"}
+    with_future = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS + [future_row], strategy="STR-THRU", driver="abs_move",
+        alpha=0.5, before="2026-09-16", min_trades=2,
+    )
+    without_future = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        before="2026-09-16", min_trades=2,
+    )
+    assert with_future.n == without_future.n == 2
+    assert with_future.intercept == pytest.approx(without_future.intercept)
+    assert with_future.slope == pytest.approx(without_future.slope)
+    assert with_future.content_hash == without_future.content_hash
+    assert with_future.window_end == "2026-09-01"
+
+    bundle = _bundle(
+        payoff_artifact_recipe={
+            "before": "2026-09-16", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=with_future,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+    assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+    assert record.resolved_request["win_model"] == pytest.approx(1.0)
+
+
+def test_missing_artifact_gives_model_not_ready():
+    bundle = _bundle(
+        payoff_artifact_recipe={"seed": 42},
+        payoff_artifact=None,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_request(), inputs)
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_incompatible_artifact_kind_gives_model_not_ready():
+    """A surface artifact handed to a single-driver strategy is incompatible,
+    not merely unlucky -- MODEL_NOT_READY, not a crash or a silent number."""
+    surface = build_payoff_surface_artifact(
+        _GOOD_RUNUP_PAYOFF_ROWS, alpha=0.5, min_trades=2,
+    )
+    bundle = _bundle(
+        payoff_artifact_recipe={"seed": 42},
+        payoff_artifact=surface,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_request(), inputs)
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_incompatible_artifact_strategy_gives_model_not_ready():
+    """An artifact fitted for a different strategy must not be silently reused."""
+    wrong_strategy = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-RUNUP", driver="abs_move", alpha=0.5,
+        min_trades=2,
+    )
+    bundle = _bundle(
+        payoff_artifact_recipe={"seed": 42},
+        payoff_artifact=wrong_strategy,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_request(), inputs)
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+
+
+def test_tampered_artifact_file_is_refused_by_the_loader(tmp_path):
+    artifact = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        min_trades=2,
+    )
+    path = tmp_path / "line.json"
+    path.write_bytes(serialize_payoff_artifact(artifact))
+    ref = PayoffArtifactRef(path="line.json", content_hash=artifact.content_hash)
+
+    loader = PayoffArtifactLoader(tmp_path)
+    loaded = loader.load(ref)
+    # resid_sd is NaN on this degenerate 2-row fit (nan != nan), so compare
+    # the fields that matter for the round trip individually rather than by
+    # dataclass equality.
+    assert loaded.content_hash == artifact.content_hash
+    assert loaded.intercept == pytest.approx(artifact.intercept)
+    assert loaded.slope == pytest.approx(artifact.slope)
+    assert loaded.residuals == artifact.residuals
+
+    path.write_bytes(b'{"schema_version": "payoff_line_artifact.v1.0", "tampered": true}')
+    tampered_loader = PayoffArtifactLoader(tmp_path)
+    with pytest.raises(PayoffArtifactError):
+        tampered_loader.load(ref)
+
+
+def test_under_v2_guard_inline_path_raises_and_artifact_path_succeeds():
+    """The exact P5-4 negative control: wrap both paths in the SAME
+    no_fit_guard() block. The inline fit must raise; the artifact path,
+    which never calls fit_payoff_line, must still produce the score."""
+    artifact = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        min_trades=2,
+    )
+    inline_bundle = _bundle(
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16},
+        payoff_source_rows=_GOOD_PAYOFF_ROWS,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    artifact_bundle = _bundle(
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=artifact,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+
+    with no_fit_guard():
+        with pytest.raises(RuntimeFitForbidden):
+            native_payoff.fit_payoff_line(_GOOD_PAYOFF_ROWS, min_trades=2)
+
+        artifact_record = application.score_one(
+            _request(), build_native_score_inputs(artifact_bundle),
+        )
+        assert artifact_record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+        assert artifact_record.validation_status == "scored"
+
+        # score_one itself must also raise for the compatibility path under
+        # the guard -- it reaches fit_payoff_line via _model_fit_and_pool.
+        with pytest.raises(RuntimeFitForbidden):
+            application.score_one(_request(), build_native_score_inputs(inline_bundle))
+
+
+# ---------------------------------------------------------------------------
+# P5-4 coordinator condition (2026-09-18): choosing the right artifact is
+# still the release's job, but the stage itself must check the FULL causal
+# key (strategy, alpha at 4dp, cutoff) against what the inline fit would
+# have used for THIS request -- not just the artifact's kind and strategy.
+# A wrong-fold artifact must never produce a plausible-looking number.
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_wrong_alpha_gives_model_not_ready():
+    """An artifact fitted at a different fill alpha than the request's own
+    resolved alpha must be refused, not silently scored -- the alpha is part
+    of the identity the inline fit would have keyed on."""
+    wrong_alpha = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.7,
+        min_trades=2,
+    )
+    bundle = _bundle(
+        # _request() resolves fill alpha 0.5; the artifact was fit at 0.7.
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=wrong_alpha,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_artifact_wrong_cutoff_gives_model_not_ready():
+    """An artifact fitted with a different causal cutoff than this request's
+    own recipe declares must be refused -- the cutoff is part of the fold
+    identity, not a detail the stage can ignore once kind/strategy match."""
+    wrong_cutoff = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        before="2026-09-01", min_trades=2,
+    )
+    bundle = _bundle(
+        # The recipe's own cutoff (what the inline fit would have used) is
+        # a DIFFERENT date than the one the artifact was actually fit under.
+        payoff_artifact_recipe={
+            "before": "2026-09-10", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=wrong_cutoff,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_artifact_leaked_future_fold_cutoff_gives_model_not_ready():
+    """The specific failure mode the coordinator called out: a release binds
+    an artifact whose cutoff is LATER than the request's own causal cutoff --
+    a future fold leaking backward. Kind and strategy match, and the wrong
+    number would otherwise look entirely plausible. It must still be
+    MODEL_NOT_READY, not a silently-wrong score."""
+    future_fold = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        before="2026-09-20", min_trades=2,
+    )
+    bundle = _bundle(
+        # This request's own causal cutoff is 2026-09-16 -- strictly earlier
+        # than the artifact's 2026-09-20 fit cutoff.
+        payoff_artifact_recipe={
+            "before": "2026-09-16", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=future_fold,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_artifact_wrong_alpha_gives_model_not_ready():
+    """The two-driver surface path applies the same full-key check as the
+    single-driver line path -- a wrong alpha must not slip through."""
+    wrong_alpha = build_payoff_surface_artifact(
+        _GOOD_RUNUP_PAYOFF_ROWS, alpha=0.9, min_trades=2,
+    )
+    bundle = _runup_bundle(
+        payoff_recipe={}, payoff_source_rows=(),
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=wrong_alpha,
+    )
+    record = application.score_one(_runup_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_artifact_leaked_future_fold_cutoff_gives_model_not_ready():
+    """Same future-fold leak, on the two-driver surface path."""
+    future_fold = build_payoff_surface_artifact(
+        _GOOD_RUNUP_PAYOFF_ROWS, alpha=0.5, before="2026-09-20", min_trades=2,
+    )
+    bundle = _runup_bundle(
+        payoff_recipe={}, payoff_source_rows=(),
+        payoff_artifact_recipe={
+            "before": "2026-09-16", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=future_fold,
+    )
+    record = application.score_one(_runup_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"

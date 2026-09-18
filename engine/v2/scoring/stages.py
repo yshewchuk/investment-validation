@@ -1066,32 +1066,113 @@ def _model_driver_and_cost(
     return driver, spot, cost
 
 
+def _artifact_key_mismatch(
+    artifact: Any, expected_type: type, name: str, alpha: float | None, cutoff: Any,
+) -> bool:
+    """True unless ``artifact`` is the right kind AND its full causal key
+    (strategy, alpha, cutoff) equals the one the inline fit would have used
+    for THIS request.
+
+    Coordinator decision, 2026-09-18: choosing the right artifact is the
+    release's job, but the stage must not simply trust that choice -- a
+    wrong-fold artifact (wrong alpha, or a LATER cutoff than this request's
+    own, i.e. a leaked future fold) must not silently produce a
+    plausible-looking number. ``alpha`` is ``None`` when the pricing stage
+    never resolved a fill alpha (should not happen once pricing has run, but
+    a missing identity component can never match, not "match by omission").
+    """
+    from engine.v2.models.payoff_artifact import payoff_artifact_key
+
+    if alpha is None or not isinstance(artifact, expected_type):
+        return True
+    return artifact.key != payoff_artifact_key(name, alpha, cutoff)
+
+
+def _line_fit_from_artifact(
+    artifact: Any, name: str, alpha: float | None, cutoff: Any, flags: list[str],
+) -> dict[str, Any] | None:
+    """Read a frozen ``PayoffLineArtifact``'s line/residuals -- never fits (P5-4).
+
+    ``None`` means MODEL_NOT_READY was already added: no artifact, the wrong
+    kind (a surface artifact on a single-driver strategy), or a causal key
+    (strategy, alpha, cutoff) that disagrees with this request's own --
+    including a LATER cutoff, which would leak a future fold. There is no
+    fallback to fitting from source rows here -- that is the separate,
+    mutually exclusive compatibility path in ``_model_fit_and_pool``.
+    """
+    from engine.v2.models.payoff_artifact import PayoffLineArtifact
+
+    if _artifact_key_mismatch(artifact, PayoffLineArtifact, name, alpha, cutoff):
+        _add_flag(flags, "MODEL_NOT_READY")
+        return None
+    return {
+        "intercept": artifact.intercept,
+        "slope": artifact.slope,
+        "resid_sd": artifact.resid_sd,
+        "n": artifact.n,
+        "r": artifact.r,
+        "residuals": np.asarray(artifact.residuals, dtype=float),
+    }
+
+
+def _surface_fit_from_artifact(
+    artifact: Any, name: str, alpha: float | None, cutoff: Any, flags: list[str],
+) -> dict[str, Any] | None:
+    """Read a frozen ``PayoffSurfaceArtifact``'s coefficients/residuals -- never
+    fits (P5-4). Same full-key check as ``_line_fit_from_artifact``."""
+    from engine.v2.models.payoff_artifact import PayoffSurfaceArtifact
+
+    if _artifact_key_mismatch(artifact, PayoffSurfaceArtifact, name, alpha, cutoff):
+        _add_flag(flags, "MODEL_NOT_READY")
+        return None
+    return {
+        "coefficients": artifact.coefficients,
+        "resid_sd": artifact.resid_sd,
+        "n": artifact.n,
+        "r": artifact.r,
+        "residuals": np.asarray(artifact.residuals, dtype=float),
+    }
+
+
 def _model_fit_and_pool(
     block: Mapping[str, Any],
     recipe: Mapping[str, Any],
     driver: float,
+    name: str,
+    values: Mapping[str, Any],
     flags: list[str],
 ) -> tuple[dict[str, Any], np.ndarray] | None:
-    """Fit the causal payoff line and the driver's own residual pool.
+    """The causal payoff line (frozen artifact or inline fit) and the
+    driver's own residual pool.
 
-    ``None`` means a flag (NO_PAYOFF_MAP or MISSING_MODEL_RESIDUALS) was
-    already added.
+    ``block["payoff_artifact"]`` present (even if ``None``) means the bundle
+    declared the P5-4 frozen-artifact path (``source_inputs._model_block``);
+    its absence means the source-rows compatibility path applies unchanged.
+    ``None`` return means a flag (NO_PAYOFF_MAP, MODEL_NOT_READY or
+    MISSING_MODEL_RESIDUALS) was already added.
     """
     from engine.v2.scoring import native_payoff
 
-    rows = block.get("payoff_source_rows")
-    if not isinstance(rows, (list, tuple)):
-        _add_flag(flags, "NO_PAYOFF_MAP")
-        return None
-    fit = native_payoff.fit_payoff_line(
-        rows,
-        before=recipe.get("before"),
-        min_trades=int(recipe.get("min_trades", native_payoff.MIN_TRADES)),
-        max_residuals=int(recipe.get("max_residuals", native_payoff.MAX_RESIDUALS)),
-        residual_seed=int(recipe.get("residual_seed", native_payoff.RESIDUAL_SEED)),
-    )
+    if "payoff_artifact" in block:
+        alpha = _finite(values.get("fill"))
+        fit = _line_fit_from_artifact(
+            block.get("payoff_artifact"), name, alpha, recipe.get("before"), flags,
+        )
+    else:
+        rows = block.get("payoff_source_rows")
+        if not isinstance(rows, (list, tuple)):
+            _add_flag(flags, "NO_PAYOFF_MAP")
+            return None
+        fit = native_payoff.fit_payoff_line(
+            rows,
+            before=recipe.get("before"),
+            min_trades=int(recipe.get("min_trades", native_payoff.MIN_TRADES)),
+            max_residuals=int(recipe.get("max_residuals", native_payoff.MAX_RESIDUALS)),
+            residual_seed=int(recipe.get("residual_seed", native_payoff.RESIDUAL_SEED)),
+        )
+        if fit is None:
+            _add_flag(flags, "NO_PAYOFF_MAP")
     if fit is None:
-        _add_flag(flags, "NO_PAYOFF_MAP")
         return None
     residual_recipe = block.get("model_residual_recipe") or {}
     driver_pool = native_payoff.driver_residual_pool(
@@ -1147,27 +1228,41 @@ def _runup_fit_and_pool(
     recipe: Mapping[str, Any],
     point_implied: float,
     point_move_d14: float,
+    values: Mapping[str, Any],
     flags: list[str],
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray] | None:
-    """Fit the causal RunupPayoffSurface and both drivers' own residual
-    pools. ``None`` means a flag (NO_PAYOFF_MAP or MISSING_MODEL_RESIDUALS)
-    was already added.
+    """The causal ``RunupPayoffSurface`` (frozen artifact or inline fit) and
+    both drivers' own residual pools.
+
+    ``block["payoff_artifact"]`` present (even if ``None``) means the bundle
+    declared the P5-4 frozen-artifact path; its absence means the
+    source-rows compatibility path applies unchanged. ``None`` return means
+    a flag (NO_PAYOFF_MAP, MODEL_NOT_READY or MISSING_MODEL_RESIDUALS) was
+    already added.
     """
     from engine.v2.scoring import native_payoff
 
-    rows = block.get("payoff_source_rows")
-    if not isinstance(rows, (list, tuple)):
-        _add_flag(flags, "NO_PAYOFF_MAP")
-        return None
-    fit = native_payoff.fit_runup_payoff_surface(
-        rows,
-        before=recipe.get("before"),
-        min_trades=int(recipe.get("min_trades", native_payoff.MIN_TRADES)),
-        max_residuals=int(recipe.get("max_residuals", native_payoff.MAX_RESIDUALS)),
-        residual_seed=int(recipe.get("residual_seed", native_payoff.RESIDUAL_SEED)),
-    )
+    if "payoff_artifact" in block:
+        alpha = _finite(values.get("fill"))
+        fit = _surface_fit_from_artifact(
+            block.get("payoff_artifact"), "STR-RUNUP", alpha, recipe.get("before"),
+            flags,
+        )
+    else:
+        rows = block.get("payoff_source_rows")
+        if not isinstance(rows, (list, tuple)):
+            _add_flag(flags, "NO_PAYOFF_MAP")
+            return None
+        fit = native_payoff.fit_runup_payoff_surface(
+            rows,
+            before=recipe.get("before"),
+            min_trades=int(recipe.get("min_trades", native_payoff.MIN_TRADES)),
+            max_residuals=int(recipe.get("max_residuals", native_payoff.MAX_RESIDUALS)),
+            residual_seed=int(recipe.get("residual_seed", native_payoff.RESIDUAL_SEED)),
+        )
+        if fit is None:
+            _add_flag(flags, "NO_PAYOFF_MAP")
     if fit is None:
-        _add_flag(flags, "NO_PAYOFF_MAP")
         return None
     residual_recipe = block.get("model_residual_recipe") or {}
     deciles = int(residual_recipe.get("deciles", native_payoff.DECILES))
@@ -1217,7 +1312,9 @@ def _execute_runup_model(
     if resolved is None:
         return {}
     point_implied, point_move_d14, spot, strike, cost, days = resolved
-    fitted = _runup_fit_and_pool(block, recipe, point_implied, point_move_d14, flags)
+    fitted = _runup_fit_and_pool(
+        block, recipe, point_implied, point_move_d14, values, flags,
+    )
     if fitted is None:
         return {}
     fit, implied_pool, move_pool = fitted
@@ -1274,7 +1371,7 @@ def _execute_model(
     if driver_cost is None:
         return {}
     driver, spot, cost = driver_cost
-    fitted = _model_fit_and_pool(block, recipe, driver, flags)
+    fitted = _model_fit_and_pool(block, recipe, driver, name, values, flags)
     if fitted is None:
         return {}
     fit, driver_pool = fitted

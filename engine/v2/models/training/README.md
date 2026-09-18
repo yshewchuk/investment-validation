@@ -24,9 +24,15 @@ The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
 `checks/package_readmes.py`.
 
-_Nothing yet — the package is an empty skeleton. The first name added here is added to this list in the same commit._
+P5-4 (`payoff.py`) adds the payoff-calibration artifact builders:
+`build_payoff_line_artifact`, `build_payoff_surface_artifact`. Each fits via
+`engine.v2.scoring.native_payoff`'s unchanged math (layer 5, strictly below
+this package's layer 6) and wraps the result with `engine.v2.models`'s
+(layer 3) `make_payoff_line_artifact`/`make_payoff_surface_artifact`, so the
+returned artifact is bit-identical to the corresponding inline fit on the
+same rows and cutoff.
 
-<!-- public-interface: none -->
+<!-- public-interface: build_payoff_line_artifact, build_payoff_surface_artifact -->
 
 ## Consumers
 
@@ -40,10 +46,15 @@ _Nothing yet — no package imports this one. The first importer is added here i
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+    from engine.v2.models.training.payoff import build_payoff_line_artifact
+
+    artifact = build_payoff_line_artifact(
+        rows, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        before="2026-09-16",
+    )
+    # artifact is None when fewer than min_trades rows survive the causal
+    # (exit_date < before) filter -- the same NO_PAYOFF_MAP condition the
+    # inline fit refuses on today.
 
 ## Testing
 
