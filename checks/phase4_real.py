@@ -231,10 +231,18 @@ def _numerical_independence_control() -> dict[str, bool]:
             "weights": (0.5, 0.5),
             "capital_at_risk": 1.0,
         },
-        analog_recipe={
-            "recipe_id": "phase4-analogs-v1",
-            "population_ref": "phase4-analog-population",
-        },
+        # No analog recipe: this control asserts independent recomputation
+        # of forecast/simulation/gate only (see the assertions below -- none
+        # of them reads `analogs`, `ci_low`, `ci_high` or `n_analogs`). Its
+        # ticker ("PHASE4") and event dates are synthetic fixture values with
+        # no real prior-event bucket population behind them, so satisfying a
+        # non-empty analog_recipe here would mean fabricating
+        # analog_source_rows -- exactly what `_analog_block`'s own docstring
+        # in source_inputs.py forbids. A non-empty recipe with no rows is a
+        # genuine defect (MISSING_ANALOG_INPUT); declaring no recipe at all
+        # is the honest not-applicable path for a control that was never
+        # testing analogs.
+        analog_recipe={},
         gate_recipe={
             "model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
             "threshold": 0.0,
