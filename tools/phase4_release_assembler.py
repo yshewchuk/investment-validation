@@ -15,6 +15,15 @@ REQUIRED_STAGES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
     "analogs", "simulation", "gate", "chooser", "serialization",
 )
+#: The payoff-calibration/model stage (exp_pnl_model, win_model) is executed
+#: by every native scoring call made after it was added, so its observation
+#: is always present in a fresh capture and must be a *known*, real-evidence
+#: stage rather than an unknown one. It is intentionally NOT in
+#: REQUIRED_STAGES: bundles captured before the stage existed never recorded
+#: it, the trace schema carries no version field to key a hard requirement
+#: on, and this file must not manufacture one. When present, it is validated
+#: with the exact same hash/owner checks as every other stage below.
+OPTIONAL_STAGES = ("model",)
 NATIVE_INPUT_KEYS = frozenset({
     "context", "features", "forecast", "geometry", "pricing", "analogs",
     "simulation", "gate", "chooser", "diagnostics", "source_ref",
@@ -191,7 +200,7 @@ def assemble_input_trace(*, request: Mapping[str, Any], shared_inputs: Mapping[s
         )
 
     by_stage = {}
-    allowed_stages = set(REQUIRED_STAGES) | {"diagnostics"}
+    allowed_stages = set(REQUIRED_STAGES) | set(OPTIONAL_STAGES) | {"diagnostics"}
     for item in observations:
         try:
             stage = item.receipt.stage
@@ -221,7 +230,9 @@ def assemble_input_trace(*, request: Mapping[str, Any], shared_inputs: Mapping[s
     if missing:
         raise ReleaseAssemblyError(f"native observations missing stages: {missing}")
     stages = {}
-    for stage in REQUIRED_STAGES:
+    for stage in (*REQUIRED_STAGES, *OPTIONAL_STAGES):
+        if stage not in by_stage:
+            continue
         item = by_stage[stage]
         stages[stage] = {
             "input": item.input_document,
@@ -250,6 +261,6 @@ def assemble_input_trace(*, request: Mapping[str, Any], shared_inputs: Mapping[s
 
 
 __all__ = [
-    "NATIVE_INPUT_KEYS", "REQUIRED_STAGES", "ReleaseAssemblyError",
-    "assemble_input_trace",
+    "NATIVE_INPUT_KEYS", "OPTIONAL_STAGES", "REQUIRED_STAGES",
+    "ReleaseAssemblyError", "assemble_input_trace",
 ]

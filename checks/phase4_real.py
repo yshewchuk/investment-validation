@@ -1043,6 +1043,21 @@ _REQUIRED_TRACE_STAGES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
     "analogs", "simulation", "gate", "chooser", "serialization",
 )
+#: The payoff-calibration/model stage (exp_pnl_model, win_model). Every
+#: native scoring call made after this stage existed emits a real "model"
+#: observation, so it must be a known, validated-when-present stage here
+#: too -- not an unknown one, and not a required one, since traces captured
+#: before the stage existed never recorded it and the trace schema carries
+#: no version field to key a hard requirement on.
+_OPTIONAL_TRACE_STAGES = ("model",)
+#: Execution order matches ``engine.v2.scoring.stages.STAGE_NAMES`` with
+#: ``diagnostics`` removed (diagnostics is handled separately, never part
+#: of a captured/verified trace). Used to keep the trace's stage ordering
+#: consistent with the order stages actually execute in.
+_KNOWN_TRACE_STAGE_ORDER = (
+    "resolve_context", "features", "forecast", "geometry", "pricing",
+    "model", "analogs", "simulation", "gate", "chooser", "serialization",
+)
 _ADVISORY_FLAGS = frozenset({"LAYER_DISAGREE"})
 
 
@@ -1336,11 +1351,17 @@ def _verify_runtime_execution(
     verified: Mapping[str, Any], native,
 ) -> tuple[tuple[dict[str, str], ...], dict[str, str]]:
     runtime_receipts = _verified_runtime_receipts(native)
+    captured = verified["captured_receipts"]
+    # Filter runtime receipts down to exactly the stages the captured trace
+    # itself claims (always every required stage, plus "model" only when
+    # the trace recorded it). A stage the runtime always executes but the
+    # captured trace predates -- "model", for a pre-existing capture -- is
+    # not compared here; that asymmetry is expected, not a mismatch.
+    captured_stage_names = {row["stage"] for row in captured}
     runtime_required = tuple(
         row for row in runtime_receipts
-        if row["stage"] in _REQUIRED_TRACE_STAGES
+        if row["stage"] in captured_stage_names
     )
-    captured = verified["captured_receipts"]
     if tuple(row["stage"] for row in runtime_required) != tuple(
         row["stage"] for row in captured
     ):
@@ -1456,14 +1477,21 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     stage_rows = trace.get("stages")
     if not isinstance(stage_rows, Mapping):
         raise _TraceError("input_trace.stages: missing")
-    if set(stage_rows) != set(_REQUIRED_TRACE_STAGES):
+    missing_required = set(_REQUIRED_TRACE_STAGES) - set(stage_rows)
+    unknown_stages = (
+        set(stage_rows) - set(_REQUIRED_TRACE_STAGES) - set(_OPTIONAL_TRACE_STAGES)
+    )
+    if missing_required or unknown_stages:
         raise _TraceError(
             "input_trace.stages: incomplete "
-            f"{sorted(set(_REQUIRED_TRACE_STAGES) - set(stage_rows))}"
+            f"missing={sorted(missing_required)} unknown={sorted(unknown_stages)}"
         )
     receipts = []
     captured_receipts = []
-    for stage in _REQUIRED_TRACE_STAGES:
+    present_stages = tuple(
+        stage for stage in _KNOWN_TRACE_STAGE_ORDER if stage in stage_rows
+    )
+    for stage in present_stages:
         row = stage_rows[stage]
         if not isinstance(row, Mapping) or set(row) != {
             "input", "output", "input_hash", "output_hash", "owner",
