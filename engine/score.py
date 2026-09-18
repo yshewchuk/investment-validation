@@ -2529,21 +2529,6 @@ class Scorer:
         verdict = rule.evaluate(facts)
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is not None:
-            if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
-                collector.capture_source_bundle(
-                    model_bindings=({
-                        "model_id": entry.id,
-                        "role": "gate",
-                        "feature_order": tuple(artifact.features),
-                        "artifact": str(entry.path),
-                        "artifact_sha256": entry.artifact_sha256,
-                        "adapter": "joblib-estimator.v1",
-                        "output_names": ("gate_score",),
-                        "strategy": request.strategy,
-                        "decision_offset": entry.decision_offset,
-                        "threshold": entry.threshold,
-                    },),
-                )
             collector.capture_gate_inputs({
                 "kind": "entry_rule",
                 "rule_identity": f"entry-rule:{rule.strategy}",
@@ -2934,6 +2919,21 @@ class Scorer:
         result.gate_score = float(artifact.predict(X)[0])
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is not None:
+            if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+                collector.capture_source_bundle(
+                    model_bindings=({
+                        "model_id": entry.id,
+                        "role": "gate",
+                        "feature_order": tuple(artifact.features),
+                        "artifact": str(entry.path),
+                        "artifact_sha256": entry.artifact_sha256,
+                        "adapter": "joblib-estimator.v1",
+                        "output_names": ("gate_score",),
+                        "strategy": request.strategy,
+                        "decision_offset": entry.decision_offset,
+                        "threshold": entry.threshold,
+                    },),
+                )
             collector.capture_gate_inputs({
                 "kind": "model",
                 "model_identity": entry.id,
