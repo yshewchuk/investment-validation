@@ -168,6 +168,8 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # materialization's actual panel object -- a stale ref from a different
     # snapshot, caught before it is ever copied in.
     "TIER4_CACHE_STALE": ("validation", False),
+    # engine/v2/data/repository.py:585
+    "STALE_EXPECTATION": ("validation", False),
 }
 
 
