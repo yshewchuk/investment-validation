@@ -503,7 +503,7 @@ class Phase4TraceCollector:
             return
         alpha = float(evidence.get("alpha", 0.5))
         strategy = str(evidence.get("strategy", ""))
-        snapshot = str(evidence.get("snapshot", self.snapshot))
+        snapshot = str(evidence.get("snapshot", ""))
         request_key = str(evidence.get("request_key", ""))
         buckets = {
             name: query.get(name) for name in legacy_bucket_dimensions
