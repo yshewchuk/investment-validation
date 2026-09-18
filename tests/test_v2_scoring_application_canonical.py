@@ -303,3 +303,48 @@ def test_typed_frozen_gate_uses_calculated_price_and_existing_threshold():
     )
     assert record.gate_terms["gate_score"] != pytest.approx(999.0)
     assert record.gate_terms["gate_threshold"] == pytest.approx(1.0)
+
+
+def test_typed_frozen_gate_ignores_caller_supplied_gate_threshold():
+    """gate_threshold is answer-bearing (source_inputs._ANSWER_FIELDS); the
+    frozen path must take it only from the native bundle's own gate block,
+    never from a caller-supplied fields mapping passed alongside it."""
+    member = SimpleNamespace(name="model", content_hash="sha256:gate")
+    binding = SimpleNamespace(
+        binding_id="gate-binding",
+        model_id="gate-model",
+        role="gate",
+        feature_order=("entry_cost",),
+        output_names=("prediction",),
+        members=(member,),
+    )
+    release = SimpleNamespace(release_id="release-1", bindings=(binding,))
+    inference_request = SimpleNamespace(
+        binding_id="gate-binding",
+        rows=((999.0,),),
+    )
+
+    class GateInference:
+        def infer(self, model_release, request):
+            return SimpleNamespace(
+                status="READY",
+                release_id=model_release.release_id,
+                binding_id=request.binding_id,
+                model_id="gate-model",
+                output_names=("prediction",),
+                predictions=((request.rows[0][0],),),
+                artifact_hashes=("sha256:gate",),
+                reason_codes=(),
+                detail=None,
+            )
+
+    base = _override_inputs()
+    fields = {
+        "_native_inputs": replace(base, gate={"threshold": 1.0}),
+        "gate_threshold": 999.0,
+    }
+    record = application.score_frozen(
+        _request(), GateInference(), release, inference_request, fields,
+    )
+
+    assert record.gate_terms["gate_threshold"] == pytest.approx(1.0)

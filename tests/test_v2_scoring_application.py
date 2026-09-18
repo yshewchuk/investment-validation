@@ -94,15 +94,51 @@ def test_frozen_inference_path_does_not_call_legacy_backend():
             return SimpleNamespace(status="READY", predictions=((0.42,),),
                                     artifact_hashes=("sha256:model",), reason_codes=(), detail=None)
 
+    # Native inputs are built explicitly here (the legitimate non-acceptance
+    # use of NativeScoreInputs.from_legacy_fields, mirroring
+    # checks/phase4_real.py's _native() helper) rather than reconstructed
+    # implicitly inside score_frozen.
+    raw = {"ticker": "AAA", "event_date": "2026-09-16", "spot": 100.0,
+           "entry_cost": 5.0, "implied_move": 6.0, "driver_name": "abs_move",
+           "legs": [], "flags": [], "model_inputs": {}, "payoff": {}, "fill": 0.5}
     record = application.score_frozen(
         request(), Frozen(), object(), object(),
-        {"ticker": "AAA", "event_date": "2026-09-16", "spot": 100.0,
-         "entry_cost": 5.0, "implied_move": 6.0, "driver_name": "abs_move",
-         "legs": [], "flags": [], "model_inputs": {}, "payoff": {}, "fill": 0.5},
+        {"_native_inputs": NativeScoreInputs.from_legacy_fields(raw)},
     )
     assert record.forecasts["driver_prediction"] == 0.42
     assert record.validation_status == "refused"
     assert record.readiness == "refused"
+
+
+def test_frozen_path_refuses_legacy_answer_fields_without_native_inputs():
+    """The acceptance/frozen path must not fall back to reconstructing
+    NativeScoreInputs from caller-supplied legacy answer fields; it must
+    refuse, naming what it tried to source from an answer."""
+    class Frozen:
+        def infer(self, release, inference_request):
+            return SimpleNamespace(status="READY", predictions=((0.42,),),
+                                    artifact_hashes=("sha256:model",), reason_codes=(), detail=None)
+
+    with pytest.raises(TypeError) as excinfo:
+        application.score_frozen(
+            request(), Frozen(), object(), object(),
+            {"driver_prediction": 7.0, "gate_score": 0.7, "gate_threshold": 0.6,
+             "gate_pass": True},
+        )
+    message = str(excinfo.value)
+    assert "_native_inputs" in message
+    assert "driver_prediction" in message
+    assert "gate_threshold" in message
+
+
+def test_frozen_path_refuses_when_native_inputs_missing_entirely():
+    class Frozen:
+        def infer(self, release, inference_request):
+            return SimpleNamespace(status="READY", predictions=((0.42,),),
+                                    artifact_hashes=("sha256:model",), reason_codes=(), detail=None)
+
+    with pytest.raises(TypeError, match="_native_inputs"):
+        application.score_frozen(request(), Frozen(), object(), object(), {})
 
 
 def test_direct_dynamic_request_resolves_complete_menu_without_regating(monkeypatch):
