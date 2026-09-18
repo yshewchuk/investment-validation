@@ -346,7 +346,13 @@ class Phase4TraceCollector:
     checkpoint_schema_version = "phase4_legacy_diagnostic_checkpoint.v1.0"
     _checkpoint_names = frozenset((
         "features", "selection_pricing", "simulation", "gate_inputs", "dyn_sv",
+        "source_inputs",
     ))
+    _source_answer_fields = frozenset({
+        "legs", "selected_contracts", "entry_cost", "gate_pass", "gate_score",
+        "exp_pnl_sim", "win_sim", "exp_pnl_analog", "win_analog",
+        "chooser_score", "chosen_strategy", "financial_diagnostics",
+    })
 
     def __init__(self, *, retain_full_trace: bool = True,
                  content_hasher: Callable[[Any], str] | None = None) -> None:
@@ -355,6 +361,10 @@ class Phase4TraceCollector:
         self.status = "pending"
         self.disposition: dict[str, Any] = {"status": "pending", "flags": []}
         self._checkpoint_groups: dict[str, Any] = {}
+        self._source_bundle: dict[str, Any] = {
+            "context": {}, "quote_domain": [], "features": {},
+            "model_bindings": [],
+        }
         self.retain_full_trace = bool(retain_full_trace)
         self._content_hasher = content_hasher
 
@@ -456,6 +466,28 @@ class Phase4TraceCollector:
             "eligibility": eligibility,
             "ranking": ranking,
         })
+
+    def capture_source_bundle(self, *, context: Mapping[str, Any] | None = None,
+                              quote_domain: Any = None,
+                              features: Mapping[str, Any] | None = None,
+                              model_bindings: Sequence[Mapping[str, Any]] = ()) -> None:
+        """Capture bounded source-owned inputs without scoring answers."""
+        document = self._source_bundle
+        if context:
+            document["context"].update(self._document(context))
+        if quote_domain is not None:
+            document["quote_domain"] = self._document(quote_domain)
+        if features:
+            document["features"].update(self._document(features))
+        if model_bindings:
+            document["model_bindings"].extend(self._document(tuple(model_bindings)))
+        found = sorted(
+            key for key in self._source_answer_fields
+            if key in document["context"] or key in document["features"]
+        )
+        if found:
+            raise ValueError(f"source bundle contains scoring answers: {found}")
+        self._checkpoint_groups["source_inputs"] = self._document(document)
 
     def record(self, stage: str, inputs: Any, output: Any, *,
                status: str = "completed") -> None:
@@ -1568,6 +1600,18 @@ class Scorer:
         # caller-supplied chain index, so a board row and its selfcheck
         # re-score — which passes no index — agree by construction.
         result._entry_rows = clean
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            collector.capture_source_bundle(
+                context={
+                    "ticker": request.ticker,
+                    "strategy": request.strategy,
+                    "quote_date": result.quote_date,
+                    "event_date": result.event_date,
+                    "session": result.session,
+                },
+                quote_domain=clean,
+            )
         snapshot = ChainSnapshot(
             ticker=request.ticker,
             obs_date=result.quote_date,
@@ -1821,6 +1865,14 @@ class Scorer:
         built["days_before_print"] = _trading_days_before(
             self.calendar, result.entry_date, result.event_date, result.session
         )
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            source_features = {
+                str(key): built[key].iloc[0]
+                for key in built.columns
+                if key not in {"entry_cost", "entry_cost_pct", "spot_entry"}
+            }
+            collector.capture_source_bundle(features=source_features)
 
         # The panel's market-state block — `or_implied`, `dist_high`,
         # `spy_vol20`, the market cap — is read at the last pre-print close. The
@@ -1938,6 +1990,14 @@ class Scorer:
                     "input_as_of": result.model_input_as_of,
                 },
                 role=driver,
+            )
+            collector.capture_source_bundle(
+                model_bindings=({
+                    "model_id": entry.id,
+                    "role": driver,
+                    "feature_order": tuple(artifact.features),
+                    "input_as_of": result.model_input_as_of,
+                },),
             )
 
         missing = [f for f in artifact.features if f not in features.columns]

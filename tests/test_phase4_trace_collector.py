@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import engine.score as score_module
 from engine.pnl_sim import DRAWS, ResidualPool
@@ -159,6 +160,24 @@ def test_model_boundary_captures_exact_vector_mask_and_identity() -> None:
     assert checkpoint["disposition"]["flags"] == ["MISSING_FEATURES"]
     assert "simulation" not in checkpoint["checkpoints"]
     assert "gate_inputs" not in checkpoint["checkpoints"]
+
+
+def test_source_bundle_is_bounded_and_rejects_scoring_answers() -> None:
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_source_bundle(
+        context={"ticker": "ABC", "strategy": "STR-THRU"},
+        quote_domain=[{"right": "call", "strike": 100.0, "bid": 1.0, "ask": 2.0}],
+        features={"iv30": 0.25},
+        model_bindings=({"role": "size", "model_id": "size-v7"},),
+    )
+    source = _checkpoint_value(collector, "source_inputs")
+
+    assert source["context"] == {"ticker": "ABC", "strategy": "STR-THRU"}
+    assert source["quote_domain"][0]["strike"] == 100.0
+    assert source["model_bindings"][0]["role"] == "size"
+
+    with pytest.raises(ValueError, match="scoring answers"):
+        collector.capture_source_bundle(features={"entry_cost": 4.0})
 
 
 def test_score_captures_boundary_legs_and_cost_before_later_mutation(
