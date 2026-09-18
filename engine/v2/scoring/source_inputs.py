@@ -131,6 +131,12 @@ class SourceBundle:
     # row's own answer either.
     model_residual_recipe: Mapping[str, Any] = field(default_factory=dict)
     model_residual_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # STR-RUNUP's second driver (legacy's ``runup_move`` champion): its own
+    # held-out (prediction, residual) pairs, at the model's native D14 scale
+    # -- distinct from ``model_residual_rows``, which for STR-RUNUP carries
+    # the FIRST driver's (``implied_t1``) pool. Ignored by every strategy
+    # with only one driver.
+    runup_move_residual_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -316,14 +322,16 @@ def _model_block(bundle: SourceBundle) -> dict[str, Any]:
     )
     if not recipe:
         if (bundle.payoff_source_rows or bundle.model_residual_rows
-                or bundle.model_residual_recipe):
+                or bundle.model_residual_recipe
+                or bundle.runup_move_residual_rows):
             raise ValueError(
-                "payoff_source_rows/model_residual_* supplied without a "
-                "payoff_recipe"
+                "payoff_source_rows/model_residual_*/runup_move_residual_rows "
+                "supplied without a payoff_recipe"
             )
         return {}
     _reject_answers("payoff_source_rows", bundle.payoff_source_rows)
     _reject_answers("model_residual_rows", bundle.model_residual_rows)
+    _reject_answers("runup_move_residual_rows", bundle.runup_move_residual_rows)
     residual_recipe = _bounded_recipe(
         "model_residual_recipe", bundle.model_residual_recipe,
         _MODEL_RESIDUAL_RECIPE_FIELDS,
@@ -333,6 +341,9 @@ def _model_block(bundle: SourceBundle) -> dict[str, Any]:
         "payoff_source_rows": [dict(row) for row in bundle.payoff_source_rows],
         "model_residual_recipe": residual_recipe,
         "model_residual_rows": [dict(row) for row in bundle.model_residual_rows],
+        "runup_move_residual_rows": [
+            dict(row) for row in bundle.runup_move_residual_rows
+        ],
     }
 
 
