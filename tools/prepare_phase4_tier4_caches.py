@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Prepare old implied_t1 serving caches for bounded Phase 4 capture.
+"""Prepare old Tier-4 serving caches for bounded Phase 4 capture.
 
-The Phase 4 corpus touches several historical Tier-4 folds.  Caches written
-before the residual-pool embedding change contain the fitted estimator but not
+The Phase 4 corpus touches several historical Tier-4 folds, for every
+producer ``Scorer._serving`` and ``Scorer._crush_forecast`` reach:
+``implied_t1`` (``pred_im_t1_d14``), ``size`` (``pred_abs_move``),
+``runup_move`` (``pred_runup_abs_move_d14``) and ``iv_crush``
+(``pred_iv_crush_30``) — see ``MODEL_CHOICES``. Caches written before the
+residual-pool embedding change contain the fitted estimator but not
 ``pool_pred``/``pool_res``.  Serving one of those files recomputes the pool
 while a fully populated ``Scorer`` is resident, which exceeds this host's
 memory budget.
 
 This utility upgrades only existing old-format caches that match all of:
 
-* the current registered ``implied_t1`` champion;
+* the current registered champion for the requested ``--model``
+  (``implied_t1`` by default, matching pre-``--model`` behaviour);
 * the current Tier-3 panel snapshot and feature order; and
-* a fold selected by the Phase 4 capture workload (or an explicit ``--fold``).
+* a fold selected by the Phase 4 capture workload (or an explicit ``--fold``,
+  which applies to every requested model — see ``phase4_required_folds``).
 
 Each cache is rebuilt in its own subprocess.  The child calls Tier 4's existing
 ``_pool_before`` implementation, verifies the result and the unchanged model
@@ -47,6 +53,69 @@ from engine.data.features import tier4  # noqa: E402
 MAX_CACHE_BYTES = 64 * 1024 * 1024
 HEARTBEAT_SECONDS = 30.0
 POOL_KEYS = frozenset({"pool_pred", "pool_res"})
+
+#: ``--model`` names -> the Tier-4 ``produces`` column each resolves to,
+#: exactly as ``Scorer._serving`` resolves them:
+#:
+#: - ``implied_t1`` -> ``pred_im_t1_d14``: ``_chooser_frame``'s
+#:   ``self._serving(fold, produces="pred_im_t1_d14")``
+#:   (engine/score.py:3438-3442) -> ``tier4.feature_model("pred_im_t1_d14")``
+#:   -> ``tier4.im_t1_feature_model`` (engine/data/features/tier4.py:273).
+#: - ``runup_move`` -> ``pred_runup_abs_move_d14``: the same
+#:   ``_chooser_frame`` loop, second entry (engine/score.py:3438-3442) ->
+#:   ``tier4.feature_model("pred_runup_abs_move_d14")`` ->
+#:   ``tier4.runup_move_feature_model`` (tier4.py:347).
+#: - ``size`` -> ``pred_abs_move``: ``_chooser_frame``'s own forecast call,
+#:   ``self._serving(tier4.serving_fold(...))`` with no ``produces`` kwarg
+#:   (engine/score.py:3363-3365), so ``_serving`` takes its
+#:   ``produces="pred_abs_move"`` default (engine/score.py:2569) and passes
+#:   ``model=None`` to ``tier4.serving_model`` (engine/score.py:2577-2578),
+#:   which defaults ``model`` to ``size_feature_model()`` itself
+#:   (tier4.py:1291). ``tier4.feature_model("pred_abs_move")`` reaches the
+#:   identical factory through ``FEATURE_MODELS["pred_abs_move"]`` (tier4.py:
+#:   446), so resolving it that way here matches the live default exactly.
+#: - ``iv_crush`` -> ``pred_iv_crush_30``: ``Scorer._crush_forecast``'s
+#:   ``self._serving(fold, produces="pred_iv_crush_30")``
+#:   (engine/score.py:2908-2913) -> ``tier4.feature_model("pred_iv_crush_30")``
+#:   -> ``tier4.iv_crush_feature_model`` (tier4.py:401).
+MODEL_CHOICES: dict[str, str] = {
+    "implied_t1": "pred_im_t1_d14",
+    "size": "pred_abs_move",
+    "runup_move": "pred_runup_abs_move_d14",
+    "iv_crush": "pred_iv_crush_30",
+}
+
+#: Kept as the sole default so an unflagged run upgrades exactly what it
+#: upgraded before ``--model`` existed.
+DEFAULT_MODEL = "implied_t1"
+
+
+def _resolve_model(name: str, registry=None) -> "tier4.FeatureModel":
+    """The ``FeatureModel`` for one ``--model`` name, resolved as ``Scorer._serving`` does."""
+    try:
+        produces = MODEL_CHOICES[name]
+    except KeyError:
+        raise CachePreparationError(
+            f"{name!r} is not a known --model; choices: {sorted(MODEL_CHOICES)} or 'all'"
+        ) from None
+    return tier4.feature_model(produces, registry)
+
+
+def _selected_models(requested: list[str]) -> list[str]:
+    """``--model`` values -> the ordered, de-duplicated model names to upgrade.
+
+    No flag at all means ``[DEFAULT_MODEL]`` (unchanged pre-``--model``
+    behaviour). Any occurrence of ``all`` expands to every ``MODEL_CHOICES``
+    name in its declared order, regardless of what else was passed.
+    """
+    values = requested or [DEFAULT_MODEL]
+    if "all" in values:
+        return list(MODEL_CHOICES)
+    ordered: list[str] = []
+    for name in values:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
 
 
 class CachePreparationError(RuntimeError):
@@ -204,7 +273,14 @@ def phase4_required_folds(
     max_events: int,
     boundary_events: int,
 ) -> tuple[pd.Timestamp, ...]:
-    """Plan folds from the same events and strategy windows as corpus capture."""
+    """Plan folds from the same events and strategy windows as corpus capture.
+
+    Model-independent: every fold comes from ``tier4.serving_fold(event_date,
+    decision_date)``, which takes no model argument, so this same fold set is
+    what every Tier-4 producer needs for a given capture window — it is
+    planned once in ``main`` and reused across every ``--model`` selection
+    rather than recomputed per model.
+    """
     from engine import replay as replay_mod
     from engine import score as score_mod
     from engine.calendar import trading_calendar
@@ -335,7 +411,7 @@ def upgrade_one(
     return int(pool_pred.size)
 
 
-def _run_child(target: CacheTarget, snapshot: str) -> None:
+def _run_child(target: CacheTarget, produces: str, snapshot: str) -> None:
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -347,6 +423,8 @@ def _run_child(target: CacheTarget, snapshot: str) -> None:
         str(target.fold.date()),
         "--expected-snapshot",
         snapshot,
+        "--expected-produces",
+        produces,
     ]
     process = subprocess.Popen(command, cwd=str(ROOT))
     started = time.monotonic()
@@ -357,16 +435,22 @@ def _run_child(target: CacheTarget, snapshot: str) -> None:
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - started
             print(
-                f"[phase4-cache] fold {target.fold:%Y-%m} still rebuilding "
+                f"[phase4-cache] fold {target.fold:%Y-%m} ({produces}) still rebuilding "
                 f"({elapsed:.0f}s elapsed)",
                 flush=True,
             )
     if code != 0:
-        raise CachePreparationError(f"fold {target.fold:%Y-%m} child exited with status {code}")
+        raise CachePreparationError(
+            f"fold {target.fold:%Y-%m} ({produces}) child exited with status {code}"
+        )
 
 
 def _worker(args: argparse.Namespace) -> int:
-    model = tier4.im_t1_feature_model()
+    # Resolved exactly as `discover_targets`/`main` resolved it when planning
+    # this target: `tier4.feature_model(produces)` covers all four producers,
+    # `pred_abs_move` included (see MODEL_CHOICES above for why that matches
+    # `Scorer._serving`'s own default).
+    model = tier4.feature_model(args.expected_produces)
     snapshot = store.file_sha256(paths.PANEL)
     if snapshot != args.expected_snapshot:
         raise CachePreparationError(
@@ -378,12 +462,17 @@ def _worker(args: argparse.Namespace) -> int:
         _fold(args.expected_fold),
         args.expected_sha256,
     )
-    print(f"[phase4-cache] fold {target.fold:%Y-%m} loading panel", flush=True)
+    print(
+        f"[phase4-cache] fold {target.fold:%Y-%m} model={model.model_id} "
+        f"({args.expected_produces}) loading panel",
+        flush=True,
+    )
     started = time.monotonic()
     count = upgrade_one(target, model=model, snapshot=snapshot)
     elapsed = time.monotonic() - started
     print(
-        f"[phase4-cache] fold {target.fold:%Y-%m} installed {count:,} residuals in {elapsed:.0f}s",
+        f"[phase4-cache] fold {target.fold:%Y-%m} ({args.expected_produces}) "
+        f"installed {count:,} residuals in {elapsed:.0f}s",
         flush=True,
     )
     return 0
@@ -401,11 +490,26 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=[],
         help="upgrade this YYYY-MM-01 fold; repeat to bypass capture planning",
     )
+    parser.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        choices=[*MODEL_CHOICES, "all"],
+        help=(
+            "Tier-4 producer to upgrade (repeatable); one of "
+            f"{sorted(MODEL_CHOICES)} or 'all' for every producer "
+            "Scorer._serving serves. Folds are the same for every model "
+            "(phase4_required_folds keys them on event_date/decision_date, "
+            "not on the producer). Default: "
+            f"{DEFAULT_MODEL!r} (unchanged behaviour)."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--upgrade-one", help=argparse.SUPPRESS)
     parser.add_argument("--expected-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--expected-fold", help=argparse.SUPPRESS)
     parser.add_argument("--expected-snapshot", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-produces", help=argparse.SUPPRESS)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     worker_values = (
@@ -413,6 +517,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         args.expected_sha256,
         args.expected_fold,
         args.expected_snapshot,
+        args.expected_produces,
     )
     if any(worker_values):
         if not all(worker_values):
@@ -424,6 +529,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.as_of is not None
         else pd.Timestamp.today().normalize()
     )
+    # phase4_required_folds keys every fold on (event_date, decision_date)
+    # via tier4.serving_fold, with no model in that computation at all — so
+    # the same fold set is required by every producer, and it is planned
+    # once and reused across --model selections rather than per model.
     folds = (
         tuple(_fold(value) for value in args.fold)
         if args.fold
@@ -434,35 +543,57 @@ def main(argv: Iterable[str] | None = None) -> int:
             boundary_events=args.boundary_events,
         )
     )
-    model = tier4.im_t1_feature_model()
+    model_names = _selected_models(args.model)
+
     snapshot = store.file_sha256(paths.PANEL)
-    targets, missing = discover_targets(folds, model=model, snapshot=snapshot)
+    plan: list[tuple[str, str, "tier4.FeatureModel", list[CacheTarget], list[pd.Timestamp]]] = []
+    total_targets = 0
+    total_missing = 0
+    for name in model_names:
+        produces = MODEL_CHOICES[name]
+        model = _resolve_model(name)
+        targets, missing = discover_targets(folds, model=model, snapshot=snapshot)
+        plan.append((name, produces, model, targets, missing))
+        total_targets += len(targets)
+        total_missing += len(missing)
+
     print(
-        f"[phase4-cache] planned {len(folds)} fold(s); "
-        f"{len(targets)} old cache(s), {len(missing)} missing cache(s)",
+        f"[phase4-cache] planned {len(folds)} fold(s) x {len(model_names)} model(s) "
+        f"({', '.join(model_names)}); "
+        f"{total_targets} old cache(s), {total_missing} missing cache(s)",
         flush=True,
     )
-    for target in targets:
+    for name, produces, model, targets, missing in plan:
         print(
-            f"[phase4-cache] old {target.fold:%Y-%m} {target.path.name} "
-            f"sha256={target.original_sha256}",
+            f"[phase4-cache] {name} ({produces}, model_id={model.model_id}): "
+            f"{len(targets)} old cache(s), {len(missing)} missing cache(s)",
             flush=True,
         )
-    for fold in missing:
-        print(
-            f"[phase4-cache] missing {fold:%Y-%m}; left untouched because no old cache exists",
-            flush=True,
-        )
+        for target in targets:
+            print(
+                f"[phase4-cache] old {name} {target.fold:%Y-%m} {target.path.name} "
+                f"sha256={target.original_sha256}",
+                flush=True,
+            )
+        for fold in missing:
+            print(
+                f"[phase4-cache] missing {name} {fold:%Y-%m}; "
+                "left untouched because no old cache exists",
+                flush=True,
+            )
     if args.dry_run:
         return 0
 
-    total = len(targets)
-    for index, target in enumerate(targets, start=1):
-        print(
-            f"[phase4-cache] upgrading {index}/{total}: fold {target.fold:%Y-%m}",
-            flush=True,
-        )
-        _run_child(target, snapshot)
+    total = total_targets
+    index = 0
+    for name, produces, model, targets, missing in plan:
+        for target in targets:
+            index += 1
+            print(
+                f"[phase4-cache] upgrading {index}/{total}: {name} fold {target.fold:%Y-%m}",
+                flush=True,
+            )
+            _run_child(target, produces, snapshot)
     print(f"[phase4-cache] complete: upgraded {total} cache(s)", flush=True)
     return 0
 
