@@ -465,15 +465,23 @@ def _required_forecast_roles(
     for role in declared:
         if role not in roles:
             roles.append(role)
-    planned = (
-        inputs.simulation.get("mode") == "planned_exit"
-        or inputs.simulation.get("residuals") is not None
-    )
-    if planned:
+    if _is_planned(inputs.simulation):
         for role in ("size", "iv_crush"):
             if role not in roles:
                 roles.append(role)
     return tuple(roles)
+
+
+def _is_planned(block: Mapping[str, Any]) -> bool:
+    """A planned-exit simulation: declared by mode, raw residual rows, or
+    (P5-4) a frozen paired residual pool artifact."""
+    from engine.v2.scoring.native_residuals import PAIRED_ARTIFACT_FIELD
+
+    return (
+        block.get("mode") == "planned_exit"
+        or block.get("residuals") is not None
+        or PAIRED_ARTIFACT_FIELD in block
+    )
 
 
 def _validate_forecast_roles(inputs: NativeScoreInputs,
@@ -849,10 +857,29 @@ def _residual_arrays(raw: Any) -> tuple[np.ndarray, ...]:
     )
 
 
+def _simulation_residual_arrays(
+    block: Mapping[str, Any], flags: list[str],
+) -> tuple[np.ndarray, ...] | None:
+    """The paired pool: the frozen artifact when declared (P5-4, never
+    rebuilt, MODEL_NOT_READY on a missing/mismatched one), else the
+    request-supplied rows exactly as before."""
+    from engine.v2.scoring import native_residuals
+
+    if native_residuals.PAIRED_ARTIFACT_FIELD not in block:
+        return _residual_arrays(block.get("residuals"))
+    arrays, flag = native_residuals.paired_arrays_from_artifact(block)
+    if flag is not None:
+        _add_flag(flags, flag)
+    return arrays
+
+
 def _draw_residuals(block: Mapping[str, Any], event_date: Any,
                     prediction: float, key: str,
                     flags: list[str]) -> tuple[Any, ...] | None:
-    dates, predicted, move, crush = _residual_arrays(block.get("residuals"))
+    arrays = _simulation_residual_arrays(block, flags)
+    if arrays is None:
+        return None
+    dates, predicted, move, crush = arrays
     try:
         cutoff = np.datetime64(str(event_date))
     except ValueError:
@@ -886,6 +913,12 @@ def _draw_residuals(block: Mapping[str, Any], event_date: Any,
     return move[chosen], crush[chosen], rng, end
 
 
+def _is_planned_artifact(block: Mapping[str, Any]) -> bool:
+    from engine.v2.scoring.native_residuals import PAIRED_ARTIFACT_FIELD
+
+    return PAIRED_ARTIFACT_FIELD in block
+
+
 def _planned_parameters(block: Mapping[str, Any], values: Mapping[str, Any],
                         flags: list[str]) -> tuple[Any, ...] | None:
     parameters = {
@@ -904,7 +937,7 @@ def _planned_parameters(block: Mapping[str, Any], values: Mapping[str, Any],
     event_date = block.get("event_date", values.get("event_date"))
     if event_date is None:
         missing.append("event_date")
-    if block.get("residuals") is None:
+    if block.get("residuals") is None and not _is_planned_artifact(block):
         missing.append("residuals")
     for name in missing:
         _add_flag(flags, f"MISSING_SIMULATION_INPUT:{name}")
@@ -978,11 +1011,7 @@ def _execute_simulation(
     if block.get("mode") == "not_applicable":
         return {}
     output: dict[str, Any] = {}
-    planned = (
-        block.get("mode") == "planned_exit"
-        or block.get("residuals") is not None
-    )
-    if planned:
+    if _is_planned(block):
         output = _planned_exit_simulation(
             block, values, pricing, geometry.strategy, flags,
         )
@@ -1134,6 +1163,34 @@ def _surface_fit_from_artifact(
     }
 
 
+def _driver_pool(
+    block: Mapping[str, Any], slot: str, rows_field: str, prediction: float,
+    flags: list[str],
+) -> np.ndarray | None:
+    """One driver's residual pool: the frozen artifact when the bundle
+    declared one (P5-4 -- a key-checked lookup, MODEL_NOT_READY on a
+    missing/mismatched artifact, never a rebuild from rows), else the
+    request-supplied rows bucketed exactly as before. ``None`` means a flag
+    was already added."""
+    from engine.v2.scoring import native_payoff, native_residuals
+
+    if native_residuals.RESIDUAL_ARTIFACTS_FIELD in block:
+        pool, flag = native_residuals.driver_pool_from_artifact(block, slot, prediction)
+        if flag is not None:
+            _add_flag(flags, flag)
+        return pool
+    residual_recipe = block.get("model_residual_recipe") or {}
+    pool = native_payoff.driver_residual_pool(
+        block.get(rows_field), prediction,
+        deciles=int(residual_recipe.get("deciles", native_payoff.DECILES)),
+        min_pool=int(residual_recipe.get("min_pool", native_payoff.MIN_POOL)),
+    )
+    if pool is None or pool.size == 0:
+        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+        return None
+    return pool
+
+
 def _model_fit_and_pool(
     block: Mapping[str, Any],
     recipe: Mapping[str, Any],
@@ -1174,14 +1231,8 @@ def _model_fit_and_pool(
             _add_flag(flags, "NO_PAYOFF_MAP")
     if fit is None:
         return None
-    residual_recipe = block.get("model_residual_recipe") or {}
-    driver_pool = native_payoff.driver_residual_pool(
-        block.get("model_residual_rows"), driver,
-        deciles=int(residual_recipe.get("deciles", native_payoff.DECILES)),
-        min_pool=int(residual_recipe.get("min_pool", native_payoff.MIN_POOL)),
-    )
-    if driver_pool is None or driver_pool.size == 0:
-        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+    driver_pool = _driver_pool(block, "driver", "model_residual_rows", driver, flags)
+    if driver_pool is None:
         return None
     return fit, driver_pool
 
@@ -1264,22 +1315,15 @@ def _runup_fit_and_pool(
             _add_flag(flags, "NO_PAYOFF_MAP")
     if fit is None:
         return None
-    residual_recipe = block.get("model_residual_recipe") or {}
-    deciles = int(residual_recipe.get("deciles", native_payoff.DECILES))
-    min_pool = int(residual_recipe.get("min_pool", native_payoff.MIN_POOL))
-    implied_pool = native_payoff.driver_residual_pool(
-        block.get("model_residual_rows"), point_implied,
-        deciles=deciles, min_pool=min_pool,
+    implied_pool = _driver_pool(
+        block, "driver", "model_residual_rows", point_implied, flags,
     )
-    if implied_pool is None or implied_pool.size == 0:
-        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+    if implied_pool is None:
         return None
-    move_pool = native_payoff.driver_residual_pool(
-        block.get("runup_move_residual_rows"), point_move_d14,
-        deciles=deciles, min_pool=min_pool,
+    move_pool = _driver_pool(
+        block, "runup_move", "runup_move_residual_rows", point_move_d14, flags,
     )
-    if move_pool is None or move_pool.size == 0:
-        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+    if move_pool is None:
         return None
     return fit, implied_pool, move_pool
 
@@ -1571,6 +1615,14 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
     return output
 
 
+def _simulation_identity(block: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The simulation block as documented in its receipt: a frozen artifact
+    appears as its ``schema:content_hash`` identity, not its rows (P5-4)."""
+    from engine.v2.scoring.native_residuals import identity_view
+
+    return identity_view(block)
+
+
 def _append_late_stages(
     inputs: NativeScoreInputs,
     values: dict[str, Any],
@@ -1612,7 +1664,8 @@ def _append_late_stages(
         )
         _emit_stage(
             executed, "simulation",
-            {"prior": executed[-1].output_hash, "inputs": inputs.simulation,
+            {"prior": executed[-1].output_hash,
+             "inputs": _simulation_identity(inputs.simulation),
              "entry_cost": pricing.entry_cost},
             simulation, observer,
         )
