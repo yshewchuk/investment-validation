@@ -20,6 +20,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.phase4_checkpoints import CheckpointError, load_bundle  # noqa: E402
 from checks.phase4_frozen_bridge import prepare_frozen_replay  # noqa: E402
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
@@ -663,6 +664,25 @@ def _champion_artifacts_verified() -> bool:
         entry = registry.champion(role, strategy)
         if not entry.path.is_file() or artifact_sha256(entry.path) != entry.artifact_sha256:
             return False
+    return True
+
+
+def _diagnostic_checkpoint_control(corpus) -> bool:
+    """Validate the release's Phase 4 diagnostic checkpoint bundle, if declared.
+
+    No real corpus carries `diagnostic_checkpoint_manifest` yet (confirmed
+    against every `fixtures/tier0/*/INDEX.json`), so its absence must not
+    block completion -- only a DECLARED bundle that fails verification does.
+    Mirrors `_native_parity`'s per-item catch of `_TraceError`: a
+    `CheckpointError` here becomes a visible `False` flag, not a crash.
+    """
+    manifest_ref = corpus.index.get("diagnostic_checkpoint_manifest")
+    if manifest_ref is None:
+        return True
+    try:
+        load_bundle(corpus.root / manifest_ref)
+    except CheckpointError:
+        return False
     return True
 
 
@@ -1882,6 +1902,10 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         # below.
         "full_saved_release_compared": saved_release_comparison["complete"],
         "champion_artifacts_verified": _champion_artifacts_verified(),
+        # Not in `final_controls`: a real bundle's absence must not become a
+        # new gating requirement. Only surfaces a DECLARED bundle's own
+        # verification failure.
+        "diagnostic_checkpoint_bundle_valid": _diagnostic_checkpoint_control(corpus),
         "batch_resources_measured": application_controls["batch_resource_profile"],
     })
     completion_controls.update({
