@@ -54,11 +54,13 @@ __all__ = [
 #:
 #: ``engine/v2/**`` outside :data:`REPLAY_V2_PACKAGES` is deliberately NOT in
 #: the hash (rearchitecture phase 1 decision D6). Legacy may not import v2
-#: (§4.2 rule 3, enforced), and the harness imports only diagnosis, whose own
-#: dependency closure is foundation and contracts. An edit to ``engine/v2/ops``
-#: therefore cannot change a replay's answer, and binding the receipt to it
-#: would turn the phase-0 gate red on every operations commit — the same
-#: reasoning that rejected binding to a git commit.
+#: (§4.2 rule 3, enforced), and the harness (tools/replay_tier1.py,
+#: tools/capture_tier0_corpus.py, checks/tier0_corpus.py, checks/replay_identity.py)
+#: imports diagnosis and related packages whose own dependency closures include
+#: scoring, models, features, registry, domain/generation, domain/valuation, and
+#: foundation/contracts. An edit to ``engine/v2/ops`` therefore cannot change a
+#: replay's answer, and binding the receipt to it would turn the phase-0 gate red on
+#: every operations commit — the same reasoning that rejected binding to a git commit.
 #: ``tests/test_v2_ops_replay_scope.py`` re-derives that closure from the
 #: import graph, so a harness that starts importing another v2 package fails
 #: until this tuple grows with it.
@@ -66,7 +68,13 @@ CODE_ROOTS = (("engine", "**/*.py"),)
 REPLAY_V2_PACKAGES = (
     "engine/v2/contracts",
     "engine/v2/diagnosis",
+    "engine/v2/domain/generation",
+    "engine/v2/domain/valuation",
+    "engine/v2/features",
     "engine/v2/foundation",
+    "engine/v2/models",
+    "engine/v2/registry",
+    "engine/v2/scoring",
 )
 CODE_FILES = (
     "tools/replay_tier1.py",
