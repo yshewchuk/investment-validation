@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from math import isfinite, log
 from typing import Any, Callable, Iterable, Mapping
 
@@ -16,7 +17,8 @@ from engine.v2.foundation import content_hash, to_document
 
 STAGE_NAMES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
-    "analogs", "simulation", "gate", "chooser", "diagnostics", "serialization",
+    "model", "analogs", "simulation", "gate", "chooser", "diagnostics",
+    "serialization",
 )
 
 
@@ -56,13 +58,21 @@ class NativeScoreInputs:
     diagnostics: Mapping[str, Any]
     source_ref: str
     stage_receipts: tuple[StageReceipt, ...]
+    #: The payoff-calibration/model layer (exp_pnl_model, win_model), added
+    #: after every other block already had a caller. Defaulted and exempted
+    #: from the required-receipt check below (like diagnostics) so the many
+    #: existing NativeScoreInputs call sites that predate this field, and
+    #: that hard-code their own declared stage_receipts tuples, keep working
+    #: unchanged -- the "model" stage is still always EXECUTED (see
+    #: assemble_native_values), just not required to be pre-DECLARED.
+    model: Mapping[str, Any] = dataclass_field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.source_ref.strip():
             raise ValueError("native score inputs require source_ref")
         stages = tuple(receipt.stage for receipt in self.stage_receipts)
         seen = set(stages)
-        required = set(STAGE_NAMES) - {"diagnostics"}
+        required = set(STAGE_NAMES) - {"diagnostics", "model"}
         missing = sorted(required - seen)
         if missing:
             raise ValueError(f"missing native stage receipts: {missing}")
@@ -82,8 +92,8 @@ class NativeScoreInputs:
         """
         values = dict(fields)
         blocks = {name: values for name in ("context", "features", "forecast",
-                                             "analogs", "simulation", "gate",
-                                             "chooser", "diagnostics")}
+                                             "model", "analogs", "simulation",
+                                             "gate", "chooser", "diagnostics")}
         receipts = tuple(StageReceipt(
             stage,
             content_hash({"stage": stage, "values": values}),
@@ -133,6 +143,8 @@ _GATE_OUTPUTS = frozenset({"gate_score", "gate_threshold", "gate_pass"})
 _ANALOG_OUTPUTS = frozenset({
     "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
 })
+#: engine/score.py:2210/2214-2216 -- the payoff-calibration/model layer.
+_MODEL_OUTPUTS = frozenset({"exp_pnl_model", "win_model"})
 _FINANCIAL_OUTPUTS = frozenset({
     "entry_cost_pct", "model_vs_market", "fair_premium_pct",
     "premium_vs_fair", "cost_over_width", "terminal_payoff",
@@ -143,7 +155,7 @@ _FINANCIAL_OUTPUTS = frozenset({
 })
 _OWNED_OUTPUTS = (
     _PRICING_OUTPUTS | _FORECAST_OUTPUTS | _SIMULATION_OUTPUTS
-    | _GATE_OUTPUTS | _ANALOG_OUTPUTS
+    | _GATE_OUTPUTS | _ANALOG_OUTPUTS | _MODEL_OUTPUTS
 )
 _DIAGNOSTIC_PROTECTED = _OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
 _ROLE_OUTPUTS = {
@@ -178,6 +190,16 @@ _SIM_MIN_SPOT_FRACTION = 1e-4
 ATM_TOLERANCE_PCT = 2.0     # engine/score.py:204
 WIDE_MARKET_RATIO = 0.5     # engine/fills.py:25
 GATE_MCAP_FLOOR = 1e9       # engine/score.py:199
+
+# -- Model layer (payoff calibration -> exp_pnl_model/win_model) ------------
+# engine/payoff.py:79-82 PAYOFF_DRIVER: which strategies have a calibrated
+# payoff line at all. The bounded native builder (source_inputs.py) only
+# declares forecast recipes for STR-THRU today, so only STR-THRU is wired
+# here; every other strategy (including STR-RUNUP, whose legacy payoff is a
+# two-driver surface, not a line) refuses with NO_PAYOFF_MAP exactly as
+# legacy's driver_for() would for a strategy absent from its dict.
+_PAYOFF_DRIVER_STRATEGIES = frozenset({"STR-THRU"})
+_PAYOFF_DRIVER_FIELD = {"STR-THRU": "driver_prediction"}
 
 # -- Advisory-vs-refusal flag taxonomy ---------------------------------------
 # Whether a reason code the scorer emits merely ANNOTATES a row that still
@@ -995,6 +1017,144 @@ def _execute_simulation(
     return output
 
 
+def _model_seed(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> int:
+    """Deterministic RNG seed from answer-free identity, when none is given.
+
+    Mirrors the SHAPE of engine/score.py:2164-2168's
+    ``sha256(f"{snapshot}|{key}")`` -- one stable string hashed to an int --
+    without depending on legacy's ``Scorer.snapshot``/``ScoreRequest.key()``,
+    neither of which a bounded source builder carries. Built from
+    ``source_ref`` (this request's own content-addressed identity) plus the
+    driver prediction actually used, so two distinct requests draw
+    independent Monte Carlo paths.
+    """
+    key = f"{inputs.source_ref}|model|{values.get('driver_prediction')}"
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big")
+
+
+def _model_driver_and_cost(
+    name: str,
+    block: Mapping[str, Any],
+    values: Mapping[str, Any],
+    flags: list[str],
+) -> tuple[float, float, float] | None:
+    """Resolve the driver/spot/entry_cost a payoff line would be pushed
+    through, or add the refusing flag and return ``None``.
+
+    ``None`` here always means a flag was already added by this function --
+    callers just propagate it as "nothing more to do".
+    """
+    if name not in _PAYOFF_DRIVER_STRATEGIES:
+        _add_flag(flags, "NO_PAYOFF_MAP")
+        return None
+    driver_field = _PAYOFF_DRIVER_FIELD[name]
+    driver = _finite(values.get(driver_field))
+    spot = _finite(values.get("spot"))
+    cost = _finite(values.get("entry_cost"))
+    if driver is None:
+        _add_flag(flags, f"MISSING_MODEL_INPUT:{driver_field}")
+        return None
+    if spot is None or cost is None or cost <= 0.0:
+        # No entry cost, no denominator -- engine/score.py:2180-2188's own
+        # guard. A row already refused for the missing chain keeps that
+        # reason rather than picking up a second, misleading one.
+        if "COARSE_LADDER" not in flags:
+            _add_flag(flags, "NO_CHAIN")
+        return None
+    return driver, spot, cost
+
+
+def _model_fit_and_pool(
+    block: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    driver: float,
+    flags: list[str],
+) -> tuple[dict[str, Any], np.ndarray] | None:
+    """Fit the causal payoff line and the driver's own residual pool.
+
+    ``None`` means a flag (NO_PAYOFF_MAP or MISSING_MODEL_RESIDUALS) was
+    already added.
+    """
+    from engine.v2.scoring import native_payoff
+
+    rows = block.get("payoff_source_rows")
+    if not isinstance(rows, (list, tuple)):
+        _add_flag(flags, "NO_PAYOFF_MAP")
+        return None
+    fit = native_payoff.fit_payoff_line(
+        rows,
+        before=recipe.get("before"),
+        min_trades=int(recipe.get("min_trades", native_payoff.MIN_TRADES)),
+        max_residuals=int(recipe.get("max_residuals", native_payoff.MAX_RESIDUALS)),
+        residual_seed=int(recipe.get("residual_seed", native_payoff.RESIDUAL_SEED)),
+    )
+    if fit is None:
+        _add_flag(flags, "NO_PAYOFF_MAP")
+        return None
+    residual_recipe = block.get("model_residual_recipe") or {}
+    driver_pool = native_payoff.driver_residual_pool(
+        block.get("model_residual_rows"), driver,
+        deciles=int(residual_recipe.get("deciles", native_payoff.DECILES)),
+        min_pool=int(residual_recipe.get("min_pool", native_payoff.MIN_POOL)),
+    )
+    if driver_pool is None or driver_pool.size == 0:
+        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+        return None
+    return fit, driver_pool
+
+
+def _execute_model(
+    inputs: NativeScoreInputs,
+    name: str,
+    values: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    """Payoff-calibration/model layer: exp_pnl_model, win_model.
+
+    Mirrors engine/score.py:2067-2218 (``_score_model``) using
+    ``native_payoff``'s pure re-derivation of ``engine/payoff.py``'s
+    ``fit_payoff``/``simulate_returns`` and
+    ``engine/models/registry.py``'s ``bucket_residuals``/``residual_pool``
+    (engine/v2 has no dependency on legacy ``engine/`` code -- see
+    ATM_TOLERANCE_PCT above). NO_PAYOFF_MAP fires exactly where legacy fires
+    it: a strategy absent from PAYOFF_DRIVER (engine/payoff.py:79-93,
+    ``driver_for``), or too few closed trades before the decision cutoff to
+    fit a line (engine/payoff.py:332-337, ``PayoffError``).
+    """
+    from engine.v2.scoring import native_payoff
+
+    block = inputs.model
+    recipe = block.get("payoff_recipe")
+    if recipe is None:
+        if any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
+            _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
+        return {}
+    if not isinstance(recipe, Mapping):
+        _add_flag(flags, "INVALID_PAYOFF_RECIPE")
+        return {}
+    driver_cost = _model_driver_and_cost(name, block, values, flags)
+    if driver_cost is None:
+        return {}
+    driver, spot, cost = driver_cost
+    fitted = _model_fit_and_pool(block, recipe, driver, flags)
+    if fitted is None:
+        return {}
+    fit, driver_pool = fitted
+    draws = int(recipe.get("draw_count", native_payoff.MODEL_DRAWS))
+    seed = recipe.get("seed")
+    seed = int(seed) if seed is not None else _model_seed(inputs, values)
+    returns = native_payoff.simulate_model_returns(
+        driver, driver_pool, fit["residuals"], fit["intercept"], fit["slope"],
+        spot, cost, draws, np.random.default_rng(seed),
+    )
+    output = {
+        "exp_pnl_model": float(np.mean(returns)),
+        "win_model": float(np.mean(returns > 0.0)),
+    }
+    values.update(output)
+    return output
+
+
 def _execute_analogs(
     inputs: NativeScoreInputs,
     values: dict[str, Any],
@@ -1144,11 +1304,13 @@ def _append_late_stages(
     flags: list[str],
     observer: StageObserver | None,
 ) -> None:
-    blocks = (inputs.context, inputs.features, inputs.forecast, inputs.analogs,
-              inputs.simulation, inputs.gate, inputs.chooser, inputs.diagnostics)
+    blocks = (inputs.context, inputs.features, inputs.forecast, inputs.model,
+              inputs.analogs, inputs.simulation, inputs.gate, inputs.chooser,
+              inputs.diagnostics)
     if compatibility:
         for stage, block in (
-            ("analogs", inputs.analogs), ("simulation", inputs.simulation),
+            ("model", inputs.model), ("analogs", inputs.analogs),
+            ("simulation", inputs.simulation),
             ("gate", inputs.gate), ("chooser", inputs.chooser),
             ("diagnostics", inputs.diagnostics),
         ):
@@ -1158,6 +1320,11 @@ def _append_late_stages(
                 observer,
             )
     else:
+        model_output = _execute_model(inputs, geometry.strategy, values, flags)
+        _emit_stage(
+            executed, "model", {"prior": executed[-1].output_hash},
+            model_output, observer,
+        )
         analog_output = _execute_analogs(inputs, values, flags)
         _emit_stage(
             executed, "analogs", {"prior": executed[-1].output_hash},

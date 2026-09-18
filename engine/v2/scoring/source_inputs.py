@@ -60,6 +60,19 @@ _BUCKET_ANALOG_RECIPE_FIELDS = frozenset({
 _GATE_RECIPE_FIELDS = frozenset({
     "model", "threshold", "recipe_id", "artifact_ref", "artifact_hashes",
 })
+# Payoff-calibration/model-layer recipe fields. ``before`` is the decision's
+# evidence cutoff (a raw fact, matched against each row's own exit_date by
+# the native stage -- see stages.py's ``_execute_model``/``native_payoff.
+# fit_payoff_line``), never a
+# calculated answer. ``min_trades``/``max_residuals``/``residual_seed`` mirror
+# engine/payoff.py's MIN_TRADES/MAX_RESIDUALS/RESIDUAL_SEED; ``draw_count``
+# mirrors engine/score.py's MODEL_DRAWS; ``seed`` overrides the derived
+# seed for tests that need a fixed one (parity checks).
+_PAYOFF_RECIPE_FIELDS = frozenset({
+    "before", "min_trades", "max_residuals", "residual_seed", "draw_count",
+    "seed",
+})
+_MODEL_RESIDUAL_RECIPE_FIELDS = frozenset({"deciles", "min_pool"})
 _SIZE_STRATEGIES = frozenset({
     "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7",
     "CTR5",
@@ -106,6 +119,18 @@ class SourceBundle:
     analog_source_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     # This request's own bucket membership (no outcome, no legacy answer).
     analog_query: Mapping[str, Any] = field(default_factory=dict)
+    # Payoff-calibration/model layer (exp_pnl_model, win_model), mirroring
+    # the analog fields above exactly: a recipe describes the fit, the rows
+    # are real PRIOR trades' own outcomes (driver, spot_entry, exit_value,
+    # exit_date), never this row's own answer. Empty by default -- the model
+    # stage stays not-applicable until a caller opts in.
+    payoff_recipe: Mapping[str, Any] = field(default_factory=dict)
+    payoff_source_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # The champion driver model's own held-out (prediction, residual) pairs
+    # -- a fixed, artifact-owned population (see native_payoff.py), not this
+    # row's own answer either.
+    model_residual_recipe: Mapping[str, Any] = field(default_factory=dict)
+    model_residual_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -275,6 +300,42 @@ def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     }
 
 
+def _model_block(bundle: SourceBundle) -> dict[str, Any]:
+    """Express the payoff-calibration/model-layer recipe, mirroring ``_analog_block``.
+
+    An empty ``payoff_recipe`` means nothing was requested: the model stage
+    stays not-applicable (``{}``), matching every bundle built before this
+    field existed. A non-empty recipe is a positive request -- the declared
+    recipe (and rows, when present) are carried through even when the rows
+    are absent or insufficient, so the native model stage reports
+    NO_PAYOFF_MAP itself rather than this builder silently downgrading a
+    real request to not-applicable.
+    """
+    recipe = _bounded_recipe(
+        "payoff_recipe", bundle.payoff_recipe, _PAYOFF_RECIPE_FIELDS,
+    )
+    if not recipe:
+        if (bundle.payoff_source_rows or bundle.model_residual_rows
+                or bundle.model_residual_recipe):
+            raise ValueError(
+                "payoff_source_rows/model_residual_* supplied without a "
+                "payoff_recipe"
+            )
+        return {}
+    _reject_answers("payoff_source_rows", bundle.payoff_source_rows)
+    _reject_answers("model_residual_rows", bundle.model_residual_rows)
+    residual_recipe = _bounded_recipe(
+        "model_residual_recipe", bundle.model_residual_recipe,
+        _MODEL_RESIDUAL_RECIPE_FIELDS,
+    )
+    return {
+        "payoff_recipe": recipe,
+        "payoff_source_rows": [dict(row) for row in bundle.payoff_source_rows],
+        "model_residual_recipe": residual_recipe,
+        "model_residual_rows": [dict(row) for row in bundle.model_residual_rows],
+    }
+
+
 def _declaration_receipts(
     source_ref: str,
     strategy: str,
@@ -282,6 +343,7 @@ def _declaration_receipts(
     features: Mapping[str, Any],
     forecast: Mapping[str, Any],
     quotes: Mapping[Any, Any],
+    model: Mapping[str, Any],
     analogs: Mapping[str, Any],
     simulation: Mapping[str, Any],
     gate: Mapping[str, Any],
@@ -293,6 +355,7 @@ def _declaration_receipts(
         ("forecast", features, forecast),
         ("geometry", {"strategy": strategy, "context": context}, pending),
         ("pricing", {"raw_quotes": quotes}, pending),
+        ("model", {"recipe": model}, pending),
         ("analogs", {"recipe": analogs}, pending),
         ("simulation", {"recipe": simulation}, pending),
         ("gate", {"recipe": gate}, pending),
@@ -341,11 +404,12 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
     simulation = _bounded_recipe(
         "residual_recipe", bundle.residual_recipe, _RESIDUAL_RECIPE_FIELDS,
     )
+    model = _model_block(bundle)
     analogs = _analog_block(bundle)
     gate = _gate_block(bundle.gate_recipe)
     receipts = _declaration_receipts(
         bundle.source_ref, strategy, context, features, forecast, quotes,
-        analogs, simulation, gate,
+        model, analogs, simulation, gate,
     )
     return NativeScoreInputs(
         context=context,
@@ -353,6 +417,7 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
         forecast=forecast,
         geometry=None,
         pricing=None,
+        model=model,
         analogs=analogs,
         simulation=simulation,
         gate=gate,
