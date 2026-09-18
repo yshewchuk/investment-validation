@@ -419,11 +419,12 @@ class _AnalogMatchEvidence:
         )
         self.request_key = request_key
         self.bucket_query = _json_value(bucket_query)
-        # Row-level cache: shared across every _evidence_rows call THIS
-        # instance makes (population, causal pool, every widening step) — see
-        # _evidence_rows' docstring. When the matcher hands in its OWN
-        # persistent cache (the normal path), that sharing extends across
-        # every OTHER candidate scored against this matcher too.
+        # Row-level cache, scoped to POPULATION content only (see the class
+        # docstring below for why this must not be shared with the causal
+        # pool's own row cache). Used for this one _documented() call, then
+        # `set_causal` swaps `self._row_cache` to the causal-scoped one for
+        # every call that follows (add_step, emit) — they all read `pool`/
+        # `matched`, which are causal-provenance frames, never `population`.
         self._row_cache: dict[Any, dict[str, Any]] = (
             {} if row_cache is None else row_cache
         )
@@ -444,7 +445,19 @@ class _AnalogMatchEvidence:
         implied_edges: tuple[float, float] | None,
         *,
         causal_key: Any = None,
+        row_cache: dict[Any, dict[str, Any]] | None = None,
     ) -> None:
+        # Swap to a row cache scoped to THIS causal_key from here on: `pool`
+        # carries an `implied_tercile` recomputed from causal (as_of-
+        # dependent) edges via `.assign()` in `match()`, which is DIFFERENT
+        # content for the same row index than the population's own
+        # `implied_tercile` (population-wide edges) — and different again
+        # across two causal pools with different `as_of`/edges. Reusing the
+        # population's row cache here, or one causal_key's cache for
+        # another, would silently serve a row with the wrong tercile label
+        # (a real bug caught in review: content, not just cost, depends on
+        # which frame/as_of a row's cached value came from).
+        self._row_cache = {} if row_cache is None else row_cache
         self.causal = _documented(
             pool, row_cache=self._row_cache,
             doc_cache=self._documented_causal, doc_key=causal_key,
@@ -529,10 +542,25 @@ class AnalogMatcher:
         # usually share a bucket) reuse one documented population/causal pool
         # instead of each re-serializing and separately retaining its own —
         # see `_documented`'s docstring and `_evidence_rows`' for the
-        # measured effect. `_row_cache` backs both: it is the one place a
-        # single row's JSON-safe value is ever built, no matter how many of
-        # population/causal/every widening step touch that row.
-        self._row_cache: dict[Any, dict[str, Any]] = {}
+        # measured effect.
+        #
+        # Row caches are scoped PER documented-block key, not shared
+        # globally by pandas index. Content, not just cost, differs by
+        # provenance: `match()` recomputes `implied_tercile` on the causal
+        # pool from CAUSAL (as_of-dependent) edges via `.assign()`, which
+        # differs from the population's own `implied_tercile` (population-
+        # wide edges, set once in `bucket_frame`) for the SAME row index —
+        # and differs again between two causal pools at different `as_of`.
+        # A single index-keyed cache shared across all of these would serve
+        # a row with whichever tercile label happened to be cached first,
+        # silently wrong for every other caller. One row cache per
+        # population key and one per causal key keeps each key's rows
+        # self-consistent while still sharing across every candidate that
+        # matches the SAME key.
+        self._population_row_caches: dict[tuple[str, float], dict[Any, dict[str, Any]]] = {}
+        self._causal_row_caches: dict[
+            tuple[str, float, pd.Timestamp | None], dict[Any, dict[str, Any]]
+        ] = {}
         self._documented_pools: dict[tuple[str, float], dict[str, Any]] = {}
         self._documented_causal: dict[
             tuple[str, float, pd.Timestamp], dict[str, Any]
@@ -637,7 +665,7 @@ class AnalogMatcher:
                 request_key=request_key,
                 bucket_query=buckets,
                 population=base,
-                row_cache=self._row_cache,
+                row_cache=self._population_row_caches.setdefault(key, {}),
                 documented_pools=self._documented_pools,
                 population_key=key,
                 documented_causal=self._documented_causal,
@@ -687,10 +715,12 @@ class AnalogMatcher:
                     evicted = next(iter(self._causal_pools))
                     self._causal_pools.pop(evicted)
                     # Kept in lockstep with _causal_pools: a documented block
-                    # for a pool that no longer exists would grow unbounded,
-                    # never evicted, for a scan that touches many as_of dates
-                    # (recalibrate.build_pairs, the calibration sampler).
+                    # (or row cache) for a pool that no longer exists would
+                    # grow unbounded, never evicted, for a scan that touches
+                    # many as_of dates (recalibrate.build_pairs, the
+                    # calibration sampler).
                     self._documented_causal.pop(evicted, None)
+                    self._causal_row_caches.pop(evicted, None)
                 self._causal_pools[cache_key] = (pool, edges)
             ratio = buckets.get("implied_ratio")
             if ratio is not None and edges is not None:
@@ -699,7 +729,10 @@ class AnalogMatcher:
                                                      ("low", "mid", "high"))[0]
             causal_edges = edges
         if evidence is not None:
-            evidence.set_causal(pool, buckets, causal_edges, causal_key=causal_key)
+            evidence.set_causal(
+                pool, buckets, causal_edges, causal_key=causal_key,
+                row_cache=self._causal_row_caches.setdefault(causal_key, {}),
+            )
 
         # A dimension with no value cannot match on, and must be COUNTED as
         # dropped rather than quietly skipped. The loop below used to `continue`

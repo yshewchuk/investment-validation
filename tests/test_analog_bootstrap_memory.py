@@ -347,8 +347,10 @@ def test_evidence_row_cache_is_read_only():
     matcher.match("STR-THRU", buckets, alpha=0.5, as_of="2024-01-01",
                    min_analogs=1, bootstrap=0, evidence_hook=captured.append)
 
-    assert len(matcher._row_cache) > 0
-    cached_entry = next(iter(matcher._row_cache.values()))
+    assert len(matcher._causal_row_caches) > 0
+    row_cache = next(iter(matcher._causal_row_caches.values()))
+    assert len(row_cache) > 0
+    cached_entry = next(iter(row_cache.values()))
     with pytest.raises(TypeError):
         cached_entry["values"]["ret"] = 999.0
 
@@ -403,3 +405,151 @@ def test_retention_across_20_same_bucket_candidates_stays_bounded():
         f"peak_shared={peak_shared/1e6:.1f}MB not well below "
         f"peak_independent={peak_independent/1e6:.1f}MB for {n}-row x20 candidates"
     )
+
+
+# -- row-cache content-provenance bug (review finding, fixed after fd34bcd) --
+#
+# The matcher-lifetime row cache in fd34bcd was keyed by pandas index alone.
+# But `match()` recomputes `implied_tercile` on the causal pool from CAUSAL
+# (as_of-dependent) edges via `.assign()` — different content for the same
+# row index than the population's own `implied_tercile` (population-wide
+# edges from `bucket_frame`), and different again between two causal pools
+# at different `as_of`. An index-keyed cache shared across those frames
+# silently serves whichever tercile label was cached first. The fix scopes
+# one row cache per population key and one per causal key.
+
+
+def _trades_with_trending_implied_ratio(n: int, *, seed: int = 0) -> pd.DataFrame:
+    """Same single mcap/dte/moneyness bucket as `_trades`, but `implied_ratio`
+    trends up with `event_date`, so: (a) the population-wide tercile edges
+    (fit over ALL rows) differ from any as_of-restricted causal pool's edges,
+    and (b) two causal pools with different `as_of` cutoffs — different
+    prefixes of this trend — get different edges from EACH OTHER too. Both
+    are needed to make a stale/wrong-provenance cache hit observable.
+    """
+    rng = np.random.default_rng(seed)
+    order = np.arange(n)
+    event_date = pd.Timestamp("2015-01-01") + pd.to_timedelta(order, unit="D")
+    frame = pd.DataFrame({
+        "strategy": "STR-THRU",
+        "fill_alpha": 0.5,
+        "ret": rng.normal(0, 0.3, n),
+        "mcap_usd": 5e9,
+        "dte_entry": 5,
+        "spot_entry": 100.0,
+        "strike": 100.0,
+        # Trends from ~1.0 to ~3.0 over the span; mean_prior fixed at 1.0, so
+        # implied_ratio == or_implied trends the same way.
+        "or_implied": 1.0 + 2.0 * (order / max(n - 1, 1)),
+        "mean_prior_or_implied": 1.0,
+        "event_date": event_date,
+        "exit_date": event_date + pd.Timedelta(days=1),
+    })
+    return frame
+
+
+def _causal_tercile_edges(trades: pd.DataFrame, as_of: str) -> tuple[float, float]:
+    """Independent reference: the SAME computation `match()` does inline,
+    recomputed from scratch (no cache of any kind) for one `as_of`.
+    """
+    ts = pd.Timestamp(as_of).normalize()
+    causal = trades[trades["exit_date"] < ts]
+    ratio = causal["or_implied"] / causal["mean_prior_or_implied"]
+    finite = ratio[np.isfinite(ratio)]
+    if len(finite) < 30:
+        return (0.9, 1.1)
+    return tuple(float(e) for e in np.quantile(finite, [1 / 3, 2 / 3]))
+
+
+def _values_by_source_index(block: dict) -> dict:
+    return {row["source_index"]: row["values"] for row in block["rows"]}
+
+
+def test_population_then_causal_in_one_match_preserves_implied_tercile():
+    """Population is documented first (in `_AnalogMatchEvidence.__init__`),
+    causal second (in `set_causal`) -- both touch the same row indices. The
+    causal block's `implied_tercile` must reflect CAUSAL edges, not whatever
+    the population's own row cache happened to compute first.
+    """
+    from engine.analogs import _bucket
+
+    trades = _trades_with_trending_implied_ratio(200, seed=1)
+    matcher = AnalogMatcher(trades.copy(), snapshot="synthetic-snapshot")
+    as_of = "2015-06-01"  # roughly the midpoint of the 200-day span
+    buckets = matcher.buckets_for(mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=2.0)
+
+    captured = []
+    matcher.match("STR-THRU", buckets, alpha=0.5, as_of=as_of, min_analogs=1,
+                   bootstrap=0, evidence_hook=captured.append)
+    evidence = captured[0]
+
+    causal_edges = _causal_tercile_edges(trades, as_of)
+    population_values = _values_by_source_index(evidence["population"])
+    causal_values = _values_by_source_index(evidence["causal"])
+
+    saw_a_mismatch_opportunity = False
+    for source_index, values in causal_values.items():
+        ratio = values["implied_ratio"]
+        expected = _bucket([ratio], causal_edges, ("low", "mid", "high"))[0]
+        assert values["implied_tercile"] == expected, (
+            f"row {source_index}: causal tercile {values['implied_tercile']!r} "
+            f"!= expected {expected!r} from causal edges {causal_edges}"
+        )
+        population_tercile = population_values[source_index]["implied_tercile"]
+        if population_tercile != expected:
+            saw_a_mismatch_opportunity = True
+    # If every row's population and causal tercile happened to agree, this
+    # fixture would not distinguish the fix from the bug -- fail loudly
+    # rather than pass for the wrong reason.
+    assert saw_a_mismatch_opportunity, (
+        "fixture did not exercise a population/causal tercile disagreement"
+    )
+
+
+def test_two_candidates_different_as_of_get_correct_own_tercile_labels():
+    """Candidate B, scored on the SAME matcher right after candidate A
+    (sharing a bucket, different `as_of`, overlapping causal rows), must
+    report ITS OWN causal edges' tercile for every row -- not A's, and not
+    the population's. Checked against the independently-computed ground
+    truth (not against a second "fresh matcher" run: population is always
+    documented before causal for EVERY matcher, fresh or not, so a fresh
+    reference suffers the identical population-poisons-causal contamination
+    and would agree with a buggy shared result for the wrong reason -- see
+    test_documented_population_and_causal_content_is_independent_of_sharing
+    for that byte-identical-to-a-fresh-matcher property instead).
+    """
+    from engine.analogs import _bucket
+
+    trades = _trades_with_trending_implied_ratio(200, seed=2)
+    buckets = AnalogMatcher(trades.copy()).buckets_for(
+        mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=2.0)
+    as_of_a, as_of_b = "2015-04-01", "2015-09-01"
+    edges_a = _causal_tercile_edges(trades, as_of_a)
+    edges_b = _causal_tercile_edges(trades, as_of_b)
+    assert edges_a != edges_b, "fixture must give the two as_of dates different edges"
+
+    shared_matcher = AnalogMatcher(trades.copy(), snapshot="synthetic-snapshot")
+
+    def run(matcher, as_of):
+        captured = []
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=as_of, min_analogs=1,
+                       bootstrap=0, evidence_hook=captured.append)
+        return captured[0]
+
+    captured_a = run(shared_matcher, as_of_a)  # warms the shared caches
+    captured_b = run(shared_matcher, as_of_b)  # must not reuse A's rows/edges
+
+    for label, captured, edges, other_edges in (
+        ("A", captured_a, edges_a, edges_b), ("B", captured_b, edges_b, edges_a),
+    ):
+        causal_values = _values_by_source_index(captured["causal"])
+        wrong = []
+        for source_index, values in causal_values.items():
+            ratio = values["implied_ratio"]
+            expected = _bucket([ratio], edges, ("low", "mid", "high"))[0]
+            if values["implied_tercile"] != expected:
+                wrong.append((source_index, values["implied_tercile"], expected))
+        assert not wrong, (
+            f"candidate {label}: {len(wrong)} rows do not match candidate "
+            f"{label}'s own causal edges {edges} — e.g. {wrong[0]}"
+        )
