@@ -1524,9 +1524,9 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "verdicts": native.gate_terms.get("gate_pass") == record.get("gate_pass"),
             "flags": _semantic_flags({"flags": native.reason_codes}) == (
                 _semantic_flags(record)
-                + (["UNVALIDATED_STRUCTURE"] if record.get("strategy") in
+                + ("UNVALIDATED_STRUCTURE",) if record.get("strategy") in
                    {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
-                   (record.get("flags") or ()) else [])
+                   (record.get("flags") or ()) else ()
             ),
             "null_masks": native.null_masks == {
                 key: value is None for key, value in (record.get("model_inputs") or {}).items()
