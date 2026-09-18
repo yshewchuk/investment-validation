@@ -1991,14 +1991,21 @@ class Scorer:
                 },
                 role=driver,
             )
-            collector.capture_source_bundle(
-                model_bindings=({
-                    "model_id": entry.id,
-                    "role": driver,
-                    "feature_order": tuple(artifact.features),
-                    "input_as_of": result.model_input_as_of,
-                },),
-            )
+            if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+                collector.capture_source_bundle(
+                    model_bindings=({
+                        "model_id": entry.id,
+                        "role": driver,
+                        "feature_order": tuple(artifact.features),
+                        "artifact": str(entry.path),
+                        "artifact_sha256": entry.artifact_sha256,
+                        "adapter": "joblib-estimator.v1",
+                        "output_names": ("driver_prediction",),
+                        "strategy": request.strategy,
+                        "decision_offset": entry.decision_offset,
+                        "input_as_of": result.model_input_as_of,
+                    },),
+                )
 
         missing = [f for f in artifact.features if f not in features.columns]
         if missing:
@@ -2145,6 +2152,24 @@ class Scorer:
                     },
                     role=role,
                 )
+                if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+                    collector.capture_source_bundle(
+                        model_bindings=({
+                            "model_id": entry.id,
+                            "role": role,
+                            "feature_order": tuple(artifact.features),
+                            "artifact": str(entry.path),
+                            "artifact_sha256": entry.artifact_sha256,
+                            "adapter": "joblib-estimator.v1",
+                            "output_names": (
+                                "implied_t1" if role == "implied_t1"
+                                else "runup_move_prediction"
+                            ),
+                            "strategy": request.strategy,
+                            "decision_offset": entry.decision_offset,
+                            "input_as_of": result.model_input_as_of,
+                        },),
+                    )
         missing = [name for name in all_features if name not in features.columns]
         if missing:
             result.flag("MISSING_FEATURES")
@@ -2504,6 +2529,21 @@ class Scorer:
         verdict = rule.evaluate(facts)
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is not None:
+            if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+                collector.capture_source_bundle(
+                    model_bindings=({
+                        "model_id": entry.id,
+                        "role": "gate",
+                        "feature_order": tuple(artifact.features),
+                        "artifact": str(entry.path),
+                        "artifact_sha256": entry.artifact_sha256,
+                        "adapter": "joblib-estimator.v1",
+                        "output_names": ("gate_score",),
+                        "strategy": request.strategy,
+                        "decision_offset": entry.decision_offset,
+                        "threshold": entry.threshold,
+                    },),
+                )
             collector.capture_gate_inputs({
                 "kind": "entry_rule",
                 "rule_identity": f"entry-rule:{rule.strategy}",
