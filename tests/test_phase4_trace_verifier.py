@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -538,3 +539,168 @@ def test_expected_population_comes_from_release_manifest_members(tmp_path):
     assert parity["population"]["expected"] == 2
     assert parity["population"]["manifest_bound"] is True
     assert parity["complete"] is False
+
+
+# --------------------------------------------------------------------------
+# R4-3: the comparator must not silently omit gate_score/gate_threshold,
+# ci_low/ci_high/n_analogs, or the contract's entry/exit/execution dates.
+# Each field gets its own synthetic pair proving a change in ONLY that
+# field is caught, per checks/phase4_real.py's own newly-added dimensions
+# ("verdicts", "analogs") and the extended _contract_projection.
+# --------------------------------------------------------------------------
+
+
+def _r43_record(**overrides):
+    base = {
+        "gate_score": 0.7, "gate_threshold": 0.6, "gate_pass": True,
+        "ci_low": -0.0123, "ci_high": 0.0456, "n_analogs": 42,
+    }
+    base.update(overrides)
+    return base
+
+
+def _r43_native(**overrides):
+    base = dict(
+        forecasts={}, uncertainty={},
+        resolved_request={"ci_low": -0.0123, "ci_high": 0.0456, "n_analogs": 42},
+        financial_diagnostics={},
+        gate_terms={"gate_score": 0.7, "gate_threshold": 0.6, "gate_pass": True},
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_verdicts_and_analogs_dimensions_agree_on_identical_pairs():
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), _r43_native())
+    assert comparison["verdicts"]["agree"] is True
+    assert comparison["verdicts"]["finding_fields"] == []
+    assert comparison["analogs"]["agree"] is True
+    assert comparison["analogs"]["finding_fields"] == []
+
+
+def test_gate_score_only_difference_is_caught():
+    native = _r43_native(gate_terms={
+        "gate_score": 0.71, "gate_threshold": 0.6, "gate_pass": True,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["verdicts"]["agree"] is False
+    assert comparison["verdicts"]["finding_fields"] == ["gate_score"]
+
+
+def test_gate_threshold_only_difference_is_caught():
+    native = _r43_native(gate_terms={
+        "gate_score": 0.7, "gate_threshold": 0.61, "gate_pass": True,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["verdicts"]["agree"] is False
+    assert comparison["verdicts"]["finding_fields"] == ["gate_threshold"]
+
+
+def test_gate_pass_only_difference_is_caught():
+    native = _r43_native(gate_terms={
+        "gate_score": 0.7, "gate_threshold": 0.6, "gate_pass": False,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["verdicts"]["agree"] is False
+    assert comparison["verdicts"]["finding_fields"] == ["gate_pass"]
+
+
+def test_ci_low_only_difference_is_caught():
+    native = _r43_native(resolved_request={
+        "ci_low": -0.0999, "ci_high": 0.0456, "n_analogs": 42,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["analogs"]["agree"] is False
+    assert comparison["analogs"]["finding_fields"] == ["ci_low"]
+
+
+def test_ci_high_only_difference_is_caught():
+    native = _r43_native(resolved_request={
+        "ci_low": -0.0123, "ci_high": 0.0999, "n_analogs": 42,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["analogs"]["agree"] is False
+    assert comparison["analogs"]["finding_fields"] == ["ci_high"]
+
+
+def test_n_analogs_only_difference_is_caught():
+    native = _r43_native(resolved_request={
+        "ci_low": -0.0123, "ci_high": 0.0456, "n_analogs": 41,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["analogs"]["agree"] is False
+    assert comparison["analogs"]["finding_fields"] == ["n_analogs"]
+
+
+def _r43_legs():
+    return [{
+        "name": "call", "right": "C", "side": "long", "quantity": 1.0,
+        "strike": 100.0, "expiry": "2026-09-18", "fill": 1.5,
+        "cash_flow": -150.0,
+    }]
+
+
+def test_contract_projection_identical_pair_agrees():
+    left = phase4_real._contract_projection(
+        _r43_legs(), entry_date="2026-09-16", exit_date="2026-09-17",
+        execution_date="2026-09-16",
+    )
+    right = phase4_real._contract_projection(
+        copy.deepcopy(_r43_legs()), entry_date="2026-09-16",
+        exit_date="2026-09-17", execution_date="2026-09-16",
+    )
+    assert left == right
+
+
+def test_contract_projection_catches_entry_date_only_difference():
+    legs = _r43_legs()
+    left = phase4_real._contract_projection(
+        legs, entry_date="2026-09-16", exit_date="2026-09-17",
+        execution_date="2026-09-16",
+    )
+    right = phase4_real._contract_projection(
+        legs, entry_date="2026-09-15", exit_date="2026-09-17",
+        execution_date="2026-09-16",
+    )
+    assert left != right
+    assert left["legs"] == right["legs"]
+    assert left["entry_date"] != right["entry_date"]
+
+
+def test_contract_projection_catches_exit_date_only_difference():
+    legs = _r43_legs()
+    left = phase4_real._contract_projection(
+        legs, entry_date="2026-09-16", exit_date="2026-09-17",
+        execution_date="2026-09-16",
+    )
+    right = phase4_real._contract_projection(
+        legs, entry_date="2026-09-16", exit_date="2026-09-18",
+        execution_date="2026-09-16",
+    )
+    assert left != right
+    assert left["legs"] == right["legs"]
+    assert left["exit_date"] != right["exit_date"]
+
+
+def test_contract_projection_catches_execution_date_only_difference():
+    legs = _r43_legs()
+    left = phase4_real._contract_projection(
+        legs, entry_date="2026-09-16", exit_date="2026-09-17",
+        execution_date="2026-09-16",
+    )
+    right = phase4_real._contract_projection(
+        legs, entry_date="2026-09-16", exit_date="2026-09-17",
+        execution_date="2026-09-17",
+    )
+    assert left != right
+    assert left["legs"] == right["legs"]
+    assert left["execution_date"] != right["execution_date"]
+
+
+def test_contract_projection_dates_absent_on_both_sides_are_none_not_dropped():
+    """A missing date is compared as an explicit None, not silently omitted."""
+    projection = phase4_real._contract_projection(_r43_legs())
+    assert projection["entry_date"] is None
+    assert projection["exit_date"] is None
+    assert projection["execution_date"] is None
+    assert set(projection) == {"legs", "entry_date", "exit_date", "execution_date"}
