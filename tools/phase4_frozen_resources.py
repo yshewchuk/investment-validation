@@ -196,7 +196,16 @@ def _normalized_binding(
     artifact_value = _alias(raw, "artifact", "artifact_path", label)
     digest_value = _alias(raw, "artifact_sha256", "artifact_hash", label)
     strategy_value = _alias(raw, "strategy", "strategy_id", label)
-    clock_value = _alias(raw, "decision_clock", "decision_clock_id", label)
+    clock_value = raw.get("decision_clock")
+    if clock_value is None:
+        clock_value = raw.get("decision_clock_id")
+    if clock_value is None and "decision_offset" in raw:
+        offset = raw.get("decision_offset")
+        if offset is None:
+            offset = 0
+        clock_value = f"legacy.decision_offset.{offset}"
+    if clock_value is None:
+        raise FrozenResourceError(f"{label}.decision_clock: missing")
     digest = _digest(digest_value, f"{label}.artifact_sha256")
     source = _safe_source(artifact_value, source_root, f"{label}.artifact")
     adapter = _nonempty(raw.get("adapter", _DEFAULT_ADAPTER), f"{label}.adapter")
@@ -204,7 +213,11 @@ def _normalized_binding(
         raise FrozenResourceError(f"{label}.adapter: unsupported {adapter}")
     return {
         "model_id": _nonempty(raw.get("model_id"), f"{label}.model_id"),
-        "role": _nonempty(raw.get("role"), f"{label}.role"),
+        "role": {
+            "abs_move": "size",
+            "forecast_sizing": "size",
+        }.get(_nonempty(raw.get("role"), f"{label}.role"),
+              _nonempty(raw.get("role"), f"{label}.role")),
         "strategy_id": _nonempty(strategy_value, f"{label}.strategy"),
         "decision_clock_id": _nonempty(clock_value, f"{label}.decision_clock"),
         "adapter": adapter,
