@@ -362,13 +362,19 @@ def _analog_recipe(rows: list[dict]) -> dict:
 
 def test_no_analog_recipe_stays_silent_and_unowned_check_still_fires():
     # Genuinely not-applicable: analogs={} carries no recipe and no inputs at
-    # all (R4-7 negative control). This must keep behaving exactly as today:
-    # no MISSING_ANALOG_INPUT flag, no analog outputs, record still scores.
+    # all (R4-7 negative control): no MISSING_ANALOG_INPUT flag, no analog
+    # outputs. `_native()` also carries no model layer, so this row is the
+    # exact defect fixed 2026-09-18 (engine/score.py:847-848 legacy parity):
+    # zero exp_pnl_model/exp_pnl_analog numbers and no other refusing flag
+    # must not read as "scored" -- it is refused with the native NO_SCORE
+    # code instead of passing silently, which is the behavior change from
+    # what this test asserted before that fix.
     record = application.score_one(_request(), _native())
 
     assert "MISSING_ANALOG_INPUT" not in record.reason_codes
     assert record.resolved_request.get("exp_pnl_analog") is None
-    assert record.validation_status == "scored"
+    assert record.validation_status == "refused"
+    assert "NO_SCORE" in record.reason_codes
 
     # A stray owned output with no recipe/inputs at all is still reported by
     # the pre-existing UNOWNED_ANALOG_OUTPUT check, unaffected by this fix.

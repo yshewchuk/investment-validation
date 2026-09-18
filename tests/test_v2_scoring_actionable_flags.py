@@ -9,6 +9,7 @@ import math
 
 from engine.v2.contracts import ScoreRequest
 from engine.v2.scoring import application
+from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
@@ -40,8 +41,29 @@ _QUOTES = {
 }
 
 
+def _analog_block() -> dict:
+    # A minimal real analog recipe so a row can carry an actual
+    # exp_pnl_analog number (engine/score.py:847-848 legacy parity, applied
+    # in application._has_score_number) instead of the default
+    # not-applicable block, for tests that need "scored" to mean something.
+    rows = [
+        {"row_id": "a", "features": {"move": 1.0}, "realized_pnl": 3.0},
+        {"row_id": "b", "features": {"move": -1.0}, "realized_pnl": -1.0},
+    ]
+    return {
+        "recipe": {
+            "feature_names": ("move",),
+            "neighbors": 2,
+            "population_hash": source_population_hash(rows),
+        },
+        "source_rows": rows,
+        "query_features": {"move": 1.0},
+    }
+
+
 def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
-           quotes=None, diagnostics=None, simulation=None) -> NativeScoreInputs:
+           quotes=None, diagnostics=None, simulation=None,
+           analogs=None) -> NativeScoreInputs:
     context = {
         "ticker": "AAA",
         "strategy": "STR-THRU",
@@ -64,7 +86,7 @@ def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
         forecast=forecast,
         geometry=None,
         pricing=None,
-        analogs={"recipe": None},
+        analogs=analogs if analogs is not None else {"recipe": None},
         simulation=simulation if simulation is not None else {"mode": "not_applicable"},
         gate=gate if gate is not None else {"mode": "not_applicable"},
         chooser={},
@@ -167,7 +189,12 @@ _GATE_MODEL = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0
 
 
 def test_annotation_only_flag_still_scores():
-    record = application.score_one(_request(), _inputs(quotes=_WIDE_QUOTES))
+    # Needs a real number (2026-09-18 fix: a flagless-but-numberless row is
+    # NO_SCORE, not "scored") so this isolates what it claims to test: that
+    # WIDE_MARKET alone does not force a refusal.
+    record = application.score_one(_request(), _inputs(
+        quotes=_WIDE_QUOTES, analogs=_analog_block(),
+    ))
     assert record.validation_status == "scored"
     assert record.readiness == "ready"
     assert "WIDE_MARKET" in record.reason_codes
@@ -199,9 +226,12 @@ def test_out_of_domain_alone_refuses():
 # the taxonomy in engine/v2/scoring/stages.py's ADVISORY_FLAGS.
 
 def test_row_carrying_only_an_advisory_flag_still_scores():
+    # Needs a real number for the same reason as test_annotation_only_flag_
+    # still_scores above.
     inputs = _inputs(
         diagnostics={"flags": ("CHOOSER_MISSING_FEATURES",)},
         simulation={"mode": "not_applicable"},
+        analogs=_analog_block(),
     )
     record = application.score_one(_request(), inputs)
 

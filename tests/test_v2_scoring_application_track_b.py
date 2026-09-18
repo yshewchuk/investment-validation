@@ -22,7 +22,7 @@ def _request(strategy="STR-THRU"):
 
 
 def _native(strategy="STR-THRU", *, chooser_score=0.2, exp_pnl=0.1,
-            flags=(), forged=False):
+            flags=(), forged=False, exp_pnl_analog=None):
     context = {
         "ticker": "AAA", "strategy": strategy, "event_date": "2026-09-16",
         "entry_date": "2026-09-16", "exit_date": "2026-09-17",
@@ -44,7 +44,14 @@ def _native(strategy="STR-THRU", *, chooser_score=0.2, exp_pnl=0.1,
         context=context,
         features={"model_inputs": {"x": 0.0}, "implied_move": 6.0},
         forecast=forecast, geometry=geometry, pricing=priced,
-        analogs={}, simulation={"exp_pnl_sim": exp_pnl},
+        # 2026-09-18 fix (engine/score.py:847-848 legacy parity): a scored
+        # row needs a real exp_pnl_model/exp_pnl_analog number, not just
+        # exp_pnl_sim. compatibility-input mode copies this block verbatim
+        # (stages._append_late_stages), so this is the direct way to give a
+        # fixture a real analog number without exercising the recipe machinery.
+        analogs=({"exp_pnl_analog": exp_pnl_analog} if exp_pnl_analog is not None
+                else {}),
+        simulation={"exp_pnl_sim": exp_pnl},
         gate={"flags": flags, "gate_pass": not flags},
         chooser={"chooser_score": chooser_score}, diagnostics={"flags": ()},
         source_ref="fixture", stage_receipts=receipts,
@@ -58,6 +65,9 @@ def _override_native(strategy="STR-THRU"):
         "expiry": "2026-09-18", "spot": 100.0, "entry_cost": 3.0,
         "driver_name": "abs_move", "driver_prediction": 7.0,
         "forecast_abs_move": 7.0, "model_inputs": {}, "flags": (),
+        # 2026-09-18 fix: a "scored" row needs a real exp_pnl_model/
+        # exp_pnl_analog number (engine/score.py:847-848 legacy parity).
+        "exp_pnl_analog": 0.1,
     }
     priced_legs = []
     for strike in (100.0, 105.0):
@@ -131,7 +141,7 @@ def test_dynamic_requires_simulation_before_ranking_and_preserves_flags():
         replace(
             _native(
                 "TWIN-P5", chooser_score=0.2, exp_pnl=0.1,
-                flags=("CHOOSER_MISSING_FEATURES",),
+                flags=("CHOOSER_MISSING_FEATURES",), exp_pnl_analog=0.1,
             ),
             source_ref="compatibility-input",
         ),
@@ -168,7 +178,8 @@ def test_dynamic_uses_one_ranking_rule_and_does_not_veto_flagged_candidate():
     scored = application.score_one(
         _request("TWIN-P"),
         replace(_native("TWIN-P", chooser_score=0.2,
-                        exp_pnl=0.1, flags=("CHOOSER_MISSING_FEATURES",)),
+                        exp_pnl=0.1, flags=("CHOOSER_MISSING_FEATURES",),
+                        exp_pnl_analog=0.1),
                 source_ref="compatibility-input"),
     )
     unscored = application.score_one(

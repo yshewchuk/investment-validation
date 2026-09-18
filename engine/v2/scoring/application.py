@@ -114,10 +114,45 @@ def _chooser_selection(values: Mapping[str, Any]) -> dict[str, Any] | None:
     return _value_fields(values, ("chosen_strategy", "chosen_margin", "menu_size"))
 
 
+# Legacy parity: ``ScoreResult.scored`` (engine/score.py:847-848) is
+# ``exp_pnl_model is not None or exp_pnl_analog is not None`` -- NOT
+# ``exp_pnl_sim``, which is a third, independent layer (engine/score.py:685,
+# NO_PAYOFF_MAP only stops the model layer, THIN_ANALOGS's zero-analog case
+# only empties the analog layer). v2 carries the identical two field names
+# verbatim in ``values``/``legacy_fields`` -- confirmed at
+# engine/v2/serving/bridge.py:317 (``row.get("exp_pnl_model") is not None or
+# row.get("exp_pnl_analog") is not None``), the serving-layer twin of this
+# same rule. This is the scoring-layer version: a row with neither number,
+# and no already-refusing flag, must not be silently marked "scored".
+_SCORE_NUMBER_FIELDS = ("exp_pnl_model", "exp_pnl_analog")
+
+
+def _has_score_number(values: Mapping[str, Any]) -> bool:
+    for name in _SCORE_NUMBER_FIELDS:
+        value = values.get(name)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(number):
+            return True
+    return False
+
+
 def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
                     legacy_fields: Mapping[str, Any]) -> dict[str, Any]:
     features, null_masks = _feature_fields(values)
     reasons = tuple(values.get("flags") or ())
+    if not flags_refuse(reasons) and not _has_score_number(values):
+        # Neither layer produced a number and nothing else already refuses
+        # this row: name the refusal instead of letting it pass silently as
+        # "scored" with no numbers (the defect this guards against). No
+        # legacy flag covers this case -- NO_PAYOFF_MAP/THIN_ANALOGS/etc. are
+        # per-layer, not "both layers empty" -- so this is a native-only code
+        # and is deliberately absent from ADVISORY_FLAGS: it always refuses.
+        reasons = (*reasons, "NO_SCORE")
     diagnostics = financial_diagnostics(values)
     forecasts = _value_fields(values, ("driver_prediction", "forecast_abs_move",
                                         "runup_move_prediction", "exp_pnl_sim",
