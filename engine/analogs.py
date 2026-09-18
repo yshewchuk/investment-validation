@@ -565,6 +565,24 @@ class AnalogMatcher:
         self._documented_causal: dict[
             tuple[str, float, pd.Timestamp], dict[str, Any]
         ] = {}
+        #: Phase 4 strict-capture only: `engine.score.Phase4TraceCollector
+        #: .capture_analog_inputs` derives a trimmed, bucket-dimension-only
+        #: projection of the FULL causal block above (every row, not just the
+        #: matched subset) for its replayable recipe, and used to rebuild that
+        #: projection — and retain a fresh copy of it — for every candidate,
+        #: even candidates sharing this matcher's own (strategy, alpha, as_of)
+        #: causal block by reference. A 40-forward-event strict capture visits
+        #: close to one distinct causal block per event, so the growth was
+        #: roughly linear in candidates scored, not bounded by anything: the
+        #: measured driver of the forward-pass RSS climb this cache fixes.
+        #: Keyed and evicted in lockstep with `_documented_causal` below (same
+        #: key shape); the trace collector only ever reads/writes through
+        #: `capture_analog_inputs`, never iterates it directly.
+        #: Value shape is `(population_hash, documented_rows)` — see
+        #: `Phase4TraceCollector.capture_analog_inputs` for what populates it.
+        self.phase4_recipe_cache: dict[
+            tuple[str, float, pd.Timestamp | None], tuple[str | None, Any]
+        ] = {}
         #: Cache ceiling, in entries. Sized from the workload, not from a round
         #: number: a full three-week board (3,120 rows) generates **34** distinct
         #: keys — 31 entry dates x 2 scoreable strategies — so 64 clears the
@@ -721,6 +739,7 @@ class AnalogMatcher:
                     # calibration sampler).
                     self._documented_causal.pop(evicted, None)
                     self._causal_row_caches.pop(evicted, None)
+                    self.phase4_recipe_cache.pop(evicted, None)
                 self._causal_pools[cache_key] = (pool, edges)
             ratio = buckets.get("implied_ratio")
             if ratio is not None and edges is not None:
