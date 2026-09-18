@@ -1015,9 +1015,17 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
             request = replace(request, model_artifact_refs=package.request_refs)
             inputs, shared_inputs = native_inputs_from_capture(candidate, request)
             runtime = _frozen_runtime(package, release_root, request, inputs)
+            resources = list(package.resource_rows)
+            resources.extend({
+                "resource_id": binding["binding_id"],
+                "ref": binding["request_ref"],
+                "kind": "sidecar",
+                "document": binding,
+                "content_hash": content_hash(binding),
+            } for binding in package.sidecar_document["bindings"])
             trace, native = package_strict_trace(
                 request, inputs, shared_inputs,
-                resources=list(package.resource_rows),
+                resources=resources,
                 metadata={
                     "capture_mode": "bounded-strict-probe",
                     "legacy_checkpoint_hash": content_hash(
