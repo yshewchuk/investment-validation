@@ -20,6 +20,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.phase4_frozen_bridge import prepare_frozen_replay  # noqa: E402
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
 from engine.fills import MID  # noqa: E402
@@ -1390,6 +1391,14 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         source_ref=resolved_inputs["source_ref"],
         stage_receipts=tuple(receipts),
     )
+    frozen_replay = prepare_frozen_replay(
+        release_root=release_root,
+        resource_rows=trace.get("resources"),
+        verified_documents=resources,
+        metadata=trace.get("metadata"),
+        request=request,
+        inputs=inputs,
+    )
     return {
         "request": request,
         "inputs": inputs,
@@ -1404,6 +1413,7 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         "trace_hash": trace_hash,
         "captured_stages": tuple(_REQUIRED_TRACE_STAGES),
         "captured_receipts": tuple(captured_receipts),
+        "frozen_replay": frozen_replay,
     }
 
 
@@ -1456,9 +1466,19 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         legacy_ids.append(pair["payload_hash"])
         try:
             verified = _verified_trace_bundle(pair, corpus.root)
-            native = application.score_one(
-                verified["request"], verified["inputs"],
-            )
+            frozen_replay = verified["frozen_replay"]
+            if frozen_replay is None:
+                native = application.score_one(
+                    verified["request"], verified["inputs"],
+                )
+            else:
+                native = application.score_frozen(
+                    verified["request"],
+                    frozen_replay.inference,
+                    frozen_replay.release,
+                    frozen_replay.requests,
+                    {"_native_inputs": verified["inputs"]},
+                )
             runtime_receipts, runtime_identities = _verify_runtime_execution(
                 verified, native,
             )
@@ -1519,6 +1539,9 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "disposition": "compared",
             "same_input_hash": verified["same_input_receipt"],
             "trace_hash": verified["trace_hash"],
+            "frozen_replay_receipt": (
+                frozen_replay.receipt if frozen_replay is not None else None
+            ),
             "runtime_receipts": runtime_receipts,
             "runtime_identities": runtime_identities,
             "checks": checks,
