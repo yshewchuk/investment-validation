@@ -18,6 +18,7 @@ from tools.capture_tier0_corpus import (
     STRICT_TRACE_SUPPORTED_STRATEGIES,
     StrictTraceCaptureError,
     _frozen_runtime,
+    _merged_model_inputs,
     _role_feature_vectors,
     attach_strict_probe,
     canonical_v2_request,
@@ -153,6 +154,52 @@ def test_capture_conversion_refuses_absent_executable_recipes():
 
     with pytest.raises(StrictTraceCaptureError, match="native_recipes"):
         native_inputs_from_capture(candidate, _request())
+
+
+def test_merged_model_inputs_refuses_a_genuinely_absent_feature():
+    """Characterizes the STR-THRU `has_implied_quote` gap (not a collector bug).
+
+    `engine.features.add_quote_indicators` guarantees `has_implied_quote` is
+    ALWAYS 0.0/1.0 whenever its source column (`or_implied`) exists in the
+    frame -- NaN coerces to `values > 0 == False == 0.0`, never to a null
+    indicator (see the direct check in test_features_quote_indicator.py). So
+    a `None` captured for it, as here, means the whole market block never
+    landed in `built` for this row -- the SAME condition that makes legacy's
+    own `missing = [f for f in artifact.features if f not in features.columns]`
+    check (engine/score.py `_score_model`) flag MISSING_FEATURES and decline
+    to score. The strict validator is right to refuse this row rather than
+    coerce a fabricated value; `attach_strict_probe` is designed to record
+    exactly this as a typed per-pair gap (see
+    test_attach_strict_probe_records_a_typed_gap_and_still_traces_the_rest)
+    rather than fabricate a value or abort the whole capture.
+    """
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="abs_move",
+        driver_vector={"has_implied_quote": None, "mcap_log": 10.0},
+        gate_vector=None,
+    )}
+
+    with pytest.raises(
+        StrictTraceCaptureError,
+        match=r"feature abs_move\.has_implied_quote is missing or nonnumeric",
+    ):
+        _merged_model_inputs(candidate)
+
+
+def test_merged_model_inputs_accepts_the_boolean_quote_indicator_when_present():
+    """The companion case: once `or_implied` exists, the indicator is a real
+    0.0/1.0 float and the same validator accepts it -- confirming the failure
+    above is about genuine absence, not about the value being boolean-shaped.
+    """
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="abs_move",
+        driver_vector={"has_implied_quote": 0.0, "mcap_log": 10.0},
+        gate_vector=None,
+    )}
+
+    merged = _merged_model_inputs(candidate)
+
+    assert merged == {"has_implied_quote": 0.0, "mcap_log": 10.0}
 
 
 def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):

@@ -25,6 +25,7 @@ from engine.data.features.tier4 import (
     COLUMNS,
     FIRST_FOLD,
     FeatureModel,
+    ServingModel,
     Tier4Error,
     build_forecasts,
     fit_fold,
@@ -1134,3 +1135,63 @@ class TestServingIsProcessDeterministic:
             "when the panel's own row order changed -- a row-order "
             "dependency the board's own digest precision would catch"
         )
+
+
+# --------------------------------------------------------------------------
+# ServingModel.artifact_ref -- what a Phase 4 strict trace binds to
+#
+# Fix context: `_size_from_forecast` (engine/score.py) captures the served
+# fold model's FEATURES into a Phase 4 trace but, before this fix, never
+# recorded a `model_bindings` entry for it -- unlike every other scored
+# role. `capture_source_bundle` only derives `native_recipes["forecast"]`
+# from a captured binding (see test_phase4_trace_collector.py), so a
+# FORECAST_SIZED strategy (TWIN-P and friends) hit
+# "source_inputs.native_recipes missing ['forecast']" in strict assembly
+# even though the served model's artifact genuinely exists on disk --
+# `serving_model()` always persists it before returning. `artifact_ref()`
+# is the accessor the fix now calls to get a real path + sha256 instead of
+# leaving the binding out.
+# --------------------------------------------------------------------------
+
+
+def test_serving_model_artifact_ref_points_at_the_persisted_cache_file(tmp_path, monkeypatch):
+    from engine.data.features import tier4 as tier4_module
+
+    monkeypatch.setattr(tier4_module, "SERVING_DIR", tmp_path)
+    fold = pd.Timestamp("2026-01-01")
+    served = ServingModel(
+        estimator=object(),
+        model_id="size_v1_4",
+        fold_start=fold,
+        tier3_snapshot="deadbeef" * 8,
+        features=("has_implied_quote", "mcap_log"),
+    )
+    expected_path = tier4_module._serving_path(
+        served.model_id, served.fold_start, served.tier3_snapshot
+    )
+    expected_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_path.write_bytes(b"not a real joblib file, just needs bytes to hash")
+
+    path, digest = served.artifact_ref()
+
+    assert path == expected_path
+    import hashlib
+
+    assert digest == hashlib.sha256(expected_path.read_bytes()).hexdigest()
+
+
+def test_serving_model_artifact_ref_is_missing_when_never_served(tmp_path, monkeypatch):
+    """No cache file, no answer -- `artifact_ref` must not fabricate a hash."""
+    from engine.data.features import tier4 as tier4_module
+
+    monkeypatch.setattr(tier4_module, "SERVING_DIR", tmp_path)
+    served = ServingModel(
+        estimator=object(),
+        model_id="size_v1_4",
+        fold_start=pd.Timestamp("2026-01-01"),
+        tier3_snapshot="deadbeef" * 8,
+        features=("has_implied_quote",),
+    )
+
+    with pytest.raises(FileNotFoundError):
+        served.artifact_ref()

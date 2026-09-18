@@ -176,6 +176,41 @@ def test_legacy_binding_clock_and_role_are_normalized(
     assert binding["decision_clock_id"] == "legacy.decision_offset.0"
 
 
+def test_output_names_as_a_bare_string_is_refused_not_iterated(tmp_path):
+    """Regression for the STR-RUNUP capture bug (engine/score.py, `_score_runup_model`).
+
+    The binding builder wrote ``"output_names": "runup_move_prediction"`` — a
+    plain string, not a 1-tuple, because the surrounding conditional
+    expression had no trailing comma. ``_strings`` requires a list/tuple and
+    correctly refuses a bare string outright (it does not silently iterate
+    its characters into a bogus multi-item list), which is what turned into
+    "model_bindings[0].output_names: expected nonempty list" in the strict
+    Phase 4 capture. Fixed by wrapping each branch in a 1-tuple.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    path, digest = _artifact(source)
+
+    with pytest.raises(FrozenResourceError, match="output_names: expected nonempty list"):
+        package_frozen_resources(
+            model_bindings=[_binding(path, digest, output_names="runup_move_prediction")],
+            deployment_id="deployment-1",
+            release_root=tmp_path / "release",
+            source_root=source,
+        )
+
+    # The fix: the same value wrapped in a 1-tuple is accepted.
+    package = package_frozen_resources(
+        model_bindings=[_binding(path, digest, output_names=("runup_move_prediction",))],
+        deployment_id="deployment-1",
+        release_root=tmp_path / "release2",
+        source_root=source,
+    )
+    assert package.sidecar_document["bindings"][0]["output_names"] == [
+        "runup_move_prediction",
+    ]
+
+
 def test_output_whitelists_metadata_and_never_copies_answers(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
