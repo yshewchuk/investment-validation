@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from engine.v2.contracts import ScoreRecord, ScoreRequest
 from engine.v2.foundation import content_hash, to_document
+from engine.v2.scoring.frozen_record import freeze_record_fields
 
 __all__ = ["canonical_request", "dependency_hash", "request_hash", "score_id"]
 
@@ -45,8 +46,16 @@ def score_id(record: ScoreRecord | Mapping[str, Any], *, outcome: Any = None) ->
 
 
 def with_score_id(record: ScoreRecord, *, outcome: Any = None) -> ScoreRecord:
-    """Return a record whose ID is derived from its canonical content."""
+    """Return a record whose ID is derived from its canonical content.
+
+    ``ScoreRecord`` mapping fields must be recursively immutable before the
+    record escapes the scoring package. ``dataclasses.replace`` no longer
+    reruns that freeze (the contract module defines shapes only — see
+    ``engine/v2/contracts/scoring.py``), so it is applied explicitly here,
+    the one place every constructed record passes through.
+    """
     request = content_hash(record.canonical_request)
     identity = score_id(record, outcome=outcome)
-    return replace(record, score_id=identity, request_hash=request,
-                   payload_hash=identity)
+    updated = replace(record, score_id=identity, request_hash=request,
+                       payload_hash=identity)
+    return freeze_record_fields(updated)
