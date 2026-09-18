@@ -680,6 +680,17 @@ _FINANCIAL_FIELDS = (
     "entry_cost_pct", "model_vs_market", "fair_premium_pct",
     "premium_vs_fair", "cost_over_width",
 )
+#: gate_pass alone used to stand in for the whole gate: two runs could agree
+#: on the boolean while disagreeing on the score and threshold that produced
+#: it. Compare all three explicitly.
+_GATE_FIELDS = ("gate_score", "gate_threshold", "gate_pass")
+#: ci_low/ci_high/n_analogs previously appeared in no comparison tuple at
+#: all. Both sides carry these as a genuine concept (the legacy record's own
+#: analog columns; the native side's resolved_request, populated by
+#: _execute_analogs in stages.py) — present as a key with a possibly-None
+#: value, never structurally absent, so an ordinary field comparison applies
+#: with no incomparability marker needed.
+_ANALOG_FIELDS = ("ci_low", "ci_high", "n_analogs")
 
 
 def _legacy_fair_premium(record: dict) -> float | None:
@@ -766,6 +777,8 @@ def _numeric_views(record: dict, native) -> tuple[dict, dict]:
         "forecasts": {name: record.get(name) for name in _FORECAST_FIELDS},
         "simulation": {name: record.get(name) for name in _SIMULATION_FIELDS},
         "financial_diagnostics": _expected_financial_diagnostics(record),
+        "verdicts": {name: record.get(name) for name in _GATE_FIELDS},
+        "analogs": {name: record.get(name) for name in _ANALOG_FIELDS},
     }
     native_forecasts = dict(native.forecasts)
     native_uncertainty = dict(native.uncertainty)
@@ -785,6 +798,8 @@ def _numeric_views(record: dict, native) -> tuple[dict, dict]:
             name: native.financial_diagnostics.get(name)
             for name in _FINANCIAL_FIELDS
         },
+        "verdicts": {name: native.gate_terms.get(name) for name in _GATE_FIELDS},
+        "analogs": {name: resolved.get(name) for name in _ANALOG_FIELDS},
     }
     return expected, actual
 
@@ -815,7 +830,8 @@ def _compare_numeric_outputs(record: dict, native, *, actual_override=None) -> d
         actual = actual_override
     return {
         dimension: _compare_dimension(expected[dimension], actual[dimension], dimension)
-        for dimension in ("forecasts", "simulation", "financial_diagnostics")
+        for dimension in ("forecasts", "simulation", "financial_diagnostics",
+                          "verdicts", "analogs")
     }
 
 
@@ -921,19 +937,37 @@ def _factory_parity(corpus) -> dict:
     }
 
 
-def _contract_projection(legs) -> tuple[dict, ...]:
-    return tuple({
-        "name": str(leg.get("name")),
-        "right": str(leg.get("right")),
-        "side": str(leg.get("side")),
-        "quantity": float(leg.get("quantity", leg.get("qty", 0.0))),
-        "strike": float(leg.get("strike")),
-        "expiry": str(leg.get("expiry")),
-        "price": (float(leg["fill"]) if leg.get("fill") is not None
-                  else float(leg["price"]) if leg.get("price") is not None else None),
-        "cash_flow": (float(leg["cash_flow"]) if leg.get("cash_flow") is not None
-                      else None),
-    } for leg in legs or ())
+def _contract_projection(legs, *, entry_date=None, exit_date=None,
+                         execution_date=None) -> dict[str, Any]:
+    """Project one side's contracts, plus their trade-timeline dates.
+
+    ``expiry`` lives on each leg, but ``entry_date``/``exit_date``/
+    ``execution_date`` describe the whole traded structure, not any one
+    leg (no leg dataclass on either side carries them — see
+    ``engine.v2.domain.generation.structures.PricedLeg`` and the legacy
+    leg dict shape in the real corpus). Callers pass each side's own
+    values (native: ``entry_exit_plan``/``quote_provenance``; legacy:
+    ``record["entry_date"]``/``record["exit_date"]``/``record["quote_date"]``,
+    the date the fill quote was captured, i.e. the execution date) so they
+    are compared alongside the legs rather than silently omitted.
+    """
+    return {
+        "legs": tuple({
+            "name": str(leg.get("name")),
+            "right": str(leg.get("right")),
+            "side": str(leg.get("side")),
+            "quantity": float(leg.get("quantity", leg.get("qty", 0.0))),
+            "strike": float(leg.get("strike")),
+            "expiry": str(leg.get("expiry")),
+            "price": (float(leg["fill"]) if leg.get("fill") is not None
+                      else float(leg["price"]) if leg.get("price") is not None else None),
+            "cash_flow": (float(leg["cash_flow"]) if leg.get("cash_flow") is not None
+                          else None),
+        } for leg in legs or ()),
+        "entry_date": str(entry_date) if entry_date is not None else None,
+        "exit_date": str(exit_date) if exit_date is not None else None,
+        "execution_date": str(execution_date) if execution_date is not None else None,
+    }
 
 
 _TRACE_SCHEMA = "phase4_input_trace.v1.0"
@@ -1461,6 +1495,8 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "forecasts": False,
         "simulation": False,
         "financial_diagnostics": False,
+        "verdicts": False,
+        "analogs": False,
     }
     numeric_coverage = {name: 0 for name in numeric_negative_controls}
     declared_ids, expected, manifest_bound = _release_population(corpus)
@@ -1528,9 +1564,21 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                 "native_stage_receipts", "selected_contracts",
             } - ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
                  expected_keys)),
-            "contracts": _contract_projection(native.legs) ==
-                         _contract_projection(record.get("legs") or ()),
-            "verdicts": native.gate_terms.get("gate_pass") == record.get("gate_pass"),
+            "contracts": _contract_projection(
+                native.legs,
+                entry_date=native.entry_exit_plan.get("entry_date"),
+                exit_date=native.entry_exit_plan.get("exit_date"),
+                execution_date=native.quote_provenance.get("quote_date"),
+            ) == _contract_projection(
+                record.get("legs") or (),
+                entry_date=record.get("entry_date"),
+                exit_date=record.get("exit_date"),
+                execution_date=record.get("quote_date"),
+            ),
+            # gate_score/gate_threshold/gate_pass and ci_low/ci_high/n_analogs
+            # come from the "verdicts"/"analogs" numeric dimensions below
+            # (checks.update), which is the same compare_records machinery
+            # used for forecasts/simulation/financial_diagnostics.
             "flags": _semantic_flags({"flags": native.reason_codes}) == (
                 _semantic_flags(record)
                 + ("UNVALIDATED_STRUCTURE",) if record.get("strategy") in
@@ -1583,7 +1631,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             flag_defect_detected = list(native.reason_codes) != mutated_flags
     dimensions = (
         "keys", "contracts", "verdicts", "flags", "null_masks",
-        "forecasts", "simulation", "financial_diagnostics",
+        "forecasts", "simulation", "financial_diagnostics", "analogs",
     )
     compared_rows = [row for row in rows if row["disposition"] == "compared"]
     compared = len(compared_rows)
