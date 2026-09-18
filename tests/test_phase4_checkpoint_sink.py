@@ -24,16 +24,27 @@ def test_first_write_persists_case_resource_and_manifest(tmp_path: Path) -> None
     resource = _resource(tmp_path)
     sink = DiskCheckpointSink(tmp_path)
     reference = sink.write_resource("champion", resource)
-    case_hash = sink.write_case("STR-THRU_001", {"score": 1.25, "ready": True})
-    manifest = sink.finalize({"release_id": "release-1"})
+    case_hash = sink.write_case(
+        "STR-THRU_001",
+        {"score": 1.25, "ready": True, "strategy": "STR-THRU", "branches": ["ties"]},
+    )
+    manifest = sink.finalize({"release_id": "release-1", "status": "diagnostic_only"})
 
     assert json.loads((tmp_path / "cases" / "STR-THRU_001.json").read_text()) == {
         "ready": True,
         "score": 1.25,
+        "strategy": "STR-THRU",
+        "branches": ["ties"],
     }
     assert manifest == json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["schema_version"] == SCHEMA_VERSION
+    assert manifest["release_id"] == "release-1"
+    assert manifest["metadata"] == {"release_id": "release-1", "status": "diagnostic_only"}
     assert manifest["resources"] == [reference]
+    assert manifest["coverage"] == {
+        "strategies": {"STR-THRU": ["STR-THRU_001"]},
+        "branches": {"ties": ["STR-THRU_001"]},
+    }
     assert manifest["cases"] == [{"case_id": "STR-THRU_001", "sha256": case_hash}]
     assert reference["path"] == "resources/model.bin"
 
@@ -45,7 +56,7 @@ def test_resume_finds_complete_unmanifested_cases_and_preserves_them(tmp_path: P
     resumed = DiskCheckpointSink(tmp_path)
     assert resumed.completed_case_ids() == ("case-1",)
     resumed.write_case("case-2", {"value": 2})
-    manifest = resumed.finalize({"run": "resumed"})
+    manifest = resumed.finalize({"run": "resumed", "release_id": "resume-1"})
 
     assert manifest["cases"] == [
         {"case_id": "case-1", "sha256": first_hash},
@@ -73,7 +84,7 @@ def test_resource_deduplication_and_conflicting_redefinition(tmp_path: Path) -> 
 
     first.write_bytes(b"changed")
     with pytest.raises(CheckpointSinkError, match="hash conflict"):
-        sink.finalize({})
+        sink.finalize({"release_id": "release-1"})
 
 
 def test_rejects_traversal_symlink_escape_and_malformed_ids(tmp_path: Path) -> None:
@@ -112,8 +123,8 @@ def test_manifest_hash_is_deterministic_across_order_and_reruns(tmp_path: Path) 
         for case_id in case_ids:
             sink.write_case(case_id, {"case": case_id})
         sink.write_resource("resource", resource)
-        first = sink.finalize({"release": "fixed", "number": 1})
-        second = sink.finalize({"number": 1, "release": "fixed"})
+        first = sink.finalize({"release": "fixed", "number": 1, "release_id": "fixed-release"})
+        second = sink.finalize({"number": 1, "release": "fixed", "release_id": "fixed-release"})
         assert first == second
         manifests.append(first)
 
@@ -128,8 +139,10 @@ def test_rejects_malformed_or_hash_invalid_manifest(tmp_path: Path, kind: str) -
     else:
         manifest_path.write_text(json.dumps({
             "schema_version": SCHEMA_VERSION,
+            "release_id": "release-1",
             "metadata": {},
             "resources": [],
+            "coverage": {"strategies": {}, "branches": {}},
             "cases": [],
             "manifest_hash": "sha256:" + "0" * 64,
         }), encoding="utf-8")
