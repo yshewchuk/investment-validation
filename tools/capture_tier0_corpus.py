@@ -57,7 +57,7 @@ from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -66,12 +66,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
-from engine import replay as replay_mod, score as score_mod  # noqa: E402
+from engine import replay as replay_mod  # noqa: E402
+from engine import score as score_mod  # noqa: E402
 from engine.data import store  # noqa: E402
 from engine.fills import MID  # noqa: E402
 from engine.structures import STRUCTURES  # noqa: E402
+from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
+from engine.v2.foundation import to_document  # noqa: E402
+from engine.v2.scoring import application as v2_application  # noqa: E402
+from engine.v2.scoring.stages import NativeScoreInputs, receipt  # noqa: E402
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
+from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
 
 SCHEMA_VERSION = "tier0_pair.v1.1"
 INDEX_VERSION = "tier0_corpus.v1.1"
@@ -97,6 +103,34 @@ MODEL_ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate", "chooser"
 
 #: ``ScoreRequest`` fields serialized as dates.
 _DATE_FIELDS = frozenset({"as_of", "event_date", "expiry", "chain_as_of"})
+
+
+class StrictTraceCaptureError(ValueError):
+    """A legacy capture lacks source-owned inputs needed for native replay."""
+
+
+def parse_strategies(values: Iterable[str] | None) -> tuple[str, ...] | None:
+    """Normalize an optional CLI strategy filter; None preserves all."""
+    if values is None:
+        return None
+    requested = tuple(dict.fromkeys(
+        item.strip()
+        for value in values
+        for item in str(value).split(",")
+        if item.strip()
+    ))
+    allowed = set(STRUCTURES) | {score_mod.DYNAMIC_STRATEGY}
+    unknown = sorted(set(requested) - allowed)
+    if unknown:
+        raise StrictTraceCaptureError(f"unknown strategies: {unknown}")
+    if not requested:
+        raise StrictTraceCaptureError("--strategies requires at least one strategy")
+    return requested
+
+
+def _score_strategies(strategies: tuple[str, ...] | None) -> tuple[str, ...]:
+    selected = set(STRUCTURES) if strategies is None else set(strategies)
+    return tuple(name for name in STRUCTURES if name in selected)
 
 
 # --------------------------------------------------------------------------
@@ -163,6 +197,229 @@ def request_from_dict(data: dict) -> score_mod.ScoreRequest:
     return score_mod.ScoreRequest(**kwargs)
 
 
+def canonical_v2_request(candidate: Mapping[str, Any], snapshot: str) -> V2ScoreRequest:
+    """Translate source-owned legacy request identity into a canonical command."""
+    event_id = candidate.get("event_id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise StrictTraceCaptureError("strict trace requires the captured event_id")
+    raw = candidate.get("request")
+    if not isinstance(raw, Mapping):
+        raw = request_to_dict(raw)
+    legacy = request_from_dict(dict(raw))
+    if legacy.strategy not in {"STR-THRU", "STR-RUNUP"}:
+        raise StrictTraceCaptureError(
+            f"strict probe does not support {legacy.strategy}"
+        )
+    decision = legacy.as_of if legacy.as_of is not None else legacy.chain_as_of
+    if decision is None:
+        raise StrictTraceCaptureError("strict trace requires a decision date")
+    event_date = legacy.event_date
+    if event_date is None:
+        raise StrictTraceCaptureError("strict trace requires an event date")
+    event_identity = {
+        "event_id": event_id,
+        "ticker": legacy.ticker,
+        "event_date": str(pd.Timestamp(event_date).date()),
+        "session": legacy.session,
+    }
+    geometry_override = dict(legacy.structure_params or {})
+    if legacy.strike is not None:
+        geometry_override["strike"] = float(legacy.strike)
+    if legacy.expiry is not None:
+        geometry_override["expiry"] = str(pd.Timestamp(legacy.expiry).date())
+    return V2ScoreRequest(
+        event_id=event_id,
+        event_revision="event:" + content_hash(event_identity),
+        calendar_revision="calendar:" + content_hash({
+            "decision": str(pd.Timestamp(decision).date()),
+            "event": event_identity,
+        }),
+        strategy_version=legacy.strategy,
+        deployment_id=f"legacy-capture:{snapshot}",
+        decision_clock_id=(
+            "legacy.decision_offset."
+            + str(legacy.decision_offset if legacy.decision_offset is not None else 0)
+        ),
+        requested_decision_at=str(pd.Timestamp(decision).date()),
+        snapshot_id=str(snapshot),
+        mode="replay",
+        fill_model={
+            "policy_id": "legacy.fill_alpha.v1",
+            "alpha": float(legacy.fill.alpha),
+        },
+        geometry_override=geometry_override or None,
+    )
+
+
+def _checkpoint_value(candidate: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    trace = candidate.get("legacy_trace")
+    checkpoints = trace.get("checkpoints") if isinstance(trace, Mapping) else None
+    row = checkpoints.get(name) if isinstance(checkpoints, Mapping) else None
+    if not isinstance(row, Mapping) or not isinstance(row.get("value"), Mapping):
+        raise StrictTraceCaptureError(f"legacy checkpoint missing {name}")
+    value = row["value"]
+    if row.get("content_hash") != content_hash(value):
+        raise StrictTraceCaptureError(f"legacy checkpoint hash mismatch: {name}")
+    return value
+
+
+def _quote_map(rows: Any) -> dict[str, dict[str, float]]:
+    if not isinstance(rows, list) or not rows:
+        raise StrictTraceCaptureError("source_inputs.quote_domain is empty")
+    quotes: dict[str, dict[str, float]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise StrictTraceCaptureError(f"quote_domain[{index}] is not an object")
+        try:
+            right = str(row["right"]).upper()
+            right = {"CALL": "C", "PUT": "P"}.get(right, right)
+            strike = float(row["strike"])
+            expiry = str(pd.Timestamp(row["expiry"]).date())
+            bid = float(row["bid"])
+            ask = float(row["ask"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StrictTraceCaptureError(
+                f"quote_domain[{index}] lacks a complete contract quote"
+            ) from exc
+        if right not in {"C", "P"} or not all(
+            math.isfinite(value) for value in (strike, bid, ask)
+        ) or bid < 0.0 or ask < bid:
+            raise StrictTraceCaptureError(f"quote_domain[{index}] is invalid")
+        key = f"{right}:{strike}:{expiry}"
+        quote = {"bid": bid, "ask": ask}
+        if key in quotes and quotes[key] != quote:
+            raise StrictTraceCaptureError(f"conflicting source quote: {key}")
+        quotes[key] = quote
+    return quotes
+
+
+def _merged_model_inputs(candidate: Mapping[str, Any]) -> dict[str, float]:
+    features = _checkpoint_value(candidate, "features")
+    vectors = features.get("feature_vector")
+    if not isinstance(vectors, Mapping) or not vectors:
+        raise StrictTraceCaptureError("features.feature_vector is empty")
+    merged: dict[str, float] = {}
+    for role, vector in vectors.items():
+        if not isinstance(vector, Mapping):
+            raise StrictTraceCaptureError(f"feature vector {role} is malformed")
+        for name, raw in vector.items():
+            try:
+                value = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise StrictTraceCaptureError(
+                    f"feature {role}.{name} is missing or nonnumeric"
+                ) from exc
+            if not math.isfinite(value):
+                raise StrictTraceCaptureError(
+                    f"feature {role}.{name} is nonfinite"
+                )
+            if name in merged and merged[name] != value:
+                raise StrictTraceCaptureError(
+                    f"feature {name} differs across model roles"
+                )
+            merged[str(name)] = value
+    return merged
+
+
+def native_inputs_from_capture(
+    candidate: Mapping[str, Any],
+    request: V2ScoreRequest,
+) -> tuple[NativeScoreInputs, dict[str, Any]]:
+    """Build executable native inputs only from source-owned captured material."""
+    source = _checkpoint_value(candidate, "source_inputs")
+    recipes = source.get("native_recipes")
+    if not isinstance(recipes, Mapping):
+        raise StrictTraceCaptureError(
+            "source_inputs lacks executable native_recipes "
+            "(forecast, analogs, simulation, and gate)"
+        )
+    required_recipes = {"forecast", "analogs", "simulation", "gate"}
+    missing_recipes = sorted(required_recipes - set(recipes))
+    if missing_recipes:
+        raise StrictTraceCaptureError(
+            f"source_inputs.native_recipes missing {missing_recipes}"
+        )
+    context = dict(source.get("context") or {})
+    source_features = dict(source.get("features") or {})
+    for key in ("entry_date", "exit_date", "expiry", "spot", "as_of"):
+        if key not in context and source_features.get(key) is not None:
+            context[key] = source_features[key]
+    context["strategy"] = request.strategy_version
+    context["quotes"] = _quote_map(source.get("quote_domain"))
+    missing_context = sorted(
+        key for key in ("ticker", "event_date", "entry_date", "exit_date", "spot")
+        if context.get(key) is None
+    )
+    if missing_context:
+        raise StrictTraceCaptureError(
+            f"source_inputs context missing {missing_context}"
+        )
+    blocks = {
+        "context": context,
+        "features": {
+            "model_inputs": _merged_model_inputs(candidate),
+            "source_features": source_features,
+        },
+        "forecast": dict(recipes["forecast"]),
+        "geometry": None,
+        "pricing": None,
+        "analogs": dict(recipes["analogs"]),
+        "simulation": dict(recipes["simulation"]),
+        "gate": dict(recipes["gate"]),
+        "chooser": dict(recipes.get("chooser") or {}),
+        "diagnostics": dict(recipes.get("diagnostics") or {}),
+    }
+    request_doc = to_document(request)
+    shared_inputs = {"request": request_doc, "native_inputs": blocks}
+    source_ref = content_hash(shared_inputs)
+    declarations = tuple(
+        receipt(stage, {"source_ref": source_ref}, {"execution": "native-runtime"})
+        for stage in (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "analogs", "simulation", "gate", "chooser", "serialization",
+        )
+    )
+    inputs = NativeScoreInputs(
+        **blocks, source_ref=source_ref, stage_receipts=declarations,
+    )
+    return inputs, shared_inputs
+
+
+def package_strict_trace(
+    request: V2ScoreRequest,
+    inputs: NativeScoreInputs,
+    shared_inputs: Mapping[str, Any],
+    *,
+    resources: list[Mapping[str, Any]] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], Any]:
+    """Execute native scoring and package the observer output for verification."""
+    observations = []
+    native = v2_application.score_one(request, inputs, observer=observations.append)
+    native_document = {
+        "context": dict(inputs.context),
+        "features": dict(inputs.features),
+        "forecast": dict(inputs.forecast),
+        "geometry": None if inputs.geometry is None else to_document(inputs.geometry),
+        "pricing": None if inputs.pricing is None else to_document(inputs.pricing),
+        "analogs": dict(inputs.analogs),
+        "simulation": dict(inputs.simulation),
+        "gate": dict(inputs.gate),
+        "chooser": dict(inputs.chooser),
+        "diagnostics": dict(inputs.diagnostics),
+        "source_ref": inputs.source_ref,
+    }
+    trace = assemble_input_trace(
+        request=to_document(request),
+        shared_inputs=shared_inputs,
+        native_inputs=native_document,
+        observations=observations,
+        resources=list(resources or ()),
+        metadata=metadata,
+    )
+    return trace, native
+
+
 # --------------------------------------------------------------------------
 # one pair
 # --------------------------------------------------------------------------
@@ -171,6 +428,8 @@ def request_from_dict(data: dict) -> score_mod.ScoreRequest:
 def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
               *, record_kind: str, duration: float,
               legacy_trace: dict | None = None,
+              input_trace: dict | None = None,
+              legacy_input_hash: str | None = None,
               relations: dict | None = None, notes: str = "") -> dict:
     payload: dict[str, Any] = {"request": request, "record": record,
                                "record_kind": record_kind}
@@ -181,6 +440,13 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
         # incomplete trace cannot be mistaken for a completed one.
         payload["legacy_trace"] = legacy_trace
         payload["trace_disposition"] = "incomplete"
+    if input_trace is not None:
+        if legacy_input_hash != input_trace.get("shared_input_hash"):
+            raise StrictTraceCaptureError("strict trace legacy input hash mismatch")
+        payload["input_trace"] = input_trace
+        payload["input_trace_hash"] = input_trace["trace_hash"]
+        payload["legacy_input_hash"] = legacy_input_hash
+        payload["trace_disposition"] = "complete"
     if relations:
         payload["relations"] = relations
     return {
@@ -354,10 +620,12 @@ def _candidate(request, raw: dict | None, record: dict, took: float, *,
 
 
 def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
-                 quote_max_age: int) -> list[dict]:
+                 quote_max_age: int,
+                 strategies: tuple[str, ...] | None = None) -> list[dict]:
     """Every strategy on every forward event, as the board's scoring loop does."""
+    strategy_names = _score_strategies(strategies)
     keys: set[tuple[str, pd.Timestamp]] = set()
-    for strategy in STRUCTURES:
+    for strategy in strategy_names:
         if strategy in score_mod.DISABLED_STRATEGIES:
             continue
         plan = replay_mod.plan_events(
@@ -375,19 +643,23 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
 
     out: list[dict] = []
     for row in events.itertuples(index=False):
-        for strategy in STRUCTURES:
+        for strategy in strategy_names:
             request = score_mod.ScoreRequest(
                 ticker=str(row.ticker), strategy=strategy, as_of=None,
                 event_date=pd.Timestamp(row.event_date), session=str(row.session),
                 fill=MID, quote_max_age_sessions=quote_max_age, chain_as_of=as_of,
             )
             raw, record, took, trace = _score(scorer, request, index=index)
-            out.append(_candidate(request, raw, record, took, frame="forward",
-                                  legacy_trace=trace))
+            candidate = _candidate(
+                request, raw, record, took, frame="forward", legacy_trace=trace,
+            )
+            candidate["event_id"] = str(row.event_id)
+            out.append(candidate)
     return out
 
 
-def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
+def boundary_pass(scorer, events: pd.DataFrame,
+                  strategies: tuple[str, ...] | None = None) -> list[dict]:
     """Past events, scored at their own decision close, for the two boundaries.
 
     ``as_of`` is the structure's DECISION date, resolved through the calendar,
@@ -397,7 +669,7 @@ def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
     NO_FORECAST with empty legs.
     """
     out: list[dict] = []
-    for strategy in STRUCTURES:
+    for strategy in _score_strategies(strategies):
         structure = STRUCTURES[strategy]()
         plan = replay_mod.plan_events(structure, events, calendar=scorer.calendar)
         for row in plan.frame.to_dict("records"):
@@ -413,8 +685,11 @@ def boundary_pass(scorer, events: pd.DataFrame) -> list[dict]:
                 print(f"[corpus]   skipped {row['ticker']} {strategy}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
                 continue
-            out.append(_candidate(request, raw, record, took, frame="boundary",
-                                  legacy_trace=trace))
+            candidate = _candidate(
+                request, raw, record, took, frame="boundary", legacy_trace=trace,
+            )
+            candidate["event_id"] = str(row["event_id"])
+            out.append(candidate)
     return out
 
 
@@ -432,7 +707,10 @@ def _rescore(scorer, source: dict, label: str, **changes) -> dict | None:
         print(f"[corpus]   {label} skip {request.ticker} {request.strategy}: "
               f"{type(exc).__name__}: {exc}", flush=True)
         return None
-    return _candidate(request, raw, record, took, legacy_trace=trace)
+    candidate = _candidate(request, raw, record, took, legacy_trace=trace)
+    if source.get("event_id") is not None:
+        candidate["event_id"] = source["event_id"]
+    return candidate
 
 
 def _anchor_strike(record: dict) -> float | None:
@@ -539,7 +817,8 @@ def dyn_sv_pass(candidates: list[dict]) -> list[dict]:
     return out
 
 
-def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2) -> list[dict]:
+def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
+                         strategies: tuple[str, ...] | None = None) -> list[dict]:
     """Price CAL-P and CND-P under research, where the scorer refuses them.
 
     §7.1 requires both to appear as *refusals* on the production path and to
@@ -548,6 +827,8 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2) -> list[d
     """
     out: list[dict] = []
     for strategy in score_mod.DISABLED_STRATEGIES:
+        if strategies is not None and strategy not in strategies:
+            continue
         structure = STRUCTURES[strategy]()
         plan = replay_mod.plan_events(structure, events, calendar=scorer.calendar)
         index = replay_mod.load_chain_index(plan.chain_keys, progress_every=0)
@@ -631,6 +912,42 @@ def _fixture_id(cand: dict, i: int) -> str:
     return f"{i:03d}_{stem}_{digest}".replace("/", "-").replace(" ", "")
 
 
+def attach_strict_probe(chosen: list[dict], snapshot: str,
+                        strategy: str) -> str:
+    """Attach one strict trace, or fail with the missing source contract."""
+    failures = []
+    for candidate in chosen:
+        if (
+            candidate.get("kind") != "score_result"
+            or candidate.get("record", {}).get("strategy") != strategy
+        ):
+            continue
+        try:
+            request = canonical_v2_request(candidate, snapshot)
+            inputs, shared_inputs = native_inputs_from_capture(candidate, request)
+            trace, native = package_strict_trace(
+                request, inputs, shared_inputs,
+                metadata={
+                    "capture_mode": "bounded-strict-probe",
+                    "legacy_checkpoint_hash": content_hash(
+                        candidate["legacy_trace"]
+                    ),
+                },
+            )
+        except (StrictTraceCaptureError, TypeError, ValueError) as exc:
+            failures.append(f"{candidate.get('fixture_id', 'candidate')}: {exc}")
+            continue
+        candidate["request"] = to_document(request)
+        candidate["input_trace"] = trace
+        candidate["legacy_input_hash"] = trace["shared_input_hash"]
+        candidate["native_score_id"] = native.score_id
+        return str(candidate["fixture_id"])
+    detail = "; ".join(failures[:3]) if failures else "no selected candidate"
+    raise StrictTraceCaptureError(
+        f"no honest strict {strategy} trace could be assembled: {detail}"
+    )
+
+
 # --------------------------------------------------------------------------
 # writing
 # --------------------------------------------------------------------------
@@ -669,6 +986,8 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
             record_kind=cand["kind"], duration=cand["duration"],
             legacy_trace=cand.get("legacy_trace"),
+            input_trace=cand.get("input_trace"),
+            legacy_input_hash=cand.get("legacy_input_hash"),
             relations=cand.get("relations"),
         )
         text = json.dumps(pair, indent=2, sort_keys=True) + "\n"
@@ -742,7 +1061,36 @@ def main(argv: Iterable[str] | None = None) -> int:
     ap.add_argument("--max-events", type=int, default=40)
     ap.add_argument("--boundary-events", type=int, default=4)
     ap.add_argument("--quote-max-age", type=int, default=5)
+    ap.add_argument(
+        "--strategies", nargs="+", default=None,
+        help="capture only these strategies (space- or comma-separated); "
+             "default preserves the current all-strategy capture",
+    )
+    ap.add_argument(
+        "--strict-phase4-trace", action="store_true",
+        help="reserved strict probe; currently refuses because the legacy "
+             "collector does not emit executable source recipes",
+    )
     args = ap.parse_args(list(argv) if argv is not None else None)
+    try:
+        strategies = parse_strategies(args.strategies)
+    except StrictTraceCaptureError as exc:
+        ap.error(str(exc))
+    if args.strict_phase4_trace and (
+        strategies is None
+        or len(strategies) != 1
+        or strategies[0] not in {"STR-THRU", "STR-RUNUP"}
+    ):
+        ap.error(
+            "--strict-phase4-trace requires --strategies STR-THRU "
+            "or --strategies STR-RUNUP"
+        )
+    if args.strict_phase4_trace:
+        ap.error(
+            "--strict-phase4-trace is unfinished: Phase4TraceCollector "
+            "source_inputs does not yet emit answer-free executable forecast, "
+            "analog, simulation, and gate recipes"
+        )
 
     as_of = (pd.Timestamp(args.as_of).normalize() if args.as_of
              else pd.Timestamp.today().normalize())
@@ -753,20 +1101,28 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     forward = _events(as_of, args.forward_days, args.max_events)
     print(f"[corpus] forward events: {len(forward)}", flush=True)
-    candidates = forward_pass(scorer, forward, as_of, args.quote_max_age)
+    candidates = forward_pass(
+        scorer, forward, as_of, args.quote_max_age, strategies,
+    )
     print(f"[corpus] forward scores: {len(candidates)}", flush=True)
 
     boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
     print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
-    candidates += boundary_pass(scorer, boundaries)
+    candidates += boundary_pass(scorer, boundaries, strategies)
 
     candidates += pinned_and_strike_pass(scorer, candidates)
     candidates += coarse_ladder_pass(scorer, candidates)
-    candidates += dyn_sv_pass(candidates)
-    candidates += research_replay_pass(scorer, boundaries)
+    if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
+        candidates += dyn_sv_pass(candidates)
+    candidates += research_replay_pass(
+        scorer, boundaries, strategies=strategies,
+    )
     print(f"[corpus] candidates: {len(candidates)}", flush=True)
 
     chosen, index = select(candidates)
+    if args.strict_phase4_trace:
+        strict_id = attach_strict_probe(chosen, scorer.snapshot, strategies[0])
+        print(f"[corpus] strict Phase 4 trace: {strict_id}", flush=True)
     if args.out:
         out_dir = Path(args.out)
     else:
