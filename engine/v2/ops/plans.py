@@ -22,6 +22,24 @@ NIGHTLY_GRAPH = {
 }
 
 
+def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan):
+    """R3B-3: validate and pin ``refresh_mode``/``refresh_plan`` onto
+    ``identity``/``plan`` in place. Mirrors the ``input_mode`` block in
+    :func:`nightly_plan`: the default ``"legacy"`` touches neither dict, so
+    a plan built before this stage existed hashes byte-identically.
+    """
+    if refresh_mode not in ("legacy", "native"):
+        raise fail("INVALID_REQUEST", "refresh_mode must be legacy or native")
+    if refresh_mode != "native":
+        return
+    if refresh_plan is None:
+        raise fail("INVALID_REQUEST", "native refresh mode needs a pinned refresh plan")
+    from engine.v2.foundation import to_document
+    refresh_document = refresh_plan if isinstance(refresh_plan, dict) else to_document(refresh_plan)
+    identity.update(refresh_mode=refresh_mode, refresh_plan_hash=refresh_document.get("plan_hash", ""))
+    plan.update(refresh_mode=refresh_mode, refresh_plan=refresh_document)
+
+
 def check_plan(source_root, expected_ids):
     manifest = worker_source_manifest(Path(source_root))
     return {"schema_version": "operations_plan.v1.0", "kind": "artifact_check", "mode": "shadow",
@@ -34,13 +52,26 @@ def check_plan(source_root, expected_ids):
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                  tickers=(), context_tickers=(), year_start=2024, year_end=2026,
                  expected_population=(), clock=None, input_mode="legacy", snapshot_inputs=None,
-                 full_run=False):
+                 full_run=False, refresh_mode="legacy", refresh_plan=None):
     """``full_run`` (``--full-run``, decision: writing the global ``"shadow"``
     effect scope must be explicit) records this plan's universe declaration.
     Without it, ``build_legacy_job_requests`` always uses a subset effect
     scope, even when ``tickers`` equals ``context_tickers``. With it, planning
     refuses unless the watchlist equals the context exactly — a full run
     scores its whole context, never a slice of it.
+
+    ``refresh_mode`` (R3B-3): ``"legacy"`` (default) leaves the DAG exactly
+    as it is today -- no ``refresh`` job is ever submitted; the out-of-band
+    ``ops price-refresh`` (``legacy_adapter.invoke_price_refresh``) stays the
+    only refresh path, unchanged. ``"native"`` pins a caller-resolved
+    ``engine.v2.ops.incremental_data.RefreshPlan`` (``refresh_plan``, a
+    ``RefreshPlan`` or its ``to_document()`` form) into this plan document,
+    so ``nightly.build_legacy_job_requests`` submits ONE real
+    ``incremental_refresh`` job built from it. The choice is recorded on the
+    plan itself (``plan["refresh_mode"]``, present only when ``"native"`` --
+    absent means legacy, mirroring ``input_mode`` below), so a reader of a
+    saved plan or a completed run's jobs can tell which path executed
+    without inferring it from job presence/absence.
     """
     from datetime import date
 
@@ -75,6 +106,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
             raise fail("INVALID_REQUEST", "snapshot input mode needs pinned snapshot inputs")
         identity.update(input_mode=input_mode, snapshot_inputs=snapshot_inputs)
         plan.update(input_mode=input_mode, snapshot_inputs=dict(snapshot_inputs))
+    _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan)
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
                 plan_hash=content_hash(identity),
                 input_manifest_ref=manifest_ref, tickers=list(tickers),
