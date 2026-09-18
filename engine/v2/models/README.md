@@ -42,7 +42,10 @@ failure rather than a stale sentence.
 
 _Nothing yet — no package imports this one. The first importer is added here in the same commit._
 
-<!-- consumers: none -->
+The engine.v2.scoring package imports the verified frozen inference contract
+and loader for stage bound model execution.
+
+<!-- consumers: engine.v2.scoring -->
 
 ## Usage
 

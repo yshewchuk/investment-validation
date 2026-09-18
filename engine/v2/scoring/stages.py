@@ -124,6 +124,7 @@ _ROLE_OUTPUTS = {
     "iv_crush": ("pred_iv_crush", "pred_iv_crush_30"),
     "fair_value": ("model_fair_pct",),
 }
+_INTERNAL_STAGE_FIELDS = frozenset({"executors"})
 _STRATEGY_FORECAST_ROLES = {
     "STR-THRU": ("driver",),
     "STR-RUNUP": ("implied_t1", "runup_move"),
@@ -143,7 +144,9 @@ _SIM_MIN_SPOT_FRACTION = 1e-4
 
 def _merge_stage(values: dict[str, Any], block: Mapping[str, Any]) -> None:
     values.update({key: value for key, value in block.items()
-                   if key not in _OWNED_OUTPUTS and key != "flags"})
+                   if key not in _OWNED_OUTPUTS
+                   and key not in _INTERNAL_STAGE_FIELDS
+                   and key != "flags"})
 
 
 def _finite(value: Any) -> float | None:
@@ -272,7 +275,30 @@ def _execute_local_forecast(
         return False
     declared = False
     facts = _facts(inputs, values)
+    executors = block.get("executors", {})
+    if not isinstance(executors, Mapping):
+        _add_flag(flags, "INVALID_FORECAST_EXECUTORS")
+        executors = {}
     for field in _FORECAST_OUTPUTS:
+        executor = executors.get(field)
+        if executor is not None:
+            declared = True
+            predict = getattr(executor, "predict", None)
+            if not callable(predict):
+                invalid_fields.add(field)
+                _add_flag(flags, "INVALID_FORECAST_EXECUTOR")
+                continue
+            try:
+                result = predict(facts)
+                raw = result.get(field) if isinstance(result, Mapping) else result
+                value = _finite(raw)
+                if value is None:
+                    raise ValueError("non-finite result")
+                output[field] = value
+            except (TypeError, ValueError, KeyError):
+                invalid_fields.add(field)
+                _add_flag(flags, f"INVALID_FORECAST_EXECUTOR:{field}")
+            continue
         spec = models.get(field, block.get(field))
         if spec is None:
             continue
@@ -761,41 +787,81 @@ def _execute_analogs(
     return output
 
 
+def _gate_result(score: float | None, threshold: Any,
+                 flags: list[str]) -> dict[str, Any]:
+    if score is None:
+        _add_flag(flags, "INVALID_GATE_SCORE")
+        return {}
+    value = _finite(threshold)
+    if value is None:
+        _add_flag(flags, "MISSING_GATE_THRESHOLD")
+        return {}
+    return {
+        "gate_score": score,
+        "gate_threshold": value,
+        "gate_pass": score >= value,
+    }
+
+
+def _execute_gate_executor(inputs: NativeScoreInputs,
+                           values: Mapping[str, Any],
+                           block: Mapping[str, Any],
+                           flags: list[str]) -> dict[str, Any]:
+    executors = block.get("executors")
+    if not isinstance(executors, Mapping):
+        _add_flag(flags, "INVALID_GATE_EXECUTORS")
+        return {}
+    executor = executors.get("gate_score")
+    if executor is None or not callable(getattr(executor, "predict", None)):
+        _add_flag(flags, "INVALID_GATE_EXECUTOR")
+        return {}
+    try:
+        score = executor.predict(_facts(inputs, values))
+        if isinstance(score, Mapping):
+            score = score.get("gate_score")
+        score = _finite(score)
+    except (TypeError, ValueError, KeyError):
+        score = None
+    return _gate_result(score, block.get("threshold"), flags)
+
+
+def _execute_gate_model(inputs: NativeScoreInputs,
+                        values: Mapping[str, Any],
+                        block: Mapping[str, Any],
+                        flags: list[str]) -> dict[str, Any]:
+    model = block.get("model")
+    if not isinstance(model, Mapping):
+        _add_flag(flags, "INVALID_GATE_MODEL")
+        return {}
+    try:
+        score = _linear(model, _facts(inputs, values), "gate")
+    except ValueError as exc:
+        _add_flag(flags, str(exc))
+        return {}
+    return _gate_result(score, block.get("threshold"), flags)
+
+
 def _execute_gate(inputs: NativeScoreInputs, name: str,
                   values: dict[str, Any], flags: list[str]) -> dict[str, Any]:
     block = inputs.gate
-    output: dict[str, Any] = {}
-    recipe = block.get("recipe")
     if block.get("frozen_score") is not None:
         _add_flag(flags, "UNSUPPORTED_FROZEN_GATE")
-        return output
+        return {}
+    if block.get("executors") is not None:
+        output = _execute_gate_executor(inputs, values, block, flags)
     elif block.get("model") is not None:
-        model = block["model"]
-        if not isinstance(model, Mapping):
-            _add_flag(flags, "INVALID_GATE_MODEL")
-            return output
-        try:
-            score = _linear(model, _facts(inputs, values), "gate")
-        except ValueError as exc:
-            _add_flag(flags, exc)
-            return output
-        threshold = _finite(block.get("threshold"))
-        if threshold is None:
-            _add_flag(flags, "MISSING_GATE_THRESHOLD")
-            return output
-        output.update({"gate_score": score, "gate_threshold": threshold,
-                       "gate_pass": score >= threshold})
-    elif recipe is not None:
-        _add_flag(flags, f"UNSUPPORTED_GATE_RECIPE:{recipe}")
+        output = _execute_gate_model(inputs, values, block, flags)
+    elif block.get("recipe") is not None:
+        _add_flag(flags, f"UNSUPPORTED_GATE_RECIPE:{block['recipe']}")
+        return {}
     else:
-        declared = False
+        output = {}
         for field in _GATE_OUTPUTS:
             if block.get(field) is not None:
-                declared = True
                 _add_flag(flags, f"UNOWNED_GATE_OUTPUT:{field}")
-        if not declared:
+        if not any(block.get(field) is not None for field in _GATE_OUTPUTS):
             _add_flag(flags, "MISSING_GATE_INPUT")
-        return output
+            return output
     values.update(output)
     return output
 

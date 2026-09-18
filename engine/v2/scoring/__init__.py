@@ -17,6 +17,11 @@ from engine.v2.scoring.application import (
     score_one,
 )
 from engine.v2.scoring.financial import financial_diagnostics
+from engine.v2.scoring.frozen_executor import (
+    FrozenStageExecutor,
+    FrozenStageRefusal,
+    FrozenStageResult,
+)
 from engine.v2.scoring.identity import (
     canonical_request,
     dependency_hash,
@@ -30,5 +35,6 @@ __all__ = [
     "canonical_request", "dependency_hash", "financial_diagnostics",
     "NativeScoreInputs", "STAGE_NAMES", "StageReceipt",
     "SourceBundle", "build_native_score_inputs",
+    "FrozenStageExecutor", "FrozenStageRefusal", "FrozenStageResult",
     "replay", "request_hash", "score_batch", "score_event", "score_frozen", "score_id", "score_many", "score_one",
 ]
