@@ -1755,7 +1755,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "evidence_scope": "frozen_real_data_foundation",
         "corpus_root": str(resolved),
         "corpus_hash": corpus.index.get("corpus_hash"),
-        "population": {"expected": len(corpus.pairs), "supported": len(corpus.pairs), "compared": len(corpus.pairs)},
+        "population": saved_release_comparison["population"],
         "strategy_inventory": {"factories": list(STRATEGY_IDS), "dynamic_menu": list(DYNAMIC_MENU)},
         "model_roles": sorted(registry.deployment("legacy-phase4-deployment.v1").model_role_bindings),
         "feature_recipes": [recipe.recipe_id for recipe in feature_registry.recipes],
