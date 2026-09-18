@@ -13,6 +13,7 @@ from engine.v2.foundation import from_document, to_document
 from engine.v2.registry import DYNAMIC_MENU, default_registry
 
 from .financial import financial_diagnostics
+from .frozen_executor import FrozenStageExecutor
 from .identity import dependency_hash, request_hash, with_score_id
 from .stages import NativeScoreInputs, assemble_native_values
 
@@ -390,8 +391,68 @@ def _collect_frozen_results(results, bindings, inference_requests, days):
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
 
 
+def _frozen_stage_executors(bindings, inference, release):
+    executors = {}
+    for binding in bindings:
+        role = str(getattr(binding, "role", "")).split(":", 1)[0]
+        if (role in {"driver", "size", "implied_t1", "runup_move", "iv_crush"}
+                and hasattr(binding, "feature_order")):
+            for output in _frozen_role_outputs(binding):
+                executors[output] = FrozenStageExecutor(
+                    inference=inference,
+                    release=release,
+                    binding_id=binding.binding_id,
+                )
+    return executors
+
+
+def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
+                            required_roles, results, inference, release):
+    forecast = _without_frozen_recipes(base.forecast, bindings)
+    forecast.update({
+        "frozen_outputs": outputs,
+        "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
+        "binding_id": bindings[0].binding_id,
+        "binding_ids": tuple(binding.binding_id for binding in bindings),
+        "model_id": getattr(results[0], "model_id", None),
+        "required_roles": tuple(dict.fromkeys(required_roles)),
+    })
+    if inference is not None:
+        executors = _frozen_stage_executors(bindings, inference, release)
+        if executors:
+            forecast["executors"] = executors
+            forecast.pop("frozen_outputs", None)
+    return forecast
+
+
+def _frozen_gate_inputs(base, fields, bindings, gate_result,
+                        artifact_hashes, inference, release):
+    gate = dict(base.gate)
+    if gate_result is not None:
+        result, _ = gate_result
+        row = tuple(getattr(result, "predictions", ()) or ())
+        if row:
+            gate.update({
+                "frozen_score": row[0][0],
+                "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
+                "threshold": fields.get("gate_threshold"),
+            })
+    if inference is not None:
+        gate_bindings = [binding for binding in bindings
+                         if str(getattr(binding, "role", "")).split(":", 1)[0] == "gate"]
+        if gate_bindings and hasattr(gate_bindings[0], "feature_order"):
+            gate.pop("frozen_score", None)
+            gate["executors"] = {"gate_score": FrozenStageExecutor(
+                inference=inference,
+                release=release,
+                binding_id=gate_bindings[0].binding_id,
+            )}
+    return _without_runup_derived(gate)
+
+
 def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
-                          inference_requests, request) -> NativeScoreInputs:
+                          inference_requests, request, release,
+                          inference=None) -> NativeScoreInputs:
     supplied = fields.get("_native_inputs")
     if isinstance(supplied, NativeScoreInputs):
         base = supplied
@@ -422,25 +483,13 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     release_id = getattr(results[0], "release_id", request.deployment_id)
     binding_ids = tuple(binding.binding_id for binding in bindings)
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
-    forecast = _without_frozen_recipes(base.forecast, bindings)
-    forecast.update({
-        "frozen_outputs": outputs,
-        "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
-        "binding_id": binding_ids[0],
-        "binding_ids": binding_ids,
-        "model_id": getattr(results[0], "model_id", None),
-        "required_roles": tuple(dict.fromkeys(required_roles)),
-    })
-    gate = dict(base.gate)
-    if gate_result is not None:
-        result, _ = gate_result
-        row = tuple(getattr(result, "predictions", ()) or ())
-        if row:
-            gate.update({
-                "frozen_score": row[0][0],
-                "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
-                "threshold": fields.get("gate_threshold"),
-            })
+    forecast = _frozen_forecast_inputs(
+        base, bindings, outputs, artifact_hashes, required_roles,
+        results, inference, release,
+    )
+    gate = _frozen_gate_inputs(
+        base, fields, bindings, gate_result, artifact_hashes, inference, release,
+    )
     return replace(
         base,
         context={**context, "flags": flags},
@@ -448,7 +497,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
         forecast=forecast,
         analogs=_without_runup_derived(base.analogs),
         simulation=_without_runup_derived(base.simulation),
-        gate=_without_runup_derived(gate),
+        gate=gate,
         chooser=_without_runup_derived(base.chooser),
         diagnostics=_without_runup_derived(base.diagnostics),
         source_ref=source,
@@ -466,7 +515,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
         for result, item in zip(results, requests, strict=True)
     )
     inputs = _frozen_native_inputs(
-        fields, results, bindings, requests, request,
+        fields, results, bindings, requests, request, release, inference,
     )
     record = score_one(request, inputs)
     artifact_hashes = tuple(dict.fromkeys(

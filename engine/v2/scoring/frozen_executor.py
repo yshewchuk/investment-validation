@@ -185,3 +185,7 @@ class FrozenStageExecutor:
             },
             artifact_hashes=artifact_hashes,
         )
+
+    def predict(self, features: Mapping[str, float]) -> Mapping[str, float]:
+        """Return named outputs for the native stage executor contract."""
+        return self.execute(features).outputs

@@ -290,7 +290,12 @@ def _execute_local_forecast(
                 continue
             try:
                 result = predict(facts)
-                raw = result.get(field) if isinstance(result, Mapping) else result
+                if isinstance(result, Mapping):
+                    raw = result.get(field)
+                    if raw is None and len(result) == 1:
+                        raw = next(iter(result.values()))
+                else:
+                    raw = result
                 value = _finite(raw)
                 if value is None:
                     raise ValueError("non-finite result")
@@ -816,9 +821,13 @@ def _execute_gate_executor(inputs: NativeScoreInputs,
         _add_flag(flags, "INVALID_GATE_EXECUTOR")
         return {}
     try:
-        score = executor.predict(_facts(inputs, values))
-        if isinstance(score, Mapping):
-            score = score.get("gate_score")
+        result = executor.predict(_facts(inputs, values))
+        if isinstance(result, Mapping):
+            score = result.get("gate_score")
+            if score is None and len(result) == 1:
+                score = next(iter(result.values()))
+        else:
+            score = result
         score = _finite(score)
     except (TypeError, ValueError, KeyError):
         score = None

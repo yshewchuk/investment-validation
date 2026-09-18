@@ -125,6 +125,15 @@ def test_result_carries_verified_artifact_provenance(tmp_path):
     assert result.artifact_hashes == (artifact_hash,)
 
 
+def test_predict_exposes_named_outputs_for_native_stages(tmp_path):
+    executor, _ = _executor(tmp_path)
+
+    assert dict(executor.predict({"alpha": 3.0, "beta": 2.0})) == {
+        "prediction": pytest.approx(27.0),
+        "confidence": pytest.approx(-2.0),
+    }
+
+
 def test_executor_rejects_inference_lineage_that_differs_from_binding(tmp_path):
     release, _ = _release(tmp_path)
 
