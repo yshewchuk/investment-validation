@@ -60,6 +60,10 @@ from engine.v2.scoring.stages import (  # noqa: E402
     StageReceipt,
     receipt,
 )
+from engine.v2.scoring.source_inputs import (  # noqa: E402
+    SourceBundle,
+    build_native_score_inputs,
+)
 from engine.v2.serving.score_projection import legacy_score_projection  # noqa: E402
 
 __all__ = ["build_evidence", "main"]
@@ -194,39 +198,47 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
 
 def _numerical_independence_control() -> dict[str, bool]:
     """Poison supplied stage outputs so preservation cannot certify parity."""
-    legacy = _fake_result().as_dict()
-    clean = _native_record(legacy, "phase4-independent-numerical-input")
-    geometry = generate(
-        "STR-THRU",
-        {"spot": 100.0, "forecast_abs_move": 7.0,
-         "expiry": "2026-09-18"},
-    )
+    expiry = "2026-09-18"
     quotes = {
-        (leg.right, leg.strike, leg.expiry): {"bid": 1.0, "ask": 3.0}
-        for leg in geometry.legs
+        ("C", 100.0, expiry): {"bid": 1.0, "ask": 3.0},
+        ("P", 100.0, expiry): {"bid": 1.0, "ask": 3.0},
     }
-    pricing = price(geometry, quotes, 0.5)
-    executable = replace(
-        clean,
-        geometry=geometry,
-        pricing=pricing,
-        forecast={
-            "driver_name": "abs_move",
-            "models": {
-                "driver_prediction": {"intercept": 7.0, "coefficients": {}},
-                "forecast_abs_move": {"intercept": 7.0, "coefficients": {}},
-            },
+    source = SourceBundle(
+        source_ref="phase4-independent-numerical-input",
+        context={
+            "ticker": "PHASE4",
+            "event_date": "2026-09-16",
+            "entry_date": "2026-09-16",
+            "exit_date": "2026-09-17",
+            "expiry": expiry,
+            "spot": 100.0,
         },
-        simulation={
+        raw_quotes=quotes,
+        feature_vector={},
+        feature_missing_mask={},
+        model_identity={"driver": {"model_id": "phase4-driver-v1"}},
+        forecast_recipes={
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+        },
+        model_artifact_refs={
+            "driver_prediction": "sha256:phase4-driver",
+        },
+        residual_recipe={
             "terminal_spots": (95.0, 105.0),
             "weights": (0.5, 0.5),
             "capital_at_risk": 1.0,
         },
-        gate={
+        analog_recipe={
+            "recipe_id": "phase4-analogs-v1",
+            "population_ref": "phase4-analog-population",
+        },
+        gate_recipe={
             "model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
             "threshold": 0.0,
+            "recipe_id": "phase4-gate-v1",
         },
     )
+    executable = build_native_score_inputs(source)
     request = _request()
     expected = application.score_one(request, executable)
     poisoned = replace(
@@ -244,7 +256,7 @@ def _numerical_independence_control() -> dict[str, bool]:
     independently_recomputed = (
         expected.validation_status == "scored"
         and expected.forecasts.get("driver_prediction") == 7.0
-        and expected.forecasts.get("forecast_abs_move") == 7.0
+        and expected.forecasts.get("forecast_abs_move") is None
         and expected.forecasts.get("exp_pnl_sim") == 1.0
         and expected.gate_terms == {"gate_score": 1.0,
                                     "gate_threshold": 0.0,
@@ -255,8 +267,17 @@ def _numerical_independence_control() -> dict[str, bool]:
     )
     return {
         "copied_outputs_absent": (
-            not clean.forecast and not clean.simulation and not clean.gate
-            and not clean.chooser
+            all(key not in executable.forecast for key in (
+                "driver_prediction", "forecast_abs_move", "exp_pnl_sim",
+                "gate_score", "gate_pass",
+            ))
+            and all(key not in executable.simulation for key in (
+                "exp_pnl_sim", "win_sim", "sim_p10", "sim_p90",
+            ))
+            and all(key not in executable.gate for key in (
+                "gate_score", "gate_threshold", "gate_pass",
+            ))
+            and not executable.chooser
         ),
         "preservation_only_detected": preservation_only,
         "preservation_only_rejected": not preservation_only,
