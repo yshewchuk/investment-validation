@@ -222,6 +222,105 @@ def test_planted_defect_fit_during_inference_is_caught():
 
 
 # --------------------------------------------------------------------------
+# engine.payoff.fit_payoff / fit_runup_payoff — the payoff-map calibration
+# Scorer.score runs on demand (engine/score.py:2314/2489 via
+# Scorer.payoff/.runup_payoff, reached from _score_model/_score_runup_model).
+# --------------------------------------------------------------------------
+
+
+def test_no_fit_guard_blocks_payoff_fit_payoff():
+    from engine import payoff
+
+    with no_fit_guard():
+        with pytest.raises(RuntimeFitForbidden):
+            payoff.fit_payoff(pd.DataFrame(), "STR-THRU", alpha=0.5)
+
+
+def test_payoff_fit_payoff_unaffected_when_guard_off():
+    from engine import payoff
+
+    rng = np.random.RandomState(0)
+    n = payoff.MIN_TRADES + 50
+    spot_entry = rng.uniform(20.0, 200.0, n)
+    abs_move = rng.uniform(0.0, 10.0, n)
+    trades = pd.DataFrame({
+        "strategy": ["STR-THRU"] * n,
+        "fill_alpha": [0.5] * n,
+        "exit_date": pd.date_range("2018-01-01", periods=n, freq="D"),
+        "spot_entry": spot_entry,
+        "abs_move": abs_move,
+        "exit_value": spot_entry * (0.05 + 0.01 * abs_move + rng.normal(0, 0.01, n)),
+    })
+    result = payoff.fit_payoff(trades, "STR-THRU", alpha=0.5)
+    assert isinstance(result, payoff.PayoffMap)
+    assert result.n == n
+
+
+def test_no_fit_guard_blocks_payoff_fit_runup_payoff():
+    from engine import payoff
+
+    with no_fit_guard():
+        with pytest.raises(RuntimeFitForbidden):
+            payoff.fit_runup_payoff(pd.DataFrame(), alpha=0.5)
+
+
+def test_payoff_fit_runup_payoff_unaffected_when_guard_off():
+    from engine import payoff
+
+    rng = np.random.RandomState(0)
+    n = payoff.MIN_TRADES + 50
+    spot_entry = rng.uniform(20.0, 200.0, n)
+    trades = pd.DataFrame({
+        "strategy": ["STR-RUNUP"] * n,
+        "fill_alpha": [0.5] * n,
+        "exit_date": pd.date_range("2018-01-01", periods=n, freq="D"),
+        "im_t1": rng.uniform(2.0, 10.0, n),
+        "spot_entry": spot_entry,
+        "spot_exit": rng.uniform(20.0, 200.0, n),
+        "strike": rng.uniform(20.0, 200.0, n),
+        "exit_value": spot_entry * rng.uniform(0.0, 0.2, n),
+    })
+    result = payoff.fit_runup_payoff(trades, alpha=0.5)
+    assert isinstance(result, payoff.RunupPayoffSurface)
+    assert result.n == n
+
+
+# --------------------------------------------------------------------------
+# engine.recalibrate.fit_recalibration — the IsotonicRegression win-rate
+# recalibration Scorer.score runs on demand (Scorer.recalibration, reached
+# from _score_model at engine/score.py:2338).
+# --------------------------------------------------------------------------
+
+
+def test_no_fit_guard_blocks_recalibrate_fit_recalibration():
+    from engine import recalibrate
+
+    with no_fit_guard():
+        with pytest.raises(RuntimeFitForbidden):
+            # An explicit empty frame, never None: fit_recalibration(pairs=None)
+            # would call load_pairs() and read a real file if the guard did not
+            # fire first. It must fire first.
+            recalibrate.fit_recalibration("STR-THRU", 0.5, before=None, pairs=pd.DataFrame())
+
+
+def test_recalibrate_fit_recalibration_unaffected_when_guard_off():
+    from engine import recalibrate
+
+    rng = np.random.RandomState(0)
+    n = recalibrate.MIN_PAIRS + 30
+    pairs = pd.DataFrame({
+        "strategy": ["STR-THRU"] * n,
+        "fill_alpha": [0.5] * n,
+        "exit_date": pd.date_range("2018-01-01", periods=n, freq="D"),
+        "raw_win": rng.uniform(0.0, 1.0, n),
+        "outcome": rng.randint(0, 2, n).astype(float),
+    })
+    result = recalibrate.fit_recalibration("STR-THRU", 0.5, before=None, pairs=pairs)
+    assert isinstance(result, recalibrate.RecalibrationMap)
+    assert result.n == n
+
+
+# --------------------------------------------------------------------------
 # FrozenInference under the guard: cold/warm agree, missing -> MODEL_NOT_READY,
 # and it never touches a fitting/cache-write path either way (it never
 # imports engine.models.no_fit at all — the test asserts that by running the

@@ -15,6 +15,13 @@ the one switch that rigs every legacy path reachable from a score request:
   ``.fit(...)`` entry point (``train()``/``walk_forward``/``fit_final`` in
   ``engine/models/training/common.py`` all reach a model only through this
   one function per module).
+- ``engine/payoff.py::fit_payoff`` and ``::fit_runup_payoff`` — the
+  ``np.polyfit``/``np.linalg.lstsq`` payoff-map calibration ``Scorer.score``
+  runs on demand (``engine/score.py``'s ``Scorer.payoff``/``.runup_payoff``,
+  reached from ``_score_model``/``_score_runup_model``).
+- ``engine/recalibrate.py::fit_recalibration`` — the ``IsotonicRegression``
+  win-rate recalibration ``Scorer.score`` runs on demand (``Scorer
+  .recalibration``, reached from ``_score_model``).
 
 This lives under legacy ``engine/`` rather than ``engine/v2/models`` on
 purpose: ``checks/import_layers.py`` rule 3 ("legacy never imports v2")
