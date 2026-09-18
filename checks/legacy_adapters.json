@@ -1,5 +1,5 @@
 {
-  "count": 64,
+  "count": 66,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -964,9 +964,39 @@
       "retry": "none",
       "output": "legacy fill model",
       "removal_phase": "phase-5 scoring extraction"
+    },
+    {
+      "package": "engine.v2.models",
+      "module": "engine.v2.models.inventory",
+      "legacy_symbol": "engine.models.registry",
+      "reason": "P5-1 artifact inventory reads the current champion manifest (registry.json) and its ModelArtifact metadata (feature list, residual sizes) directly, rather than duplicating the legacy registry's load/verify logic; no numerical copy, hashes only.",
+      "declared_on": "2026-09-18",
+      "runtime": "current_release_inventory",
+      "read_set": "engine/models/registry.json and the champion joblib files it points at, one at a time",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure read; no side effects to retry",
+      "output": "ModelReleaseInventory plus ReleaseIssue tuples (\u00a77 model contracts)",
+      "removal_phase": "phase-5 native training/serving extraction"
+    },
+    {
+      "package": "engine.v2.models",
+      "module": "engine.v2.models.inventory",
+      "legacy_symbol": "engine.paths",
+      "reason": "Resolve ROOT/DATA/ENGINE/FEATURES the same way every other legacy and v2-bridge module does, so a hash or path this inventory reports matches what the legacy scorer actually reads from.",
+      "declared_on": "2026-09-18",
+      "runtime": "current_release_inventory",
+      "read_set": "in-process path constants only; no filesystem access beyond what callers already declare",
+      "write_set": "none",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "pure function; no side effects to retry",
+      "output": "resolved filesystem paths",
+      "removal_phase": "phase-5 native training/serving extraction"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
   "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. P2-6 (snapshot-to-legacy materialization, D13/D14 adapter half) adds 2 more engine.v2.data symbols (engine.data.store._read_part, engine.data.schemas.coerce) so materialize() proves a written legacy file is readable by the unchanged legacy loaders before it is locked read-only; each exact legacy symbol keeps its own ledger entry per review (PANEL_COLUMNS, tier4.COLUMNS, tier4.KEY_COLUMNS stay three separate entries) even though this puts engine.v2.data.legacy_adapter's own import fan-out one over its 8-edge budget -- reported in the task report as a stop-and-decide finding, not gamed by collapsing entries. P2-7 (supervised snapshot import, D16 synthetic) adds one more engine.v2.data symbol, engine.data.schemas.SOURCE_PRIORITY, for a deterministic source_priority_version fingerprint. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled. capture-inputs (2026-09-14, this task) adds two more engine.v2.ops symbols, engine.data.fetch.iter_cached and engine.calendar.projected_trading_days, for the nightly barrier read-set capture tool's raw-fetch enumeration and stale-calendar-safe session walk -- see engine/v2/ops/capture_inputs.py and engine/v2/data/legacy_nightly_read_plan.py. ops price-refresh (2026-09-14, this task) adds six more engine.v2.ops symbols -- the five engine.data.pulls.price_refresh entry points (load_events, load_price_universe, load_fetch_history, plan_refresh, run_refresh) plus engine.data.fetch.Fetcher -- so the scheduled full-history yfinance price re-downloader crosses the v2/legacy boundary through legacy_adapter.invoke_price_refresh instead of engine.v2.ops.cli importing engine.data.* directly. See engine/data/pulls/price_refresh.py and engine/v2/ops/legacy_adapter.py. Selfcheck failure-detail observability (2026-09-15, real attempt-19 diagnosis: job_1b16bb8b349dab81cb28f20726d78359) adds one more engine.v2.ops symbol, engine.dashboard.selfcheck.scrub_mismatches, so a failed legacy_selfcheck job persists a row/field/reason mismatch list to diagnostics/failure_details.json instead of only a bare traceback. Last read-set gap fix (2026-09-15) adds one more engine.v2.ops symbol, engine.data.finality.session_finality, for legacy_finality's own content-level cross-check against this run's committed materialization (task decision (b) -- legacy_model_evidence needed no new symbol at all, since its full read surface turned out to already be LEGACY_SCORE_READ_PLAN_V1, and moved into stages.SNAPSHOT_BACKED_KINDS instead). R3B-7 (2026-09-18) adds two more engine.v2.ops symbols, engine.data.finality._market_wide_complete and engine.data.finality._coverage_frame, both held only as identity-comparison originals for finality_compatibility's existing monkeypatch-detection seam (the same pattern already used for session_finality/resolve_final_session/covered_tickers) -- fixes a coverage regression where a test that faked only these two private helpers had no effect on the native v2 path, which silently fell through to a real data read instead of the fake.",
-  "committed_ceiling": 64
+  "committed_ceiling": 66
 }
