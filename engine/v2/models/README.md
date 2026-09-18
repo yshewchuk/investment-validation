@@ -32,7 +32,13 @@ ArtifactInventoryMember, ReleaseBinding, ReleaseRequirement,
 ModelReleaseInventory, ReleaseIssue, ModelReleaseRefusal, release_issues,
 require_complete_release, and their constants.
 
-<!-- public-interface: AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1 -->
+P5-1 adds the generated current-release inventory: `current_release_inventory`,
+`registry_drift_issues`, `non_model_state_inventory`, `tier4_fold_coverage`,
+`served_roles`, `FoldCoverageEntry`, `NonModelStateEntry`, and the constants
+`DEPLOYMENT_ID`, `RELEASE_ID`, `KNOWN_CLOCK_IDS`, `FEATURE_ROLES`,
+`NON_MODEL_STATE_ITEMS`.
+
+<!-- public-interface: AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1, DEPLOYMENT_ID, FEATURE_ROLES, FoldCoverageEntry, KNOWN_CLOCK_IDS, NON_MODEL_STATE_ITEMS, NonModelStateEntry, RELEASE_ID, current_release_inventory, non_model_state_inventory, registry_drift_issues, served_roles, tier4_fold_coverage -->
 
 ## Consumers
 
@@ -40,10 +46,9 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
-
 The engine.v2.scoring package imports the verified frozen inference contract
-and loader for stage bound model execution.
+and loader for stage bound model execution. `tools/phase5_inventory.py`
+(not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
 
 <!-- consumers: engine.v2.scoring -->
 
