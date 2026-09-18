@@ -30,7 +30,7 @@ underscore convention, and an import of a name absent from this list fails
 temporary legacy adapter; `financial` owns diagnostics; `identity` owns
 content-addressed request identities.
 
-<!-- public-interface: application, compatibility, financial, identity, stages, canonical_request, dependency_hash, financial_diagnostics, request_hash, replay, score_batch, score_event, score_frozen, score_id, score_many, score_one, NativeScoreInputs, STAGE_NAMES, StageReceipt -->
+<!-- public-interface: application, compatibility, financial, identity, source_inputs, stages, canonical_request, dependency_hash, financial_diagnostics, request_hash, replay, score_batch, score_event, score_frozen, score_id, score_many, score_one, NativeScoreInputs, SourceBundle, STAGE_NAMES, StageReceipt, build_native_score_inputs -->
 
 ## Consumers
 

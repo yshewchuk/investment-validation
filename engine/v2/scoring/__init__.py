@@ -23,10 +23,12 @@ from engine.v2.scoring.identity import (
     request_hash,
     score_id,
 )
+from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
 from engine.v2.scoring.stages import STAGE_NAMES, NativeScoreInputs, StageReceipt
 
 __all__ = [
     "canonical_request", "dependency_hash", "financial_diagnostics",
     "NativeScoreInputs", "STAGE_NAMES", "StageReceipt",
+    "SourceBundle", "build_native_score_inputs",
     "replay", "request_hash", "score_batch", "score_event", "score_frozen", "score_id", "score_many", "score_one",
 ]
