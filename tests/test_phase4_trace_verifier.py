@@ -521,6 +521,7 @@ def test_expected_population_comes_from_release_manifest_members(tmp_path):
 
     assert release["population"] == {
         "expected": 2,
+        "supported": 0,
         "agreed": 0,
         "manifest_bound": True,
         "compared": 0,

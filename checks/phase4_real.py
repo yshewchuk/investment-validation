@@ -26,6 +26,7 @@ from checks.tier0_corpus import run as run_corpus  # noqa: E402
 from engine.fills import MID  # noqa: E402
 from engine.models.registry import artifact_sha256, load_registry  # noqa: E402
 from engine.pnl_sim import ResidualPool, expected_pnl  # noqa: E402
+from engine.report import Report, build_provenance  # noqa: E402
 from engine.structures import (  # noqa: E402
     ChainSnapshot,
     STRUCTURES,
@@ -643,7 +644,15 @@ def _chooser_controls() -> dict[str, bool]:
     }
 
 
-def _saved_release_control() -> bool:
+def _champion_artifacts_verified() -> bool:
+    """Champion artifact files exist and hash-match the registry.
+
+    This is NOT a saved-release comparison: it never scores a single record
+    or compares a native output to a legacy one. It only checks that the
+    registry's champion pointers resolve to files on disk whose content
+    still matches the recorded hash. Kept because that integrity check is
+    useful on its own, under a name that says what it actually verifies.
+    """
     registry = load_registry()
     required = (
         ("size", "*"), ("implied_t1", "*"), ("runup_move", "*"),
@@ -1665,6 +1674,117 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     return release, parity
 
 
+def _report_population_rows(evidence: dict) -> list[list[str]]:
+    population = evidence.get("population") or {}
+    return [[str(key), str(population[key])] for key in sorted(population)]
+
+
+def _report_subject_rows(evidence: dict) -> list[list[str]]:
+    rows = []
+    for subject_id in sorted(evidence.get("subjects") or {}):
+        row = evidence["subjects"][subject_id]
+        controls = row.get("controls") or {}
+        passed = sum(1 for value in controls.values() if value is True)
+        rows.append([subject_id, str(row.get("status")), f"{passed}/{len(controls)}"])
+    return rows
+
+
+def _report_completion_rows(evidence: dict) -> list[list[str]]:
+    controls = evidence.get("completion_controls") or {}
+    return [[name, "pass" if controls.get(name) is True else "FAIL"]
+            for name in sorted(controls)]
+
+
+def _write_phase4_report(evidence: dict, artifact_root: Path) -> Path:
+    """Render the Phase 4 acceptance report through ``engine.report.Report``.
+
+    Real sections built from the evidence just computed -- the saved-release
+    population, every subject's control count, and every completion
+    control's pass/fail -- not a JSON dump pasted under a Markdown header.
+    """
+    population = evidence.get("population") or {}
+    subjects = evidence.get("subjects") or {}
+    funnel = [
+        {"stage": "acceptance subjects registered", "events": len(subjects),
+         "note": "P4-01..P4-09, checks/phase4_real.py"},
+        {"stage": "subjects PASS/FOUNDATION_PASS",
+         "events": sum(1 for row in subjects.values()
+                       if row.get("status") in ("PASS", "FOUNDATION_PASS")),
+         "note": "of the registered subjects above", "headline": True},
+        {"stage": "saved-release population expected", "events": population.get("expected"),
+         "note": "declared release manifest members"},
+        {"stage": "saved-release population compared", "events": population.get("compared"),
+         "note": f"agreed={population.get('agreed')}"},
+    ]
+    context = {
+        "kind": "audit",
+        "spec": {
+            "id": "REARCH-PHASE-4-ACCEPTANCE",
+            "title": "Rearchitecture Phase 4 -- native scoring acceptance",
+            "type": "descriptive",
+            "hypothesis": (
+                "descriptive: does native scoring reproduce the frozen "
+                "legacy saved-release records, and which subjects/controls "
+                "pass over the corpus just measured?"
+            ),
+        },
+        "results": {"headline": {}, "stress": {}, "mc": {}},
+        "headline": {}, "backtest": {}, "checklist": [],
+        "provenance": build_provenance(seeds={}, input_files=[]),
+        "survivorship_note": "",
+        "calibration": None,
+        "funnel": funnel,
+        "extra_sections": [
+            {"title": "Saved-release comparison population",
+             "note": "From `_native_parity`'s `release` return value -- the "
+                     "only source `full_saved_release_compared` is derived "
+                     "from below.",
+             "columns": ["field", "value"], "align": ["---", "---"],
+             "rows": _report_population_rows(evidence)},
+            {"title": "Acceptance subjects (P4-01–P4-09)",
+             "columns": ["subject", "status", "controls passed"],
+             "align": ["---", "---", "---:"],
+             "rows": _report_subject_rows(evidence)},
+            {"title": "Completion controls",
+             "columns": ["control", "result"], "align": ["---", "---"],
+             "rows": _report_completion_rows(evidence)},
+        ],
+    }
+    return Report(context).write(artifact_root, filename="phase4_report.md")
+
+
+def _report_is_complete(text: str, evidence: dict) -> bool:
+    """True only if the written report actually carries the required
+    content -- not merely that a file exists at the path.
+
+    Checks the fixed section headers `engine.report.Report` always renders
+    for an "audit" kind, plus that every row this call's own
+    `_write_phase4_report` built is present in the rendered Markdown
+    verbatim (mirrors the exact `"| " + " | ".join(...) + " |"` line shape
+    `Report._render_extra_sections` writes each row as).
+    """
+    if not text.strip():
+        return False
+    required_headers = (
+        "## 0. Verdict", "## 1.5 Sample funnel", "## 8. Provenance",
+        "### 8.5.1 Saved-release comparison population",
+        "### 8.5.2 Acceptance subjects (P4-01–P4-09)",
+        "### 8.5.3 Completion controls",
+        "## 10. Glossary",
+    )
+    if not all(header in text for header in required_headers):
+        return False
+    for rows in (
+        _report_population_rows(evidence),
+        _report_subject_rows(evidence),
+        _report_completion_rows(evidence),
+    ):
+        for row in rows:
+            if "| " + " | ".join(row) + " |" not in text:
+                return False
+    return True
+
+
 def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     started = time.perf_counter()
     resolved = resolve_corpus(corpus_root)
@@ -1704,7 +1824,16 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "factory_geometry_corruption_rejected": factory_parity["negative_controls"]["geometry"],
         "factory_expiry_corruption_rejected": factory_parity["negative_controls"]["expiry"],
         "factory_fill_corruption_rejected": factory_parity["negative_controls"]["fill"],
-        "full_saved_release_compared": _saved_release_control(),
+        # Honest definition: True only if EVERY declared-population record was
+        # actually run through a record-by-record saved-release comparison
+        # (expected == supported == compared, all agreed, every comparison
+        # dimension agreeing, same-input hashes verified, all required stages
+        # covered) -- exactly what `saved_release_comparison["complete"]`
+        # (_native_parity's `release` return value) measures. It is NOT the
+        # champion-artifact hash check; that lives under its own honest name
+        # below.
+        "full_saved_release_compared": saved_release_comparison["complete"],
+        "champion_artifacts_verified": _champion_artifacts_verified(),
         "batch_resources_measured": application_controls["batch_resource_profile"],
     })
     completion_controls.update({
@@ -1819,9 +1948,10 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
         "implementation_hash": content_hash({"strategies": list(STRATEGY_IDS), "recipes": [r.recipe_id for r in feature_registry.recipes], "stages": stage_ids}),
     }
-    report = artifact_root / "phase4_report.md"
-    report.write_text("# Phase 4 scoring acceptance\n\n" + json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    evidence["completion_controls"]["complete_report_written"] = report.is_file()
+    report = _write_phase4_report(evidence, artifact_root)
+    evidence["completion_controls"]["complete_report_written"] = _report_is_complete(
+        report.read_text(), evidence,
+    )
     if all(evidence["completion_controls"].get(name) is True for name in final_controls + ("complete_report_written",)):
         evidence["status"] = "PASS"
         evidence["evidence_scope"] = "native_full_release"
@@ -1829,7 +1959,10 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         for row in evidence["subjects"].values():
             if row["status"] == "FOUNDATION_PASS":
                 row["status"] = "PASS"
-        report.write_text("# Phase 4 scoring acceptance\n\n" + json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+        report = _write_phase4_report(evidence, artifact_root)
+        evidence["completion_controls"]["complete_report_written"] = _report_is_complete(
+            report.read_text(), evidence,
+        )
     return evidence
 
 
