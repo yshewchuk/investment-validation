@@ -238,11 +238,30 @@ def _json_value(value):
     return value
 
 
-def _evidence_rows(frame: pd.DataFrame) -> dict[str, Any]:
-    """Copy rows and assign deterministic identities for one evidence block."""
-    rows = []
-    occurrences: dict[str, int] = {}
-    for source_index, series in frame.iterrows():
+def _evidence_rows(
+    frame: pd.DataFrame, *, cache: dict[Any, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Copy rows and assign deterministic identities for one evidence block.
+
+    ``cache``, keyed by each row's pandas index, is optional and lets several
+    calls whose frames are nested/overlapping VIEWS of the same underlying
+    trade population — as ``match()``'s population, causal pool, and every
+    widening step are — share one row's ``(digest, values)`` instead of each
+    rebuilding it. Without it, a wide bucket that widens through several
+    steps re-runs ``to_dict`` + ``json.dumps`` + ``sha256`` on the SAME rows
+    once per step and retains an independent nested-dict copy of each row per
+    call; measured on a 50k-row population widening to a 3,714-row match,
+    that duplication is what turns a ~450 MB traced peak into a >1 GB RSS
+    spike inside `AnalogMatcher.match` — big enough, on a process already
+    resident at several GB, to exhaust an address-space cap before
+    `_summarize`'s own (much smaller) bootstrap array can allocate. The digest
+    and ``row_id`` numbering are unaffected: ``occurrence`` counting stays
+    local to this call, so identical frames still produce byte-identical
+    output whether or not a cache is supplied.
+    """
+    row_cache: dict[Any, dict[str, Any]] = {} if cache is None else cache
+
+    def _compute(source_index, series) -> dict[str, Any]:
         values = _json_value(series.to_dict())
         identity_payload = {
             "source_index": _json_value(source_index),
@@ -252,13 +271,43 @@ def _evidence_rows(frame: pd.DataFrame) -> dict[str, Any]:
             identity_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
         ).encode()
         digest = hashlib.sha256(encoded).hexdigest()
+        return {
+            "digest": digest,
+            "source_index": identity_payload["source_index"],
+            "values": values,
+        }
+
+    # `.iterrows()` boxes every column of every row into a fresh Series (a
+    # real cost on a wide frame), so a cache hit must skip it, not just skip
+    # the json/hash work below it. Safe only when the frame's own index has
+    # no duplicate labels — otherwise `.loc[missing]` could return more rows
+    # than requested, so duplicate-indexed frames fall back to the original
+    # row-by-row path (still cache-aware, just without the `.iterrows()` skip).
+    if not frame.index.has_duplicates:
+        missing = [idx for idx in frame.index if idx not in row_cache]
+        if missing:
+            # dict.fromkeys: unique, order-preserving — `.loc` on a label list
+            # with a repeat would otherwise fetch that label's row twice.
+            subset = frame.loc[list(dict.fromkeys(missing))]
+            for source_index, series in subset.iterrows():
+                row_cache[source_index] = _compute(source_index, series)
+    else:
+        for source_index, series in frame.iterrows():
+            if source_index not in row_cache:
+                row_cache[source_index] = _compute(source_index, series)
+
+    rows = []
+    occurrences: dict[str, int] = {}
+    for source_index in frame.index:
+        cached = row_cache[source_index]
+        digest = cached["digest"]
         occurrence = occurrences.get(digest, 0)
         occurrences[digest] = occurrence + 1
         row_id = f"sha256:{digest}:{occurrence}"
         rows.append({
             "row_id": row_id,
-            "source_index": identity_payload["source_index"],
-            "values": values,
+            "source_index": cached["source_index"],
+            "values": cached["values"],
         })
     return {
         "row_ids": [row["row_id"] for row in rows],
@@ -290,7 +339,15 @@ class _AnalogMatchEvidence:
         )
         self.request_key = request_key
         self.bucket_query = _json_value(bucket_query)
-        self.population = _evidence_rows(population)
+        # Shared across every _evidence_rows call this instance makes.
+        # Population, the causal pool and each widening step's `matched` are
+        # nested/overlapping views of the SAME underlying trades frame (a
+        # widened step is always a superset of the narrower ones before it),
+        # so without this cache the same rows get re-serialized and
+        # independently retained once per call — see _evidence_rows'
+        # docstring for the measured effect on a large bucket.
+        self._row_cache: dict[Any, dict[str, Any]] = {}
+        self.population = _evidence_rows(population, cache=self._row_cache)
         self.causal = None
         self.effective_bucket_query = None
         self.causal_implied_edges = None
@@ -302,7 +359,7 @@ class _AnalogMatchEvidence:
         bucket_query: dict,
         implied_edges: tuple[float, float] | None,
     ) -> None:
-        self.causal = _evidence_rows(pool)
+        self.causal = _evidence_rows(pool, cache=self._row_cache)
         self.effective_bucket_query = _json_value(bucket_query)
         self.causal_implied_edges = _json_value(implied_edges)
 
@@ -314,7 +371,7 @@ class _AnalogMatchEvidence:
         *,
         accepted: bool,
     ) -> None:
-        block = _evidence_rows(matched)
+        block = _evidence_rows(matched, cache=self._row_cache)
         self.widening_steps.append({
             "step": len(self.widening_steps),
             "active_dimensions": list(active),
@@ -341,8 +398,8 @@ class _AnalogMatchEvidence:
             "population": self.population,
             "causal": self.causal,
             "widening_steps": self.widening_steps,
-            "selected": _evidence_rows(matched),
-            "contributing": _evidence_rows(contributing),
+            "selected": _evidence_rows(matched, cache=self._row_cache),
+            "contributing": _evidence_rows(contributing, cache=self._row_cache),
             "result": result.as_dict(),
         })
 
