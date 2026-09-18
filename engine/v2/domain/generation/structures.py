@@ -62,7 +62,7 @@ class Pricing:
     refusal: str | None = None
 
 
-def _number(value: Any, name: str) -> float:
+def _finite_float(value: Any, name: str) -> float:
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
@@ -176,12 +176,12 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
         raise GeometryRefusal("UNKNOWN_STRATEGY")
     if strategy in DISABLED:
         return Geometry(strategy, 0.0, 0.0, (), DISABLED[strategy])
-    spot = _number(inputs.get("spot"), "spot")
-    forecast = abs(_number(inputs.get("forecast_abs_move", inputs.get("forecast", 0.0)), "forecast"))
+    spot = _finite_float(inputs.get("spot"), "spot")
+    forecast = abs(_finite_float(inputs.get("forecast_abs_move", inputs.get("forecast", 0.0)), "forecast"))
     divisor = {"TWIN-P": 1.5, "TWIN-P5": 1.0, "CND-PS": 2.0,
                "BFLY-P": 1.0, "BFLY-P5": 3.0, "RAMP7": 3.0,
                "CTR5": 2.0}.get(strategy, 1.0)
-    width = _number(inputs.get("width", forecast / divisor / 100.0 * spot), "width")
+    width = _finite_float(inputs.get("width", forecast / divisor / 100.0 * spot), "width")
     if width <= 0 and strategy not in {"STR-THRU", "STR-RUNUP"}:
         raise GeometryRefusal("ZERO_WIDTH")
     selected = None
@@ -202,7 +202,7 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
         ) for index, leg in enumerate(resolved))
         return Geometry(strategy, spot, _resolved_width(legs), legs)
     if strategy in {"STR-THRU", "STR-RUNUP"}:
-        strike = _number(
+        strike = _finite_float(
             inputs.get("strike", spot) if inputs.get("strike") is not None
             else selected[0] if selected is not None else spot,
             "strike",
@@ -235,7 +235,7 @@ def price(geometry: Geometry, quotes: Mapping[Any, Mapping[str, Any]],
     """Price generated legs using the shared worst-to-best fill convention."""
     if geometry.refusal:
         return Pricing(geometry.strategy, geometry.spot, 0.0, (), geometry.refusal)
-    alpha = _number(fill_alpha, "fill_alpha")
+    alpha = _finite_float(fill_alpha, "fill_alpha")
     if not 0.0 <= alpha <= 1.0:
         raise PricingRefusal("INVALID_FILL_ALPHA")
     priced: list[PricedLeg] = []
@@ -246,8 +246,8 @@ def price(geometry: Geometry, quotes: Mapping[Any, Mapping[str, Any]],
         quote = next((quotes.get(key) for key in keys if key in quotes), None)
         if quote is None:
             raise PricingRefusal(f"MISSING_QUOTE:{leg.name}")
-        bid = _number(quote.get("bid"), f"{leg.name}.bid")
-        ask = _number(quote.get("ask"), f"{leg.name}.ask")
+        bid = _finite_float(quote.get("bid"), f"{leg.name}.bid")
+        ask = _finite_float(quote.get("ask"), f"{leg.name}.ask")
         if bid < 0 or ask < bid:
             raise PricingRefusal(f"INVALID_QUOTE:{leg.name}")
         fill = ask - alpha * (ask - bid) if leg.side == "buy" else bid + alpha * (ask - bid)
