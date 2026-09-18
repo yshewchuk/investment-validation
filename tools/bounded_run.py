@@ -11,13 +11,27 @@ CPU
   makes the job yield its cores whenever anything else wants them.
 
 MEMORY
-  An external watchdog polls the job's whole process tree once per
-  ``--poll-s`` seconds and logs a heartbeat line with the tree's proportional
-  RSS. At ``--warn-pct`` of the cap it logs a warning; at the cap it SIGTERMs
-  the tree (SIGKILL after ``--kill-grace-s``), prints the per-process memory
-  breakdown, and exits 137. That turns this box's failure mode — a silent OOM
-  that kills a neighbor's job with no traceback anywhere — into a clean,
-  explained, resumable abort of exactly one job.
+  An external watchdog checks the job's whole process tree every ``--poll-s``
+  seconds (default 0.25) and logs a heartbeat line once a minute. Two limits,
+  both on real (resident) memory, never on address space:
+
+  * the job's own cap, ``--max-rss-gb``: a cheap VmRSS sum each tick, confirmed
+    with proportional RSS (Pss) before acting, so shared pages never trigger a
+    false kill. Breach: SIGTERM, then SIGKILL after ``--kill-grace-s`` or at
+    once if the box floor is crossed meanwhile.
+  * the box floor, ``--min-free-gb`` (default 0.5): MemAvailable for the whole
+    machine. Other sessions share this box, so a job under its own cap can
+    still starve docker when a neighbour grows. Breach: SIGKILL at once; this
+    is an emergency, not a courtesy stop.
+
+  Why the interval matters: the watchdog acts only when it looks, so the worst
+  overshoot is growth rate x interval. The 30 s default this replaced let a
+  capture climb gigabytes between looks and took docker down (2026-09-18); at
+  0.25 s the overshoot is tens of MB. A tick reads a few /proc files.
+
+  Either breach prints the memory breakdown and exits 137. That turns this
+  box's failure mode — a silent OOM that kills a neighbor's job with no
+  traceback anywhere — into a clean, explained abort of exactly one job.
 
 What an aborted nightly actually costs, since this said "resumable" and there
 are no checkpoints to resume from: the FETCHED work survives, because the store
@@ -36,7 +50,7 @@ once a minute.
 
 Usage:
     python3 tools/bounded_run.py [--cores N] [--max-rss-gb G] \\
-        [--poll-s S] -- <command...>
+        [--min-free-gb F] [--poll-s S] -- <command...>
 
     python3 tools/bounded_run.py --max-rss-gb 5.5 -- \\
         python3 -m engine.dashboard.nightly --as-of 2026-09-09
@@ -52,8 +66,10 @@ import sys
 import time
 from pathlib import Path
 
-POLL_DEFAULT_S = 30
+POLL_DEFAULT_S = 0.25
+MIN_FREE_DEFAULT_GB = 0.5
 KILL_GRACE_DEFAULT_S = 45
+HEARTBEAT_S = 60.0
 
 
 def _read_status(pid: int) -> dict[str, str]:
@@ -89,6 +105,32 @@ def _rss_mb(pid: int) -> tuple[float, float]:
     except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
         pass
     return vm, pss
+
+
+def _vmrss_mb(pid: int) -> float:
+    """VmRSS alone: the cheap per-tick reading (no smaps walk)."""
+    raw = _read_status(pid).get("VmRSS", "")
+    return float(raw[:-2]) / 1024.0 if raw.endswith("kB") else 0.0
+
+
+def _available_mb() -> float:
+    """The box's MemAvailable, in MB (inf if unreadable, so it never kills)."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return float(line.split()[1]) / 1024.0
+    except (OSError, IndexError, ValueError):
+        pass
+    return float("inf")
+
+
+def _box_top(limit: int = 8) -> list[tuple[float, int]]:
+    """The box's largest processes by VmRSS, for the floor-breach report."""
+    rows = []
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            rows.append((_vmrss_mb(int(entry)), int(entry)))
+    return sorted(rows, reverse=True)[:limit]
 
 
 def _descendants(root: int) -> list[int]:
@@ -135,8 +177,11 @@ def main() -> int:
                              "this cap (default: 5.5)")
     parser.add_argument("--warn-pct", type=float, default=85.0,
                         help="log a warning at this share of the cap")
-    parser.add_argument("--poll-s", type=int, default=POLL_DEFAULT_S,
-                        help="watchdog interval in seconds")
+    parser.add_argument("--min-free-gb", type=float, default=MIN_FREE_DEFAULT_GB,
+                        help="SIGKILL the job when the whole box's MemAvailable "
+                             "drops below this (default: 0.5)")
+    parser.add_argument("--poll-s", type=float, default=POLL_DEFAULT_S,
+                        help="watchdog interval in seconds (default: 0.25)")
     parser.add_argument("--kill-grace-s", type=int, default=KILL_GRACE_DEFAULT_S,
                         help="seconds between SIGTERM and SIGKILL")
     parser.add_argument("command", nargs=argparse.REMAINDER,
@@ -146,6 +191,11 @@ def main() -> int:
     command = [c for c in args.command if c != "--"] or ["true"]
     if not args.max_rss_gb > 0:
         parser.error("--max-rss-gb must be positive")
+    if not args.poll_s > 0:
+        parser.error("--poll-s must be positive")
+    if args.min_free_gb < 0:
+        parser.error("--min-free-gb must not be negative")
+    floor_mb = args.min_free_gb * 1024.0
 
     cap_mb = args.max_rss_gb * 1024.0
     cores = args.cpu_set or (f"0-{args.cores - 1}" if args.cores > 1 else "0")
@@ -167,7 +217,8 @@ def main() -> int:
         env[name] = str(worker_cores)
 
     print(f"[bounded] cap={args.max_rss_gb:g}G warn at {args.warn_pct:g}% "
-          f"cores={cores} of {os.cpu_count()} poll={args.poll_s}s "
+          f"box floor={args.min_free_gb:g}G "
+          f"cores={cores} of {os.cpu_count()} poll={args.poll_s:g}s "
           f"nice=19 threads={worker_cores}", flush=True)
     print(f"[bounded] command: {' '.join(command)}", flush=True)
 
@@ -178,6 +229,7 @@ def main() -> int:
     )
 
     warned = False
+    last_beat = float("-inf")
     while True:
         code = proc.poll()
         if code is not None:
@@ -185,41 +237,58 @@ def main() -> int:
             print(f"[bounded] exited {code} after {elapsed / 60.0:.1f} min",
                   flush=True)
             return code
-        tree = _descendants(proc.pid)
-        vm_total = pss_total = 0.0
-        for pid in tree:
-            vm, pss = _rss_mb(pid)
-            vm_total += vm
-            pss_total += pss
         elapsed = time.monotonic() - started
+        available = _available_mb()
+        if available < floor_mb:
+            tree = set(_descendants(proc.pid))
+            print(f"[watchdog] {elapsed / 60.0:6.1f}m box MemAvailable "
+                  f"{available / 1024.0:.2f}G < floor {args.min_free_gb:g}G "
+                  f"— BOX FLOOR BREACH, SIGKILL", flush=True)
+            print("[bounded] largest processes on the box (* = this job):",
+                  flush=True)
+            for rss, pid in _box_top():
+                mark = "*" if pid in tree else " "
+                print(f" {mark}{rss / 1024.0:5.2f}G  pid {pid}  {_cmdline(pid)}",
+                      flush=True)
+            _kill(proc, signal.SIGKILL)
+            print("[bounded] killed at the box memory floor", flush=True)
+            return 137
+        tree = _descendants(proc.pid)
+        rss_total = sum(_vmrss_mb(pid) for pid in tree)
+        heartbeat = elapsed - last_beat >= HEARTBEAT_S
+        if rss_total >= cap_mb * args.warn_pct / 100.0 or heartbeat:
+            # VmRSS double-counts pages shared across the tree; confirm with
+            # Pss before warning or killing, and for the heartbeat line.
+            vm_total = pss_total = 0.0
+            for pid in tree:
+                vm, pss = _rss_mb(pid)
+                vm_total += vm
+                pss_total += pss
+        else:
+            vm_total = pss_total = rss_total
         pct = 100.0 * pss_total / cap_mb
         line = (f"[watchdog] {elapsed / 60.0:6.1f}m rss "
                 f"{pss_total / 1024.0:5.2f}G pss ({vm_total / 1024.0:.2f}G vm, "
-                f"{len(tree)} procs) = {pct:.0f}% of cap")
+                f"{len(tree)} procs) = {pct:.0f}% of cap; box free "
+                f"{available / 1024.0:.2f}G")
         if pss_total >= cap_mb:
             print(f"{line} — CAP BREACH, killing tree", flush=True)
             print("[bounded] per-process memory at breach:", flush=True)
-            rows = sorted(((  _rss_mb(p)[1], p) for p in tree), reverse=True)
+            rows = sorted(((_rss_mb(p)[1], p) for p in tree), reverse=True)
             for pss, pid in rows[:8]:
                 print(f"  {pss / 1024.0:5.2f}G  pid {pid}  {_cmdline(pid)}",
                       flush=True)
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+            _kill(proc, signal.SIGTERM)
             deadline = time.monotonic() + args.kill_grace_s
             while time.monotonic() < deadline and proc.poll() is None:
-                time.sleep(2.0)
+                if _available_mb() < floor_mb:
+                    print("[bounded] box floor crossed during grace; SIGKILL",
+                          flush=True)
+                    break
+                time.sleep(args.poll_s)
             if proc.poll() is None:
-                print("[bounded] SIGTERM ignored; SIGKILL", flush=True)
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                try:
-                    proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    pass
+                print("[bounded] SIGTERM not honoured; SIGKILL", flush=True)
+                _kill(proc, signal.SIGKILL)
             print("[bounded] killed at the memory cap — the job is resumable; "
                   "raise --max-rss-gb or free memory before re-running",
                   flush=True)
@@ -229,10 +298,23 @@ def main() -> int:
             warned = True
         elif pct < args.warn_pct * 0.9:
             warned = False
-        if int(elapsed) % max(60, args.poll_s) < args.poll_s:
+        if heartbeat:
             print(line, flush=True)
+            last_beat = elapsed
         time.sleep(args.poll_s)
 
+
+def _kill(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the job's process group; for SIGKILL, also reap it."""
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if sig == signal.SIGKILL:
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
 
 if __name__ == "__main__":
     sys.exit(main())
