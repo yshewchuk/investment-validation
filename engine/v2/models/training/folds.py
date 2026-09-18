@@ -75,8 +75,9 @@ def _apply_filter(frame: pd.DataFrame, rule) -> pd.Series:
         return col.astype(str) == str(rule.value)
     if rule.op == "isclose":
         return pd.Series(np.isclose(col.astype(float), float(rule.value)), index=frame.index)
-    if rule.op == "ge":
-        return pd.to_numeric(col, errors="coerce") >= rule.value
+    if rule.op in ("ge", "gt"):
+        values = pd.to_numeric(col, errors="coerce")
+        return values >= rule.value if rule.op == "ge" else values > rule.value
     if rule.op == "notna":
         return col.notna()
     if rule.op == "year_between":

@@ -32,7 +32,7 @@ from .legacy_adapter import forbid_fitting
 from .recipes import OWNER_TRAINING_JOB, TrainingRecipe
 
 __all__ = ["EqualWeightBlend", "LogTargetModel", "SeedMeanEnsemble", "UnsupportedEstimator",
-           "fit_recipe_estimator"]
+           "fit_recipe_estimator", "forbid_fitting"]
 
 
 class UnsupportedEstimator(ValueError):

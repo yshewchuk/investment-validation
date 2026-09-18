@@ -222,9 +222,14 @@ Delivered 2026-09-18 in `engine/v2/models/training/` (layer 6):
   walk-forward plus full refit), the 4 Tier-4 producers
   (`output="tier4_monthly"`; separate identity from the champion, per the
   parity rules), and 5 calibration surfaces named after P5-1's
-  `NON_MODEL_STATE_ITEMS` (`output="calibration"`, `fit_owner` P5-4: the
-  job writes their membership/label receipts per cutoff and refuses to fit
-  them — the seam for the frozen payoff/recalibration artifact).
+  `NON_MODEL_STATE_ITEMS` (`output="calibration"`). The two payoff lines and
+  the STR-RUNUP surface are fitted per (cutoff, fill alpha) through P5-4's
+  `engine.v2.models.training.payoff` builders: the fold writes
+  `payoff_artifact.json` in `serialize_payoff_artifact` bytes, identical to
+  the builder's own output on the same rows, and the fold's members are
+  exactly the rows legacy `fit_payoff` keeps (`n` agrees). The two
+  recalibration maps stay receipt-only (`fit_owner` P5-4): no frozen
+  isotonic builder exists yet.
 - **Legacy is the spec.** Feature order comes from `registry.json`;
   constants are cross-checked against the legacy modules; `plan_folds`
   reproduces `walk_forward`/`fit_final` and `tier4.build_producer` row for

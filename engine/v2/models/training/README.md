@@ -38,8 +38,10 @@ P5-3 (current dataset/training recipes):
   `RecipeKey(role, strategy, output)`: the P5-1 inventory's champion
   bindings (`output="champion"`: expanding-year walk-forward plus full
   refit), the four Tier-4 producers (`output="tier4_monthly"`) and the
-  live-refit calibration surfaces (`output="calibration"`, fitted by P5-4,
-  receipts only here). `recipe_fingerprint` is its identity.
+  live-refit calibration surfaces (`output="calibration"`: the payoff line
+  and surface are fitted per cutoff through `payoff.py`'s P5-4 builders into
+  `PayoffLineArtifact`/`PayoffSurfaceArtifact`; the recalibration maps stay
+  receipt-only). `recipe_fingerprint` is its identity.
 - `prepare_dataset` / `plan_folds` / `dataset_fingerprint` — legacy's
   membership, masks and folds, reproduced.
 - `fold_receipts` / `receipt_issues` — the per-fold training-membership and

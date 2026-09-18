@@ -92,7 +92,7 @@ class RowFilter:
     value: Any = None
 
 
-FILTER_OPS = ("eq", "isclose", "ge", "notna", "year_between", "not_before_column",
+FILTER_OPS = ("eq", "isclose", "ge", "gt", "notna", "year_between", "not_before_column",
               "group_nunique_ge")
 
 

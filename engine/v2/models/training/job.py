@@ -35,11 +35,11 @@ import numpy as np
 import pandas as pd
 
 from . import fold_store as store
-from .estimators import UnsupportedEstimator, fit_recipe_estimator
+from .calibration import PAYOFF_KINDS, fit_payoff_fold
+from .estimators import UnsupportedEstimator, fit_recipe_estimator, forbid_fitting
 from .folds import dataset_fingerprint, plan_folds, prepare_dataset
-from .legacy_adapter import forbid_fitting
 from .receipts import fold_receipts, receipt_issues
-from .recipes import OWNER_TRAINING_JOB, TrainingRecipe, recipe_fingerprint
+from .recipes import OWNER_TRAINING_JOB, RowFilter, TrainingRecipe, recipe_fingerprint
 
 __all__ = ["TRAINING_JOB_V1", "run_training_job"]
 
@@ -66,6 +66,13 @@ def _fit_fold(recipe, prepared, fold, fit, partial) -> None:
         out.to_parquet(partial / store.PREDICTIONS_FILE, index=False)
 
 
+def _fit_payoff(recipe, prepared, fold, alpha, partial) -> str:
+    written = fit_payoff_fold(recipe, prepared.frame.iloc[fold.train], alpha=alpha,
+                              before=fold.cutoff.date().isoformat(), out_dir=partial)
+    # Under min_trades nothing is written: legacy PayoffError / NO_PAYOFF_MAP.
+    return "fitted" if written else "skipped"
+
+
 def _summary(recipe, out_dir, outcomes) -> dict:
     summary = {"recipe_id": recipe.recipe_id, "recipe_fingerprint": recipe_fingerprint(recipe),
                "folds": {o.fold_id: o.status for o in outcomes}}
@@ -81,32 +88,55 @@ def _summary(recipe, out_dir, outcomes) -> dict:
     return summary
 
 
-def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
-                     fit=fit_recipe_estimator, plan_only: bool = False, cutoffs=(),
-                     extra_filters=()) -> store.TrainingJobResult:
-    """Run (or resume) every fold of ``recipe`` over ``dataset`` into ``out_dir``.
-
-    ``plan_only`` writes both receipts per fold and fits nothing — the cheap
-    first pass over real data. ``cutoffs``/``extra_filters`` serve the
-    ``request_cutoff`` calibration recipes, which are receipt-only here.
-    ``fit(recipe, X, y)`` is injectable for tests; the default is the
-    native estimator.
-    """
-    forbid_fitting("engine.v2.models.training.job.run_training_job")
+def _prepare(recipe, dataset, *, plan_only, cutoffs, alpha, extra_filters):
+    """Owner/alpha checks, membership, dataset identity and the fold plan."""
     if recipe.fit_owner != OWNER_TRAINING_JOB and not plan_only:
         raise UnsupportedEstimator(
             f"{recipe.recipe_id} is fitted by {recipe.fit_owner}; run it with plan_only=True "
             "for its receipts")
+    if recipe.estimator.kind in PAYOFF_KINDS and alpha is None:
+        raise UnsupportedEstimator(f"{recipe.recipe_id} needs the request's fill alpha")
+    if alpha is not None:
+        extra_filters = (*extra_filters, RowFilter("fill_alpha", "isclose", float(alpha)))
     prepared = prepare_dataset(recipe, dataset, extra_filters=extra_filters)
-    dataset_fp = dataset_fingerprint(recipe, prepared)
     if recipe.folds.kind == "request_cutoff":
         folds = tuple(f for cut in cutoffs for f in plan_folds(recipe, prepared, cutoff=cut))
     else:
         folds = plan_folds(recipe, prepared)
+    return prepared, dataset_fingerprint(recipe, prepared), folds
+
+
+def _build_fold(recipe, prepared, fold, *, fit, plan_only, alpha, partial) -> str:
+    if plan_only:
+        return "planned"
+    if fold.skipped:
+        return "skipped"
+    if recipe.estimator.kind in PAYOFF_KINDS:
+        return _fit_payoff(recipe, prepared, fold, alpha, partial)
+    _fit_fold(recipe, prepared, fold, fit, partial)
+    return "fitted"
+
+
+def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
+                     fit=fit_recipe_estimator, plan_only: bool = False, cutoffs=(),
+                     alpha: float | None = None, extra_filters=()) -> store.TrainingJobResult:
+    """Run (or resume) every fold of ``recipe`` over ``dataset`` into ``out_dir``.
+
+    ``plan_only`` writes both receipts per fold and fits nothing — the cheap
+    first pass over real data. ``cutoffs``/``extra_filters`` serve the
+    ``request_cutoff`` calibration recipes; ``alpha`` is their per-request
+    fill alpha (a ``fill_alpha`` isclose filter, as legacy). The payoff
+    recipes are fitted through P5-4's frozen-artifact builders; the
+    recalibration maps stay receipt-only. ``fit(recipe, X, y)`` is
+    injectable for tests; the default is the native estimator.
+    """
+    forbid_fitting("engine.v2.models.training.job.run_training_job")
+    prepared, dataset_fp, folds = _prepare(recipe, dataset, plan_only=plan_only, cutoffs=cutoffs,
+                                           alpha=alpha, extra_filters=extra_filters)
     identity = {"schema_version": TRAINING_JOB_V1, "recipe_id": recipe.recipe_id,
                 "recipe_key": recipe.key.label(), "recipe_fingerprint": recipe_fingerprint(recipe),
                 "dataset_fingerprint": dataset_fp, "plan_only": bool(plan_only),
-                "folds": [f.fold_id for f in folds]}
+                "alpha": alpha, "folds": [f.fold_id for f in folds]}
     out_dir = store.open_job(out_dir, identity)
     folds_dir = out_dir / "folds"
 
@@ -121,9 +151,8 @@ def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
         if issues:
             raise store.TrainingRefused(issues)
         partial = store.start_fold(folds_dir, fold.fold_id, membership, label)
-        status = "planned" if plan_only else ("skipped" if fold.skipped else "fitted")
-        if status == "fitted":
-            _fit_fold(recipe, prepared, fold, fit, partial)
+        status = _build_fold(recipe, prepared, fold, fit=fit, plan_only=plan_only, alpha=alpha,
+                             partial=partial)
         store.publish_fold(partial, fold.fold_id, status)
         outcomes.append(store.FoldOutcome(fold.fold_id, status, len(fold.train), len(fold.test)))
 

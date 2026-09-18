@@ -132,14 +132,16 @@ def test_recipe_constants_mirror_legacy_modules():
     assert [d.produces for d in thru.upstream if d.lineage == "tier4_monthly_oos"] == ["pred_abs_move"]
     assert not rn.upstream
     line = _recipe("payoff_line", "STR-THRU", "calibration")
-    assert line.features == (payoff.PAYOFF_DRIVER["STR-THRU"],)
-    assert _recipe("payoff_line", "STR-RUNUP", "calibration").features == (payoff.PAYOFF_DRIVER["STR-RUNUP"],)
+    assert line.features[0] == payoff.PAYOFF_DRIVER["STR-THRU"]
+    assert _recipe("payoff_line", "STR-RUNUP", "calibration").features[0] == payoff.PAYOFF_DRIVER["STR-RUNUP"]
     assert line.estimator.params["min_trades"] == payoff.MIN_TRADES
     assert line.estimator.params["max_residuals"] == payoff.MAX_RESIDUALS
     assert line.estimator.seeds == (payoff.RESIDUAL_SEED,)
     recal = _recipe("recalibration_map", "STR-THRU", "calibration")
     assert recal.estimator.params["min_pairs"] == recalibrate.MIN_PAIRS
-    assert all(r.fit_owner == OWNER_P5_4 for k, r in RECIPES.items() if k.output == "calibration")
+    owners = {k.role: r.fit_owner for k, r in RECIPES.items() if k.output == "calibration"}
+    assert owners["recalibration_map"] == OWNER_P5_4  # no frozen recalibration builder yet
+    assert owners["payoff_line"] == owners["payoff_surface"] != OWNER_P5_4
 
 
 def _exp169():
@@ -541,21 +543,83 @@ def test_job_refuses_a_planted_future_label_and_keeps_earlier_folds(tmp_path):
     assert sorted(p.name for p in (out / "folds").iterdir()) == ["wf-2015", "wf-2016", "wf-2017"]
 
 
-def test_calibration_recipes_are_receipt_only_seams_for_p5_4(tmp_path):
-    recipe = _recipe("payoff_line", "STR-THRU", "calibration")
-    rng = np.random.default_rng(5)
-    n = 400
+def _payoff_trades(n=900, seed=5):
+    rng = np.random.default_rng(seed)
     exits = pd.Timestamp("2020-01-01") + pd.to_timedelta(rng.integers(0, 700, n), unit="D")
-    trades = pd.DataFrame({"event_id": [f"E{i}" for i in range(n)], "strategy": "STR-THRU",
-                           "fill_alpha": 0.5, "abs_move": rng.uniform(0, 10, n),
-                           "exit_value": rng.uniform(0, 5, n), "exit_date": exits})
+    trades = pd.DataFrame({
+        "event_id": [f"E{i}" for i in range(n)],
+        "strategy": np.where(rng.random(n) < 0.9, "STR-THRU", "STR-RUNUP"),
+        "fill_alpha": np.where(rng.random(n) < 0.8, 0.5, 0.25),
+        "abs_move": rng.uniform(0, 10, n), "im_t1": rng.uniform(2, 12, n),
+        "spot_entry": rng.uniform(20, 200, n), "spot_exit": rng.uniform(20, 200, n),
+        "strike": rng.uniform(20, 200, n), "exit_value": rng.uniform(0, 30, n), "exit_date": exits,
+    })
+    trades.loc[:4, "spot_entry"] = 0.0      # legacy's spot > 0 guard
+    trades.loc[5:9, "abs_move"] = np.nan    # and its finite guard
+    return trades
+
+
+def _legacy_rows(trades, strategy, driver, alpha):
+    rows = trades[(trades["strategy"] == strategy) & np.isclose(trades["fill_alpha"], alpha)]
+    return [{"driver": r[driver], "spot_entry": r["spot_entry"], "spot_exit": r["spot_exit"],
+             "strike": r["strike"], "exit_value": r["exit_value"],
+             "exit_date": r["exit_date"].strftime("%Y-%m-%d")} for _, r in rows.iterrows()]
+
+
+def test_payoff_line_recipe_fits_the_p5_4_frozen_artifact(tmp_path):
+    from engine import payoff
+    from engine.v2.models.payoff_artifact import serialize_payoff_artifact
+    from engine.v2.models.training.payoff import build_payoff_line_artifact
+
+    recipe = _recipe("payoff_line", "STR-THRU", "calibration")
+    trades = _payoff_trades()
+    with pytest.raises(UnsupportedEstimator, match="fill alpha"):
+        run_training_job(recipe, trades, tmp_path / "noalpha", cutoffs=("2021-01-01",))
+    result = run_training_job(recipe, trades, tmp_path / "fit", cutoffs=("2021-01-01",), alpha=0.5)
+    assert [o.status for o in result.outcomes] == ["fitted"]
+    fdir = tmp_path / "fit/folds/cut-2021-01-01"
+    expected = build_payoff_line_artifact(_legacy_rows(trades, "STR-THRU", "abs_move", 0.5),
+                                          strategy="STR-THRU", driver="abs_move", alpha=0.5,
+                                          before="2021-01-01")
+    assert (fdir / "payoff_artifact.json").read_bytes() == serialize_payoff_artifact(expected)
+    legacy = payoff.fit_payoff(trades, "STR-THRU", alpha=0.5, before="2021-01-01")
+    membership = json.loads((fdir / "membership_receipt.json").read_text())
+    assert membership["n_train"] == legacy.n == expected.n  # members == rows the fit keeps
+    assert (expected.slope, expected.intercept) == (legacy.slope, legacy.intercept)
+
+
+def test_payoff_surface_recipe_fits_the_p5_4_frozen_artifact(tmp_path):
+    from engine.v2.models.payoff_artifact import serialize_payoff_artifact
+    from engine.v2.models.training.payoff import build_payoff_surface_artifact
+
+    recipe = _recipe("payoff_surface", "STR-RUNUP", "calibration")
+    trades = _payoff_trades(n=4000)
+    run_training_job(recipe, trades, tmp_path / "fit", cutoffs=("2021-06-01",), alpha=0.5)
+    fdir = tmp_path / "fit/folds/cut-2021-06-01"
+    expected = build_payoff_surface_artifact(_legacy_rows(trades, "STR-RUNUP", "im_t1", 0.5),
+                                             alpha=0.5, before="2021-06-01")
+    assert (fdir / "payoff_artifact.json").read_bytes() == serialize_payoff_artifact(expected)
+    membership = json.loads((fdir / "membership_receipt.json").read_text())
+    assert membership["n_train"] == expected.n
+
+
+def test_payoff_fold_under_min_trades_is_skipped_and_recalibration_stays_a_seam(tmp_path):
+    trades = _payoff_trades()
+    line = _recipe("payoff_line", "STR-THRU", "calibration")
+    result = run_training_job(line, trades, tmp_path / "early", cutoffs=("2020-02-01",), alpha=0.5)
+    assert [o.status for o in result.outcomes] == ["skipped"]  # legacy PayoffError
+    assert not (tmp_path / "early/folds/cut-2020-02-01/payoff_artifact.json").exists()
+
+    recal = _recipe("recalibration_map", "STR-THRU", "calibration")
+    pairs = trades.assign(raw_win=0.5, outcome=1.0)
     with pytest.raises(UnsupportedEstimator):
-        run_training_job(recipe, trades, tmp_path / "fit")
-    result = run_training_job(recipe, trades, tmp_path / "plan", plan_only=True,
-                              cutoffs=("2021-01-01",))
+        run_training_job(recal, pairs, tmp_path / "fit", cutoffs=("2021-01-01",))
+    result = run_training_job(recal, pairs, tmp_path / "plan", plan_only=True,
+                              cutoffs=("2021-01-01",), alpha=0.5)
     assert [o.status for o in result.outcomes] == ["planned"]
     membership = json.loads((tmp_path / "plan/folds/cut-2021-01-01/membership_receipt.json").read_text())
-    assert membership["n_train"] == int((exits < "2021-01-01").sum())
+    keep = (pairs["strategy"] == "STR-THRU") & np.isclose(pairs["fill_alpha"], 0.5)
+    assert membership["n_train"] == int((keep & (pairs["exit_date"] < "2021-01-01")).sum())
     assert membership["n_members_at_or_after_cutoff"] == 0
 
 
