@@ -207,3 +207,64 @@ real-file hash-drift and missing-file detection on synthetic fixtures; Tier-4
 fold-coverage present/incompatible detection; non-model-state presence
 detection; and served-role coverage against the real, git-tracked
 `registry.json`).
+
+## P5-3 recipe results
+
+Delivered 2026-09-18 in `engine/v2/models/training/` (layer 6):
+`recipes.py`/`calibration.py` (`current_recipes()`), `folds.py`
+(`prepare_dataset`, `plan_folds`), `receipts.py` (`fold_receipts`,
+`receipt_issues`), `estimators.py` (`fit_recipe_estimator`), `job.py` +
+`fold_store.py` (`run_training_job`), and the real-data entry
+`tools/phase5_training_job.py`. Tests: `tests/test_v2_models_training_recipes.py`.
+
+- **Keys.** 16 recipes keyed `RecipeKey(role, strategy, output)`: the 7
+  inventory champion bindings (`output="champion"`: expanding-year
+  walk-forward plus full refit), the 4 Tier-4 producers
+  (`output="tier4_monthly"`; separate identity from the champion, per the
+  parity rules), and 5 calibration surfaces named after P5-1's
+  `NON_MODEL_STATE_ITEMS` (`output="calibration"`, `fit_owner` P5-4: the
+  job writes their membership/label receipts per cutoff and refuses to fit
+  them — the seam for the frozen payoff/recalibration artifact).
+- **Legacy is the spec.** Feature order comes from `registry.json`;
+  constants are cross-checked against the legacy modules; `plan_folds`
+  reproduces `walk_forward`/`fit_final` and `tier4.build_producer` row for
+  row (tested by recording the legacy fits); each native estimator predicts
+  bit-identically to the legacy `fit()`. Target transforms (`log1p_clip0`,
+  `quantile_normal`) and blends are explicit recipe fields and named
+  wrappers, not hidden in a pickled class.
+- **Receipts.** Each fold directory carries a training-membership receipt
+  (recipe/dataset fingerprints, member-key hash, counts, time range) and a
+  label-availability receipt (label dates vs cutoff, upstream lineage).
+  Refusal codes: `FUTURE_MEMBER`, `FUTURE_LABEL`, `LABEL_TIME_MISSING`,
+  `UPSTREAM_IN_SAMPLE`, `UPSTREAM_LINEAGE_MISSING`,
+  `UPSTREAM_MODEL_MISMATCH`, `RECEIPT_MISMATCH`, `RESUME_MISMATCH`,
+  `ARTIFACT_CORRUPT`. Legacy admits a label up to one post-print session
+  after a fold cutoff (a print on the fold's last day); receipts count those
+  (`n_labels_after_cutoff`) and refuse only beyond the recipe's
+  `max_days_after_cutoff`.
+- **Resume.** A fold is published by an atomic directory rename after its
+  hashes are written; a rerun re-derives and compares its receipts and keeps
+  it, never refits it.
+- **No-fit.** `run_training_job` and `fit_recipe_estimator` call the shared
+  `engine.models.no_fit.forbid_fitting` first (one new declared adapter,
+  ceiling 66 → 67: legacy cannot import a v2 guard, so this is the only way
+  the P5-2 scoring guard covers v2 fits). No engine module outside the
+  package imports it.
+
+Not faithfully extractable, recorded rather than guessed:
+
+- **Chooser full refit.** `dyn_sv_chooser_v1_1` was fit "on all
+  exit-complete menu7-prime events, 2018-2026" by code that is not in the
+  repo. The walk-forward folds are EXP-169 `generate()`; the recipe's
+  `full-refit` fold (every complete row) is not proven to be the registered
+  artifact's membership.
+- **Chooser label bound.** Menu structures exit at varying dates and legacy
+  sets no label-availability bound, so the chooser's `LabelRule` is
+  unbounded: receipts report late labels, they cannot refuse them.
+- **Unrecorded upstream lineage.** The STR-THRU gate's analog columns and
+  the chooser's candidate-table forecasts (`pred_abs_move`,
+  `pred_abs_move_sd`, `exp_pnl_sim*`) and causal analogs carry no fold
+  lineage; receipts count them `n_unverified`, never verified.
+- **Label dates for panel recipes.** The panel stores no post-print date:
+  the tool uses next business day (size) and `date + MAX_GAP_DAYS`
+  (iv_crush) as upper bounds, not observed dates.
