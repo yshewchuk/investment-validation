@@ -150,7 +150,10 @@ def test_native_scoring_runs_from_source_inputs():
 
     assert record.validation_status == "scored"
     assert record.readiness == "ready"
-    assert record.reason_codes == ()
+    # WIDE_MARKET is a legitimate annotation on this fixture's bid=1/ask=3
+    # quotes (R4-9 follow-up): it no longer refuses, but it still appears in
+    # reason_codes.
+    assert record.reason_codes == ("WIDE_MARKET",)
     assert record.forecasts["driver_prediction"] == pytest.approx(7.0)
     assert record.resolved_request["entry_cost"] == pytest.approx(4.0)
     assert record.forecasts["exp_pnl_sim"] == pytest.approx(1.5)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
-from math import isfinite
+from math import isfinite, log
 from typing import Any, Callable, Mapping
 
 import numpy as np
@@ -171,6 +171,14 @@ _SIM_MIN_POOL = 250
 _SIM_MIN_VOL = 0.01
 _SIM_MIN_SPOT_FRACTION = 1e-4
 
+# -- Legacy actionable-flag derivation (R4-9) --------------------------------
+# Values mirror engine/score.py's reference constants exactly. Not imported
+# from there: engine/v2 has no dependency on legacy engine/ code, so the
+# thresholds are reproduced as literals and cited by file:line instead.
+ATM_TOLERANCE_PCT = 2.0     # engine/score.py:204
+WIDE_MARKET_RATIO = 0.5     # engine/fills.py:25
+GATE_MCAP_FLOOR = 1e9       # engine/score.py:199
+
 
 def _merge_stage(values: dict[str, Any], block: Mapping[str, Any]) -> None:
     values.update({key: value for key, value in block.items()
@@ -201,6 +209,114 @@ def _add_executor_refusal(flags: list[str], error: Exception,
             _add_flag(flags, reason)
     else:
         _add_flag(flags, fallback)
+
+
+def _to_day(value: Any) -> np.datetime64 | None:
+    """Parse a date-like value the way ``_remaining_dte`` does (see below)."""
+    if value is None:
+        return None
+    try:
+        day = np.datetime64(str(value)[:10])
+    except ValueError:
+        return None
+    return None if np.isnat(day) else day
+
+
+def _check_projected_calendar(values: Mapping[str, Any], flags: list[str]) -> None:
+    """PROJECTED_CALENDAR -- engine/score.py:1337 (``calendar.is_projected``).
+
+    Mirrors ``TradingCalendar.is_projected`` (engine/calendar.py:241):
+    ``exit_date.normalize() > observed_through``, strict. Both sides are raw
+    calendar facts -- the resolved exit date, and ``calendar_observed_through``
+    (the last date backed by real observed price history, past which the
+    calendar is rule-projected) -- never a calculated scoring answer.
+    """
+    exit_day = _to_day(values.get("exit_date"))
+    observed_day = _to_day(values.get("calendar_observed_through"))
+    if exit_day is None or observed_day is None:
+        return
+    if exit_day > observed_day:
+        _add_flag(flags, "PROJECTED_CALENDAR")
+
+
+def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
+    """STALE_QUOTE -- engine/score.py:1687 (fallback chain substitution).
+
+    Legacy sets this when no chain exists for the requested decision date and
+    an older chain, within a caller bound, is substituted instead
+    (``_fresh_quote_date``, engine/score.py:1802). The source-owned signature
+    of that substitution is that the raw quotes actually used were observed
+    strictly before the requested entry date: ``quote_date`` (the date the
+    supplied raw quotes were observed) and ``entry_date`` (the requested
+    decision date) are both raw facts, never calculated answers. This
+    reproduces the trigger. It does NOT reproduce the session-count age or the
+    caller's max-age bound: those require a calendar object, which a bounded
+    SourceBundle does not carry -- native cannot currently tell an in-bound
+    substitution from an out-of-bound one, only that a substitution occurred.
+    """
+    quote_day = _to_day(values.get("quote_date"))
+    entry_day = _to_day(values.get("entry_date"))
+    if quote_day is None or entry_day is None:
+        return
+    if quote_day < entry_day:
+        _add_flag(flags, "STALE_QUOTE")
+
+
+def _check_wide_market(pricing: Pricing, flags: list[str]) -> None:
+    """WIDE_MARKET -- engine/score.py:1789 (``priced.any_wide_market``).
+
+    Mirrors ``FillModel.is_wide`` (engine/fills.py:150):
+    ``(ask - bid) / mid > WIDE_MARKET_RATIO``, with a zero-or-negative mid
+    counting as wide (no market at all). Reads the already-priced legs'
+    bid/ask; does not change pricing.
+    """
+    if pricing.refusal is not None:
+        return
+    for leg in pricing.legs:
+        mid = (leg.bid + leg.ask) / 2.0
+        wide = True if mid <= 0.0 else (leg.ask - leg.bid) / mid > WIDE_MARKET_RATIO
+        if wide:
+            _add_flag(flags, "WIDE_MARKET")
+            return
+
+
+def _check_extrapolated(geometry: Geometry, pricing: Pricing,
+                        flags: list[str]) -> None:
+    """EXTRAPOLATED -- engine/score.py:1803-1807 (moneyness vs ATM tolerance).
+
+    Mirrors legacy exactly: ``moneyness = abs(strike / spot - 1) * 100``,
+    ``extrapolated = moneyness > ATM_TOLERANCE_PCT``. Legacy substitutes
+    ``request.strike`` for the resolved strike when the caller pinned one;
+    native's ``geometry.legs[0].strike`` already reflects a pinned strike
+    (``generate()`` forces the caller-supplied value into the leg -- see
+    ``engine/v2/domain/generation/structures.py``'s STR-THRU/STR-RUNUP
+    branch), so no separate override is needed here. Only evaluated once
+    pricing has actually succeeded, matching where legacy computes it.
+    """
+    if pricing.refusal is not None or not geometry.legs:
+        return
+    spot = geometry.spot
+    if not isfinite(spot) or spot == 0.0:
+        return
+    strike = geometry.legs[0].strike
+    moneyness = abs(float(strike) / spot - 1.0) * 100.0
+    if moneyness > ATM_TOLERANCE_PCT:
+        _add_flag(flags, "EXTRAPOLATED")
+
+
+def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> bool:
+    """Mirrors engine/score.py:2475 ``_gate_in_domain`` (mcap floor clause).
+
+    Legacy's computed-moves clause was removed 2026-09-06 (see the docstring
+    at that line); only the market-cap floor remains live. Reads ``mcap_log``
+    from the model's own feature vector (never a legacy answer field). A
+    missing or non-finite ``mcap_log`` is in-domain by construction, matching
+    legacy's silent fall-through for the same cases.
+    """
+    mcap_log = _finite(_facts(inputs, values).get("mcap_log"))
+    if mcap_log is None:
+        return True
+    return mcap_log >= log(GATE_MCAP_FLOOR)
 
 
 def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, Any]:
@@ -919,6 +1035,9 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
     if block.get("frozen_score") is not None:
         _add_flag(flags, "UNSUPPORTED_FROZEN_GATE")
         return {}
+    if not _gate_in_domain(inputs, values):
+        _add_flag(flags, "OUT_OF_DOMAIN")
+        return {}
     if block.get("executors") is not None:
         output = _execute_gate_executor(inputs, values, block, flags)
     elif block.get("model") is not None:
@@ -1018,6 +1137,8 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     values, executed, legacy_cost = _initial_values(
         inputs, flags, is_compatibility, strategy, observer,
     )
+    _check_projected_calendar(values, flags)
+    _check_stale_quote(values, flags)
     name = _strategy_name(inputs, strategy, values)
     geometry_inputs, geometry = _resolve_geometry(inputs, name, values)
     _emit_stage(executed, "geometry", geometry_inputs, geometry, observer)
@@ -1035,6 +1156,8 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
         pricing, observer,
     )
     _publish_pricing(values, geometry, pricing, alpha)
+    _check_wide_market(pricing, flags)
+    _check_extrapolated(geometry, pricing, flags)
     _append_late_stages(
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
         observer,
