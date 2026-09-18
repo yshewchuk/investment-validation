@@ -9,6 +9,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.scoring.stages import StageObservation, receipt
 from tools.phase4_release_assembler import (
     NATIVE_INPUT_KEYS,
+    OPTIONAL_STAGES,
     REQUIRED_STAGES,
     ReleaseAssemblyError,
     assemble_input_trace,
@@ -72,9 +73,18 @@ def _native_inputs(request):
     return inputs, shared
 
 
-def _observations():
+def _observations(*, include_model=False):
+    stages = (*REQUIRED_STAGES[:-1], "diagnostics", REQUIRED_STAGES[-1])
+    if include_model:
+        # "model" executes between "pricing" and "analogs" in
+        # engine.v2.scoring.stages.STAGE_NAMES; insert it there so a
+        # captured observation sequence looks like a real one.
+        pricing_index = stages.index("pricing")
+        stages = (
+            *stages[:pricing_index + 1], "model", *stages[pricing_index + 1:],
+        )
     rows = []
-    for stage in (*REQUIRED_STAGES[:-1], "diagnostics", REQUIRED_STAGES[-1]):
+    for stage in stages:
         inputs = {"stage": stage, "side": "input"}
         output = {"stage": stage, "side": "output"}
         rows.append(StageObservation(inputs, output, receipt(stage, inputs, output)))
@@ -116,6 +126,69 @@ def test_assembled_trace_passes_strict_verifier(tmp_path):
         row["native_path"] != ["native_inputs", "source_ref"]
         for row in trace["input_translation"]["mappings"]
     )
+
+
+def test_model_stage_is_known_and_validated_when_present(tmp_path):
+    # A fresh capture always runs the payoff-calibration/model stage, so its
+    # observation must be accepted -- not refused as "unknown" -- and its
+    # real hash/owner evidence checked exactly like every other stage.
+    request = _request()
+    native_inputs, shared_inputs = _native_inputs(request)
+    trace = assemble_input_trace(
+        request=request,
+        shared_inputs=shared_inputs,
+        native_inputs=native_inputs,
+        observations=_observations(include_model=True),
+        resources=[],
+    )
+
+    assert "model" in trace["stages"]
+    assert set(trace["stages"]) == set(REQUIRED_STAGES) | set(OPTIONAL_STAGES)
+
+    pair = {
+        "payload": {
+            "request": request,
+            "record": {},
+            "legacy_input_hash": content_hash(shared_inputs),
+            "input_trace": trace,
+            "input_trace_hash": trace["trace_hash"],
+        },
+    }
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    assert "model" in {row["stage"] for row in verified["captured_receipts"]}
+
+
+def test_model_stage_absence_is_not_an_error_for_an_old_capture():
+    # A trace captured before the model stage existed never recorded it,
+    # and the trace schema carries no version field to key a requirement
+    # on -- so a trace with no "model" observation at all must keep working
+    # exactly as before.
+    request, native_inputs, shared_inputs, trace = _assembled()
+    assert "model" not in trace["stages"]
+    assert tuple(trace["stages"]) == REQUIRED_STAGES
+
+
+def test_a_genuinely_unknown_stage_is_still_refused():
+    request = _request()
+    native_inputs, shared_inputs = _native_inputs(request)
+    observations = list(_observations())
+    bogus = {"stage": "bogus", "side": "input"}
+    bogus_out = {"stage": "bogus", "side": "output"}
+    observations.append(
+        StageObservation(
+            bogus, bogus_out,
+            replace(receipt(REQUIRED_STAGES[0], bogus, bogus_out), stage="bogus"),
+        )
+    )
+
+    with pytest.raises(ReleaseAssemblyError, match="unknown native observation stage"):
+        assemble_input_trace(
+            request=request,
+            shared_inputs=shared_inputs,
+            native_inputs=native_inputs,
+            observations=observations,
+            resources=[],
+        )
 
 
 @pytest.mark.parametrize(
