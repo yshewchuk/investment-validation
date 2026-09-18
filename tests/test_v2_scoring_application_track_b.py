@@ -131,7 +131,7 @@ def test_dynamic_requires_simulation_before_ranking_and_preserves_flags():
         replace(
             _native(
                 "TWIN-P5", chooser_score=0.2, exp_pnl=0.1,
-                flags=("ADVISORY",),
+                flags=("CHOOSER_MISSING_FEATURES",),
             ),
             source_ref="compatibility-input",
         ),
@@ -144,7 +144,13 @@ def test_dynamic_requires_simulation_before_ranking_and_preserves_flags():
     assert chosen.chooser_selection["strategy"] == "TWIN-P5"
     assert chosen.chooser_selection["ranking_key"] == "chooser_score"
     assert chosen.chooser_selection["menu_size"] == 1
-    assert chosen.reason_codes == ("ADVISORY",)
+    # WIDE_MARKET is a real, correctly-derived flag here (the fixture's
+    # bid=1.0/ask=2.0 quote is genuinely wide); CHOOSER_MISSING_FEATURES is
+    # a real advisory flag too (engine/score.py:159-166: "the row is fully
+    # scored and priced; only the champion ranking is absent"). Neither
+    # refuses the chosen candidate.
+    assert chosen.reason_codes == ("WIDE_MARKET", "CHOOSER_MISSING_FEATURES")
+    assert chosen.validation_status == "scored"
 
 
 def test_score_one_executes_pricing_and_owns_refusal_lineage_and_receipts():
@@ -162,7 +168,7 @@ def test_dynamic_uses_one_ranking_rule_and_does_not_veto_flagged_candidate():
     scored = application.score_one(
         _request("TWIN-P"),
         replace(_native("TWIN-P", chooser_score=0.2,
-                        exp_pnl=0.1, flags=("ADVISORY",)),
+                        exp_pnl=0.1, flags=("CHOOSER_MISSING_FEATURES",)),
                 source_ref="compatibility-input"),
     )
     unscored = application.score_one(
@@ -174,7 +180,10 @@ def test_dynamic_uses_one_ranking_rule_and_does_not_veto_flagged_candidate():
 
     assert chosen.chooser_selection["strategy"] == "TWIN-P"
     assert chosen.chooser_selection["ranking_key"] == "chooser_score"
-    assert chosen.reason_codes == ("ADVISORY",)
+    # Same co-occurrence as above: WIDE_MARKET is genuinely derived from the
+    # fixture's wide quote and does not veto the flagged candidate either.
+    assert chosen.reason_codes == ("WIDE_MARKET", "CHOOSER_MISSING_FEATURES")
+    assert chosen.validation_status == "scored"
 
 
 def test_batch_keys_inputs_by_event_and_strategy():

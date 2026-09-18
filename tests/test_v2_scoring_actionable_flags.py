@@ -5,6 +5,8 @@ OUT_OF_DOMAIN:3022, WIDE_MARKET:1789, EXTRAPOLATED:1807. Each has a both-ways
 test: it fires when the legacy trigger condition holds and does not fire when
 it does not, from synthetic source-owned inputs (no corpus needed).
 """
+from engine.v2.contracts import ScoreRequest
+from engine.v2.scoring import application
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
@@ -22,8 +24,18 @@ _QUOTES = {
 }
 
 
+def _request() -> ScoreRequest:
+    return ScoreRequest(
+        event_id="evt-1", calendar_revision="cal-1", strategy_version="STR-THRU",
+        deployment_id="dep-1", decision_clock_id="entry-close",
+        requested_decision_at="2026-09-16", snapshot_id="snap-1", mode="replay",
+        fill_model={"alpha": 0.5}, dependency_refs=("analog-pop",),
+        model_artifact_refs=("model-a",), residual_state_ref="res-a",
+    )
+
+
 def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
-           quotes=None) -> NativeScoreInputs:
+           quotes=None, diagnostics=None, simulation=None) -> NativeScoreInputs:
     context = {
         "ticker": "AAA",
         "strategy": "STR-THRU",
@@ -47,10 +59,10 @@ def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
         geometry=None,
         pricing=None,
         analogs={"recipe": None},
-        simulation={},
+        simulation=simulation if simulation is not None else {},
         gate=gate if gate is not None else {"mode": "not_applicable"},
         chooser={},
-        diagnostics={},
+        diagnostics=diagnostics if diagnostics is not None else {},
         source_ref="actionable-flags-fixture",
         stage_receipts=_RECEIPTS,
     )
@@ -132,3 +144,29 @@ def test_extrapolated_fires_far_from_atm():
 def test_extrapolated_does_not_fire_at_the_money():
     values = assemble_native_values(_inputs())
     assert "EXTRAPOLATED" not in values["flags"]
+
+
+# -- Advisory-vs-refusal taxonomy: both directions, at the full-row level --
+# (application.score_one, not just assemble_native_values) -- proving the
+# row's validation_status/readiness, not merely the flags list, respects
+# the taxonomy in engine/v2/scoring/stages.py's ADVISORY_FLAGS.
+
+def test_row_carrying_only_an_advisory_flag_still_scores():
+    inputs = _inputs(
+        diagnostics={"flags": ("CHOOSER_MISSING_FEATURES",)},
+        simulation={"mode": "not_applicable"},
+    )
+    record = application.score_one(_request(), inputs)
+
+    assert record.reason_codes == ("CHOOSER_MISSING_FEATURES",)
+    assert record.validation_status == "scored"
+    assert record.readiness == "ready"
+
+
+def test_row_carrying_a_refusal_code_is_refused():
+    inputs = _inputs(diagnostics={"flags": ("NO_CHAIN",)})
+    record = application.score_one(_request(), inputs)
+
+    assert "NO_CHAIN" in record.reason_codes
+    assert record.validation_status == "refused"
+    assert record.readiness == "refused"
