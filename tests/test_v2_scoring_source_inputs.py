@@ -54,10 +54,30 @@ def _bundle() -> SourceBundle:
             "seed": 17,
         },
         analog_recipe={
-            "recipe_id": "nearest-events-v1",
-            "population_ref": "synthetic:analogs:v1",
-            "distance_metric": "scaled-euclidean",
-            "neighbors": 10,
+            "bucket_dimensions": (
+                "mcap_bucket", "moneyness_band", "dte_band", "implied_tercile",
+            ),
+            "widening_order": ("moneyness_band", "dte_band", "implied_tercile"),
+            "min_analogs": 2,
+            "alpha": 0.5,
+            "bootstrap_draws": 0,
+            "bootstrap_seed": 0,
+            "ci_quantiles": (0.1, 0.9),
+        },
+        analog_source_rows=(
+            {"row_id": "a1", "mcap_bucket": "large", "moneyness_band": "atm",
+             "dte_band": "30-45", "implied_tercile": "mid",
+             "realized_return": 0.10},
+            {"row_id": "a2", "mcap_bucket": "large", "moneyness_band": "atm",
+             "dte_band": "30-45", "implied_tercile": "mid",
+             "realized_return": 0.20},
+            {"row_id": "a3", "mcap_bucket": "small", "moneyness_band": "otm",
+             "dte_band": "0-15", "implied_tercile": "low",
+             "realized_return": -0.50},
+        ),
+        analog_query={
+            "mcap_bucket": "large", "moneyness_band": "atm",
+            "dte_band": "30-45", "implied_tercile": "mid",
         },
         gate_recipe={
             "recipe_id": "linear-gate-v1",
@@ -144,6 +164,14 @@ def test_native_scoring_runs_from_source_inputs():
         ("P", 100.0),
     }
     assert record.resolved_request["native_source_ref"] == _bundle().source_ref
+    # Analogs must actually be computed from the source bucket population,
+    # not merely pass through without raising MISSING_ANALOG_INPUT: real
+    # numbers, derived from the two matching rows (0.10, 0.20), prove the
+    # legacy-faithful bucket path in native_analog._evaluate_bucket_analogs
+    # ran rather than being silently skipped.
+    assert record.resolved_request["exp_pnl_analog"] == pytest.approx(0.15)
+    assert record.resolved_request["win_analog"] == pytest.approx(1.0)
+    assert record.resolved_request["n_analogs"] == 2
 
 
 def test_fill_reprices_and_propagates_to_simulation_and_gate():
@@ -201,3 +229,20 @@ def test_nested_answer_fields_are_rejected():
             _bundle(),
             metadata={"recipe": {"financial_diagnostics": {"fair": 1.0}}},
         ))
+
+
+def test_analog_recipe_without_source_rows_reports_missing_input():
+    # A declared-but-unfed recipe must surface MISSING_ANALOG_INPUT from the
+    # execution stage -- it must not be silently reclassified as
+    # not-applicable just because analog_source_rows is empty.
+    bundle = replace(_bundle(), analog_source_rows=())
+    inputs = build_native_score_inputs(bundle)
+
+    assert inputs.analogs["recipe"] is not None
+    assert "source_rows" not in inputs.analogs
+    assert "query_features" not in inputs.analogs
+
+    record = application.score_one(_request(0.5), inputs)
+
+    assert record.validation_status == "refused"
+    assert "MISSING_ANALOG_INPUT" in record.reason_codes
