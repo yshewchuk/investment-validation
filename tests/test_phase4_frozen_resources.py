@@ -148,6 +148,24 @@ def test_package_identity_is_deterministic_and_deduplicates_artifact(tmp_path):
     assert len([row for row in package_a.resource_rows if row["kind"] == "artifact"]) == 1
 
 
+def test_legacy_binding_clock_and_role_are_normalized(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    path, digest = _artifact(source)
+    package = package_frozen_resources(
+        model_bindings=[_binding(
+            path, digest, role="abs_move", decision_offset=None,
+            decision_clock=None,
+        )],
+        deployment_id="deployment-1",
+        release_root=tmp_path / "release",
+        source_root=source,
+    )
+    binding = package.sidecar_document["bindings"][0]
+    assert binding["role"] == "size"
+    assert binding["decision_clock_id"] == "legacy.decision_offset.0"
+
+
 def test_output_whitelists_metadata_and_never_copies_answers(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
