@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 from scipy.stats import norm
@@ -25,6 +26,18 @@ class StageReceipt:
     input_hash: str
     output_hash: str
     owner: str = "engine.v2.scoring"
+
+
+@dataclass(frozen=True)
+class StageObservation:
+    """Stable documents and receipt emitted when one native stage completes."""
+
+    input_document: Any
+    output_document: Any
+    receipt: StageReceipt
+
+
+StageObserver = Callable[[StageObservation], None]
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,21 @@ def receipt(stage: str, inputs: Any, output: Any) -> StageReceipt:
     if stage not in STAGE_NAMES:
         raise ValueError(f"unknown scoring stage: {stage}")
     return StageReceipt(stage, content_hash(inputs), content_hash(output))
+
+
+def _emit_stage(
+    executed: list[StageReceipt],
+    stage: str,
+    input_document: Any,
+    output_document: Any,
+    observer: StageObserver | None,
+) -> None:
+    item = receipt(stage, input_document, output_document)
+    executed.append(item)
+    if observer is not None:
+        observer(StageObservation(
+            deepcopy(input_document), deepcopy(output_document), item,
+        ))
 
 
 _PRICING_OUTPUTS = frozenset({
@@ -367,6 +395,7 @@ def _initial_values(
     flags: list[str],
     compatibility: bool,
     strategy: str | None,
+    observer: StageObserver | None,
 ) -> tuple[dict[str, Any], list[StageReceipt], Any]:
     values: dict[str, Any] = {}
     blocks = (inputs.context, inputs.features, inputs.forecast, inputs.analogs,
@@ -379,7 +408,7 @@ def _initial_values(
         _merge_stage(values, block)
         output = {key: value for key, value in block.items()
                   if key not in _OWNED_OUTPUTS and key != "flags"}
-        executed.append(receipt(stage, prior, output))
+        _emit_stage(executed, stage, prior, output, observer)
         prior = {"prior": executed[-1].output_hash, "values": values}
     if compatibility:
         values.update(inputs.forecast)
@@ -388,7 +417,7 @@ def _initial_values(
         forecast_output = _execute_forecast(
             inputs, values, flags, strategy,
         )
-    executed.append(receipt("forecast", prior, forecast_output))
+    _emit_stage(executed, "forecast", prior, forecast_output, observer)
     return values, executed, legacy_cost
 
 
@@ -905,6 +934,7 @@ def _append_late_stages(
     pricing: Pricing,
     compatibility: bool,
     flags: list[str],
+    observer: StageObserver | None,
 ) -> None:
     blocks = (inputs.context, inputs.features, inputs.forecast, inputs.analogs,
               inputs.simulation, inputs.gate, inputs.chooser, inputs.diagnostics)
@@ -915,32 +945,34 @@ def _append_late_stages(
             ("diagnostics", inputs.diagnostics),
         ):
             values.update(block)
-            executed.append(receipt(
-                stage, {"prior": executed[-1].output_hash}, block,
-            ))
+            _emit_stage(
+                executed, stage, {"prior": executed[-1].output_hash}, block,
+                observer,
+            )
     else:
         analog_output = _execute_analogs(inputs, values, flags)
-        executed.append(receipt(
-            "analogs", {"prior": executed[-1].output_hash}, analog_output,
-        ))
+        _emit_stage(
+            executed, "analogs", {"prior": executed[-1].output_hash},
+            analog_output, observer,
+        )
         simulation = _execute_simulation(
             inputs, values, geometry, pricing, flags,
         )
-        executed.append(receipt(
-            "simulation",
+        _emit_stage(
+            executed, "simulation",
             {"prior": executed[-1].output_hash, "inputs": inputs.simulation,
              "entry_cost": pricing.entry_cost},
-            simulation,
-        ))
+            simulation, observer,
+        )
         gate = _execute_gate(inputs, geometry.strategy, values, flags)
-        executed.append(receipt(
-            "gate",
+        _emit_stage(
+            executed, "gate",
             {"prior": executed[-1].output_hash,
              "inputs": {key: value for key, value in inputs.gate.items()
                         if key not in _INTERNAL_STAGE_FIELDS},
              "simulation": simulation},
-            gate,
-        ))
+            gate, observer,
+        )
         for stage, block in (
             ("chooser", inputs.chooser), ("diagnostics", inputs.diagnostics),
         ):
@@ -954,27 +986,29 @@ def _append_late_stages(
             )
             if stage != "diagnostics":
                 values.update(output)
-            executed.append(receipt(
-                stage, {"prior": executed[-1].output_hash}, output,
-            ))
+            _emit_stage(
+                executed, stage, {"prior": executed[-1].output_hash}, output,
+                observer,
+            )
     for block in blocks:
         for item in block.get("flags") or ():
             _add_flag(flags, item)
 
 
 def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = None,
-                           fill_model: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                           fill_model: Mapping[str, Any] | None = None,
+                           observer: StageObserver | None = None) -> dict[str, Any]:
     """Execute declared stages and return execution-owned values."""
     if not isinstance(inputs, NativeScoreInputs):
         raise TypeError("native stage assembly requires NativeScoreInputs")
     is_compatibility = inputs.source_ref == "compatibility-input"
     flags: list[str] = []
     values, executed, legacy_cost = _initial_values(
-        inputs, flags, is_compatibility, strategy,
+        inputs, flags, is_compatibility, strategy, observer,
     )
     name = _strategy_name(inputs, strategy, values)
     geometry_inputs, geometry = _resolve_geometry(inputs, name, values)
-    executed.append(receipt("geometry", geometry_inputs, geometry))
+    _emit_stage(executed, "geometry", geometry_inputs, geometry, observer)
     alpha = _finite((fill_model or {}).get("alpha", 0.5))
     if alpha is None or not 0.0 <= alpha <= 1.0:
         alpha = 0.5
@@ -983,11 +1017,15 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     pricing = _resolve_pricing(
         inputs, name, geometry, quotes, alpha, legacy_cost,
     )
-    executed.append(receipt("pricing", {"geometry": geometry, "quotes": quotes,
-                                         "fill_alpha": alpha}, pricing))
+    _emit_stage(
+        executed, "pricing",
+        {"geometry": geometry, "quotes": quotes, "fill_alpha": alpha},
+        pricing, observer,
+    )
     _publish_pricing(values, geometry, pricing, alpha)
     _append_late_stages(
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
+        observer,
     )
     for refusal in (geometry.refusal, pricing.refusal):
         if refusal:
@@ -995,7 +1033,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     _publish_pricing(values, geometry, pricing, alpha)
     values.update({"flags": tuple(flags),
                    "native_source_ref": inputs.source_ref})
-    executed.append(receipt("serialization", values, values))
+    _emit_stage(executed, "serialization", values, values, observer)
     values["native_stage_receipts"] = tuple({"stage": item.stage,
         "input_hash": item.input_hash, "output_hash": item.output_hash,
         "owner": item.owner} for item in executed)
@@ -1003,6 +1041,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
 
 
 __all__ = [
-    "NativeScoreInputs", "STAGE_NAMES", "StageReceipt",
+    "NativeScoreInputs", "STAGE_NAMES", "StageObservation", "StageObserver",
+    "StageReceipt",
     "assemble_native_values", "receipt",
 ]
