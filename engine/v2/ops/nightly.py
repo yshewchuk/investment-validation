@@ -108,8 +108,24 @@ def _legacy_action(stage):
 PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate",
                          "publication", "backup"})
 
+#: R3B-3: the "refresh" stage's native job kind, chosen only when a plan
+#: explicitly pins ``refresh_mode="native"`` (``plans.py::nightly_plan``) --
+#: never folded into PURE_STAGES above. A PURE_STAGES stage ALWAYS uses its
+#: own name unconditionally (kind == stage); "incremental_refresh" differs
+#: from the stage name "refresh" and its parameter contract
+#: (``incremental_data.RefreshParameters``, built from a caller-resolved
+#: ``RefreshPlan``) is unrelated to ``LegacyParameters``, so a plan must
+#: opt in and pin the exact plan its job reads (``build_legacy_job_requests``'s
+#: ``refresh_mode``/``refresh_plan``) rather than this being a fixed fact
+#: about the stage. Default ``refresh_mode="legacy"`` leaves ``_action_for``
+#: behaviour, and therefore the whole DAG, byte-identical to before this
+#: stage existed: "refresh" is never even in ``_DAG_STAGES``.
+NATIVE_REFRESH_ACTION = "incremental_refresh"
 
-def _action_for(stage):
+
+def _action_for(stage, refresh_mode="legacy"):
+    if refresh_mode == "native" and stage == "refresh":
+        return NATIVE_REFRESH_ACTION
     return stage if stage in PURE_STAGES else _legacy_action(stage)
 
 
@@ -232,6 +248,13 @@ def effect_scope_for(tickers, full_universe=None):
 
 
 def _legacy_resource(kind):
+    # R3B-3: the native refresh job's own resource class (stages.py's
+    # ``refresh_job_kind``/``incremental_data.refresh_job_kind``), needed
+    # here only so ``_thread_count`` can fingerprint its ``environment_ref``
+    # the same way every other stage's does -- the job itself is built by
+    # ``incremental_data.refresh_job_spec``, not ``_job_spec`` below.
+    if kind == NATIVE_REFRESH_ACTION:
+        return "io_fetch"
     if kind in ("legacy_score", "legacy_decision_replay"):
         return "legacy_score"
     if kind == "legacy_model_evidence":
@@ -433,18 +456,65 @@ def _job_spec(kind, parameters, input_refs, dependency_job_ids, implementation_r
                    checkpoint_contract_ref=_checkpoint_contract(kind))
 
 
+def _resolve_refresh_plan(refresh_mode, refresh_plan):
+    """R3B-3: validate ``refresh_mode`` and decode a pinned ``refresh_plan``
+    document into the real ``RefreshPlan`` dataclass
+    ``incremental_data.refresh_job_spec`` needs. Legacy mode never touches
+    either input -- the default DAG stays exactly as it was before this
+    stage existed."""
+    if refresh_mode not in ("legacy", "native"):
+        raise fail("INVALID_REQUEST", "refresh_mode must be legacy or native")
+    if refresh_mode != "native":
+        return None
+    if refresh_plan is None:
+        raise fail("INVALID_REQUEST", "native refresh mode needs a pinned refresh plan")
+    from engine.v2.foundation import from_document
+    from engine.v2.ops.incremental_data import RefreshPlan
+    return (refresh_plan if isinstance(refresh_plan, RefreshPlan)
+            else from_document(RefreshPlan, refresh_plan))
+
+
+def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref):
+    """R3B-3: the native refresh job, built by the stage's own contract
+    (``incremental_data.refresh_job_spec``) -- never re-derived through
+    ``_legacy_params``/``_job_spec``, whose contract (``LegacyParameters``)
+    does not fit it."""
+    from engine.v2.contracts import SubmitRequest
+    from engine.v2.ops.fingerprints import environment_identity
+    from engine.v2.ops.incremental_data import refresh_job_spec
+
+    job = refresh_job_spec(
+        refresh_plan_obj, implementation_ref=implementation_ref,
+        environment_ref=(environment_ref or content_hash(
+            environment_identity(_thread_count(kind)))),
+        output_namespace="shadow")
+    return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
+
+
+def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
+    stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
+    if snapshot is not None:
+        stages = ("materialize",) + stages
+    if refresh_mode == "native" and "refresh" not in stages:
+        stages = ("refresh",) + stages
+    return stages
+
+
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
                               expected_population=(), alt_strikes=1, input_refs=(),
                               full_universe=None, context_tickers=(),
                               input_mode="legacy", snapshot_inputs=None,
-                              prior_selfcheck_ref=None):
+                              prior_selfcheck_ref=None,
+                              refresh_mode="legacy", refresh_plan=None):
     """Build server-allowlisted JobSpecs for the actual legacy worker DAG.
 
     ``input_mode="snapshot"`` (P2-6 §9.3) adds one ``legacy_materialize``
     stage bound to the plan's pinned SnapshotRef and request artifacts, and
     makes ``score``/``decision_replay`` read its verified root instead of the
     barrier. Every other stage, and the default ``"legacy"`` graph, is unchanged.
+    ``refresh_mode``/``refresh_plan`` (R3B-3): see ``_resolve_refresh_plan``/
+    ``_refresh_submit_request``.
 
     ``prior_selfcheck_ref`` (P2-C08): optional artifact ID of a previous
     run's committed selfcheck output. When given, it is bound to the render
@@ -457,7 +527,6 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     ``context_tickers`` (P2-C04) is the historical evidence universe; it
     defaults to ``tickers`` (today's full-universe plans are unchanged) and
     ``tickers`` (the direct watchlist) must be a subset of it.
-
     ``full_universe`` (only ever passed by a ``--full-run`` plan) is the
     caller's explicit declaration that this run scores its whole context —
     writing the global ``"shadow"`` effect scope requires it; see
@@ -472,6 +541,7 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     from engine.v2.ops.submission import job_id_for
 
     snapshot = _snapshot_inputs(input_mode, snapshot_inputs, include_prerequisites)
+    refresh_plan_obj = _resolve_refresh_plan(refresh_mode, refresh_plan)
     implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
     requests = []
     keys = {}
@@ -485,13 +555,15 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
     effect_scope = effect_scope_for(tickers, full_universe)
-    stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
-    if snapshot is not None:
-        stages = ("materialize",) + stages
+    stages = _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode)
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
-        kind = _action_for(stage)
+        kind = _action_for(stage, refresh_mode=refresh_mode)
+        if kind == NATIVE_REFRESH_ACTION:
+            requests.append(_refresh_submit_request(key, refresh_plan_obj, kind,
+                                                     implementation_ref, environment_ref))
+            continue
         parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
                                        effect_scope, snapshot,
                                        prior_selfcheck_ref=prior_selfcheck_ref,

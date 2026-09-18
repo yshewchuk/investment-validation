@@ -133,6 +133,17 @@ def _add_price_refresh_command(commands):
                                     "the Tier-1 fetch store) but never the network")
 
 
+def _add_refresh_mode_arguments(plan):
+    """R3B-3: ``--refresh-mode native --refresh-plan <file>`` submits one
+    real ``incremental_refresh`` job as part of the nightly DAG (see
+    ``nightly._resolve_refresh_plan``). Default ``legacy`` submits none --
+    ``ops price-refresh`` remains the only refresh path, unchanged."""
+    plan.add_argument("--refresh-mode", default="legacy", choices=("legacy", "native"))
+    plan.add_argument("--refresh-plan", type=Path, default=None,
+                      help="JSON engine.v2.ops.incremental_data.RefreshPlan document "
+                           "(to_document()'d); required with --refresh-mode native")
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", default="data/operations")
@@ -176,6 +187,7 @@ def parser():
     plan.add_argument("--input-mode", default="legacy", choices=("legacy", "snapshot"),
                       help="snapshot: pin one data snapshot head at plan time (P2-6)")
     plan.add_argument("--snapshot-scope", default=None)
+    _add_refresh_mode_arguments(plan)
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
@@ -347,6 +359,22 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
                                session=args.as_of)
 
 
+def _read_refresh_plan(args):
+    """R3B-3: ``--refresh-mode native``'s pinned ``RefreshPlan`` document.
+
+    Resolving a real plan from live cache inventory is the data layer's job
+    (``engine.v2.ops.incremental_data.plan_refresh``), not this CLI's -- like
+    ``--input-manifest``, this reads a document the caller already resolved.
+    """
+    if args.refresh_mode != "native":
+        return None
+    if not args.refresh_plan:
+        raise fail("INVALID_REQUEST", "--refresh-mode native needs --refresh-plan")
+    if not args.refresh_plan.is_file() or args.refresh_plan.is_symlink():
+        raise fail("INPUT_CHANGED", "refresh plan file is missing")
+    return json.loads(args.refresh_plan.read_text())
+
+
 def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
@@ -359,7 +387,8 @@ def _plan_command(args, root, conn, clock):
                             expected_population=population, clock=clock,
                             input_mode=args.input_mode, full_run=args.full_run,
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
-                                                             population))
+                                                             population),
+                            refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args))
     else:
         from engine.v2.ops.experiments import experiment_plan
         plan = experiment_plan(args.spec, smoke=args.no_ledger)
@@ -464,7 +493,8 @@ def _submit_nightly(plan, conn, store, policy, clock):
         input_refs=(plan["input_manifest_ref"],),
         expected_population=tuple(plan.get("expected_population", ())),
         include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
-        snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe)
+        snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe,
+        refresh_mode=plan.get("refresh_mode", "legacy"), refresh_plan=plan.get("refresh_plan"))
     # 2026-09-14: refuse before submission a plan that would only
     # fail later at claim time (RESOURCE_LIMIT_EXCEEDED) because some
     # job's legacy read set exceeds its resource profile's scratch
