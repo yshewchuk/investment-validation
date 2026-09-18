@@ -218,6 +218,8 @@ ADVISORY_FLAGS = frozenset({
     # engine/score.py:3082-3085; engine/SCORING.md states the design intent
     # outright: "the result carries LAYER_DISAGREE and both numbers
     # survive." Corpus: 2 seen / 2 scored.
+    # User decision, 2026-09-18: LAYER_DISAGREE stays warning-only (advisory,
+    # not refusing). Recorded here per that decision, not re-derived.
     "LAYER_DISAGREE",
     # engine/score.py:3178, with the FLAGS docstring at :159-166 stating
     # outright: "the row is fully scored and priced; only the champion

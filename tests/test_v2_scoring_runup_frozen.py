@@ -6,7 +6,28 @@ import pytest
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
 from engine.v2.scoring import application
+from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import NativeScoreInputs, STAGE_NAMES, StageReceipt
+
+
+def _analog_block() -> dict:
+    # A minimal real analog recipe so a row can carry an actual
+    # exp_pnl_analog number (engine/score.py:847-848 legacy parity, applied
+    # in application._has_score_number). This fixture otherwise only tests
+    # forecast-stage wiring and never populates a real financial number.
+    rows = [
+        {"row_id": "a", "features": {"move": 1.0}, "realized_pnl": 3.0},
+        {"row_id": "b", "features": {"move": -1.0}, "realized_pnl": -1.0},
+    ]
+    return {
+        "recipe": {
+            "feature_names": ("move",),
+            "neighbors": 2,
+            "population_hash": source_population_hash(rows),
+        },
+        "source_rows": rows,
+        "query_features": {"move": 1.0},
+    }
 
 
 def _request():
@@ -164,12 +185,16 @@ class _Frozen:
 
 
 def test_frozen_runup_scales_raw_d14_and_retains_provenance():
+    # 2026-09-18 fix: a scored row needs a real exp_pnl_model/exp_pnl_analog
+    # number (engine/score.py:847-848 legacy parity); this fixture otherwise
+    # only exercises forecast-stage wiring, so give it a real analog block.
+    inputs = replace(_inputs(), analogs=_analog_block())
     record = application.score_frozen(
         _request(),
         _Frozen(),
         _release(),
         _inference_requests(),
-        {"_native_inputs": _inputs()},
+        {"_native_inputs": inputs},
     )
 
     assert record.validation_status == "scored"
