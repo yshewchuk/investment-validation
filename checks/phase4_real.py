@@ -1588,7 +1588,8 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     release = {
         "complete": complete,
         "population": {
-            "expected": expected, "compared": compared, "agreed": agreed,
+            "expected": expected, "supported": compared,
+            "compared": compared, "agreed": agreed,
             "manifest_bound": manifest_bound, **dispositions,
         },
         "source_release": {
@@ -1617,7 +1618,8 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         },
         "same_input_hashes": same_input_hashes,
         "population": {
-            "expected": expected, "compared": compared, "agreed": agreed,
+            "expected": expected, "supported": compared,
+            "compared": compared, "agreed": agreed,
             "manifest_bound": manifest_bound, **dispositions,
         },
         "stages": covered_stages,
