@@ -32,7 +32,25 @@ this package's layer 6) and wraps the result with `engine.v2.models`'s
 returned artifact is bit-identical to the corresponding inline fit on the
 same rows and cutoff.
 
-<!-- public-interface: build_payoff_line_artifact, build_payoff_surface_artifact -->
+P5-3 (current dataset/training recipes):
+
+- `current_recipes()` — every current recipe as a `TrainingRecipe`, keyed by
+  `RecipeKey(role, strategy, output)`: the P5-1 inventory's champion
+  bindings (`output="champion"`: expanding-year walk-forward plus full
+  refit), the four Tier-4 producers (`output="tier4_monthly"`) and the
+  live-refit calibration surfaces (`output="calibration"`: the payoff line
+  and surface are fitted per cutoff through `payoff.py`'s P5-4 builders into
+  `PayoffLineArtifact`/`PayoffSurfaceArtifact`; the recalibration maps stay
+  receipt-only). `recipe_fingerprint` is its identity.
+- `prepare_dataset` / `plan_folds` / `dataset_fingerprint` — legacy's
+  membership, masks and folds, reproduced.
+- `fold_receipts` / `receipt_issues` — the per-fold training-membership and
+  label-availability receipts and the check that refuses future members,
+  future labels and upstream in-sample leakage.
+- `run_training_job` — the only entry that fits a recipe; resumable per fold,
+  guarded by the shared no-fit switch.
+
+<!-- public-interface: build_payoff_line_artifact, build_payoff_surface_artifact, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job -->
 
 ## Consumers
 
@@ -40,7 +58,8 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-_Nothing yet — no package imports this one. The first importer is added here in the same commit._
+No v2 package imports this one (and none below layer 6 may). The real-data
+entry point is `tools/phase5_training_job.py`, which is not a v2 package.
 
 <!-- consumers: none -->
 
@@ -55,6 +74,19 @@ _Nothing yet — no package imports this one. The first importer is added here i
     # artifact is None when fewer than min_trades rows survive the causal
     # (exit_date < before) filter -- the same NO_PAYOFF_MAP condition the
     # inline fit refuses on today.
+
+```python
+from engine.v2.models.training import current_recipes, RecipeKey, run_training_job
+
+recipe = current_recipes()[RecipeKey("size", "*", "champion")]
+result = run_training_job(recipe, dataset, out_dir, plan_only=True)  # receipts only
+result = run_training_job(recipe, dataset, other_out_dir)            # fit; rerun resumes
+```
+
+`dataset` must carry the recipe's keys, features, target, membership time,
+year column, the label-availability column (`recipe.label.time_column`) and,
+for `tier4_monthly_oos` upstream dependencies, the Tier-4
+`<produces>_fold_start` / `<produces>_model_id` lineage columns.
 
 ## Testing
 

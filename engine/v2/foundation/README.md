@@ -63,8 +63,9 @@ failure rather than a stale sentence.
   `from_document`, `fsync_directory` and `Clock`/`SystemClock`/
   `format_timestamp` for staged-release manifests and the atomic deployment
   pointer (P5-5).
+- engine/v2/models/training — `content_hash` for recipe fingerprints and receipt hashes.
 
-<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models -->
+<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training -->
 
 ## Usage
 
