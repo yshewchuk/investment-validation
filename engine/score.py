@@ -2332,8 +2332,8 @@ class Scorer:
                             "artifact_sha256": entry.artifact_sha256,
                             "adapter": "joblib-estimator.v1",
                             "output_names": (
-                                "implied_t1" if role == "implied_t1"
-                                else "runup_move_prediction"
+                                ("implied_t1",) if role == "implied_t1"
+                                else ("runup_move_prediction",)
                             ),
                             "strategy": request.strategy,
                             "decision_offset": entry.decision_offset,
@@ -2638,6 +2638,33 @@ class Scorer:
                     "fold_start": served.fold_start,
                 },
                 role="forecast_sizing",
+            )
+            # Without this, `native_recipes["forecast"]` never gets set for a
+            # FORECAST_SIZED strategy (TWIN-P, TWIN-P5, CND-PS, BFLY-P/5,
+            # RAMP7, CTR5): capture_source_bundle only derives that recipe
+            # from a captured model binding, and unlike `_score_model` and
+            # `_score_runup_model` this call site never recorded one. The
+            # served fold model is a real artifact — `serving_model` always
+            # persists it before returning, cache hit or fresh fit — so
+            # `ServingModel.artifact_ref` gives a genuine path + sha256, not a
+            # fabricated one.
+            artifact_path, artifact_sha256 = served.artifact_ref()
+            collector.capture_source_bundle(
+                model_bindings=({
+                    "model_id": served.model_id,
+                    "role": "forecast_sizing",
+                    "feature_order": tuple(served.features),
+                    "artifact": str(artifact_path),
+                    "artifact_sha256": artifact_sha256,
+                    "adapter": "joblib-estimator.v1",
+                    "output_names": ("pred_abs_move",),
+                    "strategy": request.strategy,
+                    "decision_offset": request.decision_offset,
+                    "input_as_of": (
+                        str(pd.Timestamp(result.as_of).date())
+                        if result.as_of is not None else None
+                    ),
+                },),
             )
         missing = [f for f in served.features if f not in features.columns]
         if missing:

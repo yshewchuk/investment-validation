@@ -1205,6 +1205,19 @@ class ServingModel:
             floor=self.interval_floor,
         )
 
+    def artifact_ref(self) -> tuple[Path, str]:
+        """The on-disk cache file backing this served fold, and its sha256.
+
+        ``serving_model`` always persists this file before returning — either
+        it is the cache hit that was loaded, or it was just written after
+        fitting (see the ``joblib.dump`` at the end of that function) — so any
+        ``ServingModel`` reachable from there has one. This is what lets a
+        Phase 4 trace capture record a real, verifiable artifact for a
+        forecast-sizing role instead of omitting the binding entirely.
+        """
+        path = _serving_path(self.model_id, self.fold_start, self.tier3_snapshot)
+        return path, store.file_sha256(path)
+
 
 def serving_fold(event_date, as_of) -> pd.Timestamp:
     """Which fold's model may size a trade decided at ``as_of`` for ``event_date``.
