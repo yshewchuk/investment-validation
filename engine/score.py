@@ -564,7 +564,27 @@ class Phase4TraceCollector:
         if features:
             document["features"].update(self._document(features))
         if model_bindings:
-            document["model_bindings"].extend(self._document(tuple(model_bindings)))
+            captured = self._document(tuple(model_bindings))
+            document["model_bindings"].extend(captured)
+            forecast_roles = []
+            gate_threshold = None
+            for binding in captured:
+                role = str(binding.get("role", "")).split(":", 1)[0]
+                if role in {"abs_move", "size", "implied_t1", "runup_move",
+                             "iv_crush"}:
+                    forecast_roles.append(
+                        "size" if role == "abs_move" else role
+                    )
+                if role == "gate" and binding.get("threshold") is not None:
+                    gate_threshold = binding["threshold"]
+            if forecast_roles:
+                document["native_recipes"]["forecast"] = {
+                    "required_roles": tuple(dict.fromkeys(forecast_roles)),
+                }
+            if gate_threshold is not None:
+                document["native_recipes"]["gate"] = {
+                    "threshold": gate_threshold,
+                }
         found = sorted(
             key for key in self._source_answer_fields
             if key in document["context"] or key in document["features"]
