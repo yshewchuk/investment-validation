@@ -6,6 +6,7 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
+from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
     bucket_population_hash,
@@ -72,6 +73,12 @@ _PAYOFF_RECIPE_FIELDS = frozenset({
     "before", "min_trades", "max_residuals", "residual_seed", "draw_count",
     "seed",
 })
+# The frozen-artifact path (P5-4): only simulation knobs remain, since the
+# line/surface itself is already fitted -- `before`/`min_trades`/
+# `max_residuals`/`residual_seed` describe HOW to fit, and there is nothing
+# left here to fit. Mutually exclusive with payoff_recipe/payoff_source_rows
+# (the source-rows compatibility path); see `_model_block`.
+_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({"draw_count", "seed"})
 _MODEL_RESIDUAL_RECIPE_FIELDS = frozenset({"deciles", "min_pool"})
 _SIZE_STRATEGIES = frozenset({
     "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7",
@@ -126,6 +133,18 @@ class SourceBundle:
     # stage stays not-applicable until a caller opts in.
     payoff_recipe: Mapping[str, Any] = field(default_factory=dict)
     payoff_source_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # Frozen payoff-calibration artifact (P5-4): a verified, already-loaded
+    # PayoffLineArtifact/PayoffSurfaceArtifact (engine.v2.models.
+    # payoff_artifact). When declared (a non-empty payoff_artifact_recipe, or
+    # payoff_artifact itself set), the model stage reads its coefficients and
+    # residuals directly and never fits -- mutually exclusive with
+    # payoff_recipe/payoff_source_rows, the source-rows compatibility path
+    # kept for bundles built before an artifact existed (Phase 4 captures).
+    # A declared-but-unresolved request (payoff_artifact left None, or one of
+    # the wrong kind/strategy for this bundle) is MODEL_NOT_READY at
+    # execution -- this builder does not fall back to fitting.
+    payoff_artifact_recipe: Mapping[str, Any] = field(default_factory=dict)
+    payoff_artifact: "PayoffLineArtifact | PayoffSurfaceArtifact | None" = None
     # The champion driver model's own held-out (prediction, residual) pairs
     # -- a fixed, artifact-owned population (see native_payoff.py), not this
     # row's own answer either.
@@ -306,20 +325,44 @@ def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     }
 
 
-def _model_block(bundle: SourceBundle) -> dict[str, Any]:
-    """Express the payoff-calibration/model-layer recipe, mirroring ``_analog_block``.
-
-    An empty ``payoff_recipe`` means nothing was requested: the model stage
-    stays not-applicable (``{}``), matching every bundle built before this
-    field existed. A non-empty recipe is a positive request -- the declared
-    recipe (and rows, when present) are carried through even when the rows
-    are absent or insufficient, so the native model stage reports
-    NO_PAYOFF_MAP itself rather than this builder silently downgrading a
-    real request to not-applicable.
+def _artifact_model_block(
+    bundle: SourceBundle, artifact_recipe: Mapping[str, Any], recipe: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The P5-4 frozen-artifact branch of ``_model_block`` -- a positive
+    request for the artifact path (mutually exclusive with the source-rows
+    compatibility recipe/rows).
     """
-    recipe = _bounded_recipe(
-        "payoff_recipe", bundle.payoff_recipe, _PAYOFF_RECIPE_FIELDS,
+    if bundle.payoff_artifact is not None and not isinstance(
+        bundle.payoff_artifact, (PayoffLineArtifact, PayoffSurfaceArtifact),
+    ):
+        raise ValueError(
+            "payoff_artifact must be a PayoffLineArtifact or PayoffSurfaceArtifact"
+        )
+    if recipe or bundle.payoff_source_rows:
+        raise ValueError(
+            "payoff_artifact_recipe/payoff_artifact cannot combine with "
+            "payoff_recipe/payoff_source_rows (the source-rows compatibility path)"
+        )
+    _reject_answers("model_residual_rows", bundle.model_residual_rows)
+    _reject_answers("runup_move_residual_rows", bundle.runup_move_residual_rows)
+    residual_recipe = _bounded_recipe(
+        "model_residual_recipe", bundle.model_residual_recipe,
+        _MODEL_RESIDUAL_RECIPE_FIELDS,
     )
+    return {
+        "payoff_recipe": dict(artifact_recipe),
+        "payoff_artifact": bundle.payoff_artifact,
+        "model_residual_recipe": residual_recipe,
+        "model_residual_rows": [dict(row) for row in bundle.model_residual_rows],
+        "runup_move_residual_rows": [
+            dict(row) for row in bundle.runup_move_residual_rows
+        ],
+    }
+
+
+def _compatibility_model_block(bundle: SourceBundle, recipe: Mapping[str, Any]) -> dict[str, Any]:
+    """The source-rows compatibility branch of ``_model_block``, unchanged
+    from before the P5-4 artifact path existed (Phase 4 captures)."""
     if not recipe:
         if (bundle.payoff_source_rows or bundle.model_residual_rows
                 or bundle.model_residual_recipe
@@ -345,6 +388,35 @@ def _model_block(bundle: SourceBundle) -> dict[str, Any]:
             dict(row) for row in bundle.runup_move_residual_rows
         ],
     }
+
+
+def _model_block(bundle: SourceBundle) -> dict[str, Any]:
+    """Express the payoff-calibration/model-layer recipe, mirroring ``_analog_block``.
+
+    An empty ``payoff_recipe`` AND an undeclared ``payoff_artifact_recipe``
+    together mean nothing was requested: the model stage stays not-applicable
+    (``{}``), matching every bundle built before either field existed. A
+    non-empty ``payoff_artifact_recipe`` (or a supplied ``payoff_artifact``)
+    is a positive request for the P5-4 frozen-artifact path
+    (``_artifact_model_block``) -- mutually exclusive with the source-rows
+    COMPATIBILITY PATH (``_compatibility_model_block``) that fits inline at
+    execution time and stays in place, unchanged, for bundles that declare
+    neither artifact field (Phase 4 captures). Either declared recipe
+    carries through even when it cannot yet be satisfied, so the native
+    model stage reports its own refusal (NO_PAYOFF_MAP or MODEL_NOT_READY)
+    rather than this builder silently downgrading a real request to
+    not-applicable.
+    """
+    artifact_recipe = _bounded_recipe(
+        "payoff_artifact_recipe", bundle.payoff_artifact_recipe,
+        _PAYOFF_ARTIFACT_RECIPE_FIELDS,
+    )
+    recipe = _bounded_recipe(
+        "payoff_recipe", bundle.payoff_recipe, _PAYOFF_RECIPE_FIELDS,
+    )
+    if bool(artifact_recipe) or bundle.payoff_artifact is not None:
+        return _artifact_model_block(bundle, artifact_recipe, recipe)
+    return _compatibility_model_block(bundle, recipe)
 
 
 def _declaration_receipts(
