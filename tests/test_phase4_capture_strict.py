@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 
 import joblib
 import pandas as pd
@@ -14,16 +15,19 @@ from engine.v2.contracts import ScoreRequest as V2ScoreRequest
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.scoring.stages import NativeScoreInputs, receipt
 from tools.capture_tier0_corpus import (
+    STRICT_TRACE_SUPPORTED_STRATEGIES,
     StrictTraceCaptureError,
     _frozen_runtime,
     _role_feature_vectors,
     attach_strict_probe,
     canonical_v2_request,
     main,
+    make_pair,
     native_inputs_from_capture,
     package_strict_trace,
     parse_strategies,
     request_to_dict,
+    write,
 )
 from tools.phase4_frozen_resources import package_frozen_resources
 
@@ -174,14 +178,32 @@ def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
     ] == "serialization"
 
 
-def test_strict_cli_requires_one_supported_strategy_before_building_scorer(monkeypatch):
+def test_strict_cli_accepts_every_dyn_sv_menu_strategy_alongside_str_thru():
+    # R4-1 originally restricted --strict-phase4-trace to exactly one of
+    # STR-THRU/STR-RUNUP. That restriction was lifted: native scoring
+    # (engine.v2.scoring.stages / source_inputs) has supported the DYN-SV
+    # menu strategies since R4-6, and capture_tier0_corpus.py's own
+    # STRICT_TRACE_SUPPORTED_STRATEGIES now matches. A multi-strategy
+    # request, including a disabled/unsupported name, must still be caught
+    # by the ordinary --strategies validation, not a strict-trace-specific
+    # combination check.
+    assert parse_strategies(
+        ["STR-THRU", "STR-RUNUP", "TWIN-P", "TWIN-P5", "CND-PS",
+         "BFLY-P", "BFLY-P5", "RAMP7", "CTR5"],
+    ) == (
+        "STR-THRU", "STR-RUNUP", "TWIN-P", "TWIN-P5", "CND-PS",
+        "BFLY-P", "BFLY-P5", "RAMP7", "CTR5",
+    )
+
+
+def test_strict_cli_requires_known_strategies_before_building_scorer(monkeypatch):
     monkeypatch.setattr(
         "tools.capture_tier0_corpus.score_mod.Scorer",
         lambda: pytest.fail("argument refusal must precede scorer construction"),
     )
 
     with pytest.raises(SystemExit):
-        main(["--strict-phase4-trace", "--strategies", "STR-THRU", "STR-RUNUP"])
+        main(["--strict-phase4-trace", "--strategies", "NOT-A-STRATEGY"])
 
 
 # --------------------------------------------------------------------------
@@ -333,11 +355,11 @@ def test_frozen_runtime_refuses_a_binding_missing_a_feature_by_name(tmp_path):
 
 
 def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
-                           path, digest):
+                           path, digest, strategy="STR-THRU"):
     expiry = "2026-09-18"
     event_date = "2026-09-17"
     legacy_request = ScoreRequest(
-        ticker=ticker, strategy="STR-THRU",
+        ticker=ticker, strategy=strategy,
         as_of=pd.Timestamp("2026-09-16"), event_date=pd.Timestamp(event_date),
         session="AMC", fill=MID,
     )
@@ -374,7 +396,7 @@ def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
         "fixture_id": fixture_id,
         "covers": [],
         "kind": "score_result",
-        "record": {"strategy": "STR-THRU", "ticker": ticker},
+        "record": {"strategy": strategy, "ticker": ticker},
         "request": request_to_dict(legacy_request),
         "duration": 0.1,
         "relations": {},
@@ -398,12 +420,142 @@ def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypat
         for i, ticker in enumerate(("AAA", "BBB"))
     ]
 
-    attached = attach_strict_probe(chosen, "snapshot-1", "STR-THRU", tmp_path / "release")
+    attached, gaps = attach_strict_probe(chosen, "snapshot-1", tmp_path / "release")
 
     assert set(attached) == {"case-0", "case-1"}
+    assert gaps == {}
     for candidate in chosen:
         assert "input_trace" in candidate
         assert candidate["legacy_input_hash"] == candidate["input_trace"]["shared_input_hash"]
         assert "serialization" in candidate["input_trace"]["stages"]
     score_ids = {candidate["native_score_id"] for candidate in chosen}
     assert len(score_ids) == 2
+
+
+# --------------------------------------------------------------------------
+# Multi-strategy capture and honest per-case gaps: the CLI used to require
+# exactly one of STR-THRU/STR-RUNUP, and attach_strict_probe used to abort
+# the WHOLE batch if even one selected row of the target strategy could not
+# produce a trace (the real-corpus incident: 2 unsupported rows out of 48
+# candidates discarded all 46 that would have traced cleanly). Both
+# restrictions are lifted: every score_result row is attempted regardless of
+# strategy, a row that cannot trace is recorded with its typed reason, and
+# rows that can trace still do, in the same run.
+# --------------------------------------------------------------------------
+
+
+def test_attach_strict_probe_traces_every_dyn_sv_menu_strategy_in_one_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    strategies = ("STR-THRU", "STR-RUNUP", "TWIN-P", "CTR5")
+    assert set(strategies) <= STRICT_TRACE_SUPPORTED_STRATEGIES
+    chosen = [
+        _full_strict_candidate(
+            fixture_id=f"case-{i}", ticker=f"T{i}", strategy=strategy,
+            driver_vector={"x": 2.0 + i}, gate_vector={"x": 9.0 + i, "n_prior": 5.0 + i},
+            path=path, digest=digest,
+        )
+        for i, strategy in enumerate(strategies)
+    ]
+
+    attached, gaps = attach_strict_probe(chosen, "snapshot-1", tmp_path / "release")
+
+    assert set(attached) == {f"case-{i}" for i in range(len(strategies))}
+    assert gaps == {}
+
+
+def test_attach_strict_probe_records_a_typed_gap_and_still_traces_the_rest(tmp_path, monkeypatch):
+    # CAL-P is disabled (research-only): canonical_v2_request must refuse it
+    # by name, and that refusal must land as a gap on ONLY that row.
+    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    good = _full_strict_candidate(
+        fixture_id="case-good", ticker="AAA", strategy="STR-THRU",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+    unsupported = _full_strict_candidate(
+        fixture_id="case-bad", ticker="ZZZ", strategy="CAL-P",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+
+    attached, gaps = attach_strict_probe(
+        [good, unsupported], "snapshot-1", tmp_path / "release",
+    )
+
+    assert attached == ("case-good",)
+    assert set(gaps) == {"case-bad"}
+    assert "CAL-P" in gaps["case-bad"]
+    assert "input_trace" in good
+    assert "input_trace" not in unsupported
+
+
+def test_attach_strict_probe_refuses_only_when_nothing_at_all_traced(tmp_path, monkeypatch):
+    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    unsupported = _full_strict_candidate(
+        fixture_id="case-bad", ticker="ZZZ", strategy="CAL-P",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+
+    with pytest.raises(StrictTraceCaptureError, match="no honest strict trace"):
+        attach_strict_probe([unsupported], "snapshot-1", tmp_path / "release")
+
+
+def test_make_pair_records_a_strict_trace_gap_without_fabricating_a_trace():
+    pair = make_pair(
+        "fixture-0", [], {"strategy": "CAL-P"}, {"strategy": "CAL-P"},
+        record_kind="score_result", duration=0.1,
+        legacy_trace={"checkpoints": {}},
+        strict_trace_gap="strict probe does not support CAL-P",
+    )
+
+    assert pair["payload"]["trace_disposition"] == "gap"
+    assert pair["payload"]["strict_trace_gap"] == "strict probe does not support CAL-P"
+    assert "input_trace" not in pair["payload"]
+
+
+def test_make_pair_refuses_to_carry_a_trace_and_a_gap_together():
+    with pytest.raises(StrictTraceCaptureError, match="cannot carry both"):
+        make_pair(
+            "fixture-0", [], {}, {}, record_kind="score_result", duration=0.1,
+            input_trace={"shared_input_hash": "h", "trace_hash": "t"},
+            legacy_input_hash="h",
+            strict_trace_gap="reason",
+        )
+
+
+def test_write_persists_a_gap_pair_and_a_traced_pair_in_the_same_corpus(tmp_path, monkeypatch):
+    # End-to-end reproduction of the real-corpus incident: a batch with one
+    # traceable row and one unsupported row must write BOTH pairs, the first
+    # complete and the second an honest gap — never an empty output
+    # directory and never a fabricated trace on the second.
+    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    good = _full_strict_candidate(
+        fixture_id="case-good", ticker="AAA", strategy="STR-THRU",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+    unsupported = _full_strict_candidate(
+        fixture_id="case-bad", ticker="ZZZ", strategy="CAL-P",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+
+    doc = write(
+        tmp_path / "out", [good, unsupported], {}, pd.Timestamp("2026-09-16"),
+        "snapshot-1", strict_trace=True,
+    )
+
+    assert doc["pairs"]["case-good"]["trace_disposition"] == "complete"
+    assert doc["pairs"]["case-bad"]["trace_disposition"] == "gap"
+    good_payload = json.loads(
+        (tmp_path / "out" / "pairs" / "case-good.json").read_text())["payload"]
+    bad_payload = json.loads(
+        (tmp_path / "out" / "pairs" / "case-bad.json").read_text())["payload"]
+    assert "input_trace" in good_payload
+    assert "input_trace" not in bad_payload
+    assert "CAL-P" in bad_payload["strict_trace_gap"]
