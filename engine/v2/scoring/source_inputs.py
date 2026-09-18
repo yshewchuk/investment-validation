@@ -3,9 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
+from engine.v2.scoring.native_analog import (
+    BUCKET_RECIPE_SCHEMA,
+    bucket_population_hash,
+)
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     StageReceipt,
@@ -43,6 +47,15 @@ _RESIDUAL_RECIPE_FIELDS = frozenset({
 })
 _ANALOG_RECIPE_FIELDS = frozenset({
     "recipe_id", "population_ref", "distance_metric", "neighbors",
+})
+# Fields describing the legacy bucket-analog recipe (the PRODUCTION analog
+# construction; see native_analog.LegacyBucketRecipe). population_hash is
+# deliberately excluded here: it is derived from analog_source_rows by the
+# builder, never supplied by the caller, so a bundle cannot assert an
+# unverified answer for its own population.
+_BUCKET_ANALOG_RECIPE_FIELDS = frozenset({
+    "bucket_dimensions", "widening_order", "min_analogs", "alpha",
+    "bootstrap_draws", "bootstrap_seed", "ci_quantiles",
 })
 _GATE_RECIPE_FIELDS = frozenset({
     "model", "threshold", "recipe_id", "artifact_ref", "artifact_hashes",
@@ -86,6 +99,13 @@ class SourceBundle:
     driver_name: str = "abs_move"
     strategy: str = "STR-THRU"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # Causal bucket-analog population, source-only: each row is a PRIOR
+    # event's bucket membership plus its realized outcome. Empty by default,
+    # meaning no analog population was supplied — the analog stage is then
+    # genuinely not applicable, not silently skipped despite a request.
+    analog_source_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # This request's own bucket membership (no outcome, no legacy answer).
+    analog_query: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -103,7 +123,7 @@ def _answer_paths(value: Any, path: str) -> list[str]:
     return found
 
 
-def _reject_answers(name: str, values: Mapping[str, Any]) -> None:
+def _reject_answers(name: str, values: Any) -> None:
     forbidden = sorted(_answer_paths(values, name))
     if forbidden:
         raise ValueError(f"{name} contains calculated answer fields: {forbidden}")
@@ -210,6 +230,45 @@ def _gate_block(values: Mapping[str, Any]) -> dict[str, Any]:
     return gate
 
 
+def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
+    """Express the legacy bucket-analog recipe, with inputs, when sourced.
+
+    A recipe is only declared when the bundle carries a real, answer-free
+    population (``analog_source_rows``). Without one there is nothing to
+    execute, so the block reports genuinely not-applicable (``recipe: None``)
+    rather than declaring a recipe the stage cannot satisfy.
+    """
+    config = _bounded_recipe(
+        "analog_recipe", bundle.analog_recipe,
+        _ANALOG_RECIPE_FIELDS | _BUCKET_ANALOG_RECIPE_FIELDS,
+    )
+    if not bundle.analog_source_rows:
+        return {"recipe": None}
+    missing = sorted(_BUCKET_ANALOG_RECIPE_FIELDS - set(config))
+    if missing:
+        raise ValueError(f"analog_recipe requires bucket fields: {missing}")
+    _reject_answers("analog_source_rows", bundle.analog_source_rows)
+    _reject_answers("analog_query", bundle.analog_query)
+    dimensions = tuple(str(name) for name in config["bucket_dimensions"])
+    population_hash = bucket_population_hash(bundle.analog_source_rows, dimensions)
+    recipe = {
+        "schema_version": BUCKET_RECIPE_SCHEMA,
+        "bucket_dimensions": dimensions,
+        "widening_order": tuple(str(name) for name in config["widening_order"]),
+        "min_analogs": config["min_analogs"],
+        "alpha": config["alpha"],
+        "bootstrap_draws": config["bootstrap_draws"],
+        "bootstrap_seed": config["bootstrap_seed"],
+        "ci_quantiles": tuple(config["ci_quantiles"]),
+        "population_hash": population_hash,
+    }
+    return {
+        "recipe": recipe,
+        "source_rows": [dict(row) for row in bundle.analog_source_rows],
+        "query_features": dict(bundle.analog_query),
+    }
+
+
 def _declaration_receipts(
     source_ref: str,
     strategy: str,
@@ -276,11 +335,7 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
     simulation = _bounded_recipe(
         "residual_recipe", bundle.residual_recipe, _RESIDUAL_RECIPE_FIELDS,
     )
-    analogs = {
-        "recipe": _bounded_recipe(
-            "analog_recipe", bundle.analog_recipe, _ANALOG_RECIPE_FIELDS,
-        ),
-    }
+    analogs = _analog_block(bundle)
     gate = _gate_block(bundle.gate_recipe)
     receipts = _declaration_receipts(
         bundle.source_ref, strategy, context, features, forecast, quotes,
