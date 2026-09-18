@@ -336,7 +336,7 @@ def native_inputs_from_capture(
             "source_inputs lacks executable native_recipes "
             "(forecast, analogs, simulation, and gate)"
         )
-    required_recipes = {"forecast", "analogs", "simulation", "gate"}
+    required_recipes = {"forecast"}
     missing_recipes = sorted(required_recipes - set(recipes))
     if missing_recipes:
         raise StrictTraceCaptureError(
@@ -357,6 +357,10 @@ def native_inputs_from_capture(
         raise StrictTraceCaptureError(
             f"source_inputs context missing {missing_context}"
         )
+    recipes = dict(recipes)
+    recipes.setdefault("analogs", {"mode": "not_applicable"})
+    recipes.setdefault("simulation", {"mode": "not_applicable"})
+    recipes.setdefault("gate", {"mode": "not_applicable"})
     blocks = {
         "context": context,
         "features": {

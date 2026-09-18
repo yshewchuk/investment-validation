@@ -756,6 +756,8 @@ def _execute_simulation(
     flags: list[str],
 ) -> dict[str, Any]:
     block = inputs.simulation
+    if block.get("mode") == "not_applicable":
+        return {}
     output: dict[str, Any] = {}
     planned = (
         block.get("mode") == "planned_exit"
@@ -805,6 +807,8 @@ def _execute_analogs(
 ) -> dict[str, Any]:
     """Calculate analog summaries from a hash-bound source population."""
     block = inputs.analogs
+    if block.get("mode") == "not_applicable":
+        return {}
     recipe = block.get("recipe")
     source_rows = block.get("source_rows")
     query_features = block.get("query_features")
@@ -904,6 +908,8 @@ def _execute_gate_model(inputs: NativeScoreInputs,
 def _execute_gate(inputs: NativeScoreInputs, name: str,
                   values: dict[str, Any], flags: list[str]) -> dict[str, Any]:
     block = inputs.gate
+    if block.get("mode") == "not_applicable":
+        return {}
     if block.get("frozen_score") is not None:
         _add_flag(flags, "UNSUPPORTED_FROZEN_GATE")
         return {}
