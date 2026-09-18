@@ -36,6 +36,7 @@ import pandas as pd
 
 from engine.analogs import bucket_frame, match_frame
 from engine.data.features import tier4
+from engine.models.no_fit import forbid_fitting
 from engine.models.training import gate as gate_mod
 from engine.models.training.common import SEED
 
@@ -78,6 +79,7 @@ TOP_FRACTION = gate_mod.TOP_FRACTION
 
 
 def fit(X, y, seed: int = SEED):
+    forbid_fitting("engine.models.training.gate_forecast_analog.fit")
     return gate_mod.fit(X, y, seed=seed)
 
 

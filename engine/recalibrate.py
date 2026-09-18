@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+from engine.models.no_fit import forbid_fitting
 
 __all__ = [
     "RecalibrationMap",
@@ -110,6 +111,7 @@ def fit_recalibration(
     discipline the payoff map applies — so a map used to score an event never
     knows that event's outcome, nor any contemporary's.
     """
+    forbid_fitting("engine.recalibrate.fit_recalibration")
     if pairs is None:
         pairs = load_pairs()
     if pairs.empty:

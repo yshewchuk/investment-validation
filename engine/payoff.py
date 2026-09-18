@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from engine.models.no_fit import forbid_fitting
+
 __all__ = [
     "PayoffMap",
     "RunupPayoffSurface",
@@ -309,6 +311,7 @@ def fit_payoff(
     trades that had *closed* by then — closed, not entered, because a trade
     still open on the decision date has not yet told us what it was worth.
     """
+    forbid_fitting("engine.payoff.fit_payoff")
     driver = driver or driver_for(strategy)
     rows = trades[
         (trades["strategy"] == strategy)
@@ -371,6 +374,7 @@ def fit_runup_payoff(
     min_trades: int = MIN_TRADES,
 ) -> RunupPayoffSurface:
     """Fit the causal EXP-149 STR-RUNUP exit-value surface."""
+    forbid_fitting("engine.payoff.fit_runup_payoff")
     rows = trades[
         (trades["strategy"] == "STR-RUNUP")
         & np.isclose(trades["fill_alpha"].astype(float), float(alpha))

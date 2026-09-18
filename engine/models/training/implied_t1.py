@@ -34,6 +34,7 @@ from engine.features import (
     daily_state_frame,
     entry_feature_frame,
 )
+from engine.models.no_fit import forbid_fitting
 from engine.models.training.common import (
     SEED,
     decile_spread,
@@ -60,6 +61,7 @@ FEATURES: tuple[str, ...] = (
 
 
 def fit(X, y, seed: int = SEED):
+    forbid_fitting("engine.models.training.implied_t1.fit")
     return HistGradientBoostingRegressor(
         max_iter=300,
         learning_rate=0.06,
