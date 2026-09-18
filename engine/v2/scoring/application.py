@@ -15,7 +15,7 @@ from engine.v2.registry import DYNAMIC_MENU, default_registry
 from .financial import financial_diagnostics
 from .frozen_executor import FrozenStageExecutor
 from .identity import dependency_hash, request_hash, with_score_id
-from .stages import NativeScoreInputs, assemble_native_values
+from .stages import NativeScoreInputs, StageObserver, assemble_native_values
 
 __all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
@@ -583,7 +583,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
 
 
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
-                 fields: Mapping[str, Any]) -> ScoreRecord:
+                 fields: Mapping[str, Any], *, observer: StageObserver | None = None) -> ScoreRecord:
     """Run verified inference through the canonical native scoring graph."""
     requests = (tuple(inference_request) if isinstance(inference_request, (tuple, list))
                 else (inference_request,))
@@ -595,7 +595,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     inputs = _frozen_native_inputs(
         fields, results, bindings, requests, request, release, inference,
     )
-    record = score_one(request, inputs)
+    record = score_one(request, inputs, observer=observer)
     artifact_hashes = tuple(dict.fromkeys(
         hash_value
         for result in results
@@ -620,13 +620,15 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     return with_score_id(record)
 
 
-def score_one(request: ScoreRequest, inputs: NativeScoreInputs) -> ScoreRecord:
+def score_one(request: ScoreRequest, inputs: NativeScoreInputs, *,
+              observer: StageObserver | None = None) -> ScoreRecord:
     """Emit one record after all explicitly owned native stages completed."""
     if not isinstance(inputs, NativeScoreInputs):
         raise TypeError("score_one requires NativeScoreInputs; use the explicit legacy adapter for comparisons")
     inputs = _with_request_overrides(request, inputs)
     values = assemble_native_values(
         inputs, strategy=request.strategy_version, fill_model=request.fill_model,
+        observer=observer,
     )
     values["_model_artifact_ids"] = tuple(request.model_artifact_refs)
     return _record_values(request, values, values)
