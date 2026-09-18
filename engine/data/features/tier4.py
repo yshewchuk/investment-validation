@@ -67,6 +67,7 @@ import pandas as pd
 from engine import paths
 from engine.data import store
 from engine.models import registry as registry_mod
+from engine.models.no_fit import forbid_fitting
 from engine.models.training import size_model
 from engine.models.training.common import SEED
 
@@ -516,6 +517,7 @@ def fit_fold(trainable: pd.DataFrame, model: FeatureModel, fold_start) -> object
     function is what makes those two agree by construction rather than by
     coincidence.
     """
+    forbid_fitting("engine.data.features.tier4.fit_fold")
     cut = pd.Timestamp(fold_start)
     train = trainable[trainable["date"] < cut]
     if len(train) < MIN_TRAIN_ROWS:
@@ -1341,6 +1343,7 @@ def serving_model(
                 pool_res=pool_res,
             )
 
+    forbid_fitting("engine.data.features.tier4.serving_model:miss")
     panel = load_panel() if panel is None else panel
     _, trainable = training_frames(panel, model)
     pool_pred, pool_res = _pool_before(fold, model, panel)

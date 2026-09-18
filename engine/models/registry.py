@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 
 from engine import paths
+from engine.models.no_fit import forbid_fitting
 
 __all__ = [
     "ROLES",
@@ -233,6 +234,7 @@ class ModelArtifact:
     def save(self, path: Path) -> str:
         import joblib
 
+        forbid_fitting("engine.models.registry.ModelArtifact.save")
         path = paths.assert_writable(Path(path))
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self, path, compress=3)

@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
+from engine.models.no_fit import forbid_fitting
 from engine.models.training.common import SEED, fit_final, log, walk_forward
 
 __all__ = [
@@ -93,6 +94,7 @@ FEATURES: tuple[str, ...] = (
 
 
 def fit(X, y, seed: int = SEED):
+    forbid_fitting("engine.models.training.iv_crush.fit")
     return HistGradientBoostingRegressor(
         learning_rate=0.06, max_iter=300, random_state=seed
     ).fit(X, y)

@@ -29,6 +29,7 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from engine.models.no_fit import forbid_fitting
 from engine.models.training.common import (
     SEED,
     BlendModel,
@@ -127,6 +128,7 @@ def fit(X, y, seed: int = SEED):
     logs and streak counts in single digits trains on whichever feature happens
     to be largest.
     """
+    forbid_fitting("engine.models.training.size_model.fit")
     ols = LinearRegression().fit(X, y)
     nn = make_pipeline(
         StandardScaler(),

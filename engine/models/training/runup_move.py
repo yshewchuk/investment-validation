@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
+from engine.models.no_fit import forbid_fitting
 from engine.models.training import implied_t1
 from engine.models.training.common import SEED, fit_final, log, walk_forward
 
@@ -54,6 +55,7 @@ class LogTargetRegressor:
 
 
 def fit(X, y, seed: int = SEED):
+    forbid_fitting("engine.models.training.runup_move.fit")
     target = np.log1p(np.maximum(np.asarray(y, dtype=float), 0.0))
     estimator = HistGradientBoostingRegressor(
         max_iter=250,

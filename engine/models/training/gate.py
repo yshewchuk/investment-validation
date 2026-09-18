@@ -38,6 +38,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 from engine.features import DAILY_STATE_COLUMNS, EVENT_HISTORY_FEATURES, entry_feature_frame
 from engine.replay import legs_spot_dte
+from engine.models.no_fit import forbid_fitting
 from engine.models.training.common import SEED, fit_final, log, walk_forward
 
 __all__ = ["FEATURES", "TARGET", "GATE_ALPHA", "TOP_FRACTION", "fit", "build_dataset", "train"]
@@ -63,6 +64,7 @@ FEATURES: tuple[str, ...] = (
 
 
 def fit(X, y, seed: int = SEED):
+    forbid_fitting("engine.models.training.gate.fit")
     return HistGradientBoostingRegressor(
         max_iter=250,
         learning_rate=0.05,
