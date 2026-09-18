@@ -12,7 +12,7 @@ from scipy.stats import norm
 
 from engine.v2.domain.generation import Geometry, Pricing, generate, price
 from engine.v2.domain.valuation import terminal_payoff
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 
 STAGE_NAMES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
@@ -107,6 +107,8 @@ def _emit_stage(
     output_document: Any,
     observer: StageObserver | None,
 ) -> None:
+    input_document = to_document(input_document)
+    output_document = to_document(output_document)
     item = receipt(stage, input_document, output_document)
     executed.append(item)
     if observer is not None:
