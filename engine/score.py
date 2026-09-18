@@ -431,7 +431,7 @@ class Phase4TraceCollector:
 
     def capture_simulation(self, *, horizon: Mapping[str, Any],
                            capital_denominator: float, evidence: Mapping[str, Any]) -> None:
-        """Record simulation identity without retaining residual rows or paths."""
+        """Record replayable residual inputs without retaining simulated paths."""
         draw = evidence.get("residual_draw", {})
         population = (
             draw.get("fallback_indices", [])
@@ -453,6 +453,9 @@ class Phase4TraceCollector:
             "horizon": self._document(horizon),
             "capital_denominator": float(capital_denominator),
             "residual_population_identity": residual_identity,
+            "residual_population": self._document(
+                evidence.get("residual_population", [])
+            ),
             "draw_count": int(evidence["draw_count"]),
             "seed": int(evidence["seed"]),
         })
@@ -2744,6 +2747,11 @@ class Scorer:
         if evidence is not None:
             selection = evidence.get("residual_draw", {}).get("selected_indices", [])
             evidence["residual_rows"] = pool.evidence_rows(selection)
+            cutoff_index = evidence.get("residual_draw", {}).get("cutoff_index")
+            if isinstance(cutoff_index, (int, np.integer)) and cutoff_index >= 0:
+                evidence["residual_population"] = pool.evidence_rows(
+                    range(int(cutoff_index))
+                )
             result._phase4_simulation_evidence = evidence
             collector = getattr(result, "_phase4_checkpoint_collector", None)
             if (

@@ -180,6 +180,41 @@ def test_source_bundle_is_bounded_and_rejects_scoring_answers() -> None:
         collector.capture_source_bundle(features={"entry_cost": 4.0})
 
 
+def test_simulation_checkpoint_keeps_causal_residual_population() -> None:
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_simulation(
+        horizon={"event_date": "2026-01-02", "dte_exit": 5.0},
+        capital_denominator=4.25,
+        evidence={
+            "draw_count": 4,
+            "seed": 17,
+            "residual_draw": {
+                "cutoff": "2026-01-02",
+                "cutoff_index": 2,
+                "bucket_count": 10,
+                "bucket_index": 4,
+                "eligible_indices": [0, 1],
+                "fallback_used": False,
+            },
+            "residual_rows": [{"event_date": "2025-12-01", "err_move": 1.0}],
+            "residual_population": [
+                {"event_date": "2025-11-01", "pred_abs_move": 4.0,
+                 "err_move": 0.5, "err_crush": -2.0},
+                {"event_date": "2025-12-01", "pred_abs_move": 5.0,
+                 "err_move": 1.0, "err_crush": 3.0},
+            ],
+        },
+    )
+
+    simulation = _checkpoint_value(collector, "simulation")
+    assert simulation["residual_population"] == [
+        {"event_date": "2025-11-01", "pred_abs_move": 4.0,
+         "err_move": 0.5, "err_crush": -2.0},
+        {"event_date": "2025-12-01", "pred_abs_move": 5.0,
+         "err_move": 1.0, "err_crush": 3.0},
+    ]
+
+
 def test_score_captures_boundary_legs_and_cost_before_later_mutation(
         monkeypatch) -> None:
     monkeypatch.setattr(score_module, "assert_decision_causal", lambda *args, **kwargs: None)
