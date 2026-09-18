@@ -334,6 +334,29 @@ class ScoreRequest:
         return "|".join(parts)
 
 
+class _Predocumented:
+    """A value ``_document`` must return unchanged, not recopy.
+
+    A capture run can rescore the SAME boundary event many times (pinned,
+    strike, coarse-ladder variants all share the source event's date), and
+    the residual population before a fixed cutoff is therefore IDENTICAL
+    across every one of those requests. ``ResidualPool.documented_population``
+    builds that plain-dict-list once per cutoff and caches it; wrapping it
+    here is what lets it stay ONE shared object through every place
+    ``Phase4TraceCollector`` would otherwise deep-copy it again --
+    ``_checkpoint``'s own sanitizing pass and ``capture_source_bundle``'s
+    both walk the whole structure unconditionally. The wrapped value must
+    already be exactly what ``_document`` would have produced (plain
+    ``dict``/``list``/JSON-safe scalars) -- this bypasses that pass, it does
+    not repeat it.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
 class Phase4TraceCollector:
     """Opt-in capture of legacy scoring inputs and outcomes.
 
@@ -379,6 +402,8 @@ class Phase4TraceCollector:
     def _document(value: Any) -> Any:
         from engine.jsonio import json_safe
 
+        if isinstance(value, _Predocumented):
+            return value.value
         if isinstance(value, pd.DataFrame):
             return Phase4TraceCollector._document(value.to_dict("records"))
         if isinstance(value, pd.Series):
@@ -449,21 +474,33 @@ class Phase4TraceCollector:
                 self._document(evidence.get("residual_rows", []))
             ),
         }
-        population_rows = evidence.get("residual_population", [])
+        # Wrapped, not documented here: `evidence["residual_population"]` may
+        # already be ONE list SHARED across every rescored variant of this
+        # boundary event (pinned, strike, coarse-ladder all share its date,
+        # hence the same cutoff index against the pool -- see
+        # `ResidualPool.documented_population`). `_checkpoint`'s own
+        # sanitizing pass below AND `capture_source_bundle`'s both walk their
+        # whole argument unconditionally; without `_Predocumented` each one
+        # would deep-copy this list again, and a strict-trace run rescores
+        # one event many times, so those copies do not just cost once -- they
+        # are retained, one per candidate, for the rest of the run. That
+        # retained multiplication, on top of the transient double-copy
+        # `diagnostic_checkpoint`'s docstring covers, was still enough to OOM
+        # the bounded Phase 4 strict-capture check on the full multi-strategy
+        # repro after the transient fix alone.
+        population_rows = _Predocumented(evidence.get("residual_population", []))
         self._source_bundle["native_recipes"]["simulation"] = {
             "mode": "planned_exit",
             "event_date": evidence.get("event_date"),
             "dte_exit": horizon.get("dte_exit"),
             "pre_iv30": evidence.get("pre_iv30"),
-            "residuals": self._document(population_rows),
+            "residuals": population_rows,
         }
         self._checkpoint("simulation", {
             "horizon": self._document(horizon),
             "capital_denominator": float(capital_denominator),
             "residual_population_identity": residual_identity,
-            "residual_population": self._document(
-                evidence.get("residual_population", [])
-            ),
+            "residual_population": population_rows,
             "draw_count": int(evidence["draw_count"]),
             "seed": int(evidence["seed"]),
         })
@@ -639,12 +676,25 @@ class Phase4TraceCollector:
         }
 
     def diagnostic_checkpoint(self) -> dict[str, Any]:
-        """Return bounded contract groups with canonical content hashes."""
+        """Return bounded contract groups with canonical content hashes.
+
+        ``value`` is already JSON-safe: :meth:`_checkpoint` ran it through
+        :meth:`_document` once at capture time, and ``_document`` is
+        idempotent on an already-safe structure (every leaf is already a
+        plain ``str``/``float``/``int``/``None``, and ``json_safe`` returns
+        those unchanged). A second ``_document(value)`` pass here used to
+        rebuild an identical copy of the group for no semantic gain — for a
+        strategy whose gate simulates a P&L expectation, the "simulation"
+        group's ``residual_population`` can be tens of thousands of rows, and
+        the throwaway copy (on top of the hash's own canonicalization pass)
+        was the dominant driver of a multi-GB transient that OOM-killed the
+        bounded Phase 4 strict-capture check within seconds of a boundary
+        event's gate evaluation. Hashing still needs its own canonical-JSON
+        pass (a different normalization from ``_document``'s), so that one
+        copy remains.
+        """
         checkpoints = {
-            name: {
-                "value": self._document(value),
-                "content_hash": self._hash(value),
-            }
+            name: {"value": value, "content_hash": self._hash(value)}
             for name, value in self._checkpoint_groups.items()
         }
         return {
@@ -2868,8 +2918,11 @@ class Scorer:
             evidence["pre_iv30"] = self._pre_print_iv(request, result, features)
             cutoff_index = evidence.get("residual_draw", {}).get("cutoff_index")
             if isinstance(cutoff_index, (int, np.integer)) and cutoff_index >= 0:
-                evidence["residual_population"] = pool.evidence_rows(
-                    range(int(cutoff_index))
+                # Shared, cached by cutoff index -- see
+                # `ResidualPool.documented_population` and the `_Predocumented`
+                # note in `capture_simulation`.
+                evidence["residual_population"] = pool.documented_population(
+                    int(cutoff_index)
                 )
             result._phase4_simulation_evidence = evidence
             collector = getattr(result, "_phase4_checkpoint_collector", None)

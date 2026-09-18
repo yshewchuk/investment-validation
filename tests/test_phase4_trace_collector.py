@@ -9,7 +9,13 @@ import pytest
 
 import engine.score as score_module
 from engine.pnl_sim import DRAWS, ResidualPool
-from engine.score import Phase4TraceCollector, ScoreRequest, ScoreResult, Scorer
+from engine.score import (
+    Phase4TraceCollector,
+    ScoreRequest,
+    ScoreResult,
+    Scorer,
+    _Predocumented,
+)
 from engine.v2.foundation import content_hash
 
 
@@ -239,6 +245,49 @@ def test_simulation_checkpoint_keeps_causal_residual_population() -> None:
         {"event_date": "2025-12-01", "pred_abs_move": 5.0,
          "err_move": 1.0, "err_crush": 3.0},
     ]
+
+
+def test_predocumented_population_is_not_recopied_and_stays_shared() -> None:
+    """The retention fix: `capture_simulation` (via `_checkpoint`) and
+    `capture_source_bundle` each walk their WHOLE argument through
+    `_document` unconditionally. A residual population shared by reference
+    across many rescored candidates of the same boundary event must reach
+    BOTH checkpoint groups as the SAME object, not a fresh copy per group --
+    otherwise the sharing a caller set up (`ResidualPool.documented_population`)
+    is silently undone one layer in, and the retention it exists to avoid
+    comes right back.
+    """
+    shared_population = [
+        {"event_date": "2025-11-01", "pred_abs_move": 4.0,
+         "err_move": 0.5, "err_crush": -2.0},
+    ]
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_simulation(
+        horizon={"event_date": "2026-01-02", "dte_exit": 5.0},
+        capital_denominator=4.25,
+        evidence={
+            "draw_count": 4,
+            "seed": 17,
+            "residual_draw": {
+                "cutoff": "2026-01-02", "cutoff_index": 1, "bucket_count": 10,
+                "bucket_index": 4, "eligible_indices": [0], "fallback_used": False,
+            },
+            "residual_rows": [],
+            "residual_population": shared_population,
+        },
+    )
+    collector.capture_source_bundle(features={"spot": 1.0})
+
+    simulation = _checkpoint_value(collector, "simulation")
+    source = _checkpoint_value(collector, "source_inputs")
+
+    assert simulation["residual_population"] is shared_population
+    assert source["native_recipes"]["simulation"]["residuals"] is shared_population
+    # `_document` did not copy it, but the checkpoint's own value is still
+    # exactly what a plain (unwrapped) list would have produced -- the hash
+    # in `_checkpoint_value` already proves it round-trips through
+    # `content_hash`; this proves the VALUE is unchanged from the source.
+    assert simulation["residual_population"] == shared_population
 
 
 def test_score_captures_boundary_legs_and_cost_before_later_mutation(

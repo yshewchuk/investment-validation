@@ -34,6 +34,8 @@ this as joint integration doing the work.
 from __future__ import annotations
 
 import hashlib
+from types import MappingProxyType
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
@@ -122,6 +124,11 @@ class ResidualPool:
         self._move = h["err_move"].to_numpy(dtype=float)
         self._crush = h["err_crush"].to_numpy(dtype=float)
         self._buckets = int(buckets)
+        #: Row dicts, built once and reused by reference — see `_all_rows`.
+        self._row_cache: list[Mapping] | None = None
+        #: Plain-dict population rows before a given cutoff INDEX, cached by
+        #: that index — see `documented_population`.
+        self._documented_cache: dict[int, list[dict]] = {}
 
     def __len__(self) -> int:
         return len(self._dates)
@@ -129,7 +136,68 @@ class ResidualPool:
     def before(self, cutoff) -> int:
         return int(np.searchsorted(self._dates, np.datetime64(pd.Timestamp(cutoff)), "left"))
 
-    def evidence_rows(self, indices=None) -> list[dict]:
+    def _all_rows(self) -> list[Mapping]:
+        """Every row, JSON-safe, built once and cached for the pool's life.
+
+        A strict-trace capture calls :meth:`evidence_rows` once per request
+        that gates on a simulation, and ``range(cutoff_index)`` is always a
+        PREFIX of this same date-sorted pool (cutoff differs per request, the
+        ordering does not). Rebuilding ``cutoff_index`` fresh dicts (each with
+        its own ``pd.Timestamp(...).isoformat()`` string) on every one of
+        those requests — one 85k-row pool, a dozen-plus boundary/pinned/
+        coarse rescores in a single capture run — was the repeated-allocation
+        driver of a multi-GB transient that OOM-killed the bounded Phase 4
+        strict-capture check. Building the dicts once and slicing/indexing
+        the cached list on every subsequent call reuses the same objects
+        instead of reallocating them; the returned VALUES are identical
+        either way.
+        """
+        if self._row_cache is None:
+            # Read-only: this list is shared by reference across every
+            # caller and every future call, so a row a consumer could mutate
+            # in place would corrupt the cache (and therefore every OTHER
+            # request's checkpoint) rather than just its own copy. A plain
+            # dict allows exactly that silently; `MappingProxyType` raises
+            # instead. `_document`/`_normalize` (the only paths that touch
+            # these rows before they are hashed or written) read Mappings
+            # generically and rebuild plain dicts, so nothing downstream of
+            # here ever needs write access.
+            self._row_cache = [
+                MappingProxyType({
+                    "event_date": pd.Timestamp(self._dates[i]).isoformat(),
+                    "pred_abs_move": float(self._pred[i]),
+                    "err_move": float(self._move[i]),
+                    "err_crush": float(self._crush[i]),
+                })
+                for i in range(len(self))
+            ]
+        return self._row_cache
+
+    def documented_population(self, cutoff_index: int) -> list[dict]:
+        """Plain-dict rows before ``cutoff_index``, built once and cached.
+
+        Every rescored variant of the SAME boundary event (pinned, strike,
+        coarse-ladder) shares that event's date, hence the same cutoff INDEX
+        against this pool, hence an IDENTICAL population. A strict-trace
+        capture run rescores one event many times; this is what lets those
+        requests share ONE list of ONE set of row dicts for their evidence
+        population instead of each holding its own copy for the rest of the
+        run. Callers that want ``_document`` (or anything downstream of it)
+        to skip re-copying this list must wrap it (e.g. in
+        ``engine.score._Predocumented``) before handing it off -- that
+        contract lives with the caller, not here.
+
+        Rows are plain ``dict`` (not the `_all_rows` cache's read-only
+        mapping): this is the value that ends up written to disk, and the
+        checkpoint sink's JSON writer requires an actual ``dict``.
+        """
+        cached = self._documented_cache.get(cutoff_index)
+        if cached is None:
+            cached = [dict(row) for row in self._all_rows()[:cutoff_index]]
+            self._documented_cache[cutoff_index] = cached
+        return cached
+
+    def evidence_rows(self, indices=None) -> list[Mapping]:
         """JSON-safe residual rows for an explicit evidence selection.
 
         This is intentionally separate from :meth:draw so ordinary simulation
@@ -139,17 +207,12 @@ class ResidualPool:
         """
         if indices is None:
             indices = range(len(self._dates))
+        cache = self._all_rows()
         rows = []
         for index in indices:
             if not isinstance(index, (int, np.integer)) or not 0 <= int(index) < len(self):
                 raise IndexError(f"residual evidence index out of range: {index!r}")
-            i = int(index)
-            rows.append({
-                "event_date": pd.Timestamp(self._dates[i]).isoformat(),
-                "pred_abs_move": float(self._pred[i]),
-                "err_move": float(self._move[i]),
-                "err_crush": float(self._crush[i]),
-            })
+            rows.append(cache[int(index)])
         return rows
 
     def draw(self, cutoff, prediction: float, n: int, rng, *, evidence: dict | None = None):
