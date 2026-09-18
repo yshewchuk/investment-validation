@@ -186,7 +186,7 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
         receipt(stage, source_ref, blocks.get(stage, {}))
         for stage in (
             "resolve_context", "features", "forecast", "geometry", "pricing",
-            "analogs", "simulation", "gate", "chooser",
+            "model", "analogs", "simulation", "gate", "chooser",
             "serialization",
         )
     )
@@ -231,12 +231,40 @@ def _numerical_independence_control() -> dict[str, bool]:
             "weights": (0.5, 0.5),
             "capital_at_risk": 1.0,
         },
+        # Payoff-calibration/model layer (exp_pnl_model, win_model). Two
+        # synthetic PRIOR trades, chosen so the OLS fit is EXACT (a line
+        # through exactly two points has zero residual at both):
+        #   row1: driver=0.0,  spot_entry=100.0, exit_value=2.0 -> y=0.02
+        #   row2: driver=10.0, spot_entry=100.0, exit_value=6.0 -> y=0.06
+        #   slope = (0.06 - 0.02) / (10.0 - 0.0) = 0.004
+        #   intercept = 0.02 - 0.004 * 0.0 = 0.02
+        # so fit_residuals = [0.0, 0.0] exactly -- hand arithmetic, not
+        # taken from this program's own output. One model-residual row with
+        # residual=0.0 makes the driver's own draw pool a single zero too
+        # (native_payoff.driver_residual_pool falls back to the flat pool:
+        # one row can never clear bucket_residuals' deciles*min_pool floor).
+        # Both pools being single-valued makes every Monte Carlo draw
+        # IDENTICAL regardless of seed/draw_count, so the expected number is
+        # closed-form:
+        #   driver = 7.0 (forecast_recipes below), spot = 100.0
+        #   exit_value = max(0, (0.02 + 0.004 * 7.0) * 100.0) = 4.8
+        #   entry_cost = 4.0 (see entry_cost_pct == 4.0 below)
+        #   return = (4.8 - 4.0 + 0.0 * 100.0) / 4.0 = 0.2
+        # exp_pnl_model == 0.2 and win_model == 1.0 for EVERY seed/draw_count.
+        payoff_recipe={"min_trades": 2, "seed": 20260918, "draw_count": 8},
+        payoff_source_rows=[
+            {"driver": 0.0, "spot_entry": 100.0, "exit_value": 2.0,
+             "exit_date": "2026-09-10"},
+            {"driver": 10.0, "spot_entry": 100.0, "exit_value": 6.0,
+             "exit_date": "2026-09-10"},
+        ],
+        model_residual_rows=[{"prediction": 7.0, "residual": 0.0}],
         # No analog recipe: this control asserts independent recomputation
-        # of forecast/simulation/gate only (see the assertions below -- none
-        # of them reads `analogs`, `ci_low`, `ci_high` or `n_analogs`). Its
-        # ticker ("PHASE4") and event dates are synthetic fixture values with
-        # no real prior-event bucket population behind them, so satisfying a
-        # non-empty analog_recipe here would mean fabricating
+        # of forecast/simulation/gate/model only (see the assertions below --
+        # none of them reads `analogs`, `ci_low`, `ci_high` or `n_analogs`).
+        # Its ticker ("PHASE4") and event dates are synthetic fixture values
+        # with no real prior-event bucket population behind them, so
+        # satisfying a non-empty analog_recipe here would mean fabricating
         # analog_source_rows -- exactly what `_analog_block`'s own docstring
         # in source_inputs.py forbids. A non-empty recipe with no rows is a
         # genuine defect (MISSING_ANALOG_INPUT); declaring no recipe at all
@@ -258,11 +286,16 @@ def _numerical_independence_control() -> dict[str, bool]:
         simulation={"exp_pnl_sim": 993.0},
         gate={"gate_score": 994.0, "gate_threshold": 995.0,
               "gate_pass": False},
+        model={"exp_pnl_model": 991.5, "win_model": 0.0},
     )
     scored = application.score_one(request, poisoned)
     preservation_only = (
         scored.forecasts.get("driver_prediction") == 991.0
         and scored.forecasts.get("forecast_abs_move") == 992.0
+    )
+    model_preservation_only = (
+        scored.resolved_request.get("exp_pnl_model") == 991.5
+        or scored.resolved_request.get("win_model") == 0.0
     )
     independently_recomputed = (
         expected.validation_status == "scored"
@@ -273,8 +306,11 @@ def _numerical_independence_control() -> dict[str, bool]:
                                     "gate_threshold": 0.0,
                                     "gate_pass": True}
         and expected.financial_diagnostics.get("entry_cost_pct") == 4.0
+        and math.isclose(expected.resolved_request.get("exp_pnl_model", float("nan")), 0.2, rel_tol=1e-9)
+        and math.isclose(expected.resolved_request.get("win_model", float("nan")), 1.0, rel_tol=1e-9)
         and scored.validation_status == "refused"
         and not preservation_only
+        and not model_preservation_only
     )
     return {
         "copied_outputs_absent": (
@@ -288,10 +324,13 @@ def _numerical_independence_control() -> dict[str, bool]:
             and all(key not in executable.gate for key in (
                 "gate_score", "gate_threshold", "gate_pass",
             ))
+            and all(key not in executable.model for key in (
+                "exp_pnl_model", "win_model",
+            ))
             and not executable.chooser
         ),
-        "preservation_only_detected": preservation_only,
-        "preservation_only_rejected": not preservation_only,
+        "preservation_only_detected": preservation_only or model_preservation_only,
+        "preservation_only_rejected": not (preservation_only or model_preservation_only),
         "independent_recomputation": independently_recomputed,
     }
 
@@ -600,7 +639,7 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
             receipt(stage, "frozen-control", {})
             for stage in (
                 "resolve_context", "features", "forecast", "geometry",
-                "pricing", "analogs", "simulation", "gate", "chooser",
+                "pricing", "model", "analogs", "simulation", "gate", "chooser",
                 "serialization",
             )
         )

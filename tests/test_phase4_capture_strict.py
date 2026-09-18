@@ -95,7 +95,7 @@ def _native(request: V2ScoreRequest):
         receipt(stage, {"source_ref": source_ref}, {"execution": "native-runtime"})
         for stage in (
             "resolve_context", "features", "forecast", "geometry", "pricing",
-            "analogs", "simulation", "gate", "chooser", "serialization",
+            "model", "analogs", "simulation", "gate", "chooser", "serialization",
         )
     )
     return NativeScoreInputs(
