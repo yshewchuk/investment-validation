@@ -74,10 +74,13 @@ from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
 from engine.v2.foundation import to_document  # noqa: E402
+from engine.v2.models import FrozenInference, InferenceRequest, ModelBinding, ModelRelease  # noqa: E402
+from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.scoring import application as v2_application  # noqa: E402
 from engine.v2.scoring.stages import NativeScoreInputs, receipt  # noqa: E402
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
+from tools.phase4_frozen_resources import FrozenResourcePackage, package_frozen_resources  # noqa: E402
 
 SCHEMA_VERSION = "tier0_pair.v1.1"
 INDEX_VERSION = "tier0_corpus.v1.1"
@@ -392,10 +395,22 @@ def package_strict_trace(
     *,
     resources: list[Mapping[str, Any]] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    frozen_runtime: tuple[FrozenInference, ModelRelease, tuple[InferenceRequest, ...]] | None = None,
 ) -> tuple[dict[str, Any], Any]:
     """Execute native scoring and package the observer output for verification."""
     observations = []
-    native = v2_application.score_one(request, inputs, observer=observations.append)
+    if frozen_runtime is None:
+        native = v2_application.score_one(request, inputs, observer=observations.append)
+    else:
+        inference, release, inference_requests = frozen_runtime
+        native = v2_application.score_frozen(
+            request,
+            inference,
+            release,
+            inference_requests,
+            {"_native_inputs": inputs},
+            observer=observations.append,
+        )
     native_document = {
         "context": dict(inputs.context),
         "features": dict(inputs.features),
@@ -418,6 +433,54 @@ def package_strict_trace(
         metadata=metadata,
     )
     return trace, native
+
+
+def _frozen_runtime(
+    package: FrozenResourcePackage,
+    release_root: Path,
+    request: V2ScoreRequest,
+    inputs: NativeScoreInputs,
+) -> tuple[FrozenInference, ModelRelease, tuple[InferenceRequest, ...]]:
+    resources = {row["resource_id"]: row for row in package.resource_rows}
+    bindings = []
+    for raw in package.sidecar_document["bindings"]:
+        members = tuple(
+            ArtifactMember(
+                name=member["name"],
+                path=resources[member["resource_id"]]["path"],
+                content_hash=resources[member["resource_id"]]["sha256"],
+            )
+            for member in raw["members"]
+        )
+        bindings.append(ModelBinding(
+            binding_id=raw["binding_id"],
+            model_id=raw["model_id"],
+            role=raw["role"],
+            strategy_id=raw["strategy_id"],
+            decision_clock_id=raw["decision_clock_id"],
+            adapter=raw["adapter"],
+            feature_order=tuple(raw["feature_order"]),
+            output_names=tuple(raw["output_names"]),
+            members=members,
+        ))
+    release = ModelRelease(
+        release_id=package.sidecar_document["release_id"],
+        deployment_id=request.deployment_id,
+        bindings=tuple(bindings),
+    )
+    features = inputs.features.get("model_inputs")
+    if not isinstance(features, Mapping):
+        raise StrictTraceCaptureError("frozen runtime requires model_inputs")
+    inference_requests = tuple(
+        InferenceRequest(
+            release_id=release.release_id,
+            binding_id=binding.binding_id,
+            feature_order=binding.feature_order,
+            rows=(tuple(float(features[name]) for name in binding.feature_order),),
+        )
+        for binding in bindings
+    )
+    return FrozenInference(release_root), release, inference_requests
 
 
 # --------------------------------------------------------------------------
@@ -913,7 +976,7 @@ def _fixture_id(cand: dict, i: int) -> str:
 
 
 def attach_strict_probe(chosen: list[dict], snapshot: str,
-                        strategy: str) -> str:
+                        strategy: str, release_root: Path) -> str:
     """Attach one strict trace, or fail with the missing source contract."""
     failures = []
     for candidate in chosen:
@@ -924,15 +987,27 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
             continue
         try:
             request = canonical_v2_request(candidate, snapshot)
+            source = _checkpoint_value(candidate, "source_inputs")
+            package = package_frozen_resources(
+                model_bindings=source.get("model_bindings"),
+                deployment_id=request.deployment_id,
+                release_root=release_root,
+                source_root=ROOT,
+            )
+            request = replace(request, model_artifact_refs=package.request_refs)
             inputs, shared_inputs = native_inputs_from_capture(candidate, request)
+            runtime = _frozen_runtime(package, release_root, request, inputs)
             trace, native = package_strict_trace(
                 request, inputs, shared_inputs,
+                resources=list(package.resource_rows),
                 metadata={
                     "capture_mode": "bounded-strict-probe",
                     "legacy_checkpoint_hash": content_hash(
                         candidate["legacy_trace"]
                     ),
+                    "frozen_inference": package.trace_declaration,
                 },
+                frozen_runtime=runtime,
             )
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             failures.append(f"{candidate.get('fixture_id', 'candidate')}: {exc}")
@@ -961,7 +1036,8 @@ def _publish_current(root: Path, version: str) -> None:
 
 
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
-          as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False) -> dict:
+          as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False,
+          strict_strategy: str | None = None) -> dict:
     """Publish one immutable version directory, atomically.
 
     The version is built under a temporary sibling and published with one
@@ -978,6 +1054,11 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         shutil.rmtree(tmp)
     pairs_dir = tmp / "pairs"
     pairs_dir.mkdir(parents=True)
+    if strict_strategy is not None:
+        strict_id = attach_strict_probe(
+            chosen, snapshot, strict_strategy, tmp,
+        )
+        print(f"[corpus] strict Phase 4 trace: {strict_id}", flush=True)
     checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
 
     manifest_pairs = {}
@@ -1120,9 +1201,6 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"[corpus] candidates: {len(candidates)}", flush=True)
 
     chosen, index = select(candidates)
-    if args.strict_phase4_trace:
-        strict_id = attach_strict_probe(chosen, scorer.snapshot, strategies[0])
-        print(f"[corpus] strict Phase 4 trace: {strict_id}", flush=True)
     if args.out:
         out_dir = Path(args.out)
     else:
@@ -1130,8 +1208,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out_dir = DEFAULT_OUT / version
     out_dir.parent.mkdir(parents=True, exist_ok=True)
-    doc = write(out_dir, chosen, index, as_of, scorer.snapshot,
-                replace_existing=args.replace)
+    doc = write(
+        out_dir, chosen, index, as_of, scorer.snapshot,
+        replace_existing=args.replace,
+        strict_strategy=strategies[0] if args.strict_phase4_trace else None,
+    )
     if not args.out and out_dir.parent == DEFAULT_OUT:
         _publish_current(DEFAULT_OUT, out_dir.name)
         print(f"[corpus] CURRENT -> {out_dir.name}")
