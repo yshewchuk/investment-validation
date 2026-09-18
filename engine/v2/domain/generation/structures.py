@@ -106,12 +106,58 @@ def _quote_contracts(inputs: Mapping[str, Any]) -> tuple[tuple[str, float, str],
     return tuple(sorted(set(contracts), key=lambda row: (row[2], row[1], row[0])))
 
 
+def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> str:
+    """Resolve the expiry to trade, mirroring legacy ``ExpirySelector``.
+
+    - A caller-supplied ``expiry`` is legacy's ``fixed`` rule: it must match
+      a listed expiry exactly (by calendar date), or this refuses via
+      ``GeometryRefusal`` rather than silently substituting another expiry.
+    - Otherwise, when an ``exit_date``/``event_date`` is known, this mirrors
+      legacy's ``first_post_event``: the earliest listed expiry on/after that
+      date, with the AMC/BMO distinction applied when ``session`` is known
+      (AMC excludes an expiry landing exactly on the event date, since it
+      dies at the close before an after-close announcement). Session unknown
+      falls back to legacy's permissive ``>=`` rule. No survivor is also a
+      refusal, not a silent substitution.
+    - With no date signal at all, the earliest listed expiry is used as a
+      deterministic default.
+    """
+    requested = inputs.get("expiry")
+    if requested is not None:
+        target = str(requested)[:10]
+        matches = [candidate for candidate in expiries if candidate[:10] == target]
+        if not matches:
+            raise GeometryRefusal(f"EXPIRY_NOT_LISTED:{target}")
+        return matches[0]
+
+    target_source = inputs.get("exit_date") or inputs.get("event_date")
+    if target_source is None:
+        return expiries[0]
+
+    target = str(target_source)[:10]
+    session = str(inputs.get("session") or "").upper()
+    if session == "AMC":
+        survivors = [candidate for candidate in expiries if candidate[:10] > target]
+    else:
+        survivors = [candidate for candidate in expiries if candidate[:10] >= target]
+    if not survivors:
+        raise GeometryRefusal(f"NO_EXPIRY_ON_OR_AFTER:{target}")
+    return survivors[0]
+
+
 def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[float, str] | None:
     """Select a common listed strike and expiry from raw quote keys.
 
     This is deliberately a geometry operation. It sees the available contract
     domain and request dates, while pricing remains responsible for validating
     and consuming the bid/ask values.
+
+    Mirrors legacy ``ExpirySelector`` (``engine/structures.py``): the EXPIRY
+    is resolved first (:func:`_resolve_straddle_expiry`), and only then is a
+    strike chosen within it. Choosing by strike distance first (the previous
+    behaviour here) could return a strike from a LATER expiry than the one
+    actually requested, whenever that later expiry happened to list a strike
+    closer to spot.
     """
     contracts = _quote_contracts(inputs)
     common = {
@@ -125,18 +171,10 @@ def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[flo
     }
     if not common:
         return None
-    target = inputs.get("expiry") or inputs.get("exit_date") or inputs.get("event_date")
-    if target is not None:
-        target = str(target)[:10]
-        after = sorted((strike, expiry) for strike, expiry in common
-                       if expiry[:10] >= target)
-        pool = after or sorted(common)
-    else:
-        pool = sorted(common)
-    strike, expiry = min(
-        pool,
-        key=lambda row: (abs(row[0] - spot), row[1], row[0]),
-    )
+    expiries = sorted({expiry for _, expiry in common})
+    resolved_expiry = _resolve_straddle_expiry(inputs, expiries)
+    pool = [(strike, expiry) for strike, expiry in common if expiry == resolved_expiry]
+    strike, expiry = min(pool, key=lambda row: (abs(row[0] - spot), row[0]))
     return strike, expiry
 
 

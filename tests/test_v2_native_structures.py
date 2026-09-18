@@ -1,6 +1,6 @@
 import pytest
 
-from engine.v2.domain.generation import generate, price
+from engine.v2.domain.generation import GeometryRefusal, generate, price
 
 
 def _inputs():
@@ -83,8 +83,125 @@ def test_straddle_selects_common_listed_contract_from_raw_quote_domain():
         },
     )
 
-    assert {leg.strike for leg in geometry.legs} == {100.0}
+    # Expiry resolves FIRST (earliest listed expiry on/after exit_date), and
+    # only then is the strike nearest spot chosen within that expiry -- even
+    # though the later 2026-10-16 expiry lists a strike (100) closer to spot
+    # than either strike listed at the earlier, correct expiry.
+    assert {leg.strike for leg in geometry.legs} == {105.0}
+    assert {leg.expiry for leg in geometry.legs} == {"2026-09-18"}
+
+
+def test_straddle_honors_requested_expiry_over_a_later_nearer_strike():
+    """Reproduces the reported defect: a caller-supplied expiry must win
+    even when a LATER expiry lists a strike closer to spot."""
+    quotes = {
+        ("C", 95.0, "2026-10-16"): {"bid": 1.0, "ask": 2.0},
+        ("P", 95.0, "2026-10-16"): {"bid": 1.0, "ask": 2.0},
+        ("C", 105.0, "2026-10-16"): {"bid": 1.0, "ask": 2.0},
+        ("P", 105.0, "2026-10-16"): {"bid": 1.0, "ask": 2.0},
+        ("C", 100.0, "2026-11-20"): {"bid": 2.0, "ask": 3.0},
+        ("P", 100.0, "2026-11-20"): {"bid": 2.0, "ask": 3.0},
+    }
+
+    geometry = generate(
+        "STR-THRU",
+        {
+            "spot": 100.0,
+            "forecast_abs_move": 8.0,
+            "expiry": "2026-10-16",
+            "quotes": quotes,
+        },
+    )
+
     assert {leg.expiry for leg in geometry.legs} == {"2026-10-16"}
+    # Within the requested expiry, 105 and 95 are equidistant from spot;
+    # the tie-break is the lower strike.
+    assert {leg.strike for leg in geometry.legs} == {95.0}
+
+
+def test_straddle_refuses_when_requested_expiry_is_not_listed():
+    quotes = {
+        ("C", 100.0, "2026-10-16"): {"bid": 1.0, "ask": 2.0},
+        ("P", 100.0, "2026-10-16"): {"bid": 1.0, "ask": 2.0},
+    }
+
+    with pytest.raises(GeometryRefusal, match="EXPIRY_NOT_LISTED"):
+        generate(
+            "STR-THRU",
+            {
+                "spot": 100.0,
+                "forecast_abs_move": 8.0,
+                "expiry": "2026-11-20",
+                "quotes": quotes,
+            },
+        )
+
+
+def test_straddle_amc_excludes_expiry_landing_on_event_date():
+    """An AMC print happens after the close, so an expiry ON the event date
+    is already dead when the news lands -- it must be excluded."""
+    quotes = {
+        ("C", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("P", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("C", 105.0, "2026-09-25"): {"bid": 1.0, "ask": 2.0},
+        ("P", 105.0, "2026-09-25"): {"bid": 1.0, "ask": 2.0},
+    }
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "event_date": "2026-09-18",
+        "session": "AMC",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-THRU", inputs)
+
+    assert {leg.expiry for leg in geometry.legs} == {"2026-09-25"}
+    assert {leg.strike for leg in geometry.legs} == {105.0}
+
+
+def test_straddle_bmo_includes_expiry_landing_on_event_date():
+    """A BMO print happens before the open, so an expiry ON the event date
+    survives it and is the earliest eligible expiry."""
+    quotes = {
+        ("C", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("P", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("C", 105.0, "2026-09-25"): {"bid": 1.0, "ask": 2.0},
+        ("P", 105.0, "2026-09-25"): {"bid": 1.0, "ask": 2.0},
+    }
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "event_date": "2026-09-18",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-THRU", inputs)
+
+    assert {leg.expiry for leg in geometry.legs} == {"2026-09-18"}
+    assert {leg.strike for leg in geometry.legs} == {95.0}
+
+
+def test_straddle_unknown_session_matches_legacy_permissive_fallback():
+    """Session unknown falls back to legacy's inclusive >= rule: an expiry
+    landing exactly on the event date is NOT excluded."""
+    quotes = {
+        ("C", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("P", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("C", 105.0, "2026-09-25"): {"bid": 1.0, "ask": 2.0},
+        ("P", 105.0, "2026-09-25"): {"bid": 1.0, "ask": 2.0},
+    }
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "event_date": "2026-09-18",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-THRU", inputs)
+
+    assert {leg.expiry for leg in geometry.legs} == {"2026-09-18"}
 
 
 def test_missing_quote_is_a_truthful_refusal():
