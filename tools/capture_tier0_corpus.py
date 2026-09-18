@@ -268,6 +268,17 @@ def _checkpoint_value(candidate: Mapping[str, Any], name: str) -> Mapping[str, A
     return value
 
 
+def _checkpoint_value_optional(candidate: Mapping[str, Any], name: str) -> Mapping[str, Any] | None:
+    """Like :func:`_checkpoint_value`, but returns ``None`` if the group was
+    never recorded (e.g. an entry-rule gate never writes a model feature
+    vector). A recorded-but-malformed or hash-mismatched group still raises."""
+    trace = candidate.get("legacy_trace")
+    checkpoints = trace.get("checkpoints") if isinstance(trace, Mapping) else None
+    if not isinstance(checkpoints, Mapping) or name not in checkpoints:
+        return None
+    return _checkpoint_value(candidate, name)
+
+
 def _quote_map(rows: Any) -> dict[str, dict[str, float]]:
     if not isinstance(rows, list) or not rows:
         raise StrictTraceCaptureError("source_inputs.quote_domain is empty")
@@ -298,6 +309,28 @@ def _quote_map(rows: Any) -> dict[str, dict[str, float]]:
     return quotes
 
 
+#: Legacy checkpoint role strings that ``tools/phase4_frozen_resources.py``
+#: (``_normalized_binding``) canonicalizes before a binding reaches
+#: ``ModelBinding.role``. Kept in lockstep with that mapping so a per-role
+#: captured vector can be looked up by the SAME role a frozen binding carries.
+_LEGACY_ROLE_ALIASES = {
+    "abs_move": "driver",
+    "forecast_sizing": "size",
+}
+
+
+def _coerce_feature_value(role: str, name: str, raw: Any) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise StrictTraceCaptureError(
+            f"feature {role}.{name} is missing or nonnumeric"
+        ) from exc
+    if not math.isfinite(value):
+        raise StrictTraceCaptureError(f"feature {role}.{name} is nonfinite")
+    return value
+
+
 def _merged_model_inputs(candidate: Mapping[str, Any]) -> dict[str, float]:
     features = _checkpoint_value(candidate, "features")
     vectors = features.get("feature_vector")
@@ -308,22 +341,67 @@ def _merged_model_inputs(candidate: Mapping[str, Any]) -> dict[str, float]:
         if not isinstance(vector, Mapping):
             raise StrictTraceCaptureError(f"feature vector {role} is malformed")
         for name, raw in vector.items():
-            try:
-                value = float(raw)
-            except (TypeError, ValueError) as exc:
-                raise StrictTraceCaptureError(
-                    f"feature {role}.{name} is missing or nonnumeric"
-                ) from exc
-            if not math.isfinite(value):
-                raise StrictTraceCaptureError(
-                    f"feature {role}.{name} is nonfinite"
-                )
+            value = _coerce_feature_value(str(role), str(name), raw)
             if name in merged and merged[name] != value:
                 raise StrictTraceCaptureError(
                     f"feature {name} differs across model roles"
                 )
             merged[str(name)] = value
     return merged
+
+
+def _role_feature_vectors(candidate: Mapping[str, Any]) -> dict[str, dict[str, float]]:
+    """Per-role captured feature vectors, keyed by canonical binding role.
+
+    Unlike :func:`_merged_model_inputs` — which unions every captured role's
+    vector into one flat dict for the forecast-facing ``model_inputs`` block,
+    and refuses a genuine cross-role value conflict — this keeps each role's
+    vector separate. A binding whose ``feature_order`` is private to its own
+    role (the gate model's own feature vector is captured into the
+    ``gate_inputs`` checkpoint, not the shared ``features`` checkpoint used by
+    the forecast-family roles) can still be resolved here, and frozen
+    inference row assembly (:func:`_frozen_runtime`) must read from here, not
+    from the merged dict.
+    """
+    vectors: dict[str, dict[str, float]] = {}
+
+    def _add(role: str, raw_vector: Mapping[str, Any]) -> None:
+        coerced = {
+            str(name): _coerce_feature_value(role, str(name), raw)
+            for name, raw in raw_vector.items()
+        }
+        if role in vectors and vectors[role] != coerced:
+            raise StrictTraceCaptureError(
+                f"feature role {role} captured twice with different values"
+            )
+        vectors[role] = coerced
+
+    features = _checkpoint_value(candidate, "features")
+    role_vectors = features.get("feature_vector")
+    if not isinstance(role_vectors, Mapping) or not role_vectors:
+        raise StrictTraceCaptureError("features.feature_vector is empty")
+    for raw_role, vector in role_vectors.items():
+        if not isinstance(vector, Mapping):
+            raise StrictTraceCaptureError(f"feature vector {raw_role} is malformed")
+        role = _LEGACY_ROLE_ALIASES.get(str(raw_role), str(raw_role))
+        _add(role, vector)
+
+    gate = _checkpoint_value_optional(candidate, "gate_inputs")
+    if isinstance(gate, Mapping) and gate.get("kind") == "model":
+        gate_vector = gate.get("feature_vector")
+        if isinstance(gate_vector, Mapping) and gate_vector:
+            _add("gate", gate_vector)
+
+    dyn_sv = _checkpoint_value_optional(candidate, "dyn_sv")
+    if isinstance(dyn_sv, Mapping):
+        ranking = dyn_sv.get("ranking")
+        chooser_vector = (
+            ranking.get("feature_vector") if isinstance(ranking, Mapping) else None
+        )
+        if isinstance(chooser_vector, Mapping) and chooser_vector:
+            _add("chooser", chooser_vector)
+
+    return vectors
 
 
 def native_inputs_from_capture(
@@ -458,6 +536,7 @@ def _frozen_runtime(
     release_root: Path,
     request: V2ScoreRequest,
     inputs: NativeScoreInputs,
+    candidate: Mapping[str, Any],
 ) -> tuple[FrozenInference, ModelRelease, tuple[InferenceRequest, ...]]:
     resources = {row["resource_id"]: row for row in package.resource_rows}
     bindings = []
@@ -486,19 +565,34 @@ def _frozen_runtime(
         deployment_id=request.deployment_id,
         bindings=tuple(bindings),
     )
-    features = inputs.features.get("model_inputs")
-    if not isinstance(features, Mapping):
-        raise StrictTraceCaptureError("frozen runtime requires model_inputs")
-    inference_requests = tuple(
-        InferenceRequest(
+    # Each binding's row must come from THAT binding's own captured per-role
+    # feature vector, never the cross-role merged dict
+    # (`inputs.features["model_inputs"]`): a binding's feature_order can name
+    # features private to its own role (e.g. the gate model's own vector),
+    # which the merge — built only from the forecast-family `features`
+    # checkpoint — never carries. See `_role_feature_vectors`.
+    role_vectors = _role_feature_vectors(candidate)
+    inference_requests = []
+    for binding in bindings:
+        vector = role_vectors.get(binding.role)
+        if vector is None:
+            raise StrictTraceCaptureError(
+                f"frozen runtime binding {binding.binding_id} (role={binding.role}): "
+                "no captured per-role feature vector"
+            )
+        missing = [name for name in binding.feature_order if name not in vector]
+        if missing:
+            raise StrictTraceCaptureError(
+                f"frozen runtime binding {binding.binding_id} (role={binding.role}): "
+                f"missing feature(s) {missing}"
+            )
+        inference_requests.append(InferenceRequest(
             release_id=release.release_id,
             binding_id=binding.binding_id,
             feature_order=binding.feature_order,
-            rows=(tuple(float(features[name]) for name in binding.feature_order),),
-        )
-        for binding in bindings
-    )
-    return FrozenInference(release_root), release, inference_requests
+            rows=(tuple(vector[name] for name in binding.feature_order),),
+        ))
+    return FrozenInference(release_root), release, tuple(inference_requests)
 
 
 # --------------------------------------------------------------------------
@@ -1023,7 +1117,10 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
                 )
                 request = replace(request, model_artifact_refs=package.request_refs)
             inputs, shared_inputs = native_inputs_from_capture(candidate, request)
-            runtime = _frozen_runtime(package, release_root, request, inputs) if package else None
+            runtime = (
+                _frozen_runtime(package, release_root, request, inputs, candidate)
+                if package else None
+            )
             resources = list(package.resource_rows) if package else []
             if package:
                 resources.extend({
