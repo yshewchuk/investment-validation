@@ -229,3 +229,20 @@ def test_nested_answer_fields_are_rejected():
             _bundle(),
             metadata={"recipe": {"financial_diagnostics": {"fair": 1.0}}},
         ))
+
+
+def test_analog_recipe_without_source_rows_reports_missing_input():
+    # A declared-but-unfed recipe must surface MISSING_ANALOG_INPUT from the
+    # execution stage -- it must not be silently reclassified as
+    # not-applicable just because analog_source_rows is empty.
+    bundle = replace(_bundle(), analog_source_rows=())
+    inputs = build_native_score_inputs(bundle)
+
+    assert inputs.analogs["recipe"] is not None
+    assert "source_rows" not in inputs.analogs
+    assert "query_features" not in inputs.analogs
+
+    record = application.score_one(_request(0.5), inputs)
+
+    assert record.validation_status == "refused"
+    assert "MISSING_ANALOG_INPUT" in record.reason_codes

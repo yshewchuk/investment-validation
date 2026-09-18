@@ -233,17 +233,23 @@ def _gate_block(values: Mapping[str, Any]) -> dict[str, Any]:
 def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     """Express the legacy bucket-analog recipe, with inputs, when sourced.
 
-    A recipe is only declared when the bundle carries a real, answer-free
-    population (``analog_source_rows``). Without one there is nothing to
-    execute, so the block reports genuinely not-applicable (``recipe: None``)
-    rather than declaring a recipe the stage cannot satisfy.
+    The recipe-vs-rows distinction is the one that matters, not rows alone:
+    an empty ``analog_recipe`` means nothing was requested, so the block is
+    genuinely not-applicable (``recipe: None``). A non-empty ``analog_recipe``
+    is a positive request; if its source population (``analog_source_rows``)
+    is absent, the declared (possibly incomplete) recipe is still carried so
+    the execution stage reports MISSING_ANALOG_INPUT itself -- this builder
+    must not reclassify a declared-but-unfed recipe as not-applicable, and
+    must not fabricate rows to satisfy it.
     """
     config = _bounded_recipe(
         "analog_recipe", bundle.analog_recipe,
         _ANALOG_RECIPE_FIELDS | _BUCKET_ANALOG_RECIPE_FIELDS,
     )
-    if not bundle.analog_source_rows:
+    if not config:
         return {"recipe": None}
+    if not bundle.analog_source_rows:
+        return {"recipe": config}
     missing = sorted(_BUCKET_ANALOG_RECIPE_FIELDS - set(config))
     if missing:
         raise ValueError(f"analog_recipe requires bucket fields: {missing}")
