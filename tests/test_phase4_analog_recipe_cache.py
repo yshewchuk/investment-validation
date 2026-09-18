@@ -2,9 +2,13 @@
 
 Root cause (measured on a real `capture_tier0_corpus.py --strict-phase4-trace`
 run, 40 forward events, all strategies; see the commit this file ships with):
-`AnalogMatcher` already shares its DOCUMENTED causal block by reference across
-every candidate that matches the same (strategy, alpha, as_of) bucket
-(`_documented_causal`, proven in `test_analog_bootstrap_memory.py`). But
+at the time of this fix, `AnalogMatcher` shared its DOCUMENTED causal block by
+reference across every candidate that matches the same (strategy, alpha,
+as_of) bucket (`_documented_causal`; that whole-block cache was itself removed
+2026-09-18 as a further, separate duplication fix — see
+`test_analog_bootstrap_memory.py` — `AnalogMatcher.match` now rebuilds
+`population`/`causal` fresh per candidate from a persistent ROW-level cache
+instead, unrelated to what this file tests). But
 `Phase4TraceCollector.capture_analog_inputs` (the ONLY consumer of that
 block's raw rows) did not reuse that sharing: EVERY scored candidate that
 reaches `_score_analogs` re-walked the FULL causal population -- not just the
@@ -18,14 +22,16 @@ causal identity -- unbounded in practice, and the measured driver of the
 
 The fix threads an optional `recipe_cache` (in production,
 `scorer.matcher.phase4_recipe_cache`, a new `AnalogMatcher` cache keyed and
-evicted in lockstep with its existing `_documented_causal`/`_causal_pools`)
+evicted in lockstep with its existing `_causal_row_caches`/`_causal_pools`)
 through `capture_analog_inputs`, so candidates sharing a (strategy, alpha,
 as_of) key share one documented rows structure and one `population_hash` by
 reference, `_document`ed exactly ONCE per key (not once per candidate) so its
 NaN/Inf/numpy-scalar sanitizing pass still runs -- byte-identical output,
 bounded retention. `recipe_cache=None` (the default) is untouched: no caller
 outside `capture_tier0_corpus.py` opts in, and every existing test exercises
-that default path unchanged.
+that default path unchanged. This cache is unaffected by the 2026-09-18
+`_documented_causal` removal: it was already a separate, correctly-shared
+cache, not one of the duplicates removed.
 """
 from __future__ import annotations
 

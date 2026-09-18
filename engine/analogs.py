@@ -356,43 +356,23 @@ def _evidence_rows(
     }
 
 
-def _documented(
-    frame: pd.DataFrame, *, row_cache: dict[Any, dict[str, Any]],
-    doc_cache: dict[Any, dict[str, Any]] | None, doc_key: Any,
-) -> dict[str, Any]:
-    """``_evidence_rows(frame)``, shared by reference across every candidate
-    that passes the same ``doc_key`` on the same ``doc_cache``.
-
-    A strict-trace capture rescores one boundary event's pinned/strike/
-    coarse-ladder variants many times, and they usually share a
-    (strategy, alpha[, as_of]) bucket — so without this, the SAME population
-    or causal pool gets re-documented (fresh `_evidence_rows` output,
-    independently retained) once per candidate, for the life of the run.
-    ``doc_cache`` (owned by :class:`AnalogMatcher`, keyed the same way as its
-    own ``_pools``/``_causal_pools``) makes candidates sharing a key reuse the
-    identical output object instead.
-
-    Unlike the row-level cache inside `_evidence_rows`, this level is a plain
-    (mutable) dict, not `_freeze`-locked: the checkpoint sink's JSON writer
-    needs an actual dict, matching `engine.pnl_sim.ResidualPool
-    .documented_population`'s identical choice. Safety here rests on an
-    audit, not enforcement — every consumer of an analog evidence document
-    (`engine.score.Phase4TraceCollector.capture_analog_inputs`, `.record`,
-    and every test) only reads `population`/`causal` via `.get`; none mutates
-    a row in place. `doc_key=None` opts out of sharing (used when the caller
-    has no natural cache key), falling back to always rebuilding.
-    """
-    if doc_key is None or doc_cache is None:
-        return _evidence_rows(frame, cache=row_cache)
-    cached = doc_cache.get(doc_key)
-    if cached is None:
-        cached = _evidence_rows(frame, cache=row_cache)
-        doc_cache[doc_key] = cached
-    return cached
-
-
 class _AnalogMatchEvidence:
-    """Collect opt-in matching evidence without affecting the default path."""
+    """Collect opt-in matching evidence without affecting the default path.
+
+    ``population``/``causal`` are rebuilt fresh on every call (no matcher-
+    level cache of the DOCUMENTED block itself — see `AnalogMatcher.__init__`
+    for why that layer was removed). What persists across candidates is only
+    the ROW-LEVEL cache (`_population_row_caches`/`_causal_row_caches`,
+    passed in as ``row_cache``): the expensive part of documenting a row —
+    `to_dict` + `json.dumps` + `sha256`, run once per distinct pandas index —
+    is memoized there, `_freeze`-locked, for the matcher's whole life. What
+    this class rebuilds per call is comparatively cheap: an O(rows) loop of
+    dict lookups against that warm cache plus one `_thaw` per row, needed
+    because every consumer of an evidence document (this repo's whole test
+    suite, and the `AnalogMatcher.match` docstring) is entitled to a plain,
+    independently mutable, directly `json.dumps`-able dict back — the SAME
+    guarantee `selected`/`contributing` below have always given.
+    """
 
     def __init__(
         self,
@@ -406,9 +386,6 @@ class _AnalogMatchEvidence:
         bucket_query: dict,
         population: pd.DataFrame,
         row_cache: dict[Any, dict[str, Any]] | None = None,
-        documented_pools: dict[Any, dict[str, Any]] | None = None,
-        population_key: Any = None,
-        documented_causal: dict[Any, dict[str, Any]] | None = None,
     ):
         self.hook = hook
         self.strategy = strategy
@@ -421,18 +398,15 @@ class _AnalogMatchEvidence:
         self.bucket_query = _json_value(bucket_query)
         # Row-level cache, scoped to POPULATION content only (see the class
         # docstring below for why this must not be shared with the causal
-        # pool's own row cache). Used for this one _documented() call, then
-        # `set_causal` swaps `self._row_cache` to the causal-scoped one for
-        # every call that follows (add_step, emit) — they all read `pool`/
-        # `matched`, which are causal-provenance frames, never `population`.
+        # pool's own row cache). Used for this one _evidence_rows() call,
+        # then `set_causal` swaps `self._row_cache` to the causal-scoped one
+        # for every call that follows (add_step, emit) — they all read
+        # `pool`/`matched`, which are causal-provenance frames, never
+        # `population`.
         self._row_cache: dict[Any, dict[str, Any]] = (
             {} if row_cache is None else row_cache
         )
-        self._documented_causal = documented_causal
-        self.population = _documented(
-            population, row_cache=self._row_cache,
-            doc_cache=documented_pools, doc_key=population_key,
-        )
+        self.population = _evidence_rows(population, cache=self._row_cache)
         self.causal = None
         self.effective_bucket_query = None
         self.causal_implied_edges = None
@@ -444,7 +418,6 @@ class _AnalogMatchEvidence:
         bucket_query: dict,
         implied_edges: tuple[float, float] | None,
         *,
-        causal_key: Any = None,
         row_cache: dict[Any, dict[str, Any]] | None = None,
     ) -> None:
         # Swap to a row cache scoped to THIS causal_key from here on: `pool`
@@ -452,16 +425,13 @@ class _AnalogMatchEvidence:
         # dependent) edges via `.assign()` in `match()`, which is DIFFERENT
         # content for the same row index than the population's own
         # `implied_tercile` (population-wide edges) — and different again
-        # across two causal pools with different `as_of`/edges. Reusing the
+        # across two causal pools with different `as_of`. Reusing the
         # population's row cache here, or one causal_key's cache for
         # another, would silently serve a row with the wrong tercile label
         # (a real bug caught in review: content, not just cost, depends on
         # which frame/as_of a row's cached value came from).
         self._row_cache = {} if row_cache is None else row_cache
-        self.causal = _documented(
-            pool, row_cache=self._row_cache,
-            doc_cache=self._documented_causal, doc_key=causal_key,
-        )
+        self.causal = _evidence_rows(pool, cache=self._row_cache)
         self.effective_bucket_query = _json_value(bucket_query)
         self.causal_implied_edges = _json_value(implied_edges)
 
@@ -534,15 +504,34 @@ class AnalogMatcher:
         # ~19s on a 3,120-row board.
         self._causal_pools: dict[tuple[str, float, pd.Timestamp],
                                  tuple[pd.DataFrame, tuple[float, float] | None]] = {}
-        # Evidence caches — opt-in, populated only when a caller supplies an
-        # evidence_hook (Phase 4 strict capture), never on the default
-        # scoring path. Persist for the matcher's whole life, exactly like
-        # `_pools`/`_causal_pools` above, and are keyed the SAME way, so
-        # candidates that rescore the same boundary event's variants (which
-        # usually share a bucket) reuse one documented population/causal pool
-        # instead of each re-serializing and separately retaining its own —
-        # see `_documented`'s docstring and `_evidence_rows`' for the
-        # measured effect.
+        # Row-level evidence cache — opt-in, populated only when a caller
+        # supplies an evidence_hook (Phase 4 strict capture), never on the
+        # default scoring path. Persists for the matcher's whole life,
+        # exactly like `_pools`/`_causal_pools` above, and is keyed the SAME
+        # way, so candidates that rescore the same boundary event's variants
+        # (which usually share a bucket) reuse one row's cached
+        # `(digest, values)` instead of each re-serializing it — see
+        # `_evidence_rows`' docstring for the measured effect.
+        #
+        # This is now the ONLY documented-content cache `AnalogMatcher` owns.
+        # An earlier version also cached the fully-built, per-key DOCUMENTED
+        # `population`/`causal` blocks themselves (`_documented_pools`/
+        # `_documented_causal`) — removed 2026-09-18: a 40-forward-event
+        # strict capture visits close to one distinct causal block per event,
+        # and each retained block held its OWN independently `_thaw`ed
+        # (deep-copied) values on top of what THIS row cache already holds
+        # frozen, measured at 480.9 MB / 38 keys = 12.7 MB/key of pure
+        # duplication for `_documented_causal` alone (plus 113.2 MB, flat, in
+        # `_documented_pools`) in the run that diagnosed this file's other
+        # fix. Nothing downstream needed that retained copy to persist past
+        # the ONE candidate that built it: `_AnalogMatchEvidence.population`/
+        # `.causal` are now rebuilt fresh on every call — cheap, an O(rows)
+        # loop of lookups against this already-warm cache plus one `_thaw`
+        # per row, not the `to_dict`+`json.dumps`+`sha256` work the row cache
+        # itself memoizes — and the one caller that DOES need cross-candidate
+        # sharing of a causal block's content (`Phase4TraceCollector
+        # .capture_analog_inputs`) gets it from `phase4_recipe_cache` below,
+        # which was already a separate, correctly-shared cache.
         #
         # Row caches are scoped PER documented-block key, not shared
         # globally by pandas index. Content, not just cost, differs by
@@ -561,10 +550,6 @@ class AnalogMatcher:
         self._causal_row_caches: dict[
             tuple[str, float, pd.Timestamp | None], dict[Any, dict[str, Any]]
         ] = {}
-        self._documented_pools: dict[tuple[str, float], dict[str, Any]] = {}
-        self._documented_causal: dict[
-            tuple[str, float, pd.Timestamp], dict[str, Any]
-        ] = {}
         #: Phase 4 strict-capture only: `engine.score.Phase4TraceCollector
         #: .capture_analog_inputs` derives a trimmed, bucket-dimension-only
         #: projection of the FULL causal block above (every row, not just the
@@ -575,11 +560,19 @@ class AnalogMatcher:
         #: close to one distinct causal block per event, so the growth was
         #: roughly linear in candidates scored, not bounded by anything: the
         #: measured driver of the forward-pass RSS climb this cache fixes.
-        #: Keyed and evicted in lockstep with `_documented_causal` below (same
-        #: key shape); the trace collector only ever reads/writes through
-        #: `capture_analog_inputs`, never iterates it directly.
+        #: Keyed and evicted in lockstep with `_causal_pools`/
+        #: `_causal_row_caches` above (same key shape); the trace collector
+        #: only ever reads/writes through `capture_analog_inputs`, never
+        #: iterates it directly.
         #: Value shape is `(population_hash, documented_rows)` — see
         #: `Phase4TraceCollector.capture_analog_inputs` for what populates it.
+        #: This is the one row-content cache below `_causal_pools` that is
+        #: NOT redundant with the row cache above: it holds a different,
+        #: smaller, 5-field-per-row PROJECTION (not the full ~11-field row),
+        #: and is the one place cross-candidate sharing of that projection
+        #: actually happens — see the block comment above for what USED to
+        #: also live here (the full-row `_documented_causal` cache) and why
+        #: it was removed instead of kept alongside this one.
         self.phase4_recipe_cache: dict[
             tuple[str, float, pd.Timestamp | None], tuple[str | None, Any]
         ] = {}
@@ -588,19 +581,26 @@ class AnalogMatcher:
         #: keys — 31 entry dates x 2 scoreable strategies — so 64 clears the
         #: working set outright and the cap never binds where the cache pays.
         #:
-        #: The ceiling matters because an entry is not small. Each one holds a
-        #: filtered, re-bucketed copy of the (strategy, alpha) pool — measured at
-        #: 6.2 MB on average and ~9 MB for recent dates, where few trades have
-        #: been excluded. At the previous 256 that is **1.6 GB**, which took the
-        #: Scorer from 2.5 GB to 4.1 GB on a 7.8 GB box — most of the headroom
-        #: the phase-1 suite had just recovered by not loading a second
-        #: FeatureContext.
+        #: The ceiling matters because an entry is not small, and an entry's
+        #: cost is not just `_causal_pools`' own DataFrame slice. Measured on
+        #: the 2026-09-18 diagnostic run (38 keys reached, all three caches
+        #: below evicted in lockstep with it): `_causal_pools` 5.8 MB/key,
+        #: `_causal_row_caches` 4.3 MB/key, `phase4_recipe_cache` 6.5 MB/key
+        #: — 16.6 MB/key combined. (An earlier version of this comment quoted
+        #: 6.2 MB/key and ~575 MB worst case from `_causal_pools` alone; that
+        #: undercounted the row-level caches below it, which did not exist
+        #: yet when the number was written. It also predates the 2026-09-18
+        #: fix that removed a FOURTH, purely duplicative cache at this key
+        #: shape — `_documented_causal` — measured at 12.7 MB/key on top of
+        #: the three above; see the row-cache comment for that removal.) At
+        #: 64 entries, 16.6 MB/key projects to **~1.06 GB** worst case — the
+        #: actual budget this cap buys today, not the stale 575 MB figure.
         #:
-        #: Nothing was gained for it. The paths that would fill 256 keys —
-        #: `recalibrate.build_pairs` (~1,000 scattered decision dates), the
-        #: calibration sampler (300) — barely repeat an as_of, so they get almost
-        #: no hits regardless; the slots above the board's working set are pure
-        #: cost. 64 keeps the whole benefit at ~575 MB worst case.
+        #: Nothing was gained by a higher cap. The paths that would fill 256
+        #: keys — `recalibrate.build_pairs` (~1,000 scattered decision dates),
+        #: the calibration sampler (300) — barely repeat an as_of, so they get
+        #: almost no hits regardless; the slots above the board's working set
+        #: are pure cost.
         self.MAX_CAUSAL_CACHE = 64
 
     # -- request buckets ---------------------------------------------------
@@ -654,15 +654,29 @@ class AnalogMatcher:
         value is protected at the source (`_evidence_rows`' row cache
         `_freeze`-locks it) no matter how many places reuse it.
 
-        Above that: ``population`` and ``causal`` are shared BY REFERENCE
+        ``population``, ``causal``, ``selected``, and ``contributing`` are
+        ALL rebuilt fresh per call — ordinary, independently mutable
+        defensive copies, safe for a caller to hold onto and mutate without
+        affecting any other candidate. What is actually shared BY REFERENCE
         across every candidate that matches the same (strategy, alpha[,
-        as_of]) bucket on this matcher — a strict-trace capture rescores one
-        boundary event's pinned/strike/coarse-ladder variants, which usually
-        share a bucket — so a consumer must not mutate a row's ``values`` in
-        place there (audited: `Phase4TraceCollector.capture_analog_inputs`
-        and `.record` only read). ``selected``/``contributing`` (from
-        `_AnalogMatchEvidence.emit`) are rebuilt fresh per call and are
-        ordinary defensive copies, safe to mutate, exactly as before.
+        as_of]) bucket on this matcher is one level down, invisible to the
+        evidence document itself: the ROW cache each of those four blocks is
+        built FROM (`_population_row_caches`/`_causal_row_caches`) memoizes
+        the expensive part — `to_dict` + `json.dumps` + `sha256` per pandas
+        row — so a strict-trace capture rescoring one boundary event's
+        pinned/strike/coarse-ladder variants (which usually share a bucket)
+        pays that cost once, not once per candidate. (An earlier version of
+        this matcher also cached ``population``/``causal`` themselves by
+        reference, at the block level — removed 2026-09-18 after it was
+        measured to retain a fully independent, deep-copied duplicate of
+        every row on top of what the row cache already held; see
+        `AnalogMatcher.__init__`'s comment on `_causal_row_caches`. Content
+        is unaffected: two candidates sharing a key still get byte-identical
+        ``population``/``causal`` JSON, just as two independent objects
+        instead of one shared one — `Phase4TraceCollector
+        .capture_analog_inputs`, the one caller that needs cross-candidate
+        sharing of a causal block's content, gets it from its own
+        `phase4_recipe_cache`, unaffected by this change.)
         """
         key = (strategy, round(float(alpha), 4))
         base = self._pools.get(key)
@@ -684,9 +698,6 @@ class AnalogMatcher:
                 bucket_query=buckets,
                 population=base,
                 row_cache=self._population_row_caches.setdefault(key, {}),
-                documented_pools=self._documented_pools,
-                population_key=key,
-                documented_causal=self._documented_causal,
             )
             if evidence_hook is not None else None
         )
@@ -732,12 +743,11 @@ class AnalogMatcher:
                 if len(self._causal_pools) >= self.MAX_CAUSAL_CACHE:
                     evicted = next(iter(self._causal_pools))
                     self._causal_pools.pop(evicted)
-                    # Kept in lockstep with _causal_pools: a documented block
-                    # (or row cache) for a pool that no longer exists would
-                    # grow unbounded, never evicted, for a scan that touches
-                    # many as_of dates (recalibrate.build_pairs, the
+                    # Kept in lockstep with _causal_pools: a row cache or
+                    # recipe-cache entry for a pool that no longer exists
+                    # would grow unbounded, never evicted, for a scan that
+                    # touches many as_of dates (recalibrate.build_pairs, the
                     # calibration sampler).
-                    self._documented_causal.pop(evicted, None)
                     self._causal_row_caches.pop(evicted, None)
                     self.phase4_recipe_cache.pop(evicted, None)
                 self._causal_pools[cache_key] = (pool, edges)
@@ -749,7 +759,7 @@ class AnalogMatcher:
             causal_edges = edges
         if evidence is not None:
             evidence.set_causal(
-                pool, buckets, causal_edges, causal_key=causal_key,
+                pool, buckets, causal_edges,
                 row_cache=self._causal_row_caches.setdefault(causal_key, {}),
             )
 
