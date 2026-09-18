@@ -228,8 +228,8 @@ Delivered 2026-09-18 in `engine/v2/models/training/` (layer 6):
   `payoff_artifact.json` in `serialize_payoff_artifact` bytes, identical to
   the builder's own output on the same rows, and the fold's members are
   exactly the rows legacy `fit_payoff` keeps (`n` agrees). The two
-  recalibration maps stay receipt-only (`fit_owner` P5-4): no frozen
-  isotonic builder exists yet.
+  recalibration maps are fitted the same way since 2026-09-18 (see "P5-2
+  acceptance audit and recalibration artifact" below).
 - **Legacy is the spec.** Feature order comes from `registry.json`;
   constants are cross-checked against the legacy modules; `plan_folds`
   reproduces `walk_forward`/`fit_final` and `tier4.build_producer` row for
@@ -273,3 +273,53 @@ Not faithfully extractable, recorded rather than guessed:
 - **Label dates for panel recipes.** The panel stores no post-print date:
   the tool uses next business day (size) and `date + MAX_GAP_DAYS`
   (iv_crush) as upper bounds, not observed dates.
+
+## P5-2 acceptance audit and recalibration artifact
+
+Delivered 2026-09-18. Tests: `tests/test_v2_models_p5_2_acceptance.py`,
+`tests/test_v2_models_recalibration_artifact.py`.
+
+| P5-2 acceptance point | test |
+|---|---|
+| legacy fit/cache-write paths rigged: Tier-4 `fit_fold`, `serving_model` miss, `ModelArtifact.save`, the six training `fit`s, `fit_payoff`, `fit_runup_payoff`, `fit_recalibration` | `tests/test_v2_models_no_fit.py` (on/off pair each) |
+| legacy `Registry.save` (the `registry.json` write) and `recalibrate.build_pairs` (pairs-cache write) | added: `test_both_guards_really_rig_the_fit_and_write_paths` |
+| v2 fits rigged: `native_payoff.fit_payoff_line`/`fit_runup_payoff_surface` (v2 guard); training job/estimators (legacy switch); recalibration builder (both) | `test_v2_scoring_native_payoff.py::test_under_v2_guard_inline_path_raises_and_artifact_path_succeeds`, `test_v2_models_training_recipes.py::test_training_job_trips_the_scoring_no_fit_guard_before_touching_disk`, added `test_each_guard_alone_rigs_the_recalibration_builder` |
+| cold == warm | previously only same-process (`test_v2_models_inference.py`, `test_v2_models_no_fit.py::test_frozen_inference_joblib_cold_warm_and_missing_under_guard`); added `test_cold_process_and_warm_same_process_requests_agree` (fresh interpreter, cleared caches and warm caches give identical inference, payoff, recalibration and canonical score record; no file written) plus a changed-artifact negative control |
+| missing artifact -> MODEL_NOT_READY, never trains, per v2 scoring consumer, both guards on | added: `FrozenInference`, `FrozenStageExecutor`, `score_frozen`, and the model stage's payoff line / payoff surface / recalibration map |
+
+Audit result: no v2 scoring path fits or writes a cache once both guards are
+on. The v2 guard does not rig legacy paths, and the legacy guard does not rig
+`native_payoff`: only the pair covers everything. `score_frozen` now puts
+`MODEL_NOT_READY` on the record ahead of the inference detail code (for
+example `ARTIFACT_INVALID`). Before this change a record with a missing
+frozen model carried only the detail code.
+
+**Recalibration-map artifact.** `engine/v2/models/recalibration_artifact.py`
+(layer 3) and `engine/v2/models/training/recalibration.py` (layer 6) copy the
+payoff-artifact pattern. The builder re-derives legacy `fit_recalibration`
+statement for statement. It is proven bit-identical: thresholds, `n`,
+`base_rate` and `transform` match on pairs with mixed strategies and alphas,
+post-cutoff rows, NaNs and ties. The P5-3 `recalibration_map` recipes are
+now `fit_owner` training job and write `recalibration_artifact.json` per
+(cutoff, alpha). Scoring reads it only when a bundle declares it
+(`SourceBundle.recalibration_artifact` / `recalibration_declared`). It then
+checks the full `(strategy, alpha, cutoff)` key against the request's fill
+and the payoff recipe's `before`, and gives MODEL_NOT_READY on a missing or
+mismatched map. Undeclared bundles, which include every Phase 4 capture, are
+unchanged.
+
+Not faithful, recorded:
+
+- Below `min_pairs`, legacy returns `None` and ships the raw win. The
+  artifact freezes that as `fitted=False`, and the job status is
+  `passthrough`, not `skipped`. This is so a missing fold can refuse.
+- Fold membership uses the job's `isfinite` completeness mask. Legacy uses
+  `dropna`. They differ only on a ±inf `raw_win`/`outcome`.
+- A declared map on STR-RUNUP refuses with `UNSUPPORTED_RECALIBRATION`.
+  Legacy never recalibrates STR-RUNUP.
+- Before this work the native STR-THRU path never applied recalibration.
+  Legacy applies it whenever `recalibration_pairs.parquet` supports a map.
+  Undeclared native records keep that pre-existing difference.
+- `tools/phase5_training_job.py` still builds no calibration datasets and
+  passes no cutoffs or alpha. Real recalibration folds need a pairs-dataset
+  builder there.

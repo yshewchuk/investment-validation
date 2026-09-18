@@ -621,6 +621,7 @@ class Registry:
         )
 
     def save(self, path: Path | None = None) -> Path:
+        forbid_fitting("engine.models.registry.Registry.save")
         path = Path(path or self.path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_json() + "\n")

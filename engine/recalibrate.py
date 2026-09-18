@@ -175,6 +175,7 @@ def build_pairs(
     only — widening it means re-running this builder per alpha, not assuming
     the mid map transfers.
     """
+    forbid_fitting("engine.recalibrate.build_pairs")
     from engine.fills import FillModel
     from engine.replay import load_chain_index
     from engine.score import ScoreRequest, Scorer
