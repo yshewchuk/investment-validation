@@ -1,0 +1,162 @@
+from dataclasses import replace
+
+import pytest
+
+from engine.v2.contracts import ScoreRequest
+from engine.v2.scoring import application
+from engine.v2.scoring.source_inputs import (
+    SourceBundle,
+    build_native_score_inputs,
+)
+
+
+def _bundle() -> SourceBundle:
+    expiry = "2026-09-18"
+    return SourceBundle(
+        source_ref="synthetic:str-thru:v1",
+        context={
+            "ticker": "TEST",
+            "event_date": "2026-09-16",
+            "entry_date": "2026-09-16",
+            "exit_date": expiry,
+            "expiry": expiry,
+            "spot": 100.0,
+        },
+        raw_quotes={
+            ("C", 100.0, expiry): {"bid": 1.0, "ask": 3.0},
+            ("P", 100.0, expiry): {"bid": 1.0, "ask": 3.0},
+        },
+        feature_vector={"signal": 1.0},
+        feature_missing_mask={"signal": False},
+        model_identity={
+            "driver": {
+                "model_id": "synthetic-driver-v1",
+                "recipe_id": "linear-v1",
+            },
+        },
+        forecast_recipes={
+            "driver_prediction": {
+                "intercept": 5.0,
+                "coefficients": {"signal": 2.0},
+            },
+        },
+        model_artifact_refs={
+            "driver_prediction": "sha256:synthetic-driver",
+        },
+        residual_recipe={
+            "mode": "terminal",
+            "terminal_spots": (90.0, 110.0),
+            "weights": (1.0, 1.0),
+            "capital_at_risk": 4.0,
+            "population_ref": "synthetic:terminal-scenarios:v1",
+            "recipe_id": "terminal-payoff-v1",
+            "draw_count": 2,
+            "seed": 17,
+        },
+        analog_recipe={
+            "recipe_id": "nearest-events-v1",
+            "population_ref": "synthetic:analogs:v1",
+            "distance_metric": "scaled-euclidean",
+            "neighbors": 10,
+        },
+        gate_recipe={
+            "recipe_id": "linear-gate-v1",
+            "artifact_ref": "sha256:synthetic-gate",
+            "model": {
+                "intercept": 4.0,
+                "coefficients": {"entry_cost": -1.0},
+            },
+            "threshold": 0.0,
+        },
+        metadata={"snapshot_ref": "synthetic:snapshot:v1"},
+    )
+
+
+def _request(alpha: float) -> ScoreRequest:
+    return ScoreRequest(
+        event_id="TEST-2026-09-16",
+        calendar_revision="synthetic-calendar-v1",
+        strategy_version="STR-THRU",
+        deployment_id="synthetic-deployment-v1",
+        decision_clock_id="entry-close",
+        requested_decision_at="2026-09-16",
+        snapshot_id="synthetic-snapshot-v1",
+        mode="replay",
+        fill_model={"alpha": alpha},
+        model_artifact_refs=("sha256:synthetic-driver", "sha256:synthetic-gate"),
+        residual_state_ref="synthetic:terminal-scenarios:v1",
+        analog_state_ref="synthetic:analogs:v1",
+    )
+
+
+def test_builder_rejects_answers_and_keeps_geometry_and_pricing_unresolved():
+    inputs = build_native_score_inputs(_bundle())
+
+    assert inputs.geometry is None
+    assert inputs.pricing is None
+    assert "frozen_outputs" not in inputs.forecast
+    assert "entry_cost" not in inputs.context
+    assert "selected_contracts" not in inputs.context
+    assert "exp_pnl_sim" not in inputs.simulation
+    assert "gate_pass" not in inputs.gate
+    assert inputs.diagnostics == {}
+
+    with pytest.raises(ValueError, match="calculated answer fields"):
+        build_native_score_inputs(replace(
+            _bundle(),
+            context={**_bundle().context, "entry_cost": 4.0},
+        ))
+    with pytest.raises(ValueError, match="unsupported recipe fields"):
+        build_native_score_inputs(replace(
+            _bundle(),
+            analog_recipe={**_bundle().analog_recipe, "gate_pass": True},
+        ))
+    with pytest.raises(ValueError, match="unsupported fields"):
+        build_native_score_inputs(replace(
+            _bundle(),
+            raw_quotes={
+                ("C", 100.0, "2026-09-18"): {
+                    "bid": 1.0,
+                    "ask": 3.0,
+                    "selected_contracts": (),
+                },
+            },
+        ))
+
+
+def test_native_scoring_runs_from_source_inputs():
+    inputs = build_native_score_inputs(_bundle())
+    record = application.score_one(_request(0.5), inputs)
+
+    assert record.validation_status == "scored"
+    assert record.readiness == "ready"
+    assert record.reason_codes == ()
+    assert record.forecasts["driver_prediction"] == pytest.approx(7.0)
+    assert record.resolved_request["entry_cost"] == pytest.approx(4.0)
+    assert record.forecasts["exp_pnl_sim"] == pytest.approx(1.5)
+    assert record.gate_terms == {
+        "gate_score": pytest.approx(0.0),
+        "gate_threshold": pytest.approx(0.0),
+        "gate_pass": True,
+    }
+    assert {(leg["right"], leg["strike"]) for leg in record.selected_contracts} == {
+        ("C", 100.0),
+        ("P", 100.0),
+    }
+    assert record.resolved_request["native_source_ref"] == _bundle().source_ref
+
+
+def test_fill_reprices_and_propagates_to_simulation_and_gate():
+    inputs = build_native_score_inputs(_bundle())
+    worst = application.score_one(_request(0.0), inputs)
+    best = application.score_one(_request(1.0), inputs)
+
+    assert worst.resolved_request["entry_cost"] == pytest.approx(6.0)
+    assert best.resolved_request["entry_cost"] == pytest.approx(2.0)
+    assert worst.forecasts["exp_pnl_sim"] == pytest.approx(1.0)
+    assert best.forecasts["exp_pnl_sim"] == pytest.approx(2.0)
+    assert worst.gate_terms["gate_score"] == pytest.approx(-2.0)
+    assert best.gate_terms["gate_score"] == pytest.approx(2.0)
+    assert worst.gate_terms["gate_pass"] is False
+    assert best.gate_terms["gate_pass"] is True
+    assert worst.selected_contracts == best.selected_contracts
