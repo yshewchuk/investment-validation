@@ -16,8 +16,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from engine.v2.foundation import content_hash
 
-SCHEMA_VERSION = "phase4_checkpoint_bundle.v1.0"
+#: Shared with ``checks/phase4_checkpoints.validate_bundle`` -- one schema id,
+#: one contract. The manifest this sink finalizes is exactly what that
+#: validator expects: ``release_id`` and ``coverage`` are real, top-level,
+#: independently checkable fields (not opaque caller metadata), so a bundle
+#: is auditable after the fact without trusting the writer's say-so.
+SCHEMA_VERSION = "phase4_diagnostic_checkpoints.v1.0"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CHUNK = 1 << 20
@@ -144,6 +150,12 @@ class DiskCheckpointSink:
         self._cleanup_temps()
         self._resources: dict[str, dict[str, str]] = {}
         self._cases: dict[str, str] = {}
+        #: case_id -> {"strategy": ..., "branches": ...} as found in each
+        #: case document, refreshed by ``_scan_cases``. Bounded by case
+        #: count, not case content: only these two leaf fields are kept, so
+        #: ``finalize`` can derive honest coverage without retaining the
+        #: full corpus in memory.
+        self._coverage_index: dict[str, dict[str, Any]] = {}
         manifest = self.root / "manifest.json"
         if manifest.exists():
             if manifest.is_symlink() or not manifest.is_file():
@@ -217,9 +229,43 @@ class DiskCheckpointSink:
         self._scan_cases()
         return tuple(sorted(self._cases))
 
+    def _derive_coverage(self) -> dict[str, dict[str, list[str]]]:
+        """Recompute strategy/branch coverage from the cases actually on disk.
+
+        Coverage is never taken on the caller's word: a case only counts once
+        its own document is parsed and its ``strategy``/``branches`` fields
+        are read back, the same way resource hashes are re-verified against
+        the file rather than trusted from the caller.
+        """
+        strategies: dict[str, list[str]] = {}
+        branches: dict[str, list[str]] = {}
+        for case_id in sorted(self._cases):
+            info = self._coverage_index.get(case_id, {})
+            strategy = info.get("strategy")
+            if isinstance(strategy, str) and strategy.strip():
+                strategies.setdefault(strategy, []).append(case_id)
+            case_branches = info.get("branches")
+            if isinstance(case_branches, list):
+                for branch in case_branches:
+                    if isinstance(branch, str) and branch.strip():
+                        branches.setdefault(branch, []).append(case_id)
+        return {"strategies": strategies, "branches": branches}
+
     def finalize(self, metadata: Any) -> dict[str, Any]:
-        """Verify all references and atomically write a deterministic manifest."""
+        """Verify all references and atomically write a deterministic manifest.
+
+        ``metadata`` must carry a nonempty ``release_id`` -- the one field
+        that makes a bundle traceable to the release it came from. Anything
+        else the caller puts in ``metadata`` (a source snapshot, a status
+        label, ...) rides along verbatim under the ``metadata`` key of the
+        finalized manifest; nothing supplied here is dropped.
+        """
         _validate_json(metadata, "metadata")
+        if not isinstance(metadata, dict):
+            _fail("metadata", "expected an object")
+        release_id = metadata.get("release_id")
+        if not isinstance(release_id, str) or not release_id.strip():
+            _fail("metadata.release_id", "expected nonempty string")
         self._scan_cases()
         for resource_id, resource in sorted(self._resources.items()):
             relative, resolved = self._relative_resource(Path(resource["path"]))
@@ -227,42 +273,59 @@ class DiskCheckpointSink:
                 _fail("resource_id", "hash conflict for " + resource_id)
         body = {
             "schema_version": SCHEMA_VERSION,
+            "release_id": release_id,
             "metadata": metadata,
             "resources": [dict(self._resources[key]) for key in sorted(self._resources)],
+            "coverage": self._derive_coverage(),
             "cases": [
                 {"case_id": key, "sha256": self._cases[key]}
                 for key in sorted(self._cases)
             ],
         }
         manifest = dict(body)
-        manifest["manifest_hash"] = _sha256_bytes(_json_bytes(body))
+        # The same canonicalization ``checks/phase4_checkpoints.validate_bundle``
+        # uses to re-check this hash -- plain ``json.dumps(sort_keys=True)``
+        # is not it (see engine/v2/foundation/canonical.py's docstring): two
+        # independent re-serializations of the same dict only agree if both
+        # use the one real JCS implementation.
+        manifest["manifest_hash"] = content_hash(body)
         _atomic_write(self.root / "manifest.json", _json_bytes(manifest))
         return manifest
 
     def _scan_cases(self) -> None:
         discovered: dict[str, str] = {}
+        coverage_index: dict[str, dict[str, Any]] = {}
         for path in sorted(self.cases_dir.glob("*.json")):
             if path.is_symlink() or not path.is_file():
                 _fail("case", "unsafe case path " + path.name)
             case_id = _identifier(path.stem, "case_id")
-            _strict_load(path, "case " + case_id)
+            document = _strict_load(path, "case " + case_id)
             discovered[case_id] = _sha256_file(path)
+            if isinstance(document, dict):
+                coverage_index[case_id] = {
+                    "strategy": document.get("strategy"),
+                    "branches": document.get("branches"),
+                }
         for case_id, digest in self._cases.items():
             if case_id not in discovered:
                 _fail("case_id", "manifest case is missing: " + case_id)
             if discovered[case_id] != digest:
                 _fail("case_id", "hash conflict for " + case_id)
         self._cases = discovered
+        self._coverage_index = coverage_index
 
     def _load_manifest(self, path: Path) -> None:
         manifest = _strict_load(path, "manifest")
-        expected = {"schema_version", "metadata", "resources", "cases", "manifest_hash"}
+        expected = {
+            "schema_version", "release_id", "metadata", "resources", "coverage",
+            "cases", "manifest_hash",
+        }
         if not isinstance(manifest, dict) or set(manifest) != expected:
             _fail("manifest", "unexpected or missing fields")
         if manifest["schema_version"] != SCHEMA_VERSION:
             _fail("manifest.schema_version", "unsupported")
         body = {key: value for key, value in manifest.items() if key != "manifest_hash"}
-        if _sha256_bytes(_json_bytes(body)) != _digest(manifest["manifest_hash"], "manifest_hash"):
+        if content_hash(body) != _digest(manifest["manifest_hash"], "manifest_hash"):
             _fail("manifest_hash", "mismatch")
         if not isinstance(manifest["resources"], list):
             _fail("manifest.resources", "expected list")
