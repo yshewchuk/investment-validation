@@ -144,7 +144,10 @@ def test_dynamic_requires_simulation_before_ranking_and_preserves_flags():
     assert chosen.chooser_selection["strategy"] == "TWIN-P5"
     assert chosen.chooser_selection["ranking_key"] == "chooser_score"
     assert chosen.chooser_selection["menu_size"] == 1
-    assert chosen.reason_codes == ("ADVISORY",)
+    # WIDE_MARKET is a legitimate annotation on this fixture's bid=1/ask=3
+    # quotes (R4-9 follow-up): it no longer refuses, but it still appears in
+    # reason_codes alongside the pre-existing ADVISORY flag.
+    assert chosen.reason_codes == ("WIDE_MARKET", "ADVISORY")
 
 
 def test_score_one_executes_pricing_and_owns_refusal_lineage_and_receipts():
@@ -174,7 +177,10 @@ def test_dynamic_uses_one_ranking_rule_and_does_not_veto_flagged_candidate():
 
     assert chosen.chooser_selection["strategy"] == "TWIN-P"
     assert chosen.chooser_selection["ranking_key"] == "chooser_score"
-    assert chosen.reason_codes == ("ADVISORY",)
+    # WIDE_MARKET is a legitimate annotation on this fixture's bid=1/ask=3
+    # quotes (R4-9 follow-up): it no longer refuses, but it still appears in
+    # reason_codes alongside the pre-existing ADVISORY flag.
+    assert chosen.reason_codes == ("WIDE_MARKET", "ADVISORY")
 
 
 def test_batch_keys_inputs_by_event_and_strategy():

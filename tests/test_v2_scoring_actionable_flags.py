@@ -5,12 +5,30 @@ OUT_OF_DOMAIN:3022, WIDE_MARKET:1789, EXTRAPOLATED:1807. Each has a both-ways
 test: it fires when the legacy trigger condition holds and does not fire when
 it does not, from synthetic source-owned inputs (no corpus needed).
 """
+import math
+
+from engine.v2.contracts import ScoreRequest
+from engine.v2.scoring import application
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
     StageReceipt,
     assemble_native_values,
 )
+
+
+def _request() -> ScoreRequest:
+    return ScoreRequest(
+        event_id="evt-flags",
+        calendar_revision="cal-1",
+        strategy_version="STR-THRU",
+        deployment_id="dep-1",
+        decision_clock_id="entry-close",
+        requested_decision_at="2026-09-16",
+        snapshot_id="snap-1",
+        mode="replay",
+        fill_model={"alpha": 0.5},
+    )
 
 _RECEIPTS = tuple(
     StageReceipt(stage, "declared-input", "declared-output")
@@ -47,7 +65,7 @@ def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
         geometry=None,
         pricing=None,
         analogs={"recipe": None},
-        simulation={},
+        simulation={"mode": "not_applicable"},
         gate=gate if gate is not None else {"mode": "not_applicable"},
         chooser={},
         diagnostics={},
@@ -132,3 +150,44 @@ def test_extrapolated_fires_far_from_atm():
 def test_extrapolated_does_not_fire_at_the_money():
     values = assemble_native_values(_inputs())
     assert "EXTRAPOLATED" not in values["flags"]
+
+
+# -- R4-9 follow-up: annotation-only flags must not refuse the row ----------
+# Legacy ScoreResult.scored (engine/score.py:847) depends only on whether the
+# numbers are present, never on flags; WIDE_MARKET/EXTRAPOLATED/STALE_QUOTE/
+# PROJECTED_CALENDAR coexist with a scored row there. OUT_OF_DOMAIN is a
+# real refusal in both legacy (declines to gate) and the Phase 4 §7.1
+# refusal codes (tools/capture_tier0_corpus.py:102), and must still refuse.
+
+_WIDE_QUOTES = {
+    ("C", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 5.0},
+    ("P", 100.0, "2026-09-18"): {"bid": 1.9, "ask": 2.1},
+}
+_GATE_MODEL = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0}
+
+
+def test_annotation_only_flag_still_scores():
+    record = application.score_one(_request(), _inputs(quotes=_WIDE_QUOTES))
+    assert record.validation_status == "scored"
+    assert record.readiness == "ready"
+    assert "WIDE_MARKET" in record.reason_codes
+
+
+def test_annotation_flag_alongside_a_refusal_flag_still_refuses():
+    record = application.score_one(_request(), _inputs(
+        quotes=_WIDE_QUOTES, gate=_GATE_MODEL,
+        model_inputs={"mcap_log": math.log(1e8)},
+    ))
+    assert record.validation_status == "refused"
+    assert record.readiness == "refused"
+    assert "WIDE_MARKET" in record.reason_codes
+    assert "OUT_OF_DOMAIN" in record.reason_codes
+
+
+def test_out_of_domain_alone_refuses():
+    record = application.score_one(_request(), _inputs(
+        gate=_GATE_MODEL, model_inputs={"mcap_log": math.log(1e8)},
+    ))
+    assert record.validation_status == "refused"
+    assert record.readiness == "refused"
+    assert record.reason_codes == ("OUT_OF_DOMAIN",)

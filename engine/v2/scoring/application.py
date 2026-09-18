@@ -19,6 +19,17 @@ from .stages import NativeScoreInputs, StageObserver, assemble_native_values
 
 __all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
+# R4-9 follow-up: flags that annotate a row without refusing it, matching
+# legacy engine/score.py (ScoreResult.scored, score.py:847, depends on
+# numbers being present, never on flags -- these four coexist with a scored
+# row there too). OUT_OF_DOMAIN and every other flag stay refusing, per the
+# Phase 4 acceptance §7.1 refusal codes (tools/capture_tier0_corpus.py:102
+# REFUSAL_CODES). Do not add to this set without the same legacy citation;
+# LAYER_DISAGREE in particular is an open user decision, not an omission.
+_ANNOTATION_ONLY_FLAGS = frozenset({
+    "WIDE_MARKET", "EXTRAPOLATED", "STALE_QUOTE", "PROJECTED_CALENDAR",
+})
+
 _FEATURE_REGISTRY = default_feature_registry()
 _FROZEN_ROLE_OUTPUTS = {
     "driver": ("driver_prediction",),
@@ -118,6 +129,7 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
                     legacy_fields: Mapping[str, Any]) -> dict[str, Any]:
     features, null_masks = _feature_fields(values)
     reasons = tuple(values.get("flags") or ())
+    refusing = any(reason not in _ANNOTATION_ONLY_FLAGS for reason in reasons)
     diagnostics = financial_diagnostics(values)
     forecasts = _value_fields(values, ("driver_prediction", "forecast_abs_move",
                                         "runup_move_prediction", "exp_pnl_sim",
@@ -162,8 +174,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         chooser_selection=_chooser_selection(values),
         financial_diagnostics=diagnostics,
         requested_payoff_views=(),
-        validation_status="refused" if reasons else "scored",
-        readiness="refused" if reasons else "ready",
+        validation_status="refused" if refusing else "scored",
+        readiness="refused" if refusing else "ready",
         reason_codes=reasons,
         warnings=tuple(values.get("detail", "").split("; ")) if values.get("detail") else (),
         evidence_refs=tuple(request.dependency_refs),
