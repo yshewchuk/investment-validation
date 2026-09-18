@@ -191,6 +191,37 @@ def test_score_frozen_preserves_role_outputs_over_local_recipes():
     )
 
 
+def test_str_thru_frozen_driver_role_publishes_driver_prediction():
+    release = SimpleNamespace(
+        release_id="release-1",
+        bindings=(SimpleNamespace(
+            binding_id="driver-binding",
+            role="driver",
+            output_names=("driver_prediction",),
+        ),),
+    )
+
+    fields = _frozen_fields()
+    fields["_native_inputs"] = replace(
+        fields["_native_inputs"],
+        forecast={"required_roles": ("driver",)},
+        simulation={"mode": "not_applicable"},
+    )
+    record = application.score_frozen(
+        _request(),
+        _Frozen(),
+        release,
+        (SimpleNamespace(binding_id="driver-binding"),),
+        fields,
+    )
+
+    assert record.forecasts["driver_prediction"] == pytest.approx(0.77)
+    assert record.forecasts["forecast_abs_move"] is None
+    assert "MISSING_FORECAST_OUTPUT:driver" not in record.reason_codes
+    assert "MISSING_FORECAST_OUTPUT:size" not in record.reason_codes
+    assert "MISSING_FORECAST_OUTPUT:iv_crush" not in record.reason_codes
+
+
 def test_score_frozen_artifact_mismatch_refuses_without_local_fallback():
     class ArtifactMismatch(_Frozen):
         def infer(self, release, inference_request):

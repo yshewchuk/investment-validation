@@ -570,11 +570,13 @@ class Phase4TraceCollector:
             gate_threshold = None
             for binding in captured:
                 role = str(binding.get("role", "")).split(":", 1)[0]
-                if role in {"abs_move", "size", "implied_t1", "runup_move",
+                role = {
+                    "abs_move": "driver",
+                    "forecast_sizing": "size",
+                }.get(role, role)
+                if role in {"driver", "size", "implied_t1", "runup_move",
                              "iv_crush"}:
-                    forecast_roles.append(
-                        "size" if role == "abs_move" else role
-                    )
+                    forecast_roles.append(role)
                 if role == "gate" and binding.get("threshold") is not None:
                     gate_threshold = binding["threshold"]
             if forecast_roles:

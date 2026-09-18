@@ -214,7 +214,7 @@ def _normalized_binding(
     return {
         "model_id": _nonempty(raw.get("model_id"), f"{label}.model_id"),
         "role": {
-            "abs_move": "size",
+            "abs_move": "driver",
             "forecast_sizing": "size",
         }.get(_nonempty(raw.get("role"), f"{label}.role"),
               _nonempty(raw.get("role"), f"{label}.role")),

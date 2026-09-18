@@ -180,6 +180,32 @@ def test_source_bundle_is_bounded_and_rejects_scoring_answers() -> None:
         collector.capture_source_bundle(features={"entry_cost": 4.0})
 
 
+@pytest.mark.parametrize(
+    ("legacy_role", "output_name", "canonical_role"),
+    (
+        ("abs_move", "driver_prediction", "driver"),
+        ("forecast_sizing", "forecast_abs_move", "size"),
+    ),
+)
+def test_source_bundle_declares_canonical_forecast_roles(
+    legacy_role: str,
+    output_name: str,
+    canonical_role: str,
+) -> None:
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_source_bundle(model_bindings=({
+        "role": legacy_role,
+        "model_id": "model-v1",
+        "output_names": (output_name,),
+    },))
+
+    source = _checkpoint_value(collector, "source_inputs")
+
+    assert source["native_recipes"]["forecast"]["required_roles"] == [
+        canonical_role,
+    ]
+
+
 def test_simulation_checkpoint_keeps_causal_residual_population() -> None:
     collector = Phase4TraceCollector(content_hasher=content_hash)
     collector.capture_simulation(
