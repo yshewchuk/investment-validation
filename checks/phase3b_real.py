@@ -866,10 +866,25 @@ def run(artifact_root):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-root", type=Path, default=Path("/tmp/phase3b-real"))
+    parser.add_argument("--report", action="store_true",
+                        help="also render the Markdown acceptance report "
+                             "(checks/phase3b_report.py) from this run's own "
+                             "receipt and evidence")
     args = parser.parse_args(argv)
     run_root, evidence = run(args.artifact_root)
-    print(json.dumps({"run_root": str(run_root), "evidence": str(run_root / "evidence.json"),
-                      "receipt": str(run_root / "run_receipt.json")}, indent=2))
+    output = {"run_root": str(run_root), "evidence": str(run_root / "evidence.json"),
+              "receipt": str(run_root / "run_receipt.json")}
+    if args.report:
+        from checks import phase3b_report
+
+        report_exit = phase3b_report.main([
+            "--receipt", str(run_root / "run_receipt.json"),
+            "--evidence", str(run_root / "evidence.json"),
+            "--artifact-root", str(run_root),
+        ])
+        output["report_exit_code"] = report_exit
+        output["report"] = str(phase3b_report.OUT_DIR / "report.md")
+    print(json.dumps(output, indent=2))
 
 
 if __name__ == "__main__":
