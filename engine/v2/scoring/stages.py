@@ -767,13 +767,8 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
     output: dict[str, Any] = {}
     recipe = block.get("recipe")
     if block.get("frozen_score") is not None:
-        score = _finite(block.get("frozen_score"))
-        threshold = _finite(block.get("threshold"))
-        if score is None or threshold is None or not block.get("artifact_hashes"):
-            _add_flag(flags, "INVALID_FROZEN_GATE")
-            return output
-        output.update({"gate_score": score, "gate_threshold": threshold,
-                       "gate_pass": score >= threshold})
+        _add_flag(flags, "UNSUPPORTED_FROZEN_GATE")
+        return output
     elif block.get("model") is not None:
         model = block["model"]
         if not isinstance(model, Mapping):
