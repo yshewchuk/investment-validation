@@ -77,7 +77,9 @@ from engine.v2.foundation import to_document  # noqa: E402
 from engine.v2.models import FrozenInference, InferenceRequest, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.scoring import application as v2_application  # noqa: E402
-from engine.v2.scoring.stages import NativeScoreInputs, receipt  # noqa: E402
+from engine.v2.scoring.stages import (  # noqa: E402
+    NativeScoreInputs, StageObservation, receipt,
+)
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
 from tools.phase4_frozen_resources import FrozenResourcePackage, package_frozen_resources  # noqa: E402
@@ -415,6 +417,18 @@ def package_strict_trace(
             {"_native_inputs": inputs},
             observer=observations.append,
         )
+    observations = [
+        StageObservation(
+            input_document=to_document(item.input_document),
+            output_document=to_document(item.output_document),
+            receipt=receipt(
+                item.receipt.stage,
+                to_document(item.input_document),
+                to_document(item.output_document),
+            ),
+        )
+        for item in observations
+    ]
     native_document = {
         "context": dict(inputs.context),
         "features": dict(inputs.features),
