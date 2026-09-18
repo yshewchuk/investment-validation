@@ -100,6 +100,9 @@ _SIMULATION_OUTPUTS = frozenset({
     "exp_pnl_sim", "win_sim", "sim_p10", "sim_p90", "pool_n",
 })
 _GATE_OUTPUTS = frozenset({"gate_score", "gate_threshold", "gate_pass"})
+_ANALOG_OUTPUTS = frozenset({
+    "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
+})
 _FINANCIAL_OUTPUTS = frozenset({
     "entry_cost_pct", "model_vs_market", "fair_premium_pct",
     "premium_vs_fair", "cost_over_width", "terminal_payoff",
@@ -109,7 +112,8 @@ _FINANCIAL_OUTPUTS = frozenset({
     "entry_date", "exit_date", "expiry",
 })
 _OWNED_OUTPUTS = (
-    _PRICING_OUTPUTS | _FORECAST_OUTPUTS | _SIMULATION_OUTPUTS | _GATE_OUTPUTS
+    _PRICING_OUTPUTS | _FORECAST_OUTPUTS | _SIMULATION_OUTPUTS
+    | _GATE_OUTPUTS | _ANALOG_OUTPUTS
 )
 _DIAGNOSTIC_PROTECTED = _OWNED_OUTPUTS | _FINANCIAL_OUTPUTS
 _ROLE_OUTPUTS = {
@@ -713,6 +717,50 @@ def _execute_simulation(
     return output
 
 
+def _execute_analogs(
+    inputs: NativeScoreInputs,
+    values: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    """Calculate analog summaries from a hash-bound source population."""
+    block = inputs.analogs
+    recipe = block.get("recipe")
+    source_rows = block.get("source_rows")
+    query_features = block.get("query_features")
+    if recipe is None and source_rows is None and query_features is None:
+        if any(block.get(field) is not None for field in _ANALOG_OUTPUTS):
+            _add_flag(flags, "UNOWNED_ANALOG_OUTPUT")
+        return {}
+    if source_rows is None and query_features is None:
+        return {}
+    if not isinstance(recipe, Mapping) or not isinstance(source_rows, (list, tuple)):
+        _add_flag(flags, "MISSING_ANALOG_INPUT")
+        return {}
+    if not isinstance(query_features, Mapping):
+        _add_flag(flags, "MISSING_ANALOG_INPUT")
+        return {}
+    try:
+        from engine.v2.scoring.native_analog import evaluate_analogs
+
+        result = evaluate_analogs(
+            source_rows=source_rows,
+            query_features=query_features,
+            recipe=recipe,
+        )
+    except (TypeError, ValueError) as exc:
+        _add_flag(flags, str(exc))
+        return {}
+    output = {
+        "exp_pnl_analog": result.exp_pnl_analog,
+        "win_analog": result.win_analog,
+        "ci_low": result.ci_low,
+        "ci_high": result.ci_high,
+        "n_analogs": result.n_analogs,
+    }
+    values.update(output)
+    return output
+
+
 def _execute_gate(inputs: NativeScoreInputs, name: str,
                   values: dict[str, Any], flags: list[str]) -> dict[str, Any]:
     block = inputs.gate
@@ -779,9 +827,7 @@ def _append_late_stages(
                 stage, {"prior": executed[-1].output_hash}, block,
             ))
     else:
-        _merge_stage(values, inputs.analogs)
-        analog_output = {key: value for key, value in inputs.analogs.items()
-                         if key not in _OWNED_OUTPUTS and key != "flags"}
+        analog_output = _execute_analogs(inputs, values, flags)
         executed.append(receipt(
             "analogs", {"prior": executed[-1].output_hash}, analog_output,
         ))
