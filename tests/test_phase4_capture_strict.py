@@ -168,13 +168,11 @@ def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
     ] == "serialization"
 
 
-def test_strict_cli_refuses_before_building_scorer(monkeypatch, capsys):
+def test_strict_cli_requires_one_supported_strategy_before_building_scorer(monkeypatch):
     monkeypatch.setattr(
         "tools.capture_tier0_corpus.score_mod.Scorer",
-        lambda: pytest.fail("strict refusal must precede scorer construction"),
+        lambda: pytest.fail("argument refusal must precede scorer construction"),
     )
 
     with pytest.raises(SystemExit):
-        main(["--strict-phase4-trace", "--strategies", "STR-THRU"])
-
-    assert "source_inputs does not yet emit" in capsys.readouterr().err
+        main(["--strict-phase4-trace", "--strategies", "STR-THRU", "STR-RUNUP"])

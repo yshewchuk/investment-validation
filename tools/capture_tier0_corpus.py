@@ -1149,8 +1149,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     ap.add_argument(
         "--strict-phase4-trace", action="store_true",
-        help="reserved strict probe; currently refuses because the legacy "
-             "collector does not emit executable source recipes",
+        help="capture one strict native trace through frozen resources",
     )
     args = ap.parse_args(list(argv) if argv is not None else None)
     try:
@@ -1166,13 +1165,6 @@ def main(argv: Iterable[str] | None = None) -> int:
             "--strict-phase4-trace requires --strategies STR-THRU "
             "or --strategies STR-RUNUP"
         )
-    if args.strict_phase4_trace:
-        ap.error(
-            "--strict-phase4-trace is unfinished: Phase4TraceCollector "
-            "source_inputs does not yet emit answer-free executable forecast, "
-            "analog, simulation, and gate recipes"
-        )
-
     as_of = (pd.Timestamp(args.as_of).normalize() if args.as_of
              else pd.Timestamp.today().normalize())
     started = time.time()
