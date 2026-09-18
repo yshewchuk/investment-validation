@@ -7,12 +7,19 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
 from engine.v2.foundation import content_hash
 
 SCHEMA_VERSION = "phase4_diagnostic_checkpoints.v1.0"
+#: Mirrors ``tools.phase4_checkpoint_sink._IDENTIFIER`` exactly -- a case_id
+#: names a file under ``<release_root>/cases/``, so it must be blocked from
+#: escaping that directory the same way the writer blocks it from escaping
+#: the bundle root: no "/", no leading ".", nothing but a bounded identifier
+#: alphabet.
+_SAFE_CASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 REQUIRED_BRANCHES = frozenset((
     "pre_expiry", "multi_expiry", "debit_credit", "missing_inputs",
     "overrides", "ties", "fallback",
@@ -139,6 +146,50 @@ def _resource(root: Path, row: Any, index: int, ids: set[str]) -> None:
     ids.add(resource_id)
 
 
+def _safe_case_id(value: Any, label: str) -> str:
+    value = _string(value, label)
+    if value in {".", ".."} or not _SAFE_CASE_ID.fullmatch(value):
+        _fail(label, "expected a safe identifier")
+    return value
+
+
+def _case_from_pointer(
+    release_root: Path, pointer: Any, index: int, resource_ids: set[str],
+) -> tuple[str, str, set[str]]:
+    """Resolve a ``{case_id, sha256}`` pointer to its on-disk case document.
+
+    Mirrors ``_resource``: the file is looked up under a fixed directory,
+    the path is proven not to escape it, the raw bytes are hash-verified
+    against the pointer's declared ``sha256`` BEFORE the bytes are parsed as
+    JSON, and only the loaded document is handed to the deep case-schema
+    checks in ``_case``.
+    """
+    label = "cases[" + str(index) + "]"
+    if not isinstance(pointer, Mapping) or set(pointer) != {"case_id", "sha256"}:
+        _fail(label, "expected case_id and sha256")
+    pointer_id = _safe_case_id(pointer["case_id"], label + ".case_id")
+    cases_dir = (release_root / "cases").resolve()
+    candidate = (cases_dir / (pointer_id + ".json")).resolve()
+    try:
+        candidate.relative_to(cases_dir)
+    except ValueError as exc:
+        raise CheckpointError(label + ".case_id: escapes release root") from exc
+    if not candidate.is_file():
+        _fail(label + ".case_id", "missing case file")
+    raw = candidate.read_bytes()
+    actual = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if actual != _hash(pointer["sha256"], label + ".sha256"):
+        _fail(label + ".sha256", "mismatch")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CheckpointError(label + ".case_id: malformed JSON") from exc
+    case_id, strategy, branches = _case(document, index, resource_ids)
+    if case_id != pointer_id:
+        _fail(label + ".case_id", "pointer/document mismatch")
+    return case_id, strategy, branches
+
+
 def _case(row: Any, index: int, resource_ids: set[str]) -> tuple[str, str, set[str]]:
     label = "cases[" + str(index) + "]"
     expected = {
@@ -197,8 +248,8 @@ def _case(row: Any, index: int, resource_ids: set[str]) -> tuple[str, str, set[s
 def validate_bundle(bundle: Any, release_root: Path) -> dict[str, Any]:
     """Validate release resources, cases, coverage, and content hashes."""
     expected = {
-        "schema_version", "release_id", "resources", "coverage", "cases",
-        "manifest_hash",
+        "schema_version", "release_id", "metadata", "resources", "coverage",
+        "cases", "manifest_hash",
     }
     if not isinstance(bundle, Mapping) or set(bundle) != expected:
         _fail("bundle", "unexpected or missing fields")
@@ -217,7 +268,7 @@ def validate_bundle(bundle: Any, release_root: Path) -> dict[str, Any]:
     strategy_cases: dict[str, set[str]] = {}
     branch_cases: dict[str, set[str]] = {}
     for index, row in enumerate(bundle["cases"]):
-        case_id, strategy, branches = _case(row, index, resource_ids)
+        case_id, strategy, branches = _case_from_pointer(release_root, row, index, resource_ids)
         if case_id in case_ids:
             _fail("cases[" + str(index) + "].case_id", "duplicate")
         case_ids.add(case_id)
