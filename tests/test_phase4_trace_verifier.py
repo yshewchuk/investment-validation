@@ -596,6 +596,15 @@ def test_gate_threshold_only_difference_is_caught():
     assert comparison["verdicts"]["finding_fields"] == ["gate_threshold"]
 
 
+def test_gate_pass_only_difference_is_caught():
+    native = _r43_native(gate_terms={
+        "gate_score": 0.7, "gate_threshold": 0.6, "gate_pass": False,
+    })
+    comparison = phase4_real._compare_numeric_outputs(_r43_record(), native)
+    assert comparison["verdicts"]["agree"] is False
+    assert comparison["verdicts"]["finding_fields"] == ["gate_pass"]
+
+
 def test_ci_low_only_difference_is_caught():
     native = _r43_native(resolved_request={
         "ci_low": -0.0999, "ci_high": 0.0456, "n_analogs": 42,
