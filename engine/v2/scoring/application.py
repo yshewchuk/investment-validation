@@ -15,7 +15,7 @@ from engine.v2.registry import DYNAMIC_MENU, default_registry
 from .financial import financial_diagnostics
 from .frozen_executor import FrozenStageExecutor
 from .identity import dependency_hash, request_hash, with_score_id
-from .stages import NativeScoreInputs, StageObserver, assemble_native_values
+from .stages import NativeScoreInputs, StageObserver, assemble_native_values, flags_refuse
 
 __all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
@@ -162,8 +162,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         chooser_selection=_chooser_selection(values),
         financial_diagnostics=diagnostics,
         requested_payoff_views=(),
-        validation_status="refused" if reasons else "scored",
-        readiness="refused" if reasons else "ready",
+        validation_status="refused" if flags_refuse(reasons) else "scored",
+        readiness="refused" if flags_refuse(reasons) else "ready",
         reason_codes=reasons,
         warnings=tuple(values.get("detail", "").split("; ")) if values.get("detail") else (),
         evidence_refs=tuple(request.dependency_refs),
