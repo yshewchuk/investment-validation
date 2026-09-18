@@ -363,7 +363,7 @@ class Phase4TraceCollector:
         self._checkpoint_groups: dict[str, Any] = {}
         self._source_bundle: dict[str, Any] = {
             "context": {}, "quote_domain": [], "features": {},
-            "model_bindings": [],
+            "model_bindings": [], "native_recipes": {},
         }
         self.retain_full_trace = bool(retain_full_trace)
         self._content_hasher = content_hasher
@@ -449,6 +449,14 @@ class Phase4TraceCollector:
                 self._document(evidence.get("residual_rows", []))
             ),
         }
+        population_rows = evidence.get("residual_population", [])
+        self._source_bundle["native_recipes"]["simulation"] = {
+            "mode": "planned_exit",
+            "event_date": evidence.get("event_date"),
+            "dte_exit": horizon.get("dte_exit"),
+            "pre_iv30": evidence.get("pre_iv30"),
+            "residuals": self._document(population_rows),
+        }
         self._checkpoint("simulation", {
             "horizon": self._document(horizon),
             "capital_denominator": float(capital_denominator),
@@ -459,6 +467,79 @@ class Phase4TraceCollector:
             "draw_count": int(evidence["draw_count"]),
             "seed": int(evidence["seed"]),
         })
+
+    def capture_analog_inputs(self, evidence: Mapping[str, Any]) -> None:
+        """Capture the causal analog population and executable bucket recipe."""
+        causal = evidence.get("causal")
+        query = evidence.get("bucket_query")
+        if not isinstance(causal, Mapping) or not isinstance(query, Mapping):
+            return
+        raw_rows = causal.get("rows")
+        if not isinstance(raw_rows, list):
+            return
+        legacy_bucket_dimensions = (
+            "mcap_bucket", "moneyness_band", "dte_band", "implied_tercile",
+        )
+        legacy_widening_order = (
+            "moneyness_band", "dte_band", "implied_tercile",
+        )
+
+        source_rows = []
+        for row in raw_rows:
+            if not isinstance(row, Mapping):
+                continue
+            values = row.get("values")
+            if not isinstance(values, Mapping) or "row_id" not in row:
+                continue
+            source_rows.append({
+                "row_id": str(row["row_id"]),
+                **{
+                    name: values.get(name)
+                    for name in legacy_bucket_dimensions
+                },
+                "realized_return": values.get("ret"),
+            })
+        if not source_rows:
+            return
+        alpha = float(evidence.get("alpha", 0.5))
+        strategy = str(evidence.get("strategy", ""))
+        snapshot = str(evidence.get("snapshot", self.snapshot))
+        request_key = str(evidence.get("request_key", ""))
+        buckets = {
+            name: query.get(name) for name in legacy_bucket_dimensions
+        }
+        normalized_rows = tuple(sorted(
+            source_rows, key=lambda row: row["row_id"],
+        ))
+        population_hash = self._hash({
+            "schema_version": "legacy_bucket_analog_population.v1.0",
+            "bucket_dimensions": legacy_bucket_dimensions,
+            "rows": normalized_rows,
+        })
+        seed_payload = "|".join(
+            [
+                snapshot, strategy, f"{alpha:.4f}", request_key,
+            ]
+            + [f"{key}={buckets.get(key)}" for key in sorted(buckets)]
+        )
+        bootstrap_seed = int.from_bytes(
+            hashlib.sha256(seed_payload.encode()).digest()[:8], "big",
+        )
+        self._source_bundle["native_recipes"]["analogs"] = {
+            "recipe": {
+                "schema_version": "legacy_bucket_analog_recipe.v1.0",
+                "bucket_dimensions": list(legacy_bucket_dimensions),
+                "widening_order": list(legacy_widening_order),
+                "min_analogs": 30,
+                "alpha": alpha,
+                "bootstrap_draws": 2000,
+                "bootstrap_seed": bootstrap_seed,
+                "ci_quantiles": [0.05, 0.95],
+                "population_hash": population_hash,
+            },
+            "source_rows": self._document(normalized_rows),
+            "query_features": self._document(buckets),
+        }
 
     def capture_gate_inputs(self, value: Mapping[str, Any]) -> None:
         self._checkpoint("gate_inputs", value)
@@ -1359,6 +1440,10 @@ class Scorer:
             },
         )
         self._score_analogs(request, result, features)
+        if trace is not None:
+            evidence = getattr(result, "_phase4_analog_evidence", None)
+            if evidence is not None:
+                trace.capture_analog_inputs(evidence)
         self._trace_phase4(
             trace,
             "analogs",
@@ -1669,6 +1754,16 @@ class Scorer:
         result.rel_spread = _mean_relative_spread(priced)
         result.structure_width = _structure_width(structure, priced)
         result.structure_peak = _structure_peak(structure, result.structure_width)
+        if collector is not None:
+            collector.capture_source_bundle(
+                context={
+                    "entry_date": result.entry_date,
+                    "exit_date": result.exit_date,
+                    "expiry": result.expiry,
+                    "spot": result.spot,
+                    "as_of": result.as_of,
+                },
+            )
         if priced.any_wide_market:
             result.flag("WIDE_MARKET")
         # EXP-117: a straddle costing more than BAD_QUOTE_COST_PCT of spot is
@@ -2747,6 +2842,8 @@ class Scorer:
         if evidence is not None:
             selection = evidence.get("residual_draw", {}).get("selected_indices", [])
             evidence["residual_rows"] = pool.evidence_rows(selection)
+            evidence["event_date"] = result.event_date
+            evidence["pre_iv30"] = self._pre_print_iv(request, result, features)
             cutoff_index = evidence.get("residual_draw", {}).get("cutoff_index")
             if isinstance(cutoff_index, (int, np.integer)) and cutoff_index >= 0:
                 evidence["residual_population"] = pool.evidence_rows(
