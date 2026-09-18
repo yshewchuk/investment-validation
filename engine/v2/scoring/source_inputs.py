@@ -73,12 +73,18 @@ _PAYOFF_RECIPE_FIELDS = frozenset({
     "before", "min_trades", "max_residuals", "residual_seed", "draw_count",
     "seed",
 })
-# The frozen-artifact path (P5-4): only simulation knobs remain, since the
-# line/surface itself is already fitted -- `before`/`min_trades`/
-# `max_residuals`/`residual_seed` describe HOW to fit, and there is nothing
-# left here to fit. Mutually exclusive with payoff_recipe/payoff_source_rows
-# (the source-rows compatibility path); see `_model_block`.
-_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({"draw_count", "seed"})
+# The frozen-artifact path (P5-4). `min_trades`/`max_residuals`/
+# `residual_seed` describe HOW to fit and drop out, since the line/surface is
+# already fitted -- but `before` stays: it is the request's own causal
+# cutoff (what the inline fit WOULD have used), and the model stage checks
+# it against the artifact's own `.cutoff` (plus strategy and the request's
+# resolved fill alpha) before trusting it -- a wrong-fold artifact is
+# MODEL_NOT_READY, never a silently-wrong number (coordinator decision,
+# 2026-09-18: the stage verifies the full causal key itself rather than
+# trusting release selection alone). Mutually exclusive with
+# payoff_recipe/payoff_source_rows (the source-rows compatibility path); see
+# `_model_block`.
+_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({"before", "draw_count", "seed"})
 _MODEL_RESIDUAL_RECIPE_FIELDS = frozenset({"deciles", "min_pool"})
 _SIZE_STRATEGIES = frozenset({
     "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7",

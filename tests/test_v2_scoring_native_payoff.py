@@ -753,7 +753,7 @@ def test_artifact_path_matches_inline_path_arbitrary_sample():
         rows, strategy="STR-THRU", driver="abs_move", alpha=0.5, before=cutoff,
     )
     artifact_bundle = _bundle(
-        payoff_artifact_recipe={"seed": 7, "draw_count": 500},
+        payoff_artifact_recipe={"before": cutoff, "seed": 7, "draw_count": 500},
         payoff_artifact=artifact,
         model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
     )
@@ -808,7 +808,9 @@ def test_artifact_path_causal_cutoff_excludes_a_post_cutoff_row():
     assert with_future.window_end == "2026-09-01"
 
     bundle = _bundle(
-        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact_recipe={
+            "before": "2026-09-16", "seed": 42, "draw_count": 16,
+        },
         payoff_artifact=with_future,
         model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
     )
@@ -926,3 +928,120 @@ def test_under_v2_guard_inline_path_raises_and_artifact_path_succeeds():
         # the guard -- it reaches fit_payoff_line via _model_fit_and_pool.
         with pytest.raises(RuntimeFitForbidden):
             application.score_one(_request(), build_native_score_inputs(inline_bundle))
+
+
+# ---------------------------------------------------------------------------
+# P5-4 coordinator condition (2026-09-18): choosing the right artifact is
+# still the release's job, but the stage itself must check the FULL causal
+# key (strategy, alpha at 4dp, cutoff) against what the inline fit would
+# have used for THIS request -- not just the artifact's kind and strategy.
+# A wrong-fold artifact must never produce a plausible-looking number.
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_wrong_alpha_gives_model_not_ready():
+    """An artifact fitted at a different fill alpha than the request's own
+    resolved alpha must be refused, not silently scored -- the alpha is part
+    of the identity the inline fit would have keyed on."""
+    wrong_alpha = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.7,
+        min_trades=2,
+    )
+    bundle = _bundle(
+        # _request() resolves fill alpha 0.5; the artifact was fit at 0.7.
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=wrong_alpha,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_artifact_wrong_cutoff_gives_model_not_ready():
+    """An artifact fitted with a different causal cutoff than this request's
+    own recipe declares must be refused -- the cutoff is part of the fold
+    identity, not a detail the stage can ignore once kind/strategy match."""
+    wrong_cutoff = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        before="2026-09-01", min_trades=2,
+    )
+    bundle = _bundle(
+        # The recipe's own cutoff (what the inline fit would have used) is
+        # a DIFFERENT date than the one the artifact was actually fit under.
+        payoff_artifact_recipe={
+            "before": "2026-09-10", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=wrong_cutoff,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_artifact_leaked_future_fold_cutoff_gives_model_not_ready():
+    """The specific failure mode the coordinator called out: a release binds
+    an artifact whose cutoff is LATER than the request's own causal cutoff --
+    a future fold leaking backward. Kind and strategy match, and the wrong
+    number would otherwise look entirely plausible. It must still be
+    MODEL_NOT_READY, not a silently-wrong score."""
+    future_fold = build_payoff_line_artifact(
+        _GOOD_PAYOFF_ROWS, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+        before="2026-09-20", min_trades=2,
+    )
+    bundle = _bundle(
+        # This request's own causal cutoff is 2026-09-16 -- strictly earlier
+        # than the artifact's 2026-09-20 fit cutoff.
+        payoff_artifact_recipe={
+            "before": "2026-09-16", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=future_fold,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    record = application.score_one(_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_artifact_wrong_alpha_gives_model_not_ready():
+    """The two-driver surface path applies the same full-key check as the
+    single-driver line path -- a wrong alpha must not slip through."""
+    wrong_alpha = build_payoff_surface_artifact(
+        _GOOD_RUNUP_PAYOFF_ROWS, alpha=0.9, min_trades=2,
+    )
+    bundle = _runup_bundle(
+        payoff_recipe={}, payoff_source_rows=(),
+        payoff_artifact_recipe={"seed": 42, "draw_count": 16},
+        payoff_artifact=wrong_alpha,
+    )
+    record = application.score_one(_runup_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_artifact_leaked_future_fold_cutoff_gives_model_not_ready():
+    """Same future-fold leak, on the two-driver surface path."""
+    future_fold = build_payoff_surface_artifact(
+        _GOOD_RUNUP_PAYOFF_ROWS, alpha=0.5, before="2026-09-20", min_trades=2,
+    )
+    bundle = _runup_bundle(
+        payoff_recipe={}, payoff_source_rows=(),
+        payoff_artifact_recipe={
+            "before": "2026-09-16", "seed": 42, "draw_count": 16,
+        },
+        payoff_artifact=future_fold,
+    )
+    record = application.score_one(_runup_request(), build_native_score_inputs(bundle))
+
+    assert "MODEL_NOT_READY" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
