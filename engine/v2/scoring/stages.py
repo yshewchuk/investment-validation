@@ -163,6 +163,16 @@ def _add_flag(flags: list[str], value: Any) -> None:
         flags.append(code)
 
 
+def _add_executor_refusal(flags: list[str], error: Exception,
+                          fallback: str) -> None:
+    reasons = tuple(getattr(error, "reason_codes", ()) or ())
+    if reasons:
+        for reason in reasons:
+            _add_flag(flags, reason)
+    else:
+        _add_flag(flags, fallback)
+
+
 def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, Any]:
     facts = dict(inputs.context)
     facts.update(inputs.features)
@@ -261,6 +271,41 @@ def _execute_frozen_forecast(
     return True
 
 
+def _execute_forecast_executor(
+    executor, field, facts, output, invalid_fields, flags,
+) -> None:
+    predict = getattr(executor, "predict", None)
+    if not callable(predict):
+        _add_flag(flags, "INVALID_FORECAST_EXECUTOR")
+        return
+    try:
+        result = predict(facts)
+        raw = result.get(field) if isinstance(result, Mapping) else result
+        if isinstance(result, Mapping) and raw is None and len(result) == 1:
+            raw = next(iter(result.values()))
+        value = _finite(raw)
+        if value is None:
+            invalid_fields.add(field)
+            _add_flag(flags, f"NONFINITE_FORECAST_OUTPUT:{field}")
+            return
+        output[field] = value
+    except (TypeError, ValueError, KeyError) as exc:
+        if not tuple(getattr(exc, "reason_codes", ()) or ()):
+            invalid_fields.add(field)
+        _add_executor_refusal(flags, exc, f"INVALID_FORECAST_EXECUTOR:{field}")
+
+
+def _execute_forecast_model(spec, field, facts, output, invalid_fields, flags):
+    if not isinstance(spec, Mapping):
+        _add_flag(flags, f"UNOWNED_FORECAST_OUTPUT:{field}")
+        return
+    try:
+        output[field] = _linear(spec, facts, "forecast")
+    except ValueError as exc:
+        invalid_fields.add(field)
+        _add_flag(flags, exc)
+
+
 def _execute_local_forecast(
     inputs: NativeScoreInputs,
     block: Mapping[str, Any],
@@ -283,39 +328,15 @@ def _execute_local_forecast(
         executor = executors.get(field)
         if executor is not None:
             declared = True
-            predict = getattr(executor, "predict", None)
-            if not callable(predict):
-                invalid_fields.add(field)
-                _add_flag(flags, "INVALID_FORECAST_EXECUTOR")
-                continue
-            try:
-                result = predict(facts)
-                if isinstance(result, Mapping):
-                    raw = result.get(field)
-                    if raw is None and len(result) == 1:
-                        raw = next(iter(result.values()))
-                else:
-                    raw = result
-                value = _finite(raw)
-                if value is None:
-                    raise ValueError("non-finite result")
-                output[field] = value
-            except (TypeError, ValueError, KeyError):
-                invalid_fields.add(field)
-                _add_flag(flags, f"INVALID_FORECAST_EXECUTOR:{field}")
+            _execute_forecast_executor(
+                executor, field, facts, output, invalid_fields, flags,
+            )
             continue
         spec = models.get(field, block.get(field))
         if spec is None:
             continue
         declared = True
-        if not isinstance(spec, Mapping):
-            _add_flag(flags, f"UNOWNED_FORECAST_OUTPUT:{field}")
-            continue
-        try:
-            output[field] = _linear(spec, facts, "forecast")
-        except ValueError as exc:
-            invalid_fields.add(field)
-            _add_flag(flags, exc)
+        _execute_forecast_model(spec, field, facts, output, invalid_fields, flags)
     return declared
 
 
@@ -829,8 +850,9 @@ def _execute_gate_executor(inputs: NativeScoreInputs,
         else:
             score = result
         score = _finite(score)
-    except (TypeError, ValueError, KeyError):
-        score = None
+    except (TypeError, ValueError, KeyError) as exc:
+        _add_executor_refusal(flags, exc, "INVALID_GATE_EXECUTOR")
+        return {}
     return _gate_result(score, block.get("threshold"), flags)
 
 
@@ -913,7 +935,9 @@ def _append_late_stages(
         gate = _execute_gate(inputs, geometry.strategy, values, flags)
         executed.append(receipt(
             "gate",
-            {"prior": executed[-1].output_hash, "inputs": inputs.gate,
+            {"prior": executed[-1].output_hash,
+             "inputs": {key: value for key, value in inputs.gate.items()
+                        if key not in _INTERNAL_STAGE_FIELDS},
              "simulation": simulation},
             gate,
         ))

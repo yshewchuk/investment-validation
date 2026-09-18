@@ -34,10 +34,10 @@ _FROZEN_OUTPUTS = frozenset(
     for output in outputs
 )
 _RUNUP_BASE_DAYS = 14.0
-_RUNUP_RAW_NAMES = frozenset({
+_RUNUP_RAW_NAMES = (
     "prediction", "pred_runup_abs_move_d14", "runup_move_d14",
     "runup_move_raw_d14",
-})
+)
 _RUNUP_FINAL_NAMES = frozenset({
     "runup_move_prediction", "runup_move_p10", "runup_move_p90",
     "runup_move_sd",
@@ -49,6 +49,54 @@ _RUNUP_DERIVED_FIELDS = frozenset({
     "runup_move_sd", "runup_move_days", "runup_move_scale",
     "runup_move_provenance",
 })
+
+
+class _CanonicalFrozenExecutor:
+    """Map one verified artifact output into its canonical stage field."""
+
+    def __init__(self, executor, source, target, *, scale=1.0, floor_zero=False):
+        self._executor = executor
+        self._source = source
+        self._target = target
+        self._scale = scale
+        self._floor_zero = floor_zero
+
+    def predict(self, features):
+        outputs = self._executor.predict(features)
+        value = float(outputs[self._source])
+        if self._floor_zero:
+            value = max(value, 0.0)
+        return {self._target: value * self._scale}
+
+
+def _runup_executor_spec(names, days):
+    if any(name in _RUNUP_FINAL_NAMES for name in names):
+        return ()
+    source = next((name for name in _RUNUP_RAW_NAMES if name in names), None)
+    source = source or (names[0] if len(names) == 1 else None)
+    if source is None or days is None or days < 0.0:
+        return ()
+    return (("runup_move_prediction", source, days / _RUNUP_BASE_DAYS, True),)
+
+
+def _ordinary_executor_specs(names, targets):
+    specs = []
+    for target in targets:
+        source = target if target in names else None
+        if source is None and len(names) == 1 and target == targets[0]:
+            source = names[0]
+        if source is not None:
+            specs.append((target, source, 1.0, False))
+    return tuple(specs)
+
+
+def _canonical_executor_specs(binding, days):
+    """Return canonical target, artifact source and transform declarations."""
+    role = str(getattr(binding, "role", "")).split(":", 1)[0]
+    names = tuple(getattr(binding, "output_names", ()) or ())
+    if role == "runup_move":
+        return _runup_executor_spec(names, days)
+    return _ordinary_executor_specs(names, _FROZEN_ROLE_OUTPUTS.get(role, ()))
 
 
 def _value_fields(values: Mapping[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
@@ -391,23 +439,33 @@ def _collect_frozen_results(results, bindings, inference_requests, days):
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
 
 
-def _frozen_stage_executors(bindings, inference, release):
+def _frozen_stage_executors(bindings, inference, release, days):
     executors = {}
+    owned = set()
     for binding in bindings:
         role = str(getattr(binding, "role", "")).split(":", 1)[0]
-        if (role in {"driver", "size", "implied_t1", "runup_move", "iv_crush"}
-                and hasattr(binding, "feature_order")):
-            for output in _frozen_role_outputs(binding):
-                executors[output] = FrozenStageExecutor(
-                    inference=inference,
-                    release=release,
-                    binding_id=binding.binding_id,
+        if role in _FROZEN_ROLE_OUTPUTS and hasattr(binding, "feature_order"):
+            owned.update(_frozen_role_outputs(binding))
+            frozen_executor = FrozenStageExecutor(
+                inference=inference,
+                release=release,
+                binding_id=binding.binding_id,
+            )
+            for target, source_name, scale, floor_zero in (
+                _canonical_executor_specs(binding, days)
+            ):
+                executors[target] = _CanonicalFrozenExecutor(
+                    frozen_executor,
+                    source_name,
+                    target,
+                    scale=scale,
+                    floor_zero=floor_zero,
                 )
-    return executors
+    return executors, owned
 
 
 def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
-                            required_roles, results, inference, release):
+                            required_roles, results, inference, release, days):
     forecast = _without_frozen_recipes(base.forecast, bindings)
     forecast.update({
         "frozen_outputs": outputs,
@@ -418,10 +476,19 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
         "required_roles": tuple(dict.fromkeys(required_roles)),
     })
     if inference is not None:
-        executors = _frozen_stage_executors(bindings, inference, release)
+        executors, executor_owned = _frozen_stage_executors(
+            bindings, inference, release, days,
+        )
+        frozen_outputs = {
+            name: value for name, value in outputs.items()
+            if name not in executor_owned
+        }
+        if frozen_outputs:
+            forecast["frozen_outputs"] = frozen_outputs
+        elif executor_owned:
+            forecast.pop("frozen_outputs", None)
         if executors:
             forecast["executors"] = executors
-            forecast.pop("frozen_outputs", None)
     return forecast
 
 
@@ -435,18 +502,29 @@ def _frozen_gate_inputs(base, fields, bindings, gate_result,
             gate.update({
                 "frozen_score": row[0][0],
                 "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
-                "threshold": fields.get("gate_threshold"),
+                "threshold": fields.get("gate_threshold", gate.get("threshold")),
             })
     if inference is not None:
         gate_bindings = [binding for binding in bindings
                          if str(getattr(binding, "role", "")).split(":", 1)[0] == "gate"]
         if gate_bindings and hasattr(gate_bindings[0], "feature_order"):
+            binding = gate_bindings[0]
             gate.pop("frozen_score", None)
-            gate["executors"] = {"gate_score": FrozenStageExecutor(
-                inference=inference,
-                release=release,
-                binding_id=gate_bindings[0].binding_id,
-            )}
+            names = tuple(getattr(binding, "output_names", ()) or ())
+            source_name = "gate_score" if "gate_score" in names else (
+                names[0] if len(names) == 1 else None
+            )
+            if source_name is not None:
+                executor = FrozenStageExecutor(
+                    inference=inference,
+                    release=release,
+                    binding_id=binding.binding_id,
+                )
+                gate["executors"] = {
+                    "gate_score": _CanonicalFrozenExecutor(
+                        executor, source_name, "gate_score",
+                    ),
+                }
     return _without_runup_derived(gate)
 
 
@@ -485,7 +563,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
     forecast = _frozen_forecast_inputs(
         base, bindings, outputs, artifact_hashes, required_roles,
-        results, inference, release,
+        results, inference, release, days,
     )
     gate = _frozen_gate_inputs(
         base, fields, bindings, gate_result, artifact_hashes, inference, release,

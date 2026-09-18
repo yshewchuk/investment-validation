@@ -234,6 +234,81 @@ def test_driver_name_without_driver_output_refuses():
     assert record.forecasts["driver_prediction"] is None
 
 
+class _ExecutorRefusal(ValueError):
+    reason_codes = ("MISSING_FEATURES",)
+
+
+class _RefusingExecutor:
+    def predict(self, features):
+        raise _ExecutorRefusal("missing alpha")
+
+
+class _NonfiniteExecutor:
+    def predict(self, features):
+        return {"driver_prediction": float("nan")}
+
+
+class _GateExecutor:
+    def predict(self, features):
+        return {"gate_score": features["entry_cost"]}
+
+
+def test_executor_refusal_preserves_specific_reason_code():
+    inputs = replace(
+        _native(),
+        forecast={
+            "driver_name": "abs_move",
+            "required_roles": ("driver",),
+            "executors": {"driver_prediction": _RefusingExecutor()},
+        },
+    )
+
+    record = application.score_one(_request(), inputs)
+
+    assert "MISSING_FEATURES" in record.reason_codes
+    assert "INVALID_FORECAST_EXECUTOR:driver_prediction" not in record.reason_codes
+
+
+def test_nonfinite_executor_output_is_not_misreported_as_missing():
+    inputs = replace(
+        _native(),
+        forecast={
+            "driver_name": "abs_move",
+            "required_roles": ("driver",),
+            "executors": {"driver_prediction": _NonfiniteExecutor()},
+        },
+    )
+
+    record = application.score_one(_request(), inputs)
+
+    assert "NONFINITE_FORECAST_OUTPUT:driver_prediction" in record.reason_codes
+    assert "MISSING_FORECAST_OUTPUT:driver" not in record.reason_codes
+
+
+def test_gate_receipt_hash_excludes_runtime_executor_identity():
+    first = replace(
+        _native(),
+        gate={"threshold": 0.0, "executors": {"gate_score": _GateExecutor()}},
+    )
+    second = replace(
+        _native(),
+        gate={"threshold": 0.0, "executors": {"gate_score": _GateExecutor()}},
+    )
+
+    first_record = application.score_one(_request(), first)
+    second_record = application.score_one(_request(), second)
+    first_gate = next(
+        item for item in first_record.resolved_request["native_stage_receipts"]
+        if item["stage"] == "gate"
+    )
+    second_gate = next(
+        item for item in second_record.resolved_request["native_stage_receipts"]
+        if item["stage"] == "gate"
+    )
+
+    assert first_gate == second_gate
+
+
 def test_pricing_is_published_before_gate_and_diagnostics_cannot_replace_fair_value():
     base = _planned_native()
     inputs = replace(

@@ -221,3 +221,54 @@ def test_score_frozen_artifact_mismatch_refuses_without_local_fallback():
     assert "MISSING_FORECAST_OUTPUT:implied_t1" in record.reason_codes
     assert record.validation_status == "refused"
     assert record.readiness == "refused"
+
+
+def test_typed_frozen_gate_uses_calculated_price_and_existing_threshold():
+    member = SimpleNamespace(name="model", content_hash="sha256:gate")
+    binding = SimpleNamespace(
+        binding_id="gate-binding",
+        model_id="gate-model",
+        role="gate",
+        feature_order=("entry_cost",),
+        output_names=("prediction",),
+        members=(member,),
+    )
+    release = SimpleNamespace(release_id="release-1", bindings=(binding,))
+    inference_request = SimpleNamespace(
+        binding_id="gate-binding",
+        rows=((999.0,),),
+    )
+
+    class GateInference:
+        def infer(self, model_release, request):
+            return SimpleNamespace(
+                status="READY",
+                release_id=model_release.release_id,
+                binding_id=request.binding_id,
+                model_id="gate-model",
+                output_names=("prediction",),
+                predictions=((request.rows[0][0],),),
+                artifact_hashes=("sha256:gate",),
+                reason_codes=(),
+                detail=None,
+            )
+
+    base = _override_inputs()
+    record = application.score_frozen(
+        _request(),
+        GateInference(),
+        release,
+        inference_request,
+        {
+            "_native_inputs": replace(
+                base,
+                gate={"threshold": 1.0},
+            ),
+        },
+    )
+
+    assert record.gate_terms["gate_score"] == pytest.approx(
+        record.resolved_request["entry_cost"],
+    )
+    assert record.gate_terms["gate_score"] != pytest.approx(999.0)
+    assert record.gate_terms["gate_threshold"] == pytest.approx(1.0)

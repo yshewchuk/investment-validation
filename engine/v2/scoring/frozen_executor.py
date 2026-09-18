@@ -122,7 +122,7 @@ class FrozenStageExecutor:
     ) -> tuple[tuple[str, ...], tuple[float, ...]]:
         if result.status != MODEL_READY:
             reasons = tuple(result.reason_codes) or ("MODEL_NOT_READY",)
-            detail = result.detail or ", ".join(reasons)
+            detail = getattr(result, "detail", None) or ", ".join(reasons)
             raise FrozenStageRefusal(
                 "MODEL_NOT_READY",
                 detail,

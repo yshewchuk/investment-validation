@@ -64,6 +64,31 @@ must still include all relevant dependencies. No mutable latest lookup, rounded
 replay input, independent JavaScript arithmetic or watchlist-sized statistical
 population is permitted.
 
+## Required scoring and evidence interfaces
+
+Build independently executable native inputs through
+`engine.v2.scoring.SourceBundle` and `build_native_score_inputs`, then run the
+shared scoring application. A source bundle contains raw context and quotes,
+features and missing masks, model identities/artifact references, and
+calculation recipes. It must not contain selected contracts, calculated
+forecasts or prices, simulation summaries, gate decisions, or financial
+answers copied from legacy results. The current builder supports bounded
+STR-THRU inputs only; extending coverage means extending this interface and its
+answer-injection rejection tests, not constructing answer-bearing
+`NativeScoreInputs` in an acceptance adapter.
+
+Capture legacy diagnostic evidence with an opt-in
+`engine.score.Phase4TraceCollector`. Construct it with
+`retain_full_trace=False` and
+`content_hasher=engine.v2.diagnosis.content_hash`, then pass it to
+`Scorer.score` as `trace=`. Persist `diagnostic_checkpoint()`, not the
+collector or live DataFrames. For a real corpus, use
+`tools.phase4_checkpoint_sink.DiskCheckpointSink`: register hash-bound shared
+resources below its root, resume from `completed_case_ids()`, write one atomic
+case at a time, and finalize the deterministic manifest after the run. Full
+trace retention is limited to small local diagnosis and is not required for
+acceptance.
+
 ## Tests and completion
 
 At P4-1 define a Phase 4 acceptance registry and runnable gate with explicit

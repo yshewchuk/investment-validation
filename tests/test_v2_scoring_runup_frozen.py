@@ -98,15 +98,20 @@ def _release(runup_output="prediction"):
         bindings=(
             SimpleNamespace(
                 binding_id="implied-binding",
+                model_id="implied-model",
                 role="implied_t1",
+                feature_order=("days_before_print",),
                 output_names=("prediction",),
-                members=(),
+                members=(_member("model", "sha256:implied"),),
             ),
             SimpleNamespace(
                 binding_id="runup-binding",
+                model_id="runup-model",
                 role="runup_move",
+                feature_order=("days_before_print",),
                 output_names=(runup_output,),
                 members=(
+                    _member("model", "sha256:runup"),
                     _member("residual_interval", "sha256:interval"),
                     _member("calibration", "sha256:calibration"),
                 ),
@@ -151,7 +156,9 @@ class _Frozen:
             output_names=(self.runup_output,),
             predictions=((8.0,),),
             prediction_interval=((6.0, 10.0, 2.0),),
-            artifact_hashes=("sha256:runup",),
+            artifact_hashes=(
+                "sha256:runup", "sha256:interval", "sha256:calibration",
+            ),
             reason_codes=reasons,
         )
 

@@ -49,6 +49,23 @@ carry context, feature, forecast, geometry, pricing, analog, simulation, gate,
 chooser and serialization receipts. Legacy scoring remains available only
 through the explicit compatibility module for comparison.
 
+### Answer-free native inputs
+
+Acceptance and parity callers start with `SourceBundle` and call
+`build_native_score_inputs(bundle)` before `score_one`. Supply raw context and
+quotes, the feature vector and missing mask, model identity and artifact
+references, and recipes for forecasts, residual simulation, analogs and the
+gate. The builder rejects calculated answer fields and leaves geometry,
+pricing, simulation summaries and decisions for the native stages to produce.
+
+The current builder is deliberately bounded to STR-THRU and its declared
+recipes. To add another strategy or recipe, extend `source_inputs.py` and add
+tests proving both execution from source inputs and rejection of injected
+answers. Do not bypass the boundary by hand-constructing `NativeScoreInputs`
+from legacy-selected contracts, forecasts, prices, simulation results, gate
+decisions or diagnostics. Legacy records are expected values for the
+comparator only.
+
 ## Feature-change contract
 
 Before implementing a new or changed scoring stage, declare its authoritative
@@ -63,11 +80,21 @@ result:
 - gate inputs; and
 - DYN-SV candidate eligibility and ranking values when applicable.
 
-Use the opt-in `engine.score.Phase4TraceCollector` for source-bound evidence.
-Real captures use
-`tools.phase4_checkpoint_sink.DiskCheckpointSink`, stream one per-case file,
-and keep only compact indexes in memory. Do not retain the full corpus or full
-DataFrames for tracing.
+Use the opt-in `engine.score.Phase4TraceCollector` for source-bound evidence:
+construct it with `retain_full_trace=False` and
+`engine.v2.diagnosis.content_hash`, pass it as `trace=` to
+`engine.score.Scorer.score`, then persist `diagnostic_checkpoint()`. Set
+`retain_full_trace=True` only for a small local diagnostic case; it is not an
+acceptance artifact.
+
+Real captures use `tools.phase4_checkpoint_sink.DiskCheckpointSink`. Place
+shared resource files below the sink root and register each once with
+`write_resource`. On restart, skip `completed_case_ids()`, write each finished
+case immediately with `write_case`, and call `finalize` after all cases and
+resources are present. The sink writes atomic, hash-bound per-case files and a
+deterministic manifest; keep only case IDs and compact indexes in memory. See
+`tools/capture_tier0_corpus.py` for the production wiring. Do not retain the
+full corpus or full DataFrames for tracing.
 
 Add a focused regression test and a planted-defect test for every checkpointed
 output. Include direct, batch and shuffled-input cases where relevant. Legacy
