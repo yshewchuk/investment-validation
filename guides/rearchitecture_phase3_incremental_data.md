@@ -1,7 +1,12 @@
 # Rearchitecture Phase 3B — Incremental EOD data
 
 Status: implementation plan, 2026-09-16; not implemented or accepted by this
-document. Authority: [delivery plan](rearchitecture_delivery_plan.md) and
+document. The acceptance-evidence and documentation slice (R3B-1, R3B-2,
+R3B-4, R3B-5, R3B-8) has a completed record as of 2026-09-18:
+[`rearchitecture_phase3b_closeout.md`](rearchitecture_phase3b_closeout.md).
+That record states plainly that it is bounded-scope evidence and that R3B-3,
+R3B-6 and R3B-7 remain open — this plan is still not fully implemented or
+accepted. Authority: [delivery plan](rearchitecture_delivery_plan.md) and
 [system design §§5, 12](system_rearchitecture.md#5-data-storage-contracts-and-incremental-ingestion).
 Phase 3A remains the [saved-score preview](rearchitecture_phase3_parity_launch.md).
 Its L01–L14 gate does not cover this work.

@@ -301,6 +301,99 @@ back after B, pass A retained projection binding with a new operation id
 (for example `rollback-a-001`), then run the supervisor command again. Do
 not update a source job, attempt, lease, fence, release or `CURRENT` by hand.
 
+## 7. Phase 3B — incremental append/correction/recovery (2026-09-18)
+
+**Status: acceptance harness EXISTS and is verified over a retained run;
+there is no standalone operator CLI for append/correction/recovery yet
+(R3B-3 — `incremental_refresh` is registered as a job kind and a worker,
+`engine/v2/ops/stages.py:185`, `engine/v2/ops/worker.py:142`, but no nightly
+plan or CLI submits it; `plans.py`'s `NIGHTLY_GRAPH` "refresh" stage still
+runs the legacy adapter). Until R3B-3 lands, the commands below — run through
+`checks/phase3b_real.py`/`checks/rearchitecture_phase3b.py` — are the only
+verified way to exercise append, correction, tombstone, conflict-refusal and
+atomic fault-recovery behavior end to end.** See
+[`rearchitecture_phase3b_closeout.md`](rearchitecture_phase3b_closeout.md) for
+the full record this section supports.
+
+Re-evaluate the acceptance gate against the retained, read-only evidence from
+run `run-1789640509` (VERIFIED — executed 2026-09-18, real output shown):
+
+```bash
+python3 checks/rearchitecture_phase3b.py \
+    --evidence /tmp/phase3b-acceptance-final/run-1789640509/evidence.json \
+    --artifact-root /tmp/phase3b-acceptance-final/run-1789640509 --json
+```
+
+Real output shape (`schema_version`/`counts`/`findings` shown; the full
+document also carries `changed_partitions`, `negative_controls` and
+`subjects`):
+
+```json
+{
+  "schema_version": "phase3b_acceptance.v1.0",
+  "status": "PASS",
+  "ok": true,
+  "evidence_scope": "frozen_real_data",
+  "run_id": "run-1789640509",
+  "counts": {
+    "artifact_findings": 0,
+    "failed_subjects": 0,
+    "negative_controls_passed": 24,
+    "negative_controls_total": 24,
+    "passed_subjects": 8,
+    "registered_subjects": 8
+  },
+  "findings": []
+}
+```
+
+Render the full evidence report from that same run (VERIFIED — executed
+2026-09-18, real output line shown):
+
+```bash
+python3 checks/phase3b_report.py
+```
+
+```
+wrote /<worktree>/reports/phase3b_acceptance/report.md (16,697 bytes); gate status PASS, 0 findings
+```
+
+Run the acceptance harness itself — which is what actually exercises append
+(fresh partitions), correction (`_bump`-mutated rows), tombstone deletion,
+conflict refusal, atomic fault injection/recovery, and no-op-replay
+idempotency, all through the real `engine/v2/data`/`engine/v2/ops` entry
+points — and render its own report in one pass:
+
+```bash
+python3 checks/phase3b_real.py --artifact-root <scratch-root> --report
+```
+
+**UNVERIFIED in this session** (not executed here): it requires the real
+curated store and Tier-4 feature files under `data/curated`/`data/features`,
+which this worktree does not carry (per the sub-agent standing rule, real
+data roots stay in the primary checkout); running it is also, by
+construction, the same bounded 64-row-per-partition acceptance pass this
+closeout accepted as a recorded limitation (R3B-1), never a real-scale run.
+Expected output shape, from reading `checks/phase3b_real.py::main`/`run`:
+
+```json
+{
+  "run_root": "<scratch-root>/run-<unix-ts>",
+  "evidence": "<scratch-root>/run-<unix-ts>/evidence.json",
+  "receipt": "<scratch-root>/run-<unix-ts>/run_receipt.json",
+  "report_exit_code": 0,
+  "report": "<worktree>/reports/phase3b_acceptance/report.md"
+}
+```
+
+Recovery specifically: the harness's `_table_runs` (`checks/phase3b_real.py`)
+injects one real fault (`RuntimeError` at the `before_commit` fence) on the
+first table's commit, confirms the snapshot head is unmoved
+(`Repository(conn).resolve(parent.snapshot_id) == resolved.snapshot`), then
+retries the same commit and asserts it succeeds — this is subject P3B07
+(`atomic_fault_recovery`) in the evidence above. There is no separate
+"recover a stuck refresh" operator command to run by hand yet; that is R3B-3.
+
 ## Deferred / not this task
 
 - Receipt producers now exist, including engineering history, browser, coverage
@@ -308,5 +401,7 @@ not update a source job, attempt, lease, fence, release or `CURRENT` by hand.
   file. Remaining work is fresh same-generation acceptance, the coverage
   ratchet, inherited-disposition handling and an assembled report, not another
   set of parallel producers.
-- Incremental ingestion is Phase 3B. Native scoring/models, complete consumer
-  parity and official cutover are Phases 4–7; this runbook does not activate them.
+- Incremental ingestion is Phase 3B; §7 above covers what is verified today.
+  Nightly integration (R3B-3), native scoring/models, complete consumer
+  parity and official cutover are Phases 4–7; this runbook does not activate
+  them.
