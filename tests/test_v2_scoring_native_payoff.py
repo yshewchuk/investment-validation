@@ -18,7 +18,16 @@ import pandas as pd
 import pytest
 
 from engine.models.registry import ModelArtifact, bucket_residuals
-from engine.payoff import PayoffMap, fit_payoff, simulate_returns
+from engine.payoff import (
+    PayoffMap,
+    RunupPayoffSurface,
+    fit_payoff,
+    fit_runup_payoff,
+    scale_runup_move as legacy_scale_runup_move,
+    simulate_returns,
+    simulate_runup_returns,
+)
+from engine.payoff import runup_payoff_design as legacy_runup_payoff_design
 from engine.v2.contracts import ScoreRequest
 from engine.v2.scoring import application, native_payoff
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
@@ -334,6 +343,342 @@ def test_poisoned_model_block_answers_are_not_preserved():
 
     poisoned = replace(inputs, model={"exp_pnl_model": 991.5, "win_model": 0.0})
     record = application.score_one(_request(), poisoned)
+
+    assert record.resolved_request.get("exp_pnl_model") != 991.5
+    assert record.resolved_request.get("win_model") != 0.0
+    assert "UNOWNED_MODEL_OUTPUT" in record.reason_codes
+    assert record.validation_status == "refused"
+
+
+# ---------------------------------------------------------------------------
+# STR-RUNUP -- the two-driver payoff surface (R4-17)
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_runup_trades(n: int, *, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    implied = rng.uniform(0.0, 8.0, size=n)
+    spot_entry = np.full(n, 100.0)
+    signed_move = rng.normal(0.0, 3.0, size=n)
+    spot_exit = spot_entry * np.exp(signed_move / 100.0)
+    strike = np.full(n, 100.0)
+    moneyness = 100.0 * np.log(spot_exit / strike)
+    design = legacy_runup_payoff_design(implied, moneyness)
+    coeffs = np.array([0.02, 0.004, 0.001, 0.0005, 0.0007, 0.0003])
+    noise = rng.normal(0.0, 0.002, size=n)
+    target = design @ coeffs + noise
+    exit_value = target * spot_entry
+    dates = pd.date_range("2020-01-01", periods=n, freq="D")
+    return pd.DataFrame({
+        "strategy": "STR-RUNUP",
+        "fill_alpha": 0.5,
+        "im_t1": implied,
+        "spot_entry": spot_entry,
+        "spot_exit": spot_exit,
+        "strike": strike,
+        "exit_value": exit_value,
+        "exit_date": dates,
+    })
+
+
+def _runup_rows_from_trades(trades: pd.DataFrame) -> list[dict]:
+    return [
+        {
+            "driver": float(row.im_t1),
+            "spot_entry": float(row.spot_entry),
+            "spot_exit": float(row.spot_exit),
+            "strike": float(row.strike),
+            "exit_value": float(row.exit_value),
+            "exit_date": str(row.exit_date.date()),
+        }
+        for row in trades.itertuples()
+    ]
+
+
+def test_fit_runup_payoff_surface_matches_legacy_small_sample_and_cutoff():
+    trades = _synthetic_runup_trades(300, seed=7)
+    rows = _runup_rows_from_trades(trades)
+    cutoff = trades["exit_date"].iloc[250]
+
+    legacy = fit_runup_payoff(trades, alpha=0.5, before=cutoff)
+    native = native_payoff.fit_runup_payoff_surface(rows, before=str(cutoff.date()))
+
+    assert native is not None
+    assert native["n"] == legacy.n == 250
+    np.testing.assert_allclose(native["coefficients"], legacy.coefficients, rtol=1e-10)
+    assert native["resid_sd"] == pytest.approx(legacy.resid_sd, rel=1e-10)
+    assert native["r"] == pytest.approx(legacy.r, rel=1e-10)
+    np.testing.assert_allclose(native["residuals"], legacy.residuals)
+
+
+def test_fit_runup_payoff_surface_matches_legacy_residual_capping_above_5000():
+    trades = _synthetic_runup_trades(6000, seed=11)
+    rows = _runup_rows_from_trades(trades)
+
+    legacy = fit_runup_payoff(trades, alpha=0.5)
+    native = native_payoff.fit_runup_payoff_surface(rows)
+
+    assert legacy.n == 6000 > native_payoff.MAX_RESIDUALS
+    assert native is not None
+    assert native["residuals"].size == native_payoff.MAX_RESIDUALS == legacy.residuals.size
+    np.testing.assert_array_equal(native["residuals"], legacy.residuals)
+
+
+def test_runup_exit_value_per_spot_matches_legacy_surface():
+    coefficients = (0.02, 0.004, 0.001, 0.0005, 0.0007, 0.0003)
+    payoff = RunupPayoffSurface(
+        alpha=0.5, coefficients=coefficients, resid_sd=0.01, n=250, r=0.9,
+    )
+    implied = np.array([1.0, 3.0, 5.0, 7.0])
+    signed_move = np.array([-2.0, 0.0, 1.5, 4.0])
+    spot, strike = 123.0, 118.0
+
+    legacy = payoff.value_per_spot(implied, signed_move, spot=spot, strike=strike)
+    native = native_payoff.runup_exit_value_per_spot(
+        implied, signed_move, coefficients, spot=spot, strike=strike,
+    )
+    np.testing.assert_allclose(native, legacy, rtol=1e-12)
+
+    # Broadcasting a scalar move across several implied-move draws (the shape
+    # simulate_runup_model_returns actually calls it with) must also agree.
+    legacy_scalar = payoff.value_per_spot(implied, 0.0, spot=spot, strike=strike)
+    native_scalar = native_payoff.runup_exit_value_per_spot(
+        implied, 0.0, coefficients, spot=spot, strike=strike,
+    )
+    np.testing.assert_allclose(native_scalar, legacy_scalar, rtol=1e-12)
+
+
+def test_simulate_runup_model_returns_matches_legacy_draw_order_and_seed():
+    """Proves the fit -> draw -> return pipeline is bit-identical, including
+    draw ORDER (implied pool, then move pool, then the sign draw, then the
+    payoff surface's own residuals -- engine/score.py:2385-2421)."""
+    implied_pool = np.array([-0.5, 0.0, 0.5, 1.0, -1.0])
+    move_pool = np.array([-0.2, 0.1, 0.0, 0.3, -0.1])
+    payoff_residuals = np.array([-0.02, 0.0, 0.01, 0.03, -0.01, 0.02])
+    coefficients = (0.02, 0.004, 0.001, 0.0005, 0.0007, 0.0003)
+    point_implied, point_move_d14 = 7.0, 3.0
+    spot, strike, cost, draws, days = 100.0, 100.0, 4.0, 500, 7.0
+
+    payoff = RunupPayoffSurface(
+        alpha=0.5, coefficients=coefficients,
+        resid_sd=float(payoff_residuals.std()), n=250, r=0.9,
+        residuals=payoff_residuals,
+    )
+
+    seed = 12345
+    legacy_rng = np.random.default_rng(seed)
+    implied_draws = point_implied + legacy_rng.choice(implied_pool, size=draws, replace=True)
+    implied_draws = np.maximum(implied_draws, 0.0)
+    move_draws_d14 = point_move_d14 + legacy_rng.choice(move_pool, size=draws, replace=True)
+    move_draws = legacy_scale_runup_move(np.maximum(move_draws_d14, 0.0), days)
+    signed_moves = legacy_rng.choice((-1.0, 1.0), size=draws) * move_draws
+    legacy_noise = payoff.residual_draws(draws, legacy_rng)
+    legacy_returns = simulate_runup_returns(
+        implied_draws, signed_moves, payoff, spot=spot, strike=strike, cost=cost,
+        payoff_noise=legacy_noise,
+    )
+
+    native_rng = np.random.default_rng(seed)
+    native_returns = native_payoff.simulate_runup_model_returns(
+        point_implied, point_move_d14, implied_pool, move_pool, coefficients,
+        payoff_residuals, spot, strike, cost, days, draws, native_rng,
+    )
+
+    np.testing.assert_array_equal(native_returns, legacy_returns)
+
+    # Reordering the four draws must NOT match -- otherwise this test could
+    # not tell a real order bug from an accident.
+    reordered_rng = np.random.default_rng(seed)
+    reordered_noise = payoff.residual_draws(draws, reordered_rng)
+    reordered_implied = point_implied + reordered_rng.choice(implied_pool, size=draws, replace=True)
+    reordered_implied = np.maximum(reordered_implied, 0.0)
+    reordered_move_d14 = point_move_d14 + reordered_rng.choice(move_pool, size=draws, replace=True)
+    reordered_move = legacy_scale_runup_move(np.maximum(reordered_move_d14, 0.0), days)
+    reordered_signed = reordered_rng.choice((-1.0, 1.0), size=draws) * reordered_move
+    reordered_returns = simulate_runup_returns(
+        reordered_implied, reordered_signed, payoff, spot=spot, strike=strike,
+        cost=cost, payoff_noise=reordered_noise,
+    )
+    assert not np.array_equal(native_returns, reordered_returns)
+
+
+# ---------------------------------------------------------------------------
+# Causality: the runup payoff fit only ever uses rows before the decision
+# cutoff
+# ---------------------------------------------------------------------------
+
+
+def test_runup_causal_cutoff_excludes_a_post_cutoff_row():
+    good_rows = [
+        {"driver": 0.0, "spot_entry": 100.0, "spot_exit": 100.0, "strike": 100.0,
+         "exit_value": 2.0, "exit_date": "2026-09-01"},
+        {"driver": 10.0, "spot_entry": 100.0, "spot_exit": 100.0, "strike": 100.0,
+         "exit_value": 6.0, "exit_date": "2026-09-01"},
+    ]
+    future_row = {"driver": 5.0, "spot_entry": 100.0, "spot_exit": 100.0,
+                  "strike": 100.0, "exit_value": 999.0, "exit_date": "2026-09-20"}
+    cutoff = "2026-09-16"
+
+    baseline = native_payoff.fit_runup_payoff_surface(good_rows, before=cutoff, min_trades=2)
+    with_future_row = native_payoff.fit_runup_payoff_surface(
+        good_rows + [future_row], before=cutoff, min_trades=2,
+    )
+
+    assert baseline is not None and with_future_row is not None
+    assert with_future_row["n"] == baseline["n"] == 2
+    np.testing.assert_array_equal(with_future_row["coefficients"], baseline["coefficients"])
+    np.testing.assert_array_equal(with_future_row["residuals"], baseline["residuals"])
+
+    without_cutoff = native_payoff.fit_runup_payoff_surface(
+        good_rows + [future_row], before=None, min_trades=2,
+    )
+    assert without_cutoff["n"] == 3
+    assert without_cutoff["coefficients"] != baseline["coefficients"]
+
+
+# ---------------------------------------------------------------------------
+# Native stage behavior, end to end through build_native_score_inputs
+# ---------------------------------------------------------------------------
+
+
+def _runup_request() -> ScoreRequest:
+    return ScoreRequest(
+        event_id="evt-runup-model", calendar_revision="cal-1",
+        strategy_version="STR-RUNUP", deployment_id="dep-1",
+        decision_clock_id="entry-close", requested_decision_at="2026-09-16",
+        snapshot_id="snap-1", mode="replay", fill_model={"alpha": 0.5},
+    )
+
+
+_GOOD_RUNUP_PAYOFF_ROWS = [
+    {"driver": 0.0, "spot_entry": 100.0, "spot_exit": 100.0, "strike": 100.0,
+     "exit_value": 2.0, "exit_date": "2026-09-01"},
+    {"driver": 10.0, "spot_entry": 100.0, "spot_exit": 100.0, "strike": 100.0,
+     "exit_value": 6.0, "exit_date": "2026-09-01"},
+]
+
+
+def _runup_bundle(**overrides) -> SourceBundle:
+    base: dict = dict(
+        source_ref="native-runup-model-test",
+        context={
+            "ticker": "AAA", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+            "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0,
+            "strike": 100.0, "days_before_print": 7.0,
+        },
+        raw_quotes=_QUOTES,
+        feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "m1"}},
+        forecast_recipes={
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+            "runup_move_prediction": {"intercept": 0.0, "coefficients": {}},
+        },
+        model_artifact_refs={
+            "driver_prediction": "sha256:m1", "runup_move_prediction": "sha256:m2",
+        },
+        residual_recipe={
+            "terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),
+            "capital_at_risk": 1.0,
+        },
+        analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        strategy="STR-RUNUP",
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16},
+        payoff_source_rows=_GOOD_RUNUP_PAYOFF_ROWS,
+        model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+        runup_move_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS,
+    )
+    base.update(overrides)
+    return SourceBundle(**base)
+
+
+def test_runup_model_number_computed_from_answer_free_inputs():
+    # Both drivers' forecasts (7.0, 0.0), spot == strike and a zero-residual
+    # move pool degenerate the two-driver surface onto the same fitted line
+    # as STR-THRU's own closed-form control (0.02 + 0.004*driver): exit
+    # value / spot = 0.02 + 0.004*7 = 0.048, so exp_pnl_model =
+    # (0.048*100 - 4.0) / 4.0 == 0.2, win_model == 1.0.
+    bundle = _runup_bundle()
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+    assert record.resolved_request["win_model"] == pytest.approx(1.0)
+    assert "NO_PAYOFF_MAP" not in record.reason_codes
+    assert record.validation_status == "scored"
+
+
+def test_runup_no_payoff_map_without_source_rows():
+    bundle = _runup_bundle(
+        payoff_recipe={"min_trades": 200, "seed": 42},  # only 2 rows below
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    assert "NO_PAYOFF_MAP" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_missing_implied_residual_rows_flags_and_withholds_the_number():
+    bundle = _runup_bundle(model_residual_rows=[])
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    assert "MISSING_MODEL_RESIDUALS" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_missing_move_residual_rows_flags_and_withholds_the_number():
+    bundle = _runup_bundle(runup_move_residual_rows=[])
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    assert "MISSING_MODEL_RESIDUALS" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_missing_days_before_print_flags_and_withholds_the_number():
+    bundle = _runup_bundle(context={
+        "ticker": "AAA", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+        "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0,
+        "strike": 100.0,
+    })
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    assert "MISSING_MODEL_INPUT:days_before_print" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.validation_status == "refused"
+
+
+def test_runup_end_to_end_causal_cutoff_excludes_a_post_cutoff_payoff_row():
+    future_row = {"driver": 5.0, "spot_entry": 100.0, "spot_exit": 100.0,
+                  "strike": 100.0, "exit_value": 999.0, "exit_date": "2026-09-20"}
+    bundle = _runup_bundle(
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16,
+                       "before": "2026-09-16"},
+        payoff_source_rows=_GOOD_RUNUP_PAYOFF_ROWS + [future_row],
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    # Same closed-form answer as the two-row-only case: the future row was
+    # excluded, not silently included.
+    assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+    assert record.resolved_request["win_model"] == pytest.approx(1.0)
+
+
+def test_runup_poisoned_model_block_answers_are_not_preserved():
+    """The model stage must recompute, never copy a pre-supplied answer."""
+    bundle = _runup_bundle()
+    inputs = build_native_score_inputs(bundle)
+    from dataclasses import replace
+
+    poisoned = replace(inputs, model={"exp_pnl_model": 991.5, "win_model": 0.0})
+    record = application.score_one(_runup_request(), poisoned)
 
     assert record.resolved_request.get("exp_pnl_model") != 991.5
     assert record.resolved_request.get("win_model") != 0.0

@@ -193,12 +193,14 @@ GATE_MCAP_FLOOR = 1e9       # engine/score.py:199
 
 # -- Model layer (payoff calibration -> exp_pnl_model/win_model) ------------
 # engine/payoff.py:79-82 PAYOFF_DRIVER: which strategies have a calibrated
-# payoff line at all. The bounded native builder (source_inputs.py) only
-# declares forecast recipes for STR-THRU today, so only STR-THRU is wired
-# here; every other strategy (including STR-RUNUP, whose legacy payoff is a
-# two-driver surface, not a line) refuses with NO_PAYOFF_MAP exactly as
-# legacy's driver_for() would for a strategy absent from its dict.
-_PAYOFF_DRIVER_STRATEGIES = frozenset({"STR-THRU"})
+# payoff at all. STR-THRU is a single-driver LINE (``_execute_model`` below);
+# STR-RUNUP (R4-17) is the two-driver SURFACE ``engine/payoff.py``'s
+# ``RunupPayoffSurface`` fits (implied T-1 move + exit moneyness), executed
+# by ``_execute_runup_model``. Every other strategy (the bounded native
+# builder declares no forecast recipe for their drivers) refuses with
+# NO_PAYOFF_MAP exactly as legacy's driver_for() would for a strategy absent
+# from its dict.
+_PAYOFF_DRIVER_STRATEGIES = frozenset({"STR-THRU", "STR-RUNUP"})
 _PAYOFF_DRIVER_FIELD = {"STR-THRU": "driver_prediction"}
 
 # -- Advisory-vs-refusal flag taxonomy ---------------------------------------
@@ -1103,6 +1105,138 @@ def _model_fit_and_pool(
     return fit, driver_pool
 
 
+def _runup_model_inputs(
+    values: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    flags: list[str],
+) -> tuple[float, float, float, float, float, float] | None:
+    """Resolve the two drivers, spot, strike, entry_cost and horizon a
+    RunupPayoffSurface would be pushed through, or add the refusing flag
+    and return ``None`` -- mirrors ``_model_driver_and_cost`` for the
+    two-driver case (engine/score.py:2358-2413).
+    """
+    point_implied = _finite(values.get("driver_prediction"))
+    point_move_d14 = _finite(values.get("runup_move_prediction"))
+    days = _finite(facts.get("days_before_print"))
+    if point_implied is None:
+        _add_flag(flags, "MISSING_MODEL_INPUT:driver_prediction")
+        return None
+    if point_move_d14 is None:
+        _add_flag(flags, "MISSING_MODEL_INPUT:runup_move_prediction")
+        return None
+    if days is None or days < 0.0:
+        # engine/score.py:2363-2366 -- invalid days_before_print refuses
+        # before the model ever runs.
+        _add_flag(flags, "MISSING_MODEL_INPUT:days_before_print")
+        return None
+    spot = _finite(values.get("spot"))
+    strike = _finite(values.get("strike"))
+    cost = _finite(values.get("entry_cost"))
+    if spot is None or strike is None or cost is None or cost <= 0.0:
+        # engine/score.py:2405-2413's own guard -- no chain, no denominator,
+        # no resolved strike. A row already refused for the missing chain
+        # keeps that reason rather than picking up a second, misleading one.
+        if "COARSE_LADDER" not in flags:
+            _add_flag(flags, "NO_CHAIN")
+        return None
+    return point_implied, point_move_d14, spot, strike, cost, days
+
+
+def _runup_fit_and_pool(
+    block: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    point_implied: float,
+    point_move_d14: float,
+    flags: list[str],
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray] | None:
+    """Fit the causal RunupPayoffSurface and both drivers' own residual
+    pools. ``None`` means a flag (NO_PAYOFF_MAP or MISSING_MODEL_RESIDUALS)
+    was already added.
+    """
+    from engine.v2.scoring import native_payoff
+
+    rows = block.get("payoff_source_rows")
+    if not isinstance(rows, (list, tuple)):
+        _add_flag(flags, "NO_PAYOFF_MAP")
+        return None
+    fit = native_payoff.fit_runup_payoff_surface(
+        rows,
+        before=recipe.get("before"),
+        min_trades=int(recipe.get("min_trades", native_payoff.MIN_TRADES)),
+        max_residuals=int(recipe.get("max_residuals", native_payoff.MAX_RESIDUALS)),
+        residual_seed=int(recipe.get("residual_seed", native_payoff.RESIDUAL_SEED)),
+    )
+    if fit is None:
+        _add_flag(flags, "NO_PAYOFF_MAP")
+        return None
+    residual_recipe = block.get("model_residual_recipe") or {}
+    deciles = int(residual_recipe.get("deciles", native_payoff.DECILES))
+    min_pool = int(residual_recipe.get("min_pool", native_payoff.MIN_POOL))
+    implied_pool = native_payoff.driver_residual_pool(
+        block.get("model_residual_rows"), point_implied,
+        deciles=deciles, min_pool=min_pool,
+    )
+    if implied_pool is None or implied_pool.size == 0:
+        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+        return None
+    move_pool = native_payoff.driver_residual_pool(
+        block.get("runup_move_residual_rows"), point_move_d14,
+        deciles=deciles, min_pool=min_pool,
+    )
+    if move_pool is None or move_pool.size == 0:
+        _add_flag(flags, "MISSING_MODEL_RESIDUALS")
+        return None
+    return fit, implied_pool, move_pool
+
+
+def _execute_runup_model(
+    inputs: NativeScoreInputs,
+    block: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    values: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    """STR-RUNUP's two-driver payoff-calibration/model layer (R4-17).
+
+    Mirrors engine/score.py:2270-2440 (``_score_runup_model``) using
+    ``native_payoff``'s pure re-derivation of ``engine/payoff.py``'s
+    ``fit_runup_payoff``/``RunupPayoffSurface``/``simulate_runup_returns``.
+    ``driver_prediction`` (legacy's ``point_implied``) and
+    ``runup_move_prediction`` are read exactly as the forecast stage left
+    them -- i.e. at the model's own D14 scale, since nothing upstream of
+    this stage applies ``scale_runup_move`` in the native/local path
+    (unlike the frozen-inference path's own ``application._runup_frozen_output``,
+    which produces the row's PUBLISHED, already-scaled forecast field of the
+    same name for a different purpose). This stage applies the scale itself,
+    exactly once, when building the Monte Carlo move draws.
+    """
+    from engine.v2.scoring import native_payoff
+
+    facts = _facts(inputs, values)
+    resolved = _runup_model_inputs(values, facts, flags)
+    if resolved is None:
+        return {}
+    point_implied, point_move_d14, spot, strike, cost, days = resolved
+    fitted = _runup_fit_and_pool(block, recipe, point_implied, point_move_d14, flags)
+    if fitted is None:
+        return {}
+    fit, implied_pool, move_pool = fitted
+    draws = int(recipe.get("draw_count", native_payoff.MODEL_DRAWS))
+    seed = recipe.get("seed")
+    seed = int(seed) if seed is not None else _model_seed(inputs, values)
+    returns = native_payoff.simulate_runup_model_returns(
+        point_implied, point_move_d14, implied_pool, move_pool,
+        fit["coefficients"], fit["residuals"], spot, strike, cost, days,
+        draws, np.random.default_rng(seed),
+    )
+    output = {
+        "exp_pnl_model": float(np.mean(returns)),
+        "win_model": float(np.mean(returns > 0.0)),
+    }
+    values.update(output)
+    return output
+
+
 def _execute_model(
     inputs: NativeScoreInputs,
     name: str,
@@ -1119,7 +1253,9 @@ def _execute_model(
     ATM_TOLERANCE_PCT above). NO_PAYOFF_MAP fires exactly where legacy fires
     it: a strategy absent from PAYOFF_DRIVER (engine/payoff.py:79-93,
     ``driver_for``), or too few closed trades before the decision cutoff to
-    fit a line (engine/payoff.py:332-337, ``PayoffError``).
+    fit a line (engine/payoff.py:332-337, ``PayoffError``). STR-RUNUP
+    (R4-17) is dispatched to ``_execute_runup_model``'s two-driver surface
+    instead of the single-driver line below.
     """
     from engine.v2.scoring import native_payoff
 
@@ -1132,6 +1268,8 @@ def _execute_model(
     if not isinstance(recipe, Mapping):
         _add_flag(flags, "INVALID_PAYOFF_RECIPE")
         return {}
+    if name == "STR-RUNUP":
+        return _execute_runup_model(inputs, block, recipe, values, flags)
     driver_cost = _model_driver_and_cost(name, block, values, flags)
     if driver_cost is None:
         return {}

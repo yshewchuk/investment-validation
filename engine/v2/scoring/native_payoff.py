@@ -19,6 +19,17 @@ Legacy computes ``exp_pnl_model``/``win_model`` in two pieces
    payoff line's residuals (engine/score.py:2164-2208) -- order matters
    because ``rng.choice`` consumes the generator's state sequentially.
 
+STR-RUNUP (R4-17) is the two-driver exception (EXP-149): its exit value is
+not a line through one driver but a surface through the predicted T-1
+implied move AND exit moneyness, fitted by
+``engine/payoff.py::fit_runup_payoff``/``RunupPayoffSurface`` and simulated
+by ``engine/score.py::Scorer._score_runup_model`` (:2270-2440) +
+``engine/payoff.py::simulate_runup_returns`` (:469-491). The draw order there
+is fixed too, from one shared rng: the implied-move model's own residual
+pool FIRST, the runup-move model's own residual pool (at its native D14
+scale) SECOND, the +/-1 sign draw THIRD, the payoff surface's own residuals
+FOURTH (engine/score.py:2385-2421).
+
 ``engine/v2`` has no dependency on legacy ``engine/`` code (see
 ``stages.py``'s ``ATM_TOLERANCE_PCT`` precedent), so this module reproduces
 the pure math as literal, cited functions rather than importing
@@ -34,10 +45,12 @@ import numpy as np
 
 __all__ = [
     "MIN_TRADES", "MAX_RESIDUALS", "RESIDUAL_SEED", "DECILES", "MIN_POOL",
-    "MODEL_DRAWS",
+    "MODEL_DRAWS", "RUNUP_TERMS", "RUNUP_BASE_DAYS",
     "fit_payoff_line", "cap_residuals", "bucket_residual_pool",
     "residual_pool_for", "driver_residual_pool", "payoff_exit_value",
     "simulate_model_returns",
+    "scale_runup_move", "runup_payoff_design", "fit_runup_payoff_surface",
+    "runup_exit_value_per_spot", "simulate_runup_model_returns",
 ]
 
 #: engine/payoff.py:285
@@ -277,3 +290,191 @@ def simulate_model_returns(
     if cost <= 0:
         return np.full(np.shape(pnl), np.nan)
     return pnl / float(cost)
+
+
+# ---------------------------------------------------------------------------
+# STR-RUNUP -- the two-driver payoff surface (R4-17)
+# ---------------------------------------------------------------------------
+
+#: engine/payoff.py:172-180 RUNUP_TERMS / RUNUP_BASE_DAYS
+RUNUP_TERMS = (
+    "intercept",
+    "implied_move",
+    "abs_moneyness",
+    "moneyness_sq_div10",
+    "signed_moneyness",
+    "implied_x_abs_moneyness_div10",
+)
+RUNUP_BASE_DAYS = 14.0
+
+
+def scale_runup_move(values: Sequence[float] | float,
+                     days_before_print: float) -> np.ndarray:
+    """engine/payoff.py:183-186 (``scale_runup_move``), verbatim."""
+    scale = float(days_before_print) / RUNUP_BASE_DAYS
+    return np.asarray(values, dtype=float) * scale
+
+
+def runup_payoff_design(implied_move: Sequence[float],
+                        moneyness: Sequence[float]) -> np.ndarray:
+    """engine/payoff.py:189-203 (``runup_payoff_design``), verbatim."""
+    implied = np.asarray(implied_move, dtype=float)
+    money = np.asarray(moneyness, dtype=float)
+    absolute = np.abs(money)
+    return np.column_stack([
+        np.ones(len(implied)),
+        implied,
+        absolute,
+        np.square(money) / 10.0,
+        money,
+        implied * absolute / 10.0,
+    ])
+
+
+def fit_runup_payoff_surface(
+    rows: Sequence[Mapping[str, Any]] | None,
+    *,
+    before: Any = None,
+    min_trades: int = MIN_TRADES,
+    max_residuals: int = MAX_RESIDUALS,
+    residual_seed: int = RESIDUAL_SEED,
+) -> dict[str, Any] | None:
+    """engine/payoff.py:366-442 (``fit_runup_payoff``), from raw source rows.
+
+    Each row is one PRIOR, already-closed STR-RUNUP trade: ``driver`` (the
+    implied T-1 move realized at entry, legacy's ``im_t1``), ``spot_entry``,
+    ``spot_exit``, ``strike`` and ``exit_value``. ``before`` restricts to
+    trades closed strictly before it, the same causal rule
+    :func:`fit_payoff_line` applies. Returns ``None`` (mirroring
+    ``PayoffError``) when fewer than ``min_trades`` rows survive filtering.
+    """
+    cutoff = _parse_day(before) if before is not None else None
+    implied: list[float] = []
+    spot_entry: list[float] = []
+    spot_exit: list[float] = []
+    strike: list[float] = []
+    exit_value: list[float] = []
+    for row in rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        if cutoff is not None:
+            exit_day = _parse_day(row.get("exit_date"))
+            if exit_day is None or not (exit_day < cutoff):
+                continue
+        try:
+            im = float(row["driver"])
+            se = float(row["spot_entry"])
+            sx = float(row["spot_exit"])
+            k = float(row["strike"])
+            ev = float(row["exit_value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        implied.append(im)
+        spot_entry.append(se)
+        spot_exit.append(sx)
+        strike.append(k)
+        exit_value.append(ev)
+    implied_arr = np.asarray(implied, dtype=float)
+    se_arr = np.asarray(spot_entry, dtype=float)
+    sx_arr = np.asarray(spot_exit, dtype=float)
+    k_arr = np.asarray(strike, dtype=float)
+    ev_arr = np.asarray(exit_value, dtype=float)
+    ok = (
+        np.isfinite(implied_arr) & np.isfinite(se_arr) & np.isfinite(sx_arr)
+        & np.isfinite(k_arr) & np.isfinite(ev_arr)
+        & (se_arr > 0) & (sx_arr > 0) & (k_arr > 0)
+    )
+    implied_arr, se_arr, sx_arr, k_arr, ev_arr = (
+        implied_arr[ok], se_arr[ok], sx_arr[ok], k_arr[ok], ev_arr[ok],
+    )
+    n = int(implied_arr.size)
+    if n < min_trades:
+        return None
+    moneyness = 100.0 * np.log(sx_arr / k_arr)
+    design = runup_payoff_design(implied_arr, moneyness)
+    target = ev_arr / se_arr
+    coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+    fitted = design @ coefficients
+    residuals = target - fitted
+    r = (
+        float(np.corrcoef(fitted, target)[0, 1])
+        if fitted.std() > 0 and target.std() > 0
+        else None
+    )
+    return {
+        "coefficients": tuple(float(value) for value in coefficients),
+        "resid_sd": float(residuals.std(ddof=2)) if residuals.size > 2 else float("nan"),
+        "n": n,
+        "r": r,
+        "residuals": cap_residuals(residuals, max_residuals=max_residuals, seed=residual_seed),
+    }
+
+
+def runup_exit_value_per_spot(
+    implied_move: Sequence[float],
+    signed_move: Sequence[float],
+    coefficients: Sequence[float],
+    *,
+    spot: float,
+    strike: float,
+) -> np.ndarray:
+    """engine/payoff.py:225-256 (``RunupPayoffSurface.exit_value``/``value_per_spot``).
+
+    Unfloored -- the caller applies the zero floor after adding the surface's
+    own residual noise, exactly as ``simulate_runup_returns`` does
+    (engine/payoff.py:480-488).
+    """
+    implied = np.asarray(implied_move, dtype=float)
+    move = np.asarray(signed_move, dtype=float)
+    implied, move = np.broadcast_arrays(implied, move)
+    exit_spot = float(spot) * np.exp(move / 100.0)
+    moneyness = 100.0 * np.log(exit_spot / float(strike))
+    design = runup_payoff_design(implied.ravel(), moneyness.ravel())
+    value_per_spot = design @ np.asarray(coefficients, dtype=float)
+    return value_per_spot.reshape(implied.shape)
+
+
+def simulate_runup_model_returns(
+    point_implied: float,
+    point_move_d14: float,
+    implied_pool: Sequence[float],
+    move_pool: Sequence[float],
+    coefficients: Sequence[float],
+    payoff_residuals: Sequence[float],
+    spot: float,
+    strike: float,
+    cost: float,
+    days_before_print: float,
+    draws: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """engine/score.py:2377-2430 + engine/payoff.py:469-491, in one call.
+
+    Draw order is fixed and matches legacy exactly, all from the SAME rng:
+    the implied-move model's own residual pool FIRST, the runup-move
+    model's own residual pool (at its native D14 scale) SECOND, the +/-1
+    sign draw THIRD, the payoff surface's own residuals FOURTH. Reordering
+    any of the four would silently change every draw downstream.
+    """
+    implied_draws = float(point_implied) + rng.choice(
+        np.asarray(implied_pool, dtype=float), size=int(draws), replace=True,
+    )
+    implied_draws = np.maximum(implied_draws, 0.0)
+    move_draws_d14 = float(point_move_d14) + rng.choice(
+        np.asarray(move_pool, dtype=float), size=int(draws), replace=True,
+    )
+    move_draws = scale_runup_move(
+        np.maximum(move_draws_d14, 0.0), days_before_print,
+    )
+    signed_moves = rng.choice((-1.0, 1.0), size=int(draws)) * move_draws
+    noise = rng.choice(
+        np.asarray(payoff_residuals, dtype=float), size=int(draws), replace=True,
+    )
+    value_per_spot = runup_exit_value_per_spot(
+        implied_draws, signed_moves, coefficients, spot=spot, strike=strike,
+    )
+    value_per_spot = value_per_spot + noise
+    value = np.maximum(value_per_spot, 0.0) * float(spot)
+    if cost <= 0:
+        return np.full(np.shape(value), np.nan)
+    return (value - float(cost)) / float(cost)
