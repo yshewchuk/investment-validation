@@ -160,3 +160,44 @@ def test_fill_reprices_and_propagates_to_simulation_and_gate():
     assert worst.gate_terms["gate_pass"] is False
     assert best.gate_terms["gate_pass"] is True
     assert worst.selected_contracts == best.selected_contracts
+
+
+@pytest.mark.parametrize("strategy", ["STR-RUNUP", "BFLY-P", "CTR5"])
+def test_supported_source_strategies_require_their_declared_forecast_inputs(strategy):
+    bundle = replace(
+        _bundle(),
+        strategy=strategy,
+        model_artifact_refs={
+            "driver_prediction": "sha256:synthetic-driver",
+            **({"runup_move_prediction": "sha256:synthetic-runup"}
+               if strategy == "STR-RUNUP" else
+               {"forecast_abs_move": "sha256:synthetic-size"}),
+        },
+        forecast_recipes={
+            "driver_prediction": {
+                "intercept": 5.0,
+                "coefficients": {"signal": 2.0},
+            },
+            **({"runup_move_prediction": {
+                "intercept": 1.0,
+                "coefficients": {"signal": 0.5},
+            }} if strategy == "STR-RUNUP" else {
+                "forecast_abs_move": {
+                    "intercept": 1.0,
+                    "coefficients": {"signal": 0.5},
+                },
+            }),
+        },
+    )
+    inputs = build_native_score_inputs(bundle)
+
+    assert inputs.context["strategy"] == strategy
+    assert set(inputs.forecast["models"]) >= set(bundle.forecast_recipes)
+
+
+def test_nested_answer_fields_are_rejected():
+    with pytest.raises(ValueError, match="calculated answer fields"):
+        build_native_score_inputs(replace(
+            _bundle(),
+            metadata={"recipe": {"financial_diagnostics": {"fair": 1.0}}},
+        ))

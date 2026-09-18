@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Mapping
 
+from engine.v2.domain.generation import DISABLED, STRATEGIES
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     StageReceipt,
@@ -15,13 +16,21 @@ __all__ = ["SourceBundle", "build_native_score_inputs"]
 
 _ANSWER_FIELDS = frozenset({
     "legs", "selected_legs", "selected_contracts", "resolved_legs",
-    "entry_cost", "forecasts", "driver_prediction", "forecast_abs_move",
-    "runup_move_prediction", "pred_iv_crush", "pred_iv_crush_30",
-    "model_fair_pct", "exp_pnl_sim", "win_sim", "sim_p10", "sim_p90",
-    "pool_n", "gate_score", "gate_pass", "gate_decision",
-    "financial_diagnostics", "fair_premium_pct", "premium_vs_fair",
-    "cost_over_width", "terminal_payoff", "chooser_selection",
-    "validation_status", "readiness", "reason_codes",
+    "entry_cost", "structure_width", "model_artifact_ids", "forecasts",
+    "driver_prediction", "forecast_abs_move", "forecast_p10",
+    "forecast_p90", "forecast_sd", "runup_move_prediction",
+    "runup_move_raw_d14", "runup_move_raw_d14_p10",
+    "runup_move_raw_d14_p90", "runup_move_raw_d14_sd", "runup_move_p10",
+    "runup_move_p90", "runup_move_sd", "pred_iv_crush",
+    "pred_iv_crush_30", "model_fair_pct", "exp_pnl_sim", "win_sim",
+    "sim_p10", "sim_p90", "pool_n", "exp_pnl_analog", "win_analog",
+    "ci_low", "ci_high", "n_analogs", "gate_score", "gate_threshold",
+    "gate_pass", "gate_decision", "chooser_score", "chooser_candidates",
+    "chooser_selection", "chosen_strategy", "chosen_margin", "menu_size",
+    "financial_diagnostics", "entry_cost_pct", "model_vs_market",
+    "fair_premium_pct", "premium_vs_fair", "cost_over_width",
+    "terminal_payoff", "exp_pnl_model", "win_model", "resolved_request",
+    "validation_status", "readiness", "reason_codes", "warnings",
 })
 _FORECAST_OUTPUTS = frozenset({
     "driver_prediction", "forecast_abs_move", "runup_move_prediction",
@@ -38,11 +47,26 @@ _ANALOG_RECIPE_FIELDS = frozenset({
 _GATE_RECIPE_FIELDS = frozenset({
     "model", "threshold", "recipe_id", "artifact_ref", "artifact_hashes",
 })
+_SIZE_STRATEGIES = frozenset({
+    "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7",
+    "CTR5",
+})
+_STRATEGY_FORECAST_OUTPUTS = {
+    "STR-THRU": frozenset({"driver_prediction"}),
+    "STR-RUNUP": frozenset({
+        "driver_prediction", "runup_move_prediction",
+    }),
+    **{
+        strategy: frozenset({"forecast_abs_move"})
+        for strategy in _SIZE_STRATEGIES
+    },
+}
+_SUPPORTED_STRATEGIES = frozenset(_STRATEGY_FORECAST_OUTPUTS)
 
 
 @dataclass(frozen=True, kw_only=True)
 class SourceBundle:
-    """Source-only inputs for one bounded STR-THRU execution.
+    """Source-only inputs for one bounded native strategy execution.
 
     Recipes describe calculations. They do not carry calculated forecasts,
     selected contracts, prices, simulation summaries, or decisions.
@@ -64,8 +88,23 @@ class SourceBundle:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+def _answer_paths(value: Any, path: str) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            key_name = str(key)
+            child_path = f"{path}.{key_name}"
+            if key_name in _ANSWER_FIELDS:
+                found.append(child_path)
+            found.extend(_answer_paths(child, child_path))
+    elif isinstance(value, (tuple, list)):
+        for index, child in enumerate(value):
+            found.extend(_answer_paths(child, f"{path}[{index}]"))
+    return found
+
+
 def _reject_answers(name: str, values: Mapping[str, Any]) -> None:
-    forbidden = sorted(str(key) for key in values if str(key) in _ANSWER_FIELDS)
+    forbidden = sorted(_answer_paths(values, name))
     if forbidden:
         raise ValueError(f"{name} contains calculated answer fields: {forbidden}")
 
@@ -96,12 +135,17 @@ def _linear_recipe(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _forecast_block(bundle: SourceBundle) -> dict[str, Any]:
+def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     unknown = sorted(set(bundle.forecast_recipes) - _FORECAST_OUTPUTS)
     if unknown:
         raise ValueError(f"unsupported forecast recipe outputs: {unknown}")
-    if "driver_prediction" not in bundle.forecast_recipes:
-        raise ValueError("STR-THRU requires a driver_prediction recipe")
+    missing = sorted(
+        _STRATEGY_FORECAST_OUTPUTS[strategy] - set(bundle.forecast_recipes)
+    )
+    if missing:
+        raise ValueError(
+            f"{strategy} requires forecast recipes for: {missing}"
+        )
     missing_refs = sorted(
         set(bundle.forecast_recipes) - set(bundle.model_artifact_refs)
     )
@@ -168,6 +212,7 @@ def _gate_block(values: Mapping[str, Any]) -> dict[str, Any]:
 
 def _declaration_receipts(
     source_ref: str,
+    strategy: str,
     context: Mapping[str, Any],
     features: Mapping[str, Any],
     forecast: Mapping[str, Any],
@@ -181,7 +226,7 @@ def _declaration_receipts(
         ("resolve_context", {"source_ref": source_ref}, context),
         ("features", context, features),
         ("forecast", features, forecast),
-        ("geometry", {"strategy": "STR-THRU", "context": context}, pending),
+        ("geometry", {"strategy": strategy, "context": context}, pending),
         ("pricing", {"raw_quotes": quotes}, pending),
         ("analogs", {"recipe": analogs}, pending),
         ("simulation", {"recipe": simulation}, pending),
@@ -199,8 +244,17 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
         raise TypeError("source input builder requires SourceBundle")
     if not bundle.source_ref.strip():
         raise ValueError("source_ref must be non-empty")
-    if bundle.strategy != "STR-THRU":
-        raise ValueError("bounded source input builder supports STR-THRU only")
+    strategy = str(bundle.strategy)
+    if strategy not in _SUPPORTED_STRATEGIES:
+        if strategy in DISABLED:
+            detail = DISABLED[strategy]
+        elif strategy in STRATEGIES:
+            detail = "UNSUPPORTED_SOURCE_CONTRACT"
+        else:
+            detail = "UNKNOWN_STRATEGY"
+        raise ValueError(
+            f"source input builder does not support {strategy}: {detail}"
+        )
     for name, values in (
         ("context", bundle.context),
         ("feature_vector", bundle.feature_vector),
@@ -211,14 +265,14 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
         _reject_answers(name, values)
 
     quotes = _quote_block(bundle.raw_quotes)
-    context = {**dict(bundle.context), "strategy": bundle.strategy, "quotes": quotes}
+    context = {**dict(bundle.context), "strategy": strategy, "quotes": quotes}
     features = {
         "model_inputs": dict(bundle.feature_vector),
         "missing_mask": dict(bundle.feature_missing_mask),
         "model_identity": dict(bundle.model_identity),
         "source_metadata": dict(bundle.metadata),
     }
-    forecast = _forecast_block(bundle)
+    forecast = _forecast_block(bundle, strategy)
     simulation = _bounded_recipe(
         "residual_recipe", bundle.residual_recipe, _RESIDUAL_RECIPE_FIELDS,
     )
@@ -229,7 +283,7 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
     }
     gate = _gate_block(bundle.gate_recipe)
     receipts = _declaration_receipts(
-        bundle.source_ref, context, features, forecast, quotes,
+        bundle.source_ref, strategy, context, features, forecast, quotes,
         analogs, simulation, gate,
     )
     return NativeScoreInputs(
