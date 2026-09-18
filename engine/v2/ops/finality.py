@@ -38,12 +38,22 @@ def _legacy_compatibility(name, native):
 
 def _market_wide_complete(stamp: pd.Timestamp) -> bool:
     from engine.v2.ops import legacy_adapter
-    return legacy_adapter.finality_market_wide_complete(stamp)
+    # R3B-7 fix: honor the same explicitly-monkeypatched legacy seam as
+    # ``session_finality``/``resolve_final_session``/``covered_tickers``
+    # below, so a test that fakes ``engine.data.finality._market_wide_complete``
+    # (without also faking the public ``covered_tickers`` name) still reaches
+    # the native per-ticker computation with the fake data, instead of
+    # silently falling through to a real ORATS-cache read.
+    compatibility = _legacy_compatibility(
+        "_market_wide_complete", legacy_adapter.finality_market_wide_complete)
+    return compatibility(stamp)
 
 
 def _coverage_frame(table: str, column: str, stamp: pd.Timestamp):
     from engine.v2.ops import legacy_adapter
-    return legacy_adapter.finality_coverage_frame(table, column, stamp)
+    compatibility = _legacy_compatibility(
+        "_coverage_frame", legacy_adapter.finality_coverage_frame)
+    return compatibility(table, column, stamp)
 
 
 def _coverage_sets(table: str, column: str, stamp: pd.Timestamp,

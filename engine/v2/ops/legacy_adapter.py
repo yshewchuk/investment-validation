@@ -8,6 +8,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from engine.data.finality import _coverage_frame as _legacy_coverage_frame
+from engine.data.finality import _market_wide_complete as _legacy_market_wide_complete
 from engine.data.finality import covered_tickers as _legacy_covered_tickers
 from engine.data.finality import resolve_final_session as _legacy_resolve_final_session
 from engine.data.finality import session_finality as _legacy_session_finality
@@ -21,6 +23,19 @@ _LEGACY_FINALITY_ORIGINALS = {
     "session_finality": _legacy_session_finality,
     "resolve_final_session": _legacy_resolve_final_session,
     "covered_tickers": _legacy_covered_tickers,
+    # R3B-7 fix: the two private helpers ``session_finality``/``covered_tickers``
+    # actually read data through (below) need the SAME monkeypatch seam as the
+    # public names above. Before this, a test that patched only
+    # ``engine.data.finality._market_wide_complete``/``_coverage_frame`` (the
+    # realistic shape -- those are what a fixture patches to fake data without
+    # faking every public entry point) had no effect on the native v2 path:
+    # ``covered_tickers`` alone was untouched, so ``finality_compatibility``
+    # left it on the NATIVE implementation, which reads real ORATS cache /
+    # ``engine.data.store`` through ``finality_market_wide_complete``/
+    # ``finality_coverage_frame`` below -- both fail closed (empty/None) with
+    # no real data present, so every ticker came back uncovered.
+    "_market_wide_complete": _legacy_market_wide_complete,
+    "_coverage_frame": _legacy_coverage_frame,
 }
 
 __all__ = ["copy_read_set", "invoke_evaluate", "invoke_nightly_helper",
