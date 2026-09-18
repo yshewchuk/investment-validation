@@ -79,6 +79,67 @@ def _expiry(inputs: Mapping[str, Any]) -> str:
     return str(expiry)
 
 
+def _quote_contracts(inputs: Mapping[str, Any]) -> tuple[tuple[str, float, str], ...]:
+    """Return the raw contract keys available to a source-driven selector."""
+    quotes = inputs.get("quotes")
+    if not isinstance(quotes, Mapping):
+        return ()
+    contracts = []
+    for key in quotes:
+        if isinstance(key, tuple) and len(key) == 3:
+            right, strike, expiry = key
+        elif isinstance(key, str):
+            parts = key.split(":")
+            if len(parts) != 3:
+                continue
+            right, strike, expiry = parts
+        else:
+            continue
+        try:
+            right = str(right).upper()
+            strike = float(strike)
+            expiry = str(expiry)
+        except (TypeError, ValueError):
+            continue
+        if right in {"C", "P"} and isfinite(strike) and expiry:
+            contracts.append((right, strike, expiry))
+    return tuple(sorted(set(contracts), key=lambda row: (row[2], row[1], row[0])))
+
+
+def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[float, str] | None:
+    """Select a common listed strike and expiry from raw quote keys.
+
+    This is deliberately a geometry operation. It sees the available contract
+    domain and request dates, while pricing remains responsible for validating
+    and consuming the bid/ask values.
+    """
+    contracts = _quote_contracts(inputs)
+    common = {
+        (strike, expiry)
+        for right, strike, expiry in contracts
+        if right == "C"
+    } & {
+        (strike, expiry)
+        for right, strike, expiry in contracts
+        if right == "P"
+    }
+    if not common:
+        return None
+    target = inputs.get("expiry") or inputs.get("exit_date") or inputs.get("event_date")
+    if target is not None:
+        target = str(target)[:10]
+        after = sorted((strike, expiry) for strike, expiry in common
+                       if expiry[:10] >= target)
+        pool = after or sorted(common)
+    else:
+        pool = sorted(common)
+    strike, expiry = min(
+        pool,
+        key=lambda row: (abs(row[0] - spot), row[1], row[0]),
+    )
+    return strike, expiry
+
+
 def _resolved_width(legs: tuple[NativeLeg, ...]) -> float:
     """Derive the traded spacing from resolved contracts."""
     by_name = {leg.name: leg.strike for leg in legs}
@@ -123,7 +184,12 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
     width = _number(inputs.get("width", forecast / divisor / 100.0 * spot), "width")
     if width <= 0 and strategy not in {"STR-THRU", "STR-RUNUP"}:
         raise GeometryRefusal("ZERO_WIDTH")
-    expiry = _expiry(inputs)
+    selected = None
+    if strategy in {"STR-THRU", "STR-RUNUP"} and (
+        inputs.get("strike") is None or inputs.get("expiry") is None
+    ):
+        selected = _select_listed_straddle(inputs, spot)
+    expiry = str(selected[1]) if selected is not None else _expiry(inputs)
     resolved = inputs.get("resolved_legs")
     if resolved:
         legs = tuple(NativeLeg(
@@ -136,7 +202,11 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
         ) for index, leg in enumerate(resolved))
         return Geometry(strategy, spot, _resolved_width(legs), legs)
     if strategy in {"STR-THRU", "STR-RUNUP"}:
-        strike = _number(inputs.get("strike", spot), "strike")
+        strike = _number(
+            inputs.get("strike", spot) if inputs.get("strike") is not None
+            else selected[0] if selected is not None else spot,
+            "strike",
+        )
         legs = (NativeLeg("call", "C", "buy", 1.0, strike, expiry),
                 NativeLeg("put", "P", "buy", 1.0, strike, expiry))
     elif strategy == "CND-PS":

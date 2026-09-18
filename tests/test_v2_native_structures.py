@@ -62,6 +62,31 @@ def test_straddle_pricing_is_deterministic_and_fill_aware():
     assert price(geometry, quotes, 0.5) == mid
 
 
+def test_straddle_selects_common_listed_contract_from_raw_quote_domain():
+    quotes = {
+        ("C", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("P", 95.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("C", 105.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("P", 105.0, "2026-09-18"): {"bid": 1.0, "ask": 2.0},
+        ("C", 100.0, "2026-10-16"): {"bid": 2.0, "ask": 3.0},
+        ("P", 100.0, "2026-10-16"): {"bid": 2.0, "ask": 3.0},
+    }
+
+    geometry = generate(
+        "STR-THRU",
+        {
+            "spot": 101.0,
+            "forecast_abs_move": 8.0,
+            "event_date": "2026-09-16",
+            "exit_date": "2026-09-17",
+            "quotes": quotes,
+        },
+    )
+
+    assert {leg.strike for leg in geometry.legs} == {100.0}
+    assert {leg.expiry for leg in geometry.legs} == {"2026-10-16"}
+
+
 def test_missing_quote_is_a_truthful_refusal():
     geometry = generate("STR-THRU", _inputs())
     with pytest.raises(ValueError, match="MISSING_QUOTE"):
