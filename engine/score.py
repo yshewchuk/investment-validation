@@ -505,8 +505,30 @@ class Phase4TraceCollector:
             "seed": int(evidence["seed"]),
         })
 
-    def capture_analog_inputs(self, evidence: Mapping[str, Any]) -> None:
-        """Capture the causal analog population and executable bucket recipe."""
+    def capture_analog_inputs(
+        self, evidence: Mapping[str, Any], *, recipe_cache: dict | None = None,
+    ) -> None:
+        """Capture the causal analog population and executable bucket recipe.
+
+        ``recipe_cache`` is the trimmed-projection counterpart of
+        ``AnalogMatcher._documented_causal``/``_causal_pools`` — pass
+        ``scorer.matcher.phase4_recipe_cache`` (persists for the scoring
+        run, evicted in lockstep with the matcher's own causal caches).
+        ``causal["rows"]`` is already shared BY REFERENCE across every
+        candidate matching the same (strategy, alpha, as_of) bucket (see
+        `AnalogMatcher`'s own docstrings), but without this cache each
+        candidate still re-walked all of it — up to the FULL causal
+        population, not just the matched subset — into its own fresh
+        ``normalized_rows``/``population_hash``, and retained that copy for
+        the rest of the run. That per-candidate rebuild-and-retain, not the
+        (already-shared) causal block itself, was the measured driver of the
+        forward-pass RSS climb in a 40-forward-event strict capture: every
+        candidate reaches this method via `_score_analogs`. With the cache,
+        candidates sharing a (strategy, alpha, as_of) key share one
+        documented rows structure and one ``population_hash`` by reference;
+        ``None`` (the default) reproduces the prior always-rebuild behavior
+        exactly, byte for byte.
+        """
         causal = evidence.get("causal")
         query = evidence.get("bucket_query")
         if not isinstance(causal, Mapping) or not isinstance(query, Mapping):
@@ -520,39 +542,78 @@ class Phase4TraceCollector:
         legacy_widening_order = (
             "moneyness_band", "dte_band", "implied_tercile",
         )
-
-        source_rows = []
-        for row in raw_rows:
-            if not isinstance(row, Mapping):
-                continue
-            values = row.get("values")
-            if not isinstance(values, Mapping) or "row_id" not in row:
-                continue
-            source_rows.append({
-                "row_id": str(row["row_id"]),
-                **{
-                    name: values.get(name)
-                    for name in legacy_bucket_dimensions
-                },
-                "realized_return": values.get("ret"),
-            })
-        if not source_rows:
-            return
         alpha = float(evidence.get("alpha", 0.5))
         strategy = str(evidence.get("strategy", ""))
         snapshot = str(evidence.get("snapshot", ""))
         request_key = str(evidence.get("request_key", ""))
+
+        # `evidence["cutoff"]` is `_AnalogMatchEvidence`'s own isoformat
+        # string of the SAME normalized timestamp `AnalogMatcher.match`
+        # keys its `_causal_pools`/`_documented_causal`/eviction on
+        # (`pd.Timestamp(as_of).normalize()`). Reconstructing the Timestamp
+        # here — not keying on the string — is what makes `evicted` (a
+        # `(strategy, alpha, Timestamp)` tuple `AnalogMatcher` pops on
+        # eviction) actually match a key in THIS cache: `AnalogMatcher.pop`s
+        # `phase4_recipe_cache` in lockstep using its own Timestamp-keyed
+        # tuples, and a string third slot here would never compare equal to
+        # one, silently defeating that eviction.
+        cutoff = evidence.get("cutoff")
+        cache_key = (
+            (strategy, round(alpha, 4),
+             pd.Timestamp(cutoff) if cutoff is not None else None)
+            if recipe_cache is not None else None
+        )
+        cached = recipe_cache.get(cache_key) if cache_key is not None else None
+        if cached is not None:
+            population_hash, documented_rows = cached
+        else:
+            source_rows = []
+            for row in raw_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                values = row.get("values")
+                if not isinstance(values, Mapping) or "row_id" not in row:
+                    continue
+                source_rows.append({
+                    "row_id": str(row["row_id"]),
+                    **{
+                        name: values.get(name)
+                        for name in legacy_bucket_dimensions
+                    },
+                    "realized_return": values.get("ret"),
+                })
+            if not source_rows:
+                if cache_key is not None:
+                    recipe_cache[cache_key] = (None, ())
+                return
+            normalized_rows = tuple(sorted(
+                source_rows, key=lambda row: row["row_id"],
+            ))
+            # Hashed on the RAW rows (matching the original, uncached
+            # computation exactly) -- `content_hash`'s own canonicalization
+            # handles sanitization for hashing, independent of `_document`.
+            population_hash = self._hash({
+                "schema_version": "legacy_bucket_analog_population.v1.0",
+                "bucket_dimensions": legacy_bucket_dimensions,
+                "rows": normalized_rows,
+            })
+            # `_document` runs exactly ONCE per (strategy, alpha, as_of) key
+            # here -- not once per candidate -- so the NaN/Inf/numpy-scalar
+            # sanitizing pass it does is still applied, byte for byte; only
+            # the redundant re-application across candidates sharing this key
+            # is removed. Caching the RAW `normalized_rows` instead and
+            # deferring `_document` per candidate would reproduce the exact
+            # retention bug this fixes; caching the undocumented rows without
+            # ever documenting them would silently skip that sanitizing pass.
+            documented_rows = self._document(normalized_rows)
+            if cache_key is not None:
+                recipe_cache[cache_key] = (population_hash, documented_rows)
+        if not documented_rows:
+            return
+
         buckets = {
             name: query.get(name) for name in legacy_bucket_dimensions
         }
-        normalized_rows = tuple(sorted(
-            source_rows, key=lambda row: row["row_id"],
-        ))
-        population_hash = self._hash({
-            "schema_version": "legacy_bucket_analog_population.v1.0",
-            "bucket_dimensions": legacy_bucket_dimensions,
-            "rows": normalized_rows,
-        })
         seed_payload = "|".join(
             [
                 snapshot, strategy, f"{alpha:.4f}", request_key,
@@ -574,7 +635,15 @@ class Phase4TraceCollector:
                 "ci_quantiles": [0.05, 0.95],
                 "population_hash": population_hash,
             },
-            "source_rows": self._document(normalized_rows),
+            # `documented_rows` is already the output of `_document` (run
+            # once above, cached, and shared by reference across every
+            # candidate that hits the cache); `_Predocumented` stops the
+            # LATER unconditional `_document` passes in `_checkpoint`'s
+            # sanitizing walk and `capture_source_bundle` from re-copying it
+            # into a fresh per-candidate structure, exactly like
+            # `capture_simulation`'s `residuals` field does for the residual
+            # population.
+            "source_rows": _Predocumented(documented_rows),
             "query_features": self._document(buckets),
         }
 
@@ -1515,7 +1584,9 @@ class Scorer:
         if trace is not None:
             evidence = getattr(result, "_phase4_analog_evidence", None)
             if evidence is not None:
-                trace.capture_analog_inputs(evidence)
+                trace.capture_analog_inputs(
+                    evidence, recipe_cache=self.matcher.phase4_recipe_cache,
+                )
         self._trace_phase4(
             trace,
             "analogs",
