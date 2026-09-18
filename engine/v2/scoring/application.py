@@ -492,8 +492,13 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
     return forecast
 
 
-def _frozen_gate_inputs(base, fields, bindings, gate_result,
+def _frozen_gate_inputs(base, bindings, gate_result,
                         artifact_hashes, inference, release):
+    # gate_threshold is answer-bearing (engine/v2/scoring/source_inputs.py
+    # _ANSWER_FIELDS). The frozen/acceptance path takes it only from the
+    # source-built NativeScoreInputs (base.gate) already folded into `gate`
+    # below -- never from a caller-supplied fields mapping, which may carry
+    # the legacy answer this run is being compared against.
     gate = dict(base.gate)
     if gate_result is not None:
         result, _ = gate_result
@@ -502,7 +507,6 @@ def _frozen_gate_inputs(base, fields, bindings, gate_result,
             gate.update({
                 "frozen_score": row[0][0],
                 "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
-                "threshold": fields.get("gate_threshold", gate.get("threshold")),
             })
     if inference is not None:
         gate_bindings = [binding for binding in bindings
@@ -532,12 +536,26 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
                           inference_requests, request, release,
                           inference=None) -> NativeScoreInputs:
     supplied = fields.get("_native_inputs")
-    if isinstance(supplied, NativeScoreInputs):
-        base = supplied
-    else:
-        raw = {key: value for key, value in fields.items()
-               if key not in {"_native_inputs", "scorer"}}
-        base = NativeScoreInputs.from_legacy_fields(raw)
+    if not isinstance(supplied, NativeScoreInputs):
+        # score_frozen is the acceptance/frozen path: its native inputs must
+        # come from source material (SourceBundle / build_native_score_inputs,
+        # or an explicitly assembled NativeScoreInputs), never be reconstructed
+        # from the legacy fields a parity run is comparing against. Matches
+        # the score_one contract at application.py:627 ("score_one requires
+        # NativeScoreInputs; use the explicit legacy adapter for
+        # comparisons"): NativeScoreInputs.from_legacy_fields remains for
+        # non-acceptance legacy callers (e.g. checks/phase4_real.py's
+        # _native() helper feeding score_one/score_many directly), but is
+        # unreachable from this function.
+        offending = sorted(key for key in fields if key not in {"_native_inputs", "scorer"})
+        raise TypeError(
+            "score_frozen requires fields['_native_inputs'] as a NativeScoreInputs "
+            "built from source material; refusing to source frozen/acceptance "
+            f"inputs from legacy answer fields {offending}; build inputs via "
+            "SourceBundle/build_native_score_inputs (or assemble NativeScoreInputs "
+            "explicitly) and pass it as fields['_native_inputs']"
+        )
+    base = supplied
     context_names = ("ticker", "strategy", "event_date",
                      "entry_date", "exit_date", "expiry",
                      "spot", "session", "as_of")
@@ -566,7 +584,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
         results, inference, release, days,
     )
     gate = _frozen_gate_inputs(
-        base, fields, bindings, gate_result, artifact_hashes, inference, release,
+        base, bindings, gate_result, artifact_hashes, inference, release,
     )
     return replace(
         base,

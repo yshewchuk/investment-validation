@@ -220,11 +220,15 @@ def test_frozen_inference_preserves_refusals_roles_and_verified_artifacts():
                 reason_codes=(), detail=None,
             )
 
+    # Native inputs are built explicitly here (the legitimate non-acceptance
+    # use of NativeScoreInputs.from_legacy_fields) rather than reconstructed
+    # implicitly inside score_frozen from a caller's legacy answer fields.
+    raw = {"spot": 100.0, "implied_move": 6.0, "driver_name": "abs_move",
+           "driver_prediction": 0.77, "forecast_abs_move": 9.0,
+           "flags": ("UNVALIDATED_STRUCTURE",), "model_inputs": {}}
     record = application.score_frozen(
         _request(), Frozen(), release, inference_request,
-        {"spot": 100.0, "implied_move": 6.0, "driver_name": "abs_move",
-         "driver_prediction": 0.77, "forecast_abs_move": 9.0,
-         "flags": ("UNVALIDATED_STRUCTURE",), "model_inputs": {}},
+        {"_native_inputs": NativeScoreInputs.from_legacy_fields(raw)},
     )
 
     assert record.forecasts["forecast_abs_move"] == pytest.approx(0.42)
