@@ -41,7 +41,7 @@ _QUOTES = {
 
 
 def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
-           quotes=None) -> NativeScoreInputs:
+           quotes=None, diagnostics=None, simulation=None) -> NativeScoreInputs:
     context = {
         "ticker": "AAA",
         "strategy": "STR-THRU",
@@ -65,10 +65,10 @@ def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
         geometry=None,
         pricing=None,
         analogs={"recipe": None},
-        simulation={"mode": "not_applicable"},
+        simulation=simulation if simulation is not None else {"mode": "not_applicable"},
         gate=gate if gate is not None else {"mode": "not_applicable"},
         chooser={},
-        diagnostics={},
+        diagnostics=diagnostics if diagnostics is not None else {},
         source_ref="actionable-flags-fixture",
         stage_receipts=_RECEIPTS,
     )
@@ -191,3 +191,29 @@ def test_out_of_domain_alone_refuses():
     assert record.validation_status == "refused"
     assert record.readiness == "refused"
     assert record.reason_codes == ("OUT_OF_DOMAIN",)
+
+
+# -- Advisory-vs-refusal taxonomy: both directions, at the full-row level --
+# (application.score_one, not just assemble_native_values) -- proving the
+# row's validation_status/readiness, not merely the flags list, respects
+# the taxonomy in engine/v2/scoring/stages.py's ADVISORY_FLAGS.
+
+def test_row_carrying_only_an_advisory_flag_still_scores():
+    inputs = _inputs(
+        diagnostics={"flags": ("CHOOSER_MISSING_FEATURES",)},
+        simulation={"mode": "not_applicable"},
+    )
+    record = application.score_one(_request(), inputs)
+
+    assert record.reason_codes == ("CHOOSER_MISSING_FEATURES",)
+    assert record.validation_status == "scored"
+    assert record.readiness == "ready"
+
+
+def test_row_carrying_a_refusal_code_is_refused():
+    inputs = _inputs(diagnostics={"flags": ("NO_CHAIN",)})
+    record = application.score_one(_request(), inputs)
+
+    assert "NO_CHAIN" in record.reason_codes
+    assert record.validation_status == "refused"
+    assert record.readiness == "refused"

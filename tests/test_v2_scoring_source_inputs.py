@@ -150,9 +150,11 @@ def test_native_scoring_runs_from_source_inputs():
 
     assert record.validation_status == "scored"
     assert record.readiness == "ready"
-    # WIDE_MARKET is a legitimate annotation on this fixture's bid=1/ask=3
-    # quotes (R4-9 follow-up): it no longer refuses, but it still appears in
-    # reason_codes.
+    # WIDE_MARKET is a real, correctly-derived flag: the fixture's
+    # bid=1.0/ask=3.0 quote is genuinely wide by WIDE_MARKET_RATIO=0.5. It
+    # is advisory (engine/fills.py:150 `FillModel.is_wide`; corpus evidence
+    # in engine/v2/scoring/stages.py's ADVISORY_FLAGS), so it annotates
+    # this row without refusing it.
     assert record.reason_codes == ("WIDE_MARKET",)
     assert record.forecasts["driver_prediction"] == pytest.approx(7.0)
     assert record.resolved_request["entry_cost"] == pytest.approx(4.0)

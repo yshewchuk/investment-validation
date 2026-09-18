@@ -5,7 +5,7 @@ import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite, log
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import numpy as np
 from scipy.stats import norm
@@ -178,6 +178,81 @@ _SIM_MIN_SPOT_FRACTION = 1e-4
 ATM_TOLERANCE_PCT = 2.0     # engine/score.py:204
 WIDE_MARKET_RATIO = 0.5     # engine/fills.py:25
 GATE_MCAP_FLOOR = 1e9       # engine/score.py:199
+
+# -- Advisory-vs-refusal flag taxonomy ---------------------------------------
+# Whether a reason code the scorer emits merely ANNOTATES a row that still
+# carries a score, or WITHHOLDS the row's own numbers (a refusal). Legacy
+# (engine/score.py) distinguishes these; the native path did not, so any
+# single flag refused the whole row regardless of what it meant. See
+# application.py's row_status, the one place this taxonomy is consulted.
+#
+# This is a closed allow-list, not a denial-list: every code below is
+# ADVISORY because legacy evidence says so; every other code -- including
+# every native-only engineering-invariant code emitted elsewhere in this
+# module (the `INVALID_*`, `UNOWNED_*`, `UNKNOWN_*`, `NONFINITE_*`,
+# `UNSUPPORTED_*`, `INSUFFICIENT_*` and most `MISSING_*` codes below, none of
+# which have a legacy counterpart or corpus evidence) -- refuses by omission.
+# That is the conservative default the task requires, not an oversight.
+#
+# Evidence is measured from the frozen corpus (fixtures/tier0/*/pairs/*.json,
+# 58 records, 52 carrying flags; "scored" = legacy's own
+# `ScoreResult.scored` property, `exp_pnl_model is not None or
+# exp_pnl_analog is not None`) plus the cited engine/score.py source lines.
+ADVISORY_FLAGS = frozenset({
+    # engine/score.py:1337 (`calendar.is_projected`) -- a raw calendar fact
+    # about the resolved exit date vs the observed-through horizon, not a
+    # data defect. Corpus: 33 seen / 27 scored (21 by the task's own count).
+    "PROJECTED_CALENDAR",
+    # engine/score.py:1687 -- an older chain substituted for the requested
+    # date (`_fresh_quote_date`). Corpus: 28 seen / 25 scored (21 by the
+    # task's own count).
+    "STALE_QUOTE",
+    # engine/fills.py:150 `FillModel.is_wide` -- a fill-quality note on a
+    # leg that already priced, not a pricing failure. Corpus: 22 seen /
+    # 19 scored.
+    "WIDE_MARKET",
+    # engine/score.py:1803-1807 -- moneyness vs ATM tolerance; the strike
+    # resolved and priced, it is simply away from the money. Corpus:
+    # 10 seen / 7 scored (6 by the task's own count).
+    "EXTRAPOLATED",
+    # engine/score.py:3082-3085; engine/SCORING.md states the design intent
+    # outright: "the result carries LAYER_DISAGREE and both numbers
+    # survive." Corpus: 2 seen / 2 scored.
+    "LAYER_DISAGREE",
+    # engine/score.py:3178, with the FLAGS docstring at :159-166 stating
+    # outright: "the row is fully scored and priced; only the champion
+    # ranking is absent" -- deliberately distinguished there from
+    # MISSING_FEATURES, which withholds the row's own numbers. Corpus:
+    # 20 seen / 20 scored.
+    "CHOOSER_MISSING_FEATURES",
+    # engine/score.py:2079/2191/2366 -- fires inside `_score_model` /
+    # `_score_runup_model` and returns early, but `Scorer.score` (:1448,
+    # :1464) calls `_score_analogs` UNCONDITIONALLY afterward regardless:
+    # the analog layer is independent and still sets `exp_pnl_analog`.
+    # Corpus: 35 seen / 29 scored (via the analog layer) -- legacy
+    # demonstrably still scores most rows carrying it.
+    "NO_PAYOFF_MAP",
+    # engine/analogs.py:600 -- `thin = returns.size < MIN_ANALOGS` is set
+    # ALONGSIDE, not instead of, the real mean/median/win_rate for any
+    # nonzero analog count; comment there: "thin is reported instead and
+    # the dashboard renders it as low-confidence." Only the degenerate
+    # zero-analog case (`_empty()`, analogs.py:207) withholds a value, and
+    # that path stamps `thin=True` too -- the corpus's 6 THIN_ANALOGS
+    # occurrences all land on that zero-analog edge case (0 scored there),
+    # which is not representative of the flag's general, designed
+    # behaviour; classified advisory on the source-code evidence.
+    "THIN_ANALOGS",
+})
+
+
+def flags_refuse(flags: Iterable[str]) -> bool:
+    """True if any of ``flags`` withholds the row's own score.
+
+    Every code not in :data:`ADVISORY_FLAGS` refuses -- an unclassified or
+    native-only engineering code is conservative-refused by omission, never
+    advisory by accident.
+    """
+    return any(flag not in ADVISORY_FLAGS for flag in flags)
 
 
 def _merge_stage(values: dict[str, Any], block: Mapping[str, Any]) -> None:
@@ -1176,7 +1251,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
 
 
 __all__ = [
-    "NativeScoreInputs", "STAGE_NAMES", "StageObservation", "StageObserver",
-    "StageReceipt",
-    "assemble_native_values", "receipt",
+    "ADVISORY_FLAGS", "NativeScoreInputs", "STAGE_NAMES", "StageObservation",
+    "StageObserver", "StageReceipt",
+    "assemble_native_values", "flags_refuse", "receipt",
 ]
