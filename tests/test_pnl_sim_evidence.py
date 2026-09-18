@@ -65,6 +65,49 @@ def test_evidence_rows_reject_unknown_selection_index() -> None:
         ResidualPool(_history(300)).evidence_rows([300])
 
 
+def test_documented_population_is_cached_by_cutoff_index() -> None:
+    """The retention fix: two requests at the SAME cutoff share one list."""
+    pool = ResidualPool(_history(600))
+
+    first = pool.documented_population(300)
+    second = pool.documented_population(300)
+    other = pool.documented_population(299)
+
+    assert first is second
+    assert first is not other
+    assert len(first) == 300
+    assert first[0] == {
+        "event_date": pd.Timestamp("2020-01-01").isoformat(),
+        "pred_abs_move": 2.0,
+        "err_move": -1.5,
+        "err_crush": 5.0,
+    }
+    # Plain dicts (not the read-only row cache's mapping view): this is what
+    # the checkpoint sink's JSON writer requires.
+    assert type(first[0]) is dict
+
+
+def test_evidence_rows_are_read_only_and_shared_across_calls() -> None:
+    """Rows are cached and reused by reference (the OOM fix); a caller must
+    not be able to mutate them, because that would corrupt every OTHER
+    request's checkpoint sharing the same pool."""
+    pool = ResidualPool(_history(50))
+
+    first = pool.evidence_rows([3])
+    try:
+        first[0]["err_move"] = 999.0
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("expected a read-only row to reject mutation")
+
+    # The cache is unaffected by the attempted (and rejected) mutation, and
+    # the SAME row objects are handed back on a later call.
+    second = pool.evidence_rows([3])
+    assert second[0]["err_move"] == first[0]["err_move"]
+    assert second[0] is first[0]
+
+
 def test_draw_evidence_records_bucket_fallback_population() -> None:
     pool = ResidualPool(_history(300), buckets=10)
     evidence: dict = {}
