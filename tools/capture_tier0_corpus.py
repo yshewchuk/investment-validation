@@ -109,6 +109,22 @@ MODEL_ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate", "chooser"
 #: ``ScoreRequest`` fields serialized as dates.
 _DATE_FIELDS = frozenset({"as_of", "event_date", "expiry", "chain_as_of"})
 
+#: Strategies whose native scoring path (``engine.v2.scoring.stages``'
+#: ``_STRATEGY_FORECAST_ROLES`` and ``engine.v2.scoring.source_inputs``'
+#: ``_SUPPORTED_STRATEGIES``) can reconstruct an executable recipe from
+#: source-owned captured inputs alone: STR-THRU, STR-RUNUP, and the seven
+#: DYN-SV menu strategies. This used to be narrower (STR-THRU/STR-RUNUP only)
+#: when this capture tool was first written; R4-6 extended native scoring's
+#: bucket-analog recipe to the menu strategies, but this constant was never
+#: widened to match. Disabled strategies (CAL-P, CND-P — research-only, no
+#: production gate) are excluded: their rows are captured as a different
+#: fixture kind (``research_replay``), never ``score_result``, so they never
+#: reach strict probing in the first place. The DYN-SV chooser meta-strategy
+#: is excluded the same way (``dyn_sv_choice`` kind).
+STRICT_TRACE_SUPPORTED_STRATEGIES = (
+    frozenset(STRUCTURES) - frozenset(score_mod.DISABLED_STRATEGIES)
+)
+
 
 class StrictTraceCaptureError(ValueError):
     """A legacy capture lacks source-owned inputs needed for native replay."""
@@ -211,9 +227,10 @@ def canonical_v2_request(candidate: Mapping[str, Any], snapshot: str) -> V2Score
     if not isinstance(raw, Mapping):
         raw = request_to_dict(raw)
     legacy = request_from_dict(dict(raw))
-    if legacy.strategy not in {"STR-THRU", "STR-RUNUP"}:
+    if legacy.strategy not in STRICT_TRACE_SUPPORTED_STRATEGIES:
         raise StrictTraceCaptureError(
-            f"strict probe does not support {legacy.strategy}"
+            f"strict probe does not support {legacy.strategy} "
+            f"(supported: {sorted(STRICT_TRACE_SUPPORTED_STRATEGIES)})"
         )
     decision = legacy.as_of if legacy.as_of is not None else legacy.chain_as_of
     if decision is None:
@@ -605,6 +622,7 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
               legacy_trace: dict | None = None,
               input_trace: dict | None = None,
               legacy_input_hash: str | None = None,
+              strict_trace_gap: str | None = None,
               relations: dict | None = None, notes: str = "") -> dict:
     payload: dict[str, Any] = {"request": request, "record": record,
                                "record_kind": record_kind}
@@ -615,6 +633,17 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
         # incomplete trace cannot be mistaken for a completed one.
         payload["legacy_trace"] = legacy_trace
         payload["trace_disposition"] = "incomplete"
+    if strict_trace_gap is not None:
+        if input_trace is not None:
+            raise StrictTraceCaptureError(
+                "a pair cannot carry both a verified input_trace and a "
+                "strict_trace_gap"
+            )
+        # Strict tracing was attempted for this row and could not produce an
+        # honest trace. The typed reason is recorded verbatim, never
+        # replaced by a fabricated trace and never silently dropped.
+        payload["trace_disposition"] = "gap"
+        payload["strict_trace_gap"] = strict_trace_gap
     if input_trace is not None:
         if legacy_input_hash != input_trace.get("shared_input_hash"):
             raise StrictTraceCaptureError("strict trace legacy input hash mismatch")
@@ -1087,22 +1116,27 @@ def _fixture_id(cand: dict, i: int) -> str:
     return f"{i:03d}_{stem}_{digest}".replace("/", "-").replace(" ", "")
 
 
-def attach_strict_probe(chosen: list[dict], snapshot: str,
-                        strategy: str, release_root: Path) -> tuple[str, ...]:
-    """Attach strict traces for every selected score row of ``strategy``.
+def attach_strict_probe(
+    chosen: list[dict], snapshot: str, release_root: Path,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Attach a strict native trace to every eligible selected score row.
 
-    A single probe can validate the wiring, but it cannot establish saved
-    release parity. Keep the strategy restriction for now while ensuring the
-    selected population is executed independently row by row.
+    Every ``score_result`` candidate is executed independently, row by row.
+    A row that cannot produce an honest trace (unsupported strategy, a
+    missing or hash-mismatched checkpoint, an unresolvable feature or
+    binding, ...) is never fabricated and never allowed to abort rows that
+    DID assemble cleanly: its typed reason is recorded in the returned
+    ``gaps`` map (fixture_id -> reason) instead, and the caller persists it
+    on that pair as ``trace_disposition: "gap"``. The whole capture only
+    refuses when NOT ONE row produced a verified trace — that is a wiring
+    failure (nothing works at all), not a per-case gap.
     """
-    failures = []
+    gaps: dict[str, str] = {}
     attached = []
     for candidate in chosen:
-        if (
-            candidate.get("kind") != "score_result"
-            or candidate.get("record", {}).get("strategy") != strategy
-        ):
+        if candidate.get("kind") != "score_result":
             continue
+        fixture_id = str(candidate.get("fixture_id", "candidate"))
         try:
             request = canonical_v2_request(candidate, snapshot)
             source = _checkpoint_value(candidate, "source_inputs")
@@ -1143,23 +1177,20 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
                 frozen_runtime=runtime,
             )
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
-            failures.append(f"{candidate.get('fixture_id', 'candidate')}: {exc}")
+            gaps[fixture_id] = str(exc)
             continue
         candidate["request"] = to_document(request)
         candidate["input_trace"] = trace
         candidate["legacy_input_hash"] = trace["shared_input_hash"]
         candidate["native_score_id"] = native.score_id
-        attached.append(str(candidate["fixture_id"]))
+        attached.append(fixture_id)
     if not attached:
-        detail = "; ".join(failures[:3]) if failures else "no selected candidate"
+        detail = "; ".join(f"{k}: {v}" for k, v in list(gaps.items())[:3])
+        detail = detail or "no score_result candidate was selected"
         raise StrictTraceCaptureError(
-            f"no honest strict {strategy} trace could be assembled: {detail}"
+            f"no honest strict trace could be assembled for any candidate: {detail}"
         )
-    if failures:
-        raise StrictTraceCaptureError(
-            f"strict {strategy} population has unsupported rows: {'; '.join(failures[:3])}"
-        )
-    return tuple(attached)
+    return tuple(attached), gaps
 
 
 # --------------------------------------------------------------------------
@@ -1176,7 +1207,7 @@ def _publish_current(root: Path, version: str) -> None:
 
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
           as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False,
-          strict_strategy: str | None = None) -> dict:
+          strict_trace: bool = False) -> dict:
     """Publish one immutable version directory, atomically.
 
     The version is built under a temporary sibling and published with one
@@ -1193,11 +1224,16 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         shutil.rmtree(tmp)
     pairs_dir = tmp / "pairs"
     pairs_dir.mkdir(parents=True)
-    if strict_strategy is not None:
-        strict_ids = attach_strict_probe(
-            chosen, snapshot, strict_strategy, tmp,
-        )
-        print(f"[corpus] strict Phase 4 traces: {', '.join(strict_ids)}", flush=True)
+    strict_gaps: dict[str, str] = {}
+    if strict_trace:
+        strict_ids, strict_gaps = attach_strict_probe(chosen, snapshot, tmp)
+        print(f"[corpus] strict Phase 4 traces: {len(strict_ids)} attached "
+              f"({', '.join(strict_ids)})", flush=True)
+        if strict_gaps:
+            print(f"[corpus] strict Phase 4 trace gaps (recorded, never "
+                  f"faked): {len(strict_gaps)}", flush=True)
+            for fixture_id, reason in strict_gaps.items():
+                print(f"    {fixture_id}: {reason}", flush=True)
     checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
 
     manifest_pairs = {}
@@ -1208,6 +1244,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             legacy_trace=cand.get("legacy_trace"),
             input_trace=cand.get("input_trace"),
             legacy_input_hash=cand.get("legacy_input_hash"),
+            strict_trace_gap=strict_gaps.get(str(cand["fixture_id"])),
             relations=cand.get("relations"),
         )
         text = json.dumps(pair, indent=2, sort_keys=True) + "\n"
@@ -1288,22 +1325,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     ap.add_argument(
         "--strict-phase4-trace", action="store_true",
-        help="capture one strict native trace through frozen resources",
+        help="attach a verified native input_trace to every captured "
+             f"score_result row whose strategy currently supports one "
+             f"({', '.join(sorted(STRICT_TRACE_SUPPORTED_STRATEGIES))}); a "
+             "row that cannot is recorded with a typed gap, never faked",
     )
     args = ap.parse_args(list(argv) if argv is not None else None)
     try:
         strategies = parse_strategies(args.strategies)
     except StrictTraceCaptureError as exc:
         ap.error(str(exc))
-    if args.strict_phase4_trace and (
-        strategies is None
-        or len(strategies) != 1
-        or strategies[0] not in {"STR-THRU", "STR-RUNUP"}
-    ):
-        ap.error(
-            "--strict-phase4-trace requires --strategies STR-THRU "
-            "or --strategies STR-RUNUP"
-        )
     as_of = (pd.Timestamp(args.as_of).normalize() if args.as_of
              else pd.Timestamp.today().normalize())
     started = time.time()
@@ -1342,7 +1373,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     doc = write(
         out_dir, chosen, index, as_of, scorer.snapshot,
         replace_existing=args.replace,
-        strict_strategy=strategies[0] if args.strict_phase4_trace else None,
+        strict_trace=args.strict_phase4_trace,
     )
     if not args.out and out_dir.parent == DEFAULT_OUT:
         _publish_current(DEFAULT_OUT, out_dir.name)
