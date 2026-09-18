@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Callable
 
 import numpy as np
@@ -238,6 +239,35 @@ def _json_value(value):
     return value
 
 
+def _freeze(value):
+    """Recursively lock a ``_json_value`` structure against in-place mutation.
+
+    Only ever applied to output that is already dict/list/scalar (that is
+    what ``_json_value`` produces — it never emits a bare tuple), so the
+    mapping is exact: ``dict`` -> ``MappingProxyType``, ``list`` -> ``tuple``.
+    Used for the one row cache that every documented block (population, the
+    causal pool, every widening step) is built FROM and that persists for the
+    matcher's whole life, shared across every candidate that reuses a bucket
+    — corrupting it in place would corrupt every OTHER candidate's evidence
+    silently. Paired with :func:`_thaw` at the point a caller needs an
+    independent, JSON-``dumps``-able copy back.
+    """
+    if isinstance(value, dict):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+def _thaw(value):
+    """Invert :func:`_freeze`: a fresh, independent, mutable copy."""
+    if isinstance(value, MappingProxyType):
+        return {k: _thaw(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(v) for v in value]
+    return value
+
+
 def _evidence_rows(
     frame: pd.DataFrame, *, cache: dict[Any, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -246,18 +276,29 @@ def _evidence_rows(
     ``cache``, keyed by each row's pandas index, is optional and lets several
     calls whose frames are nested/overlapping VIEWS of the same underlying
     trade population — as ``match()``'s population, causal pool, and every
-    widening step are — share one row's ``(digest, values)`` instead of each
-    rebuilding it. Without it, a wide bucket that widens through several
-    steps re-runs ``to_dict`` + ``json.dumps`` + ``sha256`` on the SAME rows
-    once per step and retains an independent nested-dict copy of each row per
-    call; measured on a 50k-row population widening to a 3,714-row match,
-    that duplication is what turns a ~450 MB traced peak into a >1 GB RSS
-    spike inside `AnalogMatcher.match` — big enough, on a process already
-    resident at several GB, to exhaust an address-space cap before
-    `_summarize`'s own (much smaller) bootstrap array can allocate. The digest
-    and ``row_id`` numbering are unaffected: ``occurrence`` counting stays
-    local to this call, so identical frames still produce byte-identical
-    output whether or not a cache is supplied.
+    widening step are, AND as several match() calls for different candidates
+    that happen to share a (strategy, alpha[, as_of]) bucket are — share one
+    row's ``(digest, values)`` instead of each rebuilding it. Without it, a
+    wide bucket that widens through several steps re-runs ``to_dict`` +
+    ``json.dumps`` + ``sha256`` on the SAME rows once per step and retains an
+    independent nested-dict copy of each row per call; measured on a 50k-row
+    population widening to a 3,714-row match, that duplication is what turns
+    a ~450 MB traced peak into a >1 GB RSS spike inside `AnalogMatcher.match`
+    — big enough, on a process already resident at several GB, to exhaust an
+    address-space cap before `_summarize`'s own (much smaller) bootstrap
+    array can allocate. The digest and ``row_id`` numbering are unaffected:
+    ``occurrence`` counting stays local to this call, so identical frames
+    still produce byte-identical output whether or not a cache is supplied.
+
+    A cache passed by ``AnalogMatcher`` persists for the matcher's whole
+    life, so it is shared across DIFFERENT ``match()`` calls too — a strict
+    capture run rescores the same boundary event's pinned/strike/coarse-ladder
+    variants, which usually share a bucket. Each cache entry's ``values`` is
+    therefore stored `_freeze`-locked (read-only, recursively): mutating it in
+    place would silently corrupt every OTHER candidate that reused it, not
+    just the caller's own copy. Every row this function RETURNS still gets an
+    independent, ordinary, mutable, directly ``json.dumps``-able dict/list
+    (via `_thaw`) — the lock protects the shared cache, not the caller.
     """
     row_cache: dict[Any, dict[str, Any]] = {} if cache is None else cache
 
@@ -274,7 +315,7 @@ def _evidence_rows(
         return {
             "digest": digest,
             "source_index": identity_payload["source_index"],
-            "values": values,
+            "values": _freeze(values),
         }
 
     # `.iterrows()` boxes every column of every row into a fresh Series (a
@@ -307,12 +348,47 @@ def _evidence_rows(
         rows.append({
             "row_id": row_id,
             "source_index": cached["source_index"],
-            "values": cached["values"],
+            "values": _thaw(cached["values"]),
         })
     return {
         "row_ids": [row["row_id"] for row in rows],
         "rows": rows,
     }
+
+
+def _documented(
+    frame: pd.DataFrame, *, row_cache: dict[Any, dict[str, Any]],
+    doc_cache: dict[Any, dict[str, Any]] | None, doc_key: Any,
+) -> dict[str, Any]:
+    """``_evidence_rows(frame)``, shared by reference across every candidate
+    that passes the same ``doc_key`` on the same ``doc_cache``.
+
+    A strict-trace capture rescores one boundary event's pinned/strike/
+    coarse-ladder variants many times, and they usually share a
+    (strategy, alpha[, as_of]) bucket — so without this, the SAME population
+    or causal pool gets re-documented (fresh `_evidence_rows` output,
+    independently retained) once per candidate, for the life of the run.
+    ``doc_cache`` (owned by :class:`AnalogMatcher`, keyed the same way as its
+    own ``_pools``/``_causal_pools``) makes candidates sharing a key reuse the
+    identical output object instead.
+
+    Unlike the row-level cache inside `_evidence_rows`, this level is a plain
+    (mutable) dict, not `_freeze`-locked: the checkpoint sink's JSON writer
+    needs an actual dict, matching `engine.pnl_sim.ResidualPool
+    .documented_population`'s identical choice. Safety here rests on an
+    audit, not enforcement — every consumer of an analog evidence document
+    (`engine.score.Phase4TraceCollector.capture_analog_inputs`, `.record`,
+    and every test) only reads `population`/`causal` via `.get`; none mutates
+    a row in place. `doc_key=None` opts out of sharing (used when the caller
+    has no natural cache key), falling back to always rebuilding.
+    """
+    if doc_key is None or doc_cache is None:
+        return _evidence_rows(frame, cache=row_cache)
+    cached = doc_cache.get(doc_key)
+    if cached is None:
+        cached = _evidence_rows(frame, cache=row_cache)
+        doc_cache[doc_key] = cached
+    return cached
 
 
 class _AnalogMatchEvidence:
@@ -329,6 +405,10 @@ class _AnalogMatchEvidence:
         request_key: str,
         bucket_query: dict,
         population: pd.DataFrame,
+        row_cache: dict[Any, dict[str, Any]] | None = None,
+        documented_pools: dict[Any, dict[str, Any]] | None = None,
+        population_key: Any = None,
+        documented_causal: dict[Any, dict[str, Any]] | None = None,
     ):
         self.hook = hook
         self.strategy = strategy
@@ -339,15 +419,19 @@ class _AnalogMatchEvidence:
         )
         self.request_key = request_key
         self.bucket_query = _json_value(bucket_query)
-        # Shared across every _evidence_rows call this instance makes.
-        # Population, the causal pool and each widening step's `matched` are
-        # nested/overlapping views of the SAME underlying trades frame (a
-        # widened step is always a superset of the narrower ones before it),
-        # so without this cache the same rows get re-serialized and
-        # independently retained once per call — see _evidence_rows'
-        # docstring for the measured effect on a large bucket.
-        self._row_cache: dict[Any, dict[str, Any]] = {}
-        self.population = _evidence_rows(population, cache=self._row_cache)
+        # Row-level cache: shared across every _evidence_rows call THIS
+        # instance makes (population, causal pool, every widening step) — see
+        # _evidence_rows' docstring. When the matcher hands in its OWN
+        # persistent cache (the normal path), that sharing extends across
+        # every OTHER candidate scored against this matcher too.
+        self._row_cache: dict[Any, dict[str, Any]] = (
+            {} if row_cache is None else row_cache
+        )
+        self._documented_causal = documented_causal
+        self.population = _documented(
+            population, row_cache=self._row_cache,
+            doc_cache=documented_pools, doc_key=population_key,
+        )
         self.causal = None
         self.effective_bucket_query = None
         self.causal_implied_edges = None
@@ -358,8 +442,13 @@ class _AnalogMatchEvidence:
         pool: pd.DataFrame,
         bucket_query: dict,
         implied_edges: tuple[float, float] | None,
+        *,
+        causal_key: Any = None,
     ) -> None:
-        self.causal = _evidence_rows(pool, cache=self._row_cache)
+        self.causal = _documented(
+            pool, row_cache=self._row_cache,
+            doc_cache=self._documented_causal, doc_key=causal_key,
+        )
         self.effective_bucket_query = _json_value(bucket_query)
         self.causal_implied_edges = _json_value(implied_edges)
 
@@ -432,6 +521,22 @@ class AnalogMatcher:
         # ~19s on a 3,120-row board.
         self._causal_pools: dict[tuple[str, float, pd.Timestamp],
                                  tuple[pd.DataFrame, tuple[float, float] | None]] = {}
+        # Evidence caches — opt-in, populated only when a caller supplies an
+        # evidence_hook (Phase 4 strict capture), never on the default
+        # scoring path. Persist for the matcher's whole life, exactly like
+        # `_pools`/`_causal_pools` above, and are keyed the SAME way, so
+        # candidates that rescore the same boundary event's variants (which
+        # usually share a bucket) reuse one documented population/causal pool
+        # instead of each re-serializing and separately retaining its own —
+        # see `_documented`'s docstring and `_evidence_rows`' for the
+        # measured effect. `_row_cache` backs both: it is the one place a
+        # single row's JSON-safe value is ever built, no matter how many of
+        # population/causal/every widening step touch that row.
+        self._row_cache: dict[Any, dict[str, Any]] = {}
+        self._documented_pools: dict[tuple[str, float], dict[str, Any]] = {}
+        self._documented_causal: dict[
+            tuple[str, float, pd.Timestamp], dict[str, Any]
+        ] = {}
         #: Cache ceiling, in entries. Sized from the workload, not from a round
         #: number: a full three-week board (3,120 rows) generates **34** distinct
         #: keys — 31 entry dates x 2 scoreable strategies — so 64 clears the
@@ -499,9 +604,19 @@ class AnalogMatcher:
 
         ``evidence_hook`` is opt-in and receives one self-contained evidence
         document after a successful match. Default callers take the existing
-        path and allocate no row evidence. Every row in the document is a
-        defensive, JSON-safe copy, so evidence consumers cannot mutate the
-        matcher's cached populations.
+        path and allocate no row evidence. Every row's underlying trade
+        value is protected at the source (`_evidence_rows`' row cache
+        `_freeze`-locks it) no matter how many places reuse it.
+
+        Above that: ``population`` and ``causal`` are shared BY REFERENCE
+        across every candidate that matches the same (strategy, alpha[,
+        as_of]) bucket on this matcher — a strict-trace capture rescores one
+        boundary event's pinned/strike/coarse-ladder variants, which usually
+        share a bucket — so a consumer must not mutate a row's ``values`` in
+        place there (audited: `Phase4TraceCollector.capture_analog_inputs`
+        and `.record` only read). ``selected``/``contributing`` (from
+        `_AnalogMatchEvidence.emit`) are rebuilt fresh per call and are
+        ordinary defensive copies, safe to mutate, exactly as before.
         """
         key = (strategy, round(float(alpha), 4))
         base = self._pools.get(key)
@@ -522,9 +637,19 @@ class AnalogMatcher:
                 request_key=request_key,
                 bucket_query=buckets,
                 population=base,
+                row_cache=self._row_cache,
+                documented_pools=self._documented_pools,
+                population_key=key,
+                documented_causal=self._documented_causal,
             )
             if evidence_hook is not None else None
         )
+        # No as_of -> the "causal" pool is just the population, unfiltered.
+        # Keyed with a `None` third slot rather than left un-cacheable, so
+        # repeated no-as_of candidates on the same bucket still share one
+        # documented block instead of each re-serializing the population a
+        # second time under a different evidence field name.
+        causal_key = (strategy, round(float(alpha), 4), None)
         causal_edges = None
         if as_of is not None:
             # Closed strictly before the decision: a trade still open on the day
@@ -535,6 +660,7 @@ class AnalogMatcher:
             # ~19s on a 3,120-row board.
             ts = pd.Timestamp(as_of).normalize()
             cache_key = (strategy, round(float(alpha), 4), ts)
+            causal_key = cache_key
             cached = self._causal_pools.get(cache_key)
             if cached is not None:
                 pool, edges = cached
@@ -558,7 +684,13 @@ class AnalogMatcher:
                                                 ("low", "mid", "high"))
                     )
                 if len(self._causal_pools) >= self.MAX_CAUSAL_CACHE:
-                    self._causal_pools.pop(next(iter(self._causal_pools)))
+                    evicted = next(iter(self._causal_pools))
+                    self._causal_pools.pop(evicted)
+                    # Kept in lockstep with _causal_pools: a documented block
+                    # for a pool that no longer exists would grow unbounded,
+                    # never evicted, for a scan that touches many as_of dates
+                    # (recalibrate.build_pairs, the calibration sampler).
+                    self._documented_causal.pop(evicted, None)
                 self._causal_pools[cache_key] = (pool, edges)
             ratio = buckets.get("implied_ratio")
             if ratio is not None and edges is not None:
@@ -567,7 +699,7 @@ class AnalogMatcher:
                                                      ("low", "mid", "high"))[0]
             causal_edges = edges
         if evidence is not None:
-            evidence.set_causal(pool, buckets, causal_edges)
+            evidence.set_causal(pool, buckets, causal_edges, causal_key=causal_key)
 
         # A dimension with no value cannot match on, and must be COUNTED as
         # dropped rather than quietly skipped. The loop below used to `continue`

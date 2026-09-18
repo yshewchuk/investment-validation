@@ -28,6 +28,33 @@ opt-in evidence path: `_summarize`'s RNG stream, its inputs, and therefore
 construction (the cache lives on `_AnalogMatchEvidence`, never on the
 `returns` array or the `rng.choice` call), and are proven identical below
 whether or not the evidence path runs.
+
+**Retention across candidates** (added after review, mirroring
+`engine.pnl_sim.ResidualPool.documented_population` /
+`engine.score._Predocumented`, fixed for the same class of bug in commit
+53d2f8a): a strict-trace capture rescores one boundary event's pinned/
+strike/coarse-ladder variants many times, and they usually share a
+(strategy, alpha[, as_of]) bucket. `AnalogMatcher` now caches the
+DOCUMENTED population and causal-pool blocks (`_documented_pools`,
+`_documented_causal`), keyed exactly like its existing `_pools`/
+`_causal_pools`, and shares them BY REFERENCE across every `match()` call
+that hits the same key — so candidate #2..N sharing a bucket no longer
+re-serializes and separately retains its own copy. The row-level cache
+(`_evidence_rows`' `cache=`) also moved from per-`match()`-call to
+per-`AnalogMatcher` (matcher-lifetime), so even population/causal/widening/
+selected/contributing blocks that only PARTIALLY overlap across candidates
+still share a row's value. Mutation safety: each row cache entry's
+``values`` is `_freeze`-locked (recursively read-only) the moment it is
+computed — corrupting the ONE place a row's value is built would otherwise
+corrupt every candidate that ever reuses it — and `_evidence_rows` always
+`_thaw`s a fresh, independent, plain, `json.dumps`-able copy for its
+"selected"/"contributing" output and for whichever call first builds a
+"population"/"causal" cache entry. `population`/`causal` themselves are NOT
+frozen once documented (matching `documented_population`'s own choice: the
+checkpoint sink's JSON writer needs a plain dict) — safety there rests on
+an audit of every consumer (`engine.score.Phase4TraceCollector
+.capture_analog_inputs`, `.record`; every test in this repo), all read-only,
+not on enforcement.
 """
 from __future__ import annotations
 
@@ -239,3 +266,140 @@ def test_default_scoring_path_never_builds_evidence(monkeypatch):
     trades = _trades(50, seed=5)
     result = _match(trades, bootstrap=0, evidence_hook=None)
     assert result.n == 50
+
+
+# -- retention across candidates (mirrors the residual-pool fix, 53d2f8a) --
+
+
+def _population_and_causal_hashes(matcher: AnalogMatcher, buckets: dict) -> tuple[str, str]:
+    import json
+
+    captured = []
+    matcher.match(
+        "STR-THRU", buckets, alpha=0.5, as_of="2024-01-01", min_analogs=30,
+        bootstrap=0, request_key="req-hash", evidence_hook=captured.append,
+    )
+    evidence = captured[0]
+    pop_json = json.dumps(evidence["population"], sort_keys=True)
+    causal_json = json.dumps(evidence["causal"], sort_keys=True)
+    return pop_json, causal_json
+
+
+def test_documented_population_and_causal_content_is_independent_of_sharing():
+    """Sharing must not change WHAT is reported — two matchers built from the
+    identical trades, one queried once and one queried 20 times (so its
+    documented caches are exercised, not left empty), must report byte-
+    identical population/causal JSON for the same bucket.
+    """
+    trades = _trades(3714, seed=42)
+    buckets = AnalogMatcher(trades.copy()).buckets_for(
+        mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+
+    fresh_matcher = AnalogMatcher(trades.copy(), snapshot="synthetic-snapshot")
+    fresh_pop_json, fresh_causal_json = _population_and_causal_hashes(fresh_matcher, buckets)
+
+    reused_matcher = AnalogMatcher(trades.copy(), snapshot="synthetic-snapshot")
+    for _ in range(20):
+        reused_pop_json, reused_causal_json = _population_and_causal_hashes(
+            reused_matcher, buckets)
+
+    assert reused_pop_json == fresh_pop_json
+    assert reused_causal_json == fresh_causal_json
+
+
+def test_documented_population_is_shared_by_reference_across_candidates():
+    """The whole point of the cache: same (strategy, alpha) -> the identical
+    `population`/`causal` object, not merely equal content, on the second
+    candidate. A different bucket key must NOT share.
+    """
+    trades = _trades(500, seed=6)
+    matcher = AnalogMatcher(trades.copy(), snapshot="synthetic-snapshot")
+    buckets = matcher.buckets_for(mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+
+    captured_a, captured_b = [], []
+    matcher.match("STR-THRU", buckets, alpha=0.5, as_of="2024-01-01",
+                   min_analogs=30, bootstrap=0, evidence_hook=captured_a.append)
+    matcher.match("STR-THRU", buckets, alpha=0.5, as_of="2024-01-01",
+                   min_analogs=30, bootstrap=0, evidence_hook=captured_b.append)
+
+    assert captured_a[0]["population"] is captured_b[0]["population"]
+    assert captured_a[0]["causal"] is captured_b[0]["causal"]
+    # selected/contributing are NOT cross-candidate cached -- each call still
+    # gets its own independent, mutation-safe copy (test_analog_evidence.py's
+    # test_evidence_rows_are_defensive_copies pins this at the value level).
+    assert captured_a[0]["selected"] is not captured_b[0]["selected"]
+
+    captured_c = []
+    matcher.match("STR-THRU", buckets, alpha=0.75, as_of="2024-01-01",
+                   min_analogs=30, bootstrap=0, evidence_hook=captured_c.append)
+    assert captured_c[0]["population"] is not captured_a[0]["population"]
+
+
+def test_evidence_row_cache_is_read_only():
+    """The foundational per-row cache must reject in-place mutation outright
+    (not merely rely on nobody trying) -- it is the one place a row's value
+    is ever built, shared underneath every documented block.
+    """
+    trades = _trades(10, seed=8)
+    matcher = AnalogMatcher(trades.copy(), snapshot="synthetic-snapshot")
+    buckets = matcher.buckets_for(mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+    captured = []
+    matcher.match("STR-THRU", buckets, alpha=0.5, as_of="2024-01-01",
+                   min_analogs=1, bootstrap=0, evidence_hook=captured.append)
+
+    assert len(matcher._row_cache) > 0
+    cached_entry = next(iter(matcher._row_cache.values()))
+    with pytest.raises(TypeError):
+        cached_entry["values"]["ret"] = 999.0
+
+    # The document handed to the hook, meanwhile, is an ordinary mutable
+    # dict/list -- _thaw ran before it was returned.
+    captured[0]["selected"]["rows"][0]["values"]["ret"] = 999.0
+
+
+def test_retention_across_20_same_bucket_candidates_stays_bounded():
+    """20 candidates sharing one bucket on ONE persistent matcher (how
+    `Scorer.matcher` is actually used across a capture run) must not grow the
+    documented caches past ONE entry each, and must trace far less peak
+    memory than the same 20 candidates each paying their own independent
+    rebuild (a fresh matcher per candidate -- the pre-caching shape).
+    """
+    n = 3000
+    trades = _trades(n, seed=9, n_extra_cols=12)
+    buckets = AnalogMatcher(trades.copy()).buckets_for(
+        mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+
+    def run_candidates(matcher_factory):
+        kept = []
+        for _ in range(20):
+            matcher = matcher_factory()
+            captured = []
+            matcher.match(
+                "STR-THRU", buckets, alpha=0.5, as_of="2024-01-01",
+                min_analogs=30, bootstrap=0, evidence_hook=captured.append,
+            )
+            kept.append(captured[0])
+        return kept, matcher
+
+    gc.collect()
+    tracemalloc.start()
+    independent_kept, _ = run_candidates(lambda: AnalogMatcher(trades.copy()))
+    _current, peak_independent = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    del independent_kept
+    gc.collect()
+
+    shared_matcher = AnalogMatcher(trades.copy())
+    gc.collect()
+    tracemalloc.start()
+    shared_kept, shared_matcher = run_candidates(lambda: shared_matcher)
+    _current, peak_shared = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert len(shared_matcher._documented_pools) == 1
+    assert len(shared_matcher._documented_causal) == 1
+    assert all(doc["population"] is shared_kept[0]["population"] for doc in shared_kept)
+    assert peak_shared < peak_independent * 0.5, (
+        f"peak_shared={peak_shared/1e6:.1f}MB not well below "
+        f"peak_independent={peak_independent/1e6:.1f}MB for {n}-row x20 candidates"
+    )
