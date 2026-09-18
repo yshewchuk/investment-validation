@@ -994,9 +994,15 @@ def _fixture_id(cand: dict, i: int) -> str:
 
 
 def attach_strict_probe(chosen: list[dict], snapshot: str,
-                        strategy: str, release_root: Path) -> str:
-    """Attach one strict trace, or fail with the missing source contract."""
+                        strategy: str, release_root: Path) -> tuple[str, ...]:
+    """Attach strict traces for every selected score row of ``strategy``.
+
+    A single probe can validate the wiring, but it cannot establish saved
+    release parity. Keep the strategy restriction for now while ensuring the
+    selected population is executed independently row by row.
+    """
     failures = []
+    attached = []
     for candidate in chosen:
         if (
             candidate.get("kind") != "score_result"
@@ -1006,23 +1012,27 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
         try:
             request = canonical_v2_request(candidate, snapshot)
             source = _checkpoint_value(candidate, "source_inputs")
-            package = package_frozen_resources(
-                model_bindings=source.get("model_bindings"),
-                deployment_id=request.deployment_id,
-                release_root=release_root,
-                source_root=ROOT,
-            )
-            request = replace(request, model_artifact_refs=package.request_refs)
+            bindings = source.get("model_bindings") or ()
+            package = None
+            if bindings:
+                package = package_frozen_resources(
+                    model_bindings=bindings,
+                    deployment_id=request.deployment_id,
+                    release_root=release_root,
+                    source_root=ROOT,
+                )
+                request = replace(request, model_artifact_refs=package.request_refs)
             inputs, shared_inputs = native_inputs_from_capture(candidate, request)
-            runtime = _frozen_runtime(package, release_root, request, inputs)
-            resources = list(package.resource_rows)
-            resources.extend({
-                "resource_id": binding["binding_id"],
-                "ref": binding["request_ref"],
-                "kind": "sidecar",
-                "document": binding,
-                "content_hash": content_hash(binding),
-            } for binding in package.sidecar_document["bindings"])
+            runtime = _frozen_runtime(package, release_root, request, inputs) if package else None
+            resources = list(package.resource_rows) if package else []
+            if package:
+                resources.extend({
+                    "resource_id": binding["binding_id"],
+                    "ref": binding["request_ref"],
+                    "kind": "sidecar",
+                    "document": binding,
+                    "content_hash": content_hash(binding),
+                } for binding in package.sidecar_document["bindings"])
             trace, native = package_strict_trace(
                 request, inputs, shared_inputs,
                 resources=resources,
@@ -1031,7 +1041,7 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
                     "legacy_checkpoint_hash": content_hash(
                         candidate["legacy_trace"]
                     ),
-                    "frozen_inference": package.trace_declaration,
+                    "frozen_inference": package.trace_declaration if package else None,
                 },
                 frozen_runtime=runtime,
             )
@@ -1042,11 +1052,17 @@ def attach_strict_probe(chosen: list[dict], snapshot: str,
         candidate["input_trace"] = trace
         candidate["legacy_input_hash"] = trace["shared_input_hash"]
         candidate["native_score_id"] = native.score_id
-        return str(candidate["fixture_id"])
-    detail = "; ".join(failures[:3]) if failures else "no selected candidate"
-    raise StrictTraceCaptureError(
-        f"no honest strict {strategy} trace could be assembled: {detail}"
-    )
+        attached.append(str(candidate["fixture_id"]))
+    if not attached:
+        detail = "; ".join(failures[:3]) if failures else "no selected candidate"
+        raise StrictTraceCaptureError(
+            f"no honest strict {strategy} trace could be assembled: {detail}"
+        )
+    if failures:
+        raise StrictTraceCaptureError(
+            f"strict {strategy} population has unsupported rows: {'; '.join(failures[:3])}"
+        )
+    return tuple(attached)
 
 
 # --------------------------------------------------------------------------
@@ -1081,10 +1097,10 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     pairs_dir = tmp / "pairs"
     pairs_dir.mkdir(parents=True)
     if strict_strategy is not None:
-        strict_id = attach_strict_probe(
+        strict_ids = attach_strict_probe(
             chosen, snapshot, strict_strategy, tmp,
         )
-        print(f"[corpus] strict Phase 4 trace: {strict_id}", flush=True)
+        print(f"[corpus] strict Phase 4 traces: {', '.join(strict_ids)}", flush=True)
     checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
 
     manifest_pairs = {}

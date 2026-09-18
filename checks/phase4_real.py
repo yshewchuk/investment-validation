@@ -933,6 +933,20 @@ _REQUIRED_TRACE_STAGES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
     "analogs", "simulation", "gate", "chooser", "serialization",
 )
+_ADVISORY_FLAGS = frozenset({"LAYER_DISAGREE"})
+
+
+def _semantic_flags(values: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return flags that affect scoring disposition or readiness.
+
+    ``LAYER_DISAGREE`` remains useful legacy metadata, but it describes the
+    known behavior of the analog diagnostic layer and is not an acceptance
+    refusal. Phase 4 records it separately while comparing actionable flags.
+    """
+    return tuple(
+        str(flag) for flag in (values.get("flags") or ())
+        if str(flag) not in _ADVISORY_FLAGS
+    )
 _TRACE_KEYS = frozenset({
     "schema_version", "request", "request_hash", "shared_inputs",
     "shared_input_hash", "native_input_hash", "native_inputs",
@@ -1508,11 +1522,12 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "contracts": _contract_projection(native.legs) ==
                          _contract_projection(record.get("legs") or ()),
             "verdicts": native.gate_terms.get("gate_pass") == record.get("gate_pass"),
-            "flags": list(native.reason_codes) == list(
-                record.get("flags") or ()
-            ) + (["UNVALIDATED_STRUCTURE"] if record.get("strategy") in
-                  {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
-                  (record.get("flags") or ()) else []),
+            "flags": _semantic_flags({"flags": native.reason_codes}) == (
+                _semantic_flags(record)
+                + (["UNVALIDATED_STRUCTURE"] if record.get("strategy") in
+                   {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
+                   (record.get("flags") or ()) else [])
+            ),
             "null_masks": native.null_masks == {
                 key: value is None for key, value in (record.get("model_inputs") or {}).items()
             },
@@ -1547,6 +1562,10 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "checks": checks,
             "numeric_findings": {
                 name: result["finding_fields"] for name, result in numeric.items()
+            },
+            "advisory_flags": {
+                "legacy": sorted(set(record.get("flags") or ()) & _ADVISORY_FLAGS),
+                "native": sorted(set(native.reason_codes) & _ADVISORY_FLAGS),
             },
         })
         native_ids.append(native.payload_hash)
