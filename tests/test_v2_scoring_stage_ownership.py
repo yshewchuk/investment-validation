@@ -7,6 +7,7 @@ from engine import pnl_sim
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
 from engine.v2.scoring import application
+from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
@@ -337,3 +338,94 @@ def test_pricing_is_published_before_gate_and_diagnostics_cannot_replace_fair_va
     }
     assert worst.financial_diagnostics["fair_premium_pct"] == pytest.approx(4.6)
     assert best.financial_diagnostics["fair_premium_pct"] == pytest.approx(4.6)
+
+
+def _analog_population() -> list[dict]:
+    return [
+        {"row_id": "a", "features": {"move": 1.0}, "realized_pnl": 3.0},
+        {"row_id": "b", "features": {"move": -1.0}, "realized_pnl": -1.0},
+        {"row_id": "c", "features": {"move": 1.0}, "realized_pnl": 100.0},
+    ]
+
+
+def _analog_recipe(rows: list[dict]) -> dict:
+    # A plain dict, matching how source_inputs._bounded_recipe builds the
+    # real "analogs.recipe" block (not the AnalogRecipe dataclass, which
+    # is a separate accepted shape used only by direct evaluate_analogs
+    # callers).
+    return {
+        "feature_names": ("move",),
+        "neighbors": 2,
+        "population_hash": source_population_hash(rows),
+    }
+
+
+def test_no_analog_recipe_stays_silent_and_unowned_check_still_fires():
+    # Genuinely not-applicable: analogs={} carries no recipe and no inputs at
+    # all (R4-7 negative control). This must keep behaving exactly as today:
+    # no MISSING_ANALOG_INPUT flag, no analog outputs, record still scores.
+    record = application.score_one(_request(), _native())
+
+    assert "MISSING_ANALOG_INPUT" not in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_analog") is None
+    assert record.validation_status == "scored"
+
+    # A stray owned output with no recipe/inputs at all is still reported by
+    # the pre-existing UNOWNED_ANALOG_OUTPUT check, unaffected by this fix.
+    stray = application.score_one(
+        _request(), replace(_native(), analogs={"exp_pnl_analog": 0.1}),
+    )
+    assert "UNOWNED_ANALOG_OUTPUT" in stray.reason_codes
+
+
+def test_analog_recipe_with_inputs_present_computes_outputs():
+    rows = _analog_population()
+    inputs = replace(
+        _native(),
+        analogs={
+            "recipe": _analog_recipe(rows),
+            "source_rows": rows,
+            "query_features": {"move": 1.0},
+        },
+    )
+
+    record = application.score_one(_request(), inputs)
+
+    assert "MISSING_ANALOG_INPUT" not in record.reason_codes
+    assert record.resolved_request["exp_pnl_analog"] is not None
+    assert record.resolved_request["n_analogs"] == 2
+
+
+def test_analog_recipe_with_missing_required_inputs_is_reported_not_silent():
+    rows = _analog_population()
+    recipe = _analog_recipe(rows)
+
+    # Recipe present, both source_rows and query_features absent: the
+    # defect this task fixes (R4-7). Previously returned {} with no flag.
+    both_missing = application.score_one(
+        _request(), replace(_native(), analogs={"recipe": recipe}),
+    )
+    assert "MISSING_ANALOG_INPUT" in both_missing.reason_codes
+    assert both_missing.validation_status == "refused"
+    assert both_missing.resolved_request.get("exp_pnl_analog") is None
+
+    # Recipe present, only source_rows absent: already reported before this
+    # fix (existing isinstance check) and must remain reported.
+    source_missing = application.score_one(
+        _request(),
+        replace(
+            _native(),
+            analogs={"recipe": recipe, "query_features": {"move": 1.0}},
+        ),
+    )
+    assert "MISSING_ANALOG_INPUT" in source_missing.reason_codes
+    assert source_missing.resolved_request.get("exp_pnl_analog") is None
+
+    # Recipe present, only query_features absent: already reported before
+    # this fix and must remain reported.
+    query_missing = application.score_one(
+        _request(),
+        replace(_native(), analogs={"recipe": recipe, "source_rows": rows}),
+    )
+    assert "MISSING_ANALOG_INPUT" in query_missing.reason_codes
+    assert query_missing.resolved_request.get("exp_pnl_analog") is None

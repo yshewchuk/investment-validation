@@ -815,11 +815,15 @@ def _execute_analogs(
     source_rows = block.get("source_rows")
     query_features = block.get("query_features")
     if recipe is None and source_rows is None and query_features is None:
+        # Genuinely not-applicable: no recipe and no inputs at all. This row
+        # never asked for an analog calculation, so silence here is correct
+        # and unchanged.
         if any(block.get(field) is not None for field in _ANALOG_OUTPUTS):
             _add_flag(flags, "UNOWNED_ANALOG_OUTPUT")
         return {}
-    if source_rows is None and query_features is None:
-        return {}
+    # From here a recipe (or a stray input) is present: the row DID ask for
+    # an analog calculation. Missing required inputs must be reported, not
+    # silently skipped, so every remaining path below flags before returning.
     if not isinstance(recipe, Mapping) or not isinstance(source_rows, (list, tuple)):
         _add_flag(flags, "MISSING_ANALOG_INPUT")
         return {}
