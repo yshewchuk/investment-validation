@@ -49,13 +49,25 @@ P5-4 adds the v2-native no-fit guard (`fitting_forbidden`, `forbid_fitting`,
 `native_payoff.fit_payoff_line`/`fit_runup_payoff_surface` and wraps the
 result with the `make_payoff_*_artifact` constructors above.
 
+P5-4 also adds the win-rate recalibration-map artifact
+(`recalibration_artifact.py`): `RecalibrationMapArtifact`,
+`RecalibrationArtifactRef`, `RecalibrationArtifactLoader`,
+`RecalibrationArtifactError`, `recalibration_artifact_key`,
+`make_recalibration_map_artifact`, `serialize_recalibration_artifact` and
+`RECALIBRATION_MAP_ARTIFACT_V1`. Same pattern as the payoff artifact: keyed
+by `(strategy, alpha, cutoff)`, content-hashed canonical JSON, a verified
+loader. Below legacy's `min_pairs` floor the artifact freezes legacy's "no
+map, ship the raw probability" answer (`fitted=False`) rather than being
+absent, so scoring can tell it from a missing fold. The fit lives in
+`engine/v2/models/training/recalibration.py`.
+
 P5-5 adds atomic staging and deployment: `stage_release`, `promote`,
 `rollback`, `resolve_release`, `current_release`, `current_pointer`,
 `pointer_history`, `StagedManifest`, `PointerState`, `DeploymentError`,
 `StagingRefused`, `ReleaseNotStaged`, `NoPriorRelease`, and the constants
 `STAGED_MANIFEST_V1`, `POINTER_STATE_V1`, `DEPLOYMENT_REFUSAL`.
 
-<!-- public-interface: AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1, DEPLOYMENT_ID, FEATURE_ROLES, FoldCoverageEntry, KNOWN_CLOCK_IDS, NON_MODEL_STATE_ITEMS, NonModelStateEntry, RELEASE_ID, current_release_inventory, non_model_state_inventory, registry_drift_issues, served_roles, tier4_fold_coverage, PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1, PayoffArtifactError, PayoffArtifactKey, PayoffArtifactLoader, PayoffArtifactRef, PayoffLineArtifact, PayoffSurfaceArtifact, fitting_forbidden, forbid_fitting, make_payoff_line_artifact, make_payoff_surface_artifact, no_fit_guard, payoff_artifact_key, serialize_payoff_artifact, DEPLOYMENT_REFUSAL, POINTER_STATE_V1, STAGED_MANIFEST_V1, DeploymentError, NoPriorRelease, PointerState, ReleaseNotStaged, StagedManifest, StagingRefused, current_pointer, current_release, pointer_history, promote, resolve_release, rollback, stage_release -->
+<!-- public-interface: AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1, DEPLOYMENT_ID, FEATURE_ROLES, FoldCoverageEntry, KNOWN_CLOCK_IDS, NON_MODEL_STATE_ITEMS, NonModelStateEntry, RELEASE_ID, current_release_inventory, non_model_state_inventory, registry_drift_issues, served_roles, tier4_fold_coverage, PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1, PayoffArtifactError, PayoffArtifactKey, PayoffArtifactLoader, PayoffArtifactRef, PayoffLineArtifact, PayoffSurfaceArtifact, fitting_forbidden, forbid_fitting, make_payoff_line_artifact, make_payoff_surface_artifact, no_fit_guard, payoff_artifact_key, serialize_payoff_artifact, RECALIBRATION_MAP_ARTIFACT_V1, RecalibrationArtifactError, RecalibrationArtifactLoader, RecalibrationArtifactRef, RecalibrationMapArtifact, make_recalibration_map_artifact, recalibration_artifact_key, serialize_recalibration_artifact, DEPLOYMENT_REFUSAL, POINTER_STATE_V1, STAGED_MANIFEST_V1, DeploymentError, NoPriorRelease, PointerState, ReleaseNotStaged, StagedManifest, StagingRefused, current_pointer, current_release, pointer_history, promote, resolve_release, rollback, stage_release -->
 
 ## Consumers
 

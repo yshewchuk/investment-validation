@@ -12,17 +12,22 @@ The two payoff recipes are fitted by the training job through P5-4's
 ``native_payoff``'s unchanged math, so a job fold's artifact is the one the
 builder makes on the same rows and cutoff. The fold's members are exactly
 the rows that fit keeps: the ``gt 0`` filters and the completeness mask
-reproduce ``fit_payoff``/``fit_runup_payoff``'s ``ok`` mask. The
-recalibration maps stay a receipt-only seam (``fit_owner`` P5-4): no frozen
-recalibration builder exists yet.
+reproduce ``fit_payoff``/``fit_runup_payoff``'s ``ok`` mask. The two
+recalibration maps are fitted the same way through
+``engine.v2.models.training.recalibration`` (legacy ``fit_recalibration``,
+re-derived and proven bit-identical); the fold writes
+``recalibration_artifact.json`` -- also below ``min_pairs``, where it freezes
+legacy's "no map, ship the raw probability" answer (``fitted=False``).
 """
 from __future__ import annotations
 
 import pandas as pd
 
 from engine.v2.models.payoff_artifact import serialize_payoff_artifact
+from engine.v2.models.recalibration_artifact import serialize_recalibration_artifact
 
 from .payoff import build_payoff_line_artifact, build_payoff_surface_artifact
+from .recalibration import build_recalibration_map_artifact
 from .recipes import (
     CLOCK_ID,
     MISSING_DROP_INCOMPLETE,
@@ -38,7 +43,8 @@ from .recipes import (
     TrainingRecipe,
 )
 
-__all__ = ["PAYOFF_KINDS", "calibration_recipes", "fit_payoff_fold"]
+__all__ = ["PAYOFF_KINDS", "RECALIBRATION_KINDS", "calibration_recipes", "fit_payoff_fold",
+           "fit_recalibration_fold"]
 
 #: P5-4's canonical bytes (``serialize_payoff_artifact``): the file's sha256
 #: equals the artifact's own ``content_hash``, so a ``PayoffArtifactRef`` can
@@ -47,6 +53,10 @@ PAYOFF_ARTIFACT_FILE = "payoff_artifact.json"
 
 #: Estimator kinds the job fits through the P5-4 builders.
 PAYOFF_KINDS = ("payoff_line", "payoff_surface")
+RECALIBRATION_KINDS = ("isotonic",)
+
+#: ``serialize_recalibration_artifact`` bytes; sha256 == the artifact's hash.
+RECALIBRATION_ARTIFACT_FILE = "recalibration_artifact.json"
 
 #: payoff.MIN_TRADES / MAX_RESIDUALS / RESIDUAL_SEED; recalibrate.MIN_PAIRS.
 _PAYOFF_MIN_TRADES = 200
@@ -98,8 +108,14 @@ def calibration_recipes() -> list[TrainingRecipe]:
                                                  "min_pairs": _RECAL_MIN_PAIRS, "alpha": "per request"}, ()),
             residuals=ResidualRule("none"),
             refs=("engine.recalibrate.fit_recalibration", "engine.score.Scorer.recalibration"),
+            fit_owner=OWNER_TRAINING_JOB,
         ))
     return recipes
+
+
+_BUILDERS = {"payoff_line": "engine.v2.models.training.payoff",
+             "payoff_surface": "engine.v2.models.training.payoff",
+             "isotonic": "engine.v2.models.training.recalibration"}
 
 
 def _calibration(key, recipe_id, *, dataset, target, features, filters, estimator, residuals, refs,
@@ -114,7 +130,7 @@ def _calibration(key, recipe_id, *, dataset, target, features, filters, estimato
         label=LabelRule("exit_date", "trade exit close; exit_date < request cutoff", 0),
         folds=FoldScheme("request_cutoff", 0),
         estimator=estimator, residuals=residuals, fit_owner=fit_owner, legacy_refs=refs,
-        notes=("Fitted by the job through engine.v2.models.training.payoff (P5-4's frozen "
+        notes=(f"Fitted by the job through {_BUILDERS[estimator.kind]} (P5-4's frozen "
                "artifact builder); " if fit_owner == OWNER_TRAINING_JOB else
                "Seam for P5-4: no frozen builder yet; this recipe supplies membership and label "
                "receipts per cutoff only; ")
@@ -152,3 +168,20 @@ def fit_payoff_fold(recipe: TrainingRecipe, rows: pd.DataFrame, *, alpha: float,
         return False
     (out_dir / PAYOFF_ARTIFACT_FILE).write_bytes(serialize_payoff_artifact(artifact))
     return True
+
+
+def fit_recalibration_fold(recipe: TrainingRecipe, rows: pd.DataFrame, *, alpha: float, before,
+                           out_dir) -> bool:
+    """Write the frozen recalibration-map artifact for one cutoff into ``out_dir``.
+
+    Always writes (below ``min_pairs`` the artifact is legacy's frozen "no
+    map"). Returns whether a map was fitted. ``rows`` are the fold's members;
+    legacy's own filters are re-applied inside the builder and are a no-op
+    on them.
+    """
+    artifact = build_recalibration_map_artifact(
+        rows, strategy=recipe.key.strategy, alpha=float(alpha), before=before,
+        min_pairs=int(recipe.estimator.params["min_pairs"]),
+    )
+    (out_dir / RECALIBRATION_ARTIFACT_FILE).write_bytes(serialize_recalibration_artifact(artifact))
+    return artifact.fitted

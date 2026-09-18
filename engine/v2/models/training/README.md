@@ -32,6 +32,13 @@ this package's layer 6) and wraps the result with `engine.v2.models`'s
 returned artifact is bit-identical to the corresponding inline fit on the
 same rows and cutoff.
 
+P5-4 (`recalibration.py`) adds the recalibration-map builder:
+`build_recalibration_map_artifact` and `fit_recalibration_map`. The fit is
+legacy `engine.recalibrate.fit_recalibration` re-derived statement for
+statement (v2 may not import legacy numerics) and tested bit-identical to
+it; the result is wrapped with `engine.v2.models`'s
+`make_recalibration_map_artifact`. It checks both no-fit switches.
+
 P5-3 (current dataset/training recipes):
 
 - `current_recipes()` — every current recipe as a `TrainingRecipe`, keyed by
@@ -40,8 +47,8 @@ P5-3 (current dataset/training recipes):
   refit), the four Tier-4 producers (`output="tier4_monthly"`) and the
   live-refit calibration surfaces (`output="calibration"`: the payoff line
   and surface are fitted per cutoff through `payoff.py`'s P5-4 builders into
-  `PayoffLineArtifact`/`PayoffSurfaceArtifact`; the recalibration maps stay
-  receipt-only). `recipe_fingerprint` is its identity.
+  `PayoffLineArtifact`/`PayoffSurfaceArtifact`, and the recalibration maps
+  through `recalibration.py` into `RecalibrationMapArtifact`). `recipe_fingerprint` is its identity.
 - `prepare_dataset` / `plan_folds` / `dataset_fingerprint` — legacy's
   membership, masks and folds, reproduced.
 - `fold_receipts` / `receipt_issues` — the per-fold training-membership and
@@ -50,7 +57,7 @@ P5-3 (current dataset/training recipes):
 - `run_training_job` — the only entry that fits a recipe; resumable per fold,
   guarded by the shared no-fit switch.
 
-<!-- public-interface: build_payoff_line_artifact, build_payoff_surface_artifact, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job -->
+<!-- public-interface: build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job -->
 
 ## Consumers
 

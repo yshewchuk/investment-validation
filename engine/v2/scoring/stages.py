@@ -1312,6 +1312,10 @@ def _execute_runup_model(
     if resolved is None:
         return {}
     point_implied, point_move_d14, spot, strike, cost, days = resolved
+    if "recalibration_artifact" in block:
+        # Legacy never recalibrates STR-RUNUP (engine/score.py:2508-2513).
+        _add_flag(flags, "UNSUPPORTED_RECALIBRATION")
+        return {}
     fitted = _runup_fit_and_pool(
         block, recipe, point_implied, point_move_d14, values, flags,
     )
@@ -1386,8 +1390,46 @@ def _execute_model(
         "exp_pnl_model": float(np.mean(returns)),
         "win_model": float(np.mean(returns > 0.0)),
     }
+    output = _recalibrated_output(block, recipe, name, values, output, flags)
     values.update(output)
     return output
+
+
+def _recalibrated_output(
+    block: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+    name: str,
+    values: Mapping[str, Any],
+    output: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    """Apply a declared frozen recalibration map to ``win_model`` (P5-4).
+
+    Mirrors engine/score.py:2336-2341: ``win_model`` is the raw Monte Carlo
+    win rate pushed through ``Scorer.recalibration(strategy, alpha,
+    evidence_cutoff)``. Undeclared (no ``recalibration_artifact`` key in the
+    block) returns ``output`` untouched -- the path every bundle took before
+    this artifact existed. Declared: the artifact must be a
+    ``RecalibrationMapArtifact`` whose full causal key (strategy, alpha at
+    4dp, the payoff recipe's ``before``) equals this request's, else
+    MODEL_NOT_READY and no model numbers. Never fits. Legacy keeps STR-RUNUP
+    raw (engine/score.py:2508-2513), so this is only reached from the
+    single-driver line path.
+    """
+    if "recalibration_artifact" not in block:
+        return output
+    from engine.v2.models.recalibration_artifact import (
+        RecalibrationMapArtifact,
+        recalibration_artifact_key,
+    )
+
+    artifact = block.get("recalibration_artifact")
+    alpha = _finite(values.get("fill"))
+    if (alpha is None or not isinstance(artifact, RecalibrationMapArtifact)
+            or artifact.key != recalibration_artifact_key(name, alpha, recipe.get("before"))):
+        _add_flag(flags, "MODEL_NOT_READY")
+        return {}
+    return {**output, "win_model": artifact.transform(output["win_model"])}
 
 
 def _execute_analogs(
