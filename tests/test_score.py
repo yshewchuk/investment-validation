@@ -1433,6 +1433,45 @@ class TestArithmeticEntryRule:
         assert result.rel_spread == pytest.approx(expected)
 
 
+class TestSimulatedPnLMemoryHandling:
+    """``_simulated_pnl`` must not swallow a ``MemoryError`` from
+    ``_expectation`` (engine/score.py) the way it swallows an ordinary
+    simulation failure. ``MemoryError`` is a subclass of ``Exception`` in
+    CPython, so a broad ``except Exception`` there previously turned a
+    resource failure into a normal-looking decline (``result.detail``) and
+    let the row -- and the run -- continue, silently corrupting a
+    corpus/board with rows that look like considered declines rather than
+    memory failures. A ``MemoryError`` must propagate; every other exception
+    keeps today's per-row handling.
+    """
+
+    def test_memory_error_from_expectation_propagates(self, scorer, monkeypatch):
+        def _boom(*_args, **_kwargs):
+            raise MemoryError("synthetic OOM")
+
+        monkeypatch.setattr(scorer, "_expectation", _boom)
+        result = ScoreResult(
+            ticker=TICKER, strategy="TWIN-P", as_of=EVENT, event_date=EVENT,
+        )
+        with pytest.raises(MemoryError):
+            scorer._simulated_pnl(request(strategy="TWIN-P"), result)
+
+    def test_value_error_from_expectation_still_becomes_the_detail_note(
+        self, scorer, monkeypatch
+    ):
+        def _boom(*_args, **_kwargs):
+            raise ValueError("synthetic bad input")
+
+        monkeypatch.setattr(scorer, "_expectation", _boom)
+        result = ScoreResult(
+            ticker=TICKER, strategy="TWIN-P", as_of=EVENT, event_date=EVENT,
+        )
+        out = scorer._simulated_pnl(request(strategy="TWIN-P"), result)
+        assert result.exp_pnl_sim is None
+        assert "expected-P&L unavailable: synthetic bad input" in result.detail
+        assert "exp_pnl_sim" not in out
+
+
 class TestTheForecastBandOnTheBoard:
     """A forecast without a width is half an answer; a fabricated one is worse."""
 

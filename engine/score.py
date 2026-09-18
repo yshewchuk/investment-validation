@@ -1870,6 +1870,8 @@ class Scorer:
             return None, None
         try:
             newest = latest_chain_date(request.ticker, anchor)
+        except MemoryError:
+            raise
         except Exception:  # a board must not die on a diagnostic
             return None, None
         if newest is None:
@@ -1908,6 +1910,8 @@ class Scorer:
 
         try:
             newest = latest_chain_date(request.ticker, result.entry_date)
+        except MemoryError:
+            raise
         except Exception:  # a diagnostic must never take the score down
             return
         if newest is None:
@@ -2611,6 +2615,8 @@ class Scorer:
             served = self._serving(
                 tier4.serving_fold(result.event_date, result.as_of)
             )
+        except MemoryError:
+            raise
         except Exception as exc:  # a board must not die on one unfit fold
             result.flag("NO_FORECAST")
             result.detail = f"{request.strategy}: no fold model — {exc}"
@@ -2775,6 +2781,8 @@ class Scorer:
                         events=events,
                         daily=daily[columns],
                     )
+            except MemoryError:
+                raise
             except Exception:
                 self._crush_frame = pd.DataFrame(
                     columns=["ticker", "event_date", "pre_iv30", "crush_pct_iv30"])
@@ -2812,6 +2820,8 @@ class Scorer:
             h["err_move"] = h["abs_move"] - h["pred_abs_move"]
             h["err_crush"] = h["crush_pct_iv30"] - h["pred_iv_crush_30"]
             pool = pnl_sim.ResidualPool(h.dropna(subset=["err_move", "err_crush"]))
+        except MemoryError:
+            raise
         except Exception:
             pool = None
         self._pool = pool
@@ -2840,6 +2850,8 @@ class Scorer:
                 frame = self._crush_table()[["ticker", "event_date", "pre_iv30"]]
                 self._pre_iv = {(t, pd.Timestamp(d)): v for t, d, v
                                 in zip(frame.ticker, frame.event_date, frame.pre_iv30)}
+            except MemoryError:
+                raise
             except Exception:
                 self._pre_iv = {}
         stored = self._pre_iv.get((request.ticker, pd.Timestamp(result.event_date)))
@@ -2858,6 +2870,8 @@ class Scorer:
                 frame = self._crush_table()[["ticker", "event_date", "pre_iv30"]].dropna()
                 frame = frame.sort_values("event_date")
                 self._latest_iv = {t: g for t, g in frame.groupby("ticker")}
+            except MemoryError:
+                raise
             except Exception:
                 self._latest_iv = {}
         rows = self._latest_iv.get(ticker)
@@ -2883,6 +2897,8 @@ class Scorer:
                 frame = tier4.load_forecasts()[["ticker", "event_date", "pred_iv_crush_30"]]
                 self._crush = {(t, pd.Timestamp(d)): v for t, d, v
                                in zip(frame.ticker, frame.event_date, frame.pred_iv_crush_30)}
+            except MemoryError:
+                raise
             except Exception:
                 self._crush = {}
         stored = self._crush.get((request.ticker, pd.Timestamp(result.event_date)))
@@ -2897,6 +2913,8 @@ class Scorer:
             )
             value = float(served.predict(features)[0])
             return value if value == value else None
+        except MemoryError:
+            raise
         except Exception:
             return None
 
@@ -2991,6 +3009,14 @@ class Scorer:
                 out["exp_pnl_sim"] = sim["exp_pnl_sim"]
                 result.exp_pnl_sim = sim["exp_pnl_sim"]
                 result.win_sim = sim["win_sim"]
+        except MemoryError:
+            # Never swallow this one: a board must not die on one unsimulable
+            # row, but a row that failed because the PROCESS ran out of
+            # memory is not "unsimulable" — recording a soft detail note and
+            # continuing would silently corrupt a corpus/board with rows that
+            # look like considered declines. Let it propagate and kill the
+            # run loudly instead.
+            raise
         except Exception as exc:  # a board must not die on one unsimulable row
             result.detail = (f"{result.detail}; expected-P&L unavailable: {exc}"
                              if result.detail else f"expected-P&L unavailable: {exc}")
@@ -3022,6 +3048,8 @@ class Scorer:
         out = {c: float("nan") for c in self._GATE_FORECAST_COLUMNS}
         try:
             served = self._serving(tier4.serving_fold(result.event_date, result.as_of))
+        except MemoryError:
+            raise
         except Exception:  # a board must not die on one unfit fold
             return out
         if any(f not in features.columns for f in served.features):
@@ -3226,6 +3254,8 @@ class Scorer:
         try:
             frame = self._chooser_frame(request, result, features,
                                         artifact.features)
+        except MemoryError:
+            raise
         except Exception as exc:  # a board must not die on one row
             collector = getattr(result, "_phase4_checkpoint_collector", None)
             if collector is not None:
@@ -3339,6 +3369,8 @@ class Scorer:
                                             float(band[1][0]),
                                             float(band[2][0]),
                                             float(band[3][0]))
+            except MemoryError:
+                raise
             except Exception:
                 pass
         out["pred_abs_move"] = m
@@ -3416,6 +3448,8 @@ class Scorer:
                     out[columns[2]] = float(band[1][0])
                     if len(columns) > 3:
                         out[columns[3]] = float(band[2][0])
+            except MemoryError:
+                raise
             except Exception:
                 pass
         # The training `tier4_pred_abs_move_sd` is the Tier-4 table's own
@@ -3570,6 +3604,8 @@ class Scorer:
         self._chooser_pool = None
         try:
             frame = pd.read_parquet(paths.FEATURES / CHOOSER_ANALOG_POOL)
+        except MemoryError:
+            raise
         except Exception:
             return self._chooser_pool
         needed = {"strategy", "entry_date", "exit_date", "pnl",
@@ -3807,6 +3843,8 @@ def score_calendar(
         for ticker in events["ticker"].astype(str).unique():
             try:
                 newest = latest_chain_date(ticker, as_of)
+            except MemoryError:
+                raise
             except Exception:
                 continue
             if newest is not None:

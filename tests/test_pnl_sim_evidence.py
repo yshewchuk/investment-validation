@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -65,16 +66,23 @@ def test_evidence_rows_reject_unknown_selection_index() -> None:
         ResidualPool(_history(300)).evidence_rows([300])
 
 
-def test_documented_population_is_cached_by_cutoff_index() -> None:
-    """The retention fix: two requests at the SAME cutoff share one list."""
+def test_documented_population_shares_row_objects_not_the_wrapping_list() -> None:
+    """The retention fix: each call returns a FRESH list (never cached or
+    retained per cutoff — see `documented_population`'s docstring for why),
+    but its elements are the SAME dict objects every time, sliced out of the
+    one-time `_documented_rows()` build rather than rebuilt.
+    """
     pool = ResidualPool(_history(600))
 
     first = pool.documented_population(300)
     second = pool.documented_population(300)
     other = pool.documented_population(299)
 
-    assert first is second
-    assert first is not other
+    assert first is not second  # not cached — nothing is retained per cutoff
+    assert first == second  # but the content, and the row objects, agree
+    assert all(a is b for a, b in zip(first, second))
+    assert first[:299] == other
+    assert all(a is b for a, b in zip(first, other))
     assert len(first) == 300
     assert first[0] == {
         "event_date": pd.Timestamp("2020-01-01").isoformat(),
@@ -85,6 +93,70 @@ def test_documented_population_is_cached_by_cutoff_index() -> None:
     # Plain dicts (not the read-only row cache's mapping view): this is what
     # the checkpoint sink's JSON writer requires.
     assert type(first[0]) is dict
+
+
+def _canonical_hash(rows: list[dict]) -> str:
+    encoded = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def test_documented_population_matches_the_old_per_cutoff_rebuild() -> None:
+    """Byte-identical to the previous ``[dict(row) for row in
+    _all_rows()[:cutoff]]`` shape, at several cutoffs including both edges
+    (0 and the full length). The fix changes HOW the list is built (slice a
+    once-built full copy instead of rebuilding one per cutoff), never WHAT it
+    contains.
+    """
+    pool = ResidualPool(_history(400))
+
+    for cutoff in (0, 1, 150, 399, 400):
+        old = [dict(row) for row in pool._all_rows()[:cutoff]]
+        new = pool.documented_population(cutoff)
+        assert new == old
+        assert _canonical_hash(new) == _canonical_hash(old)
+
+
+def test_documented_population_marginal_cost_is_a_slice_not_a_copy() -> None:
+    """The retention fix, measured: after the pool's rows are documented
+    ONCE, a new DISTINCT cutoff costs a list of references (~8 bytes/row),
+    not a fresh ``[dict(row) for row in ...]`` copy.
+
+    This is the regression for the runaway: a 40-forward-event capture run
+    hits close to 40 distinct cutoffs (one per distinct forward event_date,
+    not shared the way a boundary/pinned/coarse rescore's cutoff is), and the
+    OLD shape retained one full per-cutoff dict-copy PER distinct cutoff,
+    unbounded -- see ``engine.pnl_sim.ResidualPool._documented_rows``.
+    """
+    import tracemalloc
+
+    n = 20_000
+    pool = ResidualPool(_history(n))
+
+    tracemalloc.start()
+    before_first = tracemalloc.take_snapshot()
+    pool.documented_population(n)  # forces the one-time full build
+    after_first = tracemalloc.take_snapshot()
+    first_call_growth = sum(
+        s.size_diff for s in after_first.compare_to(before_first, "lineno")
+        if s.size_diff > 0
+    )
+    assert first_call_growth > 0
+
+    # 39 more DISTINCT cutoffs, near the end of the pool (the shape a 40
+    # forward-event pass actually produces).
+    baseline = tracemalloc.take_snapshot()
+    cutoffs = np.unique(np.linspace(n - 500, n, 40, dtype=int))
+    for cutoff in cutoffs:
+        pool.documented_population(int(cutoff))
+    after = tracemalloc.take_snapshot()
+    marginal_growth = sum(
+        s.size_diff for s in after.compare_to(baseline, "lineno") if s.size_diff > 0
+    )
+    tracemalloc.stop()
+
+    assert marginal_growth < 0.10 * first_call_growth, (
+        marginal_growth, first_call_growth,
+    )
 
 
 def test_evidence_rows_are_read_only_and_shared_across_calls() -> None:

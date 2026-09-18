@@ -126,9 +126,11 @@ class ResidualPool:
         self._buckets = int(buckets)
         #: Row dicts, built once and reused by reference — see `_all_rows`.
         self._row_cache: list[Mapping] | None = None
-        #: Plain-dict population rows before a given cutoff INDEX, cached by
-        #: that index — see `documented_population`.
-        self._documented_cache: dict[int, list[dict]] = {}
+        #: Plain-dict copy of EVERY row, built once for the pool's life — see
+        #: `_documented_rows`. `documented_population` slices this fresh on
+        #: every call; it never rebuilds a per-cutoff copy and never retains
+        #: one either — see that method's docstring for why.
+        self._documented_all: list[dict] | None = None
 
     def __len__(self) -> int:
         return len(self._dates)
@@ -173,29 +175,71 @@ class ResidualPool:
             ]
         return self._row_cache
 
+    def _documented_rows(self) -> list[dict]:
+        """Plain-dict copy of every pool row, built ONCE and shared by reference.
+
+        One pass over the whole pool, not one pass per distinct cutoff. A
+        strict-trace forward pass hits a distinct `cutoff_index` per distinct
+        forward `event_date` — up to one per event, not shared like a
+        boundary/pinned/coarse rescore's cutoff is — so caching per-cutoff
+        COPIES here (the previous shape) meant every new forward date paid
+        another full `[dict(row) for row in ...]` pass and retained it
+        forever: measured on a synthetic 20k-row pool, ~91% of the retained
+        growth over 40 distinct near-end cutoffs traced to that one list
+        comprehension (see the marginal-cost regression test in
+        `tests/test_pnl_sim_evidence.py`), unbounded because a 40-event run
+        never revisits a cutoff often enough for any small eviction cap to
+        bind.
+
+        Building this list once and having `documented_population` SLICE it
+        fixes that: `full[:cutoff_index]` is a new list object holding
+        REFERENCES to these same dicts (list slicing does not copy elements),
+        so its marginal cost is ~8 bytes/row (one pointer), not one dict
+        rebuild per row. The dicts themselves exist once, period, regardless
+        of how many distinct cutoffs the run visits.
+
+        Contract unchanged from before: plain ``dict`` (not `_all_rows`'s
+        read-only ``MappingProxyType`` — the checkpoint sink's JSON writer
+        needs an actual ``dict``), shared by reference across every cutoff,
+        every candidate, and the pool's whole life, and never mutated in
+        place by any consumer. That audit already covers this list unchanged:
+        `engine.score.Phase4TraceCollector._document` only reads Mappings
+        (dict/list/scalar) to rebuild ITS OWN copies; `capture_simulation`
+        wraps the value in `_Predocumented` specifically so `_document` does
+        not re-copy it; nothing writes to a row in place.
+        """
+        if self._documented_all is None:
+            self._documented_all = [dict(row) for row in self._all_rows()]
+        return self._documented_all
+
     def documented_population(self, cutoff_index: int) -> list[dict]:
-        """Plain-dict rows before ``cutoff_index``, built once and cached.
+        """Plain-dict rows before ``cutoff_index``, sliced from one shared list.
+
+        ``full[:cutoff_index]`` is a NEW list object, but its elements are
+        REFERENCES to the same dicts `_documented_rows` built once -- list
+        slicing does not copy elements -- so the marginal cost of a call at a
+        never-seen cutoff is ~8 bytes/row (one pointer), not a row rebuild.
+
+        Deliberately NOT cached per cutoff. A strict-trace forward pass hits
+        close to one distinct `cutoff_index` per forward event (40 events,
+        ~40 distinct cutoffs, no bounded cache -- 64 slots, say -- ever fills
+        enough to evict); caching the SLICE would still retain one growing
+        list per distinct cutoff for the run's whole life, just ~70x cheaper
+        per entry than the old per-cutoff dict-rebuild. Returning a fresh,
+        uncached slice means nothing outlives the caller that asked for it:
+        steady-state memory is the ONE `_documented_rows()` list, full stop,
+        regardless of how many distinct cutoffs the run visits.
 
         Every rescored variant of the SAME boundary event (pinned, strike,
         coarse-ladder) shares that event's date, hence the same cutoff INDEX
-        against this pool, hence an IDENTICAL population. A strict-trace
-        capture run rescores one event many times; this is what lets those
-        requests share ONE list of ONE set of row dicts for their evidence
-        population instead of each holding its own copy for the rest of the
-        run. Callers that want ``_document`` (or anything downstream of it)
-        to skip re-copying this list must wrap it (e.g. in
+        -- those calls still get lists with IDENTICAL, reference-shared
+        elements; they just are not the same wrapping list object. Callers
+        that want ``_document`` (or anything downstream of it) to skip
+        re-copying this list must wrap it (e.g. in
         ``engine.score._Predocumented``) before handing it off -- that
         contract lives with the caller, not here.
-
-        Rows are plain ``dict`` (not the `_all_rows` cache's read-only
-        mapping): this is the value that ends up written to disk, and the
-        checkpoint sink's JSON writer requires an actual ``dict``.
         """
-        cached = self._documented_cache.get(cutoff_index)
-        if cached is None:
-            cached = [dict(row) for row in self._all_rows()[:cutoff_index]]
-            self._documented_cache[cutoff_index] = cached
-        return cached
+        return self._documented_rows()[:cutoff_index]
 
     def evidence_rows(self, indices=None) -> list[Mapping]:
         """JSON-safe residual rows for an explicit evidence selection.
