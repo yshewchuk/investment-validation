@@ -295,7 +295,43 @@ def cmd_run(cfg: dict, args) -> int:
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)
+    if rc != 0:
+        diagnose(work, cfg, args.module, env)
     return rc
+
+
+def diagnose(work: Path, cfg: dict, name: str, env: dict) -> int:
+    """After a failed mutmut run, rerun the module's tests in plain pytest.
+
+    mutmut swallows pytest's output when its clean/stats run fails ("failed to
+    collect stats. runner returned 1" and nothing else). This reruns the same
+    selection with the same pytest args, from the same directory (mutants/,
+    trampolined code, unmutated), without -x, and prints the failing test ids
+    with short tracebacks. If it passes, the failure only happens inside mutmut
+    (state it leaves in the process), and the message says so.
+    """
+    defaults = cfg["defaults"]
+    cwd = work / "mutants" if (work / "mutants").is_dir() else work
+    cmd = [sys.executable, "-m", "pytest", "--rootdir=.", "-q", "-rfE", "--tb=short",
+           "-p", "no:randomly", "-p", "no:random-order", *defaults["pytest_args"],
+           *[f"--deselect={d}" for d in defaults.get("deselect", [])],
+           *test_files(cfg, name)]
+    denv = dict(env, MUTANT_UNDER_TEST="")
+    print(f"\n[mutation_pilot] diagnose {name}: plain pytest of the selected tests in "
+          f"{cwd}", flush=True)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, env=denv, capture_output=True, text=True,
+                              timeout=1500)
+    except subprocess.TimeoutExpired:
+        print("[mutation_pilot] diagnose: pytest did not finish in 1500 s", flush=True)
+        return -1
+    lines = (proc.stdout + proc.stderr).splitlines()
+    print("\n".join(lines[-250:]), flush=True)
+    verdict = ("tests fail outside mutmut too: see above" if proc.returncode else
+               "tests PASS outside mutmut: the failure depends on mutmut's in-process run")
+    print(f"[mutation_pilot] diagnose {name}: pytest exited {proc.returncode}; {verdict}",
+          flush=True)
+    return proc.returncode
 
 
 def _function_span(source: str, func: str, cls: str | None) -> tuple[int, int] | None:
