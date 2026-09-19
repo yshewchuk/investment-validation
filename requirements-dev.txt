@@ -5,3 +5,6 @@
 # forcing a new Phase 0 baseline version, so it lives here instead.
 
 pytest-xdist==3.8.0
+# Mutation testing (tools/mutation_pilot.py, .github/workflows/mutation.yml).
+# The CI cache key carries this version: a bump starts every module from scratch.
+mutmut==3.8.0

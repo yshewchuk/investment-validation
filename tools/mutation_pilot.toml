@@ -1,5 +1,14 @@
-# Mutation-testing PILOT (mutmut 3.8.0). How to run it: tests/README.md,
-# "Mutation-testing pilot". Driven by tools/mutation_pilot.py.
+# Mutation testing (mutmut 3.8.0, pinned in requirements-dev.txt). How to run
+# it: tests/README.md, "Mutation-testing pilot" (local) and "Mutation CI".
+# Driven by tools/mutation_pilot.py. Every enabled [modules.<name>] is one job
+# of .github/workflows/mutation.yml's matrix; a module with an `excluded`
+# reason is listed but never run. The CI cache key hashes this file, so any
+# edit here restarts every module's incremental state.
+#
+# `mutate` and `tests` entries are tracked paths or globs (fnmatch: `*` also
+# matches `/`); `skip` removes paths from `mutate`. A pattern that matches
+# nothing is an error. tests/test_mutation_ci.py checks that every
+# engine/v2 file sits in exactly one module.
 #
 # Each [modules.<name>] mutates only its `mutate` files and runs only its
 # `tests` files: never the whole suite (it hangs on this box), never xdist.
@@ -21,10 +30,22 @@
 # CPU-seconds.
 timeout_constant = 2.0
 timeout_multiplier = 5.0
-# Parallel mutant workers. Match bounded_run's --cores.
+# Parallel mutant workers. Match bounded_run's --cores. CI overrides it with
+# --max-children $(nproc) (4 on a standard GitHub runner).
 max_children = 2
 # Passed to every pytest invocation mutmut makes.
 pytest_args = ["-p", "no:xdist", "-p", "no:cacheprovider"]
+# Tests that need data/ or a browser, inside files that are otherwise
+# data-free. Deselected in every mutmut pytest call (harmless where the file is
+# not selected). Each failed with no data/ on 2026-09-19 (FileNotFoundError on
+# data/curated/..., or empty real tables); the browser test needs playwright's
+# chromium, which CI does not install.
+deselect = [
+    "tests/test_v2_data_generic_incremental.py::test_generic_earnings_events_candidate_commits_atomically",
+    "tests/test_v2_data_incremental_persistence.py::test_frozen_curated_append_correction_tombstone_and_noop_replay",
+    "tests/test_v2_data_incremental_tables.py::test_frozen_curated_tables_use_the_same_merge_rules",
+    "tests/test_v2_dashboard_preview.py::test_l02_browser_frame_pins_r1_then_reload_shows_r2",
+]
 # Tracked files copied into the work copy (git ls-files of these paths).
 # Some targeted tests import checks/ (test_phase4_acceptance_independence).
 copy = ["engine", "tests", "checks", "tools"]
@@ -83,4 +104,521 @@ tests = [
     "tests/test_v2_scoring_actionable_flags.py",
     "tests/test_v2_scoring_stage_ownership.py",
     "tests/test_v2_scoring_source_inputs.py",
+]
+
+# -- engine/v2 matrix modules (CI: .github/workflows/mutation.yml) ---------
+# Tests: data-free files only (they pass with no data/, which CI does not have),
+# chosen from the tests that import the module, most specific first, capped at
+# ~150 s of clean test time per module (40 s for foundation, which every test
+# touches). Browser/npm tests are never selected: CI installs no browsers.
+
+[modules.foundation]
+why = "Typed values, artifact identities and the clock every v2 layer builds on; a slip in a validator or identity helper is inherited everywhere."
+mutate = [
+    "engine/v2/foundation/*.py",
+]
+skip = [
+    "*/canonical.py",
+]
+tests = [
+    "tests/test_phase4_analog_recipe_cache.py",
+    "tests/test_phase4_capture_strict.py",
+    "tests/test_phase4_checkpoints.py",
+    "tests/test_phase4_frozen_resources.py",
+    "tests/test_phase4_release_assembler.py",
+    "tests/test_phase4_trace_collector.py",
+    "tests/test_phase4_trace_verifier.py",
+    "tests/test_v2_contracts_scoring.py",
+    "tests/test_v2_data_contracts.py",
+    "tests/test_v2_data_tier4_coverage.py",
+    "tests/test_v2_features_recipes.py",
+    "tests/test_v2_models_inference.py",
+    "tests/test_v2_models_releases.py",
+    "tests/test_v2_ops_artifacts.py",
+    "tests/test_v2_ops_contracts.py",
+    "tests/test_v2_ops_decision_validation_order.py",
+    "tests/test_v2_ops_effects_backup.py",
+    "tests/test_v2_ops_foundation.py",
+    "tests/test_v2_scoring_stage_observer.py",
+    "tests/test_v2_serving_bridge.py",
+]
+
+[modules.domain_features]
+why = "Structure generation, payoff valuation, feature recipes/context and the strategy registry: the domain arithmetic behind every scored structure."
+mutate = [
+    "engine/v2/domain/*.py",
+    "engine/v2/features/*.py",
+    "engine/v2/registry/*.py",
+]
+tests = [
+    "tests/test_v2_features_context.py",
+    "tests/test_v2_features_recipes.py",
+    "tests/test_v2_native_structures.py",
+    "tests/test_v2_registry_scoring.py",
+    "tests/test_v2_scoring_application_canonical.py",
+    "tests/test_v2_scoring_application_track_b.py",
+    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/test_v2_scoring_planned_exit_bundle.py",
+    "tests/test_v2_scoring_r4_20_infinite_residuals.py",
+    "tests/test_v2_scoring_runup_frozen.py",
+    "tests/test_v2_scoring_stage_observer.py",
+    "tests/test_v2_scoring_stage_ownership.py",
+    "tests/test_v2_valuation.py",
+]
+
+[modules.diagnosis]
+why = "Record comparator, tolerances and receipts decide whether two runs agree; a weakened comparison hides a parity break."
+mutate = [
+    "engine/v2/diagnosis/*.py",
+]
+tests = [
+    "tests/test_baseline_export.py",
+    "tests/test_diagnosis_comparator.py",
+    "tests/test_v2_ops_foundation.py",
+    "tests/test_v2_serving_legacy_bundle.py",
+    "tests/test_v2_serving_projections.py",
+]
+
+[modules.data_store]
+why = "Catalog, repository, objects and manifests: the content-addressed store every snapshot and artifact is read back from."
+mutate = [
+    "engine/v2/data/__init__.py",
+    "engine/v2/data/catalog.py",
+    "engine/v2/data/repository.py",
+    "engine/v2/data/objects.py",
+    "engine/v2/data/manifests.py",
+    "engine/v2/data/schema.py",
+    "engine/v2/data/errors.py",
+    "engine/v2/data/time_formats.py",
+]
+tests = [
+    "tests/test_v2_data_atomicity.py",
+    "tests/test_v2_data_commit.py",
+    "tests/test_v2_data_events_chains.py",
+    "tests/test_v2_data_generic_incremental.py",
+    "tests/test_v2_data_import.py",
+    "tests/test_v2_data_incremental_persistence.py",
+    "tests/test_v2_data_legacy_adapter.py",
+    "tests/test_v2_data_manifests.py",
+    "tests/test_v2_data_objects.py",
+    "tests/test_v2_data_partitions.py",
+    "tests/test_v2_data_price_downloads.py",
+    "tests/test_v2_data_query.py",
+    "tests/test_v2_data_repository.py",
+    "tests/test_v2_data_roundtrip.py",
+    "tests/test_v2_ops_price_history.py",
+    "tests/test_v2_serving_api.py",
+    "tests/test_v2_serving_projections.py",
+    "tests/test_v2_serving_publication_binding.py",
+]
+
+[modules.data_documents]
+why = "Documents, query, chains, events and event revisions: the typed readers over stored snapshots."
+mutate = [
+    "engine/v2/data/documents.py",
+    "engine/v2/data/query.py",
+    "engine/v2/data/chains.py",
+    "engine/v2/data/events.py",
+    "engine/v2/data/eod_inventory.py",
+    "engine/v2/data/event_revisions.py",
+]
+tests = [
+    "tests/test_v2_data_eod_inventory.py",
+    "tests/test_v2_data_event_revisions.py",
+    "tests/test_v2_data_events_chains.py",
+    "tests/test_v2_data_legacy_adapter.py",
+    "tests/test_v2_data_manifests.py",
+    "tests/test_v2_data_objects.py",
+    "tests/test_v2_data_partitions.py",
+    "tests/test_v2_data_query.py",
+    "tests/test_v2_data_rebuild_rollback.py",
+]
+
+[modules.data_incremental]
+why = "Incremental merge rules (append, correction, tombstone, replay) for curated tables; an off-by-one silently drops or duplicates rows."
+mutate = [
+    "engine/v2/data/incremental.py",
+    "engine/v2/data/generic_incremental.py",
+    "engine/v2/data/incremental_tables.py",
+]
+tests = [
+    "tests/test_v2_data_generic_incremental.py",
+    "tests/test_v2_data_incremental.py",
+    "tests/test_v2_data_incremental_persistence.py",
+    "tests/test_v2_data_incremental_tables.py",
+]
+
+[modules.data_legacy]
+why = "Legacy materialization, mapping, reference inputs and price history: the bridge that feeds legacy-shaped inputs into v2."
+mutate = [
+    "engine/v2/data/legacy_*.py",
+    "engine/v2/data/import_snapshot.py",
+    "engine/v2/data/reference_*.py",
+    "engine/v2/data/tier4_coverage.py",
+    "engine/v2/data/price_*.py",
+]
+tests = [
+    "tests/test_v2_data_legacy_adapter.py",
+    "tests/test_v2_data_legacy_materialization.py",
+    "tests/test_v2_data_price_downloads.py",
+    "tests/test_v2_data_reference_inputs.py",
+    "tests/test_v2_data_tier4_coverage.py",
+    "tests/test_v2_ops_price_history.py",
+    "tests/test_v2_ops_tier4_coverage.py",
+]
+
+[modules.models_training]
+why = "Training recipes, folds, calibration, receipts and residuals: what a model release is fitted and receipted from."
+mutate = [
+    "engine/v2/models/training/*.py",
+]
+tests = [
+    "tests/test_v2_models_p5_2_acceptance.py",
+    "tests/test_v2_models_phase5_datasets.py",
+    "tests/test_v2_models_recalibration_artifact.py",
+    "tests/test_v2_models_residual_artifact.py",
+    "tests/test_v2_models_training_payoff.py",
+    "tests/test_v2_models_training_recipes.py",
+    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/test_v2_scoring_native_payoff.py",
+    "tests/test_v2_scoring_r4_20_infinite_residuals.py",
+]
+
+[modules.models_release]
+why = "Model releases, deployment, inventory, lineage and loaders: which frozen model serves which request."
+mutate = [
+    "engine/v2/models/*.py",
+]
+skip = [
+    "engine/v2/models/training/*",
+    "*/no_fit.py",
+    "*/payoff_artifact.py",
+    "*/residual_artifact.py",
+    "*/recalibration_artifact.py",
+]
+tests = [
+    "tests/test_v2_models_admissible_table.py",
+    "tests/test_v2_models_deployment.py",
+    "tests/test_v2_models_inference.py",
+    "tests/test_v2_models_inventory.py",
+    "tests/test_v2_models_lineage.py",
+    "tests/test_v2_models_no_fit.py",
+    "tests/test_v2_models_no_fit_native.py",
+    "tests/test_v2_models_p5_2_acceptance.py",
+    "tests/test_v2_models_phase5_datasets.py",
+    "tests/test_v2_models_releases.py",
+    "tests/test_v2_models_residual_artifact.py",
+    "tests/test_v2_scoring_frozen_executor.py",
+    "tests/test_v2_scoring_frozen_recipes.py",
+    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/test_v2_scoring_planned_exit_bundle.py",
+    "tests/test_v2_scoring_r4_20_frozen_parity.py",
+    "tests/test_v2_scoring_r4_20_infinite_residuals.py",
+]
+
+[modules.scoring_stages]
+why = "Scoring stage graph, frozen executor, identity and gate features: stage ownership and the recorded scoring answer."
+mutate = [
+    "engine/v2/scoring/stages.py",
+    "engine/v2/scoring/frozen_executor.py",
+    "engine/v2/scoring/frozen_record.py",
+    "engine/v2/scoring/compatibility.py",
+    "engine/v2/scoring/identity.py",
+    "engine/v2/scoring/native_gate_features.py",
+]
+tests = [
+    "tests/test_phase4_acceptance_independence.py",
+    "tests/test_phase4_capture_strict.py",
+    "tests/test_phase4_frozen_resources.py",
+    "tests/test_phase4_release_assembler.py",
+    "tests/test_phase4_trace_verifier.py",
+    "tests/test_v2_contracts_scoring.py",
+    "tests/test_v2_models_p5_2_acceptance.py",
+    "tests/test_v2_scoring_actionable_flags.py",
+    "tests/test_v2_scoring_application.py",
+    "tests/test_v2_scoring_application_canonical.py",
+    "tests/test_v2_scoring_application_track_b.py",
+    "tests/test_v2_scoring_forecast_roles.py",
+    "tests/test_v2_scoring_frozen_executor.py",
+    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/test_v2_scoring_no_score_status.py",
+    "tests/test_v2_scoring_r4_20_frozen_parity.py",
+    "tests/test_v2_scoring_runup_frozen.py",
+    "tests/test_v2_scoring_stage_observer.py",
+    "tests/test_v2_scoring_stage_ownership.py",
+]
+
+[modules.scoring_application]
+why = "Scoring application, financial arithmetic and source inputs: turning source bundles into the scored record."
+mutate = [
+    "engine/v2/scoring/__init__.py",
+    "engine/v2/scoring/application.py",
+    "engine/v2/scoring/financial.py",
+    "engine/v2/scoring/source_inputs.py",
+]
+tests = [
+    "tests/test_phase4_acceptance_independence.py",
+    "tests/test_v2_models_p5_2_acceptance.py",
+    "tests/test_v2_models_recalibration_artifact.py",
+    "tests/test_v2_scoring_actionable_flags.py",
+    "tests/test_v2_scoring_application.py",
+    "tests/test_v2_scoring_application_canonical.py",
+    "tests/test_v2_scoring_application_track_b.py",
+    "tests/test_v2_scoring_financial.py",
+    "tests/test_v2_scoring_frozen_recipes.py",
+    "tests/test_v2_scoring_frozen_residuals.py",
+    "tests/test_v2_scoring_native_payoff.py",
+    "tests/test_v2_scoring_no_score_status.py",
+    "tests/test_v2_scoring_planned_exit_bundle.py",
+    "tests/test_v2_scoring_r4_20_frozen_parity.py",
+    "tests/test_v2_scoring_r4_20_infinite_residuals.py",
+    "tests/test_v2_scoring_runup_frozen.py",
+    "tests/test_v2_scoring_source_inputs.py",
+    "tests/test_v2_scoring_stage_ownership.py",
+]
+
+[modules.serving]
+why = "Serving API, projections, bridge and legacy bundle plus the dashboard preview: what the board shows."
+mutate = [
+    "engine/v2/serving/*.py",
+    "engine/v2/dashboard/*.py",
+]
+tests = [
+    "tests/test_v2_dashboard_preview.py",
+    "tests/test_v2_ops_serving.py",
+    "tests/test_v2_serving_api.py",
+    "tests/test_v2_serving_bridge.py",
+    "tests/test_v2_serving_legacy_bundle.py",
+    "tests/test_v2_serving_projections.py",
+    "tests/test_v2_serving_publication_binding.py",
+]
+
+[modules.ops_cli]
+why = "The ops CLI surface, diagnostics and health checks."
+mutate = [
+    "engine/v2/ops/cli.py",
+    "engine/v2/ops/__main__.py",
+    "engine/v2/ops/diagnostics.py",
+    "engine/v2/ops/health.py",
+    "engine/v2/ops/experiments.py",
+]
+tests = [
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_capture_inputs.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_diagnostics.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_generation_effects.py",
+    "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_legacy_defects.py",
+    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_runner_onboarding.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_ops_worker_typed_failures.py",
+]
+
+[modules.ops_runtime]
+why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
+mutate = [
+    "engine/v2/ops/supervisor.py",
+    "engine/v2/ops/worker.py",
+    "engine/v2/ops/worker_progress.py",
+    "engine/v2/ops/executor*.py",
+    "engine/v2/ops/resources.py",
+    "engine/v2/ops/recovery.py",
+    "engine/v2/ops/discovery.py",
+    "engine/v2/ops/profiles.py",
+    "engine/v2/ops/provider_budget.py",
+]
+tests = [
+    "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_diagnostics.py",
+    "tests/test_v2_ops_effects_graph.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_generation_binding_lineage.py",
+    "tests/test_v2_ops_incremental_data.py",
+    "tests/test_v2_ops_incremental_registration.py",
+    "tests/test_v2_ops_legacy_defects.py",
+    "tests/test_v2_ops_provider_admission.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_recovery_reboot.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_runtime.py",
+    "tests/test_v2_ops_worker_typed_failures.py",
+]
+
+[modules.ops_catalog]
+why = "Job lifecycle, submission, scheduler, catalog schema/migrations and checkpoints: the job state machine."
+mutate = [
+    "engine/v2/ops/__init__.py",
+    "engine/v2/ops/lifecycle.py",
+    "engine/v2/ops/submission.py",
+    "engine/v2/ops/scheduler.py",
+    "engine/v2/ops/catalog.py",
+    "engine/v2/ops/bootstrap.py",
+    "engine/v2/ops/migrations.py",
+    "engine/v2/ops/schema*.py",
+    "engine/v2/ops/checkpoints.py",
+    "engine/v2/ops/store_barrier.py",
+    "engine/v2/ops/errors.py",
+]
+tests = [
+    "tests/test_v2_dashboard_publish.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_incremental_data.py",
+    "tests/test_v2_ops_incremental_registration.py",
+    "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/test_v2_ops_parity.py",
+    "tests/test_v2_ops_provider_admission.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_recovery_reboot.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_legacy]
+why = "Legacy adapter actions, capture inputs, render inputs, bindings, parity and finality."
+mutate = [
+    "engine/v2/ops/legacy_*.py",
+    "engine/v2/ops/capture_inputs.py",
+    "engine/v2/ops/render_inputs.py",
+    "engine/v2/ops/input_bindings.py",
+    "engine/v2/ops/parity.py",
+    "engine/v2/ops/finality.py",
+    "engine/v2/ops/decision_replay.py",
+]
+tests = [
+    "tests/test_v2_dashboard_publish.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_capture_inputs.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
+    "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_effect_receipt_collision.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_finality.py",
+    "tests/test_v2_ops_legacy_defects.py",
+    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/test_v2_ops_parity.py",
+    "tests/test_v2_ops_render_parity.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_runner_onboarding.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_ops_security_gate.py",
+    "tests/test_v2_serving_publication_binding.py",
+]
+
+[modules.ops_effects]
+why = "Coordinator effects graph, publication, outbox, backup, generation binding and the ledger export."
+mutate = [
+    "engine/v2/ops/effects_graph.py",
+    "engine/v2/ops/publication*.py",
+    "engine/v2/ops/outbox.py",
+    "engine/v2/ops/backup.py",
+    "engine/v2/ops/generation_binding.py",
+    "engine/v2/ledger/*.py",
+]
+tests = [
+    "tests/test_v2_dashboard_publish.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_effect_receipt_collision.py",
+    "tests/test_v2_ops_effects.py",
+    "tests/test_v2_ops_effects_backup.py",
+    "tests/test_v2_ops_effects_graph.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_generation_effects.py",
+    "tests/test_v2_ops_render_parity.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_serving_publication_binding.py",
+]
+
+[modules.ops_decisions]
+why = "Decision commit, validation and evidence, ledger history import and session resolution: decision authority."
+mutate = [
+    "engine/v2/ops/decision_commit.py",
+    "engine/v2/ops/decision_validation.py",
+    "engine/v2/ops/decision_evidence.py",
+    "engine/v2/ops/ledger_history_import.py",
+    "engine/v2/ops/session_*.py",
+]
+tests = [
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_decision_validation_order.py",
+    "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_same_session_replan.py",
+]
+
+[modules.ops_nightly]
+why = "Nightly DAG, stage map, plans, fingerprints and incremental data wiring."
+mutate = [
+    "engine/v2/ops/nightly.py",
+    "engine/v2/ops/stages.py",
+    "engine/v2/ops/plans.py",
+    "engine/v2/ops/fingerprints.py",
+    "engine/v2/ops/incremental_data.py",
+]
+tests = [
+    "tests/test_v2_data_incremental_persistence.py",
+    "tests/test_v2_ops_capture_inputs.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_effect_receipt_collision.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_fingerprints_code_assets.py",
+    "tests/test_v2_ops_fingerprints_model_scan.py",
+    "tests/test_v2_ops_incremental_data.py",
+    "tests/test_v2_ops_incremental_refresh_wiring.py",
+    "tests/test_v2_ops_incremental_registration.py",
+    "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_legacy_defects.py",
+    "tests/test_v2_ops_legacy_workflows.py",
+    "tests/test_v2_ops_render_parity.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_runtime.py",
+    "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_store_barrier.py",
+    "tests/test_v2_ops_worker_typed_failures.py",
+]
+
+[modules.ops_snapshots]
+why = "Snapshot planning, import, promotion, stages and roots, plus the price-history store."
+mutate = [
+    "engine/v2/ops/snapshot*.py",
+    "engine/v2/ops/price_history_store.py",
+    "engine/v2/ops/materialization_worker.py",
+]
+tests = [
+    "tests/test_v2_data_legacy_materialization.py",
+    "tests/test_v2_data_rebuild_rollback.py",
+    "tests/test_v2_data_repository.py",
+    "tests/test_v2_ops_generation_binding_lineage.py",
+    "tests/test_v2_ops_price_history.py",
+    "tests/test_v2_ops_snapshot_stages.py",
+]
+
+[modules.contracts]
+excluded = "mutmut generates 0 mutants here: these files hold only dataclass, enum and constant declarations (module-level constants and decorated functions are never mutated)."
+mutate = [
+    "engine/v2/__init__.py",
+    "engine/v2/contracts/*.py",
+    "engine/v2/evaluation/*.py",
 ]
