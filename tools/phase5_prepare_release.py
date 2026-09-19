@@ -193,6 +193,52 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
     return found
 
 
+#: Model-stage driver pools: STR-THRU reads ``size`` (driver abs_move),
+#: STR-RUNUP reads ``implied_t1`` and ``runup_move`` (engine/score.py).
+DRIVER_POOL_ROLES = ("size", "implied_t1", "runup_move")
+
+
+def champion_driver_pools(inventory: ModelReleaseInventory, *, load,
+                          resolve=lambda ref: Path(ref)) -> dict[str, dict[str, bytes]]:
+    """Freeze each driver champion's own embedded residual pool, unchanged.
+
+    Legacy serves the model stage's draws from the full-refit champion's
+    ``ModelArtifact.residuals`` and ``residual_buckets`` (flat pool plus
+    prediction-decile buckets). Those arrays are wrapped as-is with the
+    layer-3 constructor -- no re-bucketing, no fitting -- keyed
+    ``(role, champion id, fold=None)``, the key the residual artifact module
+    documents for a full-refit champion's own pool. The champion's training
+    cutoff is not recorded anywhere, so the lineage declares the Tier-3 panel
+    with no end bound: any panel correction invalidates it (conservative).
+    """
+    from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.lineage import DataDependency, Lineage
+    from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
+    from engine.v2.scoring import native_payoff
+
+    lineage = Lineage(data=(DataDependency(table="tier3.panel"),))
+    estimators = {item.artifact_id: next(m for m in item.members if m.kind == "estimator")
+                  for item in inventory.artifacts}
+    found: dict[str, dict[str, bytes]] = {}
+    for binding in inventory.bindings:
+        if binding.role not in DRIVER_POOL_ROLES:
+            continue
+        artifact = load(resolve(estimators[binding.artifact_id].artifact_ref))
+        buckets = artifact.residual_buckets or None
+        pool = make_driver_residual_pool_artifact(
+            role=binding.role, model_id=binding.artifact_id, fold=None,
+            flat_residuals=artifact.residuals,
+            buckets=None if buckets is None else {"edges": buckets["edges"],
+                                                  "pools": buckets["pools"]},
+            deciles=native_payoff.DECILES,
+            min_pool=int((buckets or {}).get("min_pool", native_payoff.MIN_POOL)),
+            lineage=lineage,
+        )
+        found[f"driver_residual_pool:{binding.role}"] = {
+            f"{binding.artifact_id}|champion": serialize_frozen_state(pool)}
+    return found
+
+
 def default_admissible_table() -> dict[str, dict[str, bytes]]:
     from engine.v2.models.admissible_table import legacy_n_admissible_table
     from engine.v2.models.frozen_state import serialize_frozen_state
@@ -290,6 +336,12 @@ def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
     }
 
 
+def _merge(found: dict[str, dict[str, bytes]], more: Mapping[str, Mapping[str, bytes]]) -> None:
+    """Add objects per member; a later source adds to, never drops, a member."""
+    for member_id, objects in more.items():
+        found.setdefault(member_id, {}).update(objects)
+
+
 def _refuse_data_dir(out: Path) -> None:
     from engine import paths
 
@@ -316,15 +368,20 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
         snapshot = store.file_sha256(paths.PANEL)
     feature_ids = {b.role: b.artifact_id for b in inventory.bindings if b.strategy_id == "*"}
     found: dict[str, dict[str, bytes]] = {}
-    found.update(tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
+    _merge(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
                                      feature_ids, snapshot, args.fold_month))
     if modules_available(("engine.v2.models.payoff_artifact",))[0]:
-        found.update(payoff_payloads(args.training_root or ()))
+        _merge(found, payoff_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.recalibration_artifact",))[0]:
-        found.update(recalibration_payloads(args.training_root or ()))
+        _merge(found, recalibration_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.frozen_state",))[0]:
-        found.update(default_admissible_table())
-        found.update(frozen_state_payloads(args.frozen_state or ()))
+        from engine.models import registry as legacy_registry
+
+        _merge(found, default_admissible_table())
+        _merge(found, champion_driver_pools(
+            inventory, load=legacy_registry.load_artifact,
+            resolve=lambda ref: Path(ref) if Path(ref).is_absolute() else paths.ROOT / ref))
+        _merge(found, frozen_state_payloads(args.frozen_state or ()))
     pool = paths.FEATURES / "chooser_analog_pool.parquet"
     if pool.is_file():
         found["chooser_analog_pool"] = {pool.name: pool.read_bytes()}

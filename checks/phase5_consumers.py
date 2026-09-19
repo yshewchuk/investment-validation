@@ -1,0 +1,314 @@
+"""P5-6 score-consumer probes over a staged release.
+
+Each probe drives one real v2 score consumer with members resolved from the
+staged release (never from ``data/``) and reports, per member object,
+whether the consumer resolved it and whether it refused ``MODEL_NOT_READY``
+once the member was taken away. Probe contexts are fixed and synthetic: they
+prove resolution and refusal, not parity (that is the Phase 4 replay).
+
+A probe row is ``{"consumer", "member_id", "resolved", "refused_when_missing",
+"detail"}``, or ``{"consumer", "member_id", "blocked": True}`` when a member
+the consumer needs is not staged and verified. ``CONSUMERS`` maps consumer id
+to probe; ``None`` means no v2 consumer or probe exists yet (PENDING).
+"""
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+from typing import Callable
+
+from checks.phase5_release import deployment_root
+from engine.v2.models.contracts import ModelRelease
+
+__all__ = ["CONSUMERS", "ReleaseContext"]
+
+
+@dataclasses.dataclass
+class ReleaseContext:
+    """What the consumer probes read: the resolved release, never data/."""
+
+    release_root: Path
+    model_release: ModelRelease
+    states: dict[str, dict]
+
+
+
+def _probe_frozen_executor(ctx: ReleaseContext) -> list[dict]:
+    """``FrozenStageExecutor`` over every staged model binding."""
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.scoring.frozen_executor import FrozenStageExecutor, FrozenStageRefusal
+
+    rows = []
+    root = deployment_root(ctx.release_root)
+    for binding in ctx.model_release.bindings:
+        features = {name: 0.0 for name in binding.feature_order}
+        resolved, detail = False, ""
+        try:
+            result = FrozenStageExecutor(inference=FrozenInference(root),
+                                         release=ctx.model_release,
+                                         binding_id=binding.binding_id).execute(features)
+            staged = tuple(member.content_hash for member in binding.members)
+            resolved = tuple(result.artifact_hashes) == staged
+            detail = "" if resolved else "artifact hashes differ from the staged binding"
+        except FrozenStageRefusal as exc:
+            detail = exc.code + ":" + ",".join(exc.reason_codes)
+        broken = dataclasses.replace(binding, members=tuple(
+            dataclasses.replace(member, path=f"objects/absent-{member.name}")
+            for member in binding.members))
+        stripped = dataclasses.replace(ctx.model_release, bindings=tuple(
+            broken if item.binding_id == binding.binding_id else item
+            for item in ctx.model_release.bindings))
+        refused = False
+        try:
+            FrozenStageExecutor(inference=FrozenInference(root), release=stripped,
+                                binding_id=binding.binding_id).execute(features)
+        except FrozenStageRefusal as exc:
+            refused = exc.code == "MODEL_NOT_READY"
+        rows.append({"consumer": "frozen_stage_executor",
+                     "member_id": f"model:{binding.role}:{binding.strategy_id}",
+                     "resolved": resolved, "refused_when_missing": refused, "detail": detail})
+    return rows
+
+
+def _probe_request(strategy: str, alpha: float):
+    from engine.v2.contracts import ScoreRequest
+
+    return ScoreRequest(
+        event_id="p5-6-probe", calendar_revision="probe", strategy_version=strategy,
+        deployment_id="p5-6-probe", decision_clock_id="entry-close",
+        requested_decision_at="2026-09-16", snapshot_id="probe", mode="replay",
+        fill_model={"alpha": alpha},
+    )
+
+
+_ZERO_POOL = ({"prediction": 1.0, "residual": 0.0},)
+_PROBE_QUOTES = {("C", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 3.0},
+                 ("P", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 3.0}}
+
+
+def _probe_bundle(strategy: str, artifact, cutoff, **overrides):
+    """A source-only model-stage probe bundle; ``overrides`` replace fields."""
+    from engine.v2.scoring.source_inputs import SourceBundle
+
+    context = {"ticker": "P5PROBE", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+               "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0}
+    recipes = {"driver_prediction": {"intercept": 1.0, "coefficients": {}}}
+    refs = {"driver_prediction": "sha256:probe-driver"}
+    fields = {}
+    if strategy == "STR-RUNUP":
+        context.update({"strike": 100.0, "days_before_print": 7.0})
+        recipes["runup_move_prediction"] = {"intercept": 0.0, "coefficients": {}}
+        refs["runup_move_prediction"] = "sha256:probe-move"
+        fields["runup_move_residual_rows"] = _ZERO_POOL
+    recipe = {"seed": 1, "draw_count": 16}
+    if cutoff is not None:
+        recipe["before"] = cutoff
+    fields.update(
+        source_ref="p5-6-probe", context=context, raw_quotes=_PROBE_QUOTES,
+        feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "probe"}},
+        forecast_recipes=recipes, model_artifact_refs=refs,
+        residual_recipe={"terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),
+                         "capital_at_risk": 1.0},
+        analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        strategy=strategy, payoff_artifact_recipe=recipe, payoff_artifact=artifact,
+        model_residual_rows=_ZERO_POOL,
+    )
+    fields.update(overrides)
+    return SourceBundle(**fields)
+
+
+def _score(strategy: str, alpha: float, bundle):
+    from engine.v2.scoring import application
+    from engine.v2.scoring.source_inputs import build_native_score_inputs
+
+    return application.score_one(_probe_request(strategy, alpha),
+                                  build_native_score_inputs(bundle))
+
+
+def _score_flags(strategy: str, artifact, alpha: float, cutoff,
+                 **overrides) -> tuple[str, ...]:
+    bundle = _probe_bundle(strategy, artifact, cutoff, **overrides)
+    return tuple(_score(strategy, alpha, bundle).reason_codes)
+
+
+def _row(consumer: str, member_id: str, flags, missing_flags) -> dict:
+    resolved = not ({"MODEL_NOT_READY", "NO_PAYOFF_MAP"} & set(flags))
+    return {"consumer": consumer, "member_id": member_id, "resolved": resolved,
+            "refused_when_missing": "MODEL_NOT_READY" in missing_flags,
+            "detail": "" if resolved else ",".join(flags)}
+
+
+def _payoff_probe(member_id: str, strategy: str, consumer: str):
+    def probe(ctx: ReleaseContext) -> list[dict]:
+        state = ctx.states.get(member_id)
+        if state is None:
+            return [{"consumer": consumer, "member_id": member_id, "blocked": True}]
+        rows = []
+        for artifact in state["artifacts"]:
+            flags = _score_flags(strategy, artifact, artifact.alpha, artifact.cutoff)
+            resolved = not ({"MODEL_NOT_READY", "NO_PAYOFF_MAP"} & set(flags))
+            missing = _score_flags(strategy, None, artifact.alpha, artifact.cutoff)
+            rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                         "refused_when_missing": "MODEL_NOT_READY" in missing,
+                         "detail": "" if resolved else ",".join(flags)})
+        return rows
+    return probe
+
+
+def _probe_recalibration(ctx: ReleaseContext) -> list[dict]:
+    """The STR-THRU model stage applying a frozen recalibration map.
+
+    Legacy applies the map on the payoff path with the same
+    ``(strategy, alpha, cutoff)`` key, so each staged map is scored together
+    with the staged payoff line of that key. A map with no such line is a
+    release defect (the stage could never reach it), reported as unresolved.
+    """
+    consumer, member_id = "model_stage.recalibration", "recalibration_map:STR-THRU"
+    state = ctx.states.get(member_id)
+    lines = ctx.states.get("payoff_line:STR-THRU")
+    if state is None or lines is None:
+        return [{"consumer": consumer, "member_id": member_id, "blocked": True}]
+    by_key = {line.key: line for line in lines["artifacts"]}
+    rows = []
+    for recal in state["artifacts"]:
+        line = by_key.get(recal.key)
+        if line is None:
+            rows.append({"consumer": consumer, "member_id": member_id, "resolved": False,
+                         "refused_when_missing": True,
+                         "detail": "no staged payoff_line:STR-THRU with the same key"})
+            continue
+        flags = _score_flags("STR-THRU", line, line.alpha, line.cutoff,
+                             recalibration_artifact=recal)
+        missing = _score_flags("STR-THRU", line, line.alpha, line.cutoff,
+                               recalibration_declared=True)
+        resolved = not ({"MODEL_NOT_READY", "NO_PAYOFF_MAP"} & set(flags))
+        rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                     "refused_when_missing": "MODEL_NOT_READY" in missing,
+                     "detail": "" if resolved else ",".join(flags)})
+    return rows
+
+
+def _blocked(consumer: str, member_id: str) -> list[dict]:
+    return [{"consumer": consumer, "member_id": member_id, "blocked": True}]
+
+
+def _first(ctx: ReleaseContext, member_id: str):
+    state = ctx.states.get(member_id)
+    return state["artifacts"][0] if state and state["artifacts"] else None
+
+
+def _driver_key(pool) -> dict:
+    return {"role": pool.role, "model_id": pool.model_id, "fold": pool.fold,
+            "content_hash": pool.content_hash}
+
+
+def _driver_case(ctx: ReleaseContext, role: str):
+    """``(strategy, slot, payoff artifact, partner slots)`` for one driver role.
+
+    Legacy's model stage reads the ``size`` pool for STR-THRU (driver
+    ``abs_move``) and the ``implied_t1`` plus ``runup_move`` pools for
+    STR-RUNUP (engine/score.py ``_score_model``/``_score_runup_model``).
+    """
+    if role == "size":
+        return "STR-THRU", "driver", _first(ctx, "payoff_line:STR-THRU"), {}
+    partner_role = "runup_move" if role == "implied_t1" else "implied_t1"
+    partner = _first(ctx, f"driver_residual_pool:{partner_role}")
+    slot = "driver" if role == "implied_t1" else "runup_move"
+    partner_slot = "runup_move" if slot == "driver" else "driver"
+    partners = {} if partner is None else {partner_slot: partner}
+    return "STR-RUNUP", slot, _first(ctx, "payoff_surface:STR-RUNUP"), partners
+
+
+def _probe_driver_pools(ctx: ReleaseContext) -> list[dict]:
+    """The model stage reading frozen driver residual pools by causal key.
+
+    Each staged pool is scored with the staged payoff artifact of its
+    strategy (inline fitting is forbidden under the guards) and, for
+    STR-RUNUP, the other driver's first staged pool.
+    """
+    consumer, rows = "model_stage.driver_residual_pool", []
+    for role in ("size", "implied_t1", "runup_move"):
+        member_id = f"driver_residual_pool:{role}"
+        state = ctx.states.get(member_id)
+        strategy, slot, payoff, partners = _driver_case(ctx, role)
+        if state is None or payoff is None or (strategy == "STR-RUNUP" and not partners):
+            rows += _blocked(consumer, member_id)
+            continue
+        for pool in state["artifacts"]:
+            slots = {slot: pool, **partners}
+            common = dict(model_residual_rows=(), runup_move_residual_rows=(),
+                          model_residual_artifact_recipe={
+                              name: _driver_key(item) for name, item in slots.items()})
+            flags = _score_flags(strategy, payoff, payoff.alpha, payoff.cutoff,
+                                 model_residual_artifacts=slots, **common)
+            missing = _score_flags(strategy, payoff, payoff.alpha, payoff.cutoff,
+                                   model_residual_artifacts={**slots, slot: None}, **common)
+            rows.append(_row(consumer, member_id, flags, missing))
+    return rows
+
+
+def _paired_bundle(pool, *, artifact):
+    """The planned-exit STR-THRU shape of tests/test_v2_scoring_frozen_residuals."""
+    from engine.v2.scoring.source_inputs import SourceBundle
+
+    key = {"move_model_id": pool.move_model_id, "crush_model_id": pool.crush_model_id,
+           "cutoff": pool.cutoff, "content_hash": pool.content_hash}
+    return SourceBundle(
+        source_ref="p5-6-paired-probe",
+        context={"ticker": "P5PROBE", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+                 "exit_date": "2026-09-09", "expiry": "2026-09-18", "spot": 100.0,
+                 "pre_iv30": 40.0},
+        raw_quotes={("C", 100.0, "2026-09-18"): {"bid": 1.95, "ask": 2.05},
+                    ("P", 100.0, "2026-09-18"): {"bid": 1.95, "ask": 2.05}},
+        feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "probe"}},
+        forecast_recipes={"driver_prediction": {"intercept": 7.0, "coefficients": {}},
+                          "forecast_abs_move": {"intercept": 7.0, "coefficients": {}},
+                          "pred_iv_crush": {"intercept": -20.0, "coefficients": {}}},
+        model_artifact_refs={"driver_prediction": "sha256:p1", "forecast_abs_move": "sha256:p2",
+                             "pred_iv_crush": "sha256:p3"},
+        residual_recipe={}, analog_recipe={},
+        gate_recipe={"model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
+                     "threshold": 0.0},
+        paired_residual_recipe=key, paired_residual_artifact=artifact,
+    )
+
+
+def _probe_paired_pool(ctx: ReleaseContext) -> list[dict]:
+    """The planned-exit simulation reading the frozen paired residual pool."""
+    consumer, member_id = "simulation.paired_residual_pool", "paired_residual_pool"
+    state = ctx.states.get(member_id)
+    if state is None:
+        return _blocked(consumer, member_id)
+    rows = []
+    for pool in state["artifacts"]:
+        record = _score("STR-THRU", 0.5, _paired_bundle(pool, artifact=pool))
+        missing = _score("STR-THRU", 0.5, _paired_bundle(pool, artifact=None))
+        resolved = (record.resolved_request.get("exp_pnl_sim") is not None
+                    and "MODEL_NOT_READY" not in record.reason_codes)
+        rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                     "refused_when_missing": "MODEL_NOT_READY" in missing.reason_codes,
+                     "detail": "" if resolved else ",".join(record.reason_codes)})
+    return rows
+
+
+#: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
+CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
+    "frozen_stage_executor": _probe_frozen_executor,
+    "model_stage.payoff_line": _payoff_probe(
+        "payoff_line:STR-THRU", "STR-THRU", "model_stage.payoff_line"),
+    "model_stage.payoff_surface": _payoff_probe(
+        "payoff_surface:STR-RUNUP", "STR-RUNUP", "model_stage.payoff_surface"),
+    "model_stage.driver_residual_pool": _probe_driver_pools,
+    "simulation.paired_residual_pool": _probe_paired_pool,
+    "model_stage.recalibration": _probe_recalibration,
+    # No v2 scoring stage reads the n_admissible table yet (legacy serves
+    # the chooser feature in engine/score.py); PENDING until one does.
+    "chooser.admissible_table": None,
+    "gate.trailing_cutoff": None,
+    "chooser.analog_pool": None,
+    "analogs.board_analog_matcher": None,
+    "features.tier4_serving_folds": None,
+}

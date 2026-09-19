@@ -34,6 +34,13 @@ from engine.v2.models.training.payoff import (
     build_payoff_surface_artifact,
 )
 from engine.v2.models.training.recalibration import build_recalibration_map_artifact
+from engine.v2.models.admissible_table import legacy_n_admissible_table
+from engine.v2.models.frozen_state import serialize_frozen_state
+from engine.v2.models.lineage import DataDependency, Lineage
+from engine.v2.models.training.residuals import (
+    build_driver_residual_pool_artifact,
+    build_paired_residual_pool_artifact,
+)
 from tools import phase5_prepare_release as prep
 
 CLOCK = "legacy.entry_close.v1"
@@ -106,6 +113,38 @@ def _recal(alpha: float = 0.5, before=None) -> bytes:
         _recal_pairs(), strategy="STR-THRU", alpha=alpha, before=before))
 
 
+LINEAGE = Lineage(data=(DataDependency(table="tier3.panel", end_exclusive="2026-09-01"),))
+
+
+def _driver_pool(role: str, *, lineage=LINEAGE, seed: int = 1) -> bytes:
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    rows = [{"prediction": float(p), "residual": float(r)}
+            for p, r in zip(rng.uniform(0, 12, 60), rng.normal(0, 1.5, 60))]
+    return serialize_frozen_state(build_driver_residual_pool_artifact(
+        rows, role=role, model_id=f"m-{role}", fold=None, lineage=lineage))
+
+
+def _paired_pool() -> bytes:
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(17)
+    forecasts, outcomes, crush = [], [], []
+    for index, day in enumerate(pd.date_range("2025-06-01", periods=400, freq="D")):
+        ticker, stamp = ("AAA", "BBB", "CCC")[index % 3], str(day.date())
+        forecasts.append({"ticker": ticker, "event_date": stamp,
+                          "pred_abs_move": 4.0 + index % 20 / 10.0, "pred_iv_crush_30": -20.0})
+        outcomes.append({"ticker": ticker, "event_date": stamp,
+                         "abs_move": float(rng.uniform(0, 12))})
+        crush.append({"ticker": ticker, "event_date": stamp,
+                      "crush_pct_iv30": float(rng.uniform(-45, 0))})
+    return serialize_frozen_state(build_paired_residual_pool_artifact(
+        forecasts, outcomes, crush, move_model_id="size_v1_4",
+        crush_model_id="iv_crush_v1_gbm", cutoff="2026-09-01", lineage=LINEAGE))
+
+
 def _state_payloads() -> dict[str, dict[str, bytes]]:
     line = build_payoff_line_artifact(_ROWS, strategy="STR-THRU", driver="abs_move",
                                       alpha=0.5, min_trades=2)
@@ -119,12 +158,18 @@ def _state_payloads() -> dict[str, dict[str, bytes]]:
         # keyed like the undated line: (STR-THRU, 0.5, no cutoff)
         "recalibration_map:STR-THRU": {"a": _recal()},
         "tier4_folds:size": {"m_202609_abcdefabcdef.joblib": b"fold-bytes"},
+        "driver_residual_pool:size": {"m-size|champion": _driver_pool("size")},
+        "driver_residual_pool:implied_t1": {"m-implied_t1|champion": _driver_pool("implied_t1")},
+        "driver_residual_pool:runup_move": {"m-runup_move|champion": _driver_pool("runup_move")},
+        "paired_residual_pool": {"size_v1_4|iv_crush_v1_gbm|2026-09-01": _paired_pool()},
+        "admissible_table:dyn_sv": {"dyn_sv.n_admissible_by_depth|v1": serialize_frozen_state(
+            legacy_n_admissible_table())},
     }
 
 
-#: A reduced catalog whose every member can be built here: the payoff and
-#: recalibration states (real typed loaders + real v2 consumers) and one raw
-#: state.
+#: A reduced catalog whose every member can be built here: payoff,
+#: recalibration, residual pools and the admissible table (real typed loaders,
+#: real v2 consumers where one exists) and one raw state.
 SPECS = tuple(s for s in layout.STATE_SPECS if s.member_id in _state_payloads())
 
 
@@ -144,6 +189,8 @@ CONSUMERS = {
     "model_stage.payoff_line": gate.CONSUMERS["model_stage.payoff_line"],
     "model_stage.payoff_surface": gate.CONSUMERS["model_stage.payoff_surface"],
     "model_stage.recalibration": gate.CONSUMERS["model_stage.recalibration"],
+    "model_stage.driver_residual_pool": gate.CONSUMERS["model_stage.driver_residual_pool"],
+    "simulation.paired_residual_pool": gate.CONSUMERS["simulation.paired_residual_pool"],
     "features.tier4_serving_folds": _stub_probe("tier4_folds:size",
                                                 "features.tier4_serving_folds"),
 }
@@ -195,6 +242,10 @@ def test_complete_release_passes(tmp_path):
     assert ("model_stage.payoff_line", "payoff_line:STR-THRU") in consumers
     assert ("model_stage.payoff_surface", "payoff_surface:STR-RUNUP") in consumers
     assert ("model_stage.recalibration", "recalibration_map:STR-THRU") in consumers
+    for role in ("size", "implied_t1", "runup_move"):
+        assert ("model_stage.driver_residual_pool", f"driver_residual_pool:{role}") in consumers
+    assert ("simulation.paired_residual_pool", "paired_residual_pool") in consumers
+    assert evidence["lineage"] == {"status": "ok", "states": 5, "valid": 5}
     assert all(r["status"] == "ok" for r in evidence["consumers"])
     # both (alpha, cutoff) folds of the line were scored, each by its own key
     assert sum(1 for c, m in [(r["consumer"], r["member_id"]) for r in evidence["consumers"]]
@@ -346,6 +397,9 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     pending = {r["consumer"] for r in evidence["consumers"] if r["status"] == "PENDING"}
     assert "analogs.board_analog_matcher" in pending
     assert "model_stage.recalibration" not in pending  # a real probe since 3dea05e
+    assert "model_stage.driver_residual_pool" not in pending  # real since 52ef989
+    assert "simulation.paired_residual_pool" not in pending
+    assert "chooser.admissible_table" in pending  # no v2 consumer reads it yet
     by_id = {r["member_id"]: r for r in evidence["members"]}
     for member_id in ("board_analog_matcher", "recalibration_map:STR-RUNUP",
                       "trailing_pnl_cutoff"):
@@ -424,3 +478,85 @@ def test_preparer_collects_recalibration_and_payoff_artifacts(tmp_path):
     (fold / "recalibration_artifact.json").write_bytes(b"{}")
     with pytest.raises(ValueError):
         prep.recalibration_payloads([tmp_path / "train"])
+
+
+def test_driver_pool_staged_under_the_wrong_role_fails_identity(tmp_path):
+    states = _state_payloads()
+    states["driver_residual_pool:size"] = {"x": _driver_pool("implied_t1")}
+    evidence = _run(tmp_path, _release(tmp_path, states=states))
+
+    assert {"P5_MEMBER_IDENTITY", "P5_CONSUMER_BLOCKED"} <= set(evidence["finding_codes"])
+
+
+def test_missing_paired_pool_blocks_the_simulation_consumer(tmp_path):
+    states = _state_payloads()
+    del states["paired_residual_pool"]
+    evidence = _run(tmp_path, _release(tmp_path, states=states))
+
+    blocked = [f for f in evidence["findings"] if f["code"] == "P5_CONSUMER_BLOCKED"]
+    assert [f["subject"] for f in blocked] == ["simulation.paired_residual_pool"]
+
+
+def test_unknown_lineage_upstream_fails(tmp_path):
+    states = _state_payloads()
+    orphan = Lineage(data=LINEAGE.data, upstream=("fold:size:2026-09",))
+    states["driver_residual_pool:size"] = {"m-size|champion": _driver_pool("size", lineage=orphan)}
+    evidence = _run(tmp_path, _release(tmp_path, states=states))
+
+    assert "P5_LINEAGE_INVALID" in evidence["finding_codes"]
+    assert evidence["lineage"]["code"] == "UNKNOWN_UPSTREAM"
+
+
+def test_lineage_upstream_naming_a_staged_state_passes(tmp_path):
+    states = _state_payloads()
+    parent = "driver_residual_pool:implied_t1/m-implied_t1|champion"
+    child = Lineage(data=LINEAGE.data, upstream=(parent,))
+    states["driver_residual_pool:size"] = {"m-size|champion": _driver_pool("size", lineage=child)}
+    evidence = _run(tmp_path, _release(tmp_path, states=states))
+
+    assert evidence["lineage"]["status"] == "ok"
+    assert evidence["release_ok"] is True
+
+
+def test_preparer_freezes_champion_pools_unchanged(tmp_path):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
+
+    keys = (("size", "*"), ("implied_t1", "*"), ("gate", "STR-THRU"))
+    _release_obj, inventory, _payloads = _models("rel", keys=keys)
+    stored = {
+        "m-size-all": SimpleNamespace(
+            residuals=np.array([1.0, -2.0, 0.5]),
+            residual_buckets={"edges": np.array([0.0, 5.0, 10.0]),
+                              "pools": [np.array([1.0]), np.array([-2.0, 0.5])],
+                              "min_pool": 1, "kind": "prediction_decile"}),
+        "m-implied_t1-all": SimpleNamespace(residuals=np.array([0.25]), residual_buckets=None),
+    }
+    # json-linear fixtures share one artifact_ref, so serve in binding order
+    served = iter([stored["m-size-all"], stored["m-implied_t1-all"]])
+
+    def load(path):
+        return next(served)
+
+    found = prep.champion_driver_pools(inventory, load=load)
+    assert sorted(found) == ["driver_residual_pool:implied_t1", "driver_residual_pool:size"]
+    data = found["driver_residual_pool:size"]["m-size-all|champion"]
+    (tmp_path / "pool.json").write_bytes(data)
+    pool = FrozenStateLoader(tmp_path).load(
+        FrozenStateRef(path="pool.json", content_hash=layout.sha256_bytes(data)))
+    assert (pool.role, pool.model_id, pool.fold) == ("size", "m-size-all", None)
+    assert pool.flat_residuals == (1.0, -2.0, 0.5)
+    assert pool.bucket_edges == (0.0, 5.0, 10.0) and pool.min_pool == 1
+    assert pool.lineage.declared
+
+
+def test_preparer_classifies_prebuilt_frozen_states(tmp_path):
+    paths = []
+    for name, data in (("d.json", _driver_pool("runup_move")), ("p.json", _paired_pool())):
+        (tmp_path / name).write_bytes(data)
+        paths.append(tmp_path / name)
+    found = prep.frozen_state_payloads(paths)
+    assert sorted(found) == ["driver_residual_pool:runup_move", "paired_residual_pool"]
