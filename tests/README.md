@@ -186,7 +186,7 @@ clean test run fails, or the run hits its 330-minute step timeout.
 | weekly (Sun 05:23 UTC) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 
-- **Scope.** All of `engine/v2`, split into 22 modules plus the six pilot
+- **Scope.** All of `engine/v2`, split into 23 modules plus the six pilot
   modules. The only legacy files are the pilot's `engine/pnl_sim.py` and
   `engine/models/no_fit.py`. `contracts` (with `engine/v2/__init__.py` and
   `evaluation/`) is listed as excluded: mutmut generates no mutants there.
