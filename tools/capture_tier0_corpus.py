@@ -127,9 +127,35 @@ from tools.phase4_request_translation import (  # noqa: E402
     canonical_request_from_legacy,
 )
 
-SCHEMA_VERSION = "tier0_pair.v1.1"
+#: v1.2 (was v1.1): a pair's payload MAY now embed a shared frozen document
+#: (a served fold pool, residual pool or payoff fit) by reference instead of
+#: in full -- see ``SHARED_REF_KEY``/``SHARED_DOCUMENT_SCHEMA_VERSION`` and
+#: ``guides/rearchitecture_phase0_baseline.md`` Sec 7.4. Nothing reads this
+#: field to gate behaviour (the loader recognizes the reference SHAPE, not
+#: the version string), so the bump is documentary, matching this module's
+#: convention of bumping on every payload-shape change.
+SCHEMA_VERSION = "tier0_pair.v1.2"
 INDEX_VERSION = "tier0_corpus.v1.1"
 DEFAULT_OUT = ROOT / "fixtures" / "tier0"
+
+#: A pair (or a shared document's own body) may embed a frozen document this
+#: capture identified as shared (``_SHARED_TRACE_DOCUMENTS``) by reference
+#: instead of in full: ``{SHARED_REF_KEY: "sha256:<64 hex>"}`` and NOTHING
+#: else in that dict. ``checks/tier0_corpus.py`` carries the SAME two
+#: literals independently -- that module must run in a bare checkout with no
+#: pandas, no store and no models, so it cannot import this one (the same
+#: reason ``engine/v2/foundation/canonical.py``'s ``NONFINITE_KEY`` docstring
+#: gives: one convention, not two, kept in sync by
+#: ``tests/test_tier0_shared_documents.py``).
+SHARED_REF_KEY = "$shared"
+
+#: Schema for one file under a corpus version's ``shared/`` directory:
+#: ``{"schema_version": ..., "digest": "sha256:...", "value": <content>}``,
+#: where ``digest`` is the content hash of the FULLY EXPANDED logical
+#: document (``value`` with every nested ``$shared`` reference resolved) --
+#: the exact value ``content_hash``/``_SHARED_TRACE_DOCUMENTS`` already
+#: define, unchanged by how the document happens to be stored on disk.
+SHARED_DOCUMENT_SCHEMA_VERSION = "tier0_shared_document.v1.0"
 
 #: How a NaN is frozen. Not ``null``: contracts §2.1 forbids sending a missing
 #: value as NaN, and collapsing the two here would lose the distinction between
@@ -1712,25 +1738,138 @@ def _prepare_normalized_shared(value: Any, cache: dict[int, tuple[Any, Any]]) ->
     return tag_nonfinite(value)
 
 
-def _write_pair_file(path: Path, pair: dict) -> int:
-    """Write one pair's JSON exactly as
-    ``json.dumps(tag_nonfinite(pair), indent=2, sort_keys=True, allow_nan=False) + "\\n"``
-    would, byte for byte, but never as one materialized string.
+class _SharedDocumentWriter:
+    """Write each ``_SHARED_TRACE_DOCUMENTS``-identified document ONCE per
+    corpus version, under ``<version>/shared/<digest-hex>.json``, keyed by
+    the content digest of its fully expanded logical form -- the exact value
+    ``content_hash``/``_SHARED_TRACE_DOCUMENTS`` already compute (unchanged
+    by this class; see ``_prepare_normalized_referenced``).
 
-    ``_prepare_normalized_shared`` tags/normalizes ``pair`` once, reusing the
-    same prepared object at every occurrence of a shared container (a
-    chooser's shared fold pool, embedded once per member) instead of
-    rebuilding it per occurrence. ``json.JSONEncoder.iterencode`` (the pure
-    Python path, since ``indent`` is set) then walks that already-deduped
-    tree and yields the rendered text piece by piece straight to the file
-    handle -- there is no ``json.dumps`` call and no final ``str.join``.
-    Revisiting the same prepared object at each of its occurrences still
-    costs the CPU of re-rendering that text (the output file legitimately
-    repeats it once per member), but never holds more than one occurrence's
-    text in memory at a time.
+    A chooser pair used to carry a full copy of the same frozen fold pool,
+    residual pool or payoff fit once per ranked menu member (11 members: 11
+    copies), and two DYN-SV choosers served by the same fold repeated it
+    again across pairs. This writer is reused across every candidate one
+    ``write()`` call processes, so the SAME digest is written exactly once
+    no matter how many pairs or occurrences reference it; every occurrence
+    after the first just returns the already-written digest's reference.
+    """
+
+    def __init__(self, shared_dir: Path) -> None:
+        self.shared_dir = shared_dir
+        self.shared_dir.mkdir(parents=True, exist_ok=True)
+        self._written: set[str] = set()
+        #: digest by RAW node id -- safe against id() reuse the same way
+        #: `_SHARED_TRACE_DOCUMENTS._held` already is: these objects are held
+        #: alive (registered) until the run's `reset()`, so an id in this
+        #: cache cannot be recycled by an unrelated object while it is used.
+        self._digest_by_id: dict[int, str] = {}
+
+    def digests(self) -> tuple[str, ...]:
+        """Every digest written under ``shared/`` so far this corpus version."""
+        return tuple(self._written)
+
+    def reference(self, value: Any) -> dict[str, str]:
+        """This shared value's ``{SHARED_REF_KEY: digest}`` node, writing its
+        content under ``shared/`` the first time this digest is seen."""
+        key = id(value)
+        digest = self._digest_by_id.get(key)
+        if digest is None:
+            digest = _SHARED_TRACE_DOCUMENTS(value)
+            self._digest_by_id[key] = digest
+        if digest not in self._written:
+            # Reserve before recursing: a shared document is built
+            # bottom-up from immutable frozen state and never expected to
+            # reference itself, but reserving first turns an unexpected
+            # cycle into a truncated-but-terminating write (the inner
+            # occurrence sees "already written") instead of infinite
+            # recursion.
+            self._written.add(digest)
+            inner_cache: dict[int, tuple[Any, Any]] = {}
+            if isinstance(value, dict):
+                content: Any = {
+                    str(k): _prepare_normalized_referenced(v, inner_cache, self)
+                    for k, v in value.items()
+                }
+            else:
+                content = [
+                    _prepare_normalized_referenced(v, inner_cache, self)
+                    for v in value
+                ]
+            body = {"schema_version": SHARED_DOCUMENT_SCHEMA_VERSION,
+                    "digest": digest, "value": content}
+            path = self.shared_dir / (digest.split(":", 1)[-1] + ".json")
+            encoder = json.JSONEncoder(indent=2, sort_keys=True, allow_nan=False)
+            with path.open("w") as fh:
+                for chunk in encoder.iterencode(body):
+                    fh.write(chunk)
+                fh.write("\n")
+        return {SHARED_REF_KEY: digest}
+
+
+def _prepare_normalized_referenced(
+    value: Any, cache: dict[int, tuple[Any, Any]], shared_writer: _SharedDocumentWriter,
+) -> Any:
+    """``_prepare_normalized_shared``, but a node ``_SHARED_TRACE_DOCUMENTS``
+    identifies as shared (the SAME identity check the hashing fragments memo
+    uses) is written to ``shared_writer`` once per corpus version and
+    replaced, at every occurrence -- including nested inside another shared
+    document -- by a ``{SHARED_REF_KEY: digest}`` reference instead of being
+    expanded again.
+
+    This is the storage-side counterpart to ``_prepare_normalized_shared``:
+    that function still produces the fully expanded, hash-equivalent copy
+    ``make_pair``'s ``payload_hash`` is computed over (never changed by this
+    function). This one produces the SMALL tree a pair file or checkpoint
+    case document is actually written as. Only a value carrying TRUE object
+    identity to ``_SHARED_TRACE_DOCUMENTS`` (the raw ``legacy_trace``/
+    ``input_trace``, not ``_prepare_normalized_shared``'s already-rebuilt
+    copy) is recognized -- see ``write()``.
+    """
+    if isinstance(value, (dict, list, tuple)) and _SHARED_TRACE_DOCUMENTS.shared(value):
+        return shared_writer.reference(value)
+    if isinstance(value, dict):
+        key = id(value)
+        cached = cache.get(key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
+        result = {str(k): _prepare_normalized_referenced(v, cache, shared_writer)
+                  for k, v in value.items()}
+        cache[key] = (value, result)
+        return result
+    if isinstance(value, (list, tuple)):
+        key = id(value)
+        cached = cache.get(key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
+        result = [_prepare_normalized_referenced(v, cache, shared_writer) for v in value]
+        cache[key] = (value, result)
+        return result
+    return tag_nonfinite(value)
+
+
+def _write_pair_file(path: Path, pair: dict, shared_writer: _SharedDocumentWriter) -> int:
+    """Write one pair's JSON, byte for byte, but never as one materialized
+    string, and never re-expanding a shared frozen document at every
+    occurrence.
+
+    ``pair`` must still carry its RAW ``legacy_trace``/``input_trace`` (true
+    object identity to ``_SHARED_TRACE_DOCUMENTS``) -- not the already
+    ``_prepare_normalized_shared``'d copy ``make_pair``'s hash used, which has
+    lost that identity by rebuilding fresh containers. ``write()`` restores
+    the raw value into a shallow copy of the payload before calling this.
+
+    ``_prepare_normalized_referenced`` tags/normalizes ``pair`` once, hoists
+    every shared document it finds into ``shared_writer`` (written once per
+    corpus version, referenced everywhere else) and reuses the same prepared
+    object at every occurrence of a NON-shared repeated container, exactly
+    as ``_prepare_normalized_shared`` did before this fix.
+    ``json.JSONEncoder.iterencode`` (the pure Python path, since ``indent``
+    is set) then walks that already-deduped, already-referenced tree and
+    yields the rendered text piece by piece straight to the file handle --
+    there is no ``json.dumps`` call and no final ``str.join``.
     """
     cache: dict[int, tuple[Any, Any]] = {}
-    prepared = _prepare_normalized_shared(pair, cache)
+    prepared = _prepare_normalized_referenced(pair, cache, shared_writer)
     encoder = json.JSONEncoder(indent=2, sort_keys=True, allow_nan=False)
     with path.open("w") as fh:
         for chunk in encoder.iterencode(prepared):
@@ -2772,6 +2911,10 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
 
     manifest_pairs = {}
+    # One writer for the WHOLE corpus version: a fold pool served by two
+    # DYN-SV choosers (both traced here) is written once and both pairs
+    # reference it, not just the 11 members within a single pair.
+    shared_writer = _SharedDocumentWriter(tmp / "shared")
     for cand in chosen:
         # A +/-inf residual (legacy ResidualPool keeps it, R4-20 gap 1) is
         # written in the repo's canonical non-finite form,
@@ -2780,16 +2923,21 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         # hashes that same form, so every recorded hash is unchanged; readers
         # decode it with untag_nonfinite.
         #
-        # `_prepare_normalized_shared` (not plain `tag_nonfinite`) so a
-        # chooser's shared fold pool, embedded once per ranked member, is
-        # tagged ONCE and reused at every occurrence -- see its docstring.
-        # `checkpoint` feeds both this pair's `legacy_trace` field AND the
-        # case document below; preparing it once here means both consumers
-        # share the same deduped object instead of each re-expanding it.
+        # `raw_checkpoint` keeps its TRUE object identity to
+        # `_SHARED_TRACE_DOCUMENTS` (a chooser's shared fold pool, embedded
+        # once per ranked member); `_prepare_normalized_shared` builds a
+        # SEPARATE, fully expanded copy that has lost that identity (fresh
+        # containers, never registered) -- it feeds ONLY `make_pair`'s hash
+        # below, unchanged from before this fix, so `payload_hash` is
+        # byte-identical to the old expanded form. The FILE actually written
+        # goes through `raw_checkpoint` instead (see `storage_payload`
+        # below), so a shared document is hoisted into `shared/` once and
+        # referenced everywhere else, rather than expanded again per
+        # occurrence.
+        raw_checkpoint = cand.get("legacy_trace")
         prep_cache: dict[int, tuple[Any, Any]] = {}
-        checkpoint = cand.get("legacy_trace")
-        if checkpoint is not None:
-            checkpoint = _prepare_normalized_shared(checkpoint, prep_cache)
+        checkpoint = (_prepare_normalized_shared(raw_checkpoint, prep_cache)
+                      if raw_checkpoint is not None else None)
         input_trace = _hydrate_trace(cand.get("input_trace"))
         pair = make_pair(
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
@@ -2800,8 +2948,15 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             strict_trace_gap=strict_gaps.get(str(cand["fixture_id"])),
             relations=cand.get("relations"),
         )
+        # `pair["payload"]["input_trace"]` is already `input_trace` (raw,
+        # true identity intact -- `make_pair` never expands it). Only
+        # `legacy_trace` needs restoring to its raw form for storage.
+        storage_payload = dict(pair["payload"])
+        if raw_checkpoint is not None:
+            storage_payload["legacy_trace"] = raw_checkpoint
+        storage_pair = {**pair, "payload": storage_payload}
         pair_path = pairs_dir / f"{cand['fixture_id']}.json"
-        pair_bytes = _write_pair_file(pair_path, pair)
+        pair_bytes = _write_pair_file(pair_path, storage_pair, shared_writer)
         print(f"[corpus] wrote pair {cand['fixture_id']}: "
               f"{pair_bytes / 1e6:.1f} MB, rss {_rss_gb():.2f}G", flush=True)
         manifest_pairs[cand["fixture_id"]] = {
@@ -2811,7 +2966,10 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "covers": pair["covers"],
             "trace_disposition": pair["payload"].get("trace_disposition", "absent"),
         }
-        if checkpoint is not None:
+        if raw_checkpoint is not None:
+            case_cache: dict[int, tuple[Any, Any]] = {}
+            case_checkpoint = _prepare_normalized_referenced(
+                raw_checkpoint, case_cache, shared_writer)
             checkpoint_sink.write_case(
                 cand["fixture_id"],
                 {
@@ -2820,14 +2978,15 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
                     "strategy": pair["payload"]["record"].get("strategy"),
                     "covers": pair["covers"],
                     "record_kind": cand["kind"],
-                    "checkpoint": checkpoint,
+                    "checkpoint": case_checkpoint,
                 },
             )
+            del case_cache, case_checkpoint
         # Hydrate/prepare one pair at a time and drop it before the next --
-        # `pair`/`checkpoint`/`input_trace` are the only things this
-        # iteration grew (the spilled trace was hydrated above), so nothing
-        # else needs releasing.
-        del pair, checkpoint, input_trace, prep_cache
+        # `pair`/`checkpoint`/`input_trace`/`storage_pair` are the only
+        # things this iteration grew (the spilled trace was hydrated above),
+        # so nothing else needs releasing.
+        del pair, checkpoint, input_trace, prep_cache, storage_pair, storage_payload
         gc.collect()
 
     missing = sorted(set(required_axes()) - set(index))
@@ -2849,6 +3008,10 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         "corpus_hash": content_hash(
             {k: v["payload_hash"] for k, v in sorted(manifest_pairs.items())}
         ),
+        # Every digest hoisted under shared/ this version -- lets a reader
+        # (or a test) confirm dedup happened without diffing directory
+        # listings. Empty when no candidate carried a shared document.
+        "shared_documents": sorted(shared_writer.digests()),
     }
     checkpoint_sink.finalize({
         "release_id": out_dir.name,

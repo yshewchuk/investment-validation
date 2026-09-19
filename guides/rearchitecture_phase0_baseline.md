@@ -295,6 +295,73 @@ legacy scorer loads a panel — so the §9.5 cases divide:
   **reordered inputs**, **batch versus single** and restart. A tier-0 case
   that reorders file loading cannot fail and is not evidence of it.
 
+### 7.4 On-disk layout, and shared frozen documents (added 09-19)
+
+One version directory (`fixtures/tier0/<snapshot>/`, or the bare corpus root
+in tests): `INDEX.json`, `pairs/<fixture_id>.json` (one pair per file),
+`checkpoints/` (the `DiskCheckpointSink` diagnostic bundle: `manifest.json`
+and `cases/<case_id>.json`), and — from this schema on — `shared/<hex>.json`.
+
+A DYN-SV chooser's trace embeds the SAME served fold pool, residual pool or
+payoff fit once per ranked menu member (`_SHARED_TRACE_DOCUMENTS` in
+`tools/capture_tier0_corpus.py` is the one place that identifies these, by
+Python object identity, the same identity `engine.score.Phase4TraceCollector`
+registers when it records a fold pool or model state). Writing each
+occurrence in full made an eleven-member chooser pair 2+ GB (measured 09-19,
+corpus `20260919T212752Z`) and forced every consumer to hold that whole
+expansion just to read one pair.
+
+**The fix:** a value `_SHARED_TRACE_DOCUMENTS` identifies as shared is
+written ONCE per corpus version, to `shared/<hex>.json` (`<hex>` is its
+content digest's hex part), and every occurrence — in a pair's payload, in a
+checkpoint case document, or nested inside ANOTHER shared document — is
+replaced by a reference node instead of being expanded again:
+
+```json
+{"$shared": "sha256:<64 hex>"}
+```
+
+and NOTHING else in that dict (an extra key beside `$shared` is a hard
+refusal, never silently accepted as data). The referenced file's shape:
+
+```json
+{"schema_version": "tier0_shared_document.v1.0",
+ "digest": "sha256:<64 hex>",
+ "value": <the document's content, itself possibly carrying nested $shared references>}
+```
+
+`digest` is the content hash of the document's FULLY EXPANDED logical form
+(every nested reference resolved) — the exact value `content_hash`/
+`_SHARED_TRACE_DOCUMENTS.__call__` already compute; the hoisting a value gets
+onto disk never changes what its hash means or is taken over.
+`trace_hash`/`payload_hash`/`shared_input_hash`/`legacy_input_hash` are
+computed the same way they always were, over the fully expanded value, before
+any reference substitution — this fix touches storage, never a hash
+definition or value.
+
+**Loading:** `checks/tier0_corpus.load` is the ONE function every consumer
+uses to read a pair (`checks/phase4_real.py`, `checks/phase5_phase4_replay.py`,
+`tools/phase5_calibration_keys.py`, `tools/replay_tier1.py`,
+`checks/rearchitecture_phase2_corpus_parity.py`,
+`checks/rearchitecture_phase0_gate.py`). It resolves every `$shared`
+reference to a SINGLE Python object per digest, cached across every pair one
+`load()` call reads, so a document served to two DYN-SV choosers — or
+embedded at all 11 members of one — comes back as ONE shared object, not 12
+copies: identity sharing restored on load, matching how the capture holds it
+in memory. A missing shared file, a digest that does not match the file's
+recomputed content hash, an unsupported `shared/*.json` schema version, or an
+unrecognized reference shape are all hard refusals (`CorpusFormatError`) —
+never a silent skip or a partially-resolved pair.
+
+**Backward compatibility.** An OLD corpus (schema `tier0_pair.v1.1`, no
+`shared/` directory, no `$shared` nodes anywhere — `CURRENT` was
+`20260912T233551Z` as of this writing) loads completely unchanged: nothing in
+it is reference-shaped, so `load()`'s resolution pass is a no-op walk. The
+P2/P3 gates keep reading that corpus exactly as before. `SCHEMA_VERSION`
+(`tools/capture_tier0_corpus.py`) moved to `tier0_pair.v1.2` for the new
+corpora only; nothing gates on the literal value, so old and new pairs read
+through the same loader with no format flag.
+
 ---
 
 ## 8. Step 5 — negative controls

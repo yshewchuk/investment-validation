@@ -505,3 +505,99 @@ def test_the_cli_reports_json(corpus):
     assert out["uncovered_axes"] == []
     assert out["pairs"] == out["declared_pairs"] == 6
     assert all(c["problems"] == [] for c in out["seeded_controls"]["controls"].values())
+
+
+# --------------------------------------------------------------------------
+# shared frozen documents (a pair's payload may embed one by reference)
+# --------------------------------------------------------------------------
+
+
+def write_shared(root: Path, value, *, expanded=None) -> str:
+    """Write ``value`` (the on-disk storage form, which may itself carry
+    nested ``$shared`` references) under ``root/shared/<hex>.json``. The
+    digest is the content hash of ``expanded`` (the fully expanded logical
+    document, defaulting to ``value`` itself when it carries no nested
+    reference) -- the same value a real writer computes, never the hash of
+    the reference-shaped storage form.
+    """
+    digest = content_hash(expanded if expanded is not None else value)
+    shared_dir = root / "shared"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    body = {"schema_version": t0.SHARED_DOCUMENT_SCHEMA_VERSION,
+            "digest": digest, "value": value}
+    (shared_dir / f"{digest.split(':', 1)[-1]}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n")
+    return digest
+
+
+def test_a_shared_reference_resolves_to_one_object_shared_by_every_occurrence(tmp_path):
+    """Two DIFFERENT pairs, and two occurrences within one of them, all
+    referencing the same fold pool: `load` must read `shared/<hex>.json`
+    exactly once and hand every occurrence the SAME Python object back."""
+    pool = {"predictions": [0.1, 0.2, 0.3], "tag": "pool"}
+    digest = write_shared(tmp_path / "tier0", pool)
+    ref = {t0.SHARED_REF_KEY: digest}
+    p1 = pair("100_shared_a", request("STR-THRU"),
+              priced("STR-THRU", extra_field={"a": ref, "b": ref}))
+    p2 = pair("101_shared_b", request("BFLY-P"), priced("BFLY-P", extra_field=ref))
+    root = build(tmp_path / "tier0", [p1, p2])
+    corpus = t0.load(root)
+    a = corpus.pairs["100_shared_a"]["payload"]["record"]["extra_field"]
+    b = corpus.pairs["101_shared_b"]["payload"]["record"]["extra_field"]
+    assert a["a"] is a["b"] is b
+    assert a["a"] == pool
+
+
+def test_an_unknown_reference_shape_refuses_loudly(tmp_path):
+    pool = {"tag": "pool"}
+    digest = write_shared(tmp_path / "tier0", pool)
+    bad_ref = {t0.SHARED_REF_KEY: digest, "extra": 1}
+    p = pair("102_bad_shape", request("STR-THRU"), priced("STR-THRU", extra_field=bad_ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_missing_shared_file_refuses_loudly(tmp_path):
+    ref = {t0.SHARED_REF_KEY: "sha256:" + "a" * 64}
+    p = pair("103_missing", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_digest_mismatched_shared_file_refuses_loudly(tmp_path):
+    pool = {"tag": "pool"}
+    digest = write_shared(tmp_path / "tier0", pool)
+    # Tamper with the shared file's content after its digest was computed.
+    shared_path = tmp_path / "tier0" / "shared" / f"{digest.split(':', 1)[-1]}.json"
+    doc = json.loads(shared_path.read_text())
+    doc["value"]["tag"] = "tampered"
+    shared_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    ref = {t0.SHARED_REF_KEY: digest}
+    p = pair("104_tampered", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_shared_document_may_reference_another(tmp_path):
+    """Nested sharing: one shared document embeds a reference to another."""
+    inner = {"tag": "inner-pool"}
+    inner_digest = write_shared(tmp_path / "tier0", inner)
+    outer_stored = {"nested": {t0.SHARED_REF_KEY: inner_digest}, "tag": "outer"}
+    outer_expanded = {"nested": inner, "tag": "outer"}
+    outer_digest = write_shared(tmp_path / "tier0", outer_stored, expanded=outer_expanded)
+    ref = {t0.SHARED_REF_KEY: outer_digest}
+    p = pair("105_nested", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    corpus = t0.load(root)
+    resolved = corpus.pairs["105_nested"]["payload"]["record"]["extra_field"]
+    assert resolved["nested"] == inner
+    assert resolved["tag"] == "outer"
+
+
+def test_an_old_format_corpus_has_no_shared_directory_and_loads_unchanged(corpus):
+    assert not (corpus / "shared").exists()
+    loaded = t0.load(corpus)
+    assert loaded.pairs["000_TWIN-P5"]["payload"]["record"]["strategy"] == "TWIN-P5"
