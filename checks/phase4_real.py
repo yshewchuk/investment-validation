@@ -10,7 +10,7 @@ import math
 import sys
 import tempfile
 import time
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping
@@ -1992,6 +1992,46 @@ def _chooser_selection_checks(record: Mapping[str, Any], native) -> dict[str, bo
     }
 
 
+#: Structural dimensions of ``_record_checks`` proven catchable by planting a
+#: genuine native-side defect and re-running the SAME comparator (R4-15).
+#: Numeric dimensions (forecasts/simulation/financial_diagnostics/verdicts/
+#: analogs) already have their own corrupt-and-recheck loop in
+#: ``_native_parity``, through ``_compare_numeric_outputs``.
+_STRUCTURAL_DEFECT_DIMENSIONS = ("flags", "contracts", "keys", "null_masks")
+
+
+def _plant_structural_defect(record: Mapping[str, Any], native, dimension: str):
+    """One native-side mutation that must break ``dimension`` in
+    ``_record_checks``, or ``None`` when this row has nothing to corrupt for
+    it (no legs, an empty null-mask map, or ``native`` is a test double that
+    is not a real dataclass record -- production ``native`` objects always
+    are). Never touches ``record``: every defect lands on the native side,
+    per R4-15's control.
+    """
+    if not is_dataclass(native):
+        return None
+    if dimension == "flags":
+        return replace(native, reason_codes=tuple(native.reason_codes) + (
+            "PHASE4_PLANTED_DEFECT",
+        ))
+    if dimension == "contracts":
+        if not native.legs:
+            return None
+        return replace(native, legs=tuple(native.legs)[:-1])
+    if dimension == "null_masks":
+        if not native.null_masks:
+            return None
+        key = next(iter(native.null_masks))
+        return replace(native, null_masks={
+            **native.null_masks, key: not native.null_masks[key],
+        })
+    if dimension == "keys":
+        return replace(native, resolved_request={
+            **native.resolved_request, "phase4_planted_defect_key": True,
+        })
+    raise ValueError(f"unknown structural defect dimension {dimension!r}")
+
+
 def _native_parity(corpus) -> tuple[dict, dict]:
     """Compare only complete, hash-verified traces from the saved release."""
     rows = []
@@ -1999,7 +2039,11 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     legacy_ids = []
     dispositions = {"compared": 0, "refused_as_expected": 0, "incomparable": 0}
     runtime_stage_counts = {stage: 0 for stage in _REQUIRED_TRACE_STAGES}
-    flag_defect_detected = False
+    structural_negative_controls = {
+        name: False for name in _STRUCTURAL_DEFECT_DIMENSIONS
+    }
+    chooser_defect_seen = False
+    chooser_defect_detected = False
     numeric_negative_controls = {
         "forecasts": False,
         "simulation": False,
@@ -2090,9 +2134,16 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                         )
                         numeric_negative_controls[dimension] = not result[dimension]["agree"]
                         break
-            if not flag_defect_detected:
-                mutated_flags = list(member_record.get("flags") or ()) + ["PHASE4_PLANTED_DEFECT"]
-                flag_defect_detected = list(member_native.reason_codes) != mutated_flags
+            for dimension in _STRUCTURAL_DEFECT_DIMENSIONS:
+                if structural_negative_controls[dimension]:
+                    continue
+                mutated = _plant_structural_defect(
+                    member_record, member_native, dimension,
+                )
+                if mutated is None:
+                    continue
+                mutated_checks, _ = _record_checks(member_record, mutated)
+                structural_negative_controls[dimension] = not mutated_checks[dimension]
         checks = {
             name: all(item[name] for item in member_checks) for name in member_checks[0]
         }
@@ -2131,6 +2182,14 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             row["checks"]["chooser"] = all(selection.values())
             row["chooser_findings"] = sorted(
                 name for name, agree in selection.items() if not agree)
+            chooser_defect_seen = True
+            if not chooser_defect_detected and native.chooser_selection:
+                mutated_choice = replace(native, chooser_selection={
+                    **native.chooser_selection,
+                    "strategy": f"{native.chooser_selection.get('strategy')}-PHASE4-PLANTED",
+                })
+                mutated_selection = _chooser_selection_checks(record, mutated_choice)
+                chooser_defect_detected = not mutated_selection["chosen_strategy"]
         rows.append(row)
         native_ids.append(native.payload_hash)
     dimensions = (
@@ -2214,16 +2273,20 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "dimension_agreement": dimension_agreement,
         "planted_defect": {
             "detected": (
-                compared == expected and flag_defect_detected
+                compared == expected
+                and all(structural_negative_controls.values())
                 and all(numeric_negative_controls.values())
+                and (chooser_defect_detected if chooser_defect_seen else True)
             ),
             "controls": {
-                "flags": flag_defect_detected, **numeric_negative_controls,
+                **structural_negative_controls, **numeric_negative_controls,
+                "chooser": chooser_defect_detected if chooser_defect_seen else True,
             },
             "receipt": content_hash({
                 "comparison": comparison_receipt,
                 "defects": {
-                    "flags": flag_defect_detected, **numeric_negative_controls,
+                    **structural_negative_controls, **numeric_negative_controls,
+                    "chooser": chooser_defect_detected if chooser_defect_seen else True,
                 },
             }),
         },
