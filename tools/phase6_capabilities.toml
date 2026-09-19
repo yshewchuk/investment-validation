@@ -210,26 +210,26 @@ id = "decisions-calibration"
 area = "decisions"
 capability = "Regenerate the ledger calibration report and health.json from settled predictions"
 old = ["cli:engine.ledger calibrate", "writer:engine/ledger.py::calibrate", "writer:engine/ledger.py::write_health"]
-new = ["MISSING"]
-producer = "legacy engine.ledger.calibrate only"
-identity = "none"
-tests = ["tests/test_ledger.py"]
-disposition = "missing"
+new = ["cli:ops ledger calibrate", "py:engine/v2/ledger/calibration.py::calibrate"]
+producer = "engine.v2.ledger.calibration.calibrate over catalog decisions/outcomes, publishing health.json/report as immutable catalog artifacts; reuses engine.ledger.scored_pairs/settlement_summary/_strategy_calibration through engine/v2/ledger/legacy_adapter.py"
+identity = "ledger_calibration_state singleton row (n_scored_at_last_report) plus health/report artifact content hash"
+tests = ["tests/test_ledger.py", "tests/test_v2_ledger_calibration.py"]
+disposition = "compatibility-adapter"
 owner = "P6-3"
-notes = "No v2 job recomputes calibration/health from canonical decisions; legacy_render only reads a ledger-generation health artifact."
+notes = "Never writes into the real (read-only) ledger/ tree; state and artifacts live in the ops catalog (ledger schema migration 3)."
 
 [[row]]
 id = "decisions-status"
 area = "decisions"
 capability = "Ledger status summary (counts, duplicates, pending settlement)"
 old = ["cli:engine.ledger status"]
-new = ["MISSING"]
-producer = "legacy engine.ledger.status"
-identity = "none"
-tests = ["tests/test_ledger.py"]
-disposition = "missing"
+new = ["cli:ops ledger status", "py:engine/v2/ledger/status.py::status"]
+producer = "engine.v2.ledger.status.status over catalog decisions/outcomes (engine/v2/ledger/catalog_reader.py), reusing engine.ledger.settlement_summary via engine/v2/ledger/legacy_adapter.py"
+identity = "computed on demand from the decisions table's append-only sequence; no persisted identity"
+tests = ["tests/test_ledger.py", "tests/test_v2_ledger_status.py"]
+disposition = "compatibility-adapter"
 owner = "P6-3"
-notes = "No ops command summarizes the catalog decisions/outcomes the way engine.ledger status does."
+notes = "duplicates/pending_settlement are v2-native additions beyond engine.ledger.status()'s own shape, not claimed byte-identical to legacy's duplication_report/_unresolved."
 
 # ------------------------------------------------------------------ books
 
@@ -250,13 +250,13 @@ id = "books-funding"
 area = "books"
 capability = "Book totals, capital per trade and funding computed against canonical records"
 old = ["cli:engine/portfolio.py"]
-new = ["MISSING"]
-producer = "legacy engine.portfolio.build_book/summarize only"
-identity = "none"
-tests = ["tests/test_portfolio.py"]
-disposition = "missing"
+new = ["cli:ops ledger book", "py:engine/v2/ledger/portfolio.py::build_book"]
+producer = "engine.v2.ledger.portfolio.build_book/summarize over catalog decisions/outcomes, reusing engine.portfolio.build_book/summarize through engine/v2/ledger/legacy_adapter.py"
+identity = "computed on demand from the decisions table's append-only sequence; no persisted identity"
+tests = ["tests/test_portfolio.py", "tests/test_v2_ledger_portfolio.py"]
+disposition = "compatibility-adapter"
 owner = "P6-3"
-notes = "No v2 accounting over catalog decisions; P6-3 must show totals agree with the existing accounting."
+notes = "Totals agree with the existing accounting by construction: same build_book/summarize code, catalog-sourced rows instead of the jsonl ledger."
 
 # --------------------------------------------------------------- research
 
@@ -692,6 +692,7 @@ reason = "Resource-bounded process runner used by every heavy job; infrastructur
 "phase-3 ingestion" = "P3B"
 "phase-2 data access" = "P3B"
 "phase-1 ledger authority migration" = "P6-3"
+"phase-6 native ledger/portfolio extraction" = "P6-3"
 
 [edge_consumer_map]
 "engine.v2.ops.legacy_adapter" = "supervised legacy_* nightly job kinds (engine/v2/ops/nightly.py)"
@@ -699,6 +700,7 @@ reason = "Resource-bounded process runner used by every heavy job; infrastructur
 "engine.v2.scoring.compatibility" = "Phase 4 compatibility scoring seam"
 "engine.v2.models.inventory" = "P5-1 model inventory report (tools/phase5_inventory.py)"
 "engine.v2.models.training.legacy_adapter" = "no-fit guard shared with the legacy scorer"
+"engine.v2.ledger.legacy_adapter" = "ops ledger status|calibrate|book (engine/v2/ledger/status.py, calibration.py, portfolio.py)"
 
 [[edge_override]]
 id = "edge:engine.v2.ops.legacy_adapter::engine.dashboard.nightly.refresh_calendar_data"
