@@ -46,11 +46,13 @@ from engine.v2.ops.supervisor import Service, serve
 
 
 def _add_ledger_commands(commands):
-    """The ``ops ledger import-history`` sub-subparser -- bootstraps a fresh
-    catalog's ``decisions``/``decision_imports`` tables from the legacy JSONL
-    ledger so ``legacy_settlement`` has a committed prediction to settle
-    against on a catalog's first shadow night (see
-    ``engine.v2.ops.ledger_history_import``)."""
+    """``ops ledger import-history|status|calibrate|book`` -- see
+    ``engine.v2.ops.ledger_history_import`` and, for the last three (P6-3),
+    ``engine.v2.ledger.status``/``calibration``/``portfolio``: the native v2
+    ledger-status summary, calibration/health recompute and hypothetical-book
+    accounting over catalog decisions, matching legacy
+    ``engine/ledger.py::status``/``calibrate`` and
+    ``engine/portfolio.py::build_book``/``summarize``."""
     ledger = commands.add_parser("ledger")
     ledger.add_argument("--root", default=argparse.SUPPRESS)
     ledger_sub = ledger.add_subparsers(dest="ledger_command", required=True)
@@ -63,6 +65,25 @@ def _add_ledger_commands(commands):
                                        "this session (by their own as_of/resolved_at field)")
     import_history_p.add_argument("--dry-run", action="store_true",
                                   help="report counts without writing anything")
+
+    ledger_sub.add_parser("status", help="counts, duplicates and pending settlement "
+                                         "over catalog decisions/outcomes")
+
+    calibrate_p = ledger_sub.add_parser(
+        "calibrate", help="regenerate the calibration report and health payload")
+    calibrate_p.add_argument("--force", action="store_true")
+    calibrate_p.add_argument("--trigger", type=int, default=None,
+                             help="newly scored rows needed to trigger a recompute "
+                                  "(default: engine.v2.ledger.calibration.CALIBRATION_TRIGGER)")
+
+    book_p = ledger_sub.add_parser(
+        "book", help="the hypothetical book, capital per trade and funding "
+                     "over catalog decisions")
+    book_p.add_argument("--contracts", type=int, default=None,
+                        help="size by a fixed contract count instead of equal dollars")
+    book_p.add_argument("--capital-per-trade", type=float, default=None)
+    book_p.add_argument("--include-declined", action="store_true",
+                        help="also book the gate's rejections, tagged recommended=False")
 
 
 def _add_price_history_commands(commands):
@@ -564,7 +585,29 @@ def snapshot_command(args, root, conn, clock):
 
 
 def ledger_command(args, root, conn, clock):
-    """``ops ledger import-history`` -- see ``engine.v2.ops.ledger_history_import``."""
+    """``ops ledger import-history|status|calibrate|book`` -- see
+    ``engine.v2.ops.ledger_history_import`` (import-history) and
+    ``engine.v2.ledger.status``/``calibration``/``portfolio`` (P6-3)."""
+    if args.ledger_command == "status":
+        from engine.v2.ledger.status import status
+
+        return status(conn)
+    if args.ledger_command == "calibrate":
+        from engine.v2.ledger.calibration import calibrate
+
+        kwargs = {"force": args.force}
+        if args.trigger is not None:
+            kwargs["trigger"] = args.trigger
+        return calibrate(conn, ArtifactStore(root), clock=clock, **kwargs)
+    if args.ledger_command == "book":
+        from engine.v2.ledger.portfolio import build_book, summarize
+
+        book = build_book(conn, contracts=args.contracts,
+                          capital_per_trade=args.capital_per_trade,
+                          include_declined=args.include_declined)
+        return {"summary": summarize(book),
+                "book": json.loads(book.to_json(orient="records")) if not book.empty else []}
+
     from datetime import date
 
     from engine.v2.ops.ledger_history_import import import_history

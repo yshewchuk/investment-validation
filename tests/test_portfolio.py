@@ -303,7 +303,7 @@ class TestTheDeclaredSchema:
     def test_a_book_with_no_predictions_is_shaped_not_bare(self, monkeypatch):
         from engine import ledger, portfolio
 
-        monkeypatch.setattr(ledger, "canonical_predictions", lambda: [])
+        monkeypatch.setattr(ledger, "canonical_predictions", lambda *a, **k: [])
         frame = portfolio.build_book()
         assert list(frame.columns) == list(portfolio.BOOK_COLUMNS)
 

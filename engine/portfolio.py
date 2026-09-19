@@ -118,8 +118,16 @@ def empty_book() -> pd.DataFrame:
 
 def build_book(contracts: int | None = None,
                capital_per_trade: float = CAPITAL_PER_TRADE,
-               *, include_declined: bool = False) -> pd.DataFrame:
+               *, include_declined: bool = False,
+               predictions: Any = None,
+               outcomes: Any = None) -> pd.DataFrame:
     """One row per distinct recommended trade, with its state and P&L.
+
+    ``predictions``/``outcomes`` (P6-3) override the jsonl ledger with
+    caller-supplied rows — see :mod:`engine.v2.ledger.legacy_adapter`, which
+    feeds catalog-sourced rows here so this exact pure function computes an
+    identical book over canonical decisions. ``None`` (every caller before
+    P6-3) keeps reading the jsonl ledger unchanged.
 
     Sized by equal DOLLARS per trade by default. Pass ``contracts`` to size by
     a fixed contract count instead — useful for reading the book as a literal
@@ -141,7 +149,7 @@ def build_book(contracts: int | None = None,
     # canonical row is the last view at or before the entry — the verdict you
     # would have acted on. Grouping the raw rows instead can pick a night the
     # gate was still withholding and drop a real recommendation.
-    preds = pd.DataFrame(ledger.canonical_predictions())
+    preds = pd.DataFrame(ledger.canonical_predictions(predictions))
     if preds.empty:
         return empty_book()
     score = preds["score"].apply(lambda s: s or {})
@@ -177,7 +185,7 @@ def build_book(contracts: int | None = None,
     book = rec.sort_values("as_of").reset_index(drop=True)
     book["recommended"] = book["gate_pass"] == True  # noqa: E712 — explicit, not falsy-None
 
-    outcomes = pd.DataFrame(ledger.read_outcomes())
+    outcome_rows = pd.DataFrame(outcomes if outcomes is not None else ledger.read_outcomes())
     # `realized_entry_cost` / `realized_exit_value` are written only on a
     # RESOLVED outcome row (engine.ledger.score_outcomes) — an unresolvable one
     # has nothing to price yet. Every outcome on file can legitimately be
@@ -185,10 +193,10 @@ def build_book(contracts: int | None = None,
     # its exit session settle yet), and a DataFrame built from JSON records
     # never gets a column no row supplied. Reindexing onto the full column set
     # before selecting keeps the merge from raising in exactly that gap.
-    outcomes = outcomes.reindex(columns=list(OUTCOME_MERGE_COLUMNS))
-    if not outcomes.empty:
-        outcomes = outcomes.drop_duplicates("row_id", keep="last")
-        book = book.merge(outcomes[list(OUTCOME_MERGE_COLUMNS)],
+    outcome_rows = outcome_rows.reindex(columns=list(OUTCOME_MERGE_COLUMNS))
+    if not outcome_rows.empty:
+        outcome_rows = outcome_rows.drop_duplicates("row_id", keep="last")
+        book = book.merge(outcome_rows[list(OUTCOME_MERGE_COLUMNS)],
                           on="row_id", how="left")
     else:
         for c in OUTCOME_MERGE_COLUMNS[1:]:
