@@ -275,6 +275,7 @@ mutate = [
 skip = [
     "*/training/analogs.py",
     "*/training/chooser_pool.py",
+    "*/training/trailing_cutoff.py",
 ]
 tests = [
     "tests/test_v2_models_p5_2_acceptance.py",
@@ -301,6 +302,7 @@ skip = [
     "*/recalibration_artifact.py",
     "*/analog_artifact.py",
     "*/chooser_analog_pool.py",
+    "*/trailing_cutoff_artifact.py",
 ]
 tests = [
     "tests/test_v2_models_admissible_table.py",
@@ -348,6 +350,18 @@ tests = [
     "tests/test_v2_models_chooser_analog_pool.py",
     "tests/test_v2_scoring_native_chooser_features.py",
     "tests/test_v2_scoring_source_inputs.py",
+]
+
+[modules.entry_rule]
+why = "Native entry-rule gate and the trailing pnl_sim cutoff artifact it reads: a slip in the cutoff or the comparison lets a trade through the gate, or blocks one."
+mutate = [
+    "engine/v2/scoring/native_entry_rule.py",
+    "engine/v2/models/trailing_cutoff_artifact.py",
+    "engine/v2/models/training/trailing_cutoff.py",
+]
+tests = [
+    "tests/test_v2_scoring_native_entry_rule.py",
+    "tests/test_checks_phase5_acceptance.py",
 ]
 
 [modules.scoring_stages]
