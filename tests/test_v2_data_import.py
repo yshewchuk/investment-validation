@@ -21,7 +21,6 @@ import io
 import json
 import shutil
 import sys
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -49,7 +48,7 @@ from engine.v2.ops.snapshot_import import save_import_plan, submit_import  # noq
 from engine.v2.ops.stages import registry  # noqa: E402
 from engine.v2.ops.submission import NamespacePolicy  # noqa: E402
 from engine.v2.ops.supervisor import LEASE_SECONDS, Service  # noqa: E402
-from tests.ops_support import TEST_POLICY, FakeClock  # noqa: E402
+from tests.ops_support import TEST_POLICY, FakeClock, run_until  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
 MAPPING = data_legacy_mapping.build_legacy_mapping()
@@ -304,15 +303,7 @@ def test_plan_import_refuses_bad_snapshot_shape(tmp_path):
 
 def _run_until_terminal(service, conn, job_id, timeout=60,
                         states=("succeeded", "failed", "blocked", "cancelled")):
-    deadline = time.monotonic() + timeout
-    state = "queued"
-    while time.monotonic() < deadline:
-        service.tick()
-        state = conn.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
-        if state in states:
-            return state
-        time.sleep(0.05)
-    return state
+    return run_until(service, conn, job_id, timeout=timeout, states=states)
 
 
 def _submit_and_run(root, store_root, conn, clock, *, idempotency_key, expected_head=None,

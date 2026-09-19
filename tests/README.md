@@ -72,6 +72,45 @@ python3 -m coverage run --source=engine,checks,tools -m pytest tests \
   && python3 -m coverage report --sort=cover -m
 ```
 
+### Running the whole suite on this box (12 cores, 7.7 GB)
+
+Run it from the main checkout. A git worktree has no `data/` or
+`fixtures/tier0/` (both gitignored), so the data-dependent tests fail there
+with `FileNotFoundError`.
+
+```bash
+cd /root/investing-plan
+free -m; ps -eo pid,rss,args --sort=-rss | head    # who else holds memory
+python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | tail -60
+```
+
+- **`-n 4 --dist loadgroup`**: 4 workers when you are the only test runner.
+  Use `-n 2` while a heavy job (nightly, D14, real scoring) or another agent's
+  tests are running. `loadgroup` keeps the `xdist_group("serial")` files on
+  one worker (see `conftest.py`).
+- **Don't narrow the CPU affinity.** Don't run it under `taskset`, or
+  `bounded_run --cores`/`--cpu-set` with fewer than 6 CPUs. Real-`Service`
+  tests admit jobs against this process's own affinity minus 1 reserved CPU,
+  and the `legacy_score`/`legacy_rebuild` profiles need 5 worker CPUs. Under a
+  4-CPU affinity they can never be admitted.
+- **`-rfEs`** lists every failure, error and skip with its reason in the
+  summary, so a skip can't go unnoticed.
+
+Nothing in the suite waits unboundedly any more:
+
+| Guard | What it does | Knob |
+|---|---|---|
+| Per-test timeout (`conftest.py`) | Each setup/call/teardown phase gets 600 s; past that the test **fails** as `TIMEOUT: <node id> ...` with the stack it was waiting in, and the run continues. pytest-timeout is not installed; this is a SIGALRM equivalent that switches itself off if pytest-timeout is ever installed. The first `ui_dist_dir` setup (npm ci + build) gets a longer budget. | `--test-timeout N`, env `PYTEST_TEST_TIMEOUT`, `@pytest.mark.test_timeout(N)`; `0` disables |
+| Admission waits (`ops_support.run_until` / `AdmissionWatch`) | A real-`Service` job left queued on a host-resource reason **fails** the test with `RESOURCE WAIT (environment, not a code failure): ...`, quoting the queue reason's numbers ("needs X GiB free, MemAvailable is Y"). `PROFILE_EXCEEDS_CAPACITY` (CPU affinity or host total too small) fails at once; `MEMORY_HEADROOM`, `CPU_UNAVAILABLE`, `DISK_SPACE` and `RESERVATION_BUDGET` fail after 60 s continuously queued. Reasons from the test's own catalog (dependencies, heavy slot, store lease) are left to the test. | env `OPS_TEST_ADMISSION_WAIT_S` |
+| `ui/.npm-ci.lock` | Waits for another process's `npm ci` for at most 660 s, then fails, naming the lock. | none |
+
+These are failures, not skips, on purpose: the check did not run, and a
+skip is easy to miss when the rest of the summary is green. To separate
+environment from code, `grep -E "RESOURCE WAIT|TIMEOUT:"` the output and rerun
+those files alone on a quieter box. `TEST_POLICY` caps every profile at
+256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
+0.75 GiB for a whole minute.
+
 ## Known thin spots
 
 Honest list, so nobody has to rediscover it:

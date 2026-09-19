@@ -6,12 +6,18 @@ a fake adapter.
 """
 from __future__ import annotations
 
+import contextlib
+import faulthandler
 import fcntl
 import hashlib
 import importlib
+import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -34,6 +40,109 @@ def pytest_configure(config):
         "and routes each named group to one worker. See the grouping rule "
         "below for which files use it and why.",
     )
+    config.addinivalue_line(
+        "markers",
+        "test_timeout(seconds): per-phase time budget for this test's setup, "
+        "call and teardown, overriding --test-timeout. See the per-test "
+        "timeout section below.",
+    )
+
+
+# -- per-test timeout ---------------------------------------------------------
+#
+# pytest-timeout is not installed on this host (checked 2026-09-19), so this
+# is a small SIGALRM equivalent. Each of a test's setup, call and teardown
+# phases gets its own budget: `--test-timeout SECONDS`, else env
+# PYTEST_TEST_TIMEOUT, else DEFAULT_TEST_TIMEOUT; 0 disables it. A test can
+# carry `@pytest.mark.test_timeout(N)`. When the budget runs out the test
+# FAILS with its node id and the stack it was stuck in, and the run carries on
+# with the next test. Before this, one sleeping test kept its xdist worker
+# asleep until the outer timeout killed the run, and no summary or test name
+# came out.
+#
+# 600 s is well above any test that finishes: the slowest known are the
+# real-parquet reads (~40 s each) and legacy test_features.py (~33 s serially),
+# and contention on this box costs up to 3.4x. The one longer legitimate step,
+# the `ui_dist_dir` npm install and build, gets `_UI_SETUP_BUDGET` for its
+# setup. Disabled automatically when pytest-timeout is installed, so the two
+# never race.
+#
+# The alarm needs the main thread, which is where pytest and xdist 3.x
+# workers run tests. A SIGALRM cannot break into C code that never returns to
+# the interpreter; everything that waits in this suite (sleep, subprocess
+# wait, flock, sqlite busy wait) does return.
+
+DEFAULT_TEST_TIMEOUT = 600.0
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--test-timeout", type=float, default=None,
+        help="per-phase budget in seconds for each test's setup/call/teardown "
+             f"(default: env PYTEST_TEST_TIMEOUT or {DEFAULT_TEST_TIMEOUT:g}; 0 disables)")
+
+
+def _base_timeout(config) -> float:
+    if config.pluginmanager.hasplugin("timeout"):  # real pytest-timeout wins
+        return 0.0
+    value = config.getoption("--test-timeout")
+    if value is None:
+        value = float(os.environ.get("PYTEST_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT))
+    return value
+
+
+def _phase_timeout(item, when: str) -> float:
+    base = _base_timeout(item.config)
+    if base <= 0:
+        return 0.0
+    marker = item.get_closest_marker("test_timeout")
+    if marker is not None and marker.args:
+        base = float(marker.args[0])
+    if when == "setup" and "ui_dist_dir" in getattr(item, "fixturenames", ()):
+        base = max(base, _UI_SETUP_BUDGET)
+    return base
+
+
+@contextlib.contextmanager
+def _alarm(item, when: str):
+    seconds = _phase_timeout(item, when)
+    if (seconds <= 0 or not hasattr(signal, "setitimer")
+            or threading.current_thread() is not threading.main_thread()):
+        yield
+        return
+
+    def expired(signum, frame):
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        pytest.fail(f"TIMEOUT: {item.nodeid} exceeded its {when} budget of {seconds:g}s "
+                    f"(--test-timeout / PYTEST_TEST_TIMEOUT / @pytest.mark.test_timeout). "
+                    f"The traceback shows where it was waiting; all threads are dumped "
+                    f"in the captured stderr.")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_setup(item):
+    with _alarm(item, "setup"):
+        return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    with _alarm(item, "call"):
+        return (yield)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    with _alarm(item, "teardown"):
+        return (yield)
 
 
 # -- xdist grouping rule ------------------------------------------------------
@@ -119,6 +228,10 @@ _UI_NPM_CI_LOCK = UI_ROOT / ".npm-ci.lock"
 _UI_NPM_CI_MARKER = UI_ROOT / "node_modules" / ".package-lock-hash"
 _UI_NPM_CI_TIMEOUT = 600
 _UI_NPM_BUILD_TIMEOUT = 180
+_UI_NPM_CI_LOCK_WAIT = _UI_NPM_CI_TIMEOUT + 60
+#: Worst case for the setup of the first test that uses `ui_dist_dir`: wait
+#: out another holder's `npm ci`, run our own, then build.
+_UI_SETUP_BUDGET = _UI_NPM_CI_LOCK_WAIT + _UI_NPM_CI_TIMEOUT + _UI_NPM_BUILD_TIMEOUT + 60
 
 
 def _ui_node_available() -> bool:
@@ -143,14 +256,29 @@ def _ui_node_modules_stale() -> bool:
 def _ui_ensure_node_modules() -> None:
     """Installs `ui/node_modules` via `npm ci --prefix ui` iff missing or
     stale against `ui/package-lock.json` -- under a real `flock` so
-    concurrent callers (xdist workers, or a second agent on this host) block
-    on the install rather than racing it. Never silently skips an `npm ci`
-    failure: a nonzero exit fails the test loudly with the command's own
-    tail output. Caller is responsible for skipping first when node/npm
-    itself is not installed at all (`_ui_node_available`)."""
+    concurrent callers (xdist workers, or a second agent on this host) wait
+    for the install rather than racing it. The wait is bounded by
+    `_UI_NPM_CI_LOCK_WAIT` (one full `npm ci` timeout plus a minute): past
+    that the holder is stuck, not busy, and the test fails naming the lock
+    instead of sleeping on it. Never silently skips an `npm ci` failure: a
+    nonzero exit fails the test loudly with the command's own tail output.
+    Caller is responsible for skipping first when node/npm itself is not
+    installed at all (`_ui_node_available`)."""
     UI_ROOT.mkdir(parents=True, exist_ok=True)
     with open(_UI_NPM_CI_LOCK, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        deadline = time.monotonic() + _UI_NPM_CI_LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    pytest.fail(
+                        f"RESOURCE WAIT: {_UI_NPM_CI_LOCK} stayed locked for "
+                        f"{_UI_NPM_CI_LOCK_WAIT}s. Another process (an xdist worker or a "
+                        f"second pytest session on this worktree) is holding it through "
+                        f"`npm ci`; find it with `fuser {_UI_NPM_CI_LOCK}`.", pytrace=False)
+                time.sleep(0.5)
         try:
             if not _ui_node_modules_stale():
                 return

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import tarfile
-import time
 from pathlib import Path
 
 from engine.v2.contracts import JobSpec, SubmitRequest
@@ -43,7 +42,7 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import TEST_POLICY
+from tests.ops_support import TEST_POLICY, run_until
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -51,15 +50,7 @@ SESSION = "2026-09-12"
 
 
 def _run_until_terminal(service, conn, job_id, timeout=60):
-    deadline = time.monotonic() + timeout
-    state = "queued"
-    while time.monotonic() < deadline:
-        service.tick()
-        state = conn.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
-        if state in ("succeeded", "failed", "blocked", "cancelled"):
-            return state
-        time.sleep(0.05)
-    return state
+    return run_until(service, conn, job_id, timeout=timeout)
 
 
 def _submit_effect_kind(conn, clock, *, kind, key, scope, input_bindings=None):

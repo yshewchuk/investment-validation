@@ -39,7 +39,7 @@ from engine.v2.ops.submission import NamespacePolicy, get_job, job_id_for, submi
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import POLICY as TINY_POLICY
 from tests.ops_support import REGISTRY as TINY_REGISTRY
-from tests.ops_support import TEST_POLICY, catalog, request, sample
+from tests.ops_support import TEST_POLICY, catalog, request, run_until, sample
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -128,12 +128,8 @@ def _submit(conn, clock, *, key):
 
 
 def _run_until(conn, service, job_id, states, timeout=15):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        service.tick()
-        if get_job(conn, job_id).state in states:
-            return get_job(conn, job_id)
-        time.sleep(0.02)
+    if run_until(service, conn, job_id, timeout=timeout, states=states, poll=0.02) in states:
+        return get_job(conn, job_id)
     raise AssertionError(f"{job_id} did not reach {states} within {timeout}s "
                          f"(last: {get_job(conn, job_id).state})")
 

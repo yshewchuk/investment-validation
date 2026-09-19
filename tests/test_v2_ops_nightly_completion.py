@@ -15,7 +15,6 @@ import base64
 import json
 import sqlite3
 import tempfile
-import time
 from pathlib import Path
 
 import pandas as pd
@@ -85,7 +84,7 @@ from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit_graph
 from engine.v2.ops.supervisor import Service, _verify_decision_evidence
-from tests.ops_support import TEST_POLICY, sample
+from tests.ops_support import TEST_POLICY, run_until, sample
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -153,15 +152,7 @@ def _finality_coverage(covered_tickers=("FAKE",), *, date=SESSION):
 
 
 def _run_until_terminal(service, conn, job_id, timeout=18):
-    deadline = time.monotonic() + timeout
-    state = "queued"
-    while time.monotonic() < deadline:
-        service.tick()
-        state = conn.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
-        if state in ("succeeded", "failed", "blocked", "cancelled"):
-            return state
-        time.sleep(0.05)
-    return state
+    return run_until(service, conn, job_id, timeout=timeout)
 
 
 def _succeed_parent(conn, clock, supervisor, *, key, output_name, ref):

@@ -47,7 +47,7 @@ def _run_sequence(conn, root, store_root, clock, items, log_path):
                     break
                 time.sleep(0.1)
             if row is None or row[0] != "succeeded":
-                detail = conn.execute("SELECT state,failure_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
+                detail = conn.execute("SELECT state,failure_json,queue_reason_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
                 raise RuntimeError("sequence publication did not succeed: " + str(dict(detail) if detail else None))
             job = conn.execute("SELECT spec_json FROM jobs WHERE job_id=?", (receipt.job_id,)).fetchone()
             spec = json.loads(job["spec_json"])
