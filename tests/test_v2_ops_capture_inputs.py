@@ -473,7 +473,7 @@ def _check(path):
         real = os.path.realpath(str(path))
     except OSError:
         return
-    if real.startswith(sys.prefix) or "site-packages" in real or "/usr/lib/python" in real:
+    if real.startswith(sys.prefix) or "site-packages" in real or "/usr/lib/python" in real or real.startswith("/usr/share/zoneinfo"):
         return
     if not real.startswith(staged_root):
         escaped.append(real)
