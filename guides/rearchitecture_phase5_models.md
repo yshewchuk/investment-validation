@@ -323,3 +323,47 @@ Not faithful, recorded:
 - `tools/phase5_training_job.py` still builds no calibration datasets and
   passes no cutoffs or alpha. Real recalibration folds need a pairs-dataset
   builder there.
+
+## Real-data builders for the calibration and residual states
+
+Delivered 2026-09-19: `tools/phase5_datasets.py` (legacy readers, read-only,
+kept under `tools/` so no new v2 -> legacy adapter edge is needed),
+`tools/phase5_training_job.py` (`--alpha`/`--cutoff`/`--pairs` for the
+calibration recipes, `--state` for the frozen residual pools) and
+`residuals.freeze_stored_driver_residual_pool`. Tests:
+`tests/test_v2_models_phase5_datasets.py` (synthetic, `tmp_path` only).
+
+| member | dataset | legacy selection mirrored |
+|---|---|---|
+| `payoff_line:*`, `payoff_surface:STR-RUNUP` | `payoff_trades()` | `Scorer.trades` as `Scorer.payoff`/`runup_payoff` feed `fit_payoff`/`fit_runup_payoff`: legs parsed a partition at a time, `provenance == "engine.replay"`, full-panel left merge of `abs_move`/`or_implied`, `im_t1 = or_implied`; legacy row order |
+| `recalibration_map:*` | `recalibration_pairs()` | `recalibrate.load_pairs()`, the cached table `Scorer.recalibration` fits on |
+| `paired_residual_pool` | `paired_pool_inputs()` | `Scorer._residual_pool`: Tier-4 forecasts x panel `abs_move` x `crush_frame()` over the full universe (computed per ticker chunk; exact) |
+| `driver_residual_pool:{size,implied_t1,runup_move}` | `champion_driver_pool()` | the champion `ModelArtifact`'s stored `residuals`/`residual_buckets`, which `residual_draws` serves in the model stage (fold key `None`) |
+
+Proved on a synthetic legacy `Scorer`: fold members equal legacy's kept rows
+in order, `fit_payoff`/`fit_recalibration` agree with the artifacts, the paired
+rows equal the full-universe `_residual_pool`, and the driver artifact serves
+`ModelArtifact.residual_pool(prediction)` exactly. Job output is byte-identical
+to calling the builder directly.
+
+Differences from legacy, recorded:
+
+- **Paired pool universe.** A bounded Scorer (the nightly's) scopes the crush
+  table to its loaded tickers, so its pool depends on the board. The builder
+  uses legacy's unbounded branch only; the test shows a scoped legacy pool is
+  a strict subset. `--cutoff` (optional) bounds event dates; legacy has none.
+  Mixed Tier-4 producer ids on pooled rows are keyed as their `+` join.
+- **Driver pools** are the champions' embedded pools, not Tier-4 fold pools
+  (`_pool_before`): the latter serve the forecast band and travel in the
+  `tier4_folds:*` members. The stored buckets are wrapped unchanged; their
+  training predictions are not saved, so they cannot be re-bucketed.
+- **Recalibration pairs** are read, never rebuilt: `build_pairs` re-scores
+  events with a full Scorer and writes into `data/`, which scoring never does.
+- Payoff and recalibration artifacts are keyed per `(strategy, alpha,
+  cutoff)`; legacy's cutoff is each request's `evidence_cutoff`, which for
+  STR-RUNUP is the entry date, so a board needs one fold per distinct cutoff.
+
+Preparer hook (P5-6): collect `recalibration_artifact.json` from
+`--training-root` as it does `payoff_artifact.json`; the state JSONs
+(`<out>/<member with : as __>.json`, not the `.summary.json` beside them) go
+through `--frozen-state` unchanged.

@@ -656,6 +656,6 @@ def test_training_job_tool_lists_every_recipe_and_bounds_label_dates(capsys):
     spec.loader.exec_module(tool)
     assert tool.main(["--list"]) == 0
     listed = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
-    assert listed == [k.label() for k in RECIPES]
+    assert listed == [k.label() for k in RECIPES] + list(tool.STATES)
     friday_amc = tool._next_session(["2021-12-31", "2021-12-29"])
     assert list(friday_amc.dt.strftime("%Y-%m-%d")) == ["2022-01-03", "2021-12-30"]
