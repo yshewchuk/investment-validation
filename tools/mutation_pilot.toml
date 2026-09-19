@@ -272,6 +272,10 @@ why = "Training recipes, folds, calibration, receipts and residuals: what a mode
 mutate = [
     "engine/v2/models/training/*.py",
 ]
+skip = [
+    "*/training/analogs.py",
+    "*/training/chooser_pool.py",
+]
 tests = [
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_phase5_datasets.py",
@@ -295,6 +299,8 @@ skip = [
     "*/payoff_artifact.py",
     "*/residual_artifact.py",
     "*/recalibration_artifact.py",
+    "*/analog_artifact.py",
+    "*/chooser_analog_pool.py",
 ]
 tests = [
     "tests/test_v2_models_admissible_table.py",
@@ -314,6 +320,34 @@ tests = [
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
+]
+
+[modules.board_analog]
+why = "Frozen board analog matcher: the causal analog pools and the artifact that serves them; a slip changes which history a board row is compared against."
+mutate = [
+    "engine/v2/models/analog_artifact.py",
+    "engine/v2/models/training/analogs.py",
+]
+tests = [
+    "tests/test_v2_models_board_analog.py",
+    "tests/test_v2_models_inventory.py",
+]
+
+[modules.chooser]
+why = "Native DYN-SV chooser: its 67-column feature vector, the frozen chooser analog pool and the ranked choice; a slip changes which structure the board picks."
+mutate = [
+    "engine/v2/scoring/chooser_inputs.py",
+    "engine/v2/scoring/native_chooser.py",
+    "engine/v2/scoring/native_chooser_features.py",
+    "engine/v2/models/chooser_analog_pool.py",
+    "engine/v2/models/training/chooser_pool.py",
+]
+tests = [
+    "tests/test_phase4_capture_strict.py",
+    "tests/test_phase4_chooser_trace.py",
+    "tests/test_v2_models_chooser_analog_pool.py",
+    "tests/test_v2_scoring_native_chooser_features.py",
+    "tests/test_v2_scoring_source_inputs.py",
 ]
 
 [modules.scoring_stages]
