@@ -130,9 +130,59 @@ class JoblibEstimatorAdapter:
         return [tuple(float(item) for item in value) for value in values]
 
 
+class Tier4ServingFoldAdapter:
+    """A cached Tier-4 serving fold (R4-16).
+
+    The legacy scorer serves ``size`` and ``iv_crush`` forecasts from the
+    monthly fold caches under ``data/models/tier4``
+    (``engine.data.features.tier4.serving_model``). Those files are joblib
+    dicts (``estimator``, ``model_id``, ``fold_start``, ``tier3_snapshot``,
+    ``features``, pool arrays), not ``ModelArtifact`` objects, so
+    :class:`JoblibEstimatorAdapter` cannot execute them. This loads the fold's
+    estimator after checking its feature order, and predicts exactly as
+    ``tier4.ServingModel.predict`` does for a complete row:
+    ``estimator.predict(float matrix)``, raveled. Incomplete rows never reach
+    it; the frozen stage executor refuses them first.
+    """
+
+    name = "tier4-serving-fold.v1"
+
+    def load(self, members: Mapping[str, bytes], binding: ModelBinding) -> object:
+        raw = members.get("estimator")
+        if raw is None:
+            raise AdapterError("missing estimator member")
+        try:
+            import joblib
+
+            stored = joblib.load(io.BytesIO(raw))
+        except Exception as exc:
+            raise AdapterError("tier4 serving fold could not be decoded") from exc
+        if not isinstance(stored, Mapping) or "estimator" not in stored:
+            raise AdapterError("tier4 serving fold carries no estimator")
+        if tuple(stored.get("features", ())) != binding.feature_order:
+            raise AdapterError("artifact feature order disagrees with binding")
+        return stored["estimator"]
+
+    def predict(self, artifact, rows, binding):
+        if len(binding.output_names) != 1:
+            raise AdapterError("a tier4 serving fold has exactly one output")
+        import numpy as np
+
+        try:
+            values = np.asarray(
+                artifact.predict(np.asarray(rows, dtype=float)), dtype=float,
+            ).ravel()
+        except RuntimeFitForbidden:
+            raise
+        except Exception as exc:
+            raise AdapterError("estimator prediction failed") from exc
+        return [(float(value),) for value in values]
+
+
 def default_adapters() -> dict[str, InferenceAdapter]:
     adapters: tuple[InferenceAdapter, ...] = (
         JsonLinearAdapter(),
         JoblibEstimatorAdapter(),
+        Tier4ServingFoldAdapter(),
     )
     return {adapter.name: adapter for adapter in adapters}

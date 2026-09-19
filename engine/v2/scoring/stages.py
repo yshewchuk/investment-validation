@@ -880,9 +880,8 @@ def _draw_residuals(block: Mapping[str, Any], event_date: Any,
     if arrays is None:
         return None
     dates, predicted, move, crush = arrays
-    try:
-        cutoff = np.datetime64(str(event_date))
-    except ValueError:
+    cutoff = _event_day(event_date)
+    if cutoff is None:
         _add_flag(flags, "INVALID_SIMULATION_EVENT_DATE")
         return None
     end = int(np.searchsorted(dates, cutoff, side="left"))
@@ -906,11 +905,38 @@ def _draw_residuals(block: Mapping[str, Any], event_date: Any,
         _add_flag(flags, "INVALID_SIMULATION_DRAWS")
         return None
     seed = int.from_bytes(
-        hashlib.sha256(f"{key}|{event_date}".encode()).digest()[:8], "big",
+        hashlib.sha256(planned_exit_seed_material(key, cutoff).encode()).digest()[:8],
+        "big",
     )
     rng = np.random.default_rng(seed)
     chosen = rows[rng.integers(0, rows.size, size=draws)]
     return move[chosen], crush[chosen], rng, end
+
+
+def _event_day(event_date: Any) -> np.datetime64 | None:
+    """The event's calendar day: the legacy caller normalizes the event date
+    to midnight (engine/score.py sets ``result.event_date =
+    pd.Timestamp(...).normalize()``), so both the pool cutoff and the seed
+    are functions of the day alone, whatever form the date arrives in."""
+    try:
+        day = np.datetime64(str(event_date)).astype("datetime64[D]")
+    except ValueError:
+        return None
+    return None if np.isnat(day) else day
+
+
+def planned_exit_seed_material(key: str, event_day: np.datetime64) -> str:
+    """The planned-exit simulation's seed material (R4-10).
+
+    The recipe seeds from ``f"{strategy}|{event_date}"`` where the event
+    date is the normalized timestamp the scorer holds, whose string form is
+    ``YYYY-MM-DD 00:00:00`` (engine/pnl_sim.py ``expected_pnl``, called with
+    ``event_date=result.event_date`` from engine/score.py
+    ``Scorer._expectation``). Deriving it from the day, not from whatever
+    string the context carries, makes the draws a function of the event and
+    not of its date's spelling.
+    """
+    return f"{key}|{np.datetime_as_string(event_day, unit='D')} 00:00:00"
 
 
 def _is_planned_artifact(block: Mapping[str, Any]) -> bool:

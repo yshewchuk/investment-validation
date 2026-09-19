@@ -16,6 +16,7 @@ from engine.v2.models.contracts import (
 from engine.v2.models.loader import FrozenInference
 
 __all__ = [
+    "FrozenRecipeExecutor",
     "FrozenStageExecutor",
     "FrozenStageRefusal",
     "FrozenStageResult",
@@ -189,3 +190,80 @@ class FrozenStageExecutor:
     def predict(self, features: Mapping[str, float]) -> Mapping[str, float]:
         """Return named outputs for the native stage executor contract."""
         return self.execute(features).outputs
+
+
+class FrozenRecipeExecutor:
+    """One source-declared forecast/gate recipe executed by frozen inference.
+
+    ``SourceBundle`` recipes name a release binding (``binding_id``) instead
+    of carrying inline coefficients (R4-16). This maps that binding's
+    ``source`` output onto the native stage field ``target``, through
+    :class:`FrozenStageExecutor` -- verified members, the registered adapter,
+    no fitting. A declared recipe whose release or inference was not supplied
+    is kept as an unresolved executor that refuses ``MODEL_NOT_READY`` when
+    the stage runs, never a silent fallback to another model.
+
+    ``str()`` is the recipe identity used by stage receipts: release, binding,
+    model, member hashes and the output mapping -- never an object address.
+    """
+
+    def __init__(
+        self,
+        *,
+        target: str,
+        binding_id: str,
+        source: str | None,
+        executor: FrozenStageExecutor | None,
+        binding: ModelBinding | None,
+    ) -> None:
+        self._target = str(target)
+        self._binding_id = str(binding_id)
+        self._source = source
+        self._executor = executor
+        self._binding = binding
+
+    @property
+    def target(self) -> str:
+        return self._target
+
+    @property
+    def binding_id(self) -> str:
+        return self._binding_id
+
+    @property
+    def artifact_hashes(self) -> tuple[str, ...]:
+        if self._binding is None:
+            return ()
+        return tuple(member.content_hash for member in self._binding.members)
+
+    def __str__(self) -> str:
+        if self._executor is None or self._binding is None:
+            return f"frozen-recipe:unresolved:{self._binding_id}->{self._target}"
+        return (
+            f"frozen-recipe:{self._executor.release.release_id}:{self._binding_id}:"
+            f"{self._binding.model_id}:{self._source}->{self._target}:"
+            f"{','.join(self.artifact_hashes)}"
+        )
+
+    __repr__ = __str__
+
+    def predict(self, features: Mapping[str, float]) -> Mapping[str, float]:
+        if self._executor is None or self._source is None:
+            raise FrozenStageRefusal(
+                "MODEL_NOT_READY",
+                f"frozen recipe binding is not resolved: {self._binding_id}",
+                reason_codes=("MODEL_NOT_READY",),
+            )
+        try:
+            outputs = self._executor.predict(features)
+        except FrozenStageRefusal as exc:
+            if exc.code != "MODEL_NOT_READY" or "MODEL_NOT_READY" in exc.reason_codes:
+                raise
+            # An unservable model says so by name (P5-2), ahead of the
+            # inference detail (BINDING_NOT_FOUND, ARTIFACT_INVALID, ...).
+            raise FrozenStageRefusal(
+                exc.code, exc.detail,
+                reason_codes=("MODEL_NOT_READY", *exc.reason_codes),
+                missing_features=exc.missing_features,
+            ) from exc
+        return {self._target: float(outputs[self._source])}
