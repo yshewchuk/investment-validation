@@ -20,7 +20,10 @@ Dispositions per pair (value-free: ids, codes, counts, field paths):
 * ``mismatch`` (``P5_PHASE4_MISMATCH``) -- scored from the staged bytes, a
   stage receipt or identity differs from the capture.
 * ``member_absent`` (``P5_PHASE4_MEMBER_ABSENT``) -- the trace binds a model
-  whose bytes are not a staged member of this release; nothing is scored.
+  whose bytes are not a staged member of this release, or its entry-rule gate
+  pins a trailing ``pnl_sim`` cutoff that is not a staged
+  ``trailing_pnl_cutoff`` object (the cutoff document travels inside the
+  hash-bound trace, so the release serves it by identity); nothing is scored.
 * ``unverified`` (``P5_PHASE4_UNVERIFIED``) -- the trace fails Phase 4's own
   verification, so there is nothing trustworthy to replay.
 * ``error`` (``P5_PHASE4_ERROR``) -- scoring raised.
@@ -49,15 +52,21 @@ DISPOSITIONS = ("replayed", "mismatch", "member_absent", "unverified", "error",
                 "untraced", "not_frozen")
 
 
+#: Staged state members a replayed pair may read by content hash: the Tier-4
+#: serving folds (frozen bindings) and the entry-rule trailing cutoff.
+_STAGED_STATE_PREFIXES = ("tier4_folds:", "trailing_pnl_cutoff")
+
+
 def staged_model_objects(model_release, manifest: Mapping[str, Any]) -> dict[str, str]:
-    """``content_hash -> member id`` for every object a frozen binding may read."""
+    """``content_hash -> member id`` for every object a frozen binding, or an
+    entry-rule gate's trailing cutoff, may read."""
     staged: dict[str, str] = {}
     for binding in model_release.bindings:
         for member in binding.members:
             staged.setdefault(member.content_hash,
                               f"model:{binding.role}:{binding.strategy_id}")
     for row in manifest.get("members", ()):
-        if str(row.get("member_id", "")).startswith("tier4_folds:"):
+        if str(row.get("member_id", "")).startswith(_STAGED_STATE_PREFIXES):
             for obj in row.get("objects", ()):
                 staged.setdefault(obj["content_hash"], row["member_id"])
     return staged
@@ -111,6 +120,12 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     if plan is None:
         return {"disposition": "not_frozen"}
     rebound, absent, used = rebind_to_release(plan, release_root, staged)
+    cutoff = _entry_rule_cutoff(verified["inputs"])
+    if cutoff is not None:
+        if cutoff in staged:
+            used = sorted({*used, staged[cutoff]})
+        else:
+            absent.append(("gate:entry_rule", cutoff))
     if absent:
         return {"disposition": "member_absent", "code": PHASE4_MEMBER_ABSENT,
                 "detail": ",".join(f"{b}:{h}" for b, h in absent), "members": used}
@@ -129,6 +144,20 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     return {"disposition": "replayed", "members": used,
             "stages": len(verified["captured_receipts"]),
             "runtime_stages": len(receipts)}
+
+
+def _entry_rule_cutoff(inputs) -> str | None:
+    """The content hash of the trailing cutoff an entry-rule gate pins.
+
+    The cutoff document travels inside the hash-bound trace; the release
+    serves it by identity: the pair replays only if the staged
+    ``trailing_pnl_cutoff`` member holds the same bytes (same content hash).
+    """
+    gate = inputs.gate
+    if gate.get("mode") != "entry_rule":
+        return None
+    key = gate.get("trailing_cutoff_key") or {}
+    return key.get("content_hash") or "unpinned"
 
 
 def _replay_chooser_pair(pair, corpus_root: Path, release_root: Path,

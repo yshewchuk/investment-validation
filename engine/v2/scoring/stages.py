@@ -1846,6 +1846,24 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
     block = inputs.gate
     if block.get("mode") == "not_applicable":
         return {}
+    if block.get("mode") == "entry_rule":
+        # Legacy ``_apply_entry_rule``: reached with no gate champion, before
+        # (and without) the model gate's domain check. An unpriced row never
+        # reaches legacy's gate, so it gets no verdict and no flag here.
+        from engine.v2.scoring.native_entry_rule import execute_entry_rule
+
+        if values.get("entry_cost") is None:
+            return {}
+
+        rule_flags: list[str] = []
+        output = execute_entry_rule(
+            block, strategy=name, event_date=inputs.context.get("event_date"),
+            legs=values.get("legs") or (), exp_pnl_sim=values.get("exp_pnl_sim"),
+            flags=rule_flags)
+        for flag in rule_flags:
+            _add_flag(flags, flag)
+        values.update(output)
+        return output
     if block.get("frozen_score") is not None:
         _add_flag(flags, "UNSUPPORTED_FROZEN_GATE")
         return {}
