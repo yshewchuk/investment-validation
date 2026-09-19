@@ -62,7 +62,7 @@ POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 #: cpu_count``), so an environment_ref built from DEFAULT_POLICY (production
 #: code and most tests still do) still matches what launch resolves under this
 #: policy.
-_TEST_PROFILE_MEMORY_BYTES = 256 * MIB
+_TEST_PROFILE_MEMORY_BYTES = 384 * MIB
 _TEST_PROFILE_CPUS = 3
 TEST_POLICY = replace(DEFAULT_POLICY, profiles=tuple(
     replace(p, memory_bytes=min(p.memory_bytes, _TEST_PROFILE_MEMORY_BYTES),
