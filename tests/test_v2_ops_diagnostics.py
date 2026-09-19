@@ -145,8 +145,14 @@ def _decisions_fixture(root, legacy_root):
 
 
 def _job_state(root, job_id):
+    """State and failure after ``serve --once``. A job the host could not
+    admit fails here as ``RESOURCE WAIT`` with the queue reason's numbers,
+    not as a bare ``'queued' == ...`` assertion further down."""
+    from tests.ops_support import AdmissionWatch
+
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
     try:
+        AdmissionWatch(conn, job_id).check(final=True)
         row = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
                            (job_id,)).fetchone()
         return row["state"], row["failure_json"]
