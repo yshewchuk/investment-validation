@@ -574,39 +574,39 @@ id = "export-offline-file"
 area = "export"
 capability = "Offline single-file export of a pinned release (phone without network)"
 old = ["writer:engine/dashboard/render.py::write_single_file"]
-new = ["MISSING"]
-producer = "legacy write_single_file over the local bundle"
-identity = "bundle as-of only"
-tests = ["tests/test_dashboard.py"]
-disposition = "missing"
+new = ["cli:tools/v2_dashboard_offline_file.py", "py:tools/v2_dashboard_offline_file.py::export_offline_file"]
+producer = "write_single_file reused byte-for-byte over the real v2 release tree (releases/<release_id>/, the same P3-4 bundle format tools/v2_dashboard_project.py stages), refusing a traversing/multi-segment release id, an indirect (symlinked) release directory, credential-shaped content (engine.dashboard.publish.secret_scan) and any remaining external http(s) reference"
+identity = "pinned release_id; content_hash of the built file"
+tests = ["tests/test_v2_dashboard_offline_file.py", "tests/test_dashboard.py"]
+disposition = "compatibility-adapter"
 owner = "P6-5"
-notes = "No v2 export packages a pinned release with live actions disabled (system design §9)."
+notes = "Not a scrape of a live dashboard: it reads the pinned v2 release directory directly, the same bytes the operations server would serve for that release_id. write_single_file itself is unchanged legacy code (P3-4's bundle format is already what a v2 release stages); the new part is release-id path safety, the secret scan and the external-reference refusal."
 
 [[row]]
 id = "export-remote-delivery"
 area = "export"
 capability = "Authenticated remote snapshot for phone access (Cloudflare Access), with access probe"
 old = ["nightly:legacy publish", "doc:dashboard/README.md"]
-new = ["MISSING", "nightly:v2 delivery"]
-producer = "legacy CommandPublisher + access_probe"
-identity = "remote release stamp"
-tests = ["tests/test_dashboard.py"]
-disposition = "missing"
+new = ["py:engine/v2/serving/operations.py::create_server", "py:engine/v2/dashboard/preview.py::run", "nightly:v2 delivery"]
+producer = "engine.v2.serving.operations.create_server: every route (data/release/health) refuses a missing or wrong bearer token, on ANY bind address, gated by engine.v2.dashboard.preview's token-required, loopback-by-default CLI launcher (cli:engine/v2/dashboard/preview.py, already owned by board-compat-shell)"
+identity = "release_id resolved once from the authenticated /release/current.json route"
+tests = ["tests/test_v2_dashboard_preview.py", "tests/test_checks_phase6_remote_access.py"]
+disposition = "native"
 owner = "P6-5"
-notes = "publication.py: remote targets need their own conditional-write adapter and are not enabled; the delivery stage has no job kind."
+notes = "Closes the dashboard-bind-all-interfaces gap for v2: app-level bearer-token auth replaces perimeter-only Cloudflare Access + access_probe, so a wide bind is never an alternate way to skip auth (checks/rearchitecture_phase6_remote_access.py fails on any unauthenticated route on loopback OR 0.0.0.0, on a create_server token default, or on the CLI starting without a token / accepting a non-loopback host with no --allow-non-loopback). Cloudflare Access (or any perimeter control) in front of wherever this is exposed is still expected as defense in depth, per the capability's own Cloudflare Access framing -- this repo does not configure that SaaS. The GRAPH's own 'delivery' stage (an automated nightly push to a remote host) still has no job kind; that remains open, tracked here rather than re-declared as a new gap."
 
 [[row]]
 id = "export-restore-drill"
 area = "export"
 capability = "Restore a deployment from backup, replay an original score offline, reconcile ledger/report"
 old = ["doc:RECOVERY.md"]
-new = ["MISSING", "py:engine/v2/ops/backup.py::restore_backup"]
-producer = "ops/backup.restore_backup (restore only)"
-identity = "backup receipt"
-tests = ["tests/test_v2_ops_effects_backup.py"]
-disposition = "missing"
+new = ["cli:tools/v2_restore_drill.py", "py:tools/v2_restore_drill.py::run_drill", "py:engine/v2/ops/backup.py::restore_backup"]
+producer = "tools/v2_restore_drill.py composes three real entrypoints: ops/backup.restore_backup (isolated restore, every database/artifact byte reverified), ops/cli.rescore_command (the same no-fit, no-provider-pull ops-rescore replay of one ScoreRequest/NativeScoreInputs pair restored from the backup's artifacts/), and ledger/export.export_generation over the restored catalog, diffed byte-for-byte against a generation exported from the live catalog before the backup"
+identity = "backup receipt; restore_drill_receipt.v1.0 (score content_hash + ledger export diff + decision count)"
+tests = ["tests/test_v2_restore_drill.py", "tests/test_v2_ops_effects_backup.py", "tests/test_v2_ops_authority.py"]
+disposition = "native"
 owner = "P6-5"
-notes = "restore_backup exists; the drill (restore, offline replay, ledger/report reconcile) does not."
+notes = "UD-3: local backup only, never pushes (git push / private-mirror stays an operator action). checks/rearchitecture_phase6_restore_drill.py proves two negative controls (a wrong expected score hash, a wrong expected decision count) actually fail the drill, so a PASS is not a rubber stamp. Evidence receipt lands via --artifact-root, same convention as tools/v2_dashboard_offline_file.py."
 
 # ------------------------------------------------------ dormant historical
 
@@ -771,6 +771,14 @@ module = "tools/v2_dashboard_project.py"
 reads = "saved score.json, rendered bundle dir, Phase 2 catalog and store"
 consumer = "projection publication (P3-1b/P3-4)"
 owner = "P6-4"
+
+[[edge]]
+id = "edge:tools/v2_dashboard_offline_file.py"
+kind = "file-format"
+module = "tools/v2_dashboard_offline_file.py"
+reads = "a pinned v2 release directory's legacy bundle bytes (index.html, assets/, data/), via write_single_file and secret_scan"
+consumer = "export-offline-file"
+owner = "P6-5"
 
 [[edge]]
 id = "edge:tools/v2_dashboard_verified_input.py"
