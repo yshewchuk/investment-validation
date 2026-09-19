@@ -80,6 +80,12 @@ def _artifact_source_root() -> Path:
 
     return Path(paths.ROOT)
 
+from checks.phase4_frozen_bridge import (  # noqa: E402
+    FROZEN_CHOOSER_FIELD,
+    FROZEN_CHOOSER_SCHEMA,
+    prepare_frozen_chooser,
+    with_frozen_chooser,
+)
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
 from engine import score as score_mod  # noqa: E402
@@ -488,19 +494,103 @@ def _role_feature_vectors(candidate: Mapping[str, Any]) -> dict[str, dict[str, f
             # the other 50, and a declared derived column would override the
             # native derivation (the compatibility path). The regime values
             # are the ones `_chooser_frame` filled through `_regime_extra`.
+            # A missing (None/non-finite) primitive is left out: no binding
+            # is fed this vector, and native declines the chooser on a
+            # missing column exactly as legacy declines on a NaN one.
             _add("chooser", {
                 name: chooser_vector[name]
-                for name in CHOOSER_PRIMITIVE_COLUMNS if name in chooser_vector
+                for name in CHOOSER_PRIMITIVE_COLUMNS
+                if name in chooser_vector
+                and _finite_or_none(chooser_vector[name]) is not None
             })
 
     return vectors
 
 
+def _finite_or_none(raw: Any) -> float | None:
+    """``raw`` as a finite float, ``None`` when missing or non-finite."""
+    from engine.v2.foundation.canonical import untag_nonfinite
+
+    raw = untag_nonfinite(raw)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise StrictTraceCaptureError(f"chooser input {raw!r} is nonnumeric") from exc
+    return value if math.isfinite(value) else None
+
+
+def _frozen_block(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    from engine.v2.foundation.canonical import untag_nonfinite
+
+    source = _checkpoint_value(candidate, "source_inputs")
+    return untag_nonfinite(dict(source.get("frozen") or {}))
+
+
+def _chooser_consumed_rows(candidate: Mapping[str, Any]) -> dict[str, float | None]:
+    """Every column the legacy chooser consumed: its 17 primitives and the
+    rows it fed the Tier-4 producer folds (``<slot>@chooser``). ``None`` is a
+    missing value. A column two of those recorded differently is refused, as
+    ``frozen_source_declarations`` refuses it."""
+    frozen = _frozen_block(candidate)
+    if frozen.get("conflicts"):
+        raise StrictTraceCaptureError(
+            f"legacy recorded different values for {sorted(frozen['conflicts'])}")
+    declared = dict(frozen.get("declarations") or {})
+    inputs = dict(frozen.get("inputs") or {})
+    rows: dict[str, float | None] = {}
+
+    def feature(name: str, raw: Any, where: str) -> None:
+        value = _finite_or_none(raw)
+        if name in rows and rows[name] != value:
+            raise StrictTraceCaptureError(f"chooser feature {name} differs at {where}")
+        rows[name] = value
+
+    for key in sorted(declared):
+        entry = declared[key]
+        if not key.startswith("chooser_fold:") or not isinstance(entry, Mapping):
+            continue
+        if "site" not in entry:
+            continue
+        slot = f"{entry['binding']}@{entry['site']}"
+        if slot not in inputs:
+            raise StrictTraceCaptureError(f"no recorded input row {slot}")
+        for name, raw in sorted(inputs[slot].items()):
+            feature(str(name), raw, slot)
+    for name, raw in (declared.get("chooser_primitives") or {}).items():
+        feature(str(name), raw, "chooser_primitives")
+    return rows
+
+
+def _merge_chooser_rows(model_inputs: dict[str, float],
+                        rows: Mapping[str, float | None]) -> None:
+    """Add the chooser's consumed columns to ``model_inputs`` (the native
+    chooser reads its features from there, as a ``SourceBundle``'s
+    ``feature_vector``). A missing column stays absent; a column the forecast
+    roles hold at another value (or hold where the chooser saw none) is one
+    feature vector legacy never had, and is refused."""
+    for name, value in rows.items():
+        held = model_inputs.get(name)
+        if name in model_inputs and held != value:
+            raise StrictTraceCaptureError(
+                f"feature {name} differs between the model roles and the chooser")
+        if value is not None:
+            model_inputs[name] = value
+
+
 def native_inputs_from_capture(
     candidate: Mapping[str, Any],
     request: V2ScoreRequest,
+    *,
+    frozen_chooser: Mapping[str, Any] | None = None,
 ) -> tuple[NativeScoreInputs, dict[str, Any]]:
-    """Build executable native inputs only from source-owned captured material."""
+    """Build executable native inputs only from source-owned captured material.
+
+    ``frozen_chooser``: the row's frozen chooser declaration
+    (:func:`frozen_chooser_declaration`); it becomes the chooser block, and the
+    rows the chooser consumed join ``model_inputs``.
+    """
     request_only = _request_only_source(candidate)
     if request_only is not None:
         if request.strategy_version not in DISABLED_REQUEST_ONLY_STRATEGIES:
@@ -509,7 +599,7 @@ def native_inputs_from_capture(
             )
         blocks = _request_only_inputs(request_only, request)
     else:
-        blocks = _captured_blocks(candidate, request)
+        blocks = _captured_blocks(candidate, request, frozen_chooser)
     request_doc = to_document(request)
     shared_inputs = {"request": request_doc, "native_inputs": blocks}
     source_ref = content_hash(shared_inputs)
@@ -527,7 +617,8 @@ def native_inputs_from_capture(
 
 
 def _captured_blocks(candidate: Mapping[str, Any],
-                     request: V2ScoreRequest) -> dict[str, Any]:
+                     request: V2ScoreRequest,
+                     frozen_chooser: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Native blocks from a scored row's captured source bundle."""
     source = _checkpoint_value(candidate, "source_inputs")
     recipes = source.get("native_recipes")
@@ -566,19 +657,32 @@ def _captured_blocks(candidate: Mapping[str, Any],
     recipes.setdefault("analogs", {"mode": "not_applicable"})
     recipes.setdefault("simulation", {"mode": "not_applicable"})
     recipes.setdefault("gate", {"mode": "not_applicable"})
+    model_inputs = _merged_model_inputs(candidate)
+    if frozen_chooser is not None:
+        _merge_chooser_rows(model_inputs, _chooser_consumed_rows(candidate))
+    features = {
+        "model_inputs": model_inputs,
+        "source_features": source_features,
+    }
+    if source.get("model_bindings"):
+        # The row each frozen binding is fed, per role (the gate's own
+        # vector is not in the merged ``model_inputs``). Kept in the
+        # source-bound features block so the replay
+        # (checks/phase4_frozen_bridge.py) feeds every binding this row.
+        features["role_model_inputs"] = _role_feature_vectors(candidate)
     return {
         "context": context,
-        "features": {
-            "model_inputs": _merged_model_inputs(candidate),
-            "source_features": source_features,
-        },
+        "features": features,
         "forecast": dict(recipes["forecast"]),
         "geometry": None,
         "pricing": None,
         "analogs": dict(recipes["analogs"]),
         "simulation": dict(recipes["simulation"]),
         "gate": dict(recipes["gate"]),
-        "chooser": dict(recipes.get("chooser") or {}),
+        "chooser": (
+            {FROZEN_CHOOSER_FIELD: dict(frozen_chooser)} if frozen_chooser is not None
+            else dict(recipes.get("chooser") or {})
+        ),
         "diagnostics": dict(recipes.get("diagnostics") or {}),
     }
 
@@ -591,9 +695,18 @@ def package_strict_trace(
     resources: list[Mapping[str, Any]] | None = None,
     metadata: Mapping[str, Any] | None = None,
     frozen_runtime: tuple[FrozenInference, ModelRelease, tuple[InferenceRequest, ...]] | None = None,
+    execution_inputs: NativeScoreInputs | None = None,
 ) -> tuple[dict[str, Any], Any]:
-    """Execute native scoring and package the observer output for verification."""
+    """Execute native scoring and package the observer output for verification.
+
+    ``execution_inputs``: what actually runs when it differs from the
+    declared ``inputs`` the trace stores (a frozen chooser declaration
+    resolved into its executable block, ``with_frozen_chooser``).
+    """
     observations = []
+    declared_inputs = inputs
+    if execution_inputs is not None:
+        inputs = execution_inputs
     if frozen_runtime is None:
         native = v2_application.score_one(request, inputs, observer=observations.append)
     else:
@@ -618,6 +731,7 @@ def package_strict_trace(
         )
         for item in observations
     ]
+    inputs = declared_inputs
     native_document = {
         "context": dict(inputs.context),
         "features": dict(inputs.features),
@@ -657,7 +771,9 @@ def _frozen_runtime(
     # features private to its own role (e.g. the gate model's own vector),
     # which the merge — built only from the forecast-family `features`
     # checkpoint — never carries. See `_role_feature_vectors`.
-    role_vectors = _role_feature_vectors(candidate)
+    role_vectors = inputs.features.get("role_model_inputs")
+    if not isinstance(role_vectors, Mapping):
+        role_vectors = _role_feature_vectors(candidate)
     inference_requests = []
     for binding in bindings:
         vector = role_vectors.get(binding.role)
@@ -1809,7 +1925,17 @@ def dyn_sv_pass(candidates: list[dict]) -> list[dict]:
                                for c in siblings],
             }
             record = jsonable(chosen.iloc[0].to_dict())
-            out.append(_candidate(request, None, record, 0.0, kind="dyn_sv_choice"))
+            choice = _candidate(request, None, record, 0.0, kind="dyn_sv_choice")
+            # Every ranked member's own checkpoint (still spilled), so the
+            # strict probe can trace the choice member by member. Never
+            # written to the pair: the pair carries the members' traces.
+            choice["members"] = [
+                {"request": c["request"], "record": c["record"],
+                 "legacy_trace": c["legacy_trace"], "event_id": c.get("event_id"),
+                 "kind": "score_result"}
+                for c in siblings
+            ]
+            out.append(choice)
     return out
 
 
@@ -1948,66 +2074,320 @@ def _fixture_id(cand: dict, i: int) -> str:
     return f"{i:03d}_{stem}_{digest}".replace("/", "-").replace(" ", "")
 
 
+#: One built chooser analog pool per source file: ``(path, sha256)`` ->
+#: ``(serialized state, content_hash, pool_id, cutoff)``. Every DYN-SV menu
+#: row of a capture reads the same file, so it is frozen once.
+_CHOOSER_POOL_STATES: dict[tuple[str, str], tuple[bytes, str, str, str]] = {}
+
+
+def _chooser_pool_state(record: Mapping[str, Any]) -> tuple[bytes, str, str, str]:
+    """The k-NN pool legacy loaded, frozen as the release freezes it.
+
+    ``record`` is what legacy recorded (``path``, ``sha256``, ``cutoff``).
+    The file must still hash to what legacy read, and the frozen state is
+    built by the release preparer's own code (``chooser_pool_payloads``: the
+    legacy filter, source order), keyed by the same cutoff rule.
+    """
+    import hashlib
+
+    from engine.v2.models.frozen_documents import frozen_state_from_document
+    from tools.phase5_prepare_release import chooser_pool_payloads
+
+    path, expected = Path(str(record["path"])), str(record["sha256"])
+    key = (str(path), expected)
+    if key not in _CHOOSER_POOL_STATES:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        if "sha256:" + digest.hexdigest() != expected:
+            raise StrictTraceCaptureError(
+                "chooser analog pool file differs from the one legacy loaded")
+        payloads = chooser_pool_payloads(path).get("chooser_analog_pool") or {}
+        if len(payloads) != 1:
+            raise StrictTraceCaptureError("chooser analog pool could not be frozen")
+        ((pool_key, raw),) = payloads.items()
+        pool_id, cutoff = pool_key.split("|", 1)
+        state = frozen_state_from_document(json.loads(raw))
+        _CHOOSER_POOL_STATES[key] = (raw, state.content_hash, pool_id, cutoff)
+    raw, state_hash, pool_id, cutoff = _CHOOSER_POOL_STATES[key]
+    if cutoff != str(record["cutoff"]):
+        raise StrictTraceCaptureError(
+            "chooser analog pool cutoff differs from the one legacy recorded")
+    return raw, state_hash, pool_id, cutoff
+
+
+def frozen_chooser_declaration(
+    candidate: Mapping[str, Any], *, deployment_id: str, release_root: Path,
+) -> tuple[dict[str, Any], FrozenResourcePackage, list[dict[str, Any]]] | None:
+    """The trace's frozen chooser for a DYN-SV menu row whose legacy scorer
+    ran the chooser champion (R4-18/R4-19 recording), or ``None``.
+
+    Returns ``(declaration, package, extra resource rows)``. The champion and
+    the producer folds are packaged as their own release (their roles are
+    not the forecast bindings' and their rows are derived natively, never
+    fed as inference requests); the fold pools are the recorded ones; the
+    admissible table must be the frozen v1 table; the k-NN pool is written
+    once under ``release_root`` as a content-addressed artifact.
+    """
+    from engine.v2.models.admissible_table import legacy_n_admissible_table
+
+    frozen = _frozen_block(candidate)
+    declared = dict(frozen.get("declarations") or {})
+    chooser = declared.get("chooser")
+    if chooser is None:
+        return None
+    if frozen.get("conflicts"):
+        raise StrictTraceCaptureError(
+            f"legacy recorded different values for {sorted(frozen['conflicts'])}")
+    bindings = dict(frozen.get("bindings") or {})
+    pools = dict(frozen.get("fold_pools") or {})
+    folds = {key.split(":", 1)[1]: entry for key, entry in sorted(declared.items())
+             if key.startswith("chooser_fold:")}
+    slots = [str(chooser["binding"])] + [
+        str(entry["binding"]) for entry in folds.values() if "binding" in entry]
+    missing = sorted(slot for slot in slots if slot not in bindings)
+    if missing:
+        raise StrictTraceCaptureError(f"chooser binding(s) {missing} were not recorded")
+    package = package_frozen_resources(
+        model_bindings=[bindings[slot] for slot in slots],
+        deployment_id=deployment_id,
+        release_root=release_root,
+        source_root=_artifact_source_root(),
+    )
+    by_role = {row["role"]: row["binding_id"] for row in package.sidecar_document["bindings"]}
+
+    def ref(entry: Mapping[str, Any]) -> dict[str, str]:
+        role = bindings[str(entry["binding"])]["role"]
+        return {"binding_id": by_role[_LEGACY_ROLE_ALIASES.get(role, role)],
+                "output": str(entry["output"])}
+
+    recipe: dict[str, Any] = ref(chooser)
+    producers = {output: ref(entry) for output, entry in folds.items() if "binding" in entry}
+    if producers:
+        recipe["producers"] = producers
+    fold_pools = {}
+    for output, entry in folds.items():
+        if entry.get("pool") not in pools:
+            raise StrictTraceCaptureError(f"declared fold pool {entry.get('pool')} was not recorded")
+        fold_pools[output] = dict(pools[entry["pool"]])
+    table_key = None
+    table_record = declared.get("chooser_admissible_table")
+    if table_record is not None:
+        table = legacy_n_admissible_table()
+        recorded = tuple(tuple(float(v) for v in pair) for pair in table_record["breakpoints"])
+        if (recorded != tuple(table.breakpoints)
+                or float(table_record["fallback"]) != float(table.fallback)):
+            raise StrictTraceCaptureError(
+                "legacy n_admissible table differs from the frozen v1 table")
+        table_key = {"table_id": table.table_id, "version": table.version,
+                     "content_hash": table.content_hash}
+        recipe["admissible_table"] = table_key
+    extra: list[dict[str, Any]] = []
+    pool_resource_id = None
+    pool_record = declared.get("chooser_analog_pool")
+    if pool_record is not None:
+        raw, state_hash, pool_id, cutoff = _chooser_pool_state(pool_record)
+        recipe["analog_pool"] = {"pool_id": pool_id, "cutoff": cutoff,
+                                 "content_hash": state_hash}
+        hex_digest = _bytes_sha256(raw)[len("sha256:"):]
+        relative = f"resources/states/{hex_digest}.json"
+        destination = Path(release_root) / relative
+        if not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_bytes(raw)
+            os.replace(temporary, destination)
+        pool_resource_id = f"phase4-state-{hex_digest}"
+        extra.append({
+            "resource_id": pool_resource_id, "ref": f"state:{hex_digest}",
+            "kind": "artifact", "path": relative, "sha256": _bytes_sha256(raw),
+        })
+    declaration = {
+        "schema_version": FROZEN_CHOOSER_SCHEMA,
+        "release_resource_id": package.trace_declaration["release_resource_id"],
+        "binding_ids": list(package.trace_declaration["binding_ids"]),
+        "recipe": recipe,
+        "fold_pools": fold_pools,
+        "admissible_table": table_key,
+        "analog_pool_resource_id": pool_resource_id,
+    }
+    return declaration, package, extra
+
+
+def _bytes_sha256(raw: bytes) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _package_resources(package: FrozenResourcePackage) -> list[dict[str, Any]]:
+    """A package's rows plus one inline sidecar per binding (its ``ref`` is
+    the binding's request ref, which the request names)."""
+    rows = [dict(row) for row in package.resource_rows]
+    rows.extend({
+        "resource_id": binding["binding_id"],
+        "ref": binding["request_ref"],
+        "kind": "sidecar",
+        "document": binding,
+        "content_hash": content_hash(binding),
+    } for binding in package.sidecar_document["bindings"])
+    return rows
+
+
+def _merged_resources(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Resource rows of several packages: a row two packages share (the same
+    artifact) appears once; the same id for different content is refused."""
+    merged: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for row in group:
+            held = merged.get(row["resource_id"])
+            if held is not None and held != dict(row):
+                raise StrictTraceCaptureError(
+                    f"resource {row['resource_id']} declared twice with different content")
+            merged.setdefault(row["resource_id"], dict(row))
+    return list(merged.values())
+
+
+def strict_trace_one(
+    candidate: Mapping[str, Any], snapshot: str, release_root: Path,
+) -> tuple[dict[str, Any], Any]:
+    """One verified strict trace for one scored row: ``(trace, native record)``.
+
+    Raises :class:`StrictTraceCaptureError` (or ``TypeError``/``ValueError``)
+    when the row cannot be traced honestly.
+    """
+    request = canonical_v2_request(candidate, snapshot)
+    source = (None if _request_only_source(candidate) is not None
+              else _checkpoint_value(candidate, "source_inputs"))
+    bindings = (source or {}).get("model_bindings") or ()
+    package = None
+    if bindings:
+        package = package_frozen_resources(
+            model_bindings=bindings,
+            deployment_id=request.deployment_id,
+            release_root=release_root,
+            source_root=_artifact_source_root(),
+        )
+    chooser = (frozen_chooser_declaration(
+        candidate, deployment_id=request.deployment_id, release_root=release_root)
+        if source is not None else None)
+    refs = (*(package.request_refs if package else ()),
+            *(chooser[1].request_refs if chooser else ()))
+    if refs:
+        request = replace(request, model_artifact_refs=tuple(dict.fromkeys(refs)))
+    inputs, shared_inputs = native_inputs_from_capture(
+        candidate, request, frozen_chooser=chooser[0] if chooser else None,
+    )
+    resources = _merged_resources(
+        _package_resources(package) if package else (),
+        _package_resources(chooser[1]) if chooser else (),
+        chooser[2] if chooser else (),
+    )
+    execution_inputs = None
+    if chooser is not None:
+        documents = {chooser[0]["release_resource_id"]: chooser[1].sidecar_document}
+        execution_inputs = with_frozen_chooser(inputs, prepare_frozen_chooser(
+            release_root=Path(release_root), resource_rows=resources,
+            verified_documents=documents, request=request, inputs=inputs,
+        ))
+    runtime = (
+        _frozen_runtime(package, release_root, request, inputs, candidate)
+        if package else None
+    )
+    return package_strict_trace(
+        request, inputs, shared_inputs,
+        resources=resources,
+        metadata={
+            "capture_mode": "bounded-strict-probe",
+            "legacy_checkpoint_hash": content_hash(candidate["legacy_trace"]),
+            "frozen_inference": package.trace_declaration if package else None,
+        },
+        frozen_runtime=runtime,
+        execution_inputs=execution_inputs,
+    )
+
+
+#: ``payload.input_trace`` of a ``dyn_sv_choice`` pair: one strict trace per
+#: menu member the legacy chooser ranked, in frame order.
+CHOOSER_TRACE_SCHEMA = "phase4_chooser_trace.v1.0"
+
+
+def chooser_trace(
+    candidate: Mapping[str, Any], snapshot: str, release_root: Path,
+) -> dict[str, Any]:
+    """The multi-member trace of a ``dyn_sv_choice`` pair.
+
+    ``dynamic_short_vol`` chooses among the event's menu rows, so the choice
+    can only be replayed natively from every member it ranked. Each member
+    is traced exactly as a scored row is (:func:`strict_trace_one`, from its
+    own legacy checkpoint) and bound to its legacy request in
+    ``request.frame_rows`` by hash. One member that cannot be traced makes
+    the whole pair a gap: a choice replayed over part of the menu is not the
+    legacy choice.
+    """
+    request = candidate.get("request") or {}
+    frame_rows = request.get("frame_rows")
+    members = candidate.get("members")
+    if not isinstance(frame_rows, list) or not frame_rows:
+        raise StrictTraceCaptureError("dyn_sv_choice request has no frame_rows")
+    if not isinstance(members, list) or len(members) != len(frame_rows):
+        raise StrictTraceCaptureError(
+            "dyn_sv_choice candidate does not carry every ranked member's checkpoint")
+    traced = []
+    for index, (row, member) in enumerate(zip(frame_rows, members, strict=True)):
+        if content_hash(member.get("request")) != content_hash(row.get("request")):
+            raise StrictTraceCaptureError(f"member {index}: not the frame row's request")
+        try:
+            trace, native = strict_trace_one(member, snapshot, release_root)
+        except (StrictTraceCaptureError, TypeError, ValueError) as exc:
+            raise StrictTraceCaptureError(f"member {index}: {exc}") from exc
+        traced.append({
+            "member_index": index,
+            "request_hash": content_hash(row["request"]),
+            "legacy_input_hash": trace["shared_input_hash"],
+            "native_score_id": native.score_id,
+            "input_trace": trace,
+        })
+    body = {
+        "schema_version": CHOOSER_TRACE_SCHEMA,
+        "members": traced,
+        "shared_input_hash": content_hash(
+            [item["legacy_input_hash"] for item in traced]),
+    }
+    return {**body, "trace_hash": content_hash(body)}
+
+
 def attach_strict_probe(
     chosen: list[dict], snapshot: str, release_root: Path,
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """Attach a strict native trace to every eligible selected score row.
 
-    Every ``score_result`` candidate is executed independently, row by row.
-    A row that cannot produce an honest trace (unsupported strategy, a
-    missing or hash-mismatched checkpoint, an unresolvable feature or
-    binding, ...) is never fabricated and never allowed to abort rows that
-    DID assemble cleanly: its typed reason is recorded in the returned
-    ``gaps`` map (fixture_id -> reason) instead, and the caller persists it
-    on that pair as ``trace_disposition: "gap"``. The whole capture only
-    refuses when NOT ONE row produced a verified trace — that is a wiring
-    failure (nothing works at all), not a per-case gap.
+    Every ``score_result`` candidate is executed independently, row by row,
+    and so is every ``dyn_sv_choice`` candidate (one trace per ranked menu
+    member, :func:`chooser_trace`). A row that cannot produce an honest trace
+    (unsupported strategy, a missing or hash-mismatched checkpoint, an
+    unresolvable feature or binding, ...) is never fabricated and never
+    allowed to abort rows that DID assemble cleanly: its typed reason is
+    recorded in the returned ``gaps`` map (fixture_id -> reason) instead, and
+    the caller persists it on that pair as ``trace_disposition: "gap"``. The
+    whole capture only refuses when NOT ONE row produced a verified trace —
+    that is a wiring failure (nothing works at all), not a per-case gap.
     """
     gaps: dict[str, str] = {}
     attached = []
     for candidate in chosen:
-        if candidate.get("kind") != "score_result":
+        kind = candidate.get("kind")
+        if kind not in ("score_result", "dyn_sv_choice"):
             continue
         fixture_id = str(candidate.get("fixture_id", "candidate"))
         try:
-            request = canonical_v2_request(candidate, snapshot)
-            source = _checkpoint_value(candidate, "source_inputs")
-            bindings = source.get("model_bindings") or ()
-            package = None
-            if bindings:
-                package = package_frozen_resources(
-                    model_bindings=bindings,
-                    deployment_id=request.deployment_id,
-                    release_root=release_root,
-                    source_root=_artifact_source_root(),
-                )
-                request = replace(request, model_artifact_refs=package.request_refs)
-            inputs, shared_inputs = native_inputs_from_capture(candidate, request)
-            runtime = (
-                _frozen_runtime(package, release_root, request, inputs, candidate)
-                if package else None
-            )
-            resources = list(package.resource_rows) if package else []
-            if package:
-                resources.extend({
-                    "resource_id": binding["binding_id"],
-                    "ref": binding["request_ref"],
-                    "kind": "sidecar",
-                    "document": binding,
-                    "content_hash": content_hash(binding),
-                } for binding in package.sidecar_document["bindings"])
-            trace, native = package_strict_trace(
-                request, inputs, shared_inputs,
-                resources=resources,
-                metadata={
-                    "capture_mode": "bounded-strict-probe",
-                    "legacy_checkpoint_hash": content_hash(
-                        candidate["legacy_trace"]
-                    ),
-                    "frozen_inference": package.trace_declaration if package else None,
-                },
-                frozen_runtime=runtime,
-            )
+            if kind == "dyn_sv_choice":
+                trace = chooser_trace(candidate, snapshot, release_root)
+                native_score_id = None
+            else:
+                trace, native = strict_trace_one(candidate, snapshot, release_root)
+                native_score_id = native.score_id
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             gaps[fixture_id] = str(exc)
             continue
@@ -2017,7 +2397,8 @@ def attach_strict_probe(
         # ``shared_inputs``); phase4_real re-derives it from the legacy one.
         candidate["input_trace"] = trace
         candidate["legacy_input_hash"] = trace["shared_input_hash"]
-        candidate["native_score_id"] = native.score_id
+        if native_score_id is not None:
+            candidate["native_score_id"] = native_score_id
         attached.append(fixture_id)
     if not attached:
         detail = "; ".join(f"{k}: {v}" for k, v in list(gaps.items())[:3])
@@ -2246,9 +2627,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         # stays on disk, unread, for the rest of the run.
         _shared_hydration_cache: dict[str, Any] = {}
         for cand in chosen:
-            trace = _hydrate_trace(cand.get("legacy_trace"))
-            _reconcile_shared_trace_content(trace, _shared_hydration_cache)
-            cand["legacy_trace"] = trace
+            for holder in (cand, *(cand.get("members") or ())):
+                trace = _hydrate_trace(holder.get("legacy_trace"))
+                _reconcile_shared_trace_content(trace, _shared_hydration_cache)
+                holder["legacy_trace"] = trace
         if args.out:
             out_dir = Path(args.out)
         else:

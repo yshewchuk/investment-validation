@@ -17,10 +17,11 @@ records.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from engine.v2.contracts import ScoreRequest
 from engine.v2.foundation import content_hash
@@ -43,6 +44,8 @@ _BINDING_KEYS = frozenset({
     "decision_clock_id", "adapter", "feature_order", "output_names", "members",
 })
 _MEMBER_KEYS = frozenset({"name", "resource_id"})
+#: Roles whose feature vector is their own, not the forecast-family merge.
+_ROLE_PRIVATE_VECTORS = frozenset({"gate", "chooser"})
 _ANSWER_FIELDS = {
     "context": frozenset({"legs", "selected_contracts", "entry_cost", "gate_pass"}),
     "features": frozenset({
@@ -162,19 +165,48 @@ def _feature_rows(
     bindings: Sequence[ModelBinding],
     release_id: str,
 ) -> tuple[InferenceRequest, ...]:
-    features = inputs.features.get("model_inputs")
-    if not isinstance(features, Mapping):
+    """One inference row per binding, in the binding's own feature order.
+
+    A strict capture records the row each binding was fed per role
+    (``features.role_model_inputs``): the gate model's vector lives only in
+    its own ``gate_inputs`` checkpoint, never in the merged forecast-family
+    ``model_inputs``, and a same-named column may hold another value there.
+    When the trace carries per-role rows, each binding reads ONLY its own
+    role's row. A trace without them can still feed the forecast-family
+    roles from ``model_inputs`` (the merge refuses a cross-role conflict), but
+    never a gate or chooser binding.
+    """
+    merged = inputs.features.get("model_inputs")
+    if not isinstance(merged, Mapping):
         raise FrozenBridgeError("native inputs require features.model_inputs")
+    role_rows = inputs.features.get("role_model_inputs")
+    if role_rows is not None and not isinstance(role_rows, Mapping):
+        raise FrozenBridgeError("features.role_model_inputs: expected object")
     requests = []
     for binding in bindings:
+        role = binding.role.split(":", 1)[0]
+        if role_rows is not None:
+            vector = role_rows.get(binding.role, role_rows.get(role))
+            if not isinstance(vector, Mapping):
+                raise FrozenBridgeError(
+                    f"binding {binding.binding_id}: no captured row for role {binding.role}"
+                )
+        elif role in _ROLE_PRIVATE_VECTORS:
+            raise FrozenBridgeError(
+                f"binding {binding.binding_id}: role {role} needs its own captured "
+                "row (features.role_model_inputs); the merged model_inputs is "
+                "not its feature vector"
+            )
+        else:
+            vector = merged
         row = []
         for name in binding.feature_order:
-            if name not in features:
+            if name not in vector:
                 raise FrozenBridgeError(
                     f"binding {binding.binding_id}: missing feature {name}"
                 )
             try:
-                value = float(features[name])
+                value = float(vector[name])
             except (TypeError, ValueError) as exc:
                 raise FrozenBridgeError(
                     f"binding {binding.binding_id}: nonnumeric feature {name}"
@@ -193,32 +225,21 @@ def _feature_rows(
     return tuple(requests)
 
 
-def prepare_frozen_replay(
+def _verified_release(
     *,
     release_root: Path,
-    resource_rows: Any,
+    resources: Mapping[str, Mapping[str, Any]],
     verified_documents: Mapping[str, Any],
-    metadata: Any,
+    release_resource_id: Any,
+    binding_ids: Any,
     request: ScoreRequest,
-    inputs: NativeScoreInputs,
-) -> FrozenReplayPlan | None:
-    """Build a frozen execution plan from a hash-verified trace."""
-    if metadata is None:
-        return None
-    metadata = _object(metadata, "input_trace.metadata")
-    declaration = metadata.get("frozen_inference")
-    if declaration is None:
-        return None
-    declaration = _object(declaration, "input_trace.metadata.frozen_inference")
-    _exact_keys(declaration, _TRACE_KEYS, "frozen_inference")
-    if declaration["schema_version"] != FROZEN_TRACE_SCHEMA:
-        raise FrozenBridgeError("frozen_inference.schema_version: unsupported")
+    label: str,
+) -> tuple[ModelRelease, set[str], Mapping[str, Any], tuple[str, ...]]:
+    """The selected bindings of one verified release sidecar, as a release.
 
-    _answer_free(inputs)
-    resources = _resource_index(resource_rows)
-    release_resource_id = _nonempty(
-        declaration["release_resource_id"], "frozen_inference.release_resource_id",
-    )
+    Returns ``(release, request refs, sidecar document, selected ids)``.
+    """
+    release_resource_id = _nonempty(release_resource_id, f"{label}.release_resource_id")
     release_row = resources.get(release_resource_id)
     if release_row is None or release_row.get("kind") != "sidecar":
         raise FrozenBridgeError("frozen release resource must be a verified sidecar")
@@ -235,7 +256,7 @@ def prepare_frozen_replay(
     raw_bindings = release_document["bindings"]
     if not isinstance(raw_bindings, list) or not raw_bindings:
         raise FrozenBridgeError("frozen release.bindings: expected nonempty list")
-    selected_ids = _string_tuple(declaration["binding_ids"], "frozen_inference.binding_ids")
+    selected_ids = _string_tuple(binding_ids, f"{label}.binding_ids")
     selected = set(selected_ids)
     bindings: dict[str, ModelBinding] = {}
     request_refs: set[str] = set()
@@ -298,16 +319,56 @@ def prepare_frozen_replay(
         raise FrozenBridgeError(
             f"frozen release: missing selected bindings {sorted(selected - set(bindings))}"
         )
-    if request_refs != set(request.model_artifact_refs):
-        raise FrozenBridgeError("frozen release request refs do not exactly match request")
-
-    ordered_bindings = tuple(bindings[binding_id] for binding_id in selected_ids)
     release = ModelRelease(
         release_id=release_id,
         deployment_id=deployment_id,
-        bindings=ordered_bindings,
+        bindings=tuple(bindings[binding_id] for binding_id in selected_ids),
     )
-    requests = _feature_rows(inputs, ordered_bindings, release_id)
+    return release, request_refs, release_document, selected_ids
+
+
+def prepare_frozen_replay(
+    *,
+    release_root: Path,
+    resource_rows: Any,
+    verified_documents: Mapping[str, Any],
+    metadata: Any,
+    request: ScoreRequest,
+    inputs: NativeScoreInputs,
+    extra_refs: Iterable[str] = (),
+) -> FrozenReplayPlan | None:
+    """Build a frozen execution plan from a hash-verified trace.
+
+    ``extra_refs``: request model refs another verified declaration of the
+    same trace owns (the frozen chooser's bindings); together with this
+    release's refs they must be exactly the request's.
+    """
+    if metadata is None:
+        return None
+    metadata = _object(metadata, "input_trace.metadata")
+    declaration = metadata.get("frozen_inference")
+    if declaration is None:
+        return None
+    declaration = _object(declaration, "input_trace.metadata.frozen_inference")
+    _exact_keys(declaration, _TRACE_KEYS, "frozen_inference")
+    if declaration["schema_version"] != FROZEN_TRACE_SCHEMA:
+        raise FrozenBridgeError("frozen_inference.schema_version: unsupported")
+
+    _answer_free(inputs)
+    release, request_refs, release_document, selected_ids = _verified_release(
+        release_root=release_root,
+        resources=_resource_index(resource_rows),
+        verified_documents=verified_documents,
+        release_resource_id=declaration["release_resource_id"],
+        binding_ids=declaration["binding_ids"],
+        request=request,
+        label="frozen_inference",
+    )
+    if request_refs | set(extra_refs) != set(request.model_artifact_refs):
+        raise FrozenBridgeError("frozen release request refs do not exactly match request")
+
+    ordered_bindings = release.bindings
+    requests = _feature_rows(inputs, ordered_bindings, release.release_id)
     receipt = content_hash({
         "release": release_document,
         "binding_ids": selected_ids,
@@ -328,10 +389,119 @@ def prepare_frozen_replay(
     )
 
 
+# -- the frozen DYN-SV chooser ------------------------------------------------
+
+#: ``native_inputs.chooser`` of a DYN-SV menu candidate whose legacy row ran
+#: the chooser champion: a JSON declaration (never executors) that
+#: :func:`prepare_frozen_chooser` turns into the executable chooser block the
+#: native chooser stage runs (``engine.v2.scoring.chooser_inputs``).
+FROZEN_CHOOSER_SCHEMA = "phase4_frozen_chooser.v1.0"
+FROZEN_CHOOSER_FIELD = "frozen_chooser"
+_CHOOSER_KEYS = frozenset({
+    "schema_version", "release_resource_id", "binding_ids", "recipe",
+    "fold_pools", "admissible_table", "analog_pool_resource_id",
+})
+
+
+@dataclass(frozen=True)
+class FrozenChooserPlan:
+    release: ModelRelease
+    request_refs: frozenset[str]
+    block: Mapping[str, Any]
+
+
+def prepare_frozen_chooser(
+    *,
+    release_root: Path,
+    resource_rows: Any,
+    verified_documents: Mapping[str, Any],
+    request: ScoreRequest,
+    inputs: NativeScoreInputs,
+) -> FrozenChooserPlan | None:
+    """The executable chooser block a trace's frozen chooser declares.
+
+    The chooser champion and the Tier-4 producer folds are bindings of their
+    own verified release sidecar; the fold pools are the recorded ones; the
+    n_admissible table is the frozen v1 table (its key is checked by the
+    native stage); the k-NN pool is a verified artifact resource holding the
+    serialized ``ChooserAnalogPoolArtifact``. Nothing is fitted here.
+    """
+    declaration = inputs.chooser.get(FROZEN_CHOOSER_FIELD)
+    if declaration is None:
+        return None
+    if set(inputs.chooser) != {FROZEN_CHOOSER_FIELD}:
+        raise FrozenBridgeError("native_inputs.chooser: frozen_chooser must stand alone")
+    declaration = _object(declaration, "frozen_chooser")
+    _exact_keys(declaration, _CHOOSER_KEYS, "frozen_chooser")
+    if declaration["schema_version"] != FROZEN_CHOOSER_SCHEMA:
+        raise FrozenBridgeError("frozen_chooser.schema_version: unsupported")
+    resources = _resource_index(resource_rows)
+    release, request_refs, _document, _ids = _verified_release(
+        release_root=release_root,
+        resources=resources,
+        verified_documents=verified_documents,
+        release_resource_id=declaration["release_resource_id"],
+        binding_ids=declaration["binding_ids"],
+        request=request,
+        label="frozen_chooser",
+    )
+    table = None
+    if declaration["admissible_table"] is not None:
+        from engine.v2.models.admissible_table import legacy_n_admissible_table
+
+        table = legacy_n_admissible_table()
+    pool = None
+    if declaration["analog_pool_resource_id"] is not None:
+        from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
+        from engine.v2.models.frozen_documents import frozen_state_from_document
+
+        member = _verified_artifact(
+            release_root,
+            _nonempty(declaration["analog_pool_resource_id"],
+                      "frozen_chooser.analog_pool_resource_id"),
+            resources,
+        )
+        document = json.loads((release_root / member.path).read_bytes())
+        pool = frozen_state_from_document(document)
+        if not isinstance(pool, ChooserAnalogPoolArtifact):
+            raise FrozenBridgeError("frozen_chooser analog pool: not a chooser analog pool")
+    from engine.v2.scoring.chooser_inputs import frozen_chooser_block
+
+    try:
+        block = frozen_chooser_block(
+            strategy=request.strategy_version,
+            recipe=_object(declaration["recipe"], "frozen_chooser.recipe"),
+            fold_pools=_object(declaration["fold_pools"], "frozen_chooser.fold_pools"),
+            analog_pool=pool,
+            admissible_table=table,
+            inference=FrozenInference(release_root),
+            release=release,
+        )
+    except ValueError as exc:
+        raise FrozenBridgeError(f"frozen_chooser: {exc}") from exc
+    return FrozenChooserPlan(
+        release=release, request_refs=frozenset(request_refs), block=block,
+    )
+
+
+def with_frozen_chooser(
+    inputs: NativeScoreInputs, plan: FrozenChooserPlan | None,
+) -> NativeScoreInputs:
+    """``inputs`` with its chooser declaration replaced by the executable block."""
+    if plan is None:
+        return inputs
+    return replace(inputs, chooser=dict(plan.block))
+
+
 __all__ = [
+    "FROZEN_CHOOSER_FIELD",
+    "FROZEN_CHOOSER_SCHEMA",
     "FROZEN_RELEASE_SCHEMA",
     "FROZEN_TRACE_SCHEMA",
     "FrozenBridgeError",
+    "FrozenChooserPlan",
     "FrozenReplayPlan",
+    "prepare_frozen_chooser",
     "prepare_frozen_replay",
+    "with_frozen_chooser",
 ]

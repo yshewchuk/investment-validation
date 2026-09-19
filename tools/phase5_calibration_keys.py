@@ -100,12 +100,29 @@ def keys_from_corpus(corpus: Path) -> tuple[set[Key], dict[str, str], int]:
         if not (pair.get("payload") or {}).get("input_trace"):
             continue
         traced += 1
-        key, reason = _pair_key(pair)
-        if key is None:
-            underivable[fixture_id] = reason
-        else:
-            keys.add(key)
+        for label, keyed in _keyed_pairs(fixture_id, pair):
+            key, reason = _pair_key(keyed)
+            if key is None:
+                underivable[label] = reason
+            else:
+                keys.add(key)
     return keys, underivable, traced
+
+
+def _keyed_pairs(fixture_id: str, pair: Mapping[str, Any]):
+    """``(label, pair)`` per keyed scoring: the pair itself, or for a
+    ``dyn_sv_choice`` pair each ranked member (its own strict trace and its
+    legacy record from ``request.frame_rows``), since the choice has no
+    calibration of its own."""
+    payload = pair.get("payload") or {}
+    if payload.get("record_kind") != "dyn_sv_choice":
+        yield fixture_id, pair
+        return
+    rows = (payload.get("request") or {}).get("frame_rows") or ()
+    for index, member in enumerate((payload.get("input_trace") or {}).get("members") or ()):
+        record = rows[index].get("record") if index < len(rows) else None
+        yield f"{fixture_id}#member{index}", {"payload": {
+            "input_trace": member.get("input_trace"), "record": record or {}}}
 
 
 def keys_from_as_of(as_of: str, alphas: Iterable[float],
