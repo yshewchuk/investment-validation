@@ -43,6 +43,12 @@ builds nothing::
     python3 tools/bounded_run.py --max-rss-gb 3.5 -- python3 -u tools/phase5_training_job.py \\
         --state board_analog_matcher --alpha 0.5 --cutoff 2026-09-18 --out DIR
 
+The entry-rule gate's trailing ``pnl_sim`` cutoff writes one frozen state per
+event month (``--cutoff`` takes event dates; light, reads one small file)::
+
+    python3 -u tools/phase5_training_job.py --state trailing_pnl_cutoff \\
+        --cutoff 2026-09-16 --cutoff 2026-10-02 --out DIR
+
 Dataset builders and the legacy selection each mirrors:
 ``tools/phase5_datasets.py``.
 """
@@ -158,8 +164,9 @@ def build_dataset(recipe, *, pairs_path=None) -> pd.DataFrame:
 
 
 BOARD_ANALOG_STATE = "board_analog_matcher"
+TRAILING_CUTOFF_STATE = "trailing_pnl_cutoff"
 STATES = tuple(f"driver_residual_pool:{role}" for role in ("size", "implied_t1", "runup_move")) + (
-    "paired_residual_pool", BOARD_ANALOG_STATE)
+    "paired_residual_pool", BOARD_ANALOG_STATE, TRAILING_CUTOFF_STATE)
 
 
 def _guard(where: str) -> None:
@@ -186,8 +193,8 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
     from tools import phase5_datasets as data
 
     _guard(f"tools.phase5_training_job.build_state:{member}")
-    if member == BOARD_ANALOG_STATE:
-        raise SystemExit(f"{member} writes one artifact per causal key: use run_board_analog_job")
+    if member in (BOARD_ANALOG_STATE, TRAILING_CUTOFF_STATE):
+        raise SystemExit(f"{member} writes one artifact per causal key: use its own job")
     if member.startswith("driver_residual_pool:"):
         role = member.split(":", 1)[1]
         pool = data.champion_driver_pool(role, registry=registry)
@@ -383,6 +390,71 @@ def run_board_analog_job(out: Path, *, alpha: float, cutoffs, strategies=None,
     return summary
 
 
+# --------------------------------------------------------------------------
+# trailing pnl_sim cutoff: one frozen artifact per event month
+# --------------------------------------------------------------------------
+
+
+def _write_keyed(path: Path, payload: bytes) -> str:
+    """Write ``payload`` atomically; keep an identical file, refuse another."""
+    if path.exists():
+        if path.read_bytes() != payload:
+            raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
+        return "resumed"
+    tmp = path.with_name(path.name + ".partial")
+    tmp.write_bytes(payload)
+    tmp.replace(path)
+    return "written"
+
+
+def run_trailing_cutoff_job(out: Path, *, as_of, plan_only: bool = False,
+                            history=None, history_path=None) -> dict:
+    """Freeze the entry-rule gate's trailing cutoff for each event month.
+
+    ``as_of``: event dates (or any day of the months) the bar is needed for;
+    one artifact per distinct month, ``trailing_pnl_cutoff__<YYYY-MM-01>.json``.
+    ``history`` (``event_date``/``exp_pnl_sim`` frame) is injectable for
+    tests; by default ``phase5_datasets.pnl_sim_history`` (a small file).
+    An absent history freezes ``cutoff=None`` for every month, as legacy
+    serves no bar without it. ``plan_only`` lists the months only.
+    """
+    from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.trailing_cutoff_artifact import cutoff_month
+    from engine.v2.models.training.trailing_cutoff import build_trailing_cutoff_artifact
+    from tools import phase5_datasets as data
+
+    _guard(f"tools.phase5_training_job.run_trailing_cutoff_job:{TRAILING_CUTOFF_STATE}")
+    if not as_of:
+        raise SystemExit(f"{TRAILING_CUTOFF_STATE} needs at least one --cutoff (event date)")
+    months = sorted({cutoff_month(str(pd.Timestamp(day).date())) for day in as_of})
+    summary: dict = {"state": TRAILING_CUTOFF_STATE, "plan_only": bool(plan_only),
+                     "months": months}
+    out.mkdir(parents=True, exist_ok=True)
+    summary_path = out / f"{TRAILING_CUTOFF_STATE}.summary.json"
+    if not plan_only:
+        if history is None:
+            from engine import paths
+            from engine.pnl_sim import HISTORY_PATH
+
+            source = Path(history_path) if history_path else paths.ROOT / HISTORY_PATH
+            history = data.pnl_sim_history(source)
+            summary["sources"] = {"features.pnl_sim_history": data.file_digest(source)}
+        rows = [] if history is None else history.to_dict("records")
+        summary["history_rows"] = len(rows)
+        files = []
+        for month in months:
+            artifact = build_trailing_cutoff_artifact(rows, month=month)
+            path = out / f"{TRAILING_CUTOFF_STATE}__{month}.json"
+            status = _write_keyed(path, serialize_frozen_state(artifact))
+            files.append({"month": month, "file": path.name, "status": status,
+                          "content_hash": artifact.content_hash,
+                          "has_bar": artifact.cutoff is not None})
+        summary["files"] = files
+    summary["status"] = "planned" if plan_only else "written"
+    summary_path.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")
+    return summary
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--list", action="store_true", help="print the recipe keys and exit")
@@ -393,7 +465,8 @@ def main(argv=None) -> int:
     ap.add_argument("--alpha", type=float, help="fill alpha (calibration recipes)")
     ap.add_argument("--cutoff", action="append", default=[],
                     help="evidence cutoff YYYY-MM-DD (calibration: repeatable, one fold each; "
-                         "paired_residual_pool: optional exclusive event-date bound)")
+                         "paired_residual_pool: optional exclusive event-date bound; "
+                         "trailing_pnl_cutoff: event dates, one artifact per month)")
     ap.add_argument("--pairs", help="recalibration pairs parquet (default: legacy PAIRS_PATH)")
     ap.add_argument("--strategy", action="append", default=[],
                     help="board_analog_matcher: strategy to freeze (repeatable; default all "
@@ -424,6 +497,11 @@ def main(argv=None) -> int:
                                        strategies=args.strategy, plan_only=args.plan_only)
         print(f"[p5-3] {BOARD_ANALOG_STATE}: {summary['status']} keys={len(summary['keys'])} "
               f"est_peak_gb={summary['rss']['estimated_peak_gb']} -> {out}", flush=True)
+        return 0
+    if args.state == TRAILING_CUTOFF_STATE:
+        summary = run_trailing_cutoff_job(out, as_of=args.cutoff, plan_only=args.plan_only)
+        print(f"[p5-3] {TRAILING_CUTOFF_STATE}: {summary['status']} "
+              f"months={len(summary['months'])} -> {out}", flush=True)
         return 0
     if args.strategy:
         ap.error(f"--strategy applies to {BOARD_ANALOG_STATE} only")

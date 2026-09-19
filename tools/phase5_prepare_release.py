@@ -195,7 +195,8 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
 
     The training job's ``--state`` outputs
     (``driver_residual_pool__<role>.json``, ``paired_residual_pool.json``,
-    ``board_analog_matcher__<strategy>__<alpha>__<cutoff>.json``) are
+    ``board_analog_matcher__<strategy>__<alpha>__<cutoff>.json``,
+    ``trailing_pnl_cutoff__<month>.json``) are
     classified by their own schema and role, not by file name.
     """
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
@@ -216,6 +217,8 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
             name = f"{state.strategy}|{state.alpha:.4f}|{state.cutoff}"
         elif schema.startswith("chooser_analog_pool"):
             member, name = "chooser_analog_pool", f"{state.pool_id}|{state.cutoff}"
+        elif schema.startswith("trailing_pnl_cutoff"):
+            member, name = "trailing_pnl_cutoff", f"{state.history_id}|{state.month}"
         else:
             member, name = "admissible_table:dyn_sv", f"{state.table_id}|{state.version}"
         found.setdefault(member, {})[name] = data

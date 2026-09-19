@@ -29,12 +29,17 @@ from engine.v2.models.residual_artifact import (
     PairedResidualPoolArtifact,
     residual_artifact_from_document,
 )
+from engine.v2.models.trailing_cutoff_artifact import (
+    TRAILING_CUTOFF_ARTIFACT_V1,
+    TrailingCutoffArtifact,
+    trailing_cutoff_from_document,
+)
 
 __all__ = ["FrozenState", "frozen_state_from_document"]
 
 FrozenState = Union[
     DriverResidualPoolArtifact, PairedResidualPoolArtifact, AdmissibleDepthTable,
-    BoardAnalogPoolArtifact, ChooserAnalogPoolArtifact,
+    BoardAnalogPoolArtifact, ChooserAnalogPoolArtifact, TrailingCutoffArtifact,
 ]
 
 #: ``schema_version`` -> reader; anything else is a residual pool (whose own
@@ -43,6 +48,7 @@ _READERS = {
     ADMISSIBLE_DEPTH_TABLE_V1: admissible_table_from_document,
     BOARD_ANALOG_POOL_ARTIFACT_V1: analog_artifact_from_document,
     CHOOSER_ANALOG_POOL_ARTIFACT_V1: chooser_analog_pool_from_document,
+    TRAILING_CUTOFF_ARTIFACT_V1: trailing_cutoff_from_document,
 }
 
 

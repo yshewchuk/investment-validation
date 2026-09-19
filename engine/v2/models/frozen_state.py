@@ -3,8 +3,9 @@
 One loader for the frozen non-model states this package defines -- the
 driver and paired residual pools (:mod:`.residual_artifact`), the
 admissible-depth calibration table (:mod:`.admissible_table`), the board
-analog-matcher population (:mod:`.analog_artifact`) and the DYN-SV chooser's
-k-NN analog pool (:mod:`.chooser_analog_pool`) -- with the
+analog-matcher population (:mod:`.analog_artifact`), the DYN-SV chooser's
+k-NN analog pool (:mod:`.chooser_analog_pool`) and the entry-rule gate's
+trailing ``pnl_sim`` cutoff (:mod:`.trailing_cutoff_artifact`) -- with the
 same verification shape as ``PayoffArtifactLoader`` and ``FrozenInference``:
 re-hash the raw bytes against the reference, rebuild the record, and refuse
 unless the record's own recomputed hash agrees too.
