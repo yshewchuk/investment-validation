@@ -254,3 +254,383 @@ def test_upgrade_succeeds_for_a_non_implied_model_and_payload_is_unchanged(
     assert np.array_equal(upgraded["pool_pred"], np.array([5.0]))
     assert np.array_equal(upgraded["pool_res"], np.array([-1.0]))
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+# -- fold-state classification: current / old / missing ----------------------
+
+
+class TestClassifyFold:
+    def test_a_pool_embedded_cache_is_current(self, tmp_path, monkeypatch):
+        _cache(tmp_path, pools=True)
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+
+        state, target = prepare._classify_fold(
+            FOLD, directory=tmp_path, model=MODEL, snapshot=SNAPSHOT
+        )
+        assert state == "current"
+        assert target is None
+
+    def test_a_pool_less_cache_is_old(self, tmp_path, monkeypatch):
+        path = _cache(tmp_path)
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+
+        state, target = prepare._classify_fold(
+            FOLD, directory=tmp_path, model=MODEL, snapshot=SNAPSHOT
+        )
+        assert state == "old"
+        assert target == prepare.CacheTarget(path, FOLD, prepare._sha256(path))
+
+    def test_no_file_at_all_is_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+
+        state, target = prepare._classify_fold(
+            FOLD, directory=tmp_path, model=MODEL, snapshot=SNAPSHOT
+        )
+        assert state == "missing"
+        assert target is None
+
+
+class TestReportFoldStates:
+    """The listing this preparer's `--dry-run`/`--report` mode exposes: every
+    requested (model, fold) pair's state, no values, no Scorer.
+    """
+
+    def test_reports_all_three_states_per_model(self, tmp_path, monkeypatch):
+        current_fold = FOLD
+        old_fold = pd.Timestamp("2026-10-01")
+        missing_fold = pd.Timestamp("2026-11-01")
+        _cache(tmp_path, pools=True)  # FOLD, current
+        old_path = tmp_path / tier4._serving_path(
+            MODEL.model_id, old_fold, SNAPSHOT
+        ).name
+        joblib.dump(
+            {
+                "estimator": {"weights": [1.0]},
+                "model_id": MODEL.model_id,
+                "fold_start": str(old_fold.date()),
+                "tier3_snapshot": SNAPSHOT,
+                "features": list(MODEL.features),
+            },
+            old_path,
+        )
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+        monkeypatch.setattr(prepare, "_resolve_model", lambda name: MODEL)
+
+        reports = prepare.report_fold_states(
+            [current_fold, old_fold, missing_fold],
+            model_names=["implied_t1"],
+            cache_dir=tmp_path,
+            snapshot=SNAPSHOT,
+        )
+
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.current == (current_fold,)
+        assert report.old == (old_fold,)
+        assert report.missing == (missing_fold,)
+
+    def test_prints_no_pool_or_estimator_values(self, tmp_path, monkeypatch, capsys):
+        # A cache whose stored pool contains an easily-recognizable sentinel
+        # value: if a "list" pass ever grew a stray print of stored content,
+        # this sentinel appearing in stdout would catch it.
+        path = tier4._serving_path(MODEL.model_id, FOLD, SNAPSHOT)
+        joblib.dump(
+            {
+                "estimator": {"weights": [1.0]},
+                "model_id": MODEL.model_id,
+                "fold_start": str(FOLD.date()),
+                "tier3_snapshot": SNAPSHOT,
+                "features": list(MODEL.features),
+                "pool_pred": np.array([424242.0]),
+                "pool_res": np.array([-424242.0]),
+            },
+            tmp_path / path.name,
+        )
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+        monkeypatch.setattr(prepare, "_resolve_model", lambda name: MODEL)
+
+        prepare.report_fold_states(
+            [FOLD], model_names=["implied_t1"], cache_dir=tmp_path, snapshot=SNAPSHOT,
+        )
+        assert "424242" not in capsys.readouterr().out
+
+
+# -- building a genuinely missing cache ---------------------------------------
+
+
+def _fake_served(model: tier4.FeatureModel, fold: pd.Timestamp) -> "tier4.ServingModel":
+    return tier4.ServingModel(
+        estimator={"weights": [9.0]},
+        model_id=model.model_id,
+        fold_start=fold,
+        tier3_snapshot=SNAPSHOT,
+        features=tuple(model.features),
+        pool_pred=np.array([3.0, 4.0]),
+        pool_res=np.array([0.5, -0.5]),
+    )
+
+
+class TestBuildOne:
+    """`build_one` is the atomic-install counterpart of `upgrade_one`, for a
+    fold with no cache file at all — see the module docstring's "missing"
+    bullet for why this must fit through the SAME temp+fsync+verify+replace
+    discipline rather than `serving_model`'s own direct `joblib.dump`.
+    """
+
+    def test_builds_and_installs_atomically(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+        path = tmp_path / tier4._serving_path(MODEL.model_id, FOLD, SNAPSHOT).name
+        assert not path.exists()
+
+        count = prepare.build_one(
+            FOLD,
+            model=MODEL,
+            snapshot=SNAPSHOT,
+            cache_dir=tmp_path,
+            panel_loader=lambda: pd.DataFrame({"x": [1.0], "y": [2.0]}),
+            fit_builder=lambda fold, model, panel: _fake_served(model, fold),
+        )
+
+        assert count == 2
+        installed = joblib.load(path)
+        assert installed["model_id"] == MODEL.model_id
+        assert installed["fold_start"] == str(FOLD.date())
+        assert installed["tier3_snapshot"] == SNAPSHOT
+        assert installed["features"] == list(MODEL.features)
+        assert np.array_equal(installed["pool_pred"], np.array([3.0, 4.0]))
+        assert np.array_equal(installed["pool_res"], np.array([0.5, -0.5]))
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_refuses_when_a_cache_already_exists(self, tmp_path, monkeypatch):
+        _cache(tmp_path, pools=True)
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+
+        with pytest.raises(prepare.CachePreparationError, match="not missing"):
+            prepare.build_one(
+                FOLD,
+                model=MODEL,
+                snapshot=SNAPSHOT,
+                cache_dir=tmp_path,
+                panel_loader=lambda: pd.DataFrame(),
+                fit_builder=lambda fold, model, panel: _fake_served(model, fold),
+            )
+
+    def test_refuses_a_fit_with_the_wrong_identity(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+        wrong_fold = pd.Timestamp("2020-01-01")
+
+        with pytest.raises(prepare.CachePreparationError, match="identity mismatch"):
+            prepare.build_one(
+                FOLD,
+                model=MODEL,
+                snapshot=SNAPSHOT,
+                cache_dir=tmp_path,
+                panel_loader=lambda: pd.DataFrame(),
+                # Fit result claims a DIFFERENT fold than the one requested.
+                fit_builder=lambda fold, model, panel: _fake_served(model, wrong_fold),
+            )
+        assert not list(tmp_path.glob("*.joblib"))
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_writes_only_under_the_serving_directory(self, tmp_path, monkeypatch):
+        # `_validate_identity` recomputes the expected path from
+        # ``tier4.SERVING_DIR`` regardless of a ``cache_dir`` override, so a
+        # correct caller keeps the two in sync — exactly what every real
+        # invocation does, since ``build_one``'s own default IS
+        # ``tier4.SERVING_DIR``. This asserts that default lands exactly
+        # where ``tier4.SERVING_DIR`` points, and nowhere else (e.g. its
+        # parent directory).
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.setattr(tier4, "SERVING_DIR", elsewhere)
+
+        prepare.build_one(
+            FOLD,
+            model=MODEL,
+            snapshot=SNAPSHOT,
+            panel_loader=lambda: pd.DataFrame(),
+            fit_builder=lambda fold, model, panel: _fake_served(model, fold),
+        )
+
+        installed = list(elsewhere.glob("*.joblib"))
+        assert len(installed) == 1
+        assert not list(tmp_path.glob("*.joblib"))  # nothing landed at the parent
+
+    def test_cache_dir_override_must_match_serving_dir_identity(self, tmp_path, monkeypatch):
+        """A `cache_dir` override that disagrees with `tier4.SERVING_DIR` is
+        refused rather than silently writing an identity-mismatched file —
+        this is `_validate_identity`'s job, reused unchanged from
+        `upgrade_one`.
+        """
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+        nested = tmp_path / "nested"
+
+        with pytest.raises(prepare.CachePreparationError, match="does not match"):
+            prepare.build_one(
+                FOLD,
+                model=MODEL,
+                snapshot=SNAPSHOT,
+                cache_dir=nested,
+                panel_loader=lambda: pd.DataFrame(),
+                fit_builder=lambda fold, model, panel: _fake_served(model, fold),
+            )
+
+
+# -- every pass reuses phase4_required_folds's fold set -----------------------
+
+
+class TestPhase4RequiredFoldsCoversEveryPass:
+    """`phase4_required_folds` reads only forward+boundary events, so its
+    docstring makes a claim: every OTHER pass either shares one of those
+    folds or never touches tier4 at all. These are the static invariants
+    that claim depends on — a change to any of them means the fold planner
+    needs revisiting, not just this file.
+    """
+
+    def test_rescore_only_ever_changes_structure_params_or_strike(self):
+        """`_rescore`'s `**changes` must never touch `as_of`/`event_date`/
+        `chain_as_of` — the only fields `tier4.serving_fold` reads — or a
+        pinned/strike/coarse variant could need a fold `phase4_required_
+        folds` never planned for.
+        """
+        import inspect
+        import re
+
+        from tools import capture_tier0_corpus as capture
+
+        allowed = {"structure_params", "strike"}
+        for source in (
+            inspect.getsource(capture.pinned_and_strike_pass),
+            inspect.getsource(capture.coarse_ladder_pass),
+        ):
+            calls = re.findall(r"_rescore\([^)]*\)", source, flags=re.DOTALL)
+            assert calls, "expected at least one _rescore(...) call in this pass"
+            for call in calls:
+                kwargs = set(re.findall(r"(\w+)\s*=", call))
+                unexpected = kwargs - allowed
+                assert not unexpected, (
+                    f"_rescore call changes {unexpected}, not just {allowed}: {call}"
+                )
+
+    def test_dyn_sv_pass_never_calls_score(self):
+        """No new fold can enter through dyn_sv: it must never reach `_score`."""
+        import inspect
+
+        from tools import capture_tier0_corpus as capture
+
+        source = inspect.getsource(capture.dyn_sv_pass)
+        assert "_score(" not in source
+        assert "_rescore(" not in source
+
+    def test_research_replay_pass_never_calls_score(self):
+        """Research replay prices disabled strategies through
+        `engine.replay.replay_one` directly, never `Scorer.score`/`_score`
+        — so it can never need a Tier-4 fold this planner does not already
+        have from the STRUCTURES-keyed passes.
+        """
+        import inspect
+
+        from tools import capture_tier0_corpus as capture
+
+        source = inspect.getsource(capture.research_replay_pass)
+        assert "_score(" not in source
+        assert "_rescore(" not in source
+        assert "replay_one(" in source
+
+
+# -- main()'s --dry-run/--report mode -----------------------------------------
+
+
+def test_main_report_lists_current_old_and_missing_without_touching_anything(
+    tmp_path, monkeypatch, capsys
+):
+    current_fold = FOLD
+    old_fold = pd.Timestamp("2026-10-01")
+    missing_fold = pd.Timestamp("2026-11-01")
+    _cache(tmp_path, pools=True)
+    joblib.dump(
+        {
+            "estimator": {"weights": [1.0]},
+            "model_id": MODEL.model_id,
+            "fold_start": str(old_fold.date()),
+            "tier3_snapshot": SNAPSHOT,
+            "features": list(MODEL.features),
+        },
+        tmp_path / tier4._serving_path(MODEL.model_id, old_fold, SNAPSHOT).name,
+    )
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    monkeypatch.setattr(prepare.store, "file_sha256", lambda _path: SNAPSHOT)
+    monkeypatch.setattr(prepare, "_resolve_model", lambda name: MODEL)
+
+    called = {"upgrade": False, "build": False}
+    monkeypatch.setattr(
+        prepare, "_run_child",
+        lambda *a, **k: called.__setitem__("upgrade", True),
+    )
+    monkeypatch.setattr(
+        prepare, "_run_build_child",
+        lambda *a, **k: called.__setitem__("build", True),
+    )
+
+    code = prepare.main([
+        "--dry-run",
+        "--fold", str(current_fold.date()),
+        "--fold", str(old_fold.date()),
+        "--fold", str(missing_fold.date()),
+    ])
+
+    assert code == 0
+    assert called == {"upgrade": False, "build": False}
+    out = capsys.readouterr().out
+    assert f"current implied_t1 {current_fold:%Y-%m}" in out
+    assert f"old implied_t1 {old_fold:%Y-%m}" in out
+    assert f"missing implied_t1 {missing_fold:%Y-%m}" in out
+    assert "1 current, 1 old, 1 missing" in out
+
+
+def test_main_report_alias_is_equivalent_to_dry_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    monkeypatch.setattr(prepare.store, "file_sha256", lambda _path: SNAPSHOT)
+    monkeypatch.setattr(prepare, "_resolve_model", lambda name: MODEL)
+
+    code = prepare.main(["--report", "--fold", str(FOLD.date())])
+
+    assert code == 0
+    assert f"missing implied_t1 {FOLD:%Y-%m}" in capsys.readouterr().out
+
+
+def test_main_builds_missing_and_upgrades_old_when_not_a_dry_run(tmp_path, monkeypatch):
+    old_fold = pd.Timestamp("2026-10-01")
+    missing_fold = pd.Timestamp("2026-11-01")
+    joblib.dump(
+        {
+            "estimator": {"weights": [1.0]},
+            "model_id": MODEL.model_id,
+            "fold_start": str(old_fold.date()),
+            "tier3_snapshot": SNAPSHOT,
+            "features": list(MODEL.features),
+        },
+        tmp_path / tier4._serving_path(MODEL.model_id, old_fold, SNAPSHOT).name,
+    )
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    monkeypatch.setattr(prepare.store, "file_sha256", lambda _path: SNAPSHOT)
+    monkeypatch.setattr(prepare, "_resolve_model", lambda name: MODEL)
+
+    seen = {"upgraded": [], "built": []}
+    monkeypatch.setattr(
+        prepare, "_run_child",
+        lambda target, produces, snapshot: seen["upgraded"].append(target.fold),
+    )
+    monkeypatch.setattr(
+        prepare, "_run_build_child",
+        lambda fold, model, produces, snapshot: seen["built"].append(fold),
+    )
+
+    code = prepare.main([
+        "--fold", str(old_fold.date()),
+        "--fold", str(missing_fold.date()),
+    ])
+
+    assert code == 0
+    assert seen["upgraded"] == [old_fold]
+    assert seen["built"] == [missing_fold]
