@@ -913,6 +913,94 @@ class TestTheServingCacheCarriesItsPool:
         assert np.array_equal(again.pool_res, reference[1])
 
 
+class TestAFreshFitBuildsTheTrainableFrameOnce:
+    """2026-09-18 memory fix: a FRESH fit must not rebuild `trainable` twice.
+
+    `TestTheServingCacheCarriesItsPool` above fixed the cache-HIT path: a
+    served fold no longer re-derives its pool via `_pool_before`, which used
+    to call `training_frames(panel, model)` (`model.prepare(panel)` re-reads
+    `daily_market` and rebuilds the whole trainable frame, ~2-2.4 GiB
+    measured) on every call regardless of hit or miss. The FRESH-FIT branch
+    (a cache MISS -- the exact path a boundary/pinned/coarse rescore touching
+    a fold never served before takes) was left calling `training_frames`
+    directly AND THEN calling `_pool_before(fold, model, panel)`, which
+    called `training_frames` AGAIN internally: `model.prepare(panel)` itself
+    is deduplicated by `training_frames`'s own `_PREPARED` cache (keyed on
+    `model.model_id` and `panel`'s identity), but each call still returns a
+    FRESH `.copy()` of the cached frames regardless -- so a fresh fit paid
+    for two copies of the same trainable frame, back to back, one of them
+    for a value identical to the one already sitting in a local variable.
+
+    Real-world trigger measured 2026-09-18: a standalone boundary-pass
+    diagnostic (skipping the forward pass, so every fold it touches is a
+    genuine first-ever fresh fit) showed transient ~1.2 GB spikes, released
+    before the next request, at STR-THRU/STR-RUNUP boundary requests --
+    never at CAL-P ones, which do not reach forecast sizing. `load_chain_index`
+    was ruled out directly (10 calls, 0.4-1.4s each, all resolved) before
+    this path was read.
+    """
+
+    @pytest.fixture
+    def wired(self, panel, built, tmp_path, monkeypatch):
+        from engine import paths
+
+        panel_path = tmp_path / "panel.parquet"
+        panel.to_parquet(panel_path, index=False)
+        monkeypatch.setattr(paths, "PANEL", panel_path)
+        monkeypatch.setattr(paths, "TIER4", tmp_path / "tier4_forecasts.parquet")
+        monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path / "serving")
+        write_forecasts(built)
+        return built
+
+    def test_a_fresh_fit_calls_training_frames_only_once(self, panel, wired, monkeypatch):
+        stored = wired
+        fold = stored.loc[stored["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
+        # `wired` points SERVING_DIR at a fresh, empty tmp_path directory, so
+        # every fold -- this one included -- is necessarily a first-ever,
+        # never-cached fresh fit: `serving_model` cannot take the cache-hit
+        # branch, which is what makes this test exercise the fresh-fit path
+        # at all.
+        calls = {"n": 0}
+        original = tier4.training_frames
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(tier4, "training_frames", counting)
+        tier4.serving_model(fold, panel=panel, model=MODEL, cache=True)
+        assert calls["n"] == 1, (
+            f"expected exactly one training_frames() call on a fresh fit, got {calls['n']}"
+        )
+
+    def test_the_reused_trainable_produces_the_identical_pool(self, panel, wired, monkeypatch):
+        """Passing the already-built frame through must not change the
+        answer -- `training_frames` is a pure function of (panel, model), so
+        the caller's copy and a freshly rebuilt one are byte-for-byte the
+        same input to `_pool_before`'s own computation.
+        """
+        fold = wired.loc[wired["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
+        _, trainable = tier4.training_frames(panel, MODEL)
+
+        reused = tier4._pool_before(fold, MODEL, panel, trainable=trainable)
+        rebuilt = tier4._pool_before(fold, MODEL, panel)  # trainable=None -> old path
+
+        assert np.array_equal(reused[0], rebuilt[0])
+        assert np.array_equal(reused[1], rebuilt[1])
+
+    def test_serving_model_output_is_unchanged_by_the_reuse(self, panel, wired, monkeypatch):
+        """End to end: the fix touches only HOW the pool is computed, never
+        the fold's fitted estimator, its pool arrays, or anything else on
+        the returned `ServingModel`.
+        """
+        fold = wired.loc[wired["pred_abs_move_sd"].notna(), "pred_abs_move_fold_start"].max()
+        reference_pool = tier4._pool_before(fold, MODEL, panel)
+
+        served = tier4.serving_model(fold, panel=panel, model=MODEL, cache=True)
+        assert np.array_equal(served.pool_pred, reference_pool[0])
+        assert np.array_equal(served.pool_res, reference_pool[1])
+
+
 class TestThePnLGateSimulator:
     """`engine.pnl_sim` — the machinery the TWIN-P5 gate turns on."""
 

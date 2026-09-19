@@ -1241,7 +1241,10 @@ def _serving_path(model_id: str, fold: pd.Timestamp, snapshot: str) -> Path:
     return SERVING_DIR / f"{model_id}_{fold:%Y%m}_{snapshot[:12]}.joblib"
 
 
-def _pool_before(fold, model: FeatureModel, panel: pd.DataFrame):
+def _pool_before(
+    fold, model: FeatureModel, panel: pd.DataFrame, *,
+    trainable: pd.DataFrame | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """The held-out ``(prediction, residual)`` pool for folds before ``fold``.
 
     Read back from the STORED table rather than recomputed. That is the cheap
@@ -1249,6 +1252,24 @@ def _pool_before(fold, model: FeatureModel, panel: pd.DataFrame):
     historical row, and any drift between that computation and the build's
     would show up as a live band that disagrees with the recorded one for no
     visible reason.
+
+    ``trainable``, when the caller already built one (``serving_model``'s
+    fresh-fit branch always has), is used as-is instead of rebuilding it via
+    a second `training_frames(panel, model)` call. 2026-09-18: that second
+    call was not the whole cost the 2026-09-15 fix (see
+    `TestTheServingCacheCarriesItsPool`) removed from the cache-HIT path --
+    `model.prepare(panel)` itself is deduplicated across calls by
+    `training_frames`'s own `_PREPARED` cache (keyed on `model.model_id`,
+    `panel` by identity), but each `training_frames` call still returns
+    FRESH `.copy()`s of the cached `scorable`/`trainable` frames regardless
+    of that cache hit -- so calling it twice in one `serving_model` FRESH-FIT
+    (a boundary/pinned/coarse rescore touching a fold never served before)
+    still paid for two full copies of the trainable frame back to back, one
+    of them for a value (`_pool_before`'s own `trainable`) identical to the
+    one the caller had just built and was still holding. Passing it through
+    removes the second copy; behavior is unchanged, since `training_frames`
+    is a pure function of ``(panel, model)`` and the caller's copy is
+    byte-for-byte what this function would have rebuilt on its own.
     """
     empty = (np.empty(0, dtype=float), np.empty(0, dtype=float))
     stored = load_forecasts()
@@ -1259,7 +1280,8 @@ def _pool_before(fold, model: FeatureModel, panel: pd.DataFrame):
     earlier = stored[stored[point].notna() & (stored[fold_col] < pd.Timestamp(fold))]
     if earlier.empty:
         return empty
-    _, trainable = training_frames(panel, model)
+    if trainable is None:
+        _, trainable = training_frames(panel, model)
     realized = trainable.set_index(["ticker", "date"])[model.target]
     keys = pd.MultiIndex.from_arrays([earlier["ticker"], earlier["event_date"]])
     truth = realized.reindex(keys).to_numpy(dtype=float)
@@ -1343,7 +1365,10 @@ def serving_model(
 
     panel = load_panel() if panel is None else panel
     _, trainable = training_frames(panel, model)
-    pool_pred, pool_res = _pool_before(fold, model, panel)
+    # Pass the frame just built through rather than letting _pool_before
+    # rebuild its own -- see that function's docstring for the redundant
+    # second `training_frames`/`.copy()` this removes on a fresh fit.
+    pool_pred, pool_res = _pool_before(fold, model, panel, trainable=trainable)
     served = ServingModel(
         estimator=fit_fold(trainable, model, fold),
         model_id=model.model_id,
