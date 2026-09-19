@@ -88,11 +88,13 @@ python3 -m pytest -q -n 4 --dist loadgroup -rfEs --durations=15 tests/ 2>&1 | ta
   Use `-n 2` while a heavy job (nightly, D14, real scoring) or another agent's
   tests are running. `loadgroup` keeps the `xdist_group("serial")` files on
   one worker (see `conftest.py`).
-- **Don't narrow the CPU affinity.** Don't run it under `taskset`, or
-  `bounded_run --cores`/`--cpu-set` with fewer than 6 CPUs. Real-`Service`
-  tests admit jobs against this process's own affinity minus 1 reserved CPU,
-  and the `legacy_score`/`legacy_rebuild` profiles need 5 worker CPUs. Under a
-  4-CPU affinity they can never be admitted.
+- **Don't narrow the CPU affinity below 4 CPUs.** Don't run it under
+  `taskset`, or `bounded_run --cores`/`--cpu-set`, with fewer than 4 CPUs.
+  Real-`Service` tests admit jobs against this process's own affinity minus 1
+  reserved CPU. `ops_support.TEST_POLICY` caps every profile at 3 worker CPUs
+  (production `legacy_score`/`legacy_rebuild` need 5), so 4 CPUs is the floor,
+  the size of a standard GitHub runner. Below that the heavier profiles can
+  never be admitted.
 - **`-rfEs`** lists every failure, error and skip with its reason in the
   summary, so a skip can't go unnoticed.
 

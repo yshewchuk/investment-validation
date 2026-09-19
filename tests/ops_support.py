@@ -52,13 +52,22 @@ POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 #: at that moment -- a job stays "queued" past a test's fixed poll deadline
 #: whenever headroom is briefly short, with nothing wrong in the code under
 #: test. Every field is copied from DEFAULT_POLICY except each profile's
-#: memory_bytes, capped small: cpu_count/thread_count stay identical, so an
-#: environment_ref built from DEFAULT_POLICY (production code and most tests
-#: still do, since it does not depend on memory_bytes) still matches what
-#: launch resolves under this policy.
+#: memory_bytes, capped small, and its cpu_count, capped at
+#: ``_TEST_PROFILE_CPUS``. Admission compares cpu_count against this
+#: process's CPU affinity minus the reserved CPU, so DEFAULT_POLICY's 4- and
+#: 5-CPU profiles can never launch on a 4-CPU host (a standard GitHub runner,
+#: where mutation CI runs these tests): the job sits on
+#: PROFILE_EXCEEDS_CAPACITY. 3 fits any host with 4 or more CPUs. thread_count
+#: is pinned to DEFAULT_POLICY's effective value (``thread_count or
+#: cpu_count``), so an environment_ref built from DEFAULT_POLICY (production
+#: code and most tests still do) still matches what launch resolves under this
+#: policy.
 _TEST_PROFILE_MEMORY_BYTES = 256 * MIB
+_TEST_PROFILE_CPUS = 3
 TEST_POLICY = replace(DEFAULT_POLICY, profiles=tuple(
-    replace(p, memory_bytes=min(p.memory_bytes, _TEST_PROFILE_MEMORY_BYTES))
+    replace(p, memory_bytes=min(p.memory_bytes, _TEST_PROFILE_MEMORY_BYTES),
+            cpu_count=min(p.cpu_count, _TEST_PROFILE_CPUS),
+            thread_count=p.thread_count or p.cpu_count)
     for p in DEFAULT_POLICY.profiles))
 
 
@@ -109,7 +118,8 @@ def enqueue_claim(conn, clock, supervisor, key="one", **changes):
 #   2026-09-19: under ``taskset -c 0-3`` (what ``bounded_run --cores 4`` does)
 #   4 allowed CPUs leave 3 worker CPUs, the 5-CPU ``legacy_score`` profile
 #   never fits, and a corpus-parity test that takes 10 s sat queued with the
-#   worker asleep.
+#   worker asleep. (TEST_POLICY now caps profiles at 3 CPUs, so 4 allowed
+#   CPUs fit; fewer still fail here.)
 # * The other host-dependent reasons (``HOST_RESOURCE_REASONS``) fail once the
 #   job has sat continuously queued on them for ``ADMISSION_WAIT_SECONDS``
 #   (env ``OPS_TEST_ADMISSION_WAIT_S``, default 60), or at the caller's own
