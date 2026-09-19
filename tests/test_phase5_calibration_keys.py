@@ -116,3 +116,41 @@ def test_traced_pair_key_reads_the_v2_request_from_the_input_trace():
     # payload.request (no strategy_version/fill_model) cannot supply it.
     del pair["payload"]["input_trace"]["request"]
     assert keys_tool._pair_key(pair)[0] is None
+
+
+def _entry_rule(pair: dict, month: str | None) -> dict:
+    gate = {"mode": "entry_rule", "rule": "entry-rule:TWIN-P",
+            "trailing_cutoff_key": {"history_id": "features.pnl_sim_history",
+                                    "month": month}}
+    pair["payload"]["input_trace"]["native_inputs"]["gate"] = gate
+    return pair
+
+
+def test_entry_rule_pairs_add_the_trailing_cutoff_job_for_their_months(tmp_path, capsys):
+    corpus = _corpus(tmp_path, [
+        _entry_rule(_pair("a", strategy="TWIN-P", alpha=0.5, cutoff="2026-09-16"),
+                    "2026-09-01"),
+        _entry_rule(_pair("b", strategy="CTR5", alpha=0.5, cutoff="2026-09-20"),
+                    "2026-09-01"),
+        _entry_rule(_pair("c", strategy="TWIN-P", alpha=0.5, cutoff="2026-10-02"),
+                    "2026-10-01"),
+        _pair("d", strategy="STR-THRU", alpha=0.5, cutoff="2026-09-16"),
+    ])
+    out = tmp_path / "keys.json"
+    assert keys_tool.main(["--phase4-corpus", str(corpus), "--train-root",
+                           str(tmp_path / "t"), "--out", str(out)]) == 0
+    written = json.loads(out.read_text())
+    assert written["trailing_cutoff_months"] == ["2026-09-01", "2026-10-01"]
+    jobs = [c for c in written["commands"] if "--state trailing_pnl_cutoff" in c]
+    assert len(jobs) == 2 and jobs[0].endswith("--plan-only")
+    assert "--cutoff 2026-09-01 --cutoff 2026-10-01" in jobs[1]
+    assert "entry-rule trailing cutoff months: 2" in capsys.readouterr().out
+
+
+def test_a_gate_that_is_not_an_entry_rule_names_no_month():
+    pair = _pair("x", strategy="TWIN-P", alpha=0.5)
+    assert keys_tool.entry_rule_month(pair) is None
+    pair["payload"]["input_trace"]["native_inputs"]["gate"] = {"mode": "not_applicable"}
+    assert keys_tool.entry_rule_month(pair) is None
+    assert keys_tool.entry_rule_month(_entry_rule(pair, None)) is None
+    assert keys_tool.trailing_cutoff_commands([], Path("t")) == []

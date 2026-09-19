@@ -3,8 +3,8 @@
 Status: scaffold, 2026-09-18 (P5-6). Authority: the
 [Phase 5 plan](rearchitecture_phase5_models.md), P5-6 row. This runbook covers
 one staged model release: build it, run the acceptance gate over it, promote
-it, and roll it back. The gate is **red by design** until the pending members
-listed in §5 land.
+it, and roll it back. Every member and consumer is implemented; the gate is
+red until the real inputs are built and staged (§5).
 
 Rules that apply to every step:
 
@@ -89,7 +89,30 @@ Paths used below (pick your own; keep them outside the repo and `data/`):
    `--frozen-state $STATES`. The `*.summary.json` beside them are ignored.
    The admissible-depth table is built by the preparer itself from
    `legacy_n_admissible_table()`.
-5. After staging (§2), confirm the release holds every derived key
+5. **Board analog matcher** **[heavy, supervisor]**, one frozen state per
+   `(strategy, alpha, cutoff)`; plan-only prints the keys and an RSS
+   estimate (~2.5 GB), then the real run under a 3.5 GB cap:
+
+       python3 tools/bounded_run.py --max-rss-gb 3.5 -- python3 -u \
+           tools/phase5_training_job.py --state board_analog_matcher \
+           --alpha 0.5 --cutoff <day> [--cutoff ...] --out $STATES --plan-only
+
+   Phase 4 traces declare their analog rows (the compatibility path), so
+   the corpus replay does not read this member; its keys come from the
+   nightly's evidence cutoffs (use the §1 step 2 keys' cutoffs).
+6. **Entry-rule trailing `pnl_sim` cutoff** **[light]** (reads the small
+   `pnl_sim_history` file). Step 2 with `--phase4-corpus` prints this job
+   with the event months whose entry-rule gate pins a cutoff
+   (`trailing_cutoff_months` in the keys JSON); a corpus captured before
+   `75d40e0` has none and must be recaptured first. For a nightly, pass its
+   event dates:
+
+       python3 -u tools/phase5_training_job.py --state trailing_pnl_cutoff \
+           --cutoff 2026-09-01 [--cutoff ...] --out $TRAIN/trailing_pnl_cutoff --plan-only
+
+   One `trailing_pnl_cutoff__<YYYY-MM-01>.json` per month; pass the
+   directory with `--frozen-state` (the flag is repeatable).
+7. After staging (§2), confirm the release holds every derived key
    **[light]**: rerun step 2 with `--release-root $REL`;
    `missing_from_release` must be empty for every member.
 
@@ -103,6 +126,7 @@ Plan first. It prints one line per catalog member and writes `$REL/plan.json`.
         --max-rss-gb 1.5 -- python3 -u tools/phase5_prepare_release.py \
         --release-id p5-6-2026-09-18a --out $REL \
         --training-root $TRAIN --frozen-state $STATES \
+        --frozen-state $TRAIN/trailing_pnl_cutoff \
         [--incumbent $LIVE] --plan-only
 
 Then the same command without `--plan-only` stages it. Staging goes through
@@ -149,8 +173,19 @@ copy; the captured binding contract (release id, binding ids, role, feature
 order, output names, adapter) is kept, since those ids enter stage inputs. The
 pair is scored with `application.score_frozen` under both no-fit guards and
 `checks.phase4_real._verify_runtime_execution` compares every runtime stage
-receipt and final identity with the captured ones. Pairs with no trace, or a
-trace with no frozen binding, never read the release: they are counted
+receipt and final identity with the captured ones. A trace that declares a
+frozen chooser is rebuilt over the staged release too
+(`phase5_phase4_replay.rebind_chooser`): the champion and its `implied_t1` /
+`runup_move` producer folds by content hash, the k-NN pool and n_admissible
+table from staged `chooser_analog_pool` / `admissible_table:dyn_sv` objects
+with the same content hash; the recipe and fold pools are the trace's own
+(hash-bound) declaration. An entry-rule gate's pinned trailing cutoff must be
+a staged `trailing_pnl_cutoff` object with the same content hash (the cutoff
+document travels inside the hash-bound trace, so the release serves it by
+identity). Any of these not staged is `P5_PHASE4_MEMBER_ABSENT`. Board-analog
+rows are declared by the trace (compatibility path), so the replay does not
+read `board_analog_matcher`. Pairs with no trace, or a trace with no frozen
+binding and no frozen chooser, never read the release: they are counted
 (`untraced`, `not_frozen`), not findings — trace coverage belongs to the
 Phase 4 gate (my judgement call). Dispositions are in
 `evidence.json → phase4.dispositions`, and `phase4.members_exercised` lists
@@ -189,8 +224,11 @@ The live store is whatever directory production resolves its release from
     EOF
 
 The state members travel in `phase5_release.json` beside the staged model
-manifest; the deployment module never reads it, and no production consumer
-resolves states from it yet (that is what the PENDING consumer probes track).
+manifest; the deployment module never reads it. Every v2 consumer has a
+probe that resolves its state from the staged release, but no production
+path resolves states from `phase5_release.json` yet: that is the Phase 6
+cutover (the `SourceBundle` fields are filled by the capture converter and
+the tests, not by a release reader).
 
 Rollback returns the pointer to the release the current one was promoted
 from. It never deletes a staged release, so scores recorded against either
@@ -209,34 +247,43 @@ fallback until cutover; record that decision in the report handoff.
 
 ## 5. Why the gate is red today
 
-At `f2b4d88` + P5-6 round 2, the full catalog run shows, for a release built
-from real inputs:
+At `1493c42` (branch `phase5-code-gaps`) every catalog member has an
+artifact type and a builder, and every consumer has a probe: there is no
+`P5_MEMBER_PENDING` or `P5_CONSUMER_PENDING` left. On a release built from
+real inputs the gate is red only for inputs that were not built or staged:
 
-- `P5_MEMBER_MISSING` for any calibration or residual-pool member whose
-  §1 job was not run (the builders exist since `f2b4d88`), which also blocks
-  its consumers (`P5_CONSUMER_BLOCKED`: the driver-pool probe scores through
-  the staged payoff artifact of its strategy, the recalibration probe through
-  the same-key STR-THRU line);
-- `P5_MEMBER_PENDING` for the trailing `pnl_sim` cutoff and the board analog
-  matcher (no frozen artifact type yet);
-- `P5_CONSUMER_PENDING` for the consumers without a probe: admissible table
-  (no v2 stage reads it), trailing cutoff, chooser analog pool, board analog
-  matcher and Tier-4 serving folds (no v2 consumer resolves them from a
-  release);
-- `P5_ROLLBACK_NO_INCUMBENT` unless `--incumbent` or `--first-deployment`;
-- with `--phase4-corpus`: whatever the replay finds. Expect
-  `P5_PHASE4_MEMBER_ABSENT` for any pair captured against a model whose bytes
-  are not the staged champion (e.g. a Tier-4 fold of another month), and
-  `P5_PHASE4_EMPTY` if no pair in the corpus carries a frozen binding.
+- `P5_MEMBER_MISSING` for any member whose §1 job was not run (calibration
+  folds, residual pools, board analog matcher, trailing cutoff) or whose
+  source file is absent (chooser analog pool parquet, Tier-4 folds of the
+  pinned snapshot). It also blocks that member's consumers
+  (`P5_CONSUMER_BLOCKED`: the driver-pool probe scores through the staged
+  payoff artifact of its strategy, the recalibration probe through the
+  same-key STR-THRU line). `recalibration_map:STR-RUNUP` and
+  `payoff_line:STR-RUNUP` are catalog-only and are built at the same keys.
+- `P5_ROLLBACK_NO_INCUMBENT` unless `--incumbent` or `--first-deployment`.
+- With `--phase4-corpus`, whatever the replay finds:
+  - `P5_PHASE4_MEMBER_ABSENT` for a pair captured against model bytes that
+    are not staged. Examples: a Tier-4 fold of another month or snapshot
+    (stage the folds of the corpus's Tier-3 snapshot with
+    `--tier3-snapshot`), a chooser pool or table that is not the staged one,
+    or an entry-rule month with no staged cutoff.
+  - `P5_PHASE4_MISMATCH` if a staged member differs from what the capture
+    read, or if the corpus predates the native entry-rule gate. Traces
+    captured before `75d40e0` carry `gate=not_applicable` for the 7
+    entry-rule strategies, so recapture from `75d40e0` or later.
+  - `P5_PHASE4_EMPTY` if no pair carries a frozen binding or chooser.
 
-When a member's artifact type merges, add its builder to
-`tools/phase5_prepare_release.py`, its probe to
-`checks.phase5_consumers.CONSUMERS`, and a synthetic test; the catalog in
-`checks/phase5_release.py` already names it.
+When a new member's artifact type merges, follow the same recipe. Add its
+builder to `tools/phase5_prepare_release.py` (or a `--state` job that it
+collects). Add its probe to `checks.phase5_consumers.CONSUMERS`, and add a
+synthetic test. If a Phase 4 trace pins the member, add it to
+`checks.phase5_phase4_replay` so the replay serves it from the release. The
+catalog in `checks/phase5_release.py` already names it.
 
 ## 6. Tests
 
 Synthetic only, no real data:
 
-    timeout 600 python3 -m pytest -q -n 2 tests/test_checks_phase5_acceptance.py \
-        tests/test_checks_phase5_phase4_replay.py tests/test_phase5_calibration_keys.py
+    timeout 600 python3 -m pytest -q -p no:xdist tests/test_checks_phase5_acceptance.py \
+        tests/test_checks_phase5_phase4_replay.py tests/test_phase5_calibration_keys.py \
+        tests/test_v2_scoring_native_entry_rule.py tests/test_phase4_chooser_trace.py

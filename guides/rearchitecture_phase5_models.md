@@ -427,4 +427,83 @@ Delivered 2026-09-19. Files: `engine/v2/models/analog_artifact.py` (layer 3,
   `board_analog_matcher`, naming each `strategy|alpha|cutoff`.
 - **Chooser k-NN pool** (`chooser_analog_pool`) has a different shape
   (EXP-161 nearest neighbours over candidate features, not bucket widening
-  over a causal slice). It is left PENDING for the chooser-features work.
+  over a causal slice). It became its own frozen state
+  (`ChooserAnalogPoolArtifact`, R4-20 (a)), staged by the preparer from the
+  parquet and probed by `chooser.analog_pool`.
+
+## Entry-rule gate and the trailing `pnl_sim` cutoff (frozen state)
+
+Delivered 2026-09-19 on `phase5-code-gaps` (`cf47db3`, `75d40e0`). This is the
+last catalog member without an artifact type. Files:
+
+- `engine/v2/models/trailing_cutoff_artifact.py` (layer 3). It defines
+  `TrailingCutoffArtifact`, schema `trailing_pnl_cutoff_artifact.v1.0`,
+  release kind `threshold`, loaded through `FrozenStateLoader`.
+- `engine/v2/models/training/trailing_cutoff.py`, the layer 6 builder.
+- `tools/phase5_datasets.pnl_sim_history`.
+- `tools/phase5_training_job.py --state trailing_pnl_cutoff`.
+- The preparer's `--frozen-state` classification.
+- `engine/v2/scoring/native_entry_rule.py` plus the `entry_rule` branch of
+  `stages._execute_gate`.
+- The converter-side declaration in
+  `tools/capture_tier0_corpus.entry_rule_gate_block`.
+- The `gate.trailing_cutoff` probe.
+
+Details:
+
+- **State and key.** There is one artifact per event month (`YYYY-MM-01`).
+  It is legacy `pnl_sim.trailing_cutoff`: the 0.8 quantile of `exp_pnl_sim`
+  over `[month - 6 months, month)`, with NaN dropped, and None below 100
+  rows. The artifact refuses any other window, quantile or minimum. A
+  non-finite bar is stored as None, and the verdict is then None, as in
+  legacy.
+- **Gate.** For the 7 entry-rule strategies without a gate champion, the
+  stage evaluates legacy's three terms:
+  - `exp_pnl_sim >= cutoff`, where `exp_pnl_sim` comes from the native
+    simulation;
+  - `rel_spread <= 0.25`, where `rel_spread` comes from the priced legs;
+  - `mcap_usd >= 10e9`, where `mcap_usd` is a declared fact.
+
+  A None term makes the verdict None, and the row is flagged
+  `MISSING_FEATURES`. The key's month must be the event's month, and an
+  optional `content_hash` pins the artifact. A cutoff that is absent,
+  relabelled or of the wrong month is `MODEL_NOT_READY`. A block for another
+  strategy's rule is `UNSUPPORTED_GATE_RECIPE:entry_rule`.
+- **Declaration.** In Phase 4 the converter freezes the bar that legacy
+  recorded in `gate_inputs.facts.pnl_cutoff`. It does not recompute the bar
+  (my judgement call, the R4-18 pattern). The P5 replay requires that
+  document to be a staged `trailing_pnl_cutoff` object with the same content
+  hash. The builder and the recorded bar agree hash for hash in the tests.
+- **Parity.** The tests call the real `_apply_entry_rule` over 13 scenarios
+  for each of the 7 strategies. The scenarios cover a missing term of each
+  kind, a NaN `exp_pnl_sim`, the equality edge and one ulp below it, the
+  spread and market-cap edges, a thin window and a missing history file.
+  They also run a capture to `phase4_real` round trip, and
+  a planted one-ulp cutoff is caught by `_compare_dimension`
+  (`tests/test_v2_scoring_native_entry_rule.py`).
+- **Real data.** This job is light: it reads the small `pnl_sim_history`
+  file. `tools/phase5_calibration_keys.py --phase4-corpus` lists the months
+  (`trailing_cutoff_months`) and prints the job.
+- **Open.** `SourceBundle` has no entry-rule field. A live release reader
+  that declares the block from the staged member is Phase 6 cutover work.
+
+## Consumer probes and the P5 replay, complete
+
+As of `1493c42`:
+
+- **Consumers.** `checks.phase5_consumers.CONSUMERS` has no `None` entry.
+  The Tier-4 folds are probed through the `tier4-serving-fold.v1` adapter on
+  `FrozenStageExecutor`, at each fold's own feature order, with a missing
+  object refused as `MODEL_NOT_READY`.
+- **Replay.** `checks/phase5_phase4_replay.py` serves every model, fold and
+  frozen state that a trace pins from the staged release, by content hash:
+  - the scoring bindings;
+  - the frozen chooser's champion, its `implied_t1`/`runup_move` producer
+    folds, the k-NN pool and the n_admissible table;
+  - the entry-rule cutoff.
+
+  Board-analog rows are declared by the trace (the compatibility path), so
+  the replay does not exercise `board_analog_matcher`.
+- **Audit.** `checks/phase4_native_audit.py` fails P4N-002/P4N-003 on any
+  `population.excluded` kind outside `PHASE4_EXCLUDED_RECORD_KINDS`, or on a
+  malformed `excluded`.

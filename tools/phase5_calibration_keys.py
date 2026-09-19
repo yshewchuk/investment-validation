@@ -26,6 +26,12 @@ STR-RUNUP line and map (no v2 consumer, but the catalog stages them; my
 judgement call to build them at the same keys so the release is complete).
 Strategies with no catalog calibration member are listed as uncatalogued.
 
+The corpus source also lists the event months whose entry-rule gate pins a
+trailing ``pnl_sim`` cutoff (``native_inputs.gate.trailing_cutoff_key.month``
+of every traced pair or choice member with gate mode ``entry_rule``; a corpus
+captured before 75d40e0 has none) and adds the ``--state trailing_pnl_cutoff``
+job for them.
+
 Output: a keys JSON (``--out``) and the ordered training-job commands,
 ``--plan-only`` first, one per (recipe, alpha) with a ``--cutoff`` per fold.
 With ``--release-root`` it also reports which keys a staged release already
@@ -91,22 +97,52 @@ def _pair_key(pair: Mapping[str, Any]) -> tuple[Key | None, str]:
 
 def keys_from_corpus(corpus: Path) -> tuple[set[Key], dict[str, str], int]:
     """``(keys, {fixture_id: reason} for traced pairs without one, traced count)``."""
+    keys, underivable, traced, _months = scan_corpus(corpus)
+    return keys, underivable, traced
+
+
+def scan_corpus(corpus: Path) -> tuple[set[Key], dict[str, str], int, set[str]]:
+    """:func:`keys_from_corpus` plus the entry-rule trailing-cutoff months."""
     from checks.tier0_corpus import load, resolve_corpus
 
     loaded = load(resolve_corpus(Path(corpus)))
-    keys, underivable, traced = set(), {}, 0
+    keys, underivable, traced, months = set(), {}, 0, set()
     for fixture_id in loaded.ordered_ids:
         pair = loaded.pairs[fixture_id]
         if not (pair.get("payload") or {}).get("input_trace"):
             continue
         traced += 1
         for label, keyed in _keyed_pairs(fixture_id, pair):
+            month = entry_rule_month(keyed)
+            if month is not None:
+                months.add(month)
             key, reason = _pair_key(keyed)
             if key is None:
                 underivable[label] = reason
             else:
                 keys.add(key)
-    return keys, underivable, traced
+    return keys, underivable, traced, months
+
+
+def entry_rule_month(pair: Mapping[str, Any]) -> str | None:
+    """The event month an entry-rule gate's trailing cutoff is keyed by."""
+    trace = (pair.get("payload") or {}).get("input_trace") or {}
+    gate = (trace.get("native_inputs") or {}).get("gate") or {}
+    if not isinstance(gate, Mapping) or gate.get("mode") != "entry_rule":
+        return None
+    month = (gate.get("trailing_cutoff_key") or {}).get("month")
+    return str(month) if month else None
+
+
+def trailing_cutoff_commands(months: Iterable[str], train_root: Path) -> list[str]:
+    """``[--plan-only, real]`` for the trailing-cutoff job over ``months``."""
+    months = sorted(set(months))
+    if not months:
+        return []
+    cuts = " ".join(f"--cutoff {month}" for month in months)
+    job = (f"python3 -u tools/phase5_training_job.py --state trailing_pnl_cutoff {cuts} "
+           f"--out {Path(train_root) / 'trailing_pnl_cutoff'}")
+    return [f"{job} --plan-only", job]
 
 
 def _keyed_pairs(fixture_id: str, pair: Mapping[str, Any]):
@@ -200,14 +236,17 @@ def staged_keys(release_root: Path) -> dict[str, set[Key]]:
 
 
 def plan(keys: set[Key], *, train_root: Path, release_root: Path | None = None,
-         source: dict | None = None) -> dict:
+         source: dict | None = None, cutoff_months: Iterable[str] = ()) -> dict:
     by_member, uncatalogued = member_keys(keys)
+    months = sorted(set(cutoff_months))
+    cutoff_jobs = trailing_cutoff_commands(months, train_root)
     out = {"source": source or {}, "keys": sorted((list(k) for k in keys),
                                                    key=lambda k: _sort(tuple(k))),
            "members": {m: [list(k) for k in v] for m, v in by_member.items()},
            "consumed_members": sorted(m for m in by_member if m in CONSUMED),
            "uncatalogued": [list(k) for k in uncatalogued],
-           "commands": training_commands(by_member, train_root)}
+           "trailing_cutoff_months": months,
+           "commands": training_commands(by_member, train_root) + cutoff_jobs}
     if release_root is not None:
         held = staged_keys(release_root)
         out["missing_from_release"] = {
@@ -239,22 +278,24 @@ def main(argv=None) -> int:
             if resolved == paths.DATA.resolve() or paths.DATA.resolve() in resolved.parents:
                 parser.error(f"{target} may not be inside data/")
     if args.phase4_corpus is not None:
-        keys, underivable, traced = keys_from_corpus(args.phase4_corpus)
+        keys, underivable, traced, months = scan_corpus(args.phase4_corpus)
         src = {"phase4_corpus": str(args.phase4_corpus), "traced_pairs": traced,
                "underivable": underivable}
     else:
         if not args.alpha:
             parser.error("--as-of needs at least one --alpha")
         keys = keys_from_as_of(args.as_of, args.alpha, args.runup_entry_date)
+        months = set()
         src = {"as_of": args.as_of, "runup_entry_dates": sorted(args.runup_entry_date)}
     result = plan(keys, train_root=args.train_root, release_root=args.release_root,
-                  source=src)
+                  source=src, cutoff_months=months)
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
     print(f"keys: {len(result['keys'])}  members: "
           + ", ".join(f"{m}={len(v)}" for m, v in result["members"].items())
           + f"  uncatalogued: {len(result['uncatalogued'])}")
+    print(f"entry-rule trailing cutoff months: {len(result['trailing_cutoff_months'])}")
     if src.get("underivable"):
         print(f"underivable traced pairs: {len(src['underivable'])}")
     for member, missing in (result.get("missing_from_release") or {}).items():
