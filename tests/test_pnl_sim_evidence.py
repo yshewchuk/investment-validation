@@ -259,3 +259,219 @@ def test_thin_pool_refusal_reports_causal_population_without_drawing() -> None:
     assert draw["eligible_indices"] == []
     assert draw["fallback_indices"] == []
     assert draw["selected_indices"] == []
+
+
+# ---------------------------------------------------------------------------
+# mutation-pilot triage: behaviour of the live gate no test above pinned.
+# Expected values are derived by hand from the documented legacy semantics.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from engine import pnl_sim  # noqa: E402
+from engine.pnl_sim import black_scholes_put, load_history, trailing_cutoff  # noqa: E402
+
+
+def _flat_pool(rows: int = 300) -> ResidualPool:
+    """Zero move and crush errors, all before 2022: every draw is the forecast."""
+    return ResidualPool(pd.DataFrame({
+        "event_date": pd.date_range("2020-01-01", periods=rows, freq="D"),
+        "pred_abs_move": np.linspace(1.0, 9.0, rows),
+        "err_move": 0.0,
+        "err_crush": 0.0,
+    }))
+
+
+def _at_expiry(exit_legs, **overrides):
+    arguments = dict(
+        exit_legs=exit_legs, spot=100.0, entry_cost=10.0, pre_iv30=40.0,
+        pred_abs_move=10.0, pred_iv_crush=-20.0, dte_exit=0.0,
+        event_date=pd.Timestamp("2022-01-03"), pool=_flat_pool(), key="STR-THRU",
+        draws=400,
+    )
+    arguments.update(overrides)
+    return expected_pnl(**arguments)
+
+
+def test_black_scholes_put_at_expiry_is_intrinsic_value():
+    np.testing.assert_array_equal(
+        black_scholes_put([90.0, 100.0, 110.0], 100.0, 0.0, 0.3), [10.0, 0.0, 0.0])
+    assert float(black_scholes_put(100.0, 100.0, -1.0, 0.3)) == 0.0
+
+
+def test_leg_sides_quantities_and_skipped_legs_at_expiry():
+    """|move| = 10 on every draw, so spot exits at 90 or 110. Long two 105
+    puts (exit side "sell") and short one 95 put (exit side "buy"): the down
+    path is worth 2*15 - 5 = 25 and the up path 0, so on entry cost 10 the
+    return is +1.5 or -1 and the mean is 2.5*win - 1. The legs listed first
+    must be skipped, not stop the loop: no strike, a non-finite strike, a
+    zero quantity and a missing quantity (which defaults to zero)."""
+    skipped = [
+        {"strike": None, "qty": 1.0, "side": "sell"},
+        {"strike": float("nan"), "qty": 1.0, "side": "sell"},
+        {"strike": 99.0, "qty": 0.0, "side": "sell"},
+        {"strike": 99.0, "side": "sell"},
+    ]
+    legs = skipped + [
+        {"strike": 105.0, "qty": 2.0, "side": "SELL"},
+        {"strike": 95.0, "qty": 1.0, "side": "buy"},
+    ]
+    result = _at_expiry(legs)
+    win = result["win_sim"]
+    assert 0.3 < win < 0.7
+    assert result["exp_pnl_sim"] == pytest.approx(2.5 * win - 1.0)
+    assert (result["sim_p10"], result["sim_p90"]) == (-1.0, 1.5)
+    assert result["pool_n"] == 300
+    no_side = _at_expiry([{"strike": 105.0, "qty": 1.0}])  # no side: a short leg
+    assert no_side["sim_p10"] == pytest.approx(-2.5)
+
+
+@pytest.mark.parametrize("change, refusal", [
+    ({"exit_legs": []}, "MISSING_EXIT_LEGS"),
+    ({"spot": float("nan")}, "NONFINITE_INPUT"),
+    ({"pred_iv_crush": float("inf")}, "NONFINITE_INPUT"),
+    ({"pre_iv30": None}, "NONFINITE_INPUT"),
+    ({"pre_iv30": 0.0}, "INVALID_INPUT"),
+    ({"entry_cost": 0.0}, "INVALID_INPUT"),
+    ({"dte_exit": -1.0}, "INVALID_INPUT"),
+])
+def test_unsimulable_inputs_are_undetermined_with_and_without_evidence(change, refusal):
+    change = dict(change)
+    legs = change.pop("exit_legs", [{"strike": 100.0, "qty": 1.0, "side": "sell"}])
+    assert _at_expiry(legs, **change) is None
+    evidence: dict = {}
+    assert _at_expiry(legs, evidence=evidence, **change) is None
+    assert (evidence["status"], evidence["refusal"]) == ("refused", refusal)
+    assert evidence["schema_version"] == "expected_pnl_evidence.v1"
+
+
+@pytest.mark.parametrize("change", [
+    {"pre_iv30": 0.5}, {"entry_cost": 0.5}, {"dte_exit": 0.0}, {"dte_exit": 0.5},
+])
+def test_small_positive_inputs_still_simulate(change):
+    legs = [{"strike": 100.0, "qty": 1.0, "side": "sell"}]
+    assert _at_expiry(legs, **change) is not None
+
+
+def test_pool_is_causal_and_exactly_min_pool_rows_simulate():
+    dates = pd.date_range("2020-01-01", periods=MIN_POOL + 50, freq="D")
+    history = pd.DataFrame({"event_date": dates, "pred_abs_move": 5.0,
+                            "err_move": np.where(np.arange(len(dates)) < MIN_POOL, 0.0, 50.0),
+                            "err_crush": 0.0})
+    pool = ResidualPool(history)
+    cutoff = dates[MIN_POOL]
+    assert pool.before(cutoff) == MIN_POOL
+    move, _ = pool.draw(cutoff, 5.0, 2000, np.random.default_rng(1))
+    assert move.size == 2000 and (move == 0.0).all()  # nothing on/after the cutoff
+    assert pool.draw(dates[MIN_POOL - 1], 5.0, 5, np.random.default_rng(1))[0].size == 0
+
+
+def test_pool_rejects_missing_columns_and_keeps_rows_nan_elsewhere():
+    with pytest.raises(ValueError):
+        ResidualPool(pd.DataFrame({"event_date": [], "pred_abs_move": [], "err_move": []}))
+    history = _history(300)
+    history["ticker"] = None  # an unrelated, all-missing column
+    assert len(ResidualPool(history)) == 300
+
+
+def test_default_pool_is_deciles_and_selected_evidence_names_the_cutoff():
+    pool = ResidualPool(_history(3000))
+    evidence: dict = {}
+    pool.draw("2030-01-01", 5.0, 10, np.random.default_rng(3), evidence=evidence)
+    assert evidence["bucket_count"] == 10
+    assert len(evidence["bucket_edges"]) == 9
+    assert len(evidence["eligible_indices"]) == 300
+    assert evidence["cutoff"] == "2030-01-01T00:00:00"
+
+
+def test_bucket_membership_is_right_closed_at_a_tied_edge():
+    """Legacy buckets with ``searchsorted(side="right")``: a prediction equal
+    to a decile edge belongs to the bucket above it, and so do tied rows."""
+    history = pd.DataFrame({
+        "event_date": pd.date_range("2020-01-01", periods=601, freq="D"),
+        "pred_abs_move": [0.0] * 300 + [1.0] * 301,
+        "err_move": 0.0, "err_crush": 0.0,
+    })
+    evidence: dict = {}
+    ResidualPool(history, buckets=2).draw("2030-01-01", 1.0, 5, np.random.default_rng(0),
+                                          evidence=evidence)
+    assert evidence["bucket_edges"] == [1.0]
+    assert evidence["bucket_index"] == 1
+    assert evidence["eligible_indices"] == list(range(300, 601))
+    assert evidence["fallback_used"] is False
+
+
+def test_a_bucket_of_exactly_min_pool_rows_does_not_fall_back():
+    history = pd.DataFrame({
+        "event_date": pd.date_range("2020-01-01", periods=2 * MIN_POOL, freq="D"),
+        "pred_abs_move": [0.0] * MIN_POOL + [1.0] * MIN_POOL,
+        "err_move": 0.0, "err_crush": 0.0,
+    })
+    evidence: dict = {}
+    ResidualPool(history, buckets=2).draw("2030-01-01", 1.0, 5, np.random.default_rng(0),
+                                          evidence=evidence)
+    assert len(evidence["eligible_indices"]) == MIN_POOL
+    assert evidence["fallback_used"] is False
+
+
+def test_evidence_rows_accept_index_zero_and_reject_negative_indices():
+    pool = ResidualPool(_history(300))
+    assert pool.evidence_rows([0])[0]["event_date"].startswith("2020-01-01")
+    with pytest.raises(IndexError):
+        pool.evidence_rows([-1])
+
+
+# -- trailing gate bar and its stored history ------------------------------
+
+
+def _gate_history():
+    """Monthly-window fixture: as_of 2024-07-15 -> window [2024-01-01, 2024-07-01)."""
+    inside = pd.date_range("2024-01-01", "2024-06-30", periods=120)
+    values = np.linspace(-0.5, 0.5, 120)
+    frame = pd.DataFrame({"event_date": inside, "exp_pnl_sim": values})
+    outside = pd.DataFrame({
+        "event_date": pd.to_datetime(["2023-12-31", "2024-07-01", "2024-07-10"]),
+        "exp_pnl_sim": [9.0, 9.0, 9.0],
+    })
+    missing = pd.DataFrame({"event_date": pd.to_datetime(["2024-03-01"]),
+                            "exp_pnl_sim": [np.nan]})
+    return pd.concat([frame, outside, missing], ignore_index=True), values
+
+
+def test_trailing_cutoff_is_the_top_fifth_of_the_prior_six_calendar_months():
+    history, inside = _gate_history()
+    bar = trailing_cutoff(history, "2024-07-15")
+    assert bar == pytest.approx(float(np.quantile(inside, 0.80)))
+    assert trailing_cutoff(history, "2024-07-15", quantile=0.5) == pytest.approx(
+        float(np.quantile(inside, 0.5)))
+
+
+def test_trailing_cutoff_window_boundaries_and_minimum():
+    day = pd.DataFrame({"event_date": pd.to_datetime(["2024-01-01"] * 100),
+                        "exp_pnl_sim": np.linspace(0.0, 1.0, 100)})
+    assert trailing_cutoff(day, "2024-07-15") == pytest.approx(0.8)  # start is inclusive
+    assert trailing_cutoff(day.iloc[:99], "2024-07-15") is None
+    assert trailing_cutoff(day, "2024-07-15", min_window=101) is None
+    assert trailing_cutoff(day, "2024-07-15", window_months=5) is None
+    assert trailing_cutoff(None, "2024-07-15") is None
+    assert trailing_cutoff(pd.DataFrame(), "2024-07-15") is None
+
+
+def test_load_history_reads_the_given_or_default_path(tmp_path, monkeypatch):
+    frame = pd.DataFrame({"event_date": ["2024-01-02", "2024-01-03"],
+                          "exp_pnl_sim": [0.1, -0.2]})
+    given = tmp_path / "given.parquet"
+    frame.to_parquet(given)
+    loaded = load_history(str(given))
+    assert list(loaded["event_date"]) == list(pd.to_datetime(frame["event_date"]))
+    assert list(loaded["exp_pnl_sim"]) == [0.1, -0.2]
+    assert load_history(str(tmp_path / "absent.parquet")) is None
+
+    from engine import paths
+
+    monkeypatch.setattr(paths, "ROOT", tmp_path)
+    assert load_history() is None
+    default = tmp_path / pnl_sim.HISTORY_PATH
+    default.parent.mkdir(parents=True)
+    frame.iloc[:1].to_parquet(default)
+    assert len(load_history()) == 1
