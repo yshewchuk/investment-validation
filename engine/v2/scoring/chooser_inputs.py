@@ -17,6 +17,7 @@ rows, and ``native_chooser`` derives the columns when the stage runs.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from engine.v2.foundation import content_hash
@@ -34,7 +35,7 @@ from engine.v2.scoring.source_inputs import (
     fold_pool,
 )
 
-__all__ = ["chooser_block"]
+__all__ = ["chooser_block", "frozen_chooser_block"]
 
 _CHOOSER_RECIPE_FIELDS = _FROZEN_RECIPE_FIELDS | frozenset({
     "producers", "analog_pool", "admissible_table",
@@ -117,3 +118,22 @@ def chooser_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
         fields.ADMISSIBLE_TABLE_FIELD: table,
         fields.ADMISSIBLE_KEY_FIELD: table_key,
     }
+
+
+def frozen_chooser_block(*, strategy: str, recipe: Mapping[str, Any],
+                         fold_pools: Mapping[str, Any],
+                         analog_pool: ChooserAnalogPoolArtifact | None,
+                         admissible_table: AdmissibleDepthTable | None,
+                         inference: Any, release: Any) -> dict[str, Any]:
+    """:func:`chooser_block` over declared parts instead of a whole bundle.
+
+    A saved Phase 4 trace carries the chooser as a JSON declaration (recipe,
+    fold pools) plus a verified release and frozen state; this runs the same
+    resolution a ``SourceBundle`` gets, with no other bundle field involved.
+    """
+    parts = SimpleNamespace(
+        chooser_recipe=dict(recipe), chooser_fold_pools=dict(fold_pools),
+        chooser_analog_pool=analog_pool, chooser_admissible_table=admissible_table,
+        frozen_inference=inference, model_release=release,
+    )
+    return chooser_block(parts, strategy)  # type: ignore[arg-type]

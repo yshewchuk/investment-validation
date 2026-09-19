@@ -833,6 +833,10 @@ def _choose_dynamic(request: ScoreRequest, candidates: tuple[ScoreRecord, ...]) 
         "strategy": best.canonical_request.get("strategy_version"),
         "ranking_key": key,
         "value": best_value,
+        # engine/score.py dynamic_short_vol's chosen_margin: the winner's
+        # ranking value less the runner-up's (None with no runner-up).
+        "margin": (None if len(eligible) < 2
+                   else best_value - eligible[1][0]),
         "menu_size": len(eligible),
     }
     return with_score_id(replace(best, canonical_request={**best.canonical_request,

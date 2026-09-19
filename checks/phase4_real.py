@@ -21,7 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.phase4_checkpoints import CheckpointError, load_bundle  # noqa: E402
-from checks.phase4_frozen_bridge import prepare_frozen_replay  # noqa: E402
+from checks.phase4_frozen_bridge import (  # noqa: E402
+    prepare_frozen_chooser,
+    prepare_frozen_replay,
+    with_frozen_chooser,
+)
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
 from engine.analogs import AnalogMatcher  # noqa: E402
@@ -1751,6 +1755,13 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         source_ref=resolved_inputs["source_ref"],
         stage_receipts=tuple(receipts),
     )
+    frozen_chooser = prepare_frozen_chooser(
+        release_root=release_root,
+        resource_rows=trace.get("resources"),
+        verified_documents=resources,
+        request=request,
+        inputs=inputs,
+    )
     frozen_replay = prepare_frozen_replay(
         release_root=release_root,
         resource_rows=trace.get("resources"),
@@ -1758,7 +1769,11 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         metadata=trace.get("metadata"),
         request=request,
         inputs=inputs,
+        extra_refs=frozen_chooser.request_refs if frozen_chooser else (),
     )
+    # A declared frozen chooser runs as its executable block (the champion
+    # and producer folds of its own verified release, the recorded pools).
+    inputs = with_frozen_chooser(inputs, frozen_chooser)
     return {
         "request": request,
         "inputs": inputs,
@@ -1784,6 +1799,170 @@ def _release_population(corpus) -> tuple[tuple[str, ...], int, bool]:
         return ids, len(ids), True
     ids = tuple(corpus.ordered_ids)
     return ids, len(ids), False
+
+
+def _replayed_member(verified: Mapping[str, Any]):
+    """Score one verified trace natively: ``(record, receipts, identities)``."""
+    frozen_replay = verified["frozen_replay"]
+    if frozen_replay is None:
+        native = application.score_one(verified["request"], verified["inputs"])
+    else:
+        native = application.score_frozen(
+            verified["request"],
+            frozen_replay.inference,
+            frozen_replay.release,
+            frozen_replay.requests,
+            {"_native_inputs": verified["inputs"]},
+        )
+    runtime_receipts, runtime_identities = _verify_runtime_execution(verified, native)
+    return native, runtime_receipts, runtime_identities
+
+
+def _frozen_receipt(verified: Mapping[str, Any]) -> str | None:
+    frozen_replay = verified["frozen_replay"]
+    return frozen_replay.receipt if frozen_replay is not None else None
+
+
+def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict]:
+    """The per-record comparison of one legacy record with its native one."""
+    expected_keys = set(record)
+    native_keys = set(native.resolved_request) - {
+        "native_stage_receipts", "native_source_ref",
+    }
+    checks = {
+        "keys": expected_keys == (native_keys - {
+            "_model_artifact_ids", "native_source_ref",
+            "native_stage_receipts", "selected_contracts",
+        } - ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
+             expected_keys)),
+        "contracts": _contract_projection(
+            native.legs,
+            entry_date=native.entry_exit_plan.get("entry_date"),
+            exit_date=native.entry_exit_plan.get("exit_date"),
+            execution_date=native.quote_provenance.get("quote_date"),
+        ) == _contract_projection(
+            record.get("legs") or (),
+            entry_date=record.get("entry_date"),
+            exit_date=record.get("exit_date"),
+            execution_date=record.get("quote_date"),
+        ),
+        # gate_score/gate_threshold/gate_pass and ci_low/ci_high/n_analogs
+        # come from the "verdicts"/"analogs" numeric dimensions below
+        # (checks.update), which is the same compare_records machinery
+        # used for forecasts/simulation/financial_diagnostics.
+        "flags": _semantic_flags({"flags": native.reason_codes}) == (
+            _semantic_flags(record)
+            + ("UNVALIDATED_STRUCTURE",) if record.get("strategy") in
+               {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
+               (record.get("flags") or ()) else ()
+        ),
+        "null_masks": native.null_masks == {
+            key: value is None for key, value in (record.get("model_inputs") or {}).items()
+        },
+    }
+    numeric = _compare_numeric_outputs(record, native)
+    checks.update({name: result["agree"] for name, result in numeric.items()})
+    return checks, numeric
+
+
+_CHOOSER_TRACE_SCHEMA = "phase4_chooser_trace.v1.0"
+_CHOOSER_TRACE_KEYS = frozenset({
+    "schema_version", "members", "shared_input_hash", "trace_hash",
+})
+_CHOOSER_MEMBER_KEYS = frozenset({
+    "member_index", "request_hash", "legacy_input_hash", "native_score_id",
+    "input_trace",
+})
+
+
+def _chooser_members(pair: Mapping[str, Any]) -> list[tuple[dict, dict]]:
+    """``(member pair, legacy member record)`` for every menu row a
+    ``dyn_sv_choice`` pair's legacy chooser ranked, in frame order.
+
+    Each member pair is shaped like a scored pair (its legacy request from
+    ``request.frame_rows``, its own strict trace and hashes), so it goes
+    through the same verification as any traced pair.
+    """
+    payload = pair.get("payload")
+    if not isinstance(payload, Mapping):
+        raise _TraceError("pair.payload: missing")
+    trace = payload.get("input_trace")
+    if not isinstance(trace, Mapping):
+        raise _TraceError("input_trace: missing")
+    if set(trace) != _CHOOSER_TRACE_KEYS:
+        raise _TraceError(f"chooser input_trace: fields {sorted(trace)}")
+    if trace["schema_version"] != _CHOOSER_TRACE_SCHEMA:
+        raise _TraceError(f"chooser input_trace.schema_version: expected {_CHOOSER_TRACE_SCHEMA}")
+    body = {key: value for key, value in trace.items() if key != "trace_hash"}
+    trace_hash = _verify_content(body, trace["trace_hash"], "chooser input_trace.trace_hash")
+    if payload.get("input_trace_hash") != trace_hash:
+        raise _TraceError("pair.input_trace_hash: mismatch")
+    request = payload.get("request")
+    frame_rows = request.get("frame_rows") if isinstance(request, Mapping) else None
+    members = trace["members"]
+    if not isinstance(frame_rows, list) or not frame_rows:
+        raise _TraceError("payload.request.frame_rows: missing")
+    if not isinstance(members, list) or len(members) != len(frame_rows):
+        raise _TraceError("chooser input_trace.members: not one per ranked frame row")
+    shared = [member.get("legacy_input_hash") if isinstance(member, Mapping) else None
+              for member in members]
+    _verify_content(shared, trace["shared_input_hash"], "chooser input_trace.shared_input_hash")
+    if payload.get("legacy_input_hash") != trace["shared_input_hash"]:
+        raise _TraceError("pair.legacy_input_hash: mismatch")
+    out = []
+    for index, (member, row) in enumerate(zip(members, frame_rows, strict=True)):
+        if not isinstance(member, Mapping) or set(member) != _CHOOSER_MEMBER_KEYS:
+            raise _TraceError(f"chooser member {index}: malformed")
+        if member["member_index"] != index or not isinstance(row, Mapping):
+            raise _TraceError(f"chooser member {index}: out of frame order")
+        if member["request_hash"] != content_hash(row.get("request")):
+            raise _TraceError(f"chooser member {index}: not the frame row's request")
+        member_trace = member["input_trace"]
+        if not isinstance(member_trace, Mapping):
+            raise _TraceError(f"chooser member {index}: input_trace missing")
+        out.append(({"payload": {
+            "request": row["request"],
+            "input_trace": member_trace,
+            "input_trace_hash": member_trace.get("trace_hash"),
+            "legacy_input_hash": member["legacy_input_hash"],
+        }}, dict(row.get("record") or {})))
+    return out
+
+
+def _replayed_chooser(pair: Mapping[str, Any], release_root: Path):
+    """Replay a ``dyn_sv_choice`` pair natively.
+
+    Every ranked member is verified and scored exactly as a traced scored
+    pair; the native chooser (``application._choose_dynamic``) then ranks the
+    native member records in frame order. Returns ``(members, choice)`` with
+    ``members`` as ``(legacy record, verified, native, receipts,
+    identities)``.
+    """
+    members = []
+    for index, (member_pair, member_record) in enumerate(_chooser_members(pair)):
+        try:
+            verified = _verified_trace_bundle(member_pair, release_root)
+            native, receipts, identities = _replayed_member(verified)
+        except _TraceError as exc:
+            raise _TraceError(f"chooser member {index}: {exc}") from exc
+        members.append((member_record, verified, native, receipts, identities))
+    first = members[0][1]["request"]
+    choice = application._choose_dynamic(
+        replace(first, strategy_version="DYN-SV"),
+        tuple(item[2] for item in members),
+    )
+    return members, choice
+
+
+def _chooser_selection_checks(record: Mapping[str, Any], native) -> dict[str, bool]:
+    """The legacy choice against the native one: the chosen structure, the
+    menu that competed and the winning margin (exact)."""
+    selection = native.chooser_selection or {}
+    return {
+        "chosen_strategy": selection.get("strategy") == record.get("chosen_strategy"),
+        "menu_size": selection.get("menu_size") == record.get("menu_size"),
+        "chosen_margin": selection.get("margin") == record.get("chosen_margin"),
+    }
 
 
 def _native_parity(corpus) -> tuple[dict, dict]:
@@ -1826,24 +2005,15 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         pair = corpus.pairs[fixture_id]
         record = pair["payload"]["record"]
         legacy_ids.append(pair["payload_hash"])
+        chooser_pair = pair["payload"].get("record_kind") == "dyn_sv_choice"
         try:
-            verified = _verified_trace_bundle(pair, corpus.root)
-            frozen_replay = verified["frozen_replay"]
-            if frozen_replay is None:
-                native = application.score_one(
-                    verified["request"], verified["inputs"],
-                )
+            if chooser_pair:
+                members, native = _replayed_chooser(pair, corpus.root)
             else:
-                native = application.score_frozen(
-                    verified["request"],
-                    frozen_replay.inference,
-                    frozen_replay.release,
-                    frozen_replay.requests,
-                    {"_native_inputs": verified["inputs"]},
-                )
-            runtime_receipts, runtime_identities = _verify_runtime_execution(
-                verified, native,
-            )
+                verified = _verified_trace_bundle(pair, corpus.root)
+                member_native, receipts_, identities_ = _replayed_member(verified)
+                members = [(record, verified, member_native, receipts_, identities_)]
+                native = member_native
         except Exception as exc:
             dispositions["incomparable"] += 1
             rows.append({
@@ -1853,96 +2023,93 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             })
             continue
         dispositions["compared"] += 1
-        for stage in {
-            item["stage"] for item in runtime_receipts
-        } & set(_REQUIRED_TRACE_STAGES):
+        member_stages = [
+            {item["stage"] for item in receipts_} & set(_REQUIRED_TRACE_STAGES)
+            for _record, _verified, _native, receipts_, _identities in members
+        ]
+        for stage in set.intersection(*member_stages):
             runtime_stage_counts[stage] += 1
-        expected_keys = set(record)
-        native_keys = set(native.resolved_request) - {
-            "native_stage_receipts", "native_source_ref",
-        }
+        member_checks = []
+        numeric_findings = []
+        for member_record, _verified, member_native, _receipts, _identities in members:
+            checks, numeric = _record_checks(member_record, member_native)
+            member_checks.append(checks)
+            numeric_findings.append({
+                name: result["finding_fields"] for name, result in numeric.items()
+            })
+            expected_numeric, actual_numeric = _numeric_views(member_record, member_native)
+            for dimension in numeric_negative_controls:
+                if any(value is not None for value in expected_numeric[dimension].values()):
+                    numeric_coverage[dimension] += 1
+                if numeric_negative_controls[dimension]:
+                    continue
+                for field, value in actual_numeric[dimension].items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        corrupted = copy.deepcopy(actual_numeric)
+                        corrupted[dimension][field] = float(value) + 1.0
+                        result = _compare_numeric_outputs(
+                            member_record, member_native, actual_override=corrupted,
+                        )
+                        numeric_negative_controls[dimension] = not result[dimension]["agree"]
+                        break
+            if not flag_defect_detected:
+                mutated_flags = list(member_record.get("flags") or ()) + ["PHASE4_PLANTED_DEFECT"]
+                flag_defect_detected = list(member_native.reason_codes) != mutated_flags
         checks = {
-            "keys": expected_keys == (native_keys - {
-                "_model_artifact_ids", "native_source_ref",
-                "native_stage_receipts", "selected_contracts",
-            } - ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
-                 expected_keys)),
-            "contracts": _contract_projection(
-                native.legs,
-                entry_date=native.entry_exit_plan.get("entry_date"),
-                exit_date=native.entry_exit_plan.get("exit_date"),
-                execution_date=native.quote_provenance.get("quote_date"),
-            ) == _contract_projection(
-                record.get("legs") or (),
-                entry_date=record.get("entry_date"),
-                exit_date=record.get("exit_date"),
-                execution_date=record.get("quote_date"),
-            ),
-            # gate_score/gate_threshold/gate_pass and ci_low/ci_high/n_analogs
-            # come from the "verdicts"/"analogs" numeric dimensions below
-            # (checks.update), which is the same compare_records machinery
-            # used for forecasts/simulation/financial_diagnostics.
-            "flags": _semantic_flags({"flags": native.reason_codes}) == (
-                _semantic_flags(record)
-                + ("UNVALIDATED_STRUCTURE",) if record.get("strategy") in
-                   {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
-                   (record.get("flags") or ()) else ()
-            ),
-            "null_masks": native.null_masks == {
-                key: value is None for key, value in (record.get("model_inputs") or {}).items()
-            },
+            name: all(item[name] for item in member_checks) for name in member_checks[0]
         }
-        numeric = _compare_numeric_outputs(record, native)
-        checks.update({name: result["agree"] for name, result in numeric.items()})
-        expected_numeric, actual_numeric = _numeric_views(record, native)
-        for dimension in numeric_negative_controls:
-            if any(value is not None for value in expected_numeric[dimension].values()):
-                numeric_coverage[dimension] += 1
-            if numeric_negative_controls[dimension]:
-                continue
-            for field, value in actual_numeric[dimension].items():
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    corrupted = copy.deepcopy(actual_numeric)
-                    corrupted[dimension][field] = float(value) + 1.0
-                    result = _compare_numeric_outputs(
-                        record, native, actual_override=corrupted,
-                    )
-                    numeric_negative_controls[dimension] = not result[dimension]["agree"]
-                    break
-        rows.append({
+        row = {
             "fixture_id": fixture_id,
             "disposition": "compared",
-            "same_input_hash": verified["same_input_receipt"],
-            "trace_hash": verified["trace_hash"],
-            "frozen_replay_receipt": (
-                frozen_replay.receipt if frozen_replay is not None else None
+            "same_input_hash": (
+                members[0][1]["same_input_receipt"] if not chooser_pair
+                else content_hash([item[1]["same_input_receipt"] for item in members])
             ),
-            "runtime_receipts": runtime_receipts,
-            "runtime_identities": runtime_identities,
+            "trace_hash": (
+                members[0][1]["trace_hash"] if not chooser_pair
+                else pair["payload"].get("input_trace_hash")
+            ),
+            "frozen_replay_receipt": (
+                _frozen_receipt(members[0][1]) if not chooser_pair
+                else [_frozen_receipt(item[1]) for item in members]
+            ),
+            "runtime_receipts": (
+                members[0][3] if not chooser_pair else [item[3] for item in members]
+            ),
+            "runtime_identities": (
+                members[0][4] if not chooser_pair else [item[4] for item in members]
+            ),
             "checks": checks,
-            "numeric_findings": {
-                name: result["finding_fields"] for name, result in numeric.items()
-            },
+            "numeric_findings": (
+                numeric_findings[0] if not chooser_pair else numeric_findings
+            ),
             "advisory_flags": {
                 "legacy": sorted(set(record.get("flags") or ()) & _ADVISORY_FLAGS),
                 "native": sorted(set(native.reason_codes) & _ADVISORY_FLAGS),
             },
-        })
+        }
+        if chooser_pair:
+            selection = _chooser_selection_checks(record, native)
+            row["checks"]["chooser"] = all(selection.values())
+            row["chooser_findings"] = sorted(
+                name for name, agree in selection.items() if not agree)
+        rows.append(row)
         native_ids.append(native.payload_hash)
-        if not flag_defect_detected:
-            mutated_flags = list(record.get("flags") or ()) + ["PHASE4_PLANTED_DEFECT"]
-            flag_defect_detected = list(native.reason_codes) != mutated_flags
     dimensions = (
         "keys", "contracts", "verdicts", "flags", "null_masks",
         "forecasts", "simulation", "financial_diagnostics", "analogs",
+        "chooser",
     )
     compared_rows = [row for row in rows if row["disposition"] == "compared"]
     compared = len(compared_rows)
     agreed = sum(1 for row in compared_rows if all(row["checks"].values()))
+    # "chooser" exists only on dyn_sv_choice rows (its selection checks); the
+    # other dimensions on every compared row.
     dimension_agreement = {
         dimension: (
             compared == expected and expected > 0
-            and all(row["checks"][dimension] for row in compared_rows)
+            and all(row["checks"].get(dimension, dimension == "chooser")
+                    for row in compared_rows)
         )
         for dimension in dimensions
     }

@@ -100,6 +100,8 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     payload = pair.get("payload") or {}
     if not payload.get("input_trace"):
         return {"disposition": "untraced"}
+    if payload.get("record_kind") == "dyn_sv_choice":
+        return _replay_chooser_pair(pair, corpus_root, release_root, staged)
     try:
         verified = phase4_real._verified_trace_bundle(pair, corpus_root)
     except Exception as exc:  # noqa: BLE001 -- any refusal means "not verifiable"
@@ -127,6 +129,34 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     return {"disposition": "replayed", "members": used,
             "stages": len(verified["captured_receipts"]),
             "runtime_stages": len(receipts)}
+
+
+def _replay_chooser_pair(pair, corpus_root: Path, release_root: Path,
+                         staged: Mapping[str, str]) -> dict:
+    """A ``dyn_sv_choice`` pair replays when every ranked member replays.
+
+    Each member is its own strict trace (``phase4_real._chooser_members``);
+    the first member that does not replay decides the disposition.
+    """
+    from checks import phase4_real
+
+    try:
+        members = phase4_real._chooser_members(pair)
+    except Exception as exc:  # noqa: BLE001 -- any refusal means "not verifiable"
+        return {"disposition": "unverified", "code": PHASE4_UNVERIFIED,
+                "detail": f"{type(exc).__name__}: {exc}"}
+    used, stages, runtime = set(), 0, 0
+    for index, (member_pair, _record) in enumerate(members):
+        row = _replay_pair(member_pair, corpus_root, release_root, staged)
+        used.update(row.get("members", ()))
+        if row["disposition"] != "replayed":
+            detail = row.get("detail")
+            return {**row, "members": sorted(used),
+                    **({"detail": f"member {index}: {detail}"} if detail else {})}
+        stages += row["stages"]
+        runtime += row["runtime_stages"]
+    return {"disposition": "replayed", "members": sorted(used),
+            "stages": stages, "runtime_stages": runtime}
 
 
 def replay_corpus(corpus: Path, release_root: Path, model_release,
