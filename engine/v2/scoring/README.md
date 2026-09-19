@@ -43,9 +43,12 @@ failure rather than a stale sentence.
 `fit_runup_payoff_surface`) to build a payoff-calibration artifact from
 causal source rows -- the one place besides this package's own
 compatibility path that fitting math runs, and it is layer 6 importing
-layer 5 (strictly lower), never the reverse.
+layer 5 (strictly lower), never the reverse. `engine.v2.ops.cli` imports
+`score_one`, `NativeScoreInputs` and `StageReceipt` for the read-only
+`ops rescore` command, which re-scores one already-captured event inside a
+`no_fit_guard()` block.
 
-<!-- consumers: engine.v2.models.training -->
+<!-- consumers: engine.v2.models.training, engine.v2.ops -->
 
 ## Usage
 

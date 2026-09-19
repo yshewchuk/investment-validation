@@ -19,6 +19,17 @@ class CheckParameters:
 
 
 @dataclass(frozen=True)
+class RescoreParameters:
+    """Ad-hoc what-if rescore (P6 UD-2): the job carries no scalar data of
+    its own — the ScoreRequest and NativeScoreInputs documents live in
+    ``input_bindings``, resolved into staging exactly like every other
+    input-bound kind."""
+
+    expected_ids: tuple[str, ...]
+    input_bindings: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class SnapshotImportParameters:
     """P2-7/Task7b: the ``snapshot_import`` worker needs nothing scalar at all
     — its full plan (table sources, contract refs, calendar/source-priority
@@ -180,8 +191,12 @@ def input_mode_problems(job, params):
     return ("snapshot input mode is missing bindings: " + ",".join(missing),) if missing else ()
 
 
-def registry():
-    kinds = [
+def _core_kinds():
+    """The one-off ``JobKind`` entries with no generated sibling — every
+    "loop over a small family" kind (the outbox effects, the legacy action
+    family) is built separately in :func:`registry`, which keeps this list
+    a plain, static enumeration."""
+    return [
         refresh_job_kind(),
         JobKind(
             name="artifact_check", worker="artifact_check", parameters=CheckParameters,
@@ -197,6 +212,16 @@ def registry():
             resource_classes=frozenset({"validation"}), effects=("staged",),
             retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="decision_evidence_pair.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})),
+        # P6 UD-2: a pure, non-legacy worker (see worker.py) that re-scores
+        # one already-captured (ScoreRequest, NativeScoreInputs) pair under
+        # the v2 no-fit guard. Never reads the legacy tree, so no
+        # store_domains lease, exactly like decision_evidence above.
+        JobKind(
+            name="adhoc_rescore", worker="adhoc_rescore", parameters=RescoreParameters,
+            resource_classes=frozenset({"io_fetch"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 2, (5, 30)),
+            checkpoint_contract="adhoc_rescore_record.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
         # P2-7/Task7b (§7): streams the pinned legacy read set into per-file
         # fragment inspections. Coordinator-validated, like decision_evidence
@@ -230,6 +255,10 @@ def registry():
             checkpoint_contract="legacy_materialization_manifest.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
     ]
+
+
+def registry():
+    kinds = _core_kinds()
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the
     # nightly job DAG (guide §9.4 item 3). Each worker is trivial (it emits a
     # small receipt); the supervisor's coordinator effect

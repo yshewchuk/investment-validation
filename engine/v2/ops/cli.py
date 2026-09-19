@@ -12,6 +12,7 @@ from engine.v2.foundation import (
     SystemClock,
     content_hash,
     ensure_directory,
+    from_document,
     parse_timestamp,
     to_document,
 )
@@ -165,6 +166,25 @@ def _add_refresh_mode_arguments(plan):
                            "(to_document()'d); required with --refresh-mode native")
 
 
+def _add_reconcile_command(commands):
+    """The ``ops reconcile`` subparser, split out of :func:`parser` to keep
+    that function under the line budget."""
+    reconcile = commands.add_parser("reconcile")
+    reconcile.add_argument("--root", default=argparse.SUPPRESS)
+    reconcile.add_argument("job_id")
+    reconcile.add_argument("--expected-attempt", required=True)
+
+
+def _add_rescore_command(commands):
+    """The read-only ``ops rescore`` subparser (see :func:`rescore_command`)."""
+    rescore = commands.add_parser("rescore")
+    rescore.add_argument("--request", type=Path, required=True,
+                         help="a ScoreRequest canonical JSON document (to_document output)")
+    rescore.add_argument("--native-inputs", type=Path, required=True,
+                         help="a NativeScoreInputs canonical JSON document (to_document output); "
+                              "already-captured data only, no provider pulls, no fitting")
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", default="data/operations")
@@ -212,6 +232,7 @@ def parser():
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
+    _add_rescore_command(commands)
     capture = commands.add_parser("capture-inputs")
     capture.add_argument("--as-of", required=True)
     capture.add_argument("--tickers", default="")
@@ -222,10 +243,7 @@ def parser():
     capture.add_argument("--year-end", type=int, required=True)
     capture.add_argument("--source-root", required=True, type=Path)
     capture.add_argument("--output", required=True, type=Path)
-    reconcile = commands.add_parser("reconcile")
-    reconcile.add_argument("--root", default=argparse.SUPPRESS)
-    reconcile.add_argument("job_id")
-    reconcile.add_argument("--expected-attempt", required=True)
+    _add_reconcile_command(commands)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
     _add_price_refresh_command(commands)
@@ -541,6 +559,170 @@ def _submit_command(args, root, conn, clock):
     if plan.get("kind") == "nightly":
         return _submit_nightly(plan, conn, store, policy, clock)
     return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
+
+
+_PROBLEM_STATUS = {"validation": 400, "dependency": 409, "resource": 503,
+                   "source": 502, "integrity": 404, "internal": 500}
+
+
+def _status_for(category: str) -> int:
+    return _PROBLEM_STATUS.get(category, 500)
+
+
+def refresh_action(root: Path, payload, *, clock=None) -> tuple[int, dict]:
+    """Submit the nightly DAG named by an already-published plan artifact.
+
+    ``payload`` is the parsed JSON body of a POST to the operations server's
+    refresh action: ``{"plan_ref": "<artifact id from `ops plan nightly`>"}``.
+    Never runs the nightly itself — only queues it via the same
+    ``submit_graph`` path ``ops submit`` uses. Duplicate-submit protection is
+    inherited for free: ``build_legacy_job_requests`` derives every job's
+    identity from the plan's own content, so two calls with the SAME
+    ``plan_ref`` produce identical ``SubmitRequest``s and
+    ``submission._insert_or_match`` returns the existing jobs rather than
+    inserting new rows (submission.py's idempotency-by-digest rule).
+    """
+    clock = clock or SystemClock()
+    plan_ref = payload.get("plan_ref") if isinstance(payload, dict) else None
+    if not isinstance(plan_ref, str) or not plan_ref:
+        return 400, {"error": "plan_ref is required and must be a non-empty string"}
+    store = ArtifactStore(root)
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        ref = artifact(conn, store, plan_ref)
+        plan = json.loads(store.read_verified(ref))
+        if plan.get("kind") != "nightly":
+            return 400, {"error": "plan_ref must reference a nightly plan"}
+        policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+        result = _submit_nightly(plan, conn, store, policy, clock)
+        return 202, result
+    except OpsError as exc:
+        return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
+    finally:
+        conn.close()
+
+
+def _load_native_score_inputs(doc: dict):
+    from engine.v2.domain.generation import Geometry, Pricing
+    from engine.v2.scoring.stages import NativeScoreInputs, StageReceipt
+
+    geometry = from_document(Geometry, doc["geometry"]) if doc.get("geometry") is not None else None
+    pricing = from_document(Pricing, doc["pricing"]) if doc.get("pricing") is not None else None
+    receipts = tuple(from_document(StageReceipt, row) for row in doc["stage_receipts"])
+    kwargs = dict(
+        context=doc["context"], features=doc["features"], forecast=doc["forecast"],
+        geometry=geometry, pricing=pricing, analogs=doc["analogs"], simulation=doc["simulation"],
+        gate=doc["gate"], chooser=doc["chooser"], diagnostics=doc.get("diagnostics", {}),
+        source_ref=doc["source_ref"], stage_receipts=receipts,
+    )
+    if "model" in doc:
+        kwargs["model"] = doc["model"]
+    return NativeScoreInputs(**kwargs)
+
+
+def rescore_command(args):
+    """Read-only ad-hoc rescore: no provider pulls, no fitting.
+
+    ``args.request`` / ``args.native_inputs`` are paths to JSON files
+    already produced elsewhere from already-captured data:
+    ``args.request`` is ``to_document(a ScoreRequest)``; ``args.native_inputs``
+    is ``to_document(a NativeScoreInputs)``. The one ticker/event this scores
+    is identified by whatever ``event_id``/``context`` those documents
+    already carry -- this command never resolves a ticker/event to data
+    itself.
+    """
+    from engine.v2.contracts import ScoreRequest
+    from engine.v2.models.no_fit import no_fit_guard
+    from engine.v2.scoring.application import score_one
+
+    request_doc = json.loads(args.request.read_text())
+    native_doc = json.loads(args.native_inputs.read_text())
+    request = from_document(ScoreRequest, request_doc)
+    inputs = _load_native_score_inputs(native_doc)
+    with no_fit_guard():
+        return score_one(request, inputs)
+
+
+_PENDING_JOB_STATES = ("queued", "running", "retry_wait")
+_STOPPED_JOB_STATES = ("failed", "cancelling", "cancelled", "blocked")
+
+
+def whatif_action(root: Path, payload, *, clock=None) -> tuple[int, dict]:
+    """Submit a supervised ad-hoc rescore job; never scores inline.
+
+    ``payload`` is ``{"request": to_document(ScoreRequest), "native_inputs":
+    to_document(NativeScoreInputs)}``. Both documents are published as
+    verified artifacts and bound into the job's ``input_bindings`` --
+    ``adhoc_rescore`` (engine/v2/ops/worker.py) reads them back from its own
+    staging directory; this function never calls score_one itself. The
+    idempotency key is the content hash of the payload, so an identical
+    repeat POST resolves to the SAME job (submission.py's
+    idempotency-by-digest rule) instead of a duplicate.
+    """
+    from engine.v2.contracts import JobSpec, SubmitRequest
+    from engine.v2.ops.checkpoints import register_artifact
+    from engine.v2.ops.profiles import profile_named
+
+    clock = clock or SystemClock()
+    if not isinstance(payload, dict) or "request" not in payload or "native_inputs" not in payload:
+        return 400, {"error": "request and native_inputs are both required"}
+    store = ArtifactStore(root)
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        request_ref = store.publish_bytes(
+            json.dumps(payload["request"], sort_keys=True).encode(), schema_ref="score_request.v1.0")
+        native_ref = store.publish_bytes(
+            json.dumps(payload["native_inputs"], sort_keys=True).encode(),
+            schema_ref="native_score_inputs.v1.0")
+        with transaction(conn):
+            register_artifact(conn, request_ref, None, clock)
+            register_artifact(conn, native_ref, None, clock)
+        profile = profile_named(DEFAULT_POLICY, "io_fetch")
+        repo_root = Path(__file__).resolve().parents[3]
+        job = JobSpec(
+            kind="adhoc_rescore",
+            implementation_ref=content_hash(worker_source_manifest(repo_root)),
+            spec_hash=None,
+            environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
+            parameters={"expected_ids": ["adhoc_rescore"],
+                       "input_bindings": {"request.json": request_ref.artifact_id,
+                                          "native_inputs.json": native_ref.artifact_id}},
+            input_refs=(request_ref.artifact_id, native_ref.artifact_id),
+            output_namespace="shadow", resource_class="io_fetch", retry_policy_ref="bounded",
+            checkpoint_contract_ref="adhoc_rescore_record.v1.0")
+        idempotency_key = content_hash(payload)
+        policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+        receipt = submit(conn, registry(), policy, SubmitRequest(
+            namespace="shadow", idempotency_key=idempotency_key, principal="operator", job=job),
+            clock=clock)
+        return 202, to_document(receipt)
+    except OpsError as exc:
+        return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
+    finally:
+        conn.close()
+
+
+def whatif_result_action(root: Path, job_id: str, *, clock=None) -> tuple[int, dict]:
+    """Fetch a finished ad-hoc rescore job's canonical record, or its state
+    while it is not yet finished. Never runs any computation itself."""
+    clock = clock or SystemClock()
+    store = ArtifactStore(root)
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        receipt = get_job(conn, job_id)
+        if receipt.state in _PENDING_JOB_STATES:
+            return 202, {"state": receipt.state}
+        if receipt.state in _STOPPED_JOB_STATES:
+            return 409, {"state": receipt.state,
+                         "failure": to_document(receipt.failure) if receipt.failure else None}
+        if not receipt.output_refs:
+            return 500, {"error": "job succeeded with no output artifact"}
+        ref = artifact(conn, store, receipt.output_refs[0])
+        return 200, json.loads(store.read_verified(ref))
+    except OpsError as exc:
+        return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------
@@ -963,6 +1145,8 @@ def main(argv=None):
             document = capture_command(args)
         elif args.command == "price-refresh":
             document = price_refresh_command(args, root)
+        elif args.command == "rescore":
+            document = rescore_command(args)
         else:
             if args.command == "init":
                 ensure_directory(root)
