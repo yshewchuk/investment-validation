@@ -12,7 +12,7 @@ import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping
 
 import pandas as pd
@@ -1258,6 +1258,18 @@ _KNOWN_TRACE_STAGE_ORDER = (
     "model", "analogs", "simulation", "gate", "chooser", "serialization",
 )
 _ADVISORY_FLAGS = frozenset({"LAYER_DISAGREE"})
+#: Record kinds left out of the Phase 4 population, each with its reason
+#: (user decision 2026-09-19; guides/rearchitecture_phase3b_phase4_remaining.md,
+#: decision 7). Only these named kinds are dropped from ``expected``; each is
+#: counted under ``population.excluded``. Any other kind, known or unknown,
+#: stays expected and is a gap until it compares.
+PHASE4_EXCLUDED_RECORD_KINDS: Mapping[str, str] = MappingProxyType({
+    "research_replay": (
+        "no v2 replay path (engine.replay.replay_one research output); "
+        "excluded by user decision 2026-09-19; covered by the Tier-1 replay "
+        "(tools/replay_tier1.py)"
+    ),
+})
 
 
 def _semantic_flags(values: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1792,13 +1804,27 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     }
 
 
-def _release_population(corpus) -> tuple[tuple[str, ...], int, bool]:
+def _release_population(corpus) -> tuple[tuple[str, ...], int, bool, dict[str, str]]:
+    """``(declared ids, expected count, manifest bound, excluded id -> kind)``.
+
+    A pair is excluded only when its loaded payload names a kind in
+    ``PHASE4_EXCLUDED_RECORD_KINDS`` and, on a bound manifest, the manifest
+    row names the same kind. ``expected`` counts every other declared pair.
+    """
     declared = corpus.index.get("pairs")
-    if isinstance(declared, Mapping):
+    manifest_bound = isinstance(declared, Mapping)
+    if manifest_bound:
         ids = tuple(sorted(str(fixture_id) for fixture_id in declared))
-        return ids, len(ids), True
-    ids = tuple(corpus.ordered_ids)
-    return ids, len(ids), False
+    else:
+        ids = tuple(corpus.ordered_ids)
+    excluded = {}
+    for fixture_id in ids:
+        kind = ((corpus.pairs.get(fixture_id) or {}).get("payload") or {}).get("record_kind")
+        row = declared.get(fixture_id) if manifest_bound else {"record_kind": kind}
+        if (kind in PHASE4_EXCLUDED_RECORD_KINDS and isinstance(row, Mapping)
+                and row.get("record_kind") == kind):
+            excluded[fixture_id] = kind
+    return ids, len(ids) - len(excluded), manifest_bound, excluded
 
 
 def _replayed_member(verified: Mapping[str, Any]):
@@ -1981,7 +2007,11 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "analogs": False,
     }
     numeric_coverage = {name: 0 for name in numeric_negative_controls}
-    declared_ids, expected, manifest_bound = _release_population(corpus)
+    declared_ids, expected, manifest_bound, excluded = _release_population(corpus)
+    excluded_counts = {
+        kind: sum(1 for value in excluded.values() if value == kind)
+        for kind in PHASE4_EXCLUDED_RECORD_KINDS
+    }
     loaded_ids = set(corpus.ordered_ids)
     declared_set = set(declared_ids)
     fixture_ids = sorted(declared_set | loaded_ids)
@@ -2000,6 +2030,13 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                 "fixture_id": fixture_id,
                 "disposition": "incomparable",
                 "reason": "release manifest: declared pair file missing",
+            })
+            continue
+        if fixture_id in excluded:
+            rows.append({
+                "fixture_id": fixture_id,
+                "disposition": "excluded",
+                "reason": PHASE4_EXCLUDED_RECORD_KINDS[excluded[fixture_id]],
             })
             continue
         pair = corpus.pairs[fixture_id]
@@ -2137,6 +2174,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "expected": expected, "supported": compared,
             "compared": compared, "agreed": agreed,
             "manifest_bound": manifest_bound, **dispositions,
+            "excluded": excluded_counts,
         },
         "source_release": {
             "release_id": release_id,
@@ -2167,6 +2205,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "expected": expected, "supported": compared,
             "compared": compared, "agreed": agreed,
             "manifest_bound": manifest_bound, **dispositions,
+            "excluded": excluded_counts,
         },
         "stages": covered_stages,
         "stage_coverage": runtime_stage_counts,
@@ -2230,7 +2269,7 @@ def _write_phase4_report(evidence: dict, artifact_root: Path) -> Path:
                        if row.get("status") in ("PASS", "FOUNDATION_PASS")),
          "note": "of the registered subjects above", "headline": True},
         {"stage": "saved-release population expected", "events": population.get("expected"),
-         "note": "declared release manifest members"},
+         "note": "declared release manifest members, less counted exclusions"},
         {"stage": "saved-release population compared", "events": population.get("compared"),
          "note": f"agreed={population.get('agreed')}"},
     ]

@@ -167,3 +167,19 @@ and Phase 4 cannot close.
    `checks/rearchitecture_phase3_{publish,current_switch,preview}.py`,
    `tools/baseline_export.py`), then flip the pointer and keep the old
    version. `CURRENT` still names `20260912T233551Z`.
+7. **`research_replay` pairs left out of Phase 4** — DECIDED by the user
+   2026-09-19 (counted exclusion). They are `engine.replay.replay_one`
+   research output with no v2 replay path, and the Tier-1 replay
+   (`tools/replay_tier1.py`) covers them. `checks/phase4_real.py` names the
+   excluded kinds in one constant, `PHASE4_EXCLUDED_RECORD_KINDS`, and
+   `_release_population` drops only those from `expected`. A pair is excluded
+   only when its payload and its manifest row both name the kind. Each
+   excluded pair gets disposition `excluded` with the reason, and the
+   population reports `excluded = {"research_replay": n}`. Every other kind
+   stays expected, `dyn_sv_choice` included (replayed natively), and an
+   unknown kind is still a gap. The consumers needed no change: the native
+   audit and the completion review compare `expected` with `compared`, which
+   now leaves these pairs out, and `checks/phase5_phase4_replay.py` and
+   `tools/phase5_calibration_keys.py` already skip pairs without an
+   `input_trace`, which `research_replay` pairs never carry. Tests:
+   `tests/test_phase4_population_exclusion.py`.

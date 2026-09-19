@@ -542,6 +542,7 @@ def test_expected_population_comes_from_release_manifest_members(tmp_path):
         "compared": 0,
         "refused_as_expected": 0,
         "incomparable": 2,
+        "excluded": {"research_replay": 0},
     }
     assert [row["fixture_id"] for row in release["dispositions"]] == [
         "pair-1", "pair-2",
