@@ -169,3 +169,121 @@ What to know before reading a score:
   started before the fork hung others into false timeouts.
 - A "no tests" mutant sits in a function that no targeted test executes. It
   counts against the score, the same as a survivor.
+
+## Mutation CI
+
+`.github/workflows/mutation.yml` runs the modules in
+`tools/mutation_pilot.toml` on GitHub Actions, one matrix job per enabled
+module, with `--max-children $(nproc)` (4 on a standard runner). It only
+reports. Scores never fail a job. A job fails only when the tool does: mutmut's
+clean test run fails, or the run hits its 330-minute step timeout.
+
+| trigger | mode | state |
+|---|---|---|
+| push to main | incremental | restores the module's newest cached mutmut state |
+| weekly (Sun 05:23 UTC) | full | no restore: every mutant from scratch |
+| workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
+
+- **Scope.** All of `engine/v2`, split into 20 modules plus the six pilot
+  modules. The only legacy files are the pilot's `engine/pnl_sim.py` and
+  `engine/models/no_fit.py`. `contracts` (with `engine/v2/__init__.py` and
+  `evaluation/`) is listed as excluded: mutmut generates no mutants there.
+  `tests/test_mutation_ci.py` fails if an `engine/v2` file is in no module, or
+  in two.
+- **Tests per module** are data-free files only, since CI has no `data/`. Each
+  was run alone with no `data/` (2026-09-19). Tests are picked from those that
+  import the module, most specific first, up to ~150 s of clean test time
+  (40 s for `foundation`). Four tests that need `data/` or a browser are
+  deselected in `[defaults] deselect`. Browser and npm test files are never
+  selected.
+- **Cache.** One `actions/cache` entry per module holds only mutmut's state:
+  `mutants/**/*.meta`, `mutmut-stats.json` and the driver's
+  `mutation-ci-state.json`. The key is
+  `mutation-mutmut<ver>-py<ver>-<hash of mutation_pilot.toml>-<module>-<sha>-<run id>-<attempt>`.
+  Restore uses the same key without the sha, so each run gets the newest
+  state. The work copy and mutated files are rebuilt from the checkout. mutmut
+  then keeps every verdict whose function hash is unchanged. Editing the toml,
+  bumping mutmut or changing Python restarts every module.
+- **What incremental re-tests.** mutmut re-tests a mutant only when its own
+  function's source changed. The driver adds one rule: when a module's
+  selected tests or the shared `tests/*.py` helpers change, it resets that
+  module's survived and no-tests verdicts. Two things wait for the weekly full
+  run: a killed verdict that a weakened test would now let survive, and a
+  change in a helper function outside the module.
+- **Partial runs.** State is saved even after a timeout. The next run resumes
+  it, and unreached mutants show as `skipped`.
+
+### Report files
+
+Each job uploads `mutation-module-<module>` (90 days). It holds
+`results.jsonl`, `summary.json` and `summary.md`, which is also the job
+summary. The job summary shows the score table and each untriaged survivor in
+a function the push changed (`git diff <before>..<sha>`), with its diff. Runs
+that are not pushes list the survivors this run re-tested instead. The
+`report` job merges every module into one `mutation-report` artifact
+(90 days).
+
+`results.jsonl` has one row per mutant, including mutants a run did not
+re-test. Its fields (`schema_version` 1):
+
+| field | meaning |
+|---|---|
+| `schema_version` | 1; bumped on any incompatible change |
+| `run_id`, `sha`, `ref`, `trigger` | Actions run id, commit, ref, event (`local` for a local export) |
+| `mode` | `full`, `incremental` or `local` |
+| `module`, `file`, `function` | toml module, repo path, `func` or `Class.method` |
+| `line` | file line of the first line the mutation changes |
+| `mutant_name` | mutmut's name (`pkg.mod.x_func__mutmut_N`) |
+| `status` | `killed`, `survived`, `no_tests`, `timeout`, `suspicious` or `skipped` |
+| `mutmut_status` | mutmut's own label (`type check` maps to killed; `segfault` and `interrupted` map to suspicious; `not checked` maps to skipped) |
+| `retested_this_run` | true if this run decided it; null when unknown (local) |
+| `diff` | unified diff of the mutated function (code only) |
+| `triage` | null, or `{verdict, note, stale}` from the triage file |
+
+`summary.json` holds these counts for the module and for each file: `total`,
+each status, `checked` (total minus skipped), `score` and
+`survived_untriaged`. It also has `run_exit_code` (-1 means the step timeout
+killed the run) and `elapsed_seconds`. `score` is (killed + timeout) / checked,
+so `no_tests` counts against it. The merged `summary.json` adds overall totals
+and a `modules` map.
+
+### Triage file
+
+`tools/mutation_triage.toml` has one `[[triage]]` table per reviewed
+survivor. Each table has a `mutant` (its exact name), a `verdict` (`EQUIVALENT`
+or `LOW-VALUE`), a `note`, and an optional `diff_contains` that pins the
+mutated text. mutmut numbers mutants per function, so editing the function can
+point an old name at a different mutation. When `diff_contains` stops
+matching, the row's triage is marked `stale` and the survivor counts as
+untriaged again. The file is empty for now; the header documents the format.
+
+### Querying: `tools/mutation_report.py`
+
+By default it reads the latest completed main run's `mutation-report`. It
+fetches with `gh` into `~/.cache/investing-plan-mutation-report/<run id>/`
+(`MUTATION_REPORT_CACHE`; paths inside the repo are refused). `--run ID`,
+`--sha SHA` and `--dir PATH` choose another source. `--local [MODULE ...]` is
+offline and reads the pilot's own work copies.
+
+    # untriaged survivors in one module, with diffs
+    python3 tools/mutation_report.py --module ops_decisions --untriaged --diff
+    # survivors and no-tests mutants under scoring, as CSV
+    python3 tools/mutation_report.py --file 'engine/v2/scoring/*' --status survived,no_tests --format csv
+    # one function's mutants in one run, as JSON lines
+    python3 tools/mutation_report.py --run 123456789 --function 'Scheduler.*' --format jsonl
+    # survivors in functions changed since a commit (local git needs both commits)
+    python3 tools/mutation_report.py --changed-since 43a3ae1 --untriaged
+    # score trend over the last 10 main runs, with the change from the previous run
+    python3 tools/mutation_report.py --history 10 --module canonical,pnl_sim
+    # offline, from local pilot results
+    python3 tools/mutation_report.py --local no_fit canonical --untriaged
+    # a downloaded or locally exported directory
+    python3 tools/mutation_results.py export canonical --out /tmp/mut/canonical
+    python3 tools/mutation_report.py --dir /tmp/mut/canonical --status survived
+
+Filters combine. `--file` and `--function` take exact names or globs. `--status`
+takes a comma list. `--untriaged` means survived or no_tests with no
+current triage entry. `--format` is `table` (the default), `jsonl` or `csv`.
+In CSV, triage is flattened into `triage_verdict`, `triage_note` and
+`triage_stale`. `--history N` prints one row per run and module, plus an `ALL`
+row, with score and delta.

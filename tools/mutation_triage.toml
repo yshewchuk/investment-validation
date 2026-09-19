@@ -1,0 +1,18 @@
+# Mutation triage: survivors a human judged not worth a test.
+# Read by tools/mutation_results.py into each results.jsonl row's `triage`
+# field. Guide: tests/README.md, "Mutation CI" -> "Triage file".
+#
+# One [[triage]] table per mutant:
+#
+#   [[triage]]
+#   mutant = "engine.v2.foundation.canonical.x__number__mutmut_22"   # exact mutmut name
+#   verdict = "EQUIVALENT"      # or "LOW-VALUE"
+#   note = "why no test can (EQUIVALENT) or should (LOW-VALUE) kill it"
+#   diff_contains = ">= 1"      # optional: text of the mutated line; if a later
+#                               # edit renumbers the function's mutants and the
+#                               # diff no longer contains it, the entry is marked
+#                               # stale and the survivor counts as untriaged again
+#
+# EQUIVALENT: the mutant behaves identically to the original on every input.
+# LOW-VALUE: it differs, but only in a way no test should pin (logging text,
+# a defensive branch that is unreachable by construction, ...).

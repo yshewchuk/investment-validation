@@ -1,0 +1,188 @@
+# Mutation testing (mutmut), report only. Guide: tests/README.md, "Mutation CI".
+#
+# - push to main: incremental. Each module restores its newest mutmut state
+#   and re-tests only functions whose source changed (plus survivors, when its
+#   tests changed).
+# - weekly schedule, and workflow_dispatch by default: full, from scratch (no
+#   restore). Dispatch with fresh=false for an incremental run, and `modules`
+#   for a subset.
+#
+# Scores never fail a job. A job fails only when the tool itself does (mutmut's
+# clean test run fails, or the run hits its step timeout). Every job uploads
+# results.jsonl + summary.json; the `report` job merges them into one
+# `mutation-report` artifact, which tools/mutation_report.py queries.
+name: mutation
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 0"  # Sundays 05:23 UTC: full run
+  workflow_dispatch:
+    inputs:
+      fresh:
+        description: "Full run from scratch (skip the cache restore). Untick for incremental."
+        type: boolean
+        default: true
+      modules:
+        description: "Comma-separated module subset (empty: every enabled module)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The phase-0 environment lock (requirements.txt header: "python 3.14.4").
+  PYTHON_VERSION: "3.14.4"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.plan.outputs.modules }}
+      mode: ${{ steps.plan.outputs.mode }}
+      mutmut: ${{ steps.plan.outputs.mutmut }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          FRESH: ${{ inputs.fresh }}
+          ONLY: ${{ inputs.modules }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
+            mode=incremental
+          else
+            mode=full
+          fi
+          mutmut=$(sed -n 's/^mutmut==\([^ ]*\).*/\1/p' requirements-dev.txt)
+          test -n "$mutmut"
+          {
+            echo "modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY")"
+            echo "mode=$mode"
+            echo "mutmut=$mutmut"
+          } >> "$GITHUB_OUTPUT"
+
+  mutate:
+    needs: plan
+    if: needs.plan.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.plan.outputs.modules) }}
+    env:
+      MODULE: ${{ matrix.module }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      # tools/mutation_pilot.py's default home; the cache paths below match it.
+      STATE: ~/.cache/investing-plan-mutation-pilot/${{ matrix.module }}/mutants
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the push's base commit, to find the functions it changed
+      - id: py
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - id: key
+        run: >-
+          echo "prefix=mutation-mutmut${{ needs.plan.outputs.mutmut }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('tools/mutation_pilot.toml') }}-${{ matrix.module }}-"
+          >> "$GITHUB_OUTPUT"
+      # Only mutmut's state is cached: per-file verdicts and function hashes
+      # (*.meta), test stats and the test digest. The work copy and the mutated
+      # files are rebuilt from the checkout; unchanged functions keep their
+      # verdicts because mutmut compares function hashes, not mtimes, once the
+      # mutated file is missing.
+      - name: Restore mutmut state
+        if: needs.plan.outputs.mode == 'incremental'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.STATE }}/**/*.meta
+            ${{ env.STATE }}/mutmut-stats.json
+            ${{ env.STATE }}/mutation-ci-state.json
+          key: ${{ steps.key.outputs.prefix }}${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
+      - name: Run mutmut
+        id: run
+        timeout-minutes: 330
+        run: |
+          date +%s > "$RUNNER_TEMP/mutation-start"
+          set +e
+          python -u tools/mutation_pilot.py run "$MODULE" --max-children "$(nproc)"
+          echo "$?" > "$RUNNER_TEMP/mutation-rc"
+      - name: Export report
+        if: always() && steps.key.outcome == 'success'
+        env:
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)  # -1: killed by the step timeout
+          start=$(cat "$RUNNER_TEMP/mutation-start" 2>/dev/null || date +%s)
+          python tools/mutation_results.py export "$MODULE" --out "report/$MODULE" --mode "$MODE" \
+            ${BEFORE:+--changed-base "$BEFORE"} --run-exit-code "$rc" --elapsed "$(( $(date +%s) - start ))"
+          cat "report/$MODULE/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.key.outcome == 'success'
+        with:
+          name: mutation-module-${{ matrix.module }}
+          path: report/${{ matrix.module }}/
+          retention-days: 90
+          if-no-files-found: warn
+      # Saved even after a timeout, so the next run resumes the partial state.
+      - name: Save mutmut state
+        if: always() && steps.key.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.STATE }}/**/*.meta
+            ${{ env.STATE }}/mutmut-stats.json
+            ${{ env.STATE }}/mutation-ci-state.json
+          key: ${{ steps.key.outputs.prefix }}${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Fail only on a tool error, never on scores
+        if: always() && steps.key.outcome == 'success'
+        run: |
+          rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)
+          if [ "$rc" != 0 ]; then echo "::error::mutmut run exited $rc"; exit 1; fi
+
+  report:
+    needs: [plan, mutate]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-module-*
+          path: modules
+      - run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dirs=(modules/mutation-module-*)
+          if [ ${#dirs[@]} -eq 0 ]; then echo "::warning::no module reports to merge"; exit 0; fi
+          python tools/mutation_results.py merge --out merged "${dirs[@]}"
+          cat merged/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: merged/
+          retention-days: 90
+          if-no-files-found: ignore

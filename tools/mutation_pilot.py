@@ -19,6 +19,7 @@ the clean run instead of reading it.
 Commands::
 
     python3 tools/mutation_pilot.py list
+    python3 tools/mutation_pilot.py matrix [--only a,b]            # CI matrix (JSON)
     python3 tools/mutation_pilot.py count [MODULE ...]          # mutant counts, no tests run
     python3 tools/mutation_pilot.py run MODULE [--max-children N] [--fresh] [GLOB ...]
     python3 tools/mutation_pilot.py report [MODULE ...] [--no-diffs]
@@ -27,11 +28,16 @@ Commands::
 restricts the run to matching mutant names (mutmut's own syntax, e.g.
 ``"engine.models.no_fit.x_forbid_fitting*"``). ``report`` prints code only
 (counts, file:line and the mutation diff), never data or model values.
+Before mutmut starts, ``run`` resets survived/no-tests verdicts if the module's
+tests changed since the last run, and writes ``prerun-snapshot.json`` so
+``tools/mutation_results.py export`` can tell which mutants this run re-tested.
 """
 from __future__ import annotations
 
 import argparse
 import filecmp
+import fnmatch
+import hashlib
 import json
 import os
 import shutil
@@ -42,6 +48,7 @@ from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "tools"))
 CONFIG = REPO / "tools" / "mutation_pilot.toml"
 
 # mutmut 3.8 stats.status_by_exit_code, restated so the report does not need
@@ -82,6 +89,35 @@ def module_cfg(cfg: dict, name: str) -> dict:
     return modules[name]
 
 
+def enabled_modules(cfg: dict) -> list[str]:
+    """Modules that run. One with an ``excluded`` reason is listed, never run."""
+    return [name for name, mod in cfg["modules"].items() if not mod.get("excluded")]
+
+
+def expand(patterns: list[str], tracked: list[str], *, skip: list[str] = ()) -> list[str]:
+    """Tracked paths matching ``patterns`` (fnmatch; ``*`` spans ``/``), in
+    pattern order, minus ``skip``. A pattern that matches nothing is an error:
+    a renamed file must not silently drop out of the matrix."""
+    out: list[str] = []
+    for pat in patterns:
+        hits = [p for p in tracked if fnmatch.fnmatchcase(p, pat)]
+        if not hits:
+            sys.exit(f"pattern matches no tracked file: {pat}")
+        out.extend(h for h in hits if h not in out)
+    return [p for p in out if not any(fnmatch.fnmatchcase(p, s) for s in skip)]
+
+
+def mutate_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[str]:
+    mod = module_cfg(cfg, name)
+    tracked = tracked if tracked is not None else _tracked(["engine"])
+    return expand(mod["mutate"], tracked, skip=mod.get("skip", []))
+
+
+def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[str]:
+    tracked = tracked if tracked is not None else _tracked(["tests"])
+    return expand(module_cfg(cfg, name).get("tests", []), tracked)
+
+
 # -- work copy ---------------------------------------------------------------
 
 def _tracked(paths: list[str]) -> list[str]:
@@ -103,10 +139,11 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
         shutil.rmtree(work)
     work.mkdir(parents=True, exist_ok=True)
 
-    tracked = set(_tracked(defaults["copy"]))
-    missing = [p for p in mod["mutate"] + mod["tests"] if p not in tracked]
-    if missing:
-        sys.exit(f"{name}: not tracked in the repo: {missing}")
+    if mod.get("excluded"):
+        sys.exit(f"{name} is excluded: {mod['excluded']}")
+    tracked_list = _tracked(defaults["copy"])
+    tracked = set(tracked_list)
+    mutate, tests = mutate_files(cfg, name, tracked_list), test_files(cfg, name, tracked_list)
     for rel in sorted(tracked):
         src, dst = REPO / rel, work / rel
         if not src.is_file():
@@ -126,12 +163,13 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
 
     setup = ("[mutmut]\n"
              + lines("source_paths", ["engine"])
-             + lines("only_mutate", mod["mutate"])
+             + lines("only_mutate", mutate)
              # mutmut copies source_paths and tests/ into mutants/ by itself;
              # every other copied tree must be listed to be importable there.
              + lines("also_copy", [c for c in defaults["copy"] if c not in ("engine", "tests")] or ["tests"])
-             + lines("pytest_add_cli_args_test_selection", mod["tests"])
-             + lines("pytest_add_cli_args", defaults["pytest_args"])
+             + lines("pytest_add_cli_args_test_selection", tests)
+             + lines("pytest_add_cli_args", defaults["pytest_args"]
+                     + [f"--deselect={d}" for d in defaults.get("deselect", [])])
              + f"timeout_constant = {float(defaults['timeout_constant'])}\n"
              + f"timeout_multiplier = {float(defaults['timeout_multiplier'])}\n"
              # The work copy is not a git checkout; source hashes decide staleness.
@@ -150,8 +188,65 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
 
 def cmd_list(cfg: dict, _args) -> int:
     for name, mod in cfg["modules"].items():
-        print(f"{name}\n  mutate: {' '.join(mod['mutate'])}\n  tests:  {' '.join(mod['tests'])}\n  why:    {mod['why']}")
+        state = f"EXCLUDED: {mod['excluded']}" if mod.get("excluded") else f"why: {mod['why']}"
+        print(f"{name}\n  mutate: {' '.join(mod['mutate'])}\n  tests:  "
+              f"{' '.join(mod.get('tests', []))}\n  {state}")
     return 0
+
+
+def cmd_matrix(cfg: dict, args) -> int:
+    """JSON list of the modules a CI run covers: every enabled module, or the
+    comma-separated ``--only`` subset (an unknown or excluded name is an error)."""
+    names = enabled_modules(cfg)
+    if args.only and args.only.strip():
+        wanted = [n.strip() for n in args.only.split(",") if n.strip()]
+        bad = [n for n in wanted if n not in names]
+        if bad:
+            sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")
+        names = [n for n in names if n in wanted]
+    print(json.dumps(names))
+    return 0
+
+
+# Test-side changes mutmut cannot see: it re-tests a mutant only when the
+# mutated function's own source changes. A new or stronger test therefore
+# leaves an old "survived" verdict standing until a full run. The driver keeps
+# a digest of the module's test files plus the shared tests/ helpers, and when
+# it moves, resets survived and no-tests verdicts so this run re-tests them.
+# Killed verdicts are kept; the weekly full run re-derives everything.
+CI_STATE = "mutation-ci-state.json"
+_RETEST_ON_TEST_CHANGE = {0, 5, 33}
+
+
+def tests_digest(work: Path, tests: list[str]) -> str:
+    helpers = sorted(p.relative_to(work).as_posix() for p in (work / "tests").glob("*.py")
+                     if not p.name.startswith("test_"))
+    h = hashlib.sha256()
+    for rel in sorted(set(tests) | set(helpers)):
+        h.update(rel.encode() + b"\0" + (work / rel).read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def reset_on_test_change(work: Path, files: list[str], digest: str) -> int:
+    """Reset survived/no-tests verdicts when the digest moved; record it."""
+    state_path = work / "mutants" / CI_STATE
+    old = json.loads(state_path.read_text()).get("tests_digest") if state_path.exists() else None
+    reset = 0
+    if old is not None and old != digest:
+        for rel in files:
+            meta_path = work / "mutants" / (rel + ".meta")
+            if not meta_path.exists():
+                continue
+            meta = json.loads(meta_path.read_text())
+            codes = meta["exit_code_by_key"]
+            for key, code in codes.items():
+                if code in _RETEST_ON_TEST_CHANGE:
+                    codes[key] = None
+                    reset += 1
+            meta_path.write_text(json.dumps(meta, indent=4))
+    if (work / "mutants").is_dir():
+        state_path.write_text(json.dumps({"tests_digest": digest}) + "\n")
+    return reset
 
 
 def cmd_count(cfg: dict, args) -> int:
@@ -164,7 +259,7 @@ def cmd_count(cfg: dict, args) -> int:
         code = ("import sys\nfrom mutmut.mutation.file_mutation import mutate_file_contents\n"
                 "for rel in sys.argv[1:]:\n"
                 "    print(len(mutate_file_contents(rel, open(rel).read()).mutant_names), rel)\n")
-        out = subprocess.run([sys.executable, "-c", code, *module_cfg(cfg, name)["mutate"]],
+        out = subprocess.run([sys.executable, "-c", code, *mutate_files(cfg, name)],
                              cwd=work, check=True, capture_output=True, text=True).stdout
         total = sum(int(line.split()[0]) for line in out.splitlines())
         print(f"{name}: {total} mutants")
@@ -174,7 +269,16 @@ def cmd_count(cfg: dict, args) -> int:
 
 
 def cmd_run(cfg: dict, args) -> int:
+    from mutation_results import SNAPSHOT_NAME, snapshot
+
     work = sync_workdir(args.module, cfg, fresh=args.fresh)
+    files = mutate_files(cfg, args.module)
+    digest = tests_digest(work, test_files(cfg, args.module))
+    reset = reset_on_test_change(work, files, digest)
+    if reset:
+        print(f"[mutation_pilot] tests changed: {reset} survived/no-tests verdicts reset", flush=True)
+    # The verdicts before this run, so the export can mark what it re-tested.
+    (work / SNAPSHOT_NAME).write_text(json.dumps(snapshot(work, files)))
     children = args.max_children or int(cfg["defaults"]["max_children"])
     cmd = [sys.executable, "-u", "-m", "mutmut", "run", "--max-children", str(children), *args.globs]
     print(f"[mutation_pilot] {args.module}: {' '.join(cmd[2:])}  (cwd {work})", flush=True)
@@ -187,7 +291,11 @@ def cmd_run(cfg: dict, args) -> int:
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"
-    return subprocess.run(cmd, cwd=work, env=env).returncode
+    rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    # On a first run mutants/ did not exist before mutmut; record the digest now
+    # so the next run compares against this one.
+    reset_on_test_change(work, [], digest)
+    return rc
 
 
 def _function_span(source: str, func: str, cls: str | None) -> tuple[int, int] | None:
@@ -223,7 +331,7 @@ def cmd_report(cfg: dict, args) -> int:
     for name in names:
         work = base / name
         per_file: dict[str, Counter] = {}
-        for rel in module_cfg(cfg, name)["mutate"]:
+        for rel in mutate_files(cfg, name):
             meta = work / "mutants" / (rel + ".meta")
             counts: Counter = Counter()
             if meta.exists():
@@ -280,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
+    p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
+    p.add_argument("--only", default="", help="comma-separated subset")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")
@@ -292,7 +402,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-diffs", action="store_true")
     args = parser.parse_args(argv)
     cfg = load_config()
-    return {"list": cmd_list, "count": cmd_count, "run": cmd_run, "report": cmd_report}[args.cmd](cfg, args)
+    return {"list": cmd_list, "matrix": cmd_matrix, "count": cmd_count, "run": cmd_run,
+            "report": cmd_report}[args.cmd](cfg, args)
 
 
 if __name__ == "__main__":
