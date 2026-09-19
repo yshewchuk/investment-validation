@@ -107,3 +107,94 @@ def test_writer_keeps_infinite_residuals_in_the_canonical_form(tmp_path) -> None
         assert decoded[0]["err_move"] == float("inf")
         assert decoded[1]["err_crush"] == float("-inf")
         assert decoded[0]["err_crush"] == -1.0
+
+
+# -- the frozen pools/states are hashed and spilled once, not per candidate ----------
+
+
+def _shared_trace(pool, state):
+    """One candidate's collector with a fold pool and a model state recorded
+    through ``capture_frozen``, as ``engine.score`` records them."""
+    import tools.capture_tier0_corpus as capture
+    from engine.score import Phase4TraceCollector, _Predocumented
+
+    trace = Phase4TraceCollector(retain_full_trace=False,
+                                 content_hasher=capture._SHARED_TRACE_DOCUMENTS)
+    trace.capture_source_bundle(context={"ticker": "AAA"},
+                                quote_domain=[{"strike": 100.0, "bid": 1.0}])
+    trace.capture_frozen(
+        fold_pools={"pred_abs_move": pool}, states={"payoff:x": state},
+        declarations={"payoff": {"state": "payoff:x", "seed": 3}},
+        inputs={"fold:size@sizing": {"iv30": 55.0}})
+    assert isinstance(pool, _Predocumented)
+    return trace
+
+
+def _pool_and_state():
+    from engine.score import _Predocumented
+
+    pool = _Predocumented({"predictions": [0.5 * i for i in range(200)],
+                           "residuals": [float("inf"), -0.0, 1e-7, 1e21, *range(196)],
+                           "interval_floor": None})
+    state = _Predocumented({"kind": "line", "residuals": [0.25, -1.5], "n": 2})
+    return pool, state
+
+
+def test_shared_fragments_hash_exactly_like_the_plain_canonical_form() -> None:
+    from engine.v2.foundation.canonical import content_hash
+
+    import tools.capture_tier0_corpus as capture
+
+    pool, state = _pool_and_state()
+    registry = capture._SharedTraceDocuments(text_budget=1)
+    registry.register_shared([pool.value, state.value])
+    document = {"a": pool.value, 2: [state.value, (1, 2.5)], "b": {"c": pool.value},
+                "nan": float("nan"), "s": "é"}
+    for _ in range(2):  # rendered, then served from the memo (or evicted)
+        assert registry(document) == content_hash(document)
+    assert capture._SharedTraceDocuments()(document) == content_hash(document)
+
+
+def test_candidates_hash_and_spill_the_shared_pool_once_and_hydrate_it_shared() -> None:
+    from engine.v2.foundation.canonical import content_hash
+
+    import tools.capture_tier0_corpus as capture
+
+    pool, state = _pool_and_state()
+    try:
+        traces = [_shared_trace(pool, state) for _ in range(3)]
+        assert traces[0].shared_documents() == (pool.value, state.value)
+        checkpoints = [trace.diagnostic_checkpoint() for trace in traces]
+        for checkpoint in checkpoints:
+            row = checkpoint["checkpoints"]["source_inputs"]
+            assert row["content_hash"] == content_hash(row["value"])
+            assert row["value"]["frozen"]["fold_pools"]["pred_abs_move"] is pool.value
+        spilled = [capture._spill_trace(checkpoint) for checkpoint in checkpoints]
+        # The spill holds a reference, not ~the pool: every file is small.
+        assert max(pointer.path.stat().st_size for pointer in spilled) < 2000
+        hydrated = [capture._hydrate_trace(pointer) for pointer in spilled]
+        assert hydrated == checkpoints
+        for trace in hydrated:
+            frozen = trace["checkpoints"]["source_inputs"]["value"]["frozen"]
+            assert frozen["fold_pools"]["pred_abs_move"] is pool.value
+            assert frozen["states"]["payoff:x"] is state.value
+    finally:
+        capture._cleanup_trace_spill()
+    # After the run's registry is reset, a spill of a shared value cannot be
+    # hydrated into something else silently.
+    assert not capture._SHARED_TRACE_DOCUMENTS.shared(pool.value)
+
+
+def test_frozen_recording_redocuments_only_its_section() -> None:
+    from engine.score import Phase4TraceCollector
+
+    import tools.capture_tier0_corpus as capture
+
+    pool, state = _pool_and_state()
+    try:
+        trace = _shared_trace(pool, state)
+        trace.capture_frozen(declarations={"gate": {"binding": "gate", "output": "g"}})
+        group = trace._checkpoint_groups["source_inputs"]
+        assert group == Phase4TraceCollector._document(trace._source_bundle)
+    finally:
+        capture._cleanup_trace_spill()

@@ -403,12 +403,26 @@ class Phase4TraceCollector:
         }
         self.retain_full_trace = bool(retain_full_trace)
         self._content_hasher = content_hasher
+        # The frozen pools/states this trace embeds by reference (id -> value).
+        self._shared_documents: dict[int, Any] = {}
+
+    def shared_documents(self) -> tuple[Any, ...]:
+        """The documented values this trace shares by identity with other
+        traces (the served fold pools and model states ``capture_frozen``
+        recorded). A capture tool may hash and spill them once, not per
+        candidate; they are never mutated after recording."""
+        return tuple(self._shared_documents.values())
 
     def _hash(self, value: Any) -> str:
         if self._content_hasher is None:
             raise ValueError(
                 "phase 4 diagnostic checkpoints require an injected content hasher"
             )
+        # A hasher that memoizes shared sub-values (the capture tool's) is
+        # told which ones are shared first; the hash is the same either way.
+        register = getattr(self._content_hasher, "register_shared", None)
+        if register is not None and self._shared_documents:
+            register(self._shared_documents.values())
         return self._content_hasher(value)
 
     @staticmethod
@@ -721,22 +735,28 @@ class Phase4TraceCollector:
             if old != new and f"{section}.{name}" not in frozen["conflicts"]:
                 frozen["conflicts"].append(f"{section}.{name}")
 
-        def shared(value: Any) -> _Predocumented:
-            return value if isinstance(value, _Predocumented) else _Predocumented(
+        def shared(section: str, name: str, value: Any) -> None:
+            wrapped = value if isinstance(value, _Predocumented) else _Predocumented(
                 self._document(value))
+            put(section, name, wrapped)
+            held = frozen[section][name]
+            self._shared_documents[id(held.value)] = held.value
 
         for slot, binding in (bindings or {}).items():
             put("bindings", str(slot), self._document(binding))
         for output, pool in (fold_pools or {}).items():
-            put("fold_pools", str(output), shared(pool))
+            shared("fold_pools", str(output), pool)
         for name, value in (states or {}).items():
-            put("states", str(name), shared(value))
+            shared("states", str(name), value)
         for name, value in (declarations or {}).items():
             put("declarations", str(name), self._document(value))
         for name, row in (inputs or {}).items():
             put("inputs", str(name), self._document(row))
-        if "source_inputs" in self._checkpoint_groups:
-            self._checkpoint_groups["source_inputs"] = self._document(self._source_bundle)
+        group = self._checkpoint_groups.get("source_inputs")
+        if group is not None:
+            # Only the frozen section changed: the rest of the group is what
+            # the last `capture_source_bundle` documented, unchanged.
+            group["frozen"] = self._document(frozen)
 
     def capture_source_bundle(self, *, context: Mapping[str, Any] | None = None,
                               quote_domain: Any = None,

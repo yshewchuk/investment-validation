@@ -1190,10 +1190,92 @@ def _trace_spill_dir() -> Path:
     return _TRACE_SPILL_DIR
 
 
+class _SharedTraceDocuments:
+    """The frozen pools and model states (R4-18/R4-19) many candidates share.
+
+    A served Tier-4 fold's pool (~50k predictions and residuals), a
+    champion's residual pool and a payoff fit are documented ONCE per
+    (model, fold) by ``engine.score`` and embedded by reference in every
+    candidate's trace (``Phase4TraceCollector.shared_documents``). Per
+    candidate they used to be canonical-hashed twice (the RFC 8785 number
+    formatting of ~300k floats: >95% of the recording's CPU) and pickled
+    into the spill, then unpickled as separate copies. Registered here:
+
+    * hashing (``__call__``, the collector's ``content_hasher``) reuses each
+      shared value's canonical text, so it is rendered once per value, not
+      per candidate; the hash is byte-identical (``canonical_json``);
+    * the spill writes a shared value as a reference (pickle persistent id)
+      and hydration returns the one registered object, so ``chosen``
+      candidates share it again with no copy.
+
+    Values are held until ``reset`` (the run's end); ``engine.score`` caches
+    the same objects for the Scorer's life, so this adds no copies. Rendered
+    texts are kept in a small LRU bounded by total size.
+    """
+
+    def __init__(self, text_budget: int = 16_000_000) -> None:
+        self._held: dict[int, Any] = {}
+        self._texts: dict[int, str] = {}
+        self._text_size = 0
+        self._text_budget = int(text_budget)
+
+    def register_shared(self, values: Iterable[Any]) -> None:
+        for value in values:
+            self._held.setdefault(id(value), value)
+
+    def shared(self, value: Any) -> bool:
+        return self._held.get(id(value)) is value
+
+    def canonical(self, node: Any, render) -> str | None:
+        key = id(node)
+        if self._held.get(key) is not node:
+            return None
+        text = self._texts.pop(key, None)
+        if text is None:
+            text = render(node)
+            self._text_size += len(text)
+        self._texts[key] = text  # most recently used last
+        while self._text_size > self._text_budget and len(self._texts) > 1:
+            oldest = next(iter(self._texts))
+            self._text_size -= len(self._texts.pop(oldest))
+        return text
+
+    def __call__(self, value: Any) -> str:
+        # Shared values sit only in the source_inputs group's `frozen`
+        # section (or are hashed directly, by reconcile); every other group
+        # takes the plain path, which is faster on content with none.
+        scoped = bool(self._held) and (
+            self.shared(value) or (isinstance(value, dict) and "frozen" in value))
+        return content_hash(value, fragments=self if scoped else None)
+
+    def reset(self) -> None:
+        self._held.clear()
+        self._texts.clear()
+        self._text_size = 0
+
+
+_SHARED_TRACE_DOCUMENTS = _SharedTraceDocuments()
+
+
+class _SpillPickler(pickle.Pickler):
+    def persistent_id(self, obj: Any) -> Any:
+        if isinstance(obj, (dict, list)) and _SHARED_TRACE_DOCUMENTS.shared(obj):
+            return ("phase4-shared", id(obj))
+        return None
+
+
+class _SpillUnpickler(pickle.Unpickler):
+    def persistent_load(self, pid: Any) -> Any:
+        tag, key = pid
+        if tag != "phase4-shared" or key not in _SHARED_TRACE_DOCUMENTS._held:
+            raise pickle.UnpicklingError(f"unknown shared trace document {pid!r}")
+        return _SHARED_TRACE_DOCUMENTS._held[key]
+
+
 def _spill_trace(trace: dict) -> _SpilledTrace:
     path = _trace_spill_dir() / f"{next(_TRACE_SPILL_COUNTER)}.pkl"
     with path.open("wb") as fh:
-        pickle.dump(trace, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        _SpillPickler(fh, protocol=pickle.HIGHEST_PROTOCOL).dump(trace)
     return _SpilledTrace(path)
 
 
@@ -1202,11 +1284,12 @@ def _hydrate_trace(value: Any) -> Any:
 
     A no-op on anything that is not a spill pointer (``None``, or an
     already-hydrated dict — idempotent, so a caller never needs to know
-    whether an earlier step already hydrated this candidate).
+    whether an earlier step already hydrated this candidate). A shared
+    frozen pool/state comes back as the one registered object.
     """
     if isinstance(value, _SpilledTrace):
         with value.path.open("rb") as fh:
-            return pickle.load(fh)
+            return _SpillUnpickler(fh).load()
     return value
 
 
@@ -1215,6 +1298,7 @@ def _cleanup_trace_spill() -> None:
     if _TRACE_SPILL_DIR is not None:
         shutil.rmtree(_TRACE_SPILL_DIR, ignore_errors=True)
         _TRACE_SPILL_DIR = None
+    _SHARED_TRACE_DOCUMENTS.reset()
 
 
 # `engine.score.Phase4TraceCollector` shares two families of content BY
@@ -1303,7 +1387,7 @@ def _reconcile_shared_trace_content(
         if not present:
             continue
         value = _get_in(trace, present[0])
-        digest = content_hash(value)
+        digest = _SHARED_TRACE_DOCUMENTS(value)
         cached = cache.get(digest)
         resolved = cached if cached is not None else value
         for path in present:
@@ -1323,7 +1407,7 @@ def _score(scorer, request, *, index=None) -> tuple[dict, dict, float, dict]:
     as_of = request.as_of if request.as_of is not None else request.chain_as_of
     try:
         trace = score_mod.Phase4TraceCollector(
-            retain_full_trace=False, content_hasher=content_hash,
+            retain_full_trace=False, content_hasher=_SHARED_TRACE_DOCUMENTS,
         )
         result = (scorer.score(request, chain_index=index, trace=trace) if index is not None
                   else scorer.score(request, trace=trace))
