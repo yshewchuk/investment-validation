@@ -311,6 +311,7 @@ def test_score_captures_boundary_legs_and_cost_before_later_mutation(
         entry_offset=0,
         exit_offset=1,
         decision_offset=None,
+        decided_early=False,
     )
     expected_legs = [{
         "name": "long_put",
@@ -520,7 +521,15 @@ def test_refusal_omits_unexecuted_groups_and_default_path_is_invariant() -> None
     )
     assert checkpoint["disposition"]["status"] == "refused"
     assert checkpoint["disposition"]["flags"] == ["UNVALIDATED_STRUCTURE"]
-    assert checkpoint["checkpoints"] == {}
+    # Tier-0 gaps 005/009: nothing ran, so the only group is the request-only
+    # source bundle native refuses from.
+    assert set(checkpoint["checkpoints"]) == {"source_inputs"}
+    source = _checkpoint_value(collector, "source_inputs")
+    assert source["scope"] == "request_only"
+    assert source["context"] == {"ticker": "ABC", "strategy": "CAL-P",
+                                 "event_date": "2026-01-08", "session": "AMC"}
+    assert (source["quote_domain"], source["quote_status"]) == ([], "not_reached")
+    assert not source["model_bindings"] and not source["native_recipes"]
 
 
 # -- R4-18/R4-19: source_inputs.frozen ---------------------------------------------
@@ -632,3 +641,163 @@ def test_fold_recording_is_inert_without_a_collector(tmp_path) -> None:
         pd.DataFrame({"a": [1.0]}), site="sizing")
     assert recorded is False and served.calls == 0
     assert not hasattr(scorer, "_phase4_fold_records")
+
+
+# -- Tier-0 vetting gaps 001/012/003/004 (2026-09-19) --------------------------
+# The resolved context is recorded as soon as resolve_context has it, the chain
+# lookup says how far it got, and a BAD_QUOTE row records the models legacy
+# WOULD have served. None of it changes the legacy record.
+
+_WINDOW = SimpleNamespace(
+    entry_date=pd.Timestamp("2026-01-06"),
+    exit_date=pd.Timestamp("2026-01-09"),
+    decision_date=pd.Timestamp("2026-01-05"),
+)
+_EXPECTED_CONTEXT = {
+    "ticker": "ABC", "event_date": "2026-01-08", "session": "AMC",
+    "entry_date": "2026-01-06", "exit_date": "2026-01-09", "as_of": "2026-01-05",
+    "quote_date": "2026-01-06",
+}
+
+
+def _early_scorer(monkeypatch, strategy: str = "STR-THRU"):
+    from engine.structures import STRUCTURES
+
+    monkeypatch.setattr(score_module, "assert_decision_causal",
+                        lambda *args, **kwargs: None)
+    scorer = Scorer.__new__(Scorer)
+    scorer.snapshot = "snap-test"
+    scorer.calendar = SimpleNamespace(
+        resolve_offsets=lambda *args, **kwargs: _WINDOW,
+        is_projected=lambda value: False,
+    )
+    scorer._resolve_event = lambda request: (pd.Timestamp("2026-01-08"), "AMC")
+    scorer._structure = lambda request: STRUCTURES[strategy]()
+    scorer._features = lambda request, result: pd.DataFrame({"x": [1.0]})
+    scorer._quote_today = lambda ticker, as_of: None
+    scorer._note_chain_age = lambda request, result: None
+    scorer._score_analogs = lambda request, result, features: None
+    scorer._score_gate = lambda request, result, features: None
+    scorer._compare_layers = lambda result: None
+    return scorer
+
+
+def _request(strategy: str = "STR-THRU") -> ScoreRequest:
+    return ScoreRequest(
+        ticker="ABC", strategy=strategy, as_of=pd.Timestamp("2026-01-05"),
+        event_date=pd.Timestamp("2026-01-08"), session="AMC",
+    )
+
+
+def _source(collector) -> dict:
+    return _checkpoint_value(collector, "source_inputs")
+
+
+def test_no_chain_row_records_its_context_and_an_explicitly_empty_lookup(
+        monkeypatch) -> None:
+    """Gap 001: the NO_CHAIN row used to carry context={} and quote_domain=[]
+    with nothing saying the lookup ran and came back empty."""
+    scorer = _early_scorer(monkeypatch)
+    scorer._score_model = lambda request, result, features: None
+    empty_index = SimpleNamespace(get=lambda ticker, date: None)
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+
+    traced = scorer.score(_request(), chain_index=empty_index, trace=collector)
+    default = scorer.score(_request(), chain_index=empty_index)
+
+    assert "NO_CHAIN" in traced.flags
+    source = _source(collector)
+    assert {key: source["context"][key] for key in _EXPECTED_CONTEXT} == _EXPECTED_CONTEXT
+    assert source["context"]["strategy"] == "STR-THRU"
+    assert (source["quote_domain"], source["quote_status"]) == ([], "empty")
+    assert traced.as_dict() == default.as_dict()
+
+
+def test_row_that_never_reaches_pricing_records_context_and_not_reached(
+        monkeypatch) -> None:
+    """Gap 012: a NO_FORECAST sizing refusal returns before _price_entry."""
+    scorer = _early_scorer(monkeypatch, strategy="RAMP7")
+    monkeypatch.setattr(score_module, "FORECAST_SIZED", {"RAMP7"})
+
+    def decline(request, result, structure, *, size):
+        result.flag("NO_FORECAST")
+        return request, None
+
+    scorer._size_from_forecast = decline
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("pricing must not run")
+
+    scorer._price_entry = unreachable
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+
+    result = scorer.score(_request("RAMP7"), trace=collector)
+
+    assert result.flags == ["NO_FORECAST"]
+    source = _source(collector)
+    assert {key: source["context"][key] for key in _EXPECTED_CONTEXT} == _EXPECTED_CONTEXT
+    assert (source["quote_domain"], source["quote_status"]) == ([], "not_reached")
+
+
+def test_row_whose_pricer_raises_keeps_the_resolved_exit_date(monkeypatch) -> None:
+    """Gap 003: COARSE_LADDER raised inside price_structure, so the post-pricing
+    context capture (entry/exit/as_of) never ran."""
+    scorer = _early_scorer(monkeypatch)
+    scorer._score_model = lambda request, result, features: None
+
+    def coarse(request, structure, result, chain_index):
+        result.quote_date = result.entry_date
+        result._phase4_checkpoint_collector.capture_source_bundle(
+            quote_domain=[{"right": "C", "strike": 100.0, "expiry": "2026-01-16",
+                           "bid": 1.0, "ask": 2.0}],
+            quote_status="recorded",
+        )
+        result.flag("COARSE_LADDER")
+
+    scorer._price_entry = coarse
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+
+    scorer.score(_request(), trace=collector)
+
+    source = _source(collector)
+    assert source["context"]["exit_date"] == "2026-01-09"
+    assert source["quote_status"] == "recorded"
+    assert "spot" not in source["context"]
+
+
+def test_bad_quote_row_records_the_models_legacy_would_serve(monkeypatch) -> None:
+    """Gap 004: BAD_QUOTE leaves before _score_model, so the capture had no
+    bindings, no forecast recipe and no feature vector. They are recorded as
+    what _score_model would serve, and the legacy record does not move."""
+    scorer = _early_scorer(monkeypatch)
+    artifact = SimpleNamespace(features=("x", "y"))
+    entry = SimpleNamespace(id="size-v7", path="models/size.joblib",
+                            artifact_sha256="ab" * 32, decision_offset=None)
+    scorer.model = lambda role, *args, **kwargs: (
+        (entry, artifact) if role == "size" else None
+    )
+
+    def priced_bad(request, structure, result, chain_index):
+        result.legs = [{"name": "call", "strike": 100.0}]
+        result.entry_cost, result.spot = 40.0, 100.0
+        result.quote_date = result.entry_date
+        result.flag("BAD_QUOTE")
+
+    scorer._price_entry = priced_bad
+
+    def must_not_score(*args, **kwargs):
+        raise AssertionError("a BAD_QUOTE row is never scored")
+
+    scorer._score_model = must_not_score
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+
+    traced = scorer.score(_request(), trace=collector)
+    default = scorer.score(_request())
+
+    assert traced.as_dict() == default.as_dict()
+    assert traced.model_versions == {} and traced.model_inputs == {}
+    features = _checkpoint_value(collector, "features")
+    assert features["feature_vector"] == {"abs_move": {"x": 1.0, "y": None}}
+    source = _source(collector)
+    assert [b["model_id"] for b in source["model_bindings"]] == ["size-v7"]
+    assert source["native_recipes"]["forecast"] == {"required_roles": ["driver"]}

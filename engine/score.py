@@ -206,6 +206,12 @@ ATM_TOLERANCE_PCT = 2.0
 #: Draws used to turn a point prediction into a P&L distribution.
 MODEL_DRAWS = 4000
 
+#: The Phase 4 binding output names of STR-RUNUP's two forecast models.
+_RUNUP_MODEL_OUTPUTS = {
+    "implied_t1": ("implied_t1",),
+    "runup_move": ("runup_move_prediction",),
+}
+
 #: Below this, a quoted implied move is treated as ABSENT rather than displayed.
 #:
 #: EXP-110 established that `or_implied` uses exactly 0 for "no quote" on 25.6%
@@ -758,8 +764,29 @@ class Phase4TraceCollector:
             # the last `capture_source_bundle` documented, unchanged.
             group["frozen"] = self._document(frozen)
 
+    #: How far the chain lookup got, recorded next to ``quote_domain`` so an
+    #: empty domain says WHY it is empty. ``not_reached``: the row stopped
+    #: before ``_price_entry`` (e.g. forecast sizing declined).
+    #: ``empty``: the lookup ran and found no usable chain (NO_CHAIN).
+    #: ``recorded``: the quotes are recorded; pricing then raised or has not
+    #: finished. ``priced``: the structure priced on them.
+    QUOTE_STATUSES = ("not_reached", "empty", "recorded", "priced")
+
+    def capture_request_only_bundle(self, context: Mapping[str, Any]) -> None:
+        """The source bundle of a row legacy refuses before any stage runs
+        (a disabled strategy): only the request's own facts, no quotes
+        (``quote_status`` ``not_reached``), and ``scope`` ``request_only`` so
+        a reader knows nothing else was ever going to be recorded."""
+        if self._checkpoint_groups:
+            raise ValueError(
+                "a request-only source bundle must be the only checkpoint"
+            )
+        self._source_bundle["scope"] = "request_only"
+        self.capture_source_bundle(context=context, quote_status="not_reached")
+
     def capture_source_bundle(self, *, context: Mapping[str, Any] | None = None,
                               quote_domain: Any = None,
+                              quote_status: str | None = None,
                               features: Mapping[str, Any] | None = None,
                               model_bindings: Sequence[Mapping[str, Any]] = ()) -> None:
         """Capture bounded source-owned inputs without scoring answers."""
@@ -768,6 +795,10 @@ class Phase4TraceCollector:
             document["context"].update(self._document(context))
         if quote_domain is not None:
             document["quote_domain"] = self._document(quote_domain)
+        if quote_status is not None:
+            if quote_status not in self.QUOTE_STATUSES:
+                raise ValueError(f"unknown quote_status {quote_status!r}")
+            document["quote_status"] = quote_status
         if features:
             document["features"].update(self._document(features))
         if model_bindings:
@@ -1517,6 +1548,16 @@ class Scorer:
                 result.session = request.session
             result.flag("UNVALIDATED_STRUCTURE")
             result.detail = DISABLED_STRATEGIES[request.strategy]
+            if trace is not None:
+                # Nothing below runs, so the request is the whole source: a
+                # request-only bundle lets native reach its own refusal from
+                # the same request, and parity compare the two.
+                trace.capture_request_only_bundle({
+                    "ticker": request.ticker,
+                    "strategy": request.strategy,
+                    "event_date": result.event_date,
+                    "session": result.session,
+                })
             return self._finish_phase4_trace(trace, result, "disabled strategy")
         if request.strategy not in STRUCTURES:
             raise KeyError(f"unknown strategy {request.strategy!r}")
@@ -1568,6 +1609,27 @@ class Scorer:
                 "evidence_cutoff": result.evidence_cutoff,
             },
         )
+        if trace is not None:
+            # The resolved context, recorded as soon as it exists rather than
+            # only once a chain is found or pricing succeeds: a row that stops
+            # at NO_FORECAST sizing, NO_CHAIN or a raising pricer still has
+            # these facts, and native needs them to reach its own refusal.
+            # `quote_date` is the date the lookup will ask for; `_price_entry`
+            # overwrites it when the stale-quote fallback moves it.
+            trace.capture_source_bundle(
+                context={
+                    "ticker": request.ticker,
+                    "strategy": request.strategy,
+                    "event_date": event_date,
+                    "session": session,
+                    "entry_date": result.entry_date,
+                    "exit_date": result.exit_date,
+                    "as_of": result.as_of,
+                    "quote_date": (window.decision_date if structure.decided_early
+                                   else result.entry_date),
+                },
+                quote_status="not_reached",
+            )
 
         # -- the shape, for a structure whose shape comes from a forecast ---
         # Before pricing, which is the whole point: the strikes cannot be
@@ -1664,6 +1726,8 @@ class Scorer:
                 f"{result.spot:.2f} — above the {BAD_QUOTE_COST_PCT:.0f}% "
                 "bad-quote ceiling; not scored"
             )
+            if trace is not None:
+                self._phase4_record_served_models(request, result, features)
             return self._finish_phase4_trace(trace, result, "bad quote")
         self._score_model(request, result, features)
         self._trace_phase4(
@@ -1912,9 +1976,21 @@ class Scorer:
                     result.quote_date = fallback
                     result.quote_age_sessions = age
                     result.flag("STALE_QUOTE")
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+
+        def record_empty_lookup() -> None:
+            # The lookup ran and found nothing usable: an explicitly EMPTY
+            # quote domain, distinct from one that was never recorded.
+            if collector is not None:
+                collector.capture_source_bundle(
+                    context={"quote_date": result.quote_date},
+                    quote_domain=[], quote_status="empty",
+                )
+
         if rows is None or rows.empty:
             result.flag("NO_CHAIN")
             self._note_chain_age(request, result)
+            record_empty_lookup()
             return
 
         from engine.replay import _clean
@@ -1924,6 +2000,7 @@ class Scorer:
         if clean.empty:
             result.flag("NO_CHAIN")
             self._note_chain_age(request, result)
+            record_empty_lookup()
             return
         # Working state for this scoring pass, like `_priced_legs` below:
         # the entry rows the structure was actually priced on, at the quote
@@ -1932,7 +2009,6 @@ class Scorer:
         # caller-supplied chain index, so a board row and its selfcheck
         # re-score — which passes no index — agree by construction.
         result._entry_rows = clean
-        collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is not None:
             collector.capture_source_bundle(
                 context={
@@ -1943,6 +2019,7 @@ class Scorer:
                     "session": result.session,
                 },
                 quote_domain=clean,
+                quote_status="recorded",
             )
         snapshot = ChainSnapshot(
             ticker=request.ticker,
@@ -2007,6 +2084,7 @@ class Scorer:
                     "spot": result.spot,
                     "as_of": result.as_of,
                 },
+                quote_status="priced",
             )
         if priced.any_wide_market:
             result.flag("WIDE_MARKET")
@@ -2363,6 +2441,90 @@ class Scorer:
             }},
         )
 
+    @staticmethod
+    def _phase4_capture_served_model(collector, request, *, role, entry, artifact,
+                                     vector, input_as_of, output_names) -> None:
+        """Record one forecast-family model the model layer serves: its input
+        vector (with the missing mask) and, for a registry artifact, its
+        binding. The one recording used by the model layers and by the
+        BAD_QUOTE exit (:meth:`_phase4_record_served_models`)."""
+        collector.capture_features(
+            vector,
+            {"model_id": entry.id, "role": role, "input_as_of": input_as_of},
+            role=role,
+        )
+        if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+            collector.capture_source_bundle(
+                model_bindings=({
+                    "model_id": entry.id,
+                    "role": role,
+                    "feature_order": tuple(artifact.features),
+                    "artifact": str(entry.path),
+                    "artifact_sha256": entry.artifact_sha256,
+                    "adapter": "joblib-estimator.v1",
+                    "output_names": tuple(output_names),
+                    "strategy": request.strategy,
+                    "decision_offset": entry.decision_offset,
+                    "input_as_of": input_as_of,
+                },),
+            )
+
+    def _phase4_record_served_models(self, request, result, features) -> None:
+        """Trace-only: the forecast models the model layer WOULD serve.
+
+        A BAD_QUOTE row leaves before ``_score_model``, so legacy never
+        records which champion and which inputs the row would have used.
+        Those are deployment facts, not answers: this records the same
+        bindings and input vectors ``_score_model``/``_score_runup_model``
+        record, chosen by the same rules, without predicting anything and
+        without touching ``result`` (the legacy record is unchanged). Native
+        then reaches its own BAD_QUOTE refusal from source inputs.
+        """
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is None:
+            return
+        input_as_of = (
+            str(pd.Timestamp(result.as_of).date()) if result.as_of is not None else None
+        )
+
+        def vector(artifact) -> dict[str, float | None]:
+            return {
+                name: (
+                    float(features[name].iloc[0])
+                    if name in features.columns and pd.notna(features[name].iloc[0])
+                    else None
+                )
+                for name in artifact.features
+            }
+
+        if request.strategy == "STR-RUNUP":
+            served = [
+                (role, self.model(role)) for role in ("implied_t1", "runup_move")
+            ]
+            if any(loaded is None for _role, loaded in served):
+                return
+            for role, (entry, artifact) in served:
+                self._phase4_capture_served_model(
+                    collector, request, role=role, entry=entry, artifact=artifact,
+                    vector=vector(artifact), input_as_of=input_as_of,
+                    output_names=_RUNUP_MODEL_OUTPUTS[role],
+                )
+            return
+        from engine.payoff import PAYOFF_DRIVER
+
+        driver = PAYOFF_DRIVER.get(request.strategy)
+        if driver is None:
+            return
+        loaded = self.model("size" if driver == "abs_move" else "implied_t1")
+        if loaded is None:
+            return
+        entry, artifact = loaded
+        self._phase4_capture_served_model(
+            collector, request, role=driver, entry=entry, artifact=artifact,
+            vector=vector(artifact), input_as_of=input_as_of,
+            output_names=("driver_prediction",),
+        )
+
     def _score_model(self, request, result, features) -> None:
         strategy = request.strategy
         if strategy == "STR-RUNUP":
@@ -2401,30 +2563,11 @@ class Scorer:
         }
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is not None:
-            collector.capture_features(
-                result.model_inputs,
-                {
-                    "model_id": entry.id,
-                    "role": driver,
-                    "input_as_of": result.model_input_as_of,
-                },
-                role=driver,
+            self._phase4_capture_served_model(
+                collector, request, role=driver, entry=entry, artifact=artifact,
+                vector=result.model_inputs, input_as_of=result.model_input_as_of,
+                output_names=("driver_prediction",),
             )
-            if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
-                collector.capture_source_bundle(
-                    model_bindings=({
-                        "model_id": entry.id,
-                        "role": driver,
-                        "feature_order": tuple(artifact.features),
-                        "artifact": str(entry.path),
-                        "artifact_sha256": entry.artifact_sha256,
-                        "adapter": "joblib-estimator.v1",
-                        "output_names": ("driver_prediction",),
-                        "strategy": request.strategy,
-                        "decision_offset": entry.decision_offset,
-                        "input_as_of": result.model_input_as_of,
-                    },),
-                )
 
         missing = [f for f in artifact.features if f not in features.columns]
         if missing:
@@ -2581,36 +2724,15 @@ class Scorer:
                 ("implied_t1", implied_entry, implied_artifact),
                 ("runup_move", move_entry, move_artifact),
             ):
-                collector.capture_features(
-                    {
+                self._phase4_capture_served_model(
+                    collector, request, role=role, entry=entry, artifact=artifact,
+                    vector={
                         name: result.model_inputs[name]
                         for name in artifact.features
                     },
-                    {
-                        "model_id": entry.id,
-                        "role": role,
-                        "input_as_of": result.model_input_as_of,
-                    },
-                    role=role,
+                    input_as_of=result.model_input_as_of,
+                    output_names=_RUNUP_MODEL_OUTPUTS[role],
                 )
-                if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
-                    collector.capture_source_bundle(
-                        model_bindings=({
-                            "model_id": entry.id,
-                            "role": role,
-                            "feature_order": tuple(artifact.features),
-                            "artifact": str(entry.path),
-                            "artifact_sha256": entry.artifact_sha256,
-                            "adapter": "joblib-estimator.v1",
-                            "output_names": (
-                                ("implied_t1",) if role == "implied_t1"
-                                else ("runup_move_prediction",)
-                            ),
-                            "strategy": request.strategy,
-                            "decision_offset": entry.decision_offset,
-                            "input_as_of": result.model_input_as_of,
-                        },),
-                    )
         missing = [name for name in all_features if name not in features.columns]
         if missing:
             result.flag("MISSING_FEATURES")

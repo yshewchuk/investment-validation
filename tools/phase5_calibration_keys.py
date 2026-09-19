@@ -69,7 +69,9 @@ def _key(strategy: str, alpha: Any, cutoff: Any) -> Key:
 
 def _pair_key(pair: Mapping[str, Any]) -> tuple[Key | None, str]:
     payload = pair.get("payload") or {}
-    request = payload.get("request") or {}
+    # The canonical V2 request of a traced pair lives in input_trace.request;
+    # payload.request is the legacy request (``strategy``/``fill``).
+    request = (payload.get("input_trace") or {}).get("request") or {}
     record = payload.get("record") or {}
     strategy = request.get("strategy_version") or record.get("strategy")
     alpha = (request.get("fill_model") or {}).get("alpha", record.get("fill"))

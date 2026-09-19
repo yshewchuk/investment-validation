@@ -99,6 +99,10 @@ from engine.v2.scoring.stages import (  # noqa: E402
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
 from tools.phase4_frozen_resources import FrozenResourcePackage, package_frozen_resources  # noqa: E402
+from tools.phase4_request_translation import (  # noqa: E402
+    LegacyRequestTranslationError,
+    canonical_request_from_legacy,
+)
 
 SCHEMA_VERSION = "tier0_pair.v1.1"
 INDEX_VERSION = "tier0_corpus.v1.1"
@@ -136,13 +140,18 @@ _DATE_FIELDS = frozenset({"as_of", "event_date", "expiry", "chain_as_of"})
 #: when this capture tool was first written; R4-6 extended native scoring's
 #: bucket-analog recipe to the menu strategies, but this constant was never
 #: widened to match. Disabled strategies (CAL-P, CND-P — research-only, no
-#: production gate) are excluded: their rows are captured as a different
-#: fixture kind (``research_replay``), never ``score_result``, so they never
-#: reach strict probing in the first place. The DYN-SV chooser meta-strategy
-#: is excluded the same way (``dyn_sv_choice`` kind).
+#: production gate) are excluded here: legacy refuses them before any stage,
+#: so the only strict trace a disabled ``score_result`` row can carry is the
+#: minimal one built from its request-only source bundle
+#: (:data:`DISABLED_REQUEST_ONLY_STRATEGIES`). The DYN-SV chooser
+#: meta-strategy is captured as its own ``dyn_sv_choice`` kind.
 STRICT_TRACE_SUPPORTED_STRATEGIES = (
     frozenset(STRUCTURES) - frozenset(score_mod.DISABLED_STRATEGIES)
 )
+#: Disabled strategies: traced only from a request-only source bundle
+#: (``engine.score.Phase4TraceCollector.capture_request_only_bundle``), so
+#: native's own refusal is compared with legacy's UNVALIDATED_STRUCTURE.
+DISABLED_REQUEST_ONLY_STRATEGIES = frozenset(score_mod.DISABLED_STRATEGIES)
 
 
 class StrictTraceCaptureError(ValueError):
@@ -238,58 +247,30 @@ def request_from_dict(data: dict) -> score_mod.ScoreRequest:
 
 
 def canonical_v2_request(candidate: Mapping[str, Any], snapshot: str) -> V2ScoreRequest:
-    """Translate source-owned legacy request identity into a canonical command."""
+    """Translate source-owned legacy request identity into a canonical command.
+
+    The translation itself lives in :mod:`tools.phase4_request_translation`,
+    shared with ``checks/phase4_real.py``, which re-derives it from the saved
+    legacy request to bind the traced V2 request to its pair.
+    """
     event_id = candidate.get("event_id")
     if not isinstance(event_id, str) or not event_id.strip():
         raise StrictTraceCaptureError("strict trace requires the captured event_id")
     raw = candidate.get("request")
     if not isinstance(raw, Mapping):
         raw = request_to_dict(raw)
-    legacy = request_from_dict(dict(raw))
-    if legacy.strategy not in STRICT_TRACE_SUPPORTED_STRATEGIES:
+    legacy = request_to_dict(request_from_dict(dict(raw)))
+    request_only = (legacy["strategy"] in DISABLED_REQUEST_ONLY_STRATEGIES
+                    and _request_only_source(candidate) is not None)
+    if legacy["strategy"] not in STRICT_TRACE_SUPPORTED_STRATEGIES and not request_only:
         raise StrictTraceCaptureError(
-            f"strict probe does not support {legacy.strategy} "
+            f"strict probe does not support {legacy['strategy']} "
             f"(supported: {sorted(STRICT_TRACE_SUPPORTED_STRATEGIES)})"
         )
-    decision = legacy.as_of if legacy.as_of is not None else legacy.chain_as_of
-    if decision is None:
-        raise StrictTraceCaptureError("strict trace requires a decision date")
-    event_date = legacy.event_date
-    if event_date is None:
-        raise StrictTraceCaptureError("strict trace requires an event date")
-    event_identity = {
-        "event_id": event_id,
-        "ticker": legacy.ticker,
-        "event_date": str(pd.Timestamp(event_date).date()),
-        "session": legacy.session,
-    }
-    geometry_override = dict(legacy.structure_params or {})
-    if legacy.strike is not None:
-        geometry_override["strike"] = float(legacy.strike)
-    if legacy.expiry is not None:
-        geometry_override["expiry"] = str(pd.Timestamp(legacy.expiry).date())
-    return V2ScoreRequest(
-        event_id=event_id,
-        event_revision="event:" + content_hash(event_identity),
-        calendar_revision="calendar:" + content_hash({
-            "decision": str(pd.Timestamp(decision).date()),
-            "event": event_identity,
-        }),
-        strategy_version=legacy.strategy,
-        deployment_id=f"legacy-capture:{snapshot}",
-        decision_clock_id=(
-            "legacy.decision_offset."
-            + str(legacy.decision_offset if legacy.decision_offset is not None else 0)
-        ),
-        requested_decision_at=str(pd.Timestamp(decision).date()),
-        snapshot_id=str(snapshot),
-        mode="replay",
-        fill_model={
-            "policy_id": "legacy.fill_alpha.v1",
-            "alpha": float(legacy.fill.alpha),
-        },
-        geometry_override=geometry_override or None,
-    )
+    try:
+        return canonical_request_from_legacy(legacy, event_id=event_id, snapshot=snapshot)
+    except LegacyRequestTranslationError as exc:
+        raise StrictTraceCaptureError(str(exc)) from exc
 
 
 def _checkpoint_value(candidate: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -315,7 +296,75 @@ def _checkpoint_value_optional(candidate: Mapping[str, Any], name: str) -> Mappi
     return _checkpoint_value(candidate, name)
 
 
-def _quote_map(rows: Any) -> dict[str, dict[str, float]]:
+#: ``source_inputs.quote_status`` values under which legacy recorded NO quote
+#: domain on purpose (``engine.score.Phase4TraceCollector.QUOTE_STATUSES``).
+_EMPTY_QUOTE_STATUSES = frozenset({"empty", "not_reached"})
+
+
+def _request_only_source(candidate: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The request-only source bundle of a row legacy refused before any
+    stage, or ``None``. It must be the trace's ONLY checkpoint group, carry
+    no quotes and no recipes, and say the lookup was never reached;
+    anything else is not a request-only row and is refused, not repaired."""
+    trace = candidate.get("legacy_trace")
+    checkpoints = trace.get("checkpoints") if isinstance(trace, Mapping) else None
+    if not isinstance(checkpoints, Mapping) or "source_inputs" not in checkpoints:
+        return None
+    source = _checkpoint_value(candidate, "source_inputs")
+    if source.get("scope") != "request_only":
+        return None
+    if set(checkpoints) != {"source_inputs"}:
+        raise StrictTraceCaptureError(
+            "request-only source bundle alongside other checkpoint groups "
+            f"{sorted(set(checkpoints) - {'source_inputs'})}"
+        )
+    if (source.get("quote_status") != "not_reached" or source.get("quote_domain")
+            or source.get("model_bindings") or source.get("native_recipes")
+            or source.get("features")):
+        raise StrictTraceCaptureError(
+            "request-only source bundle carries more than the request"
+        )
+    return source
+
+
+def _request_only_inputs(
+    source: Mapping[str, Any], request: V2ScoreRequest,
+) -> dict[str, Any]:
+    """Native blocks for a request-only row: the request's own facts, no
+    quotes, no model inputs, no recipes. Native refuses from these alone."""
+    context = dict(source.get("context") or {})
+    missing = sorted(key for key in ("ticker", "strategy") if not context.get(key))
+    if missing:
+        raise StrictTraceCaptureError(f"source_inputs context missing {missing}")
+    if context["strategy"] != request.strategy_version:
+        raise StrictTraceCaptureError("request-only bundle names another strategy")
+    context["quotes"] = {}
+    return {
+        "context": context,
+        "features": {"model_inputs": {}, "source_features": {}},
+        "forecast": {},
+        "geometry": None,
+        "pricing": None,
+        "analogs": {"mode": "not_applicable"},
+        "simulation": {"mode": "not_applicable"},
+        "gate": {"mode": "not_applicable"},
+        "chooser": {},
+        "diagnostics": {},
+    }
+
+
+def _quote_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, float]]:
+    """The native quote map. An empty domain is accepted only when legacy
+    recorded WHY it is empty (lookup found no chain, or the row never reached
+    pricing); an empty domain with no recorded status was never captured."""
+    if quote_status in _EMPTY_QUOTE_STATUSES:
+        if rows != []:
+            raise StrictTraceCaptureError(
+                f"quote_status {quote_status} but quote_domain is not empty"
+            )
+        return {}
+    if quote_status not in (None, "recorded", "priced"):
+        raise StrictTraceCaptureError(f"unknown quote_status {quote_status!r}")
     if not isinstance(rows, list) or not rows:
         raise StrictTraceCaptureError("source_inputs.quote_domain is empty")
     quotes: dict[str, dict[str, float]] = {}
@@ -452,6 +501,34 @@ def native_inputs_from_capture(
     request: V2ScoreRequest,
 ) -> tuple[NativeScoreInputs, dict[str, Any]]:
     """Build executable native inputs only from source-owned captured material."""
+    request_only = _request_only_source(candidate)
+    if request_only is not None:
+        if request.strategy_version not in DISABLED_REQUEST_ONLY_STRATEGIES:
+            raise StrictTraceCaptureError(
+                f"request-only source bundle for enabled {request.strategy_version}"
+            )
+        blocks = _request_only_inputs(request_only, request)
+    else:
+        blocks = _captured_blocks(candidate, request)
+    request_doc = to_document(request)
+    shared_inputs = {"request": request_doc, "native_inputs": blocks}
+    source_ref = content_hash(shared_inputs)
+    declarations = tuple(
+        receipt(stage, {"source_ref": source_ref}, {"execution": "native-runtime"})
+        for stage in (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "analogs", "simulation", "gate", "chooser", "serialization",
+        )
+    )
+    inputs = NativeScoreInputs(
+        **blocks, source_ref=source_ref, stage_receipts=declarations,
+    )
+    return inputs, shared_inputs
+
+
+def _captured_blocks(candidate: Mapping[str, Any],
+                     request: V2ScoreRequest) -> dict[str, Any]:
+    """Native blocks from a scored row's captured source bundle."""
     source = _checkpoint_value(candidate, "source_inputs")
     recipes = source.get("native_recipes")
     if not isinstance(recipes, Mapping):
@@ -471,11 +548,16 @@ def native_inputs_from_capture(
         if key not in context and source_features.get(key) is not None:
             context[key] = source_features[key]
     context["strategy"] = request.strategy_version
-    context["quotes"] = _quote_map(source.get("quote_domain"))
-    missing_context = sorted(
-        key for key in ("ticker", "event_date", "entry_date", "exit_date", "spot")
-        if context.get(key) is None
-    )
+    quote_status = source.get("quote_status")
+    context["quotes"] = _quote_map(source.get("quote_domain"), quote_status)
+    # A spot exists only once legacy priced the structure. A row whose chain
+    # lookup came back empty, that never reached pricing, or whose pricer
+    # raised has none, and native refuses it with its own code; a capture
+    # that predates quote_status keeps the old requirement.
+    required = ["ticker", "event_date", "entry_date", "exit_date"]
+    if quote_status in (None, "priced"):
+        required.append("spot")
+    missing_context = sorted(key for key in required if context.get(key) is None)
     if missing_context:
         raise StrictTraceCaptureError(
             f"source_inputs context missing {missing_context}"
@@ -484,7 +566,7 @@ def native_inputs_from_capture(
     recipes.setdefault("analogs", {"mode": "not_applicable"})
     recipes.setdefault("simulation", {"mode": "not_applicable"})
     recipes.setdefault("gate", {"mode": "not_applicable"})
-    blocks = {
+    return {
         "context": context,
         "features": {
             "model_inputs": _merged_model_inputs(candidate),
@@ -499,20 +581,6 @@ def native_inputs_from_capture(
         "chooser": dict(recipes.get("chooser") or {}),
         "diagnostics": dict(recipes.get("diagnostics") or {}),
     }
-    request_doc = to_document(request)
-    shared_inputs = {"request": request_doc, "native_inputs": blocks}
-    source_ref = content_hash(shared_inputs)
-    declarations = tuple(
-        receipt(stage, {"source_ref": source_ref}, {"execution": "native-runtime"})
-        for stage in (
-            "resolve_context", "features", "forecast", "geometry", "pricing",
-            "analogs", "simulation", "gate", "chooser", "serialization",
-        )
-    )
-    inputs = NativeScoreInputs(
-        **blocks, source_ref=source_ref, stage_receipts=declarations,
-    )
-    return inputs, shared_inputs
 
 
 def package_strict_trace(
@@ -1943,7 +2011,10 @@ def attach_strict_probe(
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             gaps[fixture_id] = str(exc)
             continue
-        candidate["request"] = to_document(request)
+        # ``candidate["request"]`` stays the LEGACY request: coverage, pinned
+        # links, seeded controls and tier-1 replay all read it. The canonical
+        # V2 request lives only in ``input_trace.request`` (and its
+        # ``shared_inputs``); phase4_real re-derives it from the legacy one.
         candidate["input_trace"] = trace
         candidate["legacy_input_hash"] = trace["shared_input_hash"]
         candidate["native_score_id"] = native.score_id

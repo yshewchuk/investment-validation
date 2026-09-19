@@ -247,3 +247,76 @@ def test_row_carrying_a_refusal_code_is_refused():
     assert "NO_CHAIN" in record.reason_codes
     assert record.validation_status == "refused"
     assert record.readiness == "refused"
+
+
+# -- BAD_QUOTE (tier-0 vetting gap 004, 2026-09-19) --------------------------
+# Legacy engine/score.py `_price_entry` flags a priced row whose entry cost is
+# more than BAD_QUOTE_COST_PCT of spot, and `Scorer.score` then leaves before
+# the model, analog, gate and chooser layers. Native follows the same rule.
+
+_BAD_QUOTES = {
+    ("C", 100.0, "2026-09-18"): {"bid": 15.9, "ask": 16.1},
+    ("P", 100.0, "2026-09-18"): {"bid": 15.9, "ask": 16.1},
+}
+_NEAR_QUOTES = {
+    ("C", 100.0, "2026-09-18"): {"bid": 14.4, "ask": 14.6},
+    ("P", 100.0, "2026-09-18"): {"bid": 14.4, "ask": 14.6},
+}
+
+
+def test_bad_quote_threshold_is_legacys():
+    from engine.fills import BAD_QUOTE_COST_PCT as legacy
+    from engine.v2.scoring.stages import BAD_QUOTE_COST_PCT
+
+    assert BAD_QUOTE_COST_PCT == legacy
+
+
+def test_bad_quote_follows_the_legacy_predicate_exactly():
+    """The same arithmetic legacy runs (`entry_cost / spot * 100.0 >
+    BAD_QUOTE_COST_PCT`, only once priced, only with a nonzero spot), at and
+    around the threshold, including 30/100*100 == 30.000000000000004."""
+    from engine.fills import BAD_QUOTE_COST_PCT as threshold
+    from engine.v2.domain.generation import Pricing
+    from engine.v2.scoring.stages import _check_bad_quote
+
+    for spot, cost, refusal in (
+        (100.0, 29.99, None), (100.0, 30.0, None), (100.0, 30.01, None),
+        (100.0, 45.0, None), (0.0, 45.0, None), (100.0, 45.0, "NO_CHAIN"),
+        (7.3, 2.19, None), (7.3, 2.2, None),
+    ):
+        flags: list[str] = []
+        _check_bad_quote(Pricing("STR-THRU", spot, cost, (), refusal), flags)
+        legacy = bool(refusal is None and spot and cost / spot * 100.0 > threshold)
+        assert ("BAD_QUOTE" in flags) is legacy, (spot, cost, refusal)
+
+
+def test_bad_quote_fires_and_withholds_every_layer_legacy_skips():
+    values = assemble_native_values(_inputs(
+        quotes=_BAD_QUOTES, gate=_GATE_MODEL, analogs=_analog_block(),
+        model_inputs={"mcap_log": math.log(2e9)},
+    ))
+
+    assert "BAD_QUOTE" in values["flags"]
+    assert values["entry_cost"] is not None
+    for field in ("gate_score", "exp_pnl_analog", "exp_pnl_model",
+                  "driver_prediction", "driver_name"):
+        assert values.get(field) is None, field
+    receipts = [row["stage"] for row in values["native_stage_receipts"]]
+    assert receipts[-1] == "serialization" and "gate" in receipts
+
+    record = application.score_one(_request(), _inputs(
+        quotes=_BAD_QUOTES, gate=_GATE_MODEL, analogs=_analog_block(),
+        model_inputs={"mcap_log": math.log(2e9)},
+    ))
+    assert "BAD_QUOTE" in record.reason_codes
+    assert record.validation_status == "refused"
+
+
+def test_bad_quote_does_not_fire_below_the_ceiling():
+    values = assemble_native_values(_inputs(
+        quotes=_NEAR_QUOTES, gate=_GATE_MODEL,
+        model_inputs={"mcap_log": math.log(2e9)},
+    ))
+
+    assert "BAD_QUOTE" not in values["flags"]
+    assert values.get("gate_score") == 0.5

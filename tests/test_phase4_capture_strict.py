@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import json
 
@@ -203,13 +204,17 @@ def test_merged_model_inputs_accepts_the_boolean_quote_indicator_when_present():
 
 
 def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
-    request = _request()
+    legacy = request_to_dict(ScoreRequest(
+        ticker="ABC", strategy="STR-THRU", as_of=pd.Timestamp("2026-09-16"),
+        event_date=pd.Timestamp("2026-09-17"), session="AMC", fill=MID,
+    ))
+    request = canonical_v2_request({"event_id": "event-1", "request": legacy}, "snapshot-1")
     inputs, shared = _native(request)
 
     trace, native = package_strict_trace(request, inputs, shared)
     pair = {
         "payload": {
-            "request": to_document(request),
+            "request": legacy,
             "record": {},
             "legacy_input_hash": trace["shared_input_hash"],
             "input_trace": trace,
@@ -645,6 +650,113 @@ def test_write_persists_a_gap_pair_and_a_traced_pair_in_the_same_corpus(tmp_path
     assert "input_trace" in good_payload
     assert "input_trace" not in bad_payload
     assert "CAL-P" in bad_payload["strict_trace_gap"]
+
+
+def _priced_record(ticker: str, *, structure_params: dict) -> dict:
+    return {
+        "strategy": "STR-THRU", "ticker": ticker, "session": "AMC",
+        "legs": [{"right": "C", "strike": 100.0, "expiry": "2026-09-18", "qty": 1},
+                 {"right": "P", "strike": 100.0, "expiry": "2026-09-18", "qty": 1}],
+        "entry_cost": 3.0, "structure_params": structure_params,
+        "forecast_abs_move": 0.05, "forecast_p10": 0.01, "forecast_p90": 0.09,
+        "forecast_sd": 0.02, "forecast_model": "driver-x", "forecast_fold": "2026-09-01",
+        "flags": [],
+    }
+
+
+def test_traced_pairs_keep_the_legacy_request_for_tier0_and_tier1(tmp_path, monkeypatch):
+    """The 2026-09-19 blocker: the strict probe overwrote ``payload.request``
+    with the canonical V2 request on every traced pair. A traced selector pair
+    and the pinned re-score made from it must still (a) carry the legacy
+    request, which round-trips through ``request_from_dict`` for tier-1
+    replay, (b) keep ``geometry:pinned`` and ``geometry:round_listed_strike``
+    covered, (c) resolve their ``pinned_from`` link, (d) give the
+    ``forecast_suppressed`` seeded control its pinned target, and (e) still
+    pass Phase 4's strict trace verifier, which now reads the V2 request from
+    ``input_trace.request`` and binds it to the legacy one."""
+    from checks import tier0_corpus as t0
+    from tools.capture_tier0_corpus import axis_inputs, request_from_dict
+
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+
+    def candidate(fixture_id, ticker, **request_changes):
+        cand = _full_strict_candidate(
+            fixture_id=fixture_id, ticker=ticker,
+            driver_vector={"x": 2.0, "n_prior": 5.0}, gate_vector={"x": 2.0, "n_prior": 5.0},
+            path=path, digest=digest,
+        )
+        cand["request"] = request_to_dict(
+            replace(request_from_dict(cand["request"]), **request_changes))
+        # As real legacy bindings record it (decision_offset -> clock), so
+        # the frozen replay's clock check matches the canonical request.
+        row = cand["legacy_trace"]["checkpoints"]["source_inputs"]
+        for binding in row["value"]["model_bindings"]:
+            binding["decision_clock"] = "legacy.decision_offset.0"
+        row["content_hash"] = content_hash(row["value"])
+        return cand
+
+    source = candidate("case-source", "AAA")
+    source["record"] = _priced_record("AAA", structure_params={"width_moneyness": 0.05})
+    pinned = candidate("case-pinned", "AAA", strike=100.0,
+                       structure_params={"width_moneyness": 0.05})
+    pinned["record"] = _priced_record("AAA", structure_params={"width_moneyness": 0.05})
+    pinned["relations"] = {"pinned_from": content_hash(source["request"])}
+    chosen = [source, pinned]
+    legacy_requests = {c["fixture_id"]: copy.deepcopy(c["request"]) for c in chosen}
+    index: dict[str, list[str]] = {}
+    for cand in chosen:
+        cand["covers"] = t0.derive_covers(cand["record"], cand["request"], cand["kind"],
+                                          axis_inputs(), cand.get("relations"))
+        for axis in cand["covers"]:
+            index.setdefault(axis, []).append(cand["fixture_id"])
+    assert {"geometry:pinned", "geometry:round_listed_strike"} <= set(pinned["covers"])
+
+    write(tmp_path / "out", chosen, index, pd.Timestamp("2026-09-16"), "snapshot-1",
+          strict_trace=True)
+    corpus = t0.load(tmp_path / "out")
+
+    for fixture_id, legacy in legacy_requests.items():
+        payload = corpus.pairs[fixture_id]["payload"]
+        assert payload["trace_disposition"] == "complete"
+        # (a) the saved request is the legacy one, and replays.
+        assert payload["request"] == legacy
+        assert request_to_dict(request_from_dict(payload["request"])) == legacy
+        # The V2 request lives in the trace, and is the legacy one's translation.
+        assert payload["input_trace"]["request"]["strategy_version"] == "STR-THRU"
+        assert "strategy" not in payload["input_trace"]["request"]
+        # (e) Phase 4 verifies it from its new home.
+        verified = phase4_real._verified_trace_bundle(corpus.pairs[fixture_id], corpus.root)
+        assert to_document(verified["request"]) == payload["input_trace"]["request"]
+
+    # (b) coverage re-derived from the survivors agrees with the index.
+    assert t0.case_coverage(corpus).verdict == t0.AGREE
+    derived = t0._derived(corpus)["case-pinned"]
+    assert {"geometry:pinned", "geometry:round_listed_strike"} <= set(derived)
+    # (c) the pinned link resolves to the source pair.
+    pinned_receipt = t0.case_pinned_counterparts(corpus)
+    assert pinned_receipt.verdict == t0.AGREE
+    assert pinned_receipt.population.compared > 1
+    # (d) the forecast_suppressed control finds its pinned target and fires.
+    summary = t0.seeded_controls(corpus)
+    control = summary["controls"]["forecast_suppressed"]
+    assert control["target"] == "case-pinned"
+    assert control["problems"] == []
+
+    # Planted defect: the pre-fix layout (payload.request = the V2 request)
+    # loses every one of those, and Phase 4 refuses it.
+    broken = copy.deepcopy(corpus.pairs["case-pinned"])
+    broken["payload"]["request"] = broken["payload"]["input_trace"]["request"]
+    assert "geometry:pinned" not in t0.derive_covers(
+        broken["payload"]["record"], broken["payload"]["request"], "score_result",
+        axis_inputs(), broken["payload"]["relations"])
+    with pytest.raises(phase4_real._TraceError, match="not the translation"):
+        phase4_real._verified_trace_bundle(broken, corpus.root)
+    # ... and a trace re-pointed at another case's legacy request is refused.
+    swapped = copy.deepcopy(corpus.pairs["case-pinned"])
+    swapped["payload"]["request"]["ticker"] = "ZZZ"
+    with pytest.raises(phase4_real._TraceError, match="event_revision"):
+        phase4_real._verified_trace_bundle(swapped, corpus.root)
 
 
 # ---------------------------------------------------------------------------
@@ -1367,3 +1479,206 @@ def _model_native(declared):
         requested_decision_at="2026-09-16", snapshot_id="snap-1", mode="replay",
         fill_model={"alpha": 0.5})
     return application.score_one(request, build_native_score_inputs(bundle))
+
+
+# ---------------------------------------------------------------------------
+# Tier-0 vetting gaps 001/012/003 (2026-09-19): rows that stop before, at, or
+# inside pricing. Legacy now records the resolved context and HOW FAR the
+# chain lookup got (``source_inputs.quote_status``); the strict probe accepts
+# an explicitly empty quote domain, and native reaches its own refusal.
+# ---------------------------------------------------------------------------
+
+
+def _stopped_candidate(tmp_path, *, quote_status, quote_domain=(), spot=None,
+                       fixture_id="case-stopped"):
+    path, digest = _artifact(tmp_path)
+    candidate = _full_strict_candidate(
+        fixture_id=fixture_id, ticker="AAA",
+        driver_vector={"x": 2.0, "n_prior": 5.0},
+        gate_vector={"x": 2.0, "n_prior": 5.0}, path=path, digest=digest,
+    )
+    row = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    value = row["value"]
+    value["context"] = {
+        "ticker": "AAA", "strategy": "STR-THRU", "event_date": "2026-09-17",
+        "session": "AMC", "entry_date": "2026-09-16", "exit_date": "2026-09-18",
+        "as_of": "2026-09-16", "quote_date": "2026-09-16",
+    }
+    if spot is not None:
+        value["context"]["spot"] = spot
+    value["quote_domain"] = list(quote_domain)
+    if quote_status is None:
+        value.pop("quote_status", None)
+    else:
+        value["quote_status"] = quote_status
+    row["content_hash"] = content_hash(value)
+    return candidate
+
+
+def _probe_native(candidate, tmp_path, monkeypatch):
+    """Run the real probe; return (attached, gaps, native record or None)."""
+    import tools.capture_tier0_corpus as capture
+
+    seen = {}
+    real = capture.package_strict_trace
+
+    def recording(request, *args, **kwargs):
+        trace, native = real(request, *args, **kwargs)
+        seen[request.event_id] = native
+        return trace, native
+
+    monkeypatch.setattr(capture, "package_strict_trace", recording)
+    path, digest = _artifact(tmp_path, "good.joblib")
+    good = _full_strict_candidate(
+        fixture_id="case-good", ticker="BBB",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+    attached, gaps = attach_strict_probe([good, candidate], "snapshot-1",
+                                         tmp_path / "release")
+    return attached, gaps, seen.get(candidate["event_id"])
+
+
+@pytest.mark.parametrize("quote_status", ["empty", "not_reached"])
+def test_probe_traces_a_row_with_an_explicitly_empty_quote_domain(
+        tmp_path, monkeypatch, quote_status):
+    """001 (NO_CHAIN) and 012 (NO_FORECAST before pricing): no quotes and no
+    spot, recorded on purpose. The probe traces the row and native refuses
+    with its own code; parity, not the probe, compares it to legacy's."""
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    candidate = _stopped_candidate(tmp_path, quote_status=quote_status)
+
+    attached, gaps, native = _probe_native(candidate, tmp_path, monkeypatch)
+
+    assert "case-stopped" in attached, gaps
+    assert candidate["input_trace"]["native_inputs"]["context"]["quotes"] == {}
+    assert native is not None and native.reason_codes
+
+
+def test_probe_traces_a_row_whose_pricer_raised_without_a_spot(tmp_path, monkeypatch):
+    """003 (COARSE_LADDER): the quotes are recorded, pricing raised, so there
+    is no spot; the resolved exit_date is now in the context."""
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    candidate = _stopped_candidate(tmp_path, quote_status="recorded", quote_domain=[
+        {"right": "C", "strike": 100.0, "expiry": "2026-09-18", "bid": 1.0, "ask": 2.0},
+    ])
+
+    attached, gaps, native = _probe_native(candidate, tmp_path, monkeypatch)
+
+    assert "case-stopped" in attached, gaps
+    assert native.reason_codes
+
+
+_ONE_QUOTE = [{"right": "C", "strike": 100.0, "expiry": "2026-09-18",
+               "bid": 1.0, "ask": 2.0}]
+
+
+@pytest.mark.parametrize(("quote_status", "quote_domain", "spot", "message"), [
+    # Planted defect: an empty domain that legacy never said was empty is a
+    # capture that never recorded quotes, not an empty lookup.
+    (None, [], 100.0, "quote_domain is empty"),
+    ("empty", _ONE_QUOTE, None, "is not empty"),
+    ("recorded", [], None, "quote_domain is empty"),
+    # A priced row must still carry its spot.
+    ("priced", _ONE_QUOTE, None, r"missing \['spot'\]"),
+    ("bogus", [], None, "unknown quote_status"),
+])
+def test_probe_still_refuses_unrecorded_or_contradictory_quote_domains(
+        tmp_path, quote_status, quote_domain, spot, message):
+    candidate = _stopped_candidate(tmp_path, quote_status=quote_status,
+                                   quote_domain=quote_domain, spot=spot)
+    request = canonical_v2_request(candidate, "snapshot-1")
+    with pytest.raises(StrictTraceCaptureError, match=message):
+        native_inputs_from_capture(candidate, request)
+
+
+# ---------------------------------------------------------------------------
+# Tier-0 vetting gaps 005 (CAL-P) and 009 (CND-P), 2026-09-19: a disabled
+# strategy is refused before any stage. Legacy now records a request-only
+# source bundle, the probe emits a minimal trace from it, and Phase 4 compares
+# native's own refusal with legacy's instead of marking the row incomparable.
+# ---------------------------------------------------------------------------
+
+
+def _disabled_candidate(strategy: str, fixture_id: str) -> dict:
+    scorer = score_mod.Scorer.__new__(score_mod.Scorer)
+    scorer.snapshot = "snap-test"
+    legacy_request = ScoreRequest(
+        ticker="ZZZ", strategy=strategy, as_of=pd.Timestamp("2026-09-16"),
+        event_date=pd.Timestamp("2026-09-17"), session="AMC", fill=MID,
+    )
+    collector = Phase4TraceCollector(retain_full_trace=False,
+                                     content_hasher=content_hash)
+    result = scorer.score(legacy_request, trace=collector)
+    return {
+        "fixture_id": fixture_id, "covers": [], "kind": "score_result",
+        "record": result.as_dict(), "request": request_to_dict(legacy_request),
+        "duration": 0.0, "relations": {},
+        "legacy_trace": collector.diagnostic_checkpoint(),
+        "event_id": f"ZZZ_2026-09-17_{strategy}",
+    }
+
+
+@pytest.mark.parametrize("strategy", sorted(score_mod.DISABLED_STRATEGIES))
+def test_disabled_strategy_row_is_traced_and_compared_not_incomparable(
+        tmp_path, monkeypatch, strategy):
+    from checks.tier0_corpus import load
+
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    good = _full_strict_candidate(
+        fixture_id="case-good", ticker="AAA", driver_vector={"x": 2.0},
+        gate_vector={"x": 9.0, "n_prior": 5.0}, path=path, digest=digest,
+    )
+    disabled = _disabled_candidate(strategy, "case-disabled")
+
+    doc = write(tmp_path / "out", [good, disabled], {}, pd.Timestamp("2026-09-16"),
+                "snapshot-1", strict_trace=True)
+
+    assert doc["pairs"]["case-disabled"]["trace_disposition"] == "complete"
+    corpus = load(tmp_path / "out")
+    payload = corpus.pairs["case-disabled"]["payload"]
+    assert payload["request"]["strategy"] == strategy
+    native_inputs = payload["input_trace"]["native_inputs"]
+    assert native_inputs["context"]["quotes"] == {}
+    assert native_inputs["features"]["model_inputs"] == {}
+    release, _parity = phase4_real._native_parity(corpus)
+    row = next(r for r in release["dispositions"]
+               if r["fixture_id"] == "case-disabled")
+    # Compared, never passed through: parity reports whether the refusals
+    # match (the flags check), it is not decided here.
+    assert row["disposition"] == "compared", row.get("reason")
+
+
+def test_request_only_bundle_is_accepted_only_as_the_whole_disabled_trace(tmp_path):
+    disabled = _disabled_candidate("CAL-P", "case-disabled")
+    request = canonical_v2_request(disabled, "snapshot-1")
+    inputs, _shared = native_inputs_from_capture(disabled, request)
+    record = application.score_one(request, inputs)
+    assert "UNVALIDATED_STRUCTURE" in record.reason_codes
+
+    # Planted defect 1: a request-only bundle next to groups legacy recorded
+    # from later stages is not a request-only row.
+    extra = copy.deepcopy(disabled)
+    features = {"feature_vector": {}, "missing_mask": {}, "model_identity": {}}
+    extra["legacy_trace"]["checkpoints"]["features"] = {
+        "value": features, "content_hash": content_hash(features),
+    }
+    with pytest.raises(StrictTraceCaptureError, match="alongside other checkpoint"):
+        canonical_v2_request(extra, "snapshot-1")
+
+    # Planted defect 2: without the request-only bundle a disabled row is
+    # still unsupported, never traced from nothing.
+    bare = copy.deepcopy(disabled)
+    bare["legacy_trace"]["checkpoints"] = {}
+    with pytest.raises(StrictTraceCaptureError, match="does not support CAL-P"):
+        canonical_v2_request(bare, "snapshot-1")
+
+    # Planted defect 3: a request-only bundle claiming an enabled strategy.
+    enabled = copy.deepcopy(disabled)
+    enabled["request"]["strategy"] = "STR-THRU"
+    row = enabled["legacy_trace"]["checkpoints"]["source_inputs"]
+    row["value"]["context"]["strategy"] = "STR-THRU"
+    row["content_hash"] = content_hash(row["value"])
+    with pytest.raises(StrictTraceCaptureError, match="enabled STR-THRU"):
+        native_inputs_from_capture(enabled, canonical_v2_request(enabled, "snapshot-1"))
