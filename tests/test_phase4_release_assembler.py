@@ -5,7 +5,7 @@ import pytest
 
 from checks import phase4_real
 from engine.v2.contracts import SCORE_REQUEST_V1
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.scoring.stages import StageObservation, receipt
 from tools.phase4_release_assembler import (
     NATIVE_INPUT_KEYS,
@@ -14,20 +14,33 @@ from tools.phase4_release_assembler import (
     ReleaseAssemblyError,
     assemble_input_trace,
 )
+from tools.phase4_request_translation import canonical_request_from_legacy
+
+
+#: A pair's saved LEGACY request (payload.request); ``_request()`` is its
+#: canonical V2 translation, which the strict verifier re-derives.
+LEGACY_REQUEST = {
+    "ticker": "ABC", "strategy": "STR-THRU", "as_of": "2026-09-16",
+    "event_date": "2026-09-17", "session": "AMC",
+    "fill": {"policy_id": "legacy.fill_alpha.v1", "alpha": 0.5},
+}
 
 
 def _request():
+    bound = to_document(canonical_request_from_legacy(
+        LEGACY_REQUEST, event_id="event-1", snapshot="snapshot-1",
+    ))
     return {
         "event_id": "event-1",
-        "calendar_revision": "calendar-1",
+        "calendar_revision": bound["calendar_revision"],
         "strategy_version": "STR-THRU",
         "deployment_id": "deployment-1",
         "decision_clock_id": "entry-close-1",
         "requested_decision_at": "2026-09-16",
         "snapshot_id": "snapshot-1",
         "mode": "replay",
-        "fill_model": {"alpha": 0.5},
-        "event_revision": "event-revision-1",
+        "fill_model": bound["fill_model"],
+        "event_revision": bound["event_revision"],
         "contract_override": None,
         "geometry_override": None,
         "dependency_refs": [],
@@ -108,7 +121,7 @@ def test_assembled_trace_passes_strict_verifier(tmp_path):
     request, native_inputs, shared_inputs, trace = _assembled()
     pair = {
         "payload": {
-            "request": request,
+            "request": copy.deepcopy(LEGACY_REQUEST),
             "record": {},
             "legacy_input_hash": content_hash(shared_inputs),
             "input_trace": trace,
@@ -147,7 +160,7 @@ def test_model_stage_is_known_and_validated_when_present(tmp_path):
 
     pair = {
         "payload": {
-            "request": request,
+            "request": copy.deepcopy(LEGACY_REQUEST),
             "record": {},
             "legacy_input_hash": content_hash(shared_inputs),
             "input_trace": trace,

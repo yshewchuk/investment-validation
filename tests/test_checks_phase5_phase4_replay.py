@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from checks import phase4_real
@@ -22,6 +23,7 @@ from engine.v2.scoring.stages import NativeScoreInputs, receipt
 from tests.test_checks_phase5_acceptance import CLOCK, _linear, _release, _run
 from tools.capture_tier0_corpus import make_pair, package_strict_trace
 from tools.phase4_frozen_resources import package_frozen_resources
+from tools.phase4_request_translation import canonical_request_from_legacy
 
 _STAGES = ("resolve_context", "features", "forecast", "geometry", "pricing",
            "analogs", "simulation", "gate", "chooser", "serialization")
@@ -59,11 +61,17 @@ def _corpus(tmp_path: Path, *, artifact: bytes | None = None) -> Path:
             "decision_clock": CLOCK, "adapter": "json-linear.v1",
         }],
         deployment_id="dep", release_root=root, source_root=source)
-    request = ScoreRequest(
-        event_id="event-1", event_revision="event-revision-1", calendar_revision="calendar-1",
-        strategy_version="STR-THRU", deployment_id="dep", decision_clock_id=CLOCK,
-        requested_decision_at="2026-09-16", snapshot_id="snapshot-1", mode="replay",
-        fill_model={"alpha": 0.5}, model_artifact_refs=package.request_refs)
+    # payload.request is the legacy request; the traced V2 request is its
+    # translation, with the capture environment's deployment, clock and refs.
+    legacy_request = {"ticker": "ABC", "strategy": "STR-THRU", "as_of": "2026-09-16",
+                      "event_date": "2026-09-17", "session": "AMC",
+                      "fill": {"policy_id": "legacy.fill_alpha.v1", "alpha": 0.5}}
+    request = replace(
+        canonical_request_from_legacy(legacy_request, event_id="event-1",
+                                      snapshot="snapshot-1"),
+        deployment_id="dep", decision_clock_id=CLOCK,
+        model_artifact_refs=package.request_refs)
+    assert isinstance(request, ScoreRequest)
     inputs, shared = _inputs(request)
     resources = list(package.resource_rows)
     resources += [{"resource_id": b["binding_id"], "ref": b["request_ref"], "kind": "sidecar",
@@ -77,7 +85,7 @@ def _corpus(tmp_path: Path, *, artifact: bytes | None = None) -> Path:
     trace, native = package_strict_trace(
         request, inputs, shared, resources=resources, metadata=metadata,
         frozen_runtime=(plan.inference, plan.release, plan.requests))
-    pair = make_pair("pair-1", ["frozen"], to_document(request), {"score_id": native.score_id},
+    pair = make_pair("pair-1", ["frozen"], legacy_request, {"score_id": native.score_id},
                      record_kind="score_result", duration=0.0, input_trace=trace,
                      legacy_input_hash=trace["shared_input_hash"])
     (root / "pairs").mkdir()

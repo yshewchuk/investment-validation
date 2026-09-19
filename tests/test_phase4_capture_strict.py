@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import json
 
@@ -203,13 +204,17 @@ def test_merged_model_inputs_accepts_the_boolean_quote_indicator_when_present():
 
 
 def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
-    request = _request()
+    legacy = request_to_dict(ScoreRequest(
+        ticker="ABC", strategy="STR-THRU", as_of=pd.Timestamp("2026-09-16"),
+        event_date=pd.Timestamp("2026-09-17"), session="AMC", fill=MID,
+    ))
+    request = canonical_v2_request({"event_id": "event-1", "request": legacy}, "snapshot-1")
     inputs, shared = _native(request)
 
     trace, native = package_strict_trace(request, inputs, shared)
     pair = {
         "payload": {
-            "request": to_document(request),
+            "request": legacy,
             "record": {},
             "legacy_input_hash": trace["shared_input_hash"],
             "input_trace": trace,
@@ -645,6 +650,113 @@ def test_write_persists_a_gap_pair_and_a_traced_pair_in_the_same_corpus(tmp_path
     assert "input_trace" in good_payload
     assert "input_trace" not in bad_payload
     assert "CAL-P" in bad_payload["strict_trace_gap"]
+
+
+def _priced_record(ticker: str, *, structure_params: dict) -> dict:
+    return {
+        "strategy": "STR-THRU", "ticker": ticker, "session": "AMC",
+        "legs": [{"right": "C", "strike": 100.0, "expiry": "2026-09-18", "qty": 1},
+                 {"right": "P", "strike": 100.0, "expiry": "2026-09-18", "qty": 1}],
+        "entry_cost": 3.0, "structure_params": structure_params,
+        "forecast_abs_move": 0.05, "forecast_p10": 0.01, "forecast_p90": 0.09,
+        "forecast_sd": 0.02, "forecast_model": "driver-x", "forecast_fold": "2026-09-01",
+        "flags": [],
+    }
+
+
+def test_traced_pairs_keep_the_legacy_request_for_tier0_and_tier1(tmp_path, monkeypatch):
+    """The 2026-09-19 blocker: the strict probe overwrote ``payload.request``
+    with the canonical V2 request on every traced pair. A traced selector pair
+    and the pinned re-score made from it must still (a) carry the legacy
+    request, which round-trips through ``request_from_dict`` for tier-1
+    replay, (b) keep ``geometry:pinned`` and ``geometry:round_listed_strike``
+    covered, (c) resolve their ``pinned_from`` link, (d) give the
+    ``forecast_suppressed`` seeded control its pinned target, and (e) still
+    pass Phase 4's strict trace verifier, which now reads the V2 request from
+    ``input_trace.request`` and binds it to the legacy one."""
+    from checks import tier0_corpus as t0
+    from tools.capture_tier0_corpus import axis_inputs, request_from_dict
+
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+
+    def candidate(fixture_id, ticker, **request_changes):
+        cand = _full_strict_candidate(
+            fixture_id=fixture_id, ticker=ticker,
+            driver_vector={"x": 2.0, "n_prior": 5.0}, gate_vector={"x": 2.0, "n_prior": 5.0},
+            path=path, digest=digest,
+        )
+        cand["request"] = request_to_dict(
+            replace(request_from_dict(cand["request"]), **request_changes))
+        # As real legacy bindings record it (decision_offset -> clock), so
+        # the frozen replay's clock check matches the canonical request.
+        row = cand["legacy_trace"]["checkpoints"]["source_inputs"]
+        for binding in row["value"]["model_bindings"]:
+            binding["decision_clock"] = "legacy.decision_offset.0"
+        row["content_hash"] = content_hash(row["value"])
+        return cand
+
+    source = candidate("case-source", "AAA")
+    source["record"] = _priced_record("AAA", structure_params={"width_moneyness": 0.05})
+    pinned = candidate("case-pinned", "AAA", strike=100.0,
+                       structure_params={"width_moneyness": 0.05})
+    pinned["record"] = _priced_record("AAA", structure_params={"width_moneyness": 0.05})
+    pinned["relations"] = {"pinned_from": content_hash(source["request"])}
+    chosen = [source, pinned]
+    legacy_requests = {c["fixture_id"]: copy.deepcopy(c["request"]) for c in chosen}
+    index: dict[str, list[str]] = {}
+    for cand in chosen:
+        cand["covers"] = t0.derive_covers(cand["record"], cand["request"], cand["kind"],
+                                          axis_inputs(), cand.get("relations"))
+        for axis in cand["covers"]:
+            index.setdefault(axis, []).append(cand["fixture_id"])
+    assert {"geometry:pinned", "geometry:round_listed_strike"} <= set(pinned["covers"])
+
+    write(tmp_path / "out", chosen, index, pd.Timestamp("2026-09-16"), "snapshot-1",
+          strict_trace=True)
+    corpus = t0.load(tmp_path / "out")
+
+    for fixture_id, legacy in legacy_requests.items():
+        payload = corpus.pairs[fixture_id]["payload"]
+        assert payload["trace_disposition"] == "complete"
+        # (a) the saved request is the legacy one, and replays.
+        assert payload["request"] == legacy
+        assert request_to_dict(request_from_dict(payload["request"])) == legacy
+        # The V2 request lives in the trace, and is the legacy one's translation.
+        assert payload["input_trace"]["request"]["strategy_version"] == "STR-THRU"
+        assert "strategy" not in payload["input_trace"]["request"]
+        # (e) Phase 4 verifies it from its new home.
+        verified = phase4_real._verified_trace_bundle(corpus.pairs[fixture_id], corpus.root)
+        assert to_document(verified["request"]) == payload["input_trace"]["request"]
+
+    # (b) coverage re-derived from the survivors agrees with the index.
+    assert t0.case_coverage(corpus).verdict == t0.AGREE
+    derived = t0._derived(corpus)["case-pinned"]
+    assert {"geometry:pinned", "geometry:round_listed_strike"} <= set(derived)
+    # (c) the pinned link resolves to the source pair.
+    pinned_receipt = t0.case_pinned_counterparts(corpus)
+    assert pinned_receipt.verdict == t0.AGREE
+    assert pinned_receipt.population.compared > 1
+    # (d) the forecast_suppressed control finds its pinned target and fires.
+    summary = t0.seeded_controls(corpus)
+    control = summary["controls"]["forecast_suppressed"]
+    assert control["target"] == "case-pinned"
+    assert control["problems"] == []
+
+    # Planted defect: the pre-fix layout (payload.request = the V2 request)
+    # loses every one of those, and Phase 4 refuses it.
+    broken = copy.deepcopy(corpus.pairs["case-pinned"])
+    broken["payload"]["request"] = broken["payload"]["input_trace"]["request"]
+    assert "geometry:pinned" not in t0.derive_covers(
+        broken["payload"]["record"], broken["payload"]["request"], "score_result",
+        axis_inputs(), broken["payload"]["relations"])
+    with pytest.raises(phase4_real._TraceError, match="not the translation"):
+        phase4_real._verified_trace_bundle(broken, corpus.root)
+    # ... and a trace re-pointed at another case's legacy request is refused.
+    swapped = copy.deepcopy(corpus.pairs["case-pinned"])
+    swapped["payload"]["request"]["ticker"] = "ZZZ"
+    with pytest.raises(phase4_real._TraceError, match="event_revision"):
+        phase4_real._verified_trace_bundle(swapped, corpus.root)
 
 
 # ---------------------------------------------------------------------------

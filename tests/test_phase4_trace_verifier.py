@@ -9,23 +9,36 @@ import pytest
 from checks import phase4_real
 from checks.tier0_corpus import Corpus
 from engine.v2.contracts import SCORE_REQUEST_V1
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.scoring.identity import request_hash
 from engine.v2.scoring.identity import with_score_id
+from tools.phase4_request_translation import canonical_request_from_legacy
+
+
+#: The pair's saved LEGACY request (payload.request); the traced V2 request
+#: below is its translation (tools.phase4_request_translation).
+LEGACY_REQUEST = {
+    "ticker": "ABC", "strategy": "STR-THRU", "as_of": "2026-09-16",
+    "event_date": "2026-09-17", "session": "AMC",
+    "fill": {"policy_id": "legacy.fill_alpha.v1", "alpha": 0.5},
+}
 
 
 def _request_document():
+    bound = to_document(canonical_request_from_legacy(
+        LEGACY_REQUEST, event_id="event-1", snapshot="snapshot-1",
+    ))
     return {
         "event_id": "event-1",
-        "calendar_revision": "calendar-1",
+        "calendar_revision": bound["calendar_revision"],
         "strategy_version": "STR-THRU",
         "deployment_id": "deployment-1",
         "decision_clock_id": "entry-close-1",
         "requested_decision_at": "2026-09-16",
         "snapshot_id": "snapshot-1",
         "mode": "replay",
-        "fill_model": {"alpha": 0.5},
-        "event_revision": "event-revision-1",
+        "fill_model": bound["fill_model"],
+        "event_revision": bound["event_revision"],
         "contract_override": None,
         "geometry_override": None,
         "dependency_refs": ["residual:1"],
@@ -139,7 +152,7 @@ def _pair(tmp_path):
     return {
         "payload_hash": content_hash({"record": {}}),
         "payload": {
-            "request": request_doc,
+            "request": copy.deepcopy(LEGACY_REQUEST),
             "record": {},
             "legacy_input_hash": shared_hash,
             "input_trace": trace,
@@ -430,7 +443,8 @@ def test_saved_request_corruption_is_incomparable_before_execution(
     assert called is False
     assert release["population"]["compared"] == 0
     assert release["population"]["incomparable"] == 1
-    assert "not the exact saved request" in release["dispositions"][0]["reason"]
+    assert "not the translation of the saved legacy request" in (
+        release["dispositions"][0]["reason"])
     assert parity["complete"] is False
 
 

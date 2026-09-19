@@ -99,6 +99,10 @@ from engine.v2.scoring.stages import (  # noqa: E402
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
 from tools.phase4_frozen_resources import FrozenResourcePackage, package_frozen_resources  # noqa: E402
+from tools.phase4_request_translation import (  # noqa: E402
+    LegacyRequestTranslationError,
+    canonical_request_from_legacy,
+)
 
 SCHEMA_VERSION = "tier0_pair.v1.1"
 INDEX_VERSION = "tier0_corpus.v1.1"
@@ -238,58 +242,28 @@ def request_from_dict(data: dict) -> score_mod.ScoreRequest:
 
 
 def canonical_v2_request(candidate: Mapping[str, Any], snapshot: str) -> V2ScoreRequest:
-    """Translate source-owned legacy request identity into a canonical command."""
+    """Translate source-owned legacy request identity into a canonical command.
+
+    The translation itself lives in :mod:`tools.phase4_request_translation`,
+    shared with ``checks/phase4_real.py``, which re-derives it from the saved
+    legacy request to bind the traced V2 request to its pair.
+    """
     event_id = candidate.get("event_id")
     if not isinstance(event_id, str) or not event_id.strip():
         raise StrictTraceCaptureError("strict trace requires the captured event_id")
     raw = candidate.get("request")
     if not isinstance(raw, Mapping):
         raw = request_to_dict(raw)
-    legacy = request_from_dict(dict(raw))
-    if legacy.strategy not in STRICT_TRACE_SUPPORTED_STRATEGIES:
+    legacy = request_to_dict(request_from_dict(dict(raw)))
+    if legacy["strategy"] not in STRICT_TRACE_SUPPORTED_STRATEGIES:
         raise StrictTraceCaptureError(
-            f"strict probe does not support {legacy.strategy} "
+            f"strict probe does not support {legacy['strategy']} "
             f"(supported: {sorted(STRICT_TRACE_SUPPORTED_STRATEGIES)})"
         )
-    decision = legacy.as_of if legacy.as_of is not None else legacy.chain_as_of
-    if decision is None:
-        raise StrictTraceCaptureError("strict trace requires a decision date")
-    event_date = legacy.event_date
-    if event_date is None:
-        raise StrictTraceCaptureError("strict trace requires an event date")
-    event_identity = {
-        "event_id": event_id,
-        "ticker": legacy.ticker,
-        "event_date": str(pd.Timestamp(event_date).date()),
-        "session": legacy.session,
-    }
-    geometry_override = dict(legacy.structure_params or {})
-    if legacy.strike is not None:
-        geometry_override["strike"] = float(legacy.strike)
-    if legacy.expiry is not None:
-        geometry_override["expiry"] = str(pd.Timestamp(legacy.expiry).date())
-    return V2ScoreRequest(
-        event_id=event_id,
-        event_revision="event:" + content_hash(event_identity),
-        calendar_revision="calendar:" + content_hash({
-            "decision": str(pd.Timestamp(decision).date()),
-            "event": event_identity,
-        }),
-        strategy_version=legacy.strategy,
-        deployment_id=f"legacy-capture:{snapshot}",
-        decision_clock_id=(
-            "legacy.decision_offset."
-            + str(legacy.decision_offset if legacy.decision_offset is not None else 0)
-        ),
-        requested_decision_at=str(pd.Timestamp(decision).date()),
-        snapshot_id=str(snapshot),
-        mode="replay",
-        fill_model={
-            "policy_id": "legacy.fill_alpha.v1",
-            "alpha": float(legacy.fill.alpha),
-        },
-        geometry_override=geometry_override or None,
-    )
+    try:
+        return canonical_request_from_legacy(legacy, event_id=event_id, snapshot=snapshot)
+    except LegacyRequestTranslationError as exc:
+        raise StrictTraceCaptureError(str(exc)) from exc
 
 
 def _checkpoint_value(candidate: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -1943,7 +1917,10 @@ def attach_strict_probe(
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             gaps[fixture_id] = str(exc)
             continue
-        candidate["request"] = to_document(request)
+        # ``candidate["request"]`` stays the LEGACY request: coverage, pinned
+        # links, seeded controls and tier-1 replay all read it. The canonical
+        # V2 request lives only in ``input_trace.request`` (and its
+        # ``shared_inputs``); phase4_real re-derives it from the legacy one.
         candidate["input_trace"] = trace
         candidate["legacy_input_hash"] = trace["shared_input_hash"]
         candidate["native_score_id"] = native.score_id

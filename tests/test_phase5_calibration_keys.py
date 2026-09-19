@@ -13,12 +13,17 @@ from tools import phase5_calibration_keys as keys_tool
 
 def _pair(fixture_id: str, *, strategy: str, alpha, cutoff=None, context=None,
           traced: bool = True) -> dict:
-    payload = {"request": {"strategy_version": strategy, "fill_model": {"alpha": alpha}},
+    # The tier-0 layout: payload.request is the legacy request; a traced
+    # pair's canonical V2 request is input_trace.request.
+    payload = {"request": {"strategy": strategy, "fill": {"alpha": alpha}},
                "record": {"strategy": strategy, "fill": alpha}}
     if cutoff is not None:
         payload["record"]["evidence_cutoff"] = cutoff
     if traced:
-        payload["input_trace"] = {"native_inputs": {"context": context or {}}}
+        payload["input_trace"] = {
+            "request": {"strategy_version": strategy, "fill_model": {"alpha": alpha}},
+            "native_inputs": {"context": context or {}},
+        }
     return {"fixture_id": fixture_id, "payload": payload}
 
 
@@ -98,3 +103,16 @@ def test_cli_writes_keys_outside_data(tmp_path, capsys):
     assert written["keys"] == [["STR-THRU", 0.5, "2026-09-16"]]
     assert written["source"]["traced_pairs"] == 1
     assert "--plan-only" in capsys.readouterr().out
+
+
+def test_traced_pair_key_reads_the_v2_request_from_the_input_trace():
+    """payload.request is the legacy request; the key's strategy and alpha
+    come from input_trace.request even when the record carries neither."""
+    pair = _pair("p", strategy="STR-RUNUP", alpha=0.25, cutoff="2026-09-01")
+    pair["payload"]["record"] = {"evidence_cutoff": "2026-09-01"}
+    key, reason = keys_tool._pair_key(pair)
+    assert (key, reason) == (keys_tool._key("STR-RUNUP", 0.25, "2026-09-01"), "")
+    # Planted defect: the V2 request gone from its home, so the legacy
+    # payload.request (no strategy_version/fill_model) cannot supply it.
+    del pair["payload"]["input_trace"]["request"]
+    assert keys_tool._pair_key(pair)[0] is None

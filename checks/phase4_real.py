@@ -70,6 +70,7 @@ from engine.v2.scoring.source_inputs import (  # noqa: E402
     build_native_score_inputs,
 )
 from engine.v2.serving.score_projection import legacy_score_projection  # noqa: E402
+from tools.phase4_request_translation import legacy_binding_mismatches  # noqa: E402
 
 __all__ = ["build_evidence", "main"]
 
@@ -1610,9 +1611,22 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     if payload.get("input_trace_hash") != trace_hash:
         raise _TraceError("pair.input_trace_hash: mismatch")
 
-    saved_request = payload.get("request")
-    if not isinstance(saved_request, Mapping) or trace.get("request") != saved_request:
-        raise _TraceError("input_trace.request: not the exact saved request")
+    # payload.request is the LEGACY request (what tier-0 coverage, pinned
+    # links, seeded controls and tier-1 replay read). The canonical V2 request
+    # lives only in input_trace.request, and must be the translation of the
+    # saved legacy request, so a trace cannot be attached to a different case.
+    legacy_request = payload.get("request")
+    saved_request = trace.get("request")
+    if not isinstance(legacy_request, Mapping):
+        raise _TraceError("payload.request: missing legacy request")
+    if not isinstance(saved_request, Mapping):
+        raise _TraceError("input_trace.request: missing")
+    unbound = legacy_binding_mismatches(legacy_request, saved_request)
+    if unbound:
+        raise _TraceError(
+            "input_trace.request: not the translation of the saved legacy "
+            f"request ({', '.join(unbound)})"
+        )
     request = from_document(ScoreRequest, dict(saved_request))
     computed_request_hash = request_hash(request)
     if trace.get("request_hash") != computed_request_hash:
