@@ -35,6 +35,7 @@ import tarfile
 import pytest
 
 from engine.v2.contracts import EngineeringNight, JobSpec, SubmitRequest
+from engine.v2.ops import effects_graph
 from engine.v2.ops.effects_graph import engineering_gate_effect, publication_effect
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.health import (
@@ -71,6 +72,22 @@ from tests.test_v2_ops_effects_graph import _row as _decision_row
 
 SCOPE = "shadow"
 SESSION = "2026-09-12"
+
+#: What checks/rearchitecture_phase1_gate.py prints, reduced to one row per
+#: section. The real gate needs a git checkout (``git ls-files``) and
+#: /usr/bin/python3 with the repo's dependencies. Mutation CI runs these tests
+#: in a work copy that has neither. These tests cover how the effect records
+#: its receipts and history, not what the gate checks.
+#: test_v2_ops_effects_graph runs the real gate.
+GATE_OUTPUT = {"structural": {"layers": {"ok": True}},
+               "engineering": {"budgets": {"ok": True}, "coverage": {"ok": False}},
+               "code_hash": "sha256:" + "c" * 64}
+
+
+@pytest.fixture
+def stub_gate(monkeypatch):
+    monkeypatch.setattr(effects_graph, "_run_engineering_gate_subprocess",
+                        lambda repo_root: json.loads(json.dumps(GATE_OUTPUT)))
 
 
 # --------------------------------------------------------------------------
@@ -133,7 +150,7 @@ def test_trailing_occurrences_refuses_rather_than_falls_back_silently(monkeypatc
         trailing_occurrences(SESSION, nights=3)
 
 
-def test_engineering_gate_effect_records_one_observation_per_night(tmp_path):
+def test_engineering_gate_effect_records_one_observation_per_night(tmp_path, stub_gate):
     """The wiring guide §5.5 item 2 actually adds: a real
     ``engineering_gate_effect`` call now populates ``health_observations``,
     keyed by the job's own (requested) session -- never only the
@@ -155,7 +172,7 @@ def test_engineering_gate_effect_records_one_observation_per_night(tmp_path):
         conn.close()
 
 
-def test_engineering_gate_effect_two_generations_in_one_night_count_one_night(tmp_path):
+def test_engineering_gate_effect_two_generations_in_one_night_count_one_night(tmp_path, stub_gate):
     """Two DISTINCT generations of the SAME scheduled night (different
     ``deployment``/``decision_clock`` -- guide §5.5 item 1's own pinning)
     both record an observation, but ``health_observations`` still holds

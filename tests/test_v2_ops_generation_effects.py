@@ -33,6 +33,7 @@ from engine.v2.ops.outbox import watermark, watermark_would_conflict
 from tests.ops_support import catalog
 from tests.test_v2_ops_effects_graph import _commit, _open, _params, _row, _seed_decisions
 from tests.test_v2_ops_effects_graph import _submit_and_claim as _claim
+from tests.test_v2_ops_engineering_history import stub_gate  # noqa: F401 (fixture)
 
 REPO = Path(__file__).resolve().parents[1]
 SESSION = "2026-09-12"
@@ -55,7 +56,7 @@ def _watermarks(conn, scope, stage):
 # --------------------------------------------------------------------------
 
 
-def test_engineering_gate_two_generations_each_get_their_own_receipt(tmp_path):
+def test_engineering_gate_two_generations_each_get_their_own_receipt(tmp_path, stub_gate):
     conn, clock, supervisor, store, root = _open(tmp_path)
     try:
         scope = "shadow"
