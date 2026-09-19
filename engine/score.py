@@ -376,6 +376,35 @@ def _phase4_input(frame: pd.DataFrame, name: str) -> float | None:
     return number if np.isfinite(number) else None
 
 
+def _size_feature_capture_value(features: pd.DataFrame, name: str) -> Any:
+    """Value to Phase-4-capture for one ``forecast_sizing`` feature.
+
+    Distinguishes a column that never landed in ``features`` (the whole
+    market block withheld -- the same condition legacy's own
+    ``missing = [f for f in served.features if f not in features.columns]``
+    check treats as MISSING_FEATURES, so it stays ``None``) from a column
+    that DID land but reads non-finite (a real sourced value, e.g.
+    ``or_implied`` with no ORATS quote for this ticker/date -- genuinely NaN
+    in the panel, see ``engine/data/features/panel.py``'s
+    ``add_orats_features``). The two are different facts; collapsing them
+    into the same ``None`` erases the distinction the strict Phase-4 trace
+    capture needs to mirror legacy's own graceful NaN handling
+    (``engine.data.features.tier4.ServingModel.predict``'s ``np.isfinite``
+    check) instead of reporting an unexplained capture gap.
+
+    The tag shape below, ``{"__nonfinite__": repr(value)}``, matches
+    ``engine.v2.foundation.canonical.NONFINITE_KEY`` byte for byte. This
+    module is legacy-only and must not import from ``engine.v2``, so the
+    literal is reproduced here rather than imported.
+    """
+    if name not in features.columns:
+        return None
+    raw = features[name].iloc[0]
+    if pd.notna(raw):
+        return float(raw)
+    return {"__nonfinite__": repr(float(raw))}
+
+
 class Phase4TraceCollector:
     """Opt-in capture of legacy scoring inputs and outcomes.
 
@@ -476,7 +505,8 @@ class Phase4TraceCollector:
             raise ValueError(f"phase 4 feature role recorded twice: {role}")
         group["feature_vector"][role] = vector
         group["missing_mask"][role] = {
-            str(name): value is None for name, value in vector.items()
+            str(name): value is None or isinstance(value, Mapping)
+            for name, value in vector.items()
         }
         group["model_identity"][role] = self._document(model_identity)
 
@@ -3096,11 +3126,7 @@ class Scorer:
         if collector is not None:
             collector.capture_features(
                 {
-                    name: (
-                        float(features[name].iloc[0])
-                        if name in features.columns and pd.notna(features[name].iloc[0])
-                        else None
-                    )
+                    name: _size_feature_capture_value(features, name)
                     for name in served.features
                 },
                 {

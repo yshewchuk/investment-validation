@@ -421,6 +421,23 @@ _LEGACY_ROLE_ALIASES = {
 
 
 def _coerce_feature_value(role: str, name: str, raw: Any) -> float:
+    if isinstance(raw, Mapping):
+        from engine.v2.foundation.canonical import untag_nonfinite
+
+        decoded = untag_nonfinite(dict(raw))
+        if isinstance(decoded, float):
+            # A genuinely non-finite SOURCE value (e.g. `or_implied` with no
+            # ORATS quote for this ticker/date). Legacy's own
+            # `ServingModel.predict` (engine/data/features/tier4.py) already
+            # declines on this via its own `np.isfinite` check, so the honest
+            # trace mirrors the real value instead of raising: the frozen
+            # inference call downstream refuses on it gracefully (a real,
+            # non-fabricated ARTIFACT_INVALID/refused native record), which
+            # IS legacy's decline, not a defect in the capture.
+            return decoded
+        raise StrictTraceCaptureError(
+            f"feature {role}.{name} is missing or nonnumeric"
+        )
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
