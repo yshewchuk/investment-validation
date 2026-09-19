@@ -85,14 +85,27 @@ def _number(value: float) -> str:
     if value == 0.0:
         return "0"  # and -0.0: ES6 renders negative zero as "0"
     sign = "-" if value < 0 else ""
-    tup = Decimal(repr(abs(value))).as_tuple()
-    digits = "".join(str(d) for d in tup.digits)
-    e = int(tup.exponent)
-    while len(digits) > 1 and digits.endswith("0"):
-        digits = digits[:-1]
-        e += 1
-    k = len(digits)
-    n = k + e
+    if type(value) is float:
+        # The digits and the decimal point straight from repr's text
+        # ("d.ddde±x", "ddd.ddd" or "0.000ddd"): the same m and n the Decimal
+        # path below derives, without building a Decimal per float (a
+        # capture hashes ~10^5-10^6 floats per document).
+        mantissa, _, exponent = repr(abs(value)).partition("e")
+        whole, _, fraction = mantissa.partition(".")
+        raw = whole + fraction
+        digits = raw.lstrip("0")
+        n = len(whole) + (int(exponent) if exponent else 0) - (len(raw) - len(digits))
+        digits = digits.rstrip("0")
+        k = len(digits)
+    else:  # a float subclass: the original, general path
+        tup = Decimal(repr(abs(value))).as_tuple()
+        digits = "".join(str(d) for d in tup.digits)
+        e = int(tup.exponent)
+        while len(digits) > 1 and digits.endswith("0"):
+            digits = digits[:-1]
+            e += 1
+        k = len(digits)
+        n = k + e
     if k <= n <= 21:
         return sign + digits + "0" * (n - k)
     if 0 < n <= 21:
@@ -133,14 +146,55 @@ def _serialize(value: Any) -> str:
     raise TypeError(f"not canonicalizable: {type(value).__name__}")
 
 
-def canonical_json(value: Any) -> str:
-    """Serialize ``value`` to RFC 8785 canonical JSON."""
+def canonical_json(value: Any, *, fragments: Any = None) -> str:
+    """Serialize ``value`` to RFC 8785 canonical JSON.
+
+    ``fragments``: optional memo for sub-values shared BY IDENTITY across
+    many hashed documents (one served model pool embedded in every capture
+    candidate it served). It is asked ``fragments.canonical(node, render)``
+    for each container node and returns that node's canonical text (calling
+    ``render(node)`` once per shared node) or ``None`` for a node it does
+    not hold. The text is byte-identical to the plain path: JCS serializes
+    each member and element independently of where it sits.
+    """
+    if fragments is None:
+        return _serialize(_normalize(value))
+    return _serialize_shared(value, fragments)
+
+
+def _plain(value: Any) -> str:
     return _serialize(_normalize(value))
 
 
-def content_hash(value: Any) -> str:
-    """``sha256:<64 hex>`` over the canonical JSON of ``value``."""
-    digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+_CONTAINERS = (dict, list, tuple)
+
+
+def _serialize_shared(value: Any, fragments: Any) -> str:
+    if not isinstance(value, _CONTAINERS):
+        return _serialize(_scalar(value))  # a leaf: exactly _plain(value)
+    text = fragments.canonical(value, _plain)
+    if text is not None:
+        return text
+    if isinstance(value, dict):
+        members = {str(k): v for k, v in value.items()}
+        items = sorted(members.items(),
+                       key=lambda kv: kv[0].encode("utf-16-be", "surrogatepass"))
+        body = ",".join(
+            f"{json.dumps(k, ensure_ascii=False)}:"
+            + (_serialize_shared(v, fragments) if isinstance(v, _CONTAINERS)
+               else _serialize(_scalar(v)))
+            for k, v in items)
+        return "{" + body + "}"
+    return "[" + ",".join(
+        _serialize_shared(v, fragments) if isinstance(v, _CONTAINERS)
+        else _serialize(_scalar(v)) for v in value) + "]"
+
+
+def content_hash(value: Any, *, fragments: Any = None) -> str:
+    """``sha256:<64 hex>`` over the canonical JSON of ``value``. ``fragments``
+    (see :func:`canonical_json`) only saves work; the hash is the same."""
+    text = canonical_json(value, fragments=fragments)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"{CONTENT_HASH_PREFIX}{digest}"
 
 

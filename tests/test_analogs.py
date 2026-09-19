@@ -419,27 +419,194 @@ class TestCausalPoolCache:
         assert len(matcher._causal_pools) == 2
 
     def test_cache_cap_is_sized_to_the_board_not_to_a_round_number(self):
-        """The cap is a memory ceiling with two sides, both measured.
+        """`MAX_CAUSAL_CACHE` is now a loose backstop, not the memory bound.
 
-        A cached entry is not small: it holds a filtered, re-bucketed copy of
-        the (strategy, alpha) pool — 6.2 MB on average and ~9 MB for recent
-        dates, where few trades have been excluded yet.
+        2026-09-18, revised: a real 40-forward-event strict capture measured
+        per-key cost varying roughly 10x key to key (run 3: +5 keys -> +770
+        MB; elsewhere in the same run, +30 keys -> +350 MB), so a fixed
+        key-count ceiling cannot bound this cache's memory — a workload that
+        happens to visit large-population keys blows through any count cap
+        sized for the small end of that range, and one sized for the large
+        end wastes slots everywhere else. `CAUSAL_CACHE_BUDGET_BYTES`
+        (module level) is the actual memory ceiling now (see
+        `test_byte_budget_evicts_before_the_key_count_cap_would` below);
+        `MAX_CAUSAL_CACHE` only guards against unbounded DICT overhead from
+        a degenerate many-tiny-keys workload, so it can stay generous.
 
-        LOWER bound: a full three-week board (3,120 rows) generates 34 distinct
-        (strategy, alpha, as_of) keys — 31 entry dates x 2 scoreable strategies.
-        A cap below that makes the cache evict entries the board is still using,
-        on the one path where the cache actually pays.
-
-        UPPER bound: the original 256 measured at 1.6 GB, which took the Scorer
-        from 2.5 GB to 4.1 GB on a 7.8 GB box. Those slots bought nothing: the
-        paths that would fill them (build_pairs, ~1,000 scattered decision
-        dates; the calibration sampler, 300) barely repeat an as_of and get
-        almost no hits regardless.
-
-        Raising this past the upper bound should mean the workload changed, not
-        that a bigger number looked safer.
+        LOWER bound unchanged: a full three-week board (3,120 rows)
+        generates 34 distinct (strategy, alpha, as_of) keys — 31 entry dates
+        x 2 scoreable strategies. A cap below that makes the cache evict
+        entries the board is still using, on the one path where the cache
+        actually pays.
         """
         cap = self._matcher().MAX_CAUSAL_CACHE
         assert cap >= 40, "cap sits below the measured 34-key board working set"
-        assert cap <= 96, (
-            "256 entries measured at 1.6 GB on a 7.8 GB box; keep the ceiling bounded")
+        # The byte budget is the real ceiling; the count backstop just needs
+        # to stay well above the board's own working set (34) without being
+        # so low it competes with the byte budget for which one binds first
+        # in the normal (small-to-moderate per-key cost) case.
+        assert cap <= 4096, "key-count backstop should not itself need scaling"
+
+    def test_byte_budget_evicts_before_the_key_count_cap_would(self):
+        """A handful of LARGE per-key pools must evict on bytes alone, well
+        under the key-count backstop — the exact gap a count-only cap left
+        open (measured: 5 keys costing 770 MB in one real run).
+        """
+        from engine import analogs as analogs_mod
+
+        wide = pd.concat([
+            trades(4000, ret=0.05, mcap=5e9, dte=5, year=2020 + i)
+            for i in range(6)
+        ], ignore_index=True)
+        matcher = AnalogMatcher(bucket_frame(wide))
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        original_budget = analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+        analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = 2_000_000  # force eviction fast
+        try:
+            for i in range(6):
+                matcher.match("STR-THRU", buckets, alpha=0.5,
+                              as_of=f"{2030 + i}-01-01")
+            # Well under the count backstop (which never fired here) and
+            # under 6 -- the budget evicted keys long before the count cap
+            # would have needed to.
+            assert len(matcher._causal_pools) < 6
+            assert matcher._causal_cache_total_bytes <= (
+                analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+                + max(matcher._causal_cache_bytes.values(), default=0)
+            )
+        finally:
+            analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
+
+
+class TestPopulationPoolCache:
+    """2026-09-18: an instrumented strict-capture run measured the forward
+    pass's analog step costing net +1.48 GB of real RSS while
+    `CAUSAL_CACHE_BUDGET_BYTES` (600 MB) stayed the ceiling — because
+    `_pools`/`_population_row_caches` (keyed only on (strategy, alpha),
+    documenting the WHOLE population the first time any candidate touches a
+    key) were entirely invisible to that budget's accounting. These tests
+    check that they are now priced into the SAME total and evicted, causal
+    keys first, by the SAME LRU discipline the causal family already had.
+    """
+
+    def _matcher(self, *, alphas=(0.5,), n=4000):
+        frame = pd.concat([
+            trades(n, ret=0.05, mcap=5e9, dte=5, year=2020, alpha=alpha)
+            for alpha in alphas
+        ], ignore_index=True)
+        return AnalogMatcher(bucket_frame(frame))
+
+    def test_population_pool_is_priced_at_first_touch(self):
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+
+        key = ("STR-THRU", 0.5)
+        assert key in matcher._pools
+        assert key in matcher._causal_cache_bytes
+        assert matcher._causal_cache_bytes[key] > 0
+        assert matcher._causal_cache_total_bytes == matcher._causal_cache_bytes[key]
+
+    def test_population_pool_is_priced_once_not_once_per_call(self):
+        """A cache HIT on an already-seeded key must not re-charge its cost
+        — `_evidence_rows`' own row cache already makes the CPU side of a
+        repeat touch cheap; this checks the byte ledger agrees.
+        """
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        first_total = matcher._causal_cache_total_bytes
+
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+
+        assert matcher._causal_cache_total_bytes == first_total
+
+    def test_population_touch_refreshes_recency(self):
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        key = ("STR-THRU", 0.5)
+
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        assert list(matcher._population_pool_order) == [key]
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        # A dict-order re-insertion, not a duplicate or a reordering bug:
+        # exactly one entry, still present, order preserved (nothing else
+        # to reorder against with only one key touched so far).
+        assert list(matcher._population_pool_order) == [key]
+
+    def test_population_entries_evict_only_after_causal_is_exhausted(self):
+        """Causal keys, being numerous and cheap to rebuild, must absorb
+        eviction pressure before a population key's expensive
+        full-population documentation is thrown away.
+        """
+        from engine import analogs as analogs_mod
+
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)  # seeds _pools
+        population_cost = matcher._causal_cache_bytes[("STR-THRU", 0.5)]
+
+        original_budget = analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+        # Room for the population entry plus a sliver for causal ones —
+        # every later causal key must therefore evict an OLDER causal key,
+        # never the population entry, as long as any causal key remains.
+        analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = population_cost + 1
+        try:
+            for i in range(5):
+                matcher.match("STR-THRU", buckets, alpha=0.5,
+                              as_of=f"{2031 + i}-01-01")
+            assert ("STR-THRU", 0.5) in matcher._pools
+            assert len(matcher._causal_pools) <= 1
+        finally:
+            analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
+
+    def test_population_lru_eviction_once_causal_is_empty(self):
+        """With no causal entries to absorb the pressure, a new population
+        key's arrival evicts the LEAST-recently-touched population key —
+        never an arbitrary or insertion-order-only choice.
+        """
+        from engine import analogs as analogs_mod
+
+        matcher = self._matcher(alphas=(0.5, 0.75, 0.9), n=2000)
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        matcher.match("STR-THRU", buckets, alpha=0.75, as_of=None)
+        key_a, key_b = ("STR-THRU", 0.5), ("STR-THRU", 0.75)
+        cost_each = matcher._causal_cache_bytes[key_a]
+
+        # Touch key_a again -- key_b is now the least-recently-used.
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+
+        original_budget = analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+        # Room for exactly two entries; a third's arrival must evict one.
+        analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = cost_each * 2 + 1
+        try:
+            matcher.match("STR-THRU", buckets, alpha=0.9, as_of=None)
+            assert key_a in matcher._pools, "refreshed key must survive"
+            assert key_b not in matcher._pools, "least-recently-used key must evict"
+            assert key_b not in matcher._population_row_caches
+            assert ("STR-THRU", 0.9) in matcher._pools
+        finally:
+            analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
+
+
+def test_causal_cache_budget_is_400mb_not_600mb():
+    """2026-09-19: lowered from 600 MB to 400 MB after a synthetic
+    benchmark (scratch/bench_analog_budget.py, untracked) measured the
+    cost -- ~2.25 MB/causal-key, so 400 MB still holds ~177 concurrent
+    keys, comfortably above a real capture's causal-key cardinality (a
+    handful of strategies x ALPHA_GRID(5) x the boundary events' own as_of
+    dates). See CAUSAL_CACHE_BUDGET_BYTES's own docstring for the full
+    numbers. A regression back to 600 MB would silently give up the ~200
+    MB of headroom this round was measured and committed to free.
+    """
+    from engine import analogs as analogs_mod
+
+    assert analogs_mod.CAUSAL_CACHE_BUDGET_BYTES == 400 * 1024 * 1024

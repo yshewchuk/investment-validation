@@ -15,8 +15,13 @@ __all__ = [
     "AnalogRefusal",
     "AnalogResult",
     "LegacyBucketRecipe",
+    "FROZEN_ANALOG_QUERY_FIELDS",
+    "FROZEN_ANALOG_RECIPE_FIELDS",
     "bucket_population_hash",
     "evaluate_analogs",
+    "evaluate_frozen_analogs",
+    "frozen_key_mismatch",
+    "implied_tercile",
     "legacy_bucket_bootstrap_seed",
     "source_population_hash",
 ]
@@ -493,23 +498,26 @@ def legacy_bucket_bootstrap_seed(
     return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:8], "big")
 
 
-def _summarize_bucket_match(
+def _summarize_returns(
+    returns: np.ndarray,
     *,
-    rows: tuple[dict[str, Any], ...],
-    selected: tuple[dict[str, Any], ...],
-    recipe: LegacyBucketRecipe,
+    min_analogs: int,
+    bootstrap_draws: int,
+    bootstrap_seed: int,
+    ci_quantiles: tuple[float, float],
     dropped: tuple[str, ...],
     unavailable: tuple[str, ...],
+    all_unavailable: bool,
+    population_ids: tuple[str, ...],
+    selected_ids: tuple[str, ...],
+    contributing_ids: tuple[str, ...],
 ) -> AnalogResult:
-    contributing = tuple(
-        row for row in selected if row["realized_return"] is not None
-    )
-    returns = np.sort(np.asarray(
-        [row["realized_return"] for row in contributing], dtype=float,
-    ))
-    population_ids = tuple(row["row_id"] for row in rows)
-    selected_ids = tuple(row["row_id"] for row in selected)
-    contributing_ids = tuple(row["row_id"] for row in contributing)
+    """Legacy ``AnalogMatcher._summarize`` over already-sorted finite returns.
+
+    One arithmetic path for the declared-rows recipe and the frozen
+    artifact: sorted before the bootstrap (it samples by index), the
+    bootstrap seeded from the request identity, quantiles as legacy.
+    """
     if returns.size == 0:
         return AnalogResult(
             exp_pnl_analog=None,
@@ -517,7 +525,7 @@ def _summarize_bucket_match(
             ci_low=None,
             ci_high=None,
             n_analogs=0,
-            widened=0 if len(unavailable) == len(recipe.bucket_dimensions) else len(dropped),
+            widened=0 if all_unavailable else len(dropped),
             dropped=dropped,
             unavailable=unavailable,
             thin=True,
@@ -525,19 +533,19 @@ def _summarize_bucket_match(
             selected_row_ids=selected_ids,
             contributing_row_ids=contributing_ids,
         )
-    thin = returns.size < recipe.min_analogs
+    thin = returns.size < min_analogs
     ci_low = ci_high = None
-    if not thin and recipe.bootstrap_draws:
-        rng = np.random.default_rng(recipe.bootstrap_seed)
+    if not thin and bootstrap_draws:
+        rng = np.random.default_rng(bootstrap_seed)
         draws = rng.choice(
             returns,
-            size=(recipe.bootstrap_draws, returns.size),
+            size=(bootstrap_draws, returns.size),
             replace=True,
         )
         means = draws.mean(axis=1)
         ci_low, ci_high = (
-            float(np.quantile(means, recipe.ci_quantiles[0])),
-            float(np.quantile(means, recipe.ci_quantiles[1])),
+            float(np.quantile(means, ci_quantiles[0])),
+            float(np.quantile(means, ci_quantiles[1])),
         )
     return AnalogResult(
         exp_pnl_analog=float(returns.mean()),
@@ -555,6 +563,35 @@ def _summarize_bucket_match(
         population_row_ids=population_ids,
         selected_row_ids=selected_ids,
         contributing_row_ids=contributing_ids,
+    )
+
+
+def _summarize_bucket_match(
+    *,
+    rows: tuple[dict[str, Any], ...],
+    selected: tuple[dict[str, Any], ...],
+    recipe: LegacyBucketRecipe,
+    dropped: tuple[str, ...],
+    unavailable: tuple[str, ...],
+) -> AnalogResult:
+    contributing = tuple(
+        row for row in selected if row["realized_return"] is not None
+    )
+    returns = np.sort(np.asarray(
+        [row["realized_return"] for row in contributing], dtype=float,
+    ))
+    return _summarize_returns(
+        returns,
+        min_analogs=recipe.min_analogs,
+        bootstrap_draws=recipe.bootstrap_draws,
+        bootstrap_seed=recipe.bootstrap_seed,
+        ci_quantiles=recipe.ci_quantiles,
+        dropped=dropped,
+        unavailable=unavailable,
+        all_unavailable=len(unavailable) == len(recipe.bucket_dimensions),
+        population_ids=tuple(row["row_id"] for row in rows),
+        selected_ids=tuple(row["row_id"] for row in selected),
+        contributing_ids=tuple(row["row_id"] for row in contributing),
     )
 
 
@@ -723,3 +760,192 @@ def evaluate_analogs(
             recipe=recipe,
         )
     return _evaluate_nearest_analogs(source_rows, query_features, recipe)
+
+
+# --------------------------------------------------------------------------
+# the frozen board analog matcher (P5-4)
+# --------------------------------------------------------------------------
+
+#: Fields of a frozen-path recipe (``source_inputs.SourceBundle
+#: .analog_artifact_recipe``). ``cutoff`` (the request's evidence cutoff) and
+#: the optional ``content_hash`` (the release pin) are the artifact key the
+#: stage checks; the rest is legacy ``AnalogMatcher.match``'s own arguments:
+#: ``min_analogs``, ``bootstrap_draws`` (legacy ``bootstrap``), the CI
+#: quantiles, and the two request-identity parts of the legacy bootstrap seed
+#: (``seed_snapshot`` = the matcher's ``snapshot``, ``request_key``).
+FROZEN_ANALOG_RECIPE_FIELDS = frozenset({
+    "cutoff", "content_hash", "min_analogs", "bootstrap_draws", "ci_quantiles",
+    "seed_snapshot", "request_key",
+})
+FROZEN_ANALOG_QUERY_FIELDS = ("mcap_bucket", "dte_band", "moneyness_band", "implied_ratio")
+TERCILE_LABELS = ("low", "mid", "high")
+MODEL_NOT_READY = "MODEL_NOT_READY"
+_FROZEN_CACHE: dict[str, tuple[Any, ...]] = {}
+_FROZEN_CACHE_LIMIT = 8
+
+
+def implied_tercile(ratio: float | None, edges: Sequence[float]) -> str | None:
+    """Legacy ``engine.analogs._bucket`` for one implied ratio.
+
+    Half-open upward (``searchsorted(side="right")``), clipped to the three
+    labels, and ``None`` for a missing or non-finite ratio.
+    """
+    if ratio is None or not isfinite(float(ratio)):
+        return None
+    index = int(np.searchsorted(np.asarray(edges, dtype=float), float(ratio), side="right"))
+    return TERCILE_LABELS[min(max(index, 0), len(TERCILE_LABELS) - 1)]
+
+
+def _frozen_arrays(artifact: Any) -> tuple[Any, ...]:
+    """``(ids, {dimension: labels}, returns)`` of a frozen pool, cached by hash.
+
+    Read-only arrays in the artifact's own order: a request can neither pay
+    the conversion twice nor mutate what the next request reads.
+    """
+    cached = _FROZEN_CACHE.get(artifact.content_hash)
+    if cached is not None:
+        return cached
+    from engine.v2.models.analog_artifact import BOARD_ANALOG_COLUMNS
+
+    rows = artifact.rows
+    column = {name: index for index, name in enumerate(BOARD_ANALOG_COLUMNS)}
+    ids = np.asarray([row[0] for row in rows], dtype=object)
+    labels = {
+        dimension: np.asarray([row[column[dimension]] for row in rows], dtype=object)
+        for dimension in LEGACY_BUCKET_DIMENSIONS
+    }
+    returns = np.asarray(
+        [np.nan if row[column["ret"]] is None else row[column["ret"]] for row in rows],
+        dtype=float,
+    )
+    for array in (ids, returns, *labels.values()):
+        array.setflags(write=False)
+    cached = (ids, labels, returns)
+    if len(_FROZEN_CACHE) >= _FROZEN_CACHE_LIMIT:
+        _FROZEN_CACHE.pop(next(iter(_FROZEN_CACHE)))
+    _FROZEN_CACHE[artifact.content_hash] = cached
+    return cached
+
+
+def _frozen_recipe(recipe: Any) -> dict[str, Any]:
+    if not isinstance(recipe, Mapping):
+        _refuse("INVALID_ANALOG_RECIPE", "frozen analog recipe must be a mapping")
+    _reject_answers(recipe, "analog_artifact_recipe", _BUCKET_ANSWER_FIELDS)
+    unsupported = sorted(set(recipe) - FROZEN_ANALOG_RECIPE_FIELDS)
+    missing = sorted((FROZEN_ANALOG_RECIPE_FIELDS - {"content_hash"}) - set(recipe))
+    if unsupported or missing:
+        _refuse("INVALID_ANALOG_RECIPE",
+                f"frozen recipe has missing={missing} unsupported={unsupported}")
+    quantiles = recipe["ci_quantiles"]
+    if isinstance(quantiles, (str, bytes)) or not isinstance(quantiles, Sequence):
+        _refuse("INVALID_ANALOG_RECIPE", "ci_quantiles must be a sequence")
+    checked = _validate_bucket_recipe(LegacyBucketRecipe(
+        bucket_dimensions=LEGACY_BUCKET_DIMENSIONS, widening_order=LEGACY_WIDENING_ORDER,
+        min_analogs=recipe["min_analogs"], alpha=0.5,
+        bootstrap_draws=recipe["bootstrap_draws"], bootstrap_seed=0,
+        ci_quantiles=tuple(quantiles), population_hash="sha256:frozen",
+    ))
+    return {"min_analogs": checked.min_analogs, "bootstrap_draws": checked.bootstrap_draws,
+            "ci_quantiles": checked.ci_quantiles,
+            "seed_snapshot": str(recipe["seed_snapshot"]),
+            "request_key": str(recipe["request_key"])}
+
+
+def _frozen_query(query: Any) -> dict[str, Any]:
+    if not isinstance(query, Mapping):
+        _refuse("INVALID_ANALOG_INPUT", "query_features must be a mapping")
+    _reject_answers(query, "query_features", _BUCKET_ANSWER_FIELDS)
+    unsupported = sorted(set(query) - set(FROZEN_ANALOG_QUERY_FIELDS))
+    missing = sorted(set(FROZEN_ANALOG_QUERY_FIELDS) - set(query))
+    if unsupported or missing:
+        _refuse("INVALID_ANALOG_INPUT",
+                f"frozen query has missing={missing} unsupported={unsupported}")
+    out: dict[str, Any] = {}
+    for dimension in ("mcap_bucket", "dte_band", "moneyness_band"):
+        value = query[dimension]
+        if value is not None and not isinstance(value, str):
+            _refuse("INVALID_ANALOG_INPUT", f"query bucket {dimension} must be a label")
+        out[dimension] = value
+    ratio = query["implied_ratio"]
+    out["implied_ratio"] = None if ratio is None else _finite(ratio, "query implied_ratio")
+    return out
+
+
+def frozen_key_mismatch(artifact: Any, recipe: Any, strategy: Any, alpha: Any) -> bool:
+    """True unless ``artifact`` is the board analog pool for THIS request.
+
+    The full causal key ``(strategy, alpha at 4dp, cutoff)`` is the request's
+    own -- strategy and fill alpha from the resolved request, the evidence
+    cutoff from the recipe -- and a release pin (``content_hash``), when
+    given, must match too. A missing key part never matches.
+    """
+    from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact, board_analog_pool_key
+
+    if (not isinstance(artifact, BoardAnalogPoolArtifact) or not isinstance(recipe, Mapping)
+            or strategy is None or alpha is None or "cutoff" not in recipe):
+        return True
+    try:
+        expected = board_analog_pool_key(strategy, alpha, recipe["cutoff"])
+    except (TypeError, ValueError):
+        return True
+    if artifact.key != expected:
+        return True
+    pinned = recipe.get("content_hash")
+    return pinned is not None and pinned != artifact.content_hash
+
+
+def evaluate_frozen_analogs(
+    *,
+    artifact: Any,
+    recipe: Mapping[str, Any],
+    query_features: Mapping[str, Any],
+    strategy: str | None,
+    alpha: float | None,
+) -> tuple[AnalogResult | None, str | None]:
+    """Legacy ``AnalogMatcher.match`` read from a frozen causal pool.
+
+    ``(result, None)``, or ``(None, "MODEL_NOT_READY")`` when the artifact is
+    missing or its key/pin disagrees with this request -- never a rebuild,
+    never a fallback to declared rows. The request's implied ratio is
+    bucketed on the artifact's own frozen edges (legacy's causal
+    re-bucketing), and the bootstrap seed is derived from the re-bucketed
+    query exactly as legacy ``_seed`` derives it.
+    """
+    if frozen_key_mismatch(artifact, recipe, strategy, alpha):
+        return None, MODEL_NOT_READY
+    config = _frozen_recipe(recipe)
+    buckets = _frozen_query(query_features)
+    buckets["implied_tercile"] = implied_tercile(buckets["implied_ratio"],
+                                                 artifact.request_edges)
+    seed = legacy_bucket_bootstrap_seed(
+        snapshot=config["seed_snapshot"], strategy=str(strategy), alpha=float(alpha),
+        buckets=buckets, request_key=config["request_key"],
+    )
+    ids, labels, returns = _frozen_arrays(artifact)
+    unavailable = tuple(d for d in ("mcap_bucket", *LEGACY_WIDENING_ORDER)
+                        if buckets.get(d) is None)
+    common = dict(min_analogs=config["min_analogs"],
+                  bootstrap_draws=config["bootstrap_draws"], bootstrap_seed=seed,
+                  ci_quantiles=config["ci_quantiles"], unavailable=unavailable,
+                  population_ids=())
+    if len(unavailable) == len(LEGACY_BUCKET_DIMENSIONS):
+        return _summarize_returns(
+            np.empty(0), dropped=unavailable, all_unavailable=True,
+            selected_ids=(), contributing_ids=(), **common), None
+    active = [d for d in ("mcap_bucket", *LEGACY_WIDENING_ORDER) if d not in unavailable]
+    dropped = list(unavailable)
+    while True:
+        mask = np.ones(len(ids), dtype=bool)
+        for dimension in active:
+            mask &= labels[dimension] == buckets[dimension]
+        remaining = [d for d in LEGACY_WIDENING_ORDER if d not in dropped]
+        if int(mask.sum()) >= config["min_analogs"] or not remaining:
+            selected = returns[mask]
+            finite = np.isfinite(selected)
+            return _summarize_returns(
+                np.sort(selected[finite]), dropped=tuple(dropped), all_unavailable=False,
+                selected_ids=tuple(ids[mask]), contributing_ids=tuple(ids[mask][finite]),
+                **common), None
+        dimension = remaining[0]
+        active.remove(dimension)
+        dropped.append(dimension)

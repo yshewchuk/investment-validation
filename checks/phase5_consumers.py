@@ -294,6 +294,130 @@ def _probe_paired_pool(ctx: ReleaseContext) -> list[dict]:
     return rows
 
 
+_ANALOG_QUERY = {"mcap_bucket": "1-10B", "dte_band": "1-3", "moneyness_band": "ATM",
+                 "implied_ratio": 1.0}
+
+
+def _analog_recipe(pool, **overrides) -> dict:
+    recipe = {"cutoff": pool.cutoff, "content_hash": pool.content_hash, "min_analogs": 30,
+              "bootstrap_draws": 0, "ci_quantiles": (0.05, 0.95),
+              "seed_snapshot": "p5-6-probe", "request_key": "p5-6-probe"}
+    recipe.update(overrides)
+    return recipe
+
+
+def _analog_bundle(pool, *, artifact):
+    """A source-only STR-THRU bundle whose only declared population is the
+    frozen board analog pool (the shape of tests/test_v2_models_board_analog)."""
+    from engine.v2.scoring.source_inputs import SourceBundle
+
+    return SourceBundle(
+        source_ref="p5-6-analog-probe",
+        context={"ticker": "P5PROBE", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+                 "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0},
+        raw_quotes=_PROBE_QUOTES, feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "probe"}},
+        forecast_recipes={"driver_prediction": {"intercept": 1.0, "coefficients": {}}},
+        model_artifact_refs={"driver_prediction": "sha256:probe-driver"},
+        residual_recipe={}, analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        analog_query=dict(_ANALOG_QUERY), analog_artifact_recipe=_analog_recipe(pool),
+        analog_artifact=artifact,
+    )
+
+
+def _analog_direct(pool, artifact) -> tuple[bool, bool]:
+    """The analog stage's own reader, for a strategy the probe bundle cannot
+    score end to end: ``(resolved, refused_when_missing)``."""
+    from engine.v2.scoring.native_analog import evaluate_frozen_analogs
+
+    def run(item):
+        return evaluate_frozen_analogs(artifact=item, recipe=_analog_recipe(pool),
+                                       query_features=_ANALOG_QUERY, strategy=pool.strategy,
+                                       alpha=pool.alpha)
+
+    result, flag = run(artifact)
+    _, missing = run(None)
+    return result is not None and flag is None, missing == "MODEL_NOT_READY"
+
+
+def _probe_board_analog(ctx: ReleaseContext) -> list[dict]:
+    """The native analog stage reading the frozen board analog matcher.
+
+    Every staged ``(strategy, alpha, cutoff)`` pool is read under its full
+    causal key and release pin: STR-THRU end to end through ``score_one``
+    (resolved = the analog stage ran with no MODEL_NOT_READY), other
+    strategies through the stage's own reader. Removing the artifact must
+    give MODEL_NOT_READY.
+    """
+    consumer, member_id = "analogs.board_analog_matcher", "board_analog_matcher"
+    state = ctx.states.get(member_id)
+    if state is None:
+        return _blocked(consumer, member_id)
+    rows = []
+    for pool in state["artifacts"]:
+        if pool.strategy == "STR-THRU":
+            record = _score("STR-THRU", pool.alpha, _analog_bundle(pool, artifact=pool))
+            missing = _score("STR-THRU", pool.alpha, _analog_bundle(pool, artifact=None))
+            refused = "MODEL_NOT_READY" in missing.reason_codes
+            resolved = ("MODEL_NOT_READY" not in record.reason_codes
+                        and "n_analogs" in record.resolved_request)
+            detail = "" if resolved else ",".join(record.reason_codes)
+        else:
+            resolved, refused = _analog_direct(pool, pool)
+            detail = "" if resolved else "frozen analog reader did not resolve"
+        rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                     "refused_when_missing": refused, "detail": detail})
+    return rows
+
+
+_CHOOSER_QUOTES = {("P", float(strike), "2026-09-18"): {"bid": 1.0, "ask": 1.2}
+                   for strike in range(80, 121, 2)}
+
+
+def _chooser_bundle(ctx: ReleaseContext, binding_id: str, recipe: dict, **state):
+    """A TWIN-P menu candidate whose chooser declares one frozen state."""
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.scoring.source_inputs import SourceBundle
+
+    return SourceBundle(
+        source_ref="p5-6-chooser-probe", strategy="TWIN-P",
+        context={"ticker": "P5PROBE", "event_date": "2026-09-16",
+                 "entry_date": "2026-09-16", "exit_date": "2026-09-09",
+                 "expiry": "2026-09-18", "spot": 100.0},
+        raw_quotes=_CHOOSER_QUOTES, feature_vector={}, feature_missing_mask={},
+        model_identity={"size": {"model_id": "probe"}},
+        forecast_recipes={"forecast_abs_move": {"intercept": 6.0, "coefficients": {}}},
+        model_artifact_refs={"forecast_abs_move": "sha256:probe-size"},
+        residual_recipe={}, analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        chooser_recipe={"binding_id": binding_id, **recipe},
+        frozen_inference=FrozenInference(deployment_root(ctx.release_root)),
+        model_release=ctx.model_release, **state,
+    )
+
+
+def _chooser_probe(member_id: str, consumer: str, field: str, key_of):
+    """The chooser stage reading one frozen state by its declared key; the
+    staged chooser binding scores (or declines on the probe's absent
+    features), and a declared-but-absent state is MODEL_NOT_READY."""
+    def probe(ctx: ReleaseContext) -> list[dict]:
+        state = ctx.states.get(member_id)
+        chooser = [b for b in ctx.model_release.bindings if b.role == "chooser"]
+        if state is None or len(chooser) != 1:
+            return _blocked(consumer, member_id)
+        rows = []
+        for artifact in state["artifacts"]:
+            recipe = {field.removeprefix("chooser_"): key_of(artifact)}
+            flags = _score("TWIN-P", 0.5, _chooser_bundle(
+                ctx, chooser[0].binding_id, recipe, **{field: artifact})).reason_codes
+            missing = _score("TWIN-P", 0.5, _chooser_bundle(
+                ctx, chooser[0].binding_id, recipe)).reason_codes
+            rows.append(_row(consumer, member_id, flags, missing))
+        return rows
+    return probe
+
+
 #: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
 CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "frozen_stage_executor": _probe_frozen_executor,
@@ -304,11 +428,15 @@ CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "model_stage.driver_residual_pool": _probe_driver_pools,
     "simulation.paired_residual_pool": _probe_paired_pool,
     "model_stage.recalibration": _probe_recalibration,
-    # No v2 scoring stage reads the n_admissible table yet (legacy serves
-    # the chooser feature in engine/score.py); PENDING until one does.
-    "chooser.admissible_table": None,
+    "chooser.admissible_table": _chooser_probe(
+        "admissible_table:dyn_sv", "chooser.admissible_table", "chooser_admissible_table",
+        lambda table: {"table_id": table.table_id, "version": table.version,
+                       "content_hash": table.content_hash}),
     "gate.trailing_cutoff": None,
-    "chooser.analog_pool": None,
-    "analogs.board_analog_matcher": None,
+    "chooser.analog_pool": _chooser_probe(
+        "chooser_analog_pool", "chooser.analog_pool", "chooser_analog_pool",
+        lambda pool: {"pool_id": pool.pool_id, "cutoff": pool.cutoff,
+                      "content_hash": pool.content_hash}),
+    "analogs.board_analog_matcher": _probe_board_analog,
     "features.tier4_serving_folds": None,
 }

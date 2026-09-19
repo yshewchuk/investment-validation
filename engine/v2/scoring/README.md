@@ -63,6 +63,15 @@ references, and recipes for forecasts, residual simulation, analogs and the
 gate. The builder rejects calculated answer fields and leaves geometry,
 pricing, simulation summaries and decisions for the native stages to produce.
 
+The DYN-SV chooser's vector is derived the same way (`chooser_inputs.py`
+builds the block, `native_chooser.py` assembles it, `native_chooser_features.py`
+holds the ported `Scorer._chooser_frame` arithmetic): `chooser_recipe` names the
+champion binding, its `producers` (the implied_t1/runup_move Tier-4 folds) and
+the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
+`chooser_fold_pools` carries the served folds' pools. Only the 17 primitive
+features (event history, market/regime block, `dte_entry`) come from
+`feature_vector`, which still wins for any derived column it declares.
+
 The current builder is deliberately bounded to STR-THRU and its declared
 recipes. To add another strategy or recipe, extend `source_inputs.py` and add
 tests proving both execution from source inputs and rejection of injected

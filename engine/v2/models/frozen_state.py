@@ -1,8 +1,10 @@
 """Verified loading and release pinning for P5-4 frozen serving state.
 
 One loader for the frozen non-model states this package defines -- the
-driver and paired residual pools (:mod:`.residual_artifact`) and the
-admissible-depth calibration table (:mod:`.admissible_table`) -- with the
+driver and paired residual pools (:mod:`.residual_artifact`), the
+admissible-depth calibration table (:mod:`.admissible_table`), the board
+analog-matcher population (:mod:`.analog_artifact`) and the DYN-SV chooser's
+k-NN analog pool (:mod:`.chooser_analog_pool`) -- with the
 same verification shape as ``PayoffArtifactLoader`` and ``FrozenInference``:
 re-hash the raw bytes against the reference, rebuild the record, and refuse
 unless the record's own recomputed hash agrees too.
@@ -18,19 +20,10 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Union
+from typing import Any, Mapping
 
 from engine.v2.foundation.canonical import CONTENT_HASH_PREFIX, canonical_json
-from engine.v2.models.admissible_table import (
-    ADMISSIBLE_DEPTH_TABLE_V1,
-    AdmissibleDepthTable,
-    admissible_table_from_document,
-)
-from engine.v2.models.residual_artifact import (
-    DriverResidualPoolArtifact,
-    PairedResidualPoolArtifact,
-    residual_artifact_from_document,
-)
+from engine.v2.models.frozen_documents import FrozenState, frozen_state_from_document
 
 __all__ = [
     "FrozenState",
@@ -38,10 +31,6 @@ __all__ = [
     "FrozenStateLoader",
     "FrozenStateRef",
     "serialize_frozen_state",
-]
-
-FrozenState = Union[
-    DriverResidualPoolArtifact, PairedResidualPoolArtifact, AdmissibleDepthTable,
 ]
 
 class FrozenStateError(ValueError):
@@ -61,9 +50,7 @@ def serialize_frozen_state(state: FrozenState) -> bytes:
 
 
 def _from_document(document: Mapping[str, Any]) -> FrozenState:
-    if document.get("schema_version") == ADMISSIBLE_DEPTH_TABLE_V1:
-        return admissible_table_from_document(document)
-    return residual_artifact_from_document(document)
+    return frozen_state_from_document(document)
 
 
 class FrozenStateLoader:

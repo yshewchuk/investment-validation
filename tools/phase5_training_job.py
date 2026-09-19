@@ -33,6 +33,16 @@ that ``tools/phase5_prepare_release.py --frozen-state`` accepts::
 
     python3 -u tools/phase5_training_job.py --state paired_residual_pool --out DIR
 
+The board analog matcher writes one frozen state per ``(strategy, alpha,
+cutoff)`` (the request's evidence cutoff; legacy keys its causal pool the
+same way). ``--plan-only`` lists the keys and the peak-RSS estimate and
+builds nothing::
+
+    python3 -u tools/phase5_training_job.py --state board_analog_matcher \\
+        --alpha 0.5 --cutoff 2026-09-18 --out DIR --plan-only
+    python3 tools/bounded_run.py --max-rss-gb 3.5 -- python3 -u tools/phase5_training_job.py \\
+        --state board_analog_matcher --alpha 0.5 --cutoff 2026-09-18 --out DIR
+
 Dataset builders and the legacy selection each mirrors:
 ``tools/phase5_datasets.py``.
 """
@@ -147,8 +157,9 @@ def build_dataset(recipe, *, pairs_path=None) -> pd.DataFrame:
     raise SystemExit(f"{recipe.key.label()}: no dataset builder for this recipe")
 
 
+BOARD_ANALOG_STATE = "board_analog_matcher"
 STATES = tuple(f"driver_residual_pool:{role}" for role in ("size", "implied_t1", "runup_move")) + (
-    "paired_residual_pool",)
+    "paired_residual_pool", BOARD_ANALOG_STATE)
 
 
 def _guard(where: str) -> None:
@@ -175,6 +186,8 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
     from tools import phase5_datasets as data
 
     _guard(f"tools.phase5_training_job.build_state:{member}")
+    if member == BOARD_ANALOG_STATE:
+        raise SystemExit(f"{member} writes one artifact per causal key: use run_board_analog_job")
     if member.startswith("driver_residual_pool:"):
         role = member.split(":", 1)[1]
         pool = data.champion_driver_pool(role, registry=registry)
@@ -249,6 +262,127 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
     return summary
 
 
+# --------------------------------------------------------------------------
+# board analog matcher: one frozen artifact per (strategy, alpha, cutoff)
+# --------------------------------------------------------------------------
+
+#: Peak-RSS model for the real board-analog build, from measurements taken
+#: 2026-09-19 on the real root (read-only): the interpreter + pyarrow after
+#: reading the slim trades table peaked at 0.69 GB; the slim frame is
+#: 175 MB / 526,621 rows (~350 B/row) and ``Scorer._enrich`` holds up to four
+#: copies of it at once (drop-legs copy, panel merge, ``bucket_frame`` copy,
+#: the analog-column slice). The legs blob is parsed a partition at a time
+#: (853 MB of JSON over 9 years: budget one large partition, 0.5 GB), and
+#: the entry-date implied move reads ``daily_market`` 600 tickers at a time
+#: (legacy's own chunking: "a few hundred MB", budget 0.5 GB). The panel is
+#: 85 MB in memory. An ESTIMATE, not a measured run: confirm under
+#: ``bounded_run`` and record the observed peak.
+_RSS_BASELINE_GB = 0.7
+_RSS_BYTES_PER_TRADE = 350 * 4
+_RSS_LEGS_PARTITION_GB = 0.5
+_RSS_DAILY_CHUNK_GB = 0.5
+_RSS_PANEL_GB = 0.1
+
+
+def board_analog_rss_estimate(trade_rows: int) -> dict:
+    """Components of the estimated peak RSS (GB) for ``trade_rows`` trades."""
+    parts = {"baseline": _RSS_BASELINE_GB,
+             "trades_frames": round(trade_rows * _RSS_BYTES_PER_TRADE / 1e9, 2),
+             "legs_partition": _RSS_LEGS_PARTITION_GB,
+             "daily_chunk": _RSS_DAILY_CHUNK_GB, "panel": _RSS_PANEL_GB}
+    total = round(sum(parts.values()), 2)
+    return {"components_gb": parts, "estimated_peak_gb": total,
+            "recommended_cap_gb": float(np.ceil((total + 0.5) * 2) / 2)}
+
+
+def _analog_file_name(key) -> str:
+    strategy, alpha, cutoff = key
+    return f"{BOARD_ANALOG_STATE}__{strategy}__{alpha:.4f}__{cutoff}.json"
+
+
+def _analog_keys(strategies, alpha: float, cutoffs) -> list[tuple]:
+    days = sorted({str(pd.Timestamp(c).date()) for c in cutoffs})
+    return [(str(s), round(float(alpha), 4), day) for s in sorted(set(strategies)) for day in days]
+
+
+def _replay_strategies() -> tuple[list[str], int]:
+    """Strategies present in the engine-replayed trades, and the table's row
+    count -- two small columns, no legs."""
+    from engine.data import store
+
+    frame = store.read_table("trades", columns=["strategy", "provenance"])
+    replay = frame[frame["provenance"].astype(str) == "engine.replay"]
+    return sorted(replay["strategy"].astype(str).unique()), int(len(frame))
+
+
+def run_board_analog_job(out: Path, *, alpha: float, cutoffs, strategies=None,
+                         plan_only: bool = False, trades=None) -> dict:
+    """Freeze the board analog matcher for every ``(strategy, alpha, cutoff)``.
+
+    ``plan_only`` reads only two small trades columns: it lists the keys and
+    the peak-RSS estimate and writes the summary, building nothing. A full
+    run builds the analog population once (``phase5_datasets
+    .board_analog_trades``, legacy ``Scorer._enrich`` over the FULL panel),
+    then writes one frozen-state JSON per key, one at a time. A rerun keeps
+    identical files and refuses different ones. ``trades`` (the enriched
+    frame) is injectable for tests.
+    """
+    from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.training.analogs import iter_board_analog_pool_artifacts
+    from tools import phase5_datasets as data
+
+    _guard(f"tools.phase5_training_job.run_board_analog_job:{BOARD_ANALOG_STATE}")
+    if not cutoffs:
+        raise SystemExit(f"{BOARD_ANALOG_STATE} needs at least one --cutoff")
+    summary: dict = {"state": BOARD_ANALOG_STATE, "plan_only": bool(plan_only),
+                     "alpha": round(float(alpha), 4)}
+    if trades is None:
+        known, trade_rows = _replay_strategies()
+    else:
+        known, trade_rows = sorted(trades["strategy"].astype(str).unique()), int(len(trades))
+    chosen = list(strategies) if strategies else known
+    unknown = sorted(set(chosen) - set(known))
+    if unknown:
+        raise SystemExit(f"no engine.replay trades for strategies {unknown}")
+    keys = _analog_keys(chosen, alpha, cutoffs)
+    summary.update(keys=[list(key) for key in keys], rss=board_analog_rss_estimate(trade_rows),
+                   trade_rows=trade_rows)
+    out.mkdir(parents=True, exist_ok=True)
+    summary_path = out / f"{BOARD_ANALOG_STATE}.summary.json"
+    if plan_only:
+        summary["status"] = "planned"
+        summary_path.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")
+        return summary
+    if trades is None:
+        from engine import paths
+
+        trades = data.board_analog_trades()
+        summary["sources"] = {"tier3.panel": data.file_digest(paths.PANEL)}
+    files = []
+    for key, artifact in iter_board_analog_pool_artifacts(trades, keys):
+        path = out / _analog_file_name(key)
+        payload = serialize_frozen_state(artifact)
+        if path.exists():
+            if path.read_bytes() != payload:
+                raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
+            status = "resumed"
+        else:
+            tmp = path.with_name(path.name + ".partial")
+            tmp.write_bytes(payload)
+            tmp.replace(path)
+            status = "written"
+        files.append({"key": list(key), "file": path.name, "status": status,
+                      "content_hash": artifact.content_hash, "n_rows": len(artifact.rows),
+                      "bytes": len(payload)})
+        print(f"[p5-3] {BOARD_ANALOG_STATE} {key}: {status} rows={len(artifact.rows):,}",
+              flush=True)
+        del artifact, payload
+    summary.update(files=files, status="written"
+                   if any(f["status"] == "written" for f in files) else "resumed")
+    summary_path.write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")
+    return summary
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--list", action="store_true", help="print the recipe keys and exit")
@@ -261,6 +395,9 @@ def main(argv=None) -> int:
                     help="evidence cutoff YYYY-MM-DD (calibration: repeatable, one fold each; "
                          "paired_residual_pool: optional exclusive event-date bound)")
     ap.add_argument("--pairs", help="recalibration pairs parquet (default: legacy PAIRS_PATH)")
+    ap.add_argument("--strategy", action="append", default=[],
+                    help="board_analog_matcher: strategy to freeze (repeatable; default all "
+                         "engine.replay strategies)")
     ap.add_argument("--ticker-chunk", type=int, default=1000,
                     help="tickers per daily_market pass for the crush table")
     args = ap.parse_args(argv)
@@ -280,6 +417,16 @@ def main(argv=None) -> int:
     out = Path(args.out).resolve()
     if out == paths.DATA.resolve() or paths.DATA.resolve() in out.parents:
         ap.error("--out may not be inside data/")
+    if args.state == BOARD_ANALOG_STATE:
+        if args.alpha is None or not args.cutoff:
+            ap.error(f"{BOARD_ANALOG_STATE} needs --alpha and at least one --cutoff")
+        summary = run_board_analog_job(out, alpha=args.alpha, cutoffs=args.cutoff,
+                                       strategies=args.strategy, plan_only=args.plan_only)
+        print(f"[p5-3] {BOARD_ANALOG_STATE}: {summary['status']} keys={len(summary['keys'])} "
+              f"est_peak_gb={summary['rss']['estimated_peak_gb']} -> {out}", flush=True)
+        return 0
+    if args.strategy:
+        ap.error(f"--strategy applies to {BOARD_ANALOG_STATE} only")
     if args.state:
         if len(args.cutoff) > 1 or (args.cutoff and args.state != "paired_residual_pool"):
             ap.error("--cutoff: at most one, and only for paired_residual_pool")

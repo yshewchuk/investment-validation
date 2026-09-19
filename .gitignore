@@ -66,6 +66,13 @@
 # code this repo publishes — they go to the private mirror.
 /*.py
 
+# One-off instrumented/diagnostic harnesses (RSS probes, monkeypatched
+# capture re-runs, etc.). Useful on disk for the run that needed them, never
+# meant to be a maintained tool — 7952363 tracked one on capture-retention by
+# accident (the `!*.py` allow above puts every .py back in, scratch/ included,
+# unless blocked here). Stays untracked; keep on disk locally as needed.
+/scratch/
+
 # AGENTS.md carries the user's oquants account workspace/model IDs and the
 # decoded coefficients of a paid vendor's model. Operational and binding, but
 # private.

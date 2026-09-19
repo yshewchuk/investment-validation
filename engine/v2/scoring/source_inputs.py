@@ -6,6 +6,9 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
+from engine.v2.models.admissible_table import AdmissibleDepthTable
+from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
+from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.models.contracts import ModelBinding, ModelRelease
 from engine.v2.models.loader import FrozenInference
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
@@ -20,6 +23,7 @@ from engine.v2.scoring.frozen_executor import (
 )
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
+    FROZEN_ANALOG_RECIPE_FIELDS,
     bucket_population_hash,
 )
 from engine.v2.scoring.stages import (
@@ -28,7 +32,7 @@ from engine.v2.scoring.stages import (
     receipt,
 )
 
-__all__ = ["SourceBundle", "build_native_score_inputs"]
+__all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool"]
 
 _ANSWER_FIELDS = frozenset({
     "legs", "selected_legs", "selected_contracts", "resolved_legs",
@@ -77,6 +81,10 @@ _FROZEN_OUTPUT_ROLES = {
     "pred_abs_move": frozenset({"size"}),
     # The DYN-SV chooser champion (R4-20 gap 5), ``dyn_sv_chooser_v1_1``.
     "chooser_score": frozenset({"chooser"}),
+    # The chooser's other Tier-4 producer columns (legacy
+    # ``Scorer._chooser_frame``): the implied_t1 and runup_move serving folds.
+    "pred_im_t1_d14": frozenset({"implied_t1"}),
+    "pred_runup_abs_move_d14": frozenset({"runup_move"}),
 }
 _RESIDUAL_RECIPE_FIELDS = frozenset({
     "mode", "terminal_spots", "weights", "capital_at_risk", "pnl_cutoff",
@@ -205,6 +213,20 @@ class SourceBundle:
     analog_source_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     # This request's own bucket membership (no outcome, no legacy answer).
     analog_query: Mapping[str, Any] = field(default_factory=dict)
+    # Frozen board analog matcher (P5-4, engine.v2.models.analog_artifact):
+    # a verified, already-loaded BoardAnalogPoolArtifact -- the causal
+    # (strategy, alpha, cutoff) slice of the FULL-universe analog population.
+    # Declared by a non-empty recipe (native_analog.FROZEN_ANALOG_RECIPE_FIELDS:
+    # the request's evidence ``cutoff``, an optional ``content_hash`` release
+    # pin, and legacy match()'s own arguments) or a supplied artifact. The
+    # analog stage then reads the artifact after a full causal-key check and
+    # never rebuilds a pool; a missing or mismatched artifact is
+    # MODEL_NOT_READY. ``analog_query`` then carries mcap_bucket, dte_band,
+    # moneyness_band and the RAW implied_ratio (the stage buckets it on the
+    # artifact's frozen edges). Mutually exclusive with analog_recipe/
+    # analog_source_rows, the declared-rows compatibility path.
+    analog_artifact_recipe: Mapping[str, Any] = field(default_factory=dict)
+    analog_artifact: "BoardAnalogPoolArtifact | None" = None
     # Payoff-calibration/model layer (exp_pnl_model, win_model), mirroring
     # the analog fields above exactly: a recipe describes the fit, the rows
     # are real PRIOR trades' own outcomes (driver, spot_entry, exit_value,
@@ -281,6 +303,24 @@ class SourceBundle:
     # ``{"binding_id"[, "output"]}``, for a DYNAMIC_MENU candidate. Empty:
     # no chooser ranking is requested (legacy with no chooser champion).
     chooser_recipe: Mapping[str, Any] = field(default_factory=dict)
+    # The chooser's derived columns (R4-20 remaining gap (a); see
+    # ``native_chooser``). ``chooser_fold_pools``: the served Tier-4 folds'
+    # held-out pools by output (``pred_abs_move``, ``pred_im_t1_d14``,
+    # ``pred_runup_abs_move_d14``), each shaped like ``gate_forecast_pool``.
+    # ``chooser_analog_pool``/``chooser_admissible_table``: the frozen k-NN
+    # population and n_admissible table, checked against the keys
+    # ``chooser_recipe["analog_pool"]``/``["admissible_table"]`` declare.
+    chooser_fold_pools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    chooser_analog_pool: "ChooserAnalogPoolArtifact | None" = None
+    chooser_admissible_table: "AdmissibleDepthTable | None" = None
+    # R4-20 (c): a forecast legacy read from the STORED Tier-4 table instead
+    # of serving a fold (``Scorer._crush_forecast`` prefers the stored
+    # ``pred_iv_crush_30`` whenever the table holds a non-NaN value for the
+    # event). ``{"pred_iv_crush_30": {"value", "row": {"table",
+    # "table_sha256", "ticker", "event_date"}, "row_hash"}}``: ``row_hash``
+    # is the content hash of ``{"row", "value"}`` and is checked at build.
+    # A stored value wins over any recipe for the same output, as in legacy.
+    stored_forecasts: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -330,6 +370,39 @@ def _linear_recipe(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Outputs legacy may read from the stored Tier-4 table (``_crush_forecast``).
+_STORED_FORECAST_OUTPUTS = frozenset({"pred_iv_crush_30"})
+_STORED_FORECAST_FIELDS = frozenset({"value", "row", "row_hash"})
+_STORED_ROW_FIELDS = frozenset({"table", "table_sha256", "ticker", "event_date"})
+
+
+def stored_forecast_row_hash(row: Mapping[str, Any], value: float) -> str:
+    """The identity a stored forecast declaration carries: its source row
+    and value, content-hashed together."""
+    from engine.v2.foundation import content_hash
+
+    return content_hash({"row": dict(row), "value": float(value)})
+
+
+def _stored_forecasts(bundle: SourceBundle) -> dict[str, dict[str, Any]]:
+    unknown = sorted(set(bundle.stored_forecasts) - _STORED_FORECAST_OUTPUTS)
+    if unknown:
+        raise ValueError(f"unsupported stored forecast outputs: {unknown}")
+    stored: dict[str, dict[str, Any]] = {}
+    for output, declared in bundle.stored_forecasts.items():
+        name = f"stored_forecasts.{output}"
+        config = _bounded_recipe(name, declared, _STORED_FORECAST_FIELDS)
+        row = _bounded_recipe(f"{name}.row", config.get("row") or {}, _STORED_ROW_FIELDS)
+        if set(row) != _STORED_ROW_FIELDS:
+            raise ValueError(f"{name}.row must name {sorted(_STORED_ROW_FIELDS)}")
+        value = _finite_number(config.get("value"), f"{name}.value")
+        if config.get("row_hash") != stored_forecast_row_hash(row, value):
+            raise ValueError(f"{name}.row_hash does not match its row and value")
+        stored[str(output)] = {"value": value, "row": row,
+                               "row_hash": str(config["row_hash"])}
+    return stored
+
+
 def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     unknown = sorted(set(bundle.forecast_recipes) - _FORECAST_OUTPUTS)
     if unknown:
@@ -368,6 +441,9 @@ def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     }
     if executors:
         block["executors"] = executors
+    stored = _stored_forecasts(bundle)
+    if stored:
+        block["stored"] = stored
     return block
 
 
@@ -480,20 +556,28 @@ def _gate_forecast_members(bundle: SourceBundle, gate: dict[str, Any]) -> dict[s
         executor = _frozen_recipe_executor(bundle, "pred_abs_move", forecast)
         members["forecast_executor"] = executor
         members["forecast_recipe"] = str(executor)
-    pool = _bounded_recipe("gate_forecast_pool", bundle.gate_forecast_pool,
-                           _GATE_FORECAST_POOL_FIELDS)
+    pool = fold_pool("gate_forecast_pool", bundle.gate_forecast_pool)
     if pool:
-        predictions = tuple(float(value) for value in pool.get("predictions", ()))
-        residuals = tuple(float(value) for value in pool.get("residuals", ()))
-        if len(predictions) != len(residuals):
-            raise ValueError("gate_forecast_pool predictions and residuals differ in length")
-        floor = pool.get("interval_floor", 0.0)
-        members["forecast_pool"] = {
-            "predictions": predictions, "residuals": residuals,
-            "interval_floor": None if floor is None else _finite_number(
-                floor, "gate_forecast_pool.interval_floor"),
-        }
+        members["forecast_pool"] = pool
     return members
+
+
+def fold_pool(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    """A served Tier-4 fold's held-out pool (``pool_pred``/``pool_res``/
+    ``interval_floor``) as declared source rows; ``{}`` when undeclared."""
+    pool = _bounded_recipe(name, values, _GATE_FORECAST_POOL_FIELDS)
+    if not pool:
+        return {}
+    predictions = tuple(float(value) for value in pool.get("predictions", ()))
+    residuals = tuple(float(value) for value in pool.get("residuals", ()))
+    if len(predictions) != len(residuals):
+        raise ValueError(f"{name} predictions and residuals differ in length")
+    floor = pool.get("interval_floor", 0.0)
+    return {
+        "predictions": predictions, "residuals": residuals,
+        "interval_floor": None if floor is None else _finite_number(
+            floor, f"{name}.interval_floor"),
+    }
 
 
 def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
@@ -522,27 +606,11 @@ def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
 
 
 def _chooser_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
-    """The DYN-SV chooser champion as a frozen recipe (R4-20 gap 5).
+    """The DYN-SV chooser champion and its derived-column inputs
+    (``chooser_inputs.chooser_block``)."""
+    from engine.v2.scoring.chooser_inputs import chooser_block
 
-    Empty unless declared. Declared for a strategy outside legacy's
-    DYNAMIC_MENU it is a malformed bundle: legacy never scores the chooser
-    there. The binding runs through FrozenInference like every other frozen
-    recipe -- verified members, no refit, MODEL_NOT_READY when unresolved.
-    """
-    if not bundle.chooser_recipe:
-        return {}
-    if strategy not in _CHOOSER_STRATEGIES:
-        raise ValueError(f"chooser_recipe declared for {strategy}, which is not a "
-                         "DYN-SV menu candidate")
-    config = _bounded_recipe("chooser_recipe", bundle.chooser_recipe, _FROZEN_RECIPE_FIELDS)
-    if not _is_frozen_recipe(config):
-        raise ValueError("chooser_recipe must name a frozen binding")
-    return {
-        "binding_id": str(config["binding_id"]),
-        "executors": {
-            "chooser_score": _frozen_recipe_executor(bundle, "chooser_score", config),
-        },
-    }
+    return chooser_block(bundle, strategy)
 
 
 def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
@@ -557,6 +625,12 @@ def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     must not reclassify a declared-but-unfed recipe as not-applicable, and
     must not fabricate rows to satisfy it.
     """
+    frozen = _bounded_recipe(
+        "analog_artifact_recipe", bundle.analog_artifact_recipe,
+        FROZEN_ANALOG_RECIPE_FIELDS,
+    )
+    if frozen or bundle.analog_artifact is not None:
+        return _frozen_analog_block(bundle, frozen)
     config = _bounded_recipe(
         "analog_recipe", bundle.analog_recipe,
         _ANALOG_RECIPE_FIELDS | _BUCKET_ANALOG_RECIPE_FIELDS,
@@ -586,6 +660,28 @@ def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     return {
         "recipe": recipe,
         "source_rows": [dict(row) for row in bundle.analog_source_rows],
+        "query_features": dict(bundle.analog_query),
+    }
+
+
+def _frozen_analog_block(bundle: SourceBundle, recipe: dict[str, Any]) -> dict[str, Any]:
+    """The P5-4 frozen board analog matcher branch of ``_analog_block``.
+
+    The artifact is carried as given -- ``None`` included, so the stage
+    refuses MODEL_NOT_READY rather than this builder dropping the request or
+    falling back to declared rows.
+    """
+    if bundle.analog_recipe or bundle.analog_source_rows:
+        raise ValueError("analog_source_rows/analog_recipe (the compatibility path) cannot "
+                         "combine with analog_artifact_recipe/analog_artifact")
+    artifact = bundle.analog_artifact
+    if artifact is not None and not isinstance(artifact, BoardAnalogPoolArtifact):
+        raise ValueError("analog_artifact must be a BoardAnalogPoolArtifact")
+    _reject_answers("analog_artifact_recipe", recipe)
+    _reject_answers("analog_query", bundle.analog_query)
+    return {
+        "analog_artifact": artifact,
+        "analog_artifact_recipe": recipe,
         "query_features": dict(bundle.analog_query),
     }
 

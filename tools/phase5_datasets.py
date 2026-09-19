@@ -35,6 +35,14 @@ Which legacy selection each builder mirrors:
   table above. **Difference from legacy:** a bounded live Scorer (the
   nightly's) scopes the crush table to the tickers its context loaded, so its
   pool is a function of the board; this one never is.
+* :func:`board_analog_trades` -- ``Scorer.trades``, the population
+  ``engine.analogs.AnalogMatcher`` is built on: ``_load_trades_without_legs``,
+  ``provenance == "engine.replay"``, then legacy ``Scorer._enrich`` itself
+  (panel merge, entry-date implied move, ``bucket_frame``) run against the
+  FULL panel. **Difference from legacy:** a bounded live Scorer (the
+  nightly's) merges the panel its context loaded, so tickers outside the
+  board lose their market-cap and implied-ratio buckets and the matcher's
+  population moves with the board; this one never does.
 * :func:`champion_driver_pool` -- the full-refit champion's embedded pool
   (``ModelArtifact.residuals``/``residual_buckets``) that
   ``ModelArtifact.residual_draws`` serves in ``Scorer._score_model`` /
@@ -52,10 +60,12 @@ import numpy as np
 import pandas as pd
 
 __all__ = [
+    "BOARD_ANALOG_COLUMNS",
     "DRIVER_ROLES",
     "PAYOFF_STRATEGIES",
     "champion_driver_pool",
     "crush_table",
+    "board_analog_trades",
     "file_digest",
     "paired_pool_inputs",
     "payoff_trades",
@@ -258,6 +268,52 @@ def paired_pool_inputs(*, forecasts: pd.DataFrame | None = None,
         "move_model_id": _single_model_id(usable, "pred_abs_move_model_id"),
         "crush_model_id": _single_model_id(usable, "pred_iv_crush_30_model_id"),
     }
+
+
+# --------------------------------------------------------------------------
+# board analog matcher: Scorer.trades over the full panel
+# --------------------------------------------------------------------------
+
+#: What the analog builder reads (``engine.v2.models.training.analogs``).
+BOARD_ANALOG_COLUMNS = ("trade_id", "strategy", "fill_alpha", "event_date", "exit_date",
+                        "mcap_bucket", "dte_band", "moneyness_band", "implied_ratio", "ret")
+_PANEL_ENRICH_COLUMNS = ["ticker", "date", "mcap_usd", "or_implied", "mean_prior_or_implied",
+                         "abs_move", "n_prior"]
+
+
+def board_analog_trades(*, trades: pd.DataFrame | None = None, panel: pd.DataFrame | None = None,
+                        analog_daily: pd.DataFrame | None = None) -> pd.DataFrame:
+    """``Scorer.trades`` as the analog matcher sees it, over the FULL panel.
+
+    Runs legacy ``Scorer._enrich`` unchanged on a bare scorer whose context
+    holds the whole panel (only the columns ``_enrich`` merges). With no
+    ``analog_daily`` the entry-date implied move is read from
+    ``daily_market`` a ticker chunk at a time (legacy's own chunked path),
+    so no request context narrows it. ``trades``/``panel``/``analog_daily``
+    are injectable for tests. Returns the analog columns plus
+    ``implied_edges`` in ``attrs`` (legacy's population edges).
+    """
+    import types
+
+    from engine import score as score_mod
+
+    if trades is None:
+        trades = score_mod._load_trades_without_legs()
+    engine_rows = trades[trades["provenance"].astype(str) == "engine.replay"]
+    if panel is None:
+        from engine.features import load_panel
+
+        panel = load_panel()
+    scorer = score_mod.Scorer.__new__(score_mod.Scorer)
+    scorer.context = types.SimpleNamespace(
+        panel=panel[[c for c in _PANEL_ENRICH_COLUMNS if c in panel.columns]])
+    scorer._analog_daily = analog_daily
+    enriched = score_mod.Scorer._enrich(scorer, engine_rows)
+    _log(f"analog trades: {len(enriched):,} engine.replay rows; entry-date implied "
+         f"coverage {scorer.analog_entry_coverage}")
+    out = enriched[list(BOARD_ANALOG_COLUMNS)].copy()
+    out.attrs["implied_edges"] = enriched.attrs.get("implied_edges")
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -357,6 +357,19 @@ class _Predocumented:
         self.value = value
 
 
+def _phase4_input(frame: pd.DataFrame, name: str) -> float | None:
+    """One recorded model input: the float legacy read, ``None`` when the
+    column is absent, missing or not a number (a Phase 4 capture helper)."""
+    if name not in frame.columns or not len(frame):
+        return None
+    value = frame[name].iloc[0]
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
 class Phase4TraceCollector:
     """Opt-in capture of legacy scoring inputs and outcomes.
 
@@ -390,12 +403,26 @@ class Phase4TraceCollector:
         }
         self.retain_full_trace = bool(retain_full_trace)
         self._content_hasher = content_hasher
+        # The frozen pools/states this trace embeds by reference (id -> value).
+        self._shared_documents: dict[int, Any] = {}
+
+    def shared_documents(self) -> tuple[Any, ...]:
+        """The documented values this trace shares by identity with other
+        traces (the served fold pools and model states ``capture_frozen``
+        recorded). A capture tool may hash and spill them once, not per
+        candidate; they are never mutated after recording."""
+        return tuple(self._shared_documents.values())
 
     def _hash(self, value: Any) -> str:
         if self._content_hasher is None:
             raise ValueError(
                 "phase 4 diagnostic checkpoints require an injected content hasher"
             )
+        # A hasher that memoizes shared sub-values (the capture tool's) is
+        # told which ones are shared first; the hash is the same either way.
+        register = getattr(self._content_hasher, "register_shared", None)
+        if register is not None and self._shared_documents:
+            register(self._shared_documents.values())
         return self._content_hasher(value)
 
     @staticmethod
@@ -511,17 +538,17 @@ class Phase4TraceCollector:
         """Capture the causal analog population and executable bucket recipe.
 
         ``recipe_cache`` is the trimmed-projection counterpart of
-        ``AnalogMatcher._documented_causal``/``_causal_pools`` — pass
-        ``scorer.matcher.phase4_recipe_cache`` (persists for the scoring
-        run, evicted in lockstep with the matcher's own causal caches).
-        ``causal["rows"]`` is already shared BY REFERENCE across every
-        candidate matching the same (strategy, alpha, as_of) bucket (see
-        `AnalogMatcher`'s own docstrings), but without this cache each
-        candidate still re-walked all of it — up to the FULL causal
-        population, not just the matched subset — into its own fresh
-        ``normalized_rows``/``population_hash``, and retained that copy for
-        the rest of the run. That per-candidate rebuild-and-retain, not the
-        (already-shared) causal block itself, was the measured driver of the
+        ``AnalogMatcher``'s own ``_causal_pools``/``_causal_row_caches`` —
+        pass ``scorer.matcher.phase4_recipe_cache`` (persists for the
+        scoring run, evicted in lockstep with the matcher's own causal
+        caches). ``causal["rows"]`` itself is rebuilt fresh on every
+        candidate (`AnalogMatcher.match`'s row-level cache only memoizes the
+        per-row `to_dict`/`json.dumps`/`sha256` work underneath it, not the
+        ``causal`` block object), so without THIS cache each candidate still
+        re-walked all of it — up to the FULL causal population, not just the
+        matched subset — into its own fresh ``normalized_rows``/
+        ``population_hash``, and retained that copy for the rest of the run.
+        That per-candidate rebuild-and-retain was the measured driver of the
         forward-pass RSS climb in a 40-forward-event strict capture: every
         candidate reaches this method via `_score_analogs`. With the cache,
         candidates sharing a (strategy, alpha, as_of) key share one
@@ -549,7 +576,7 @@ class Phase4TraceCollector:
 
         # `evidence["cutoff"]` is `_AnalogMatchEvidence`'s own isoformat
         # string of the SAME normalized timestamp `AnalogMatcher.match`
-        # keys its `_causal_pools`/`_documented_causal`/eviction on
+        # keys its `_causal_pools`/`_causal_row_caches`/eviction on
         # (`pd.Timestamp(as_of).normalize()`). Reconstructing the Timestamp
         # here — not keying on the string — is what makes `evicted` (a
         # `(strategy, alpha, Timestamp)` tuple `AnalogMatcher` pops on
@@ -656,6 +683,80 @@ class Phase4TraceCollector:
             "eligibility": eligibility,
             "ranking": ranking,
         })
+
+    def capture_frozen(self, *, bindings: Mapping[str, Mapping[str, Any]] | None = None,
+                       fold_pools: Mapping[str, Any] | None = None,
+                       declarations: Mapping[str, Any] | None = None,
+                       inputs: Mapping[str, Mapping[str, Any]] | None = None,
+                       states: Mapping[str, Any] | None = None) -> None:
+        """Record what native scoring needs to run the frozen models (R4-18/R4-19).
+
+        Kept apart from ``model_bindings``/``native_recipes`` (the strict
+        probe packages and executes those as they are) under
+        ``source_inputs.frozen``:
+
+        * ``bindings``: slot -> the binding that served an output (``gate``,
+          ``chooser``, ``fold:<role>`` for a Tier-4 serving fold), each with
+          the ``inputs`` row legacy fed it;
+        * ``fold_pools``: output -> the served fold's in-memory
+          ``pool_pred``/``pool_res``/``interval_floor``, passed as
+          ``_Predocumented`` so every candidate of a fold shares one list;
+        * ``declarations``: name -> how legacy used them (``gate``,
+          ``forecasts``, ``chooser``, ``crush``, ``recalibration``).
+
+        * ``inputs``: ``"<slot>@<site>"`` -> the input row one call site
+          (``sizing``, ``gate``, ``chooser``, ``crush``, ``model``) fed that
+          binding; each consumer's declaration names its ``site``;
+        * ``states``: name -> a model-owned state legacy served (a payoff
+          fit, a champion's stored residual pool), ``_Predocumented`` and
+          shared like the fold pools.
+
+        Values are what legacy used for this request. Recording the same
+        name twice is a no-op when equal. A different second value never
+        raises inside legacy scoring (the row would be lost): the first value
+        stays and the disagreement goes to ``frozen.conflicts``, which the
+        converter refuses to declare.
+        """
+        frozen = self._source_bundle.setdefault("frozen", {
+            "bindings": {}, "fold_pools": {}, "declarations": {}, "inputs": {},
+            "states": {}, "conflicts": [],
+        })
+
+        def put(section: str, name: str, value: Any) -> None:
+            held = frozen[section]
+            if name not in held:
+                held[name] = value
+                return
+            old, new = held[name], value
+            if isinstance(old, _Predocumented) and isinstance(new, _Predocumented):
+                if old.value is new.value:
+                    return
+                old, new = old.value, new.value
+            if old != new and f"{section}.{name}" not in frozen["conflicts"]:
+                frozen["conflicts"].append(f"{section}.{name}")
+
+        def shared(section: str, name: str, value: Any) -> None:
+            wrapped = value if isinstance(value, _Predocumented) else _Predocumented(
+                self._document(value))
+            put(section, name, wrapped)
+            held = frozen[section][name]
+            self._shared_documents[id(held.value)] = held.value
+
+        for slot, binding in (bindings or {}).items():
+            put("bindings", str(slot), self._document(binding))
+        for output, pool in (fold_pools or {}).items():
+            shared("fold_pools", str(output), pool)
+        for name, value in (states or {}).items():
+            shared("states", str(name), value)
+        for name, value in (declarations or {}).items():
+            put("declarations", str(name), self._document(value))
+        for name, row in (inputs or {}).items():
+            put("inputs", str(name), self._document(row))
+        group = self._checkpoint_groups.get("source_inputs")
+        if group is not None:
+            # Only the frozen section changed: the rest of the group is what
+            # the last `capture_source_bundle` documented, unchanged.
+            group["frozen"] = self._document(frozen)
 
     def capture_source_bundle(self, *, context: Mapping[str, Any] | None = None,
                               quote_domain: Any = None,
@@ -2189,6 +2290,79 @@ class Scorer:
         assert_causal(vector)
         return built
 
+    def _phase4_record_driver_pool(self, result, slot: str, entry, artifact) -> None:
+        """Record the champion residual pool the model layer drew from.
+
+        Legacy draws from the artifact's stored flat residuals or its stored
+        decile buckets (``ModelArtifact.residual_pool``); both are recorded
+        as stored, once per champion and shared across candidates.
+        """
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is None:
+            return
+        cache = self.__dict__.setdefault("_phase4_driver_pools", {})
+        key = (str(entry.id), id(artifact))
+        if key not in cache:
+            buckets = getattr(artifact, "residual_buckets", None)
+            cache[key] = _Predocumented({
+                "role": str(getattr(artifact, "role", slot)),
+                "model_id": str(entry.id),
+                "flat_residuals": np.asarray(artifact.residuals, dtype=float).tolist(),
+                "buckets": None if not buckets else {
+                    "edges": np.asarray(buckets["edges"], dtype=float).tolist(),
+                    "pools": [np.asarray(pool, dtype=float).tolist()
+                              for pool in buckets["pools"]],
+                    "min_pool": int(buckets.get("min_pool", 0)),
+                },
+            })
+        state = cache[key].value
+        name = f"driver_pool:{state['model_id']}"
+        collector.capture_frozen(
+            states={name: cache[key]},
+            declarations={f"model_residual:{slot}": {
+                "state": name, "role": state["role"], "model_id": state["model_id"],
+            }},
+        )
+
+    def _phase4_record_payoff(self, request, result, payoff, seed: int) -> None:
+        """Record the payoff line/surface legacy fitted for this request, and
+        the model layer's seed and draw count (recipe constants)."""
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is None:
+            return
+        cutoff = result.evidence_cutoff
+        cutoff = None if cutoff is None else str(pd.Timestamp(cutoff).normalize().date())
+        surface = isinstance(payoff, RunupPayoffSurface)
+        strategy = "STR-RUNUP" if surface else str(payoff.strategy)
+        name = f"payoff:{strategy}|{float(payoff.alpha):.4f}|{cutoff}"
+        cache = self.__dict__.setdefault("_phase4_payoff_states", {})
+        key = (name, id(payoff))
+        if key not in cache:
+            state = {
+                "kind": "surface" if surface else "line",
+                "strategy": strategy,
+                "alpha": float(payoff.alpha),
+                "cutoff": cutoff,
+                "n": int(payoff.n),
+                "resid_sd": float(payoff.resid_sd),
+                "r": None if payoff.r is None else float(payoff.r),
+                "residuals": np.asarray(payoff.residuals, dtype=float).tolist(),
+            }
+            if surface:
+                state["coefficients"] = [float(value) for value in payoff.coefficients]
+            else:
+                state.update({"driver": str(payoff.driver),
+                              "intercept": float(payoff.intercept),
+                              "slope": float(payoff.slope)})
+            cache[key] = _Predocumented(state)
+        collector.capture_frozen(
+            states={name: cache[key]},
+            declarations={"payoff": {
+                "state": name, "before": cutoff, "seed": int(seed),
+                "draw_count": int(MODEL_DRAWS),
+            }},
+        )
+
     def _score_model(self, request, result, features) -> None:
         strategy = request.strategy
         if strategy == "STR-RUNUP":
@@ -2286,15 +2460,15 @@ class Scorer:
         # The draw ORDER is deliberate: this rng and these draws then feed the
         # P&L simulation below unchanged, so exp_pnl_model, win_model and the
         # return percentiles are bit-identical to before this band existed.
-        rng = np.random.default_rng(
-            int.from_bytes(
-                hashlib.sha256(f"{self.snapshot}|{request.key()}".encode()).digest()[:8],
-                "big",
-            )
+        seed = int.from_bytes(
+            hashlib.sha256(f"{self.snapshot}|{request.key()}".encode()).digest()[:8],
+            "big",
         )
+        rng = np.random.default_rng(seed)
         # `prediction=` is inert unless the artifact carries buckets, so this is
         # bit-identical for every champion saved before EXP-115.
         draws = point + artifact.residual_draws(MODEL_DRAWS, rng, prediction=point)
+        self._phase4_record_driver_pool(result, "driver", entry, artifact)
         result.driver_p10 = float(np.quantile(draws, 0.10))
         result.driver_p90 = float(np.quantile(draws, 0.90))
 
@@ -2316,6 +2490,7 @@ class Scorer:
             result.flag("NO_PAYOFF_MAP")
             return
         result.payoff = payoff.as_dict()
+        self._phase4_record_payoff(request, result, payoff, seed)
         # Two independent uncertainties, both real: how wrong the prediction of
         # the driver may be, and how much the payoff line fails to explain even
         # given the driver. Folding in only the first would produce intervals
@@ -2339,6 +2514,27 @@ class Scorer:
         result.win_model = (
             float(np.ravel(recal.transform(raw_win))[0]) if recal is not None else raw_win
         )
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            # R4-18: the map legacy applied (or its "no map" answer), so a
+            # native bundle declares the same one instead of shipping raw.
+            from engine import recalibrate
+
+            cutoff = result.evidence_cutoff
+            collector.capture_frozen(declarations={"recalibration": {
+                "strategy": strategy,
+                "alpha": float(request.fill.alpha),
+                "cutoff": (None if cutoff is None
+                           else str(pd.Timestamp(cutoff).normalize().date())),
+                "min_pairs": int(recalibrate.MIN_PAIRS),
+                "fitted": recal is not None,
+                "n": None if recal is None else int(recal.n),
+                "base_rate": None if recal is None else float(recal.base_rate),
+                "x_thresholds": ([] if recal is None
+                                 else np.asarray(recal.x_thresholds, dtype=float).tolist()),
+                "y_thresholds": ([] if recal is None
+                                 else np.asarray(recal.y_thresholds, dtype=float).tolist()),
+            }})
         result.model_p10 = float(np.quantile(returns, 0.10))
         result.model_p90 = float(np.quantile(returns, 0.90))
 
@@ -2449,14 +2645,13 @@ class Scorer:
             scale_runup_move(max(point_move_d14, 0.0), days)
         )
 
-        rng = np.random.default_rng(
-            int.from_bytes(
-                hashlib.sha256(
-                    f"{self.snapshot}|{request.key()}".encode()
-                ).digest()[:8],
-                "big",
-            )
+        seed = int.from_bytes(
+            hashlib.sha256(
+                f"{self.snapshot}|{request.key()}".encode()
+            ).digest()[:8],
+            "big",
         )
+        rng = np.random.default_rng(seed)
         implied_draws = point_implied + implied_artifact.residual_draws(
             MODEL_DRAWS,
             rng,
@@ -2472,6 +2667,8 @@ class Scorer:
             np.maximum(move_draws_d14, 0.0),
             days,
         )
+        self._phase4_record_driver_pool(result, "driver", implied_entry, implied_artifact)
+        self._phase4_record_driver_pool(result, "runup_move", move_entry, move_artifact)
         result.driver_p10 = float(np.quantile(implied_draws, 0.10))
         result.driver_p90 = float(np.quantile(implied_draws, 0.90))
         result.runup_move_p10 = float(np.quantile(move_draws, 0.10))
@@ -2491,6 +2688,7 @@ class Scorer:
             result.flag("NO_PAYOFF_MAP")
             return
         result.payoff = payoff.as_dict()
+        self._phase4_record_payoff(request, result, payoff, seed)
 
         signed_moves = rng.choice((-1.0, 1.0), size=MODEL_DRAWS) * move_draws
         noise = payoff.residual_draws(MODEL_DRAWS, rng)
@@ -2652,6 +2850,80 @@ class Scorer:
             )
         return self._serving_models[key]
 
+    #: Tier-4 output -> the release role of the fold that serves it.
+    _PHASE4_FOLD_ROLES = {
+        "pred_abs_move": "size",
+        "pred_iv_crush_30": "iv_crush",
+        "pred_im_t1_d14": "implied_t1",
+        "pred_runup_abs_move_d14": "runup_move",
+    }
+
+    def _phase4_record_fold(self, request, result, served, features, *,
+                            site: str,
+                            produces: str = "pred_abs_move",
+                            declarations: Mapping[str, Any] | None = None,
+                            pool: bool = True) -> bool:
+        """Record one served Tier-4 fold for a Phase 4 capture (R4-19).
+
+        The binding is the fold's cache file (path, sha256, features) under
+        the ``tier4-serving-fold.v1`` adapter; ``inputs`` is the row legacy
+        fed ``served.predict``; the pool is the in-memory ``pool_pred``/
+        ``pool_res``/``interval_floor`` legacy's band used. The file digest
+        and the documented pool are cached per served fold, so each
+        candidate shares one copy. A no-op without a collector, and nothing
+        is recorded (returns False) when the fold has no cache file to name.
+        """
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is None:
+            return False
+        cache = self.__dict__.setdefault("_phase4_fold_records", {})
+        key = (served.model_id, str(served.fold_start), served.tier3_snapshot, produces)
+        if key not in cache:
+            try:
+                path, digest = served.artifact_ref()
+            except MemoryError:
+                raise
+            except Exception:
+                cache[key] = None
+            else:
+                floor = served.interval_floor
+                cache[key] = ({
+                    "model_id": served.model_id,
+                    "role": self._PHASE4_FOLD_ROLES[produces],
+                    "feature_order": tuple(served.features),
+                    "artifact": str(path),
+                    "artifact_sha256": digest,
+                    "adapter": "tier4-serving-fold.v1",
+                    "output_names": (produces,),
+                    "fold_start": str(pd.Timestamp(served.fold_start).date()),
+                    "tier3_snapshot": served.tier3_snapshot,
+                }, _Predocumented({
+                    "predictions": np.asarray(served.pool_pred, dtype=float).tolist(),
+                    "residuals": np.asarray(served.pool_res, dtype=float).tolist(),
+                    "interval_floor": None if floor is None else float(floor),
+                }))
+        cached = cache[key]
+        if cached is None:
+            return False
+        binding, pool_document = cached
+        slot = f"fold:{binding['role']}"
+        collector.capture_frozen(
+            bindings={slot: {
+                **binding,
+                "strategy": request.strategy,
+                "decision_offset": request.decision_offset,
+            }},
+            # Per call site: the sizing, gate and chooser paths each read the
+            # frame they were handed, and a fold fed two different rows must
+            # be visible as two rows, not refused.
+            inputs={f"{slot}@{site}": {
+                name: _phase4_input(features, name) for name in served.features
+            }},
+            fold_pools={produces: pool_document} if pool else None,
+            declarations=declarations,
+        )
+        return True
+
     def _size_from_forecast(self, request, result, structure, *, size: bool = True):
         """Record the feature model's forecast, and optionally shape the trade.
 
@@ -2733,7 +3005,9 @@ class Scorer:
                     "feature_order": tuple(served.features),
                     "artifact": str(artifact_path),
                     "artifact_sha256": artifact_sha256,
-                    "adapter": "joblib-estimator.v1",
+                    # The fold cache is a joblib dict, not a ModelArtifact:
+                    # only the Tier-4 fold adapter can execute it (R4-19).
+                    "adapter": "tier4-serving-fold.v1",
                     "output_names": ("pred_abs_move",),
                     "strategy": request.strategy,
                     "decision_offset": request.decision_offset,
@@ -2742,6 +3016,12 @@ class Scorer:
                         if result.as_of is not None else None
                     ),
                 },),
+            )
+            self._phase4_record_fold(
+                request, result, served, features, site="sizing",
+                declarations={"forecast:forecast_abs_move": {
+                    "binding": "fold:size", "output": "pred_abs_move", "site": "sizing",
+                }},
             )
         missing = [f for f in served.features if f not in features.columns]
         if missing:
@@ -2973,7 +3253,20 @@ class Scorer:
             except Exception:
                 self._crush = {}
         stored = self._crush.get((request.ticker, pd.Timestamp(result.event_date)))
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
         if stored is not None and stored == stored:
+            if collector is not None:
+                # R4-20 (c): legacy used the STORED Tier-4 row, not a fold.
+                collector.capture_frozen(declarations={"forecast:pred_iv_crush_30": {
+                    "source": "stored_tier4",
+                    "value": float(stored),
+                    "row": {
+                        "table": "tier4_forecasts",
+                        "table_sha256": self._phase4_tier4_digest(),
+                        "ticker": str(request.ticker),
+                        "event_date": str(pd.Timestamp(result.event_date).date()),
+                    },
+                }})
             return float(stored)
         if features is None:
             return None
@@ -2983,11 +3276,34 @@ class Scorer:
                 produces="pred_iv_crush_30",
             )
             value = float(served.predict(features)[0])
-            return value if value == value else None
         except MemoryError:
             raise
         except Exception:
             return None
+        # Outside the try: a capture error must never become legacy's silent
+        # None.
+        self._phase4_record_fold(
+            request, result, served, features, produces="pred_iv_crush_30",
+            pool=False, site="crush",
+            declarations={"forecast:pred_iv_crush_30": {
+                "source": "served_fold", "binding": "fold:iv_crush",
+                "output": "pred_iv_crush_30", "site": "crush",
+            }},
+        )
+        return value if value == value else None
+
+    def _phase4_tier4_digest(self) -> str | None:
+        """The stored Tier-4 table's provenance hash (``tier4.forecasts_digest``),
+        for a Phase 4 capture; computed once per Scorer."""
+        if "_phase4_tier4_sha" not in self.__dict__:
+            try:
+                digest = tier4.forecasts_digest()
+            except MemoryError:
+                raise
+            except Exception:
+                digest = None
+            self._phase4_tier4_sha = digest
+        return self._phase4_tier4_sha
 
     def _expectation(self, request, result, features=None) -> dict | None:
         """Simulate this event's return distribution, or ``None`` if it cannot.
@@ -3123,6 +3439,15 @@ class Scorer:
             raise
         except Exception:  # a board must not die on one unfit fold
             return out
+        # R4-19/R4-20 gap 3: the fold behind the gate's derived forecast
+        # columns and the pool behind their band.
+        self._phase4_record_fold(
+            request, result, served, features, site="gate",
+            declarations={"gate_forecast": {
+                "binding": "fold:size", "output": "pred_abs_move",
+                "pool": "pred_abs_move", "site": "gate",
+            }},
+        )
         if any(f not in features.columns for f in served.features):
             return out
         try:
@@ -3200,7 +3525,35 @@ class Scorer:
         if not self._gate_in_domain(request, features):
             result.flag("OUT_OF_DOMAIN")
             return
+        base_features = features
         features = self._gate_feature_frame(request, result, features, artifact.features)
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None and hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+            # R4-19: the gate's binding and output, declared before any
+            # decline so native declines the same way. ``inputs`` holds only
+            # the base-frame columns: the forecast/analog columns
+            # `_gate_feature_frame` derived are derived natively.
+            collector.capture_frozen(
+                bindings={"gate": {
+                    "model_id": entry.id,
+                    "role": "gate",
+                    "feature_order": tuple(artifact.features),
+                    "artifact": str(entry.path),
+                    "artifact_sha256": entry.artifact_sha256,
+                    "adapter": "joblib-estimator.v1",
+                    "output_names": ("gate_score",),
+                    "strategy": request.strategy,
+                    "decision_offset": entry.decision_offset,
+                }},
+                inputs={"gate@gate": {
+                    name: _phase4_input(base_features, name)
+                    for name in artifact.features if name in base_features.columns
+                }},
+                declarations={"gate": {
+                    "binding": "gate", "output": "gate_score",
+                    "threshold": entry.threshold, "site": "gate",
+                }},
+            )
         # A gate that declines says WHY. Both branches used to `return` in
         # silence, which put an unexplained `n/a` on the board — indistinguishable
         # from a name the gate had never been asked about. It matters more since
@@ -3273,6 +3626,16 @@ class Scorer:
     #: assertion `checks/phase1_replay.py` makes for the shared block.
     _CHOOSER_REGIME_EXTRA = ("spy_vol5", "spy_vol60", "spy_vol252",
                              "spy_vol20_rel252")
+    #: The event-history and market columns `_chooser_frame` reads straight
+    #: off the feature frame.
+    _CHOOSER_EVENT_MARKET = ("mean_prior_abs_move", "ema12r_abs", "signed_streak",
+                             "mean_prior_or_implied", "mcap_log", "or_implied",
+                             "or_rvol30", "spy_ret21", "spy_ret63", "spy_ret252",
+                             "spy_dd252", "spy_vol20")
+    #: The 17 chooser inputs that are primitive facts, not computed from the
+    #: scoring pass (native derives the other 50; R4-20 gap (a)). A Phase 4
+    #: capture records exactly these, as `_chooser_frame` filled them.
+    _CHOOSER_PRIMITIVES = (*_CHOOSER_EVENT_MARKET, *_CHOOSER_REGIME_EXTRA, "dte_entry")
 
     #: `n_admissible` in the training panel counts how many of EXP-133's
     #: 12,600 enumerated patterns resolved, spanned the forecast, passed the
@@ -3342,6 +3705,7 @@ class Scorer:
                              if result.detail
                              else f"chooser unavailable: {exc}")
             return
+        self._phase4_record_chooser(request, result, features, entry, artifact, frame)
         vector = [frame.get(name, float("nan")) for name in artifact.features]
         if not all(np.isfinite(v) for v in vector):
             absent = [name for name, v in zip(artifact.features, vector)
@@ -3381,6 +3745,86 @@ class Scorer:
                     "score": result.chooser_score,
                 },
             )
+
+    def _phase4_record_chooser(self, request, result, features, entry, artifact,
+                               frame: Mapping[str, float]) -> None:
+        """Record the chooser's frozen inputs for a Phase 4 capture (R4-19).
+
+        The champion binding; the served Tier-4 folds `_chooser_frame` read
+        (``chooser_recipe.producers`` and ``chooser_fold_pools``); the 17
+        primitive columns exactly as the frame filled them (regime values
+        from `_regime_extra` included); the n_admissible table and the k-NN
+        pool file legacy used. A no-op without a collector.
+        """
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is None:
+            return
+        for produces, served in getattr(result, "_phase4_chooser_served", ()):
+            self._phase4_record_fold(
+                request, result, served, features, produces=produces, site="chooser",
+                declarations={f"chooser_fold:{produces}": (
+                    {"pool": produces} if produces == "pred_abs_move" else
+                    {"binding": f"fold:{self._PHASE4_FOLD_ROLES[produces]}",
+                     "output": produces, "pool": produces, "site": "chooser"}
+                )},
+            )
+        declarations: dict[str, Any] = {
+            "chooser_primitives": {
+                name: frame.get(name) for name in self._CHOOSER_PRIMITIVES
+            },
+            "chooser_admissible_table": {
+                "breakpoints": [list(pair) for pair in self._N_ADMISSIBLE_BY_DEPTH],
+                "fallback": _N_ADMISSIBLE_MEDIAN,
+            },
+        }
+        pool_identity = self._phase4_chooser_pool_identity()
+        if pool_identity is not None:
+            declarations["chooser_analog_pool"] = pool_identity
+        bindings = {}
+        if hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
+            bindings["chooser"] = {
+                "model_id": entry.id,
+                "role": "chooser",
+                "feature_order": tuple(artifact.features),
+                "artifact": str(entry.path),
+                "artifact_sha256": entry.artifact_sha256,
+                "adapter": "joblib-estimator.v1",
+                "output_names": ("chooser_score",),
+                "strategy": request.strategy,
+                "decision_offset": entry.decision_offset,
+            }
+            declarations["chooser"] = {"binding": "chooser", "output": "chooser_score"}
+        collector.capture_frozen(bindings=bindings, declarations=declarations)
+
+    def _phase4_chooser_pool_identity(self) -> dict[str, Any] | None:
+        """The k-NN pool file legacy loaded: path, sha256 and the causal
+        cutoff the Phase 5 preparer keys it by (the day after its last exit).
+        ``None`` when legacy has no pool. Cached per Scorer."""
+        cached = self.__dict__.get("_phase4_chooser_pool_id", _UNSET)
+        if cached is not _UNSET:
+            return cached
+        identity = None
+        if getattr(self, "_chooser_pool", None) not in (None, _UNSET):
+            path = paths.FEATURES / CHOOSER_ANALOG_POOL
+            try:
+                digest = hashlib.sha256()
+                with open(path, "rb") as handle:
+                    for block in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(block)
+                exits = pd.to_datetime(
+                    pd.read_parquet(path, columns=["exit_date"])["exit_date"]).dropna()
+            except MemoryError:
+                raise
+            except Exception:
+                exits = None
+            if exits is not None and not exits.empty:
+                identity = {
+                    "path": str(path),
+                    "sha256": "sha256:" + digest.hexdigest(),
+                    "cutoff": str((exits.max().normalize() + pd.Timedelta(days=1)).date()),
+                }
+        self._phase4_chooser_pool_id = identity
+        return identity
 
     def _chooser_frame(self, request, result, features, wanted
                       ) -> dict[str, float]:
@@ -3430,10 +3874,14 @@ class Scorer:
              else float(result.forecast_abs_move))
         s = nan
         p10 = p90 = resid_n = nan
+        # The folds served below, recorded for a Phase 4 capture only after
+        # every legacy try block, so a capture error cannot become a NaN.
+        phase4_served = []
         if np.isfinite(m):
             try:
                 served = self._serving(
                     tier4.serving_fold(result.event_date, result.as_of))
+                phase4_served.append(("pred_abs_move", served))
                 band = served.interval([m])
                 if np.isfinite(band[0][0]):
                     p10, p90, s, resid_n = (float(band[0][0]),
@@ -3470,10 +3918,7 @@ class Scorer:
                             else float(result.dte_entry))
 
         # -- event history and market state -----------------------------------
-        for name in ("mean_prior_abs_move", "ema12r_abs", "signed_streak",
-                     "mean_prior_or_implied", "mcap_log", "or_implied",
-                     "or_rvol30", "spy_ret21", "spy_ret63", "spy_ret252",
-                     "spy_dd252", "spy_vol20"):
+        for name in self._CHOOSER_EVENT_MARKET:
             out[name] = feat(name)
         for name in self._CHOOSER_REGIME_EXTRA:
             out[name] = feat(name)
@@ -3509,6 +3954,7 @@ class Scorer:
                 served = self._serving(
                     tier4.serving_fold(result.event_date, result.as_of),
                     produces=produces)
+                phase4_served.append((produces, served))
                 if any(f not in features.columns for f in served.features):
                     continue
                 pred = served.predict(features)
@@ -3523,6 +3969,9 @@ class Scorer:
                 raise
             except Exception:
                 pass
+        if getattr(result, "_phase4_checkpoint_collector", None) is not None:
+            # Recorded by `_score_chooser`, outside its own try block.
+            result._phase4_chooser_served = tuple(phase4_served)
         # The training `tier4_pred_abs_move_sd` is the Tier-4 table's own
         # `pred_abs_move_sd` column renamed — the same interval the sizing
         # served above, one name, one value.

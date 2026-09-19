@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare old Tier-4 serving caches for bounded Phase 4 capture.
+"""Prepare Tier-4 serving caches for bounded Phase 4 capture.
 
 The Phase 4 corpus touches several historical Tier-4 folds, for every
 producer ``Scorer._serving`` and ``Scorer._crush_forecast`` reach:
@@ -11,7 +11,34 @@ residual-pool embedding change contain the fitted estimator but not
 while a fully populated ``Scorer`` is resident, which exceeds this host's
 memory budget.
 
-This utility upgrades only existing old-format caches that match all of:
+2026-09-18: a boundary-pass diagnostic showed the deeper version of the same
+problem. A fold this preparer has never seen at all is not just "recompute
+the pool" — ``tier4.serving_model``'s cache-MISS branch FITS the fold from
+scratch (``fit_fold``, after rebuilding the whole trainable frame), at score
+time, inside the capture. That is exactly the run-time fitting Phase 5 rules
+out of the served path, and the fit itself — not just its pool — is the
+multi-hundred-MB-to-multi-GB transient this preparer exists to move offline,
+before capture ever starts a Scorer.
+
+This utility now handles all three cache states a requested (model, fold)
+pair can be in:
+
+* **current** — the cache file exists, matches the model/fold/snapshot
+  identity, and already embeds ``pool_pred``/``pool_res``. Left alone.
+* **old** — the file exists and matches identity, but was written before the
+  pool-embedding change. Upgraded: the child calls Tier 4's own
+  ``_pool_before``, verifies the result and the UNCHANGED model payload,
+  writes a temporary sibling, fsyncs it, and atomically replaces the old
+  file.
+* **missing** — no file at all. Built: the child calls ``tier4.serving_model
+  (..., cache=False)`` to fit it (the offline equivalent of the same fit
+  ``serving_model``'s cache-miss branch would otherwise do at capture time),
+  then installs it through the SAME atomic temp-file + fsync + verify +
+  ``os.replace`` discipline as an upgrade — never ``serving_model``'s own
+  direct ``joblib.dump``, so a missing fold is installed exactly as
+  carefully as an old one is upgraded.
+
+Every case matches all of:
 
 * the current registered champion for the requested ``--model``
   (``implied_t1`` by default, matching pre-``--model`` behaviour);
@@ -19,11 +46,15 @@ This utility upgrades only existing old-format caches that match all of:
 * a fold selected by the Phase 4 capture workload (or an explicit ``--fold``,
   which applies to every requested model — see ``phase4_required_folds``).
 
-Each cache is rebuilt in its own subprocess.  The child calls Tier 4's existing
-``_pool_before`` implementation, verifies the result and the unchanged model
-payload, writes a temporary sibling, fsyncs it, and atomically replaces the
-old file.  Missing caches are not created: ``serving_model`` already writes
-new caches with embedded pools.
+Each cache is rebuilt or built in its own subprocess, and every write lands
+only under ``tier4.SERVING_DIR`` (``data/models/tier4``) — the one authorized
+derived-cache location; nothing here ever writes to ``data/models``'s other
+producers or to the panel itself.
+
+``--dry-run`` (or ``--report``) lists every requested (model, fold) pair's
+state without loading a Scorer, scoring anything, or printing any cache's
+stored values (estimator weights, pool arrays) — only fold dates, model ids
+and which of the three states above each one is in.
 """
 
 from __future__ import annotations
@@ -229,6 +260,38 @@ def _validated_pools(stored: Mapping, path: Path) -> tuple[np.ndarray, np.ndarra
     return pred, res
 
 
+#: The three states one (model, fold) cache file can be in — see the module
+#: docstring's "current"/"old"/"missing" list for what each means and what
+#: this preparer does about it.
+FoldState = str  # "current" | "old" | "missing"
+
+
+def _classify_fold(
+    fold: pd.Timestamp, *, directory: Path, model: tier4.FeatureModel, snapshot: str,
+) -> tuple[FoldState, CacheTarget | None]:
+    """One (model, fold) pair's cache state, reading only the file's header.
+
+    ``_load_bounded`` refuses anything over ``MAX_CACHE_BYTES`` before
+    ``joblib.load``, so this never holds more than one bounded cache file's
+    content at a time regardless of how many folds/models are classified —
+    the same bound ``discover_targets``/``upgrade_one`` already relied on.
+    Returns a ``CacheTarget`` only for "old" (the file `upgrade_one` would
+    upgrade); "current" and "missing" both return ``None`` since neither has
+    an old file to upgrade.
+    """
+    path = directory / tier4._serving_path(model.model_id, fold, snapshot).name
+    if path.is_symlink():
+        raise CachePreparationError(f"cache must not be a symlink: {path}")
+    if not path.exists():
+        return "missing", None
+    digest = _sha256(path)
+    stored = _load_bounded(path, digest)
+    _validate_identity(stored, path=path, model=model, snapshot=snapshot, fold=fold)
+    if _validated_pools(stored, path) is None:
+        return "old", CacheTarget(path, fold, digest)
+    return "current", None
+
+
 def discover_targets(
     folds: Iterable[pd.Timestamp],
     *,
@@ -243,27 +306,70 @@ def discover_targets(
     targets: list[CacheTarget] = []
     missing: list[pd.Timestamp] = []
     for selected_fold in sorted({_fold(value) for value in folds}):
-        path = (
-            directory
-            / tier4._serving_path(selected_model.model_id, selected_fold, selected_snapshot).name
-        )
-        if path.is_symlink():
-            raise CachePreparationError(f"cache must not be a symlink: {path}")
-        if not path.exists():
-            missing.append(selected_fold)
-            continue
-        digest = _sha256(path)
-        stored = _load_bounded(path, digest)
-        _validate_identity(
-            stored,
-            path=path,
-            model=selected_model,
+        state, target = _classify_fold(
+            selected_fold, directory=directory, model=selected_model,
             snapshot=selected_snapshot,
-            fold=selected_fold,
         )
-        if _validated_pools(stored, path) is None:
-            targets.append(CacheTarget(path, selected_fold, digest))
+        if state == "missing":
+            missing.append(selected_fold)
+        elif state == "old":
+            targets.append(target)
     return targets, missing
+
+
+@dataclass(frozen=True)
+class FoldReport:
+    """One model's fold-state census for a capture window — no values, only
+    which of the three states (see the module docstring) each fold is in.
+    """
+
+    model_name: str
+    produces: str
+    model_id: str
+    current: tuple[pd.Timestamp, ...]
+    old: tuple[pd.Timestamp, ...]
+    missing: tuple[pd.Timestamp, ...]
+
+
+def report_fold_states(
+    folds: Iterable[pd.Timestamp],
+    *,
+    model_names: Iterable[str],
+    cache_dir: Path | None = None,
+    snapshot: str | None = None,
+) -> list[FoldReport]:
+    """Classify every (model, fold) pair the capture will ask for.
+
+    Read-only and Scorer-free: ``phase4_required_folds`` (the usual source
+    of ``folds``) only touches ``_events``/``_boundary_events``/
+    ``plan_events`` — plain DataFrame planning, no chain load, no Scorer —
+    and classification here reads only cache-file HEADERS, one at a time,
+    each bounded by ``MAX_CACHE_BYTES`` (64 MiB). Nothing in this function
+    loads a panel DataFrame, builds a Scorer, or scores a request, so the
+    whole call stays well under the ~1 GB a listing tool must fit in
+    regardless of how many folds or models are requested.
+    """
+    selected_snapshot = snapshot or store.file_sha256(paths.PANEL)
+    directory = Path(cache_dir) if cache_dir is not None else tier4.SERVING_DIR
+    ordered_folds = sorted({_fold(value) for value in folds})
+    reports: list[FoldReport] = []
+    for name in model_names:
+        produces = MODEL_CHOICES[name]
+        model = _resolve_model(name)
+        buckets: dict[FoldState, list[pd.Timestamp]] = {
+            "current": [], "old": [], "missing": [],
+        }
+        for fold in ordered_folds:
+            state, _ = _classify_fold(
+                fold, directory=directory, model=model, snapshot=selected_snapshot,
+            )
+            buckets[state].append(fold)
+        reports.append(FoldReport(
+            model_name=name, produces=produces, model_id=model.model_id,
+            current=tuple(buckets["current"]), old=tuple(buckets["old"]),
+            missing=tuple(buckets["missing"]),
+        ))
+    return reports
 
 
 def phase4_required_folds(
@@ -280,6 +386,33 @@ def phase4_required_folds(
     what every Tier-4 producer needs for a given capture window — it is
     planned once in ``main`` and reused across every ``--model`` selection
     rather than recomputed per model.
+
+    Covers every pass ``tools/capture_tier0_corpus.py``'s ``main()`` runs, not
+    just the two whose events are read directly here:
+
+    * ``forward_pass``/``boundary_pass`` — the two event sets read below,
+      through every non-disabled, non-superseded structure's own
+      ``plan_events`` window (identical to how each pass builds its own
+      requests).
+    * ``pinned_and_strike_pass``/``coarse_ladder_pass`` — never a NEW fold.
+      ``_rescore`` builds each pinned/strike/coarse variant with
+      ``replace(request_from_dict(source["request"]), **changes)``, and
+      ``changes`` only ever sets ``structure_params``/``strike`` (verified by
+      ``tests/test_prepare_phase4_tier4_caches.py``'s
+      ``TestPhase4RequiredFoldsCoversEveryPass.test_rescore_only_ever_changes_structure_params_or_strike``
+      reading its own source) — ``event_date``/``decision_date``, the only two
+      ``serving_fold`` reads, are always inherited from the source request
+      already in this fold set.
+    * ``dyn_sv_pass`` — never calls ``_score`` at all; it re-runs the
+      chooser over already-scored siblings' ``request``/``record`` (same
+      objects, not rebuilt), so it cannot reach a fold this set does not
+      already have.
+    * ``research_replay_pass`` — never calls ``Scorer.score``/``_score``
+      either; it prices ``score_mod.DISABLED_STRATEGIES`` (CAL-P, CND-P)
+      through ``engine.replay.replay_one`` directly, which never touches
+      ``tier4``/``Scorer._serving`` — and disabled strategies are excluded
+      from the loop below for the same reason ``main()``'s own
+      ``STRUCTURES``-keyed passes exclude them.
     """
     from engine import replay as replay_mod
     from engine import score as score_mod
@@ -411,6 +544,116 @@ def upgrade_one(
     return int(pool_pred.size)
 
 
+def build_one(
+    fold: pd.Timestamp,
+    *,
+    model: tier4.FeatureModel | None = None,
+    snapshot: str | None = None,
+    cache_dir: Path | None = None,
+    panel_loader: Callable[[], pd.DataFrame] | None = None,
+    fit_builder: Callable[..., "tier4.ServingModel"] | None = None,
+) -> int:
+    """Fit and atomically install a cache for a fold with NO existing file.
+
+    This is the offline equivalent of what ``tier4.serving_model``'s own
+    cache-miss branch does at capture time — the same ``fit_fold`` call, the
+    same ``_pool_before`` pool — with two differences that are the entire
+    point of this function existing: it runs here, before any capture starts
+    a Scorer, and it installs the result through the SAME atomic temp-file +
+    fsync + verify + ``os.replace`` discipline ``upgrade_one`` uses, never
+    ``serving_model``'s own direct, non-atomic ``joblib.dump``.
+
+    ``fit_builder`` defaults to ``tier4.serving_model`` called with
+    ``cache=False`` — fit and return, write nothing — so this function owns
+    the only write. Returns the stored residual count, matching
+    ``upgrade_one``'s return contract.
+    """
+    selected_model = model or tier4.im_t1_feature_model()
+    selected_snapshot = snapshot or store.file_sha256(paths.PANEL)
+    directory = Path(cache_dir) if cache_dir is not None else tier4.SERVING_DIR
+    path = directory / tier4._serving_path(
+        selected_model.model_id, fold, selected_snapshot
+    ).name
+    if path.is_symlink():
+        raise CachePreparationError(f"cache must not be a symlink: {path}")
+    if path.exists():
+        raise CachePreparationError(
+            f"cache already exists, this fold is not missing: {path}"
+        )
+
+    if panel_loader is None:
+        from engine.features import load_panel
+
+        panel_loader = load_panel
+    panel = panel_loader()
+    builder = fit_builder or (
+        lambda f, m, p: tier4.serving_model(f, panel=p, model=m, cache=False)
+    )
+    served = builder(fold, selected_model, panel)
+    if (
+        served.model_id != selected_model.model_id
+        or pd.Timestamp(served.fold_start).normalize() != fold
+        or tuple(served.features) != tuple(selected_model.features)
+    ):
+        raise CachePreparationError(f"freshly fit model identity mismatch for {path}")
+    pool_pred = np.asarray(served.pool_pred, dtype=float)
+    pool_res = np.asarray(served.pool_res, dtype=float)
+    candidate = {
+        "estimator": served.estimator,
+        "model_id": served.model_id,
+        "fold_start": str(fold.date()),
+        "tier3_snapshot": selected_snapshot,
+        "features": list(served.features),
+        "pool_pred": pool_pred,
+        "pool_res": pool_res,
+    }
+    _validated_pools(candidate, path)
+
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = directory / ("." + path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        joblib.dump(candidate, temporary)
+        os.chmod(temporary, 0o644)
+        descriptor = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+        if path.exists():
+            # Another process built this exact fold while we were fitting —
+            # never silently overwrite a cache we did not plan against.
+            raise CachePreparationError(f"cache appeared during build (race): {path}")
+        verified = _load_bounded(temporary)
+        _validate_identity(
+            verified, path=path, model=selected_model,
+            snapshot=selected_snapshot, fold=fold,
+        )
+        verified_pools = _validated_pools(verified, path)
+        assert verified_pools is not None
+        if not np.array_equal(verified_pools[0], pool_pred) or not np.array_equal(
+            verified_pools[1], pool_res
+        ):
+            raise CachePreparationError(f"temporary pool verification failed: {path}")
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    final = _load_bounded(path)
+    _validate_identity(
+        final, path=path, model=selected_model, snapshot=selected_snapshot, fold=fold,
+    )
+    final_pools = _validated_pools(final, path)
+    if (
+        final_pools is None
+        or not np.array_equal(final_pools[0], pool_pred)
+        or not np.array_equal(final_pools[1], pool_res)
+    ):
+        raise CachePreparationError(f"installed cache verification failed: {path}")
+    return int(pool_pred.size)
+
+
 def _run_child(target: CacheTarget, produces: str, snapshot: str) -> None:
     command = [
         sys.executable,
@@ -478,6 +721,68 @@ def _worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_build_child(
+    fold: pd.Timestamp, model: tier4.FeatureModel, produces: str, snapshot: str,
+) -> None:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--build-one",
+        str(tier4.SERVING_DIR / tier4._serving_path(model.model_id, fold, snapshot).name),
+        "--expected-fold",
+        str(fold.date()),
+        "--expected-snapshot",
+        snapshot,
+        "--expected-produces",
+        produces,
+    ]
+    process = subprocess.Popen(command, cwd=str(ROOT))
+    started = time.monotonic()
+    while True:
+        try:
+            code = process.wait(timeout=HEARTBEAT_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            print(
+                f"[phase4-cache] fold {fold:%Y-%m} ({produces}) still fitting "
+                f"({elapsed:.0f}s elapsed)",
+                flush=True,
+            )
+    if code != 0:
+        raise CachePreparationError(
+            f"fold {fold:%Y-%m} ({produces}) build child exited with status {code}"
+        )
+
+
+def _build_worker(args: argparse.Namespace) -> int:
+    # Same resolution as `_worker`: `tier4.feature_model(produces)` covers
+    # all four producers exactly as `Scorer._serving`/MODEL_CHOICES do.
+    model = tier4.feature_model(args.expected_produces)
+    snapshot = store.file_sha256(paths.PANEL)
+    if snapshot != args.expected_snapshot:
+        raise CachePreparationError(
+            "Tier-3 panel changed between planning and child execution: "
+            f"expected {args.expected_snapshot}, got {snapshot}"
+        )
+    fold = _fold(args.expected_fold)
+    path = Path(args.build_one).resolve()
+    print(
+        f"[phase4-cache] fold {fold:%Y-%m} model={model.model_id} "
+        f"({args.expected_produces}) fitting (missing)",
+        flush=True,
+    )
+    started = time.monotonic()
+    count = build_one(fold, model=model, snapshot=snapshot, cache_dir=path.parent)
+    elapsed = time.monotonic() - started
+    print(
+        f"[phase4-cache] fold {fold:%Y-%m} ({args.expected_produces}) "
+        f"built {count:,} residuals in {elapsed:.0f}s",
+        flush=True,
+    )
+    return 0
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--as-of", default=None)
@@ -504,25 +809,40 @@ def main(argv: Iterable[str] | None = None) -> int:
             f"{DEFAULT_MODEL!r} (unchanged behaviour)."
         ),
     )
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run", "--report", dest="dry_run", action="store_true",
+        help="list every (model, fold)'s state (current/old/missing) and exit; "
+             "no cache file is read past its header, no Scorer, no values printed",
+    )
     parser.add_argument("--upgrade-one", help=argparse.SUPPRESS)
+    parser.add_argument("--build-one", help=argparse.SUPPRESS)
     parser.add_argument("--expected-sha256", help=argparse.SUPPRESS)
     parser.add_argument("--expected-fold", help=argparse.SUPPRESS)
     parser.add_argument("--expected-snapshot", help=argparse.SUPPRESS)
     parser.add_argument("--expected-produces", help=argparse.SUPPRESS)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    worker_values = (
+    upgrade_worker_values = (
         args.upgrade_one,
         args.expected_sha256,
         args.expected_fold,
         args.expected_snapshot,
         args.expected_produces,
     )
-    if any(worker_values):
-        if not all(worker_values):
+    build_worker_values = (
+        args.build_one,
+        args.expected_fold,
+        args.expected_snapshot,
+        args.expected_produces,
+    )
+    if any(upgrade_worker_values):
+        if not all(upgrade_worker_values):
             parser.error("internal worker mode requires all expected values")
         return _worker(args)
+    if any(build_worker_values):
+        if not all(build_worker_values):
+            parser.error("internal worker mode requires all expected values")
+        return _build_worker(args)
 
     as_of = (
         pd.Timestamp(args.as_of).normalize()
@@ -549,6 +869,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     plan: list[tuple[str, str, "tier4.FeatureModel", list[CacheTarget], list[pd.Timestamp]]] = []
     total_targets = 0
     total_missing = 0
+    total_current = 0
+    fold_set = set(folds)
     for name in model_names:
         produces = MODEL_CHOICES[name]
         model = _resolve_model(name)
@@ -556,19 +878,34 @@ def main(argv: Iterable[str] | None = None) -> int:
         plan.append((name, produces, model, targets, missing))
         total_targets += len(targets)
         total_missing += len(missing)
+        # "current" is never fetched into `plan` (nothing to do for those
+        # folds), but it is still reported below: everything requested minus
+        # what needed upgrading or building. No cache past its own header is
+        # read a second time to get this — it is set arithmetic over the
+        # SAME `targets`/`missing` `discover_targets` just returned.
+        total_current += len(fold_set) - len(targets) - len(missing)
 
+    print(
+        f"[phase4-cache] snapshot {snapshot}",
+        flush=True,
+    )
     print(
         f"[phase4-cache] planned {len(folds)} fold(s) x {len(model_names)} model(s) "
         f"({', '.join(model_names)}); "
-        f"{total_targets} old cache(s), {total_missing} missing cache(s)",
+        f"{total_current} current, {total_targets} old, {total_missing} missing",
         flush=True,
     )
     for name, produces, model, targets, missing in plan:
+        old_folds = {target.fold for target in targets}
+        missing_folds = set(missing)
+        current_folds = sorted(fold_set - old_folds - missing_folds)
         print(
             f"[phase4-cache] {name} ({produces}, model_id={model.model_id}): "
-            f"{len(targets)} old cache(s), {len(missing)} missing cache(s)",
+            f"{len(current_folds)} current, {len(targets)} old, {len(missing)} missing",
             flush=True,
         )
+        for fold in current_folds:
+            print(f"[phase4-cache] current {name} {fold:%Y-%m}", flush=True)
         for target in targets:
             print(
                 f"[phase4-cache] old {name} {target.fold:%Y-%m} {target.path.name} "
@@ -576,15 +913,12 @@ def main(argv: Iterable[str] | None = None) -> int:
                 flush=True,
             )
         for fold in missing:
-            print(
-                f"[phase4-cache] missing {name} {fold:%Y-%m}; "
-                "left untouched because no old cache exists",
-                flush=True,
-            )
+            action = "will be left untouched (dry run)" if args.dry_run else "will be built"
+            print(f"[phase4-cache] missing {name} {fold:%Y-%m}; {action}", flush=True)
     if args.dry_run:
         return 0
 
-    total = total_targets
+    total = total_targets + total_missing
     index = 0
     for name, produces, model, targets, missing in plan:
         for target in targets:
@@ -594,7 +928,18 @@ def main(argv: Iterable[str] | None = None) -> int:
                 flush=True,
             )
             _run_child(target, produces, snapshot)
-    print(f"[phase4-cache] complete: upgraded {total} cache(s)", flush=True)
+        for fold in missing:
+            index += 1
+            print(
+                f"[phase4-cache] building {index}/{total}: {name} fold {fold:%Y-%m} (missing)",
+                flush=True,
+            )
+            _run_build_child(fold, model, produces, snapshot)
+    print(
+        f"[phase4-cache] complete: upgraded {total_targets} cache(s), "
+        f"built {total_missing} cache(s)",
+        flush=True,
+    )
     return 0
 
 
