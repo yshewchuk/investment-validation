@@ -11,6 +11,8 @@ leaves the default/legacy DAG byte-identical to before.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from engine.v2.contracts import SnapshotRef, SubmitRequest
