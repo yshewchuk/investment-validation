@@ -478,6 +478,78 @@ def _score_inputs(inputs, gate: dict):
     return application.score_one(_probe_request("TWIN-P", 0.5), replace(inputs, gate=gate))
 
 
+_TIER4_OUTPUTS = {"size": "pred_abs_move", "implied_t1": "pred_implied_t1",
+                  "iv_crush": "pred_iv_crush_30", "runup_move": "pred_runup_abs_move_d14"}
+
+
+def _fold_features(root: Path, obj: dict) -> tuple[str, ...]:
+    """The feature order a staged fold was trained on (its own ``features``)."""
+    import io
+
+    import joblib
+
+    stored = joblib.load(io.BytesIO((root / obj["path"]).read_bytes()))
+    return tuple(str(name) for name in stored.get("features", ()))
+
+
+def _fold_release(role: str, obj: dict, features: tuple[str, ...], path: str):
+    from engine.v2.models.contracts import ArtifactMember, ModelBinding
+
+    binding = ModelBinding(
+        binding_id=f"p5-probe-{role}-{obj['name']}", model_id=f"tier4:{role}", role=role,
+        strategy_id="*", decision_clock_id="legacy.entry_close.v1",
+        adapter="tier4-serving-fold.v1", feature_order=features,
+        output_names=(_TIER4_OUTPUTS[role],),
+        members=(ArtifactMember(name="estimator", path=path,
+                                content_hash=obj["content_hash"]),))
+    return ModelRelease(release_id="p5-probe", deployment_id="p5-probe",
+                        bindings=(binding,)), binding.binding_id
+
+
+def _run_fold(root: Path, role: str, obj: dict, features, path: str):
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.scoring.frozen_executor import FrozenStageExecutor
+
+    release, binding_id = _fold_release(role, obj, features, path)
+    return FrozenStageExecutor(inference=FrozenInference(root), release=release,
+                               binding_id=binding_id).execute(
+        {name: 0.0 for name in features})
+
+
+def _fold_row(root: Path, member_id: str, obj: dict) -> dict:
+    from engine.v2.scoring.frozen_executor import FrozenStageRefusal
+
+    role = member_id.split(":", 1)[1]
+    resolved, refused, detail = False, False, ""
+    try:
+        features = _fold_features(root, obj)
+        result = _run_fold(root, role, obj, features, obj["path"])
+        resolved = tuple(result.artifact_hashes) == (obj["content_hash"],)
+        detail = "" if resolved else "artifact hashes differ from the staged fold"
+        _run_fold(root, role, obj, features, f"objects/absent-{obj['name']}")
+    except FrozenStageRefusal as exc:
+        refused = resolved and exc.code == "MODEL_NOT_READY"
+        detail = detail if resolved else exc.code + ":" + ",".join(exc.reason_codes)
+    except Exception as exc:  # noqa: BLE001 -- an undecodable fold is unresolved
+        detail = type(exc).__name__
+    return {"consumer": "features.tier4_serving_folds", "member_id": member_id,
+            "resolved": resolved, "refused_when_missing": refused, "detail": detail}
+
+
+def _probe_tier4_folds(ctx: ReleaseContext) -> list[dict]:
+    """The Tier-4 serving-fold adapter over every staged fold, through
+    ``FrozenStageExecutor``: each fold serves its own feature order from the
+    staged store, and the same binding pointed at an absent object refuses
+    ``MODEL_NOT_READY``. Folds are raw joblib members (no typed loader), so
+    the probe reads the staged manifest rows, never ``data/models/tier4``."""
+    root = deployment_root(ctx.release_root)
+    rows = []
+    for member_id in sorted(m for m in ctx.states if m.startswith("tier4_folds:")):
+        for obj in sorted(ctx.states[member_id]["row"]["objects"], key=lambda o: o["name"]):
+            rows.append(_fold_row(root, member_id, obj))
+    return rows or _blocked("features.tier4_serving_folds", "tier4_folds")
+
+
 #: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
 CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "frozen_stage_executor": _probe_frozen_executor,
@@ -498,5 +570,5 @@ CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
         lambda pool: {"pool_id": pool.pool_id, "cutoff": pool.cutoff,
                       "content_hash": pool.content_hash}),
     "analogs.board_analog_matcher": _probe_board_analog,
-    "features.tier4_serving_folds": None,
+    "features.tier4_serving_folds": _probe_tier4_folds,
 }

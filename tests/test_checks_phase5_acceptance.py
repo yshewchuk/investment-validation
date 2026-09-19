@@ -157,7 +157,7 @@ def _state_payloads() -> dict[str, dict[str, bytes]]:
         "payoff_surface:STR-RUNUP": {"a": serialize_payoff_artifact(surface)},
         # keyed like the undated line: (STR-THRU, 0.5, no cutoff)
         "recalibration_map:STR-THRU": {"a": _recal()},
-        "tier4_folds:size": {"m_202609_abcdefabcdef.joblib": b"fold-bytes"},
+        "tier4_folds:size": {"m_202609_abcdefabcdef.joblib": _tier4_fold()},
         "driver_residual_pool:size": {"m-size|champion": _driver_pool("size")},
         "driver_residual_pool:implied_t1": {"m-implied_t1|champion": _driver_pool("implied_t1")},
         "driver_residual_pool:runup_move": {"m-runup_move|champion": _driver_pool("runup_move")},
@@ -170,6 +170,22 @@ def _state_payloads() -> dict[str, dict[str, bytes]]:
             f"features.pnl_sim_history|{cutoff.month}": serialize_frozen_state(cutoff)
             for cutoff in _trailing_cutoffs()},
     }
+
+
+def _tier4_fold() -> bytes:
+    """A Tier-4 serving fold in the dict form tier4.serving_model caches."""
+    import io
+
+    import joblib
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+
+    x = np.arange(12.0).reshape(6, 2)
+    buffer = io.BytesIO()
+    joblib.dump({"estimator": LinearRegression().fit(x, x.sum(axis=1)),
+                 "model_id": "m", "fold_start": "2026-09-01",
+                 "tier3_snapshot": "abcdefabcdef", "features": ["f1", "f2"]}, buffer)
+    return buffer.getvalue()
 
 
 def _trailing_cutoffs():
@@ -194,19 +210,8 @@ def _chooser_pool():
 
 #: A reduced catalog whose every member can be built here: payoff,
 #: recalibration, residual pools and the admissible table (real typed loaders,
-#: real v2 consumers where one exists) and one raw state.
+#: real v2 consumers) and one raw state (a Tier-4 fold, probed through its adapter).
 SPECS = tuple(s for s in layout.STATE_SPECS if s.member_id in _state_payloads())
-
-
-def _stub_probe(member_id: str, consumer: str):
-    """A consumer that reads its member from the resolved release only."""
-    def probe(ctx):
-        state = ctx.states.get(member_id)
-        if state is None:
-            return [{"consumer": consumer, "member_id": member_id, "blocked": True}]
-        return [{"consumer": consumer, "member_id": member_id, "resolved": True,
-                 "refused_when_missing": True, "detail": ""}]
-    return probe
 
 
 CONSUMERS = {
@@ -216,8 +221,7 @@ CONSUMERS = {
     "model_stage.recalibration": gate.CONSUMERS["model_stage.recalibration"],
     "model_stage.driver_residual_pool": gate.CONSUMERS["model_stage.driver_residual_pool"],
     "simulation.paired_residual_pool": gate.CONSUMERS["simulation.paired_residual_pool"],
-    "features.tier4_serving_folds": _stub_probe("tier4_folds:size",
-                                                "features.tier4_serving_folds"),
+    "features.tier4_serving_folds": gate.CONSUMERS["features.tier4_serving_folds"],
     "chooser.admissible_table": gate.CONSUMERS["chooser.admissible_table"],
     "chooser.analog_pool": gate.CONSUMERS["chooser.analog_pool"],
     "gate.trailing_cutoff": gate.CONSUMERS["gate.trailing_cutoff"],
@@ -422,7 +426,7 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     ids = {r["member_id"] for r in evidence["members"]}
     assert {s.member_id for s in layout.STATE_SPECS} <= ids
     assert evidence["status"] == "FAIL"
-    assert "P5_CONSUMER_PENDING" in evidence["finding_codes"]
+    assert "P5_CONSUMER_PENDING" not in evidence["finding_codes"]  # every consumer probed
     pending = {r["consumer"] for r in evidence["consumers"] if r["status"] == "PENDING"}
     assert "analogs.board_analog_matcher" not in pending  # a real probe since P5-4 analogs
     assert "model_stage.recalibration" not in pending  # a real probe since 3dea05e
@@ -431,6 +435,7 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     assert "chooser.admissible_table" not in pending  # the native chooser reads it
     assert "chooser.analog_pool" not in pending
     assert "gate.trailing_cutoff" not in pending  # the native entry-rule gate reads it
+    assert not pending  # features.tier4_serving_folds: the tier4 fold adapter probe
     by_id = {r["member_id"]: r for r in evidence["members"]}
     for member_id in ("board_analog_matcher", "recalibration_map:STR-RUNUP"):
         assert by_id[member_id]["status"] in ("PENDING", "MISSING")
@@ -580,6 +585,29 @@ def test_chooser_consumers_resolve_and_refuse_when_missing(tmp_path):
             if r["consumer"] in ("chooser.admissible_table", "chooser.analog_pool")]
     assert {r["consumer"] for r in rows} == {"chooser.admissible_table", "chooser.analog_pool"}
     assert all(r["status"] == "ok" for r in rows), rows
+
+
+def test_tier4_fold_consumer_resolves_and_refuses_when_missing(tmp_path):
+    from checks.phase5_consumers import CONSUMERS as REAL
+    from checks.phase5_consumers import ReleaseContext
+
+    root = _release(tmp_path)
+    evidence = _run(tmp_path, root)
+    rows = [r for r in evidence["consumers"] if r["consumer"] == "features.tier4_serving_folds"]
+    assert [(r["member_id"], r["status"]) for r in rows] == [("tier4_folds:size", "ok")]
+
+    manifest = layout.read_manifest(root)
+    row = next(m for m in manifest["members"] if m["member_id"] == "tier4_folds:size")
+    probe = REAL["features.tier4_serving_folds"]
+    ctx = ReleaseContext(root, None, {"tier4_folds:size": {"row": row, "artifacts": [None]}})
+    [served] = probe(ctx)
+    assert served["resolved"] is True and served["refused_when_missing"] is True
+    # The same fold bytes replaced by an undecodable object never resolve.
+    garbage = layout.write_object(root, b"not a joblib fold")
+    bad = dict(row, objects=[dict(row["objects"][0], content_hash=garbage[0], path=garbage[1])])
+    [broken] = probe(ReleaseContext(root, None, {"tier4_folds:size": {"row": bad}}))
+    assert broken["resolved"] is False and broken["detail"]
+    assert probe(ReleaseContext(root, None, {}))[0]["blocked"] is True
 
 
 def test_preparer_builds_the_chooser_pool_from_its_parquet(tmp_path):
