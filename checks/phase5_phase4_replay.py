@@ -53,8 +53,10 @@ DISPOSITIONS = ("replayed", "mismatch", "member_absent", "unverified", "error",
 
 
 #: Staged state members a replayed pair may read by content hash: the Tier-4
-#: serving folds (frozen bindings) and the entry-rule trailing cutoff.
-_STAGED_STATE_PREFIXES = ("tier4_folds:", "trailing_pnl_cutoff")
+#: serving folds (frozen bindings, including the chooser's producer folds),
+#: the entry-rule trailing cutoff, and the chooser's frozen state.
+_STAGED_STATE_PREFIXES = ("tier4_folds:", "trailing_pnl_cutoff", "chooser_analog_pool",
+                          "admissible_table:")
 
 
 def staged_model_objects(model_release, manifest: Mapping[str, Any]) -> dict[str, str]:
@@ -82,8 +84,20 @@ def rebind_to_release(plan, release_root: Path, staged: Mapping[str, str]):
     from checks.phase4_frozen_bridge import FrozenReplayPlan
     from engine.v2.models.loader import FrozenInference
 
+    release, absent, used = _rebind_release(plan.release, staged)
+    rebound = FrozenReplayPlan(
+        inference=FrozenInference(deployment_root(release_root)),
+        release=release,
+        requests=plan.requests,
+        receipt=plan.receipt,
+    )
+    return rebound, absent, sorted(used)
+
+
+def _rebind_release(release, staged: Mapping[str, str]):
+    """``(release with every member at its staged object, absent, used)``."""
     absent, used, bindings = [], set(), []
-    for binding in plan.release.bindings:
+    for binding in release.bindings:
         members = []
         for member in binding.members:
             if member.content_hash not in staged:
@@ -92,13 +106,61 @@ def rebind_to_release(plan, release_root: Path, staged: Mapping[str, str]):
                 used.add(staged[member.content_hash])
             members.append(replace(member, path=object_relpath(member.content_hash)))
         bindings.append(replace(binding, members=tuple(members)))
-    rebound = FrozenReplayPlan(
-        inference=FrozenInference(deployment_root(release_root)),
-        release=replace(plan.release, bindings=tuple(bindings)),
-        requests=plan.requests,
-        receipt=plan.receipt,
-    )
-    return rebound, absent, sorted(used)
+    return replace(release, bindings=tuple(bindings)), absent, used
+
+
+def _staged_state(release_root: Path, staged: Mapping[str, str], prefix: str, artifact):
+    """``(the staged state equal to artifact, member id)`` or ``(None, None)``.
+
+    Frozen state is matched by its own content hash after loading the staged
+    object through the typed loader, so the replay serves the release's bytes.
+    """
+    from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
+
+    loader = FrozenStateLoader(deployment_root(release_root))
+    for object_hash, member_id in staged.items():
+        if not member_id.startswith(prefix):
+            continue
+        state = loader.load(FrozenStateRef(path=object_relpath(object_hash),
+                                           content_hash=object_hash))
+        if getattr(state, "content_hash", None) == artifact.content_hash:
+            return state, member_id
+    return None, None
+
+
+def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str]):
+    """``(chooser block served from the staged release, absent, used)``.
+
+    The frozen chooser's champion and Tier-4 producer folds are rebound by
+    content hash exactly like the scoring bindings; its k-NN analog pool and
+    n_admissible table must be staged ``chooser_analog_pool`` /
+    ``admissible_table:`` objects with the same content hash, and are served
+    from the staged store. The recipe and the fold pools are the trace's own
+    declaration (hash-bound by the trace; the fold pools' hashes enter the
+    chooser stage receipt, so a staged fold with other pools would mismatch).
+    """
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.scoring.chooser_inputs import frozen_chooser_block
+
+    release, absent, used = _rebind_release(chooser.release, staged)
+    served = {}
+    for name, prefix in (("analog_pool", "chooser_analog_pool"),
+                         ("admissible_table", "admissible_table:")):
+        declared = getattr(chooser, name)
+        served[name], member_id = ((None, None) if declared is None else
+                                   _staged_state(release_root, staged, prefix, declared))
+        if declared is not None and served[name] is None:
+            absent.append((f"chooser:{name}", declared.content_hash))
+        elif member_id is not None:
+            used.add(member_id)
+    if absent:
+        return None, absent, used
+    block = frozen_chooser_block(
+        strategy=request.strategy_version, recipe=chooser.recipe,
+        fold_pools=chooser.fold_pools, analog_pool=served["analog_pool"],
+        admissible_table=served["admissible_table"],
+        inference=FrozenInference(deployment_root(release_root)), release=release)
+    return block, absent, used
 
 
 def _replay_pair(pair, corpus_root: Path, release_root: Path,
@@ -116,23 +178,21 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     except Exception as exc:  # noqa: BLE001 -- any refusal means "not verifiable"
         return {"disposition": "unverified", "code": PHASE4_UNVERIFIED,
                 "detail": f"{type(exc).__name__}: {exc}"}
-    plan = verified["frozen_replay"]
-    if plan is None:
+    if verified["frozen_replay"] is None and verified.get("frozen_chooser") is None:
         return {"disposition": "not_frozen"}
-    rebound, absent, used = rebind_to_release(plan, release_root, staged)
-    cutoff = _entry_rule_cutoff(verified["inputs"])
-    if cutoff is not None:
-        if cutoff in staged:
-            used = sorted({*used, staged[cutoff]})
-        else:
-            absent.append(("gate:entry_rule", cutoff))
+    try:
+        rebound, inputs, absent, used = _rebound_inputs(verified, release_root, staged)
+    except Exception as exc:  # noqa: BLE001 -- a staged chooser that cannot be built
+        return {"disposition": "error", "code": PHASE4_ERROR,
+                "detail": f"rebind: {type(exc).__name__}", "members": []}
     if absent:
         return {"disposition": "member_absent", "code": PHASE4_MEMBER_ABSENT,
                 "detail": ",".join(f"{b}:{h}" for b, h in absent), "members": used}
     try:
-        native = application.score_frozen(
-            verified["request"], rebound.inference, rebound.release, rebound.requests,
-            {"_native_inputs": verified["inputs"]})
+        native = (application.score_one(verified["request"], inputs) if rebound is None
+                  else application.score_frozen(
+                      verified["request"], rebound.inference, rebound.release,
+                      rebound.requests, {"_native_inputs": inputs}))
     except Exception as exc:  # noqa: BLE001
         return {"disposition": "error", "code": PHASE4_ERROR,
                 "detail": type(exc).__name__, "members": used}
@@ -144,6 +204,30 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     return {"disposition": "replayed", "members": used,
             "stages": len(verified["captured_receipts"]),
             "runtime_stages": len(receipts)}
+
+
+def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str]):
+    """``(rebound frozen plan or None, native inputs, absent, used)``: every
+    model, fold, cutoff and chooser state the pair reads, from the release."""
+    plan, chooser = verified["frozen_replay"], verified.get("frozen_chooser")
+    inputs, absent, used, rebound = verified["inputs"], [], set(), None
+    if plan is not None:
+        rebound, absent, plan_used = rebind_to_release(plan, release_root, staged)
+        used.update(plan_used)
+    if chooser is not None:
+        block, chooser_absent, chooser_used = rebind_chooser(
+            chooser, verified["request"], release_root, staged)
+        absent.extend(chooser_absent)
+        used.update(chooser_used)
+        if block is not None:
+            inputs = replace(inputs, chooser=block)
+    cutoff = _entry_rule_cutoff(inputs)
+    if cutoff is not None:
+        if cutoff in staged:
+            used.add(staged[cutoff])
+        else:
+            absent.append(("gate:entry_rule", cutoff))
+    return rebound, inputs, absent, sorted(used)
 
 
 def _entry_rule_cutoff(inputs) -> str | None:
@@ -214,5 +298,5 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
 
 
 __all__ = ["DISPOSITIONS", "PHASE4_EMPTY", "PHASE4_ERROR", "PHASE4_MEMBER_ABSENT",
-           "PHASE4_MISMATCH", "PHASE4_UNVERIFIED", "REPLAY_CODES", "rebind_to_release",
-           "replay_corpus", "staged_model_objects"]
+           "PHASE4_MISMATCH", "PHASE4_UNVERIFIED", "REPLAY_CODES", "rebind_chooser",
+           "rebind_to_release", "replay_corpus", "staged_model_objects"]

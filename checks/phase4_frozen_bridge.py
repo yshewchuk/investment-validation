@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -405,9 +405,17 @@ _CHOOSER_KEYS = frozenset({
 
 @dataclass(frozen=True)
 class FrozenChooserPlan:
+    """The executable chooser block plus the declared parts it was built from
+    (so a consumer can rebuild it over another store, e.g. the P5-6 replay
+    serving the same bytes from a staged release)."""
+
     release: ModelRelease
     request_refs: frozenset[str]
     block: Mapping[str, Any]
+    recipe: Mapping[str, Any] = field(default_factory=dict)
+    fold_pools: Mapping[str, Any] = field(default_factory=dict)
+    analog_pool: Any = None
+    admissible_table: Any = None
 
 
 def prepare_frozen_chooser(
@@ -481,6 +489,8 @@ def prepare_frozen_chooser(
         raise FrozenBridgeError(f"frozen_chooser: {exc}") from exc
     return FrozenChooserPlan(
         release=release, request_refs=frozenset(request_refs), block=block,
+        recipe=declaration["recipe"], fold_pools=declaration["fold_pools"],
+        analog_pool=pool, admissible_table=table,
     )
 
 
