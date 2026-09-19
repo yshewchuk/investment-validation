@@ -64,7 +64,6 @@ def status(conn, *, trigger: int = calibration.CALIBRATION_TRIGGER, through=None
     resolved = [o for o in outcomes if o.get("status") == "resolved"]
     due, n_now, last = calibration.calibration_due(conn, trigger=trigger)
     pairs = legacy_adapter.scored_pairs(predictions=predictions, outcomes=outcomes)
-    state = calibration._state(conn)
     return {
         "predictions": len(predictions),
         "prediction_rows_total": len(predictions_all),
@@ -77,6 +76,5 @@ def status(conn, *, trigger: int = calibration.CALIBRATION_TRIGGER, through=None
         "n_scored": n_now,
         "n_at_last_report": last,
         "settlement_diagnostics": legacy_adapter.settlement_summary(pairs),
-        "health": ({"artifact_id": state["health_artifact_id"],
-                    "content_hash": state["health_content_hash"]} if state else None),
+        "health": calibration.health_ref(conn),
     }

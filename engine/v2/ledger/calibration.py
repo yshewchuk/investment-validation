@@ -24,26 +24,31 @@ import json
 from contextlib import contextmanager
 from typing import Any
 
-from engine.v2.foundation import Clock, format_timestamp
+from engine.v2.contracts import ArtifactRef
+from engine.v2.foundation import Clock, canonical_json, format_timestamp, from_document, to_document
 
 from . import catalog_reader, legacy_adapter
 
-__all__ = ["CALIBRATION_TRIGGER", "SCHEMA_V3", "calibrate", "calibration_due", "scored_pairs"]
+__all__ = ["CALIBRATION_TRIGGER", "SCHEMA_V3", "calibrate", "calibration_due",
+           "health_ref", "report_ref", "scored_pairs"]
 
 #: Mirrors engine.ledger.CALIBRATION_TRIGGER (plan §P4.2): newly scored
 #: outcomes that trigger a calibration recompute. Kept as a literal, not an
 #: import, so this module declares no legacy adapter edge for a bare constant.
 CALIBRATION_TRIGGER = 50
 
+#: ``*_ref_json`` is a full ``ArtifactRef`` (canonical_json(to_document(ref)),
+#: the same encoding ``engine.v2.ops.catalog.dumps``/``load_json`` use for a
+#: JSON column) rather than a bare artifact_id/content_hash pair, so a reader
+#: (``status()`` below, or a test) can reconstruct the ref and call
+#: ``store.read_verified`` on it directly.
 SCHEMA_V3 = (
     """CREATE TABLE IF NOT EXISTS ledger_calibration_state (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
         n_scored_at_last_report INTEGER NOT NULL,
         generated_at TEXT NOT NULL,
-        health_artifact_id TEXT NOT NULL,
-        health_content_hash TEXT NOT NULL,
-        report_artifact_id TEXT NOT NULL,
-        report_content_hash TEXT NOT NULL
+        health_ref_json TEXT NOT NULL,
+        report_ref_json TEXT NOT NULL
     ) STRICT""",
 )
 
@@ -80,6 +85,19 @@ def _state(conn) -> dict | None:
     row = conn.execute(
         "SELECT * FROM ledger_calibration_state WHERE singleton=1").fetchone()
     return dict(row) if row else None
+
+
+def health_ref(conn) -> ArtifactRef | None:
+    """The most recently published health artifact's verifiable reference,
+    or ``None`` before the first ``calibrate()`` call."""
+    state = _state(conn)
+    return None if state is None else from_document(ArtifactRef, json.loads(state["health_ref_json"]))
+
+
+def report_ref(conn) -> ArtifactRef | None:
+    """The most recently published calibration-report artifact's reference."""
+    state = _state(conn)
+    return None if state is None else from_document(ArtifactRef, json.loads(state["report_ref_json"]))
 
 
 def calibration_due(conn, *, trigger: int = CALIBRATION_TRIGGER) -> tuple[bool, int, int]:
@@ -146,24 +164,21 @@ def calibrate(conn, store, *, clock: Clock, force: bool = False,
     health_ref = store.publish_bytes(health_bytes, schema_ref="ledger_health.v1")
     report_ref = store.publish_bytes(report_bytes, schema_ref="ledger_calibration_report.v1")
 
+    health_ref_json = canonical_json(to_document(health_ref))
+    report_ref_json = canonical_json(to_document(report_ref))
     with _transaction(conn):
         conn.execute(
             "INSERT INTO ledger_calibration_state(singleton, n_scored_at_last_report, "
-            "generated_at, health_artifact_id, health_content_hash, report_artifact_id, "
-            "report_content_hash) VALUES (1,?,?,?,?,?,?) "
+            "generated_at, health_ref_json, report_ref_json) VALUES (1,?,?,?,?) "
             "ON CONFLICT(singleton) DO UPDATE SET "
             "n_scored_at_last_report=excluded.n_scored_at_last_report, "
             "generated_at=excluded.generated_at, "
-            "health_artifact_id=excluded.health_artifact_id, "
-            "health_content_hash=excluded.health_content_hash, "
-            "report_artifact_id=excluded.report_artifact_id, "
-            "report_content_hash=excluded.report_content_hash",
-            (n_now, health["generated_at"], health_ref.artifact_id, health_ref.content_hash,
-             report_ref.artifact_id, report_ref.content_hash))
+            "health_ref_json=excluded.health_ref_json, "
+            "report_ref_json=excluded.report_ref_json",
+            (n_now, health["generated_at"], health_ref_json, report_ref_json))
 
     return {
         "regenerated": True, "n_scored": n_now,
-        "health": {"artifact_id": health_ref.artifact_id, "content_hash": health_ref.content_hash},
-        "report": {"artifact_id": report_ref.artifact_id, "content_hash": report_ref.content_hash},
+        "health": health_ref, "report": report_ref,
         "calibration": overall, "per_strategy": per_strategy,
     }
