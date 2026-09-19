@@ -203,6 +203,27 @@ def test_merged_model_inputs_accepts_the_boolean_quote_indicator_when_present():
     assert merged == {"has_implied_quote": 0.0, "mcap_log": 10.0}
 
 
+def test_merged_model_inputs_accepts_a_legitimately_nonfinite_feature():
+    """The RAMP7 `forecast_sizing.or_implied` gap: a present-but-NaN source
+    value (a real ORATS quote gap, not a capture omission) is mirrored as a
+    real NaN, not raised as an unexplained defect -- see
+    `engine.score._size_feature_capture_value` and
+    `tools.capture_tier0_corpus._coerce_feature_value`.
+    """
+    import math
+
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="size",
+        driver_vector={"or_implied": {"__nonfinite__": "nan"}, "mcap_log": 10.0},
+        gate_vector=None,
+    )}
+
+    merged = _merged_model_inputs(candidate)
+
+    assert math.isnan(merged["or_implied"])
+    assert merged["mcap_log"] == 10.0
+
+
 def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
     legacy = request_to_dict(ScoreRequest(
         ticker="ABC", strategy="STR-THRU", as_of=pd.Timestamp("2026-09-16"),

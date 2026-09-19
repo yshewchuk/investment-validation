@@ -15,6 +15,7 @@ from engine.score import (
     ScoreResult,
     Scorer,
     _Predocumented,
+    _size_feature_capture_value,
 )
 from engine.v2.foundation import content_hash
 
@@ -166,6 +167,27 @@ def test_model_boundary_captures_exact_vector_mask_and_identity() -> None:
     assert checkpoint["disposition"]["flags"] == ["MISSING_FEATURES"]
     assert "simulation" not in checkpoint["checkpoints"]
     assert "gate_inputs" not in checkpoint["checkpoints"]
+
+
+def test_size_feature_capture_value_distinguishes_absent_from_nonfinite() -> None:
+    features = pd.DataFrame({"present_finite": [5.0], "present_nan": [float("nan")]})
+
+    assert _size_feature_capture_value(features, "present_finite") == 5.0
+    tagged = _size_feature_capture_value(features, "present_nan")
+    assert tagged == {"__nonfinite__": "nan"}
+    assert _size_feature_capture_value(features, "absent_column") is None
+
+
+def test_capture_features_marks_a_nonfinite_tag_as_missing() -> None:
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_features(
+        {"quoted": 5.0, "unquoted": {"__nonfinite__": "nan"}, "absent": None},
+        {"model_id": "m", "role": "size"},
+        role="size",
+    )
+    features = _checkpoint_value(collector, "features")
+    mask = features["missing_mask"]["size"]
+    assert mask == {"quoted": False, "unquoted": True, "absent": True}
 
 
 def test_source_bundle_is_bounded_and_rejects_scoring_answers() -> None:
