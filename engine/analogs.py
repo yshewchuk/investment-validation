@@ -65,6 +65,20 @@ MIN_ANALOGS = 30
 #: elsewhere in the same run, +30 keys -> +350 MB). 600 MB leaves headroom
 #: under the 5.5 GB bounded-run cap alongside the ~2 GB fixed panel/context
 #: baseline and the matcher's OTHER (small, bounded) caches.
+#:
+#: 2026-09-18, extended: an instrumented strict-capture run measured the
+#: forward pass's analog step alone costing net +1.48 GB of real RSS while
+#: this budget stayed at 600 MB — this budget was blind to the POPULATION
+#: family (`_pools` + `_population_row_caches`), which is keyed only on
+#: (strategy, alpha), never evicted, and which `AnalogMatcher.match`
+#: documents in FULL (`_evidence_rows` over the whole, uncausal population,
+#: not just a matched subset) the first time a phase4-traced candidate
+#: touches a given key. Small key cardinality (bounded by the number of
+#: strategies, not by event count) but each key can be a five- or six-figure
+#: row population — real, resident, and previously invisible to this
+#: number. Both families now share this ONE budget and total (see
+#: `AnalogMatcher._evict_analog_cache_until_under_budget`), so this name
+#: measures actual combined resident cost, not just the causal slice of it.
 CAUSAL_CACHE_BUDGET_BYTES = 600 * 1024 * 1024
 
 #: `_causal_row_caches`/`phase4_recipe_cache` grow lazily, one row at a time,
@@ -525,7 +539,21 @@ class AnalogMatcher:
             self.trades["exit_date"] = pd.to_datetime(self.trades["exit_date"])
         # The (strategy, alpha) pool is re-derived on every match otherwise; over
         # a full calendar that is a six-figure row scan per event. Cached once.
+        #
+        # 2026-09-18: this cache and `_population_row_caches` below are now
+        # priced and evicted alongside the causal family, under the SAME
+        # `CAUSAL_CACHE_BUDGET_BYTES` total — see that constant's docstring.
+        # `_population_pool_order` tracks recency across ONLY this small
+        # (strategy, alpha)-keyed family, separately from `_causal_pools`'
+        # own dict-order recency, because the two key shapes (2-tuple vs.
+        # 3-tuple) are eviction-ordered independently:
+        # `_evict_analog_cache_until_under_budget` empties the (usually much
+        # larger, cheaper-to-rebuild) causal family first, and only reaches
+        # into this one if the total is still over budget once causal is
+        # gone — avoiding repeated, expensive full-population re-documentation
+        # thrash on a key space this small.
         self._pools: dict[tuple[str, float], pd.DataFrame] = {}
+        self._population_pool_order: dict[tuple[str, float], None] = {}
         # Causal pools: the as_of-filtered, causally re-bucketed pool depends
         # only on (strategy, alpha, as_of), and board rows share all three.
         # Without this cache the quantile + re-bucket cost is paid per row —
@@ -627,7 +655,7 @@ class AnalogMatcher:
         #: whole causal population — a conservative upper bound; a widened
         #: match can reach it entirely) times a measured average bytes/row
         #: (`CAUSAL_ROW_CACHE_BYTES_PER_ROW`, `RECIPE_CACHE_BYTES_PER_ROW`,
-        #: module level). `_evict_causal_cache_until_under_budget` pops the
+        #: module level). `_evict_analog_cache_until_under_budget` pops the
         #: least-recently-touched key — `match()` now refreshes a key's
         #: position on every cache HIT, not just on insert — until the
         #: combined estimate is back under `CAUSAL_CACHE_BUDGET_BYTES`
@@ -679,18 +707,28 @@ class AnalogMatcher:
             "implied_ratio": implied_ratio,
         }
 
-    # -- causal-family cache eviction ---------------------------------------
+    # -- analog-family cache eviction ----------------------------------------
 
-    def _evict_causal_cache_until_under_budget(self) -> None:
-        """Pop the least-recently-touched causal-family key until the
-        combined estimated size is back at or under `CAUSAL_CACHE_BUDGET_BYTES`.
+    def _evict_analog_cache_until_under_budget(self) -> None:
+        """Pop the least-recently-touched key — causal family first, then
+        population — until the combined estimated size is back at or under
+        `CAUSAL_CACHE_BUDGET_BYTES`.
 
         `_causal_pools` is iterated in insertion order, which `match()` keeps
         equal to recency order by deleting and re-inserting a key on every
         cache HIT (see the call site) — so `next(iter(...))` is always the
-        least-recently-used key, not just the oldest-inserted one. Eviction
-        never changes an answer: a re-visited key rebuilds byte-identical
-        content (see `MAX_CAUSAL_CACHE`'s comment for the recompute cost).
+        least-recently-used key, not just the oldest-inserted one. The
+        population family's own `_population_pool_order` gets the identical
+        treatment. Eviction never changes an answer: a re-visited key
+        rebuilds byte-identical content (see `MAX_CAUSAL_CACHE`'s comment for
+        the recompute cost).
+
+        Causal keys are emptied FIRST, even though both families share one
+        budget check: there are usually many more of them, each far cheaper
+        to rebuild than a population key's full-population documentation
+        (see `CAUSAL_CACHE_BUDGET_BYTES`'s docstring) — so a workload that
+        fits by evicting a handful of causal entries never pays a population
+        re-documentation cost it did not need to.
         """
         while (self._causal_pools
                and (self._causal_cache_total_bytes > CAUSAL_CACHE_BUDGET_BYTES
@@ -703,6 +741,13 @@ class AnalogMatcher:
             # dates (recalibrate.build_pairs, the calibration sampler).
             self._causal_row_caches.pop(evicted, None)
             self.phase4_recipe_cache.pop(evicted, None)
+            self._causal_cache_total_bytes -= self._causal_cache_bytes.pop(evicted, 0)
+        while (self._population_pool_order
+               and self._causal_cache_total_bytes > CAUSAL_CACHE_BUDGET_BYTES):
+            evicted = next(iter(self._population_pool_order))
+            del self._population_pool_order[evicted]
+            self._pools.pop(evicted, None)
+            self._population_row_caches.pop(evicted, None)
             self._causal_cache_total_bytes -= self._causal_cache_bytes.pop(evicted, 0)
 
     # -- matching ----------------------------------------------------------
@@ -759,6 +804,28 @@ class AnalogMatcher:
                 & np.isclose(self.trades["fill_alpha"].astype(float), float(alpha))
             ]
             self._pools[key] = base
+            # Priced and evicted alongside the causal family — see
+            # `CAUSAL_CACHE_BUDGET_BYTES`'s docstring for why this key was
+            # previously invisible to that budget despite being real,
+            # resident memory. Charged unconditionally at first creation
+            # (not gated on `evidence_hook`), matching the causal branch's
+            # own conservative philosophy below: an untraced caller still
+            # creates and keeps this same `_pools[key]` entry, so the worst
+            # case (a later traced caller fully documents it) is priced in
+            # from the start rather than only once that later call arrives.
+            row_count = len(base)
+            estimate = (
+                int(base.memory_usage(deep=True).sum())
+                + row_count * CAUSAL_ROW_CACHE_BYTES_PER_ROW
+            )
+            self._causal_cache_bytes[key] = estimate
+            self._causal_cache_total_bytes += estimate
+            self._evict_analog_cache_until_under_budget()
+        else:
+            # Refresh recency exactly as `_causal_pools`' own cache-hit
+            # branch does, below.
+            del self._population_pool_order[key]
+        self._population_pool_order[key] = None
         pool = base
         evidence = (
             _AnalogMatchEvidence(
@@ -828,7 +895,7 @@ class AnalogMatcher:
                 )
                 self._causal_cache_bytes[cache_key] = estimate
                 self._causal_cache_total_bytes += estimate
-                self._evict_causal_cache_until_under_budget()
+                self._evict_analog_cache_until_under_budget()
             ratio = buckets.get("implied_ratio")
             if ratio is not None and edges is not None:
                 buckets = dict(buckets)

@@ -477,3 +477,121 @@ class TestCausalPoolCache:
             )
         finally:
             analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
+
+
+class TestPopulationPoolCache:
+    """2026-09-18: an instrumented strict-capture run measured the forward
+    pass's analog step costing net +1.48 GB of real RSS while
+    `CAUSAL_CACHE_BUDGET_BYTES` (600 MB) stayed the ceiling — because
+    `_pools`/`_population_row_caches` (keyed only on (strategy, alpha),
+    documenting the WHOLE population the first time any candidate touches a
+    key) were entirely invisible to that budget's accounting. These tests
+    check that they are now priced into the SAME total and evicted, causal
+    keys first, by the SAME LRU discipline the causal family already had.
+    """
+
+    def _matcher(self, *, alphas=(0.5,), n=4000):
+        frame = pd.concat([
+            trades(n, ret=0.05, mcap=5e9, dte=5, year=2020, alpha=alpha)
+            for alpha in alphas
+        ], ignore_index=True)
+        return AnalogMatcher(bucket_frame(frame))
+
+    def test_population_pool_is_priced_at_first_touch(self):
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+
+        key = ("STR-THRU", 0.5)
+        assert key in matcher._pools
+        assert key in matcher._causal_cache_bytes
+        assert matcher._causal_cache_bytes[key] > 0
+        assert matcher._causal_cache_total_bytes == matcher._causal_cache_bytes[key]
+
+    def test_population_pool_is_priced_once_not_once_per_call(self):
+        """A cache HIT on an already-seeded key must not re-charge its cost
+        — `_evidence_rows`' own row cache already makes the CPU side of a
+        repeat touch cheap; this checks the byte ledger agrees.
+        """
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        first_total = matcher._causal_cache_total_bytes
+
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+
+        assert matcher._causal_cache_total_bytes == first_total
+
+    def test_population_touch_refreshes_recency(self):
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        key = ("STR-THRU", 0.5)
+
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        assert list(matcher._population_pool_order) == [key]
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        # A dict-order re-insertion, not a duplicate or a reordering bug:
+        # exactly one entry, still present, order preserved (nothing else
+        # to reorder against with only one key touched so far).
+        assert list(matcher._population_pool_order) == [key]
+
+    def test_population_entries_evict_only_after_causal_is_exhausted(self):
+        """Causal keys, being numerous and cheap to rebuild, must absorb
+        eviction pressure before a population key's expensive
+        full-population documentation is thrown away.
+        """
+        from engine import analogs as analogs_mod
+
+        matcher = self._matcher()
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)  # seeds _pools
+        population_cost = matcher._causal_cache_bytes[("STR-THRU", 0.5)]
+
+        original_budget = analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+        # Room for the population entry plus a sliver for causal ones —
+        # every later causal key must therefore evict an OLDER causal key,
+        # never the population entry, as long as any causal key remains.
+        analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = population_cost + 1
+        try:
+            for i in range(5):
+                matcher.match("STR-THRU", buckets, alpha=0.5,
+                              as_of=f"{2031 + i}-01-01")
+            assert ("STR-THRU", 0.5) in matcher._pools
+            assert len(matcher._causal_pools) <= 1
+        finally:
+            analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
+
+    def test_population_lru_eviction_once_causal_is_empty(self):
+        """With no causal entries to absorb the pressure, a new population
+        key's arrival evicts the LEAST-recently-touched population key —
+        never an arbitrary or insertion-order-only choice.
+        """
+        from engine import analogs as analogs_mod
+
+        matcher = self._matcher(alphas=(0.5, 0.75, 0.9), n=2000)
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+        matcher.match("STR-THRU", buckets, alpha=0.75, as_of=None)
+        key_a, key_b = ("STR-THRU", 0.5), ("STR-THRU", 0.75)
+        cost_each = matcher._causal_cache_bytes[key_a]
+
+        # Touch key_a again -- key_b is now the least-recently-used.
+        matcher.match("STR-THRU", buckets, alpha=0.5, as_of=None)
+
+        original_budget = analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+        # Room for exactly two entries; a third's arrival must evict one.
+        analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = cost_each * 2 + 1
+        try:
+            matcher.match("STR-THRU", buckets, alpha=0.9, as_of=None)
+            assert key_a in matcher._pools, "refreshed key must survive"
+            assert key_b not in matcher._pools, "least-recently-used key must evict"
+            assert key_b not in matcher._population_row_caches
+            assert ("STR-THRU", 0.9) in matcher._pools
+        finally:
+            analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget

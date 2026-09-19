@@ -492,13 +492,27 @@ class TestPhase4RequiredFoldsCoversEveryPass:
         `chain_as_of` — the only fields `tier4.serving_fold` reads — or a
         pinned/strike/coarse variant could need a fold `phase4_required_
         folds` never planned for.
+
+        `index` (added 2026-09-18 so these two passes can share ONE
+        up-front `ChainIndex` — see `_rescore`'s own docstring) is a real
+        DECLARED parameter of `_rescore`, not part of `**changes`: derived
+        from `inspect.signature` rather than hardcoded, so this stays
+        correct if `_rescore` grows another named parameter later. Only the
+        VAR_KEYWORD catch-all's contents are what `serving_fold` could ever
+        see, and fold-safety is exactly what this test polices.
         """
         import inspect
         import re
 
         from tools import capture_tier0_corpus as capture
 
-        allowed = {"structure_params", "strike"}
+        declared = {
+            name for name, param in
+            inspect.signature(capture._rescore).parameters.items()
+            if param.kind != inspect.Parameter.VAR_KEYWORD
+        }
+        fold_safe_changes = {"structure_params", "strike"}
+        allowed = declared | fold_safe_changes
         for source in (
             inspect.getsource(capture.pinned_and_strike_pass),
             inspect.getsource(capture.coarse_ladder_pass),
@@ -507,10 +521,13 @@ class TestPhase4RequiredFoldsCoversEveryPass:
             assert calls, "expected at least one _rescore(...) call in this pass"
             for call in calls:
                 kwargs = set(re.findall(r"(\w+)\s*=", call))
-                unexpected = kwargs - allowed
+                changes_kwargs = kwargs - declared
+                unexpected = changes_kwargs - fold_safe_changes
                 assert not unexpected, (
-                    f"_rescore call changes {unexpected}, not just {allowed}: {call}"
+                    f"_rescore call changes {unexpected}, not just "
+                    f"{fold_safe_changes}: {call}"
                 )
+                assert kwargs <= allowed  # sanity: every kwarg accounted for
 
     def test_dyn_sv_pass_never_calls_score(self):
         """No new fold can enter through dyn_sv: it must never reach `_score`."""
