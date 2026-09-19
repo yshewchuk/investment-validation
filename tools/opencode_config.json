@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openrouter/deepseek/deepseek-v4.1-flash",
+  "permission": {
+    "bash": {
+      "*": "deny",
+      "python3 tools/oc_check.py": "allow",
+      "python3 tools/oc_check.py *": "allow",
+      "tools/oc_check.py": "allow",
+      "tools/oc_check.py *": "allow"
+    },
+    "task": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "question": "deny",
+    "skill": "deny",
+    "doom_loop": "deny",
+    "external_directory": "deny",
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "data/*": "deny",
+      "fixtures/*": "deny"
+    },
+    "edit": {
+      "*": "allow",
+      ".git/*": "deny",
+      ".github/*": "deny",
+      "*.env": "deny",
+      "data/*": "deny",
+      "fixtures/*": "deny",
+      ".oc_logs/*": "deny",
+      "*/.oc_logs/*": "deny",
+      "tools/oc_check.py": "deny",
+      "tools/opencode_config.json": "deny",
+      "*/tools/oc_check.py": "deny",
+      "*/tools/opencode_config.json": "deny"
+    },
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "lsp": "allow",
+    "todowrite": "allow"
+  }
+}

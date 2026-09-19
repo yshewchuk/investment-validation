@@ -34,6 +34,7 @@
 !/checks/*.md
 !/tests/*.md
 !/tools/*.md
+!/tools/opencode_config.json
 
 # ── ui/ (React/TypeScript client): narrow explicit allowlist ─────────────
 # TypeScript and JSON are not allowed globally above (only py/yaml/toml/
