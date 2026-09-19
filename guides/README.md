@@ -74,6 +74,8 @@ runbooks own tested commands.
   strategies/refusals, shared canonical kernel and financial diagnostics.
 - [Phase 5 — Frozen models](rearchitecture_phase5_models.md): inference without
   fitting, current training recipes, fold/residual artifacts and deployment rollback.
+  [Runbook](rearchitecture_phase5_runbook.md): staged release preparation, the P5-6
+  acceptance gate, promotion and rollback.
 - [Phase 6 — Consumer parity](rearchitecture_phase6_consumer_parity.md): native
   nightly, research, ledger/book, all current views and phone/offline access.
 - [Phase 7 — Cutover](rearchitecture_phase7_cutover.md): ten qualified sessions,
