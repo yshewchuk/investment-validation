@@ -107,6 +107,45 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._release_route(config, path)
         return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
 
+    def do_POST(self):  # noqa: N802
+        config = self.server.config
+        path = unquote(urlsplit(self.path).path)
+        if path == "/actions/refresh":
+            return self._refresh_route(config)
+        return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
+
+    def _refresh_route(self, config):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        if config.submit_refresh is None:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"refresh not configured\n", "text/plain")
+        payload, error = self._read_json_body()
+        if error is not None:
+            return self._send(HTTPStatus.BAD_REQUEST, error, "text/plain")
+        try:
+            status, body = config.submit_refresh(payload)
+        except Exception:
+            return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"refresh action failed\n", "text/plain")
+        data = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        return self._send(HTTPStatus(status), data, "application/json")
+
+    def _read_json_body(self, *, max_bytes=4096):
+        """Returns (payload_dict, None) or (None, error_body_bytes). Bounded."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None, b"invalid content-length\n"
+        if length <= 0 or length > max_bytes:
+            return None, b"request body required and bounded to 4096 bytes\n"
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, b"invalid json body\n"
+        if not isinstance(payload, dict):
+            return None, b"json body must be an object\n"
+        return payload, None
+
     def _current_route(self, config):
         if not self._authorized():
             return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
@@ -183,9 +222,10 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
 
 
 def create_server(address, *, token: str, health_path: Path | str, release_root: Path | str,
-                  frozen_at: str = "unknown"):
+                  frozen_at: str = "unknown", submit_refresh=None):
     config = type("Config", (), {"token": token, "health_path": Path(health_path),
-                                  "release_root": Path(release_root), "frozen_at": frozen_at})
+                                  "release_root": Path(release_root), "frozen_at": frozen_at,
+                                  "submit_refresh": submit_refresh})
     server = http.server.ThreadingHTTPServer(address, OperationsHandler)
     server.config = config
     return server

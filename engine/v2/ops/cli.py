@@ -522,6 +522,47 @@ def _submit_command(args, root, conn, clock):
     return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
 
 
+_PROBLEM_STATUS = {"validation": 400, "dependency": 409, "resource": 503,
+                   "source": 502, "integrity": 404, "internal": 500}
+
+
+def _status_for(category: str) -> int:
+    return _PROBLEM_STATUS.get(category, 500)
+
+
+def refresh_action(root: Path, payload, *, clock=None) -> tuple[int, dict]:
+    """Submit the nightly DAG named by an already-published plan artifact.
+
+    ``payload`` is the parsed JSON body of a POST to the operations server's
+    refresh action: ``{"plan_ref": "<artifact id from `ops plan nightly`>"}``.
+    Never runs the nightly itself — only queues it via the same
+    ``submit_graph`` path ``ops submit`` uses. Duplicate-submit protection is
+    inherited for free: ``build_legacy_job_requests`` derives every job's
+    identity from the plan's own content, so two calls with the SAME
+    ``plan_ref`` produce identical ``SubmitRequest``s and
+    ``submission._insert_or_match`` returns the existing jobs rather than
+    inserting new rows (submission.py's idempotency-by-digest rule).
+    """
+    clock = clock or SystemClock()
+    plan_ref = payload.get("plan_ref") if isinstance(payload, dict) else None
+    if not isinstance(plan_ref, str) or not plan_ref:
+        return 400, {"error": "plan_ref is required and must be a non-empty string"}
+    store = ArtifactStore(root)
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        ref = artifact(conn, store, plan_ref)
+        plan = json.loads(store.read_verified(ref))
+        if plan.get("kind") != "nightly":
+            return 400, {"error": "plan_ref must reference a nightly plan"}
+        policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+        result = _submit_nightly(plan, conn, store, policy, clock)
+        return 202, result
+    except OpsError as exc:
+        return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # snapshot import/promotion/rollback (P2-7/Task7b, §7/§10)
 # --------------------------------------------------------------------------
