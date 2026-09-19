@@ -18,7 +18,9 @@ from engine.v2.scoring.stages import NativeScoreInputs, receipt
 from tools.capture_tier0_corpus import (
     STRICT_TRACE_SUPPORTED_STRATEGIES,
     StrictTraceCaptureError,
+    _SpilledTrace,
     _frozen_runtime,
+    _hydrate_trace,
     _merged_model_inputs,
     _role_feature_vectors,
     attach_strict_probe,
@@ -572,8 +574,10 @@ def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypat
     assert gaps == {}
     for candidate in chosen:
         assert "input_trace" in candidate
-        assert candidate["legacy_input_hash"] == candidate["input_trace"]["shared_input_hash"]
-        assert "serialization" in candidate["input_trace"]["stages"]
+        assert isinstance(candidate["input_trace"], _SpilledTrace)
+        trace = _hydrate_trace(candidate["input_trace"])
+        assert candidate["legacy_input_hash"] == trace["shared_input_hash"]
+        assert "serialization" in trace["stages"]
     score_ids = {candidate["native_score_id"] for candidate in chosen}
     assert len(score_ids) == 2
 
@@ -1643,7 +1647,8 @@ def test_probe_traces_a_row_with_an_explicitly_empty_quote_domain(
     attached, gaps, native = _probe_native(candidate, tmp_path, monkeypatch)
 
     assert "case-stopped" in attached, gaps
-    assert candidate["input_trace"]["native_inputs"]["context"]["quotes"] == {}
+    trace = _hydrate_trace(candidate["input_trace"])
+    assert trace["native_inputs"]["context"]["quotes"] == {}
     assert native is not None and native.reason_codes
 
 

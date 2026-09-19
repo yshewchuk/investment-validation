@@ -48,6 +48,7 @@ from tools.capture_tier0_corpus import (
     CHOOSER_TRACE_SCHEMA,
     StrictTraceCaptureError,
     _chooser_consumed_rows,
+    _hydrate_trace,
     _package_resources,
     attach_strict_probe,
     frozen_chooser_declaration,
@@ -246,7 +247,7 @@ def _choice(tmp_path, monkeypatch):
 def _pair(candidate):
     return make_pair(candidate["fixture_id"], [], candidate["request"], candidate["record"],
                      record_kind="dyn_sv_choice", duration=0.0,
-                     input_trace=candidate.get("input_trace"),
+                     input_trace=_hydrate_trace(candidate.get("input_trace")),
                      legacy_input_hash=candidate.get("legacy_input_hash"))
 
 
@@ -262,7 +263,7 @@ def test_dyn_sv_choice_carries_one_strict_trace_per_ranked_member(tmp_path, monk
     attached, gaps = attach_strict_probe([candidate], "snapshot-1", tmp_path)
     assert attached == ("dyn-0",) and gaps == {}
 
-    trace = candidate["input_trace"]
+    trace = _hydrate_trace(candidate["input_trace"])
     assert trace["schema_version"] == CHOOSER_TRACE_SCHEMA
     assert [m["member_index"] for m in trace["members"]] == [0, 1, 2]
     assert [m["request_hash"] for m in trace["members"]] == [

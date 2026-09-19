@@ -1611,6 +1611,17 @@ def _hydrate_trace(value: Any) -> Any:
     return value
 
 
+def _rss_gb() -> float:
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        pass
+    return 0.0
+
+
 def _cleanup_trace_spill() -> None:
     global _TRACE_SPILL_DIR
     if _TRACE_SPILL_DIR is not None:
@@ -2496,16 +2507,19 @@ def attach_strict_probe(
                 native_score_id = native.score_id
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             gaps[fixture_id] = str(exc)
-            continue
-        # ``candidate["request"]`` stays the LEGACY request: coverage, pinned
-        # links, seeded controls and tier-1 replay all read it. The canonical
-        # V2 request lives only in ``input_trace.request`` (and its
-        # ``shared_inputs``); phase4_real re-derives it from the legacy one.
-        candidate["input_trace"] = trace
-        candidate["legacy_input_hash"] = trace["shared_input_hash"]
-        if native_score_id is not None:
-            candidate["native_score_id"] = native_score_id
-        attached.append(fixture_id)
+        else:
+            # ``candidate["request"]`` stays the LEGACY request: coverage,
+            # pinned links, seeded controls and tier-1 replay all read it. The
+            # canonical V2 request lives only in ``input_trace.request`` (and
+            # its ``shared_inputs``); phase4_real re-derives it from the legacy
+            # one.
+            candidate["legacy_input_hash"] = trace["shared_input_hash"]
+            candidate["input_trace"] = _spill_trace(trace)
+            del trace
+            if native_score_id is not None:
+                candidate["native_score_id"] = native_score_id
+            attached.append(fixture_id)
+        print(f"[corpus] strict trace {fixture_id}: rss {_rss_gb():.2f}G", flush=True)
     if not attached:
         detail = "; ".join(f"{k}: {v}" for k, v in list(gaps.items())[:3])
         detail = detail or "no score_result candidate was selected"
@@ -2573,7 +2587,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
             record_kind=cand["kind"], duration=cand["duration"],
             legacy_trace=checkpoint,
-            input_trace=cand.get("input_trace"),
+            input_trace=_hydrate_trace(cand.get("input_trace")),
             legacy_input_hash=cand.get("legacy_input_hash"),
             strict_trace_gap=strict_gaps.get(str(cand["fixture_id"])),
             relations=cand.get("relations"),

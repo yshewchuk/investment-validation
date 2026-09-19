@@ -23,7 +23,7 @@ from engine.v2.models import ModelBinding
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring import application
 from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
-from tools.capture_tier0_corpus import attach_strict_probe
+from tools.capture_tier0_corpus import _hydrate_trace, attach_strict_probe
 
 CLOCK = "legacy.decision_offset.0"
 DRIVER = {"x": 2.0}
@@ -45,7 +45,7 @@ def _traced(tmp_path, monkeypatch, gate_vector=GATE):
     checkpoint["content_hash"] = content_hash(checkpoint["value"])
     attached, gaps = attach_strict_probe([candidate], "snapshot-1", tmp_path)
     assert attached == ("case-0",) and gaps == {}
-    trace = candidate["input_trace"]
+    trace = _hydrate_trace(candidate["input_trace"])
     pair = {"payload": {
         "request": candidate["request"], "input_trace": trace,
         "input_trace_hash": trace["trace_hash"],
