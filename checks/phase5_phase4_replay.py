@@ -1,0 +1,159 @@
+"""P5-6 Phase 4 replay: a Phase 4 corpus's traced pairs, scored from a staged release.
+
+Each pair's strict trace is verified by Phase 4's own verifier
+(``checks.phase4_real._verified_trace_bundle``, which builds the frozen replay
+plan through ``checks.phase4_frozen_bridge.prepare_frozen_replay``). The plan's
+bindings are then *rebound* to the staged release: every model member is
+looked up by content hash among the release's staged objects (model bindings
+and Tier-4 serving folds) and served from the staged deployment store instead
+of the corpus's own copy. The trace's binding contract (release id, binding
+ids, role, feature order, output names, adapter) is kept as captured: those
+ids enter the stage inputs, and legacy capture names outputs per context
+(``driver_prediction``, ``pred_abs_move``, ``gate_score``...), so only the
+bytes change hands. The rebound plan runs through
+``application.score_frozen`` and the runtime stage receipts are compared with
+the captured ones by ``checks.phase4_real._verify_runtime_execution``.
+
+Dispositions per pair (value-free: ids, codes, counts, field paths):
+
+* ``replayed`` -- every stage receipt and identity matches the capture.
+* ``mismatch`` (``P5_PHASE4_MISMATCH``) -- scored from the staged bytes, a
+  stage receipt or identity differs from the capture.
+* ``member_absent`` (``P5_PHASE4_MEMBER_ABSENT``) -- the trace binds a model
+  whose bytes are not a staged member of this release; nothing is scored.
+* ``unverified`` (``P5_PHASE4_UNVERIFIED``) -- the trace fails Phase 4's own
+  verification, so there is nothing trustworthy to replay.
+* ``error`` (``P5_PHASE4_ERROR``) -- scoring raised.
+* ``untraced`` / ``not_frozen`` -- no strict trace, or a trace with no frozen
+  model binding: the pair never reads the release. Counted, not a finding:
+  trace coverage is the Phase 4 gate's subject, not this one (my judgement
+  call). If no pair replays at all the subject fails ``P5_PHASE4_EMPTY``.
+"""
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Mapping
+
+from checks.phase5_release import deployment_root, object_relpath
+
+PHASE4_UNVERIFIED = "P5_PHASE4_UNVERIFIED"
+PHASE4_MEMBER_ABSENT = "P5_PHASE4_MEMBER_ABSENT"
+PHASE4_MISMATCH = "P5_PHASE4_MISMATCH"
+PHASE4_ERROR = "P5_PHASE4_ERROR"
+PHASE4_EMPTY = "P5_PHASE4_EMPTY"
+
+REPLAY_CODES = (PHASE4_UNVERIFIED, PHASE4_MEMBER_ABSENT, PHASE4_MISMATCH,
+                PHASE4_ERROR, PHASE4_EMPTY)
+DISPOSITIONS = ("replayed", "mismatch", "member_absent", "unverified", "error",
+                "untraced", "not_frozen")
+
+
+def staged_model_objects(model_release, manifest: Mapping[str, Any]) -> dict[str, str]:
+    """``content_hash -> member id`` for every object a frozen binding may read."""
+    staged: dict[str, str] = {}
+    for binding in model_release.bindings:
+        for member in binding.members:
+            staged.setdefault(member.content_hash,
+                              f"model:{binding.role}:{binding.strategy_id}")
+    for row in manifest.get("members", ()):
+        if str(row.get("member_id", "")).startswith("tier4_folds:"):
+            for obj in row.get("objects", ()):
+                staged.setdefault(obj["content_hash"], row["member_id"])
+    return staged
+
+
+def rebind_to_release(plan, release_root: Path, staged: Mapping[str, str]):
+    """``(rebound plan, absent [(binding_id, hash)], used member ids)``.
+
+    Only member paths change: each points at the staged store's
+    content-addressed object, and ``FrozenInference`` is rooted at the staged
+    deployment store, so the corpus's own artifact copies are never read.
+    """
+    from checks.phase4_frozen_bridge import FrozenReplayPlan
+    from engine.v2.models.loader import FrozenInference
+
+    absent, used, bindings = [], set(), []
+    for binding in plan.release.bindings:
+        members = []
+        for member in binding.members:
+            if member.content_hash not in staged:
+                absent.append((binding.binding_id, member.content_hash))
+            else:
+                used.add(staged[member.content_hash])
+            members.append(replace(member, path=object_relpath(member.content_hash)))
+        bindings.append(replace(binding, members=tuple(members)))
+    rebound = FrozenReplayPlan(
+        inference=FrozenInference(deployment_root(release_root)),
+        release=replace(plan.release, bindings=tuple(bindings)),
+        requests=plan.requests,
+        receipt=plan.receipt,
+    )
+    return rebound, absent, sorted(used)
+
+
+def _replay_pair(pair, corpus_root: Path, release_root: Path,
+                 staged: Mapping[str, str]) -> dict:
+    from checks import phase4_real
+    from engine.v2.scoring import application
+
+    payload = pair.get("payload") or {}
+    if not payload.get("input_trace"):
+        return {"disposition": "untraced"}
+    try:
+        verified = phase4_real._verified_trace_bundle(pair, corpus_root)
+    except Exception as exc:  # noqa: BLE001 -- any refusal means "not verifiable"
+        return {"disposition": "unverified", "code": PHASE4_UNVERIFIED,
+                "detail": f"{type(exc).__name__}: {exc}"}
+    plan = verified["frozen_replay"]
+    if plan is None:
+        return {"disposition": "not_frozen"}
+    rebound, absent, used = rebind_to_release(plan, release_root, staged)
+    if absent:
+        return {"disposition": "member_absent", "code": PHASE4_MEMBER_ABSENT,
+                "detail": ",".join(f"{b}:{h}" for b, h in absent), "members": used}
+    try:
+        native = application.score_frozen(
+            verified["request"], rebound.inference, rebound.release, rebound.requests,
+            {"_native_inputs": verified["inputs"]})
+    except Exception as exc:  # noqa: BLE001
+        return {"disposition": "error", "code": PHASE4_ERROR,
+                "detail": type(exc).__name__, "members": used}
+    try:
+        receipts, _identities = phase4_real._verify_runtime_execution(verified, native)
+    except phase4_real._TraceError as exc:
+        return {"disposition": "mismatch", "code": PHASE4_MISMATCH, "detail": str(exc),
+                "members": used}
+    return {"disposition": "replayed", "members": used,
+            "stages": len(verified["captured_receipts"]),
+            "runtime_stages": len(receipts)}
+
+
+def replay_corpus(corpus: Path, release_root: Path, model_release,
+                  manifest: Mapping[str, Any]) -> tuple[dict, list[tuple[str, str, str]]]:
+    """Replay every pair; return ``(summary, findings as (code, subject, detail))``."""
+    from checks.tier0_corpus import load, resolve_corpus
+
+    loaded = load(resolve_corpus(Path(corpus)))
+    staged = staged_model_objects(model_release, manifest)
+    rows, findings = [], []
+    counts = {name: 0 for name in DISPOSITIONS}
+    for fixture_id in loaded.ordered_ids:
+        row = _replay_pair(loaded.pairs[fixture_id], loaded.root, release_root, staged)
+        counts[row["disposition"]] += 1
+        rows.append({"fixture_id": fixture_id, **row})
+        if "code" in row:
+            findings.append((row["code"], f"phase4:{fixture_id}", row["detail"]))
+    if not counts["replayed"] and not findings:
+        findings.append((PHASE4_EMPTY, "phase4",
+                         f"0/{len(rows)} pairs replayed against the staged release"))
+    used = sorted({m for row in rows for m in row.get("members", ())})
+    summary = {"status": "FAIL" if findings else "PASS", "pairs": len(rows),
+               "dispositions": counts, "members_exercised": used,
+               "corpus_hash": loaded.index.get("corpus_hash"), "rows": rows}
+    return summary, findings
+
+
+__all__ = ["DISPOSITIONS", "PHASE4_EMPTY", "PHASE4_ERROR", "PHASE4_MEMBER_ABSENT",
+           "PHASE4_MISMATCH", "PHASE4_UNVERIFIED", "REPLAY_CODES", "rebind_to_release",
+           "replay_corpus", "staged_model_objects"]

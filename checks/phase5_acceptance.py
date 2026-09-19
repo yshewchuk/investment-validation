@@ -21,11 +21,13 @@ Given a release root written by ``tools/phase5_prepare_release.py`` (layout:
 4. **Rollback.** On a scratch copy of the deployment pointer state, promote
    the candidate, roll back, and check the pointer resolves to the incumbent
    again with byte-identical manifest bytes and untouched history.
-5. **Phase 4.** With ``--phase4-corpus``, count the corpus pairs carrying an
-   input trace. Integrated frozen-release replay of those traces is not
-   implemented yet, so a supplied corpus is always a PENDING finding. Without
-   one the subject is ``NOT_RUN`` and the best status is ``RELEASE_PASS``,
-   never ``PASS``.
+5. **Phase 4.** With ``--phase4-corpus``, every traced pair is verified by
+   Phase 4's own trace verifier, its frozen model bindings are rebound by
+   content hash to the staged release's objects, and it is scored with
+   ``application.score_frozen`` under both no-fit guards; the runtime stage
+   receipts must equal the captured ones
+   (:mod:`checks.phase5_phase4_replay`). Without a corpus the subject is
+   ``NOT_RUN`` and the best status is ``RELEASE_PASS``, never ``PASS``.
 6. **Report.** A value-free private report (ids, statuses, codes and counts
    only) through ``engine.report.Report``, refused inside the repo.
 
@@ -45,11 +47,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from checks.phase5_consumers import CONSUMERS, ReleaseContext  # noqa: E402
+from checks.phase5_phase4_replay import REPLAY_CODES, replay_corpus  # noqa: E402
 from checks.phase5_release import (  # noqa: E402
     EXPECTED_MODEL_BINDINGS,
     MISSING,
@@ -78,6 +82,8 @@ MEMBER_UNKNOWN = "P5_MEMBER_UNKNOWN"
 MEMBER_OBJECT_ABSENT = "P5_MEMBER_OBJECT_ABSENT"
 MEMBER_HASH_MISMATCH = "P5_MEMBER_HASH_MISMATCH"
 MEMBER_UNLOADABLE = "P5_MEMBER_UNLOADABLE"
+MEMBER_IDENTITY = "P5_MEMBER_IDENTITY"
+LINEAGE_INVALID = "P5_LINEAGE_INVALID"
 CONSUMER_UNRESOLVED = "P5_CONSUMER_UNRESOLVED"
 CONSUMER_NO_REFUSAL = "P5_CONSUMER_NO_REFUSAL"
 CONSUMER_ERROR = "P5_CONSUMER_ERROR"
@@ -90,16 +96,16 @@ ROLLBACK_NO_INCUMBENT = "P5_ROLLBACK_NO_INCUMBENT"
 ROLLBACK_CANDIDATE_LIVE = "P5_ROLLBACK_CANDIDATE_ALREADY_DEPLOYED"
 ROLLBACK_NOT_EXACT = "P5_ROLLBACK_NOT_EXACT"
 PROMOTE_REFUSED = "P5_PROMOTE_REFUSED"
-PHASE4_PENDING = "P5_PHASE4_PENDING"
 REPORT_INCOMPLETE = "P5_REPORT_INCOMPLETE"
 
 FINDING_CODES = (
     RELEASE_LAYOUT, MODEL_RELEASE_INVALID, MEMBER_MISSING, MEMBER_PENDING,
     MEMBER_UNKNOWN, MEMBER_OBJECT_ABSENT, MEMBER_HASH_MISMATCH, MEMBER_UNLOADABLE,
+    MEMBER_IDENTITY, LINEAGE_INVALID,
     CONSUMER_UNRESOLVED, CONSUMER_NO_REFUSAL, CONSUMER_ERROR, CONSUMER_PENDING,
     CONSUMER_BLOCKED, RUNTIME_FIT, MODEL_CACHE_WRITE, GUARD_CONTROL_FAILED,
     ROLLBACK_NO_INCUMBENT, ROLLBACK_CANDIDATE_LIVE, ROLLBACK_NOT_EXACT,
-    PROMOTE_REFUSED, PHASE4_PENDING, REPORT_INCOMPLETE,
+    PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
 )
 
 
@@ -116,14 +122,6 @@ class _Findings:
     def add(self, code: str, subject: str, detail: str) -> None:
         self.rows.append({"code": code, "subject": subject, "detail": detail})
 
-
-@dataclasses.dataclass
-class ReleaseContext:
-    """What the consumer probes read: the resolved release, never data/."""
-
-    release_root: Path
-    model_release: ModelRelease
-    states: dict[str, dict]
 
 
 # --------------------------------------------------------------------------
@@ -195,6 +193,14 @@ def _typed_load(spec: StateSpec, release_root: Path, obj: Mapping[str, Any]):
 
         return PayoffArtifactLoader(root).load(
             PayoffArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
+    if spec.member_id.startswith("recalibration_map:"):
+        from engine.v2.models.recalibration_artifact import (
+            RecalibrationArtifactLoader,
+            RecalibrationArtifactRef,
+        )
+
+        return RecalibrationArtifactLoader(root).load(
+            RecalibrationArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
     if "engine.v2.models.frozen_state" in spec.modules:
         from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
@@ -242,149 +248,79 @@ def _verify_state_objects(spec, release_root, row, findings, loaded) -> str:
         if not modules_available(spec.modules)[0]:
             continue  # a staged row built elsewhere; bytes are still verified
         try:
-            artifacts.append(_typed_load(spec, release_root, obj))
+            artifact = _typed_load(spec, release_root, obj)
         except (ValueError, KeyError, TypeError) as exc:
             findings.add(MEMBER_UNLOADABLE, spec.member_id, type(exc).__name__)
             verdict = MEMBER_UNLOADABLE
+            continue
+        issue = _identity_issue(spec, artifact)
+        if issue:
+            findings.add(MEMBER_IDENTITY, spec.member_id, f"{obj['name']}: {issue}")
+            verdict = MEMBER_IDENTITY
+            continue
+        artifacts.append(artifact)
     if verdict == "ok":
         loaded[spec.member_id] = {"row": row, "artifacts": artifacts}
     return verdict
 
 
+def _identity_issue(spec: StateSpec, artifact) -> str | None:
+    """A loaded state must be the kind, role and strategy its catalog row names."""
+    if artifact is None:
+        return None
+    if "engine.v2.models.frozen_state" in spec.modules:
+        from engine.v2.models.frozen_release import member_kind
+
+        if member_kind(artifact) != spec.kind:
+            return f"kind {member_kind(artifact)} != {spec.kind}"
+        role = spec.member_id.partition(":")[2]
+        if spec.member_id.startswith("driver_residual_pool:") and artifact.role != role:
+            return f"role {artifact.role} != {role}"
+        return None
+    strategy = getattr(artifact, "strategy", None)
+    if strategy is not None and (strategy,) != spec.strategies:
+        return f"strategy {strategy} not {spec.strategies}"
+    kind = spec.member_id.split(":")[0]
+    if kind.startswith("payoff_") and _payoff_kind(artifact) != kind:
+        return f"{_payoff_kind(artifact)} staged as {spec.member_id}"
+    return None
+
+
+def _payoff_kind(artifact) -> str:
+    from engine.v2.models.payoff_artifact import PayoffLineArtifact
+
+    return "payoff_line" if isinstance(artifact, PayoffLineArtifact) else "payoff_surface"
+
+
+def _lineage_subject(loaded: Mapping[str, dict], findings: _Findings) -> dict:
+    """Every staged frozen state declares a well-formed lineage graph.
+
+    Node ids are ``<member_id>/<object name>``; a state's ``upstream`` must
+    name another staged state by that id. ``propagate_corrections`` with no
+    changesets runs exactly the graph check a correction would: undeclared
+    lineage, an unknown upstream and a cycle raise ``LineageError``.
+    """
+    nodes = []
+    for member_id, state in sorted(loaded.items()):
+        objects = sorted(state["row"]["objects"], key=lambda row: row["name"])
+        for obj, artifact in zip(objects, state["artifacts"]):
+            if artifact is not None and hasattr(artifact, "lineage"):
+                nodes.append((f"{member_id}/{obj['name']}", artifact))
+    if not nodes:
+        return {"status": "NOT_APPLICABLE", "states": 0}
+    from engine.v2.models.lineage import LineageError, propagate_corrections, state_node
+
+    try:
+        report = propagate_corrections([state_node(i, a) for i, a in nodes], ())
+    except LineageError as exc:
+        findings.add(LINEAGE_INVALID, "lineage", str(exc))
+        return {"status": LINEAGE_INVALID, "states": len(nodes), "code": exc.code}
+    return {"status": "ok", "states": len(nodes), "valid": len(report.valid)}
+
+
 # --------------------------------------------------------------------------
 # 2. consumers
 # --------------------------------------------------------------------------
-
-ProbeResult = tuple[bool, bool, str]  # (resolved, refused_when_missing, detail)
-
-
-def _probe_frozen_executor(ctx: ReleaseContext) -> list[dict]:
-    """``FrozenStageExecutor`` over every staged model binding."""
-    from engine.v2.models.loader import FrozenInference
-    from engine.v2.scoring.frozen_executor import FrozenStageExecutor, FrozenStageRefusal
-
-    rows = []
-    root = deployment_root(ctx.release_root)
-    for binding in ctx.model_release.bindings:
-        features = {name: 0.0 for name in binding.feature_order}
-        resolved, detail = False, ""
-        try:
-            result = FrozenStageExecutor(inference=FrozenInference(root),
-                                         release=ctx.model_release,
-                                         binding_id=binding.binding_id).execute(features)
-            staged = tuple(member.content_hash for member in binding.members)
-            resolved = tuple(result.artifact_hashes) == staged
-            detail = "" if resolved else "artifact hashes differ from the staged binding"
-        except FrozenStageRefusal as exc:
-            detail = exc.code + ":" + ",".join(exc.reason_codes)
-        broken = dataclasses.replace(binding, members=tuple(
-            dataclasses.replace(member, path=f"objects/absent-{member.name}")
-            for member in binding.members))
-        stripped = dataclasses.replace(ctx.model_release, bindings=tuple(
-            broken if item.binding_id == binding.binding_id else item
-            for item in ctx.model_release.bindings))
-        refused = False
-        try:
-            FrozenStageExecutor(inference=FrozenInference(root), release=stripped,
-                                binding_id=binding.binding_id).execute(features)
-        except FrozenStageRefusal as exc:
-            refused = exc.code == "MODEL_NOT_READY"
-        rows.append({"consumer": "frozen_stage_executor",
-                     "member_id": f"model:{binding.role}:{binding.strategy_id}",
-                     "resolved": resolved, "refused_when_missing": refused, "detail": detail})
-    return rows
-
-
-def _probe_request(strategy: str, alpha: float):
-    from engine.v2.contracts import ScoreRequest
-
-    return ScoreRequest(
-        event_id="p5-6-probe", calendar_revision="probe", strategy_version=strategy,
-        deployment_id="p5-6-probe", decision_clock_id="entry-close",
-        requested_decision_at="2026-09-16", snapshot_id="probe", mode="replay",
-        fill_model={"alpha": alpha},
-    )
-
-
-def _probe_bundle(strategy: str, artifact, cutoff):
-    """A source-only probe bundle. The context is fixed and synthetic: this
-    probe proves resolution and refusal, it is not a parity comparison."""
-    from engine.v2.scoring.source_inputs import SourceBundle
-
-    zero_pool = ({"prediction": 1.0, "residual": 0.0},)
-    runup = strategy == "STR-RUNUP"
-    context = {"ticker": "P5PROBE", "event_date": "2026-09-16", "entry_date": "2026-09-16",
-               "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0}
-    recipes = {"driver_prediction": {"intercept": 1.0, "coefficients": {}}}
-    refs = {"driver_prediction": "sha256:probe-driver"}
-    extra = {}
-    if runup:
-        context.update({"strike": 100.0, "days_before_print": 7.0})
-        recipes["runup_move_prediction"] = {"intercept": 0.0, "coefficients": {}}
-        refs["runup_move_prediction"] = "sha256:probe-move"
-        extra = {"runup_move_residual_rows": zero_pool}
-    recipe = {"seed": 1, "draw_count": 16}
-    if cutoff is not None:
-        recipe["before"] = cutoff
-    return SourceBundle(
-        source_ref="p5-6-probe", context=context,
-        raw_quotes={("C", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 3.0},
-                    ("P", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 3.0}},
-        feature_vector={}, feature_missing_mask={},
-        model_identity={"driver": {"model_id": "probe"}},
-        forecast_recipes=recipes, model_artifact_refs=refs,
-        residual_recipe={"terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),
-                         "capital_at_risk": 1.0},
-        analog_recipe={},
-        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
-        strategy=strategy, payoff_artifact_recipe=recipe, payoff_artifact=artifact,
-        model_residual_rows=zero_pool, **extra,
-    )
-
-
-def _score_flags(strategy: str, artifact, alpha: float, cutoff) -> tuple[str, ...]:
-    from engine.v2.scoring import application
-    from engine.v2.scoring.source_inputs import build_native_score_inputs
-
-    inputs = build_native_score_inputs(_probe_bundle(strategy, artifact, cutoff))
-    record = application.score_one(_probe_request(strategy, alpha), inputs)
-    return tuple(record.reason_codes)
-
-
-def _payoff_probe(member_id: str, strategy: str, consumer: str):
-    def probe(ctx: ReleaseContext) -> list[dict]:
-        state = ctx.states.get(member_id)
-        if state is None:
-            return [{"consumer": consumer, "member_id": member_id, "blocked": True}]
-        rows = []
-        for artifact in state["artifacts"]:
-            flags = _score_flags(strategy, artifact, artifact.alpha, artifact.cutoff)
-            resolved = not ({"MODEL_NOT_READY", "NO_PAYOFF_MAP"} & set(flags))
-            missing = _score_flags(strategy, None, artifact.alpha, artifact.cutoff)
-            rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
-                         "refused_when_missing": "MODEL_NOT_READY" in missing,
-                         "detail": "" if resolved else ",".join(flags)})
-        return rows
-    return probe
-
-
-#: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
-CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
-    "frozen_stage_executor": _probe_frozen_executor,
-    "model_stage.payoff_line": _payoff_probe(
-        "payoff_line:STR-THRU", "STR-THRU", "model_stage.payoff_line"),
-    "model_stage.payoff_surface": _payoff_probe(
-        "payoff_surface:STR-RUNUP", "STR-RUNUP", "model_stage.payoff_surface"),
-    "model_stage.driver_residual_pool": None,
-    "simulation.paired_residual_pool": None,
-    "model_stage.recalibration": None,
-    "chooser.admissible_table": None,
-    "gate.trailing_cutoff": None,
-    "chooser.analog_pool": None,
-    "analogs.board_analog_matcher": None,
-    "features.tier4_serving_folds": None,
-}
-
 
 def _consumer_members(consumer: str) -> list[str]:
     if consumer == "frozen_stage_executor":
@@ -619,19 +555,28 @@ def _round_trip(root: Path, candidate: str, first_deployment: bool, findings) ->
 # --------------------------------------------------------------------------
 
 
-def _phase4_subject(corpus: Path | None, findings: _Findings) -> dict:
+def _phase4_subject(corpus: Path | None, release_root: Path, model_release,
+                    manifest: Mapping[str, Any], watch_dirs: list[Path],
+                    findings: _Findings) -> dict:
+    """Replay the corpus's traced pairs from the staged release, no fitting."""
     if corpus is None:
         return {"status": "NOT_RUN"}
-    from checks.tier0_corpus import load, resolve_corpus
-
-    loaded = load(resolve_corpus(corpus))
-    pairs = list(loaded.pairs.values())
-    traced = sum(1 for pair in pairs if (pair.get("payload") or {}).get("input_trace"))
-    findings.add(PHASE4_PENDING, "phase4",
-                 f"{traced}/{len(pairs)} pairs carry input_trace; integrated frozen-release "
-                 "replay is not implemented yet")
-    return {"status": "PENDING", "pairs": len(pairs), "traced": traced,
-            "corpus_hash": loaded.index.get("corpus_hash")}
+    if model_release is None:  # already a P5_MODEL_RELEASE_INVALID finding
+        return {"status": "BLOCKED"}
+    with guarded_scoring(watch_dirs) as watch:
+        summary, rows = replay_corpus(corpus, release_root, model_release, manifest)
+    for code, subject, detail in rows:
+        findings.add(code, subject, detail)
+    for path in sorted(set(watch.fit_paths)):
+        findings.add(RUNTIME_FIT, "phase4_replay", path)
+    if watch.dump_calls:
+        findings.add(MODEL_CACHE_WRITE, "phase4_replay", f"joblib.dump x{watch.dump_calls}")
+    for path in watch.changed_files:
+        findings.add(MODEL_CACHE_WRITE, "phase4_replay", path)
+    if watch.fit_paths or watch.dump_calls or watch.changed_files:
+        summary["status"] = "FAIL"
+    summary["fit_attempts"] = len(watch.fit_paths)
+    return summary
 
 
 # --------------------------------------------------------------------------
@@ -647,7 +592,12 @@ def _report_rows(evidence: dict) -> dict[str, list[list[str]]]:
                       for r in evidence["consumers"]],
         "controls": [[name, "pass" if ok else "FAIL"] for name, ok in sorted(
             {**evidence["scoring_pass"].get("controls", {}),
-             **evidence["rollback"].get("checks", {})}.items())],
+             **evidence["rollback"].get("checks", {}),
+             "lineage_graph_valid": evidence["lineage"].get("status")
+             in ("ok", "NOT_APPLICABLE")}.items())],
+        "phase4": [[name, str(count)] for name, count in
+                   (evidence["phase4"].get("dispositions") or {}).items()]
+        + [["status", str(evidence["phase4"].get("status"))]],
         "findings": [[f["code"], f["subject"], f["detail"]] for f in evidence["findings"]],
     }
 
@@ -690,6 +640,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
                      rows["members"]),
             _section("Score consumers", ["consumer", "members", "status"], rows["consumers"]),
             _section("No-fit and rollback controls", ["control", "result"], rows["controls"]),
+            _section("Phase 4 replay", ["disposition", "pairs"], rows["phase4"]),
             _section("Findings", ["code", "subject", "detail"], rows["findings"]),
         ],
     }
@@ -698,7 +649,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
 
 def _report_is_complete(text: str, evidence: dict) -> bool:
     headers = ("## 0. Verdict", "## 8. Provenance", "Release members", "Score consumers",
-               "No-fit and rollback controls", "Findings")
+               "No-fit and rollback controls", "Phase 4 replay", "Findings")
     if not all(header in text for header in headers):
         return False
     return all("| " + " | ".join(row) + " |" in text
@@ -731,6 +682,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
     evidence: dict[str, Any] = {"schema_version": PHASE5_EVIDENCE_SCHEMA,
                                 "release_root": str(release_root), "members": [],
                                 "consumers": [], "scoring_pass": {}, "rollback": {},
+                                "lineage": {"status": "NOT_RUN"},
                                 "phase4": {"status": "NOT_RUN"}}
     try:
         manifest = read_manifest(release_root)
@@ -743,15 +695,17 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
     evidence["members"] = _model_member_rows(release_root, model_release, findings)
     state_rows, loaded = _state_member_rows(release_root, manifest, findings, state_specs)
     evidence["members"] += state_rows
+    evidence["lineage"] = _lineage_subject(loaded, findings)
+    dirs = list(watch_dirs) if watch_dirs is not None else _default_watch_dirs(release_root)
     if model_release is not None:
         ctx = ReleaseContext(release_root=release_root, model_release=model_release,
                              states=loaded)
-        dirs = list(watch_dirs) if watch_dirs is not None else _default_watch_dirs(release_root)
         evidence["consumers"], evidence["scoring_pass"] = _scoring_pass(
             ctx, CONSUMERS if consumers is None else consumers, dirs, findings)
         evidence["rollback"] = _rollback_round_trip(
             release_root, release_id, first_deployment, findings)
-    evidence["phase4"] = _phase4_subject(phase4_corpus, findings)
+    evidence["phase4"] = _phase4_subject(phase4_corpus, release_root, model_release,
+                                         manifest, dirs, findings)
     return _finish(evidence, findings, report_dir, started)
 
 

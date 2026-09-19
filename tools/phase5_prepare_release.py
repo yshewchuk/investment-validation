@@ -3,8 +3,11 @@
 
 Reads (never writes) the champion registry and ``data/models/*.joblib``, the
 Tier-4 serving folds under ``data/models/tier4``, P5-3 training-job outputs
-(``payoff_artifact.json`` per calibration fold) and any pre-built P5-4 frozen
-states. Writes one release root (layout: ``checks/phase5_release.py``) under
+(``payoff_artifact.json`` and ``recalibration_artifact.json`` per calibration
+fold, under ``--training-root``) and the frozen states the training job's
+``--state`` writes (driver and paired residual pools, via ``--frozen-state``).
+The admissible-depth table is built here from ``legacy_n_admissible_table()``.
+Which calibration folds to train: ``tools/phase5_calibration_keys.py``. Writes one release root (layout: ``checks/phase5_release.py``) under
 ``--out``, which may not be inside ``data/``:
 
 * the seven champion bindings are staged through
@@ -152,13 +155,51 @@ def payoff_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes
     return found
 
 
+def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes]]:
+    """``recalibration_artifact.json`` files from P5-3 job outputs, verified."""
+    from engine.v2.models.recalibration_artifact import (
+        RecalibrationArtifactLoader,
+        RecalibrationArtifactRef,
+    )
+    from engine.v2.models.training.calibration import RECALIBRATION_ARTIFACT_FILE
+
+    found: dict[str, dict[str, bytes]] = {}
+    for base in training_roots:
+        for path in sorted(Path(base).rglob(RECALIBRATION_ARTIFACT_FILE)):
+            data = path.read_bytes()
+            artifact = RecalibrationArtifactLoader(path.parent).load(
+                RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
+            found.setdefault(f"recalibration_map:{artifact.strategy}", {})[name] = data
+    return found
+
+
+#: ``tools/phase5_training_job.py --state`` writes a ``<member>.summary.json``
+#: (counts, hash, status) beside each state file; it is not a state.
+SUMMARY_SUFFIX = ".summary.json"
+
+
+def frozen_state_files(paths: Iterable[Path]) -> list[Path]:
+    """Expand ``--frozen-state`` arguments: a file as given, a directory to its
+    ``*.json`` state files. ``*.summary.json`` is skipped either way."""
+    files: list[Path] = []
+    for path in map(Path, paths):
+        candidates = sorted(path.glob("*.json")) if path.is_dir() else [path]
+        files += [item for item in candidates if not item.name.endswith(SUMMARY_SUFFIX)]
+    return files
+
+
 def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
-    """Pre-built P5-4 frozen states (residual pools, tables), by member."""
+    """Pre-built P5-4 frozen states (residual pools, tables), by member.
+
+    The training job's ``--state`` outputs
+    (``driver_residual_pool__<role>.json``, ``paired_residual_pool.json``) are
+    classified by their own schema and role, not by file name.
+    """
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
     found: dict[str, dict[str, bytes]] = {}
-    for path in files:
-        path = Path(path)
+    for path in frozen_state_files(files):
         data = path.read_bytes()
         state = FrozenStateLoader(path.parent).load(
             FrozenStateRef(path=path.name, content_hash=sha256_bytes(data)))
@@ -271,6 +312,12 @@ def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
     }
 
 
+def _merge(found: dict[str, dict[str, bytes]], more: Mapping[str, Mapping[str, bytes]]) -> None:
+    """Add objects per member; a later source adds to, never drops, a member."""
+    for member_id, objects in more.items():
+        found.setdefault(member_id, {}).update(objects)
+
+
 def _refuse_data_dir(out: Path) -> None:
     from engine import paths
 
@@ -297,13 +344,15 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
         snapshot = store.file_sha256(paths.PANEL)
     feature_ids = {b.role: b.artifact_id for b in inventory.bindings if b.strategy_id == "*"}
     found: dict[str, dict[str, bytes]] = {}
-    found.update(tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
+    _merge(found, tier4_fold_payloads(Path(args.tier4_dir or tier4.SERVING_DIR),
                                      feature_ids, snapshot, args.fold_month))
     if modules_available(("engine.v2.models.payoff_artifact",))[0]:
-        found.update(payoff_payloads(args.training_root or ()))
+        _merge(found, payoff_payloads(args.training_root or ()))
+    if modules_available(("engine.v2.models.recalibration_artifact",))[0]:
+        _merge(found, recalibration_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.frozen_state",))[0]:
-        found.update(default_admissible_table())
-        found.update(frozen_state_payloads(args.frozen_state or ()))
+        _merge(found, default_admissible_table())
+        _merge(found, frozen_state_payloads(args.frozen_state or ()))
     pool = paths.FEATURES / "chooser_analog_pool.parquet"
     if pool.is_file():
         found["chooser_analog_pool"] = {pool.name: pool.read_bytes()}
@@ -315,9 +364,11 @@ def main(argv=None) -> int:
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--training-root", type=Path, action="append",
-                        help="P5-3 training-job output dir holding payoff_artifact.json files")
+                        help="P5-3 training-job output dir; every payoff_artifact.json "
+                             "and recalibration_artifact.json under it is collected")
     parser.add_argument("--frozen-state", type=Path, action="append",
-                        help="a pre-built P5-4 frozen state JSON (residual pool, table)")
+                        help="a frozen state JSON, or a dir of them (training job --state "
+                             "output; *.summary.json is ignored)")
     parser.add_argument("--tier4-dir", type=Path)
     parser.add_argument("--tier3-snapshot", default="auto",
                         help="Tier-3 snapshot hash selecting servable folds; 'auto' hashes "
