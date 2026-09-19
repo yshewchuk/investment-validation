@@ -143,7 +143,7 @@ def test_artifact_path_equals_rows_path_and_legacy_expected_pnl_bit_for_bit():
         exit_legs=[{"strike": leg.strike, "qty": leg.quantity,
                     "side": "sell" if leg.side == "buy" else "buy"} for leg in priced.legs],
         spot=100.0, entry_cost=priced.entry_cost, pre_iv30=40.0, pred_abs_move=7.0,
-        pred_iv_crush=-20.0, dte_exit=9.0, event_date="2026-09-16",
+        pred_iv_crush=-20.0, dte_exit=9.0, event_date=pd.Timestamp("2026-09-16").normalize(),
         pool=pnl_sim.ResidualPool(history), key="STR-THRU",
     )
     assert _sim(frozen) == tuple(legacy[field] for field in _SIM_FIELDS)

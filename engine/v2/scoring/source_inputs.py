@@ -6,11 +6,17 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
+from engine.v2.models.contracts import ModelBinding, ModelRelease
+from engine.v2.models.loader import FrozenInference
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
 from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact
 from engine.v2.models.residual_artifact import (
     DriverResidualPoolArtifact,
     PairedResidualPoolArtifact,
+)
+from engine.v2.scoring.frozen_executor import (
+    FrozenRecipeExecutor,
+    FrozenStageExecutor,
 )
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
@@ -47,9 +53,46 @@ _FORECAST_OUTPUTS = frozenset({
     "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
 })
 _LINEAR_RECIPE_FIELDS = frozenset({"intercept", "coefficients"})
+# A forecast/gate recipe that names a frozen release binding instead of
+# carrying inline coefficients (R4-16). ``output`` names the binding's own
+# output when it has several; the stage runs it through FrozenInference (the
+# binding's registered adapter over hash-verified members), never a refit.
+_FROZEN_RECIPE_FIELDS = frozenset({"binding_id", "output"})
+# Which release roles may own each native output. A recipe wired to a
+# binding of another role is a malformed bundle and is refused at build time.
+# The feature roles and the gate are the legacy champions actually served
+# (engine/models/registry.json, engine.v2.models.inventory): size =
+# BlendModel(OLS, scaled MLP); implied_t1, iv_crush and gate =
+# HistGradientBoostingRegressor; runup_move = LogTargetRegressor(HGBR).
+_FROZEN_OUTPUT_ROLES = {
+    "driver_prediction": frozenset({"driver", "size", "implied_t1"}),
+    "forecast_abs_move": frozenset({"size"}),
+    "runup_move_prediction": frozenset({"runup_move"}),
+    "pred_iv_crush": frozenset({"iv_crush"}),
+    "pred_iv_crush_30": frozenset({"iv_crush"}),
+    "model_fair_pct": frozenset({"fair_value"}),
+    "gate_score": frozenset({"gate"}),
+}
 _RESIDUAL_RECIPE_FIELDS = frozenset({
     "mode", "terminal_spots", "weights", "capital_at_risk", "pnl_cutoff",
     "population_ref", "recipe_id", "draw_count", "seed",
+})
+# The legacy planned-exit simulation (engine/pnl_sim.expected_pnl as called by
+# engine/score.py Scorer._expectation), declared through residual_recipe with
+# mode="planned_exit" (R4-10). Every field is a raw fact or a recipe
+# constant: pre_iv30 is the pre-print vol level, dte_exit the days left at the
+# planned exit, event_date the causal cutoff of the paired pool, draws the
+# simulation size (pnl_sim.DRAWS by default). Each is optional: omitted, the
+# stage reads pre_iv30/event_date from the context and derives dte_exit from
+# expiry - exit_date, as the legacy caller does.
+_PLANNED_EXIT_RECIPE_FIELDS = frozenset({
+    "mode", "pre_iv30", "dte_exit", "event_date", "draws", "pnl_cutoff",
+    "population_ref", "recipe_id",
+})
+# One compatibility-path paired-pool row: a PRIOR event's size forecast and
+# its paired (move, crush) errors (legacy ResidualPool's columns).
+_PAIRED_ROW_FIELDS = frozenset({
+    "event_date", "ticker", "pred_abs_move", "err_move", "err_crush",
 })
 _ANALOG_RECIPE_FIELDS = frozenset({
     "recipe_id", "population_ref", "distance_metric", "neighbors",
@@ -65,7 +108,7 @@ _BUCKET_ANALOG_RECIPE_FIELDS = frozenset({
 })
 _GATE_RECIPE_FIELDS = frozenset({
     "model", "threshold", "recipe_id", "artifact_ref", "artifact_hashes",
-})
+}) | _FROZEN_RECIPE_FIELDS
 # Payoff-calibration/model-layer recipe fields. ``before`` is the decision's
 # evidence cutoff (a raw fact, matched against each row's own exit_date by
 # the native stage -- see stages.py's ``_execute_model``/``native_payoff.
@@ -200,6 +243,18 @@ class SourceBundle:
     # causal-key check -- never from request rows or a context-scoped rebuild.
     paired_residual_recipe: Mapping[str, Any] = field(default_factory=dict)
     paired_residual_artifact: "PairedResidualPoolArtifact | None" = None
+    # The planned-exit simulation's COMPATIBILITY path (R4-10): the paired
+    # pool as source rows (event_date, pred_abs_move, err_move, err_crush,
+    # optional ticker) -- prior events' residuals, e.g. a Phase 4 capture's
+    # recorded residual_population, in that recorded order. Mutually
+    # exclusive with the frozen paired artifact above.
+    paired_residual_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # Frozen inference for recipes that name a release binding (R4-16): the
+    # verified loader and the release holding the bindings. A binding recipe
+    # without them is carried as declared-but-unresolved and refuses
+    # MODEL_NOT_READY at execution; it never falls back to another model.
+    frozen_inference: "FrozenInference | None" = None
+    model_release: "ModelRelease | None" = None
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -271,15 +326,87 @@ def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     }
     if any(not reference.strip() for reference in refs.values()):
         raise ValueError("model artifact refs must be non-empty")
-    return {
+    models: dict[str, Any] = {}
+    executors: dict[str, FrozenRecipeExecutor] = {}
+    for output, recipe in bundle.forecast_recipes.items():
+        name = str(output)
+        if _is_frozen_recipe(recipe):
+            executors[name] = _frozen_recipe_executor(bundle, name, recipe)
+        else:
+            models[name] = _linear_recipe(name, recipe)
+    block: dict[str, Any] = {
         "driver_name": str(bundle.driver_name),
-        "models": {
-            str(output): _linear_recipe(str(output), recipe)
-            for output, recipe in bundle.forecast_recipes.items()
-        },
+        "models": models,
         "artifact_hashes": tuple(refs[output] for output in bundle.forecast_recipes),
         "model_artifact_refs": refs,
     }
+    if executors:
+        block["executors"] = executors
+    return block
+
+
+def _is_frozen_recipe(recipe: Any) -> bool:
+    return isinstance(recipe, Mapping) and "binding_id" in recipe
+
+
+def _frozen_recipe_executor(
+    bundle: SourceBundle, target: str, recipe: Mapping[str, Any],
+) -> FrozenRecipeExecutor:
+    """Resolve one binding-named recipe (R4-16) into a frozen executor.
+
+    The binding, its role and its output are checked here when a release is
+    supplied, because a recipe wired to the wrong model is a malformed bundle.
+    A missing release or inference is not malformed: the request is declared
+    but unresolved, and the stage refuses it MODEL_NOT_READY.
+    """
+    config = _bounded_recipe(f"{target} recipe", recipe, _FROZEN_RECIPE_FIELDS)
+    binding_id = str(config.get("binding_id") or "").strip()
+    if not binding_id:
+        raise ValueError(f"{target} recipe binding_id must be non-empty")
+    inference, release = bundle.frozen_inference, bundle.model_release
+    if inference is not None and not isinstance(inference, FrozenInference):
+        raise ValueError("frozen_inference must be a FrozenInference")
+    if release is not None and not isinstance(release, ModelRelease):
+        raise ValueError("model_release must be a ModelRelease")
+    if inference is None or release is None:
+        return FrozenRecipeExecutor(target=target, binding_id=binding_id,
+                                    source=None, executor=None, binding=None)
+    matches = [item for item in release.bindings if item.binding_id == binding_id]
+    binding = matches[0] if len(matches) == 1 else None
+    if binding is None:
+        # Not resolvable in this release: FrozenStageExecutor refuses it
+        # (BINDING_NOT_FOUND/DUPLICATE_BINDING) at execution.
+        return FrozenRecipeExecutor(
+            target=target, binding_id=binding_id, source=str(config.get("output") or target),
+            executor=FrozenStageExecutor(inference=inference, release=release,
+                                         binding_id=binding_id),
+            binding=None,
+        )
+    return FrozenRecipeExecutor(
+        target=target, binding_id=binding_id,
+        source=_binding_output(binding, target, config.get("output")),
+        executor=FrozenStageExecutor(inference=inference, release=release,
+                                     binding_id=binding_id),
+        binding=binding,
+    )
+
+
+def _binding_output(binding: ModelBinding, target: str, declared: Any) -> str:
+    role = str(binding.role).split(":", 1)[0]
+    if role not in _FROZEN_OUTPUT_ROLES[target]:
+        raise ValueError(
+            f"{target} recipe names binding {binding.binding_id} of role {role!r}"
+        )
+    names = tuple(binding.output_names)
+    if declared is not None:
+        if str(declared) not in names:
+            raise ValueError(f"{target} recipe output {declared!r} is not in {names}")
+        return str(declared)
+    if target in names:
+        return target
+    if len(names) == 1:
+        return names[0]
+    raise ValueError(f"{target} recipe must name one of the binding outputs {names}")
 
 
 def _quote_block(raw: Mapping[Any, Mapping[str, Any]]) -> dict[Any, dict[str, float]]:
@@ -312,8 +439,20 @@ def _bounded_recipe(
     return dict(values)
 
 
-def _gate_block(values: Mapping[str, Any]) -> dict[str, Any]:
-    gate = _bounded_recipe("gate_recipe", values, _GATE_RECIPE_FIELDS)
+def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
+    gate = _bounded_recipe("gate_recipe", bundle.gate_recipe, _GATE_RECIPE_FIELDS)
+    if _is_frozen_recipe(gate):
+        if gate.get("model") is not None:
+            raise ValueError("gate_recipe cannot name both a binding and a linear model")
+        frozen = {name: gate.pop(name) for name in _FROZEN_RECIPE_FIELDS if name in gate}
+        gate["executors"] = {
+            "gate_score": _frozen_recipe_executor(bundle, "gate_score", frozen),
+        }
+        gate["binding_id"] = frozen["binding_id"]
+        gate["threshold"] = _finite_number(
+            gate.get("threshold"), "gate_recipe.threshold",
+        )
+        return gate
     model = gate.get("model")
     if not isinstance(model, Mapping):
         raise ValueError("gate_recipe requires a linear model")
@@ -479,23 +618,32 @@ def _simulation_block(bundle: SourceBundle) -> dict[str, Any]:
     one row), and a missing artifact is carried as ``None`` so the stage
     refuses MODEL_NOT_READY rather than this builder dropping the request.
     """
+    planned = bundle.residual_recipe.get("mode") == "planned_exit"
     simulation = _bounded_recipe(
-        "residual_recipe", bundle.residual_recipe, _RESIDUAL_RECIPE_FIELDS,
+        "residual_recipe", bundle.residual_recipe,
+        _PLANNED_EXIT_RECIPE_FIELDS if planned else _RESIDUAL_RECIPE_FIELDS,
     )
     recipe = _bounded_recipe(
         "paired_residual_recipe", bundle.paired_residual_recipe,
         _PAIRED_RESIDUAL_RECIPE_FIELDS,
     )
     artifact = bundle.paired_residual_artifact
-    if not recipe and artifact is None:
+    rows = bundle.paired_residual_rows
+    artifact_declared = bool(recipe) or artifact is not None
+    if not artifact_declared and not rows and not planned:
         return simulation
-    if artifact is not None and not isinstance(artifact, PairedResidualPoolArtifact):
-        raise ValueError("paired_residual_artifact must be a PairedResidualPoolArtifact")
     if simulation.get("terminal_spots") is not None or simulation.get("mode") not in (
         None, "planned_exit",
     ):
         raise ValueError("paired_residual_* declares a planned-exit simulation; "
                          "residual_recipe cannot also declare a terminal one")
+    if artifact_declared and rows:
+        raise ValueError("paired_residual_rows (the compatibility path) cannot "
+                         "combine with paired_residual_recipe/paired_residual_artifact")
+    if not artifact_declared:
+        return {**simulation, "mode": "planned_exit", **_paired_rows_member(rows)}
+    if artifact is not None and not isinstance(artifact, PairedResidualPoolArtifact):
+        raise ValueError("paired_residual_artifact must be a PairedResidualPoolArtifact")
     key = {name: recipe[name] for name in ("move_model_id", "crush_model_id", "cutoff",
                                            "content_hash") if name in recipe}
     extras = {name: recipe[name] for name in ("draws", "pre_iv30", "dte_exit") if name in recipe}
@@ -503,6 +651,26 @@ def _simulation_block(bundle: SourceBundle) -> dict[str, Any]:
         **simulation, **extras, "mode": "planned_exit",
         "paired_residual_key": key, "paired_residual_artifact": artifact,
     }
+
+
+def _paired_rows_member(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The compatibility-path pool, as declared rows in their given order.
+
+    Empty rows under a planned-exit recipe are a declared-but-unfed request:
+    no ``residuals`` member is emitted, so the stage refuses
+    MISSING_SIMULATION_INPUT:residuals itself rather than this builder
+    inventing a pool or dropping the request.
+    """
+    if not rows:
+        return {}
+    _reject_answers("paired_residual_rows", rows)
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise ValueError("each paired residual row must be a mapping")
+        extra = sorted(set(row) - _PAIRED_ROW_FIELDS)
+        if extra:
+            raise ValueError(f"paired_residual_rows[{index}] has unsupported fields: {extra}")
+    return {"residuals": [dict(row) for row in rows]}
 
 
 def _model_block(bundle: SourceBundle) -> dict[str, Any]:
@@ -622,7 +790,7 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
     simulation = _simulation_block(bundle)
     model = _model_block(bundle)
     analogs = _analog_block(bundle)
-    gate = _gate_block(bundle.gate_recipe)
+    gate = _gate_block(bundle)
     receipts = _declaration_receipts(
         bundle.source_ref, strategy, context, features, forecast, quotes,
         model, analogs, simulation, gate,

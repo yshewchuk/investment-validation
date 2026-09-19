@@ -668,7 +668,10 @@ def _simulation_acceptance_controls() -> dict[str, object]:
                 exit_legs=exit_legs, spot=100.0,
                 entry_cost=pricing.entry_cost, pre_iv30=40.0,
                 pred_abs_move=5.0, pred_iv_crush=-25.0, dte_exit=dte,
-                event_date="2026-09-17", pool=pool, key="CND-PS", draws=4000,
+                # The Scorer passes a normalized Timestamp (engine/score.py
+                # Scorer._expectation); the seed material depends on its form.
+                event_date=pd.Timestamp("2026-09-17").normalize(), pool=pool,
+                key="CND-PS", draws=4000,
             )
             key = f"dte_{dte}_alpha_{alpha:.1f}"
             comparisons[key] = {

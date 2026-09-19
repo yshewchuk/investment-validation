@@ -186,7 +186,7 @@ def test_planned_exit_simulation_matches_legacy_kernel_and_is_deterministic():
         pred_abs_move=7.0,
         pred_iv_crush=-20.0,
         dte_exit=9.0,
-        event_date="2026-09-16",
+        event_date=pd.Timestamp("2026-09-16").normalize(),  # as Scorer._expectation passes it
         pool=pnl_sim.ResidualPool(history),
         key="STR-THRU",
     )
