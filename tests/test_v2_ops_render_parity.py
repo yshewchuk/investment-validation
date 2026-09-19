@@ -623,7 +623,7 @@ def test_model_evidence_action_writes_a_real_nan_as_valid_json_and_stages_it_for
 
 
 def test_render_job_binds_finality_score_and_model_evidence_as_job_outputs():
-    plan = build_nightly_plan("/root/investing-plan", str(AS_OF.date()))
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), str(AS_OF.date()))
     requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026)
     render_request = next(r for r in requests if r.job.kind == "legacy_render")
     bindings = render_request.job.parameters["input_bindings"]
@@ -645,7 +645,7 @@ def test_every_job_binding_names_a_declared_dependency():
     ``INPUT_CHANGED``. Covers every stage ``build_legacy_job_requests``
     produces, not only render, so this class of bug can't recur silently.
     """
-    plan = build_nightly_plan("/root/investing-plan", str(AS_OF.date()))
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), str(AS_OF.date()))
     requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026)
     violations = []
     for request in requests:
@@ -695,7 +695,7 @@ def test_every_output_binding_names_an_output_its_producer_actually_registers():
     proves the ``#name`` half is one the producer's *kind* actually
     registers, so a stale or colliding name is caught here instead of
     resolving to whatever else happens to share the row at runtime."""
-    plan = build_nightly_plan("/root/investing-plan", str(AS_OF.date()))
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), str(AS_OF.date()))
     requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026,
                                          full_universe=(TICKER,))
     kind_by_job_id = {job_id_for("shadow", r.idempotency_key): r.job.kind for r in requests}
@@ -723,7 +723,7 @@ def test_prior_selfcheck_ref_binds_only_when_the_caller_supplies_one():
     render job's own ``input_refs`` -- not a ``job_<id>#output`` reference,
     since no job in this plan produces it.
     """
-    plan = build_nightly_plan("/root/investing-plan", str(AS_OF.date()))
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), str(AS_OF.date()))
     prior_ref = "art_prior_selfcheck_test"
     requests = build_legacy_job_requests(plan, tickers=(TICKER,), year_start=2025, year_end=2026,
                                          prior_selfcheck_ref=prior_ref)

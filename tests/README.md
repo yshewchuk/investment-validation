@@ -113,6 +113,37 @@ those files alone on a quieter box. `TEST_POLICY` caps every profile at
 256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
 0.75 GiB for a whole minute.
 
+## CI tests
+
+GitHub Actions runs `.github/workflows/tests.yml` on every push to `main` and
+on `workflow_dispatch`. The workflow deselects tests with four markers:
+`needs_data`, `needs_corpus`, `heavy_host` and `browser`. Tests with these
+markers require local resources (untracked data directories, real multi-GB
+workers, or a browser environment) and run locally instead.
+
+The four markers, and which tests carry them, are:
+
+| Marker | Meaning | Tests |
+|---|---|---|
+| `needs_data` | reads the real `data/` root (gitignored, absent in CI and worktrees) | tests/test_calendar.py (10), TestChainRefreshCoversTheGap, TestPanelStalenessGuard, TestPanelFeaturesStaleMarketBlock, TestLiveFeaturesBoundedByTheDecision, test_checks_phase3b_real.py::test_table_run_reopens_persisted_clean_rebuild_and_downstream_scan, 3 incremental tests |
+| `needs_corpus` | reads `fixtures/tier0` or another untracked fixture tree | tests/test_phase4_completion_review.py (whole file) |
+| `heavy_host` | launches real multi-GB workers; run alone on a quiet box | tests/test_v2_ops_supervised_legacy.py, tests/test_v2_ops_nightly_completion.py (whole files) |
+| `browser` | drives a real Playwright browser or needs node/npm (`ui/` build) | tests/test_v2_dashboard_browser.py, test_v2_dashboard_integration.py, test_v2_ops_serving_browser.py (whole files), test_l02_browser_frame_pins_r1_then_reload_shows_r2 in test_v2_dashboard_preview.py |
+
+CI runs everything except these four categories:
+
+```bash
+python -m pytest -n auto --dist loadgroup -m "not needs_data and not needs_corpus and not heavy_host and not browser" -rfE --durations=25 --junitxml=junit.xml tests/
+```
+
+To run the local complement from the main checkout (not a worktree):
+
+```bash
+python3 tools/bounded_run.py --cores 8 -- python3 -m pytest -q -n 4 --dist loadgroup -m "needs_data or needs_corpus" -rfEs tests/
+```
+
+The `heavy_host` and `browser` tests keep their existing procedure (see above).
+
 ## Known thin spots
 
 Honest list, so nobody has to rediscover it:

@@ -59,7 +59,7 @@ def _cache_satisfied_refresh_plan():
 
 def test_legacy_mode_dag_is_unchanged():
     """R3B-3 must not touch the route production still uses."""
-    plan = build_nightly_plan("/root/investing-plan", "2026-09-18")
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18")
     requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
     assert [request.job.kind for request in requests] == _LEGACY_KINDS
     assert "incremental_refresh" not in {r.job.kind for r in requests}
@@ -69,7 +69,7 @@ def test_native_refresh_mode_submits_the_real_native_stage(tmp_path):
     """The submitted action must be ``incremental_refresh`` -- never a
     ``legacy_refresh`` adapter action (which is not even a registered kind)."""
     refresh_plan = _cache_satisfied_refresh_plan()
-    plan = build_nightly_plan("/root/investing-plan", "2026-09-18")
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18")
     requests = build_legacy_job_requests(
         plan, tickers=("FAKE",), year_start=2025, year_end=2026,
         refresh_mode="native", refresh_plan=refresh_plan)
@@ -100,14 +100,14 @@ def test_native_refresh_mode_submits_the_real_native_stage(tmp_path):
 
 
 def test_native_refresh_mode_needs_a_pinned_plan():
-    plan = build_nightly_plan("/root/investing-plan", "2026-09-18")
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18")
     with pytest.raises(OpsError, match="native refresh mode needs a pinned refresh plan"):
         build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
                                   refresh_mode="native")
 
 
 def test_bad_refresh_mode_is_refused():
-    plan = build_nightly_plan("/root/investing-plan", "2026-09-18")
+    plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18")
     with pytest.raises(OpsError, match="refresh_mode must be legacy or native"):
         build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
                                   refresh_mode="bogus")
@@ -116,12 +116,12 @@ def test_bad_refresh_mode_is_refused():
 def test_refresh_mode_is_explicit_and_inspectable_on_the_saved_plan():
     """A reader of a completed run's plan document -- not just job presence
     in the catalog -- must be able to tell which route executed."""
-    legacy = nightly_plan("/root/investing-plan", "2026-09-18",
+    legacy = nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18",
                           manifest_ref="artifact:fake", expected_population=("FAKE|x|2026-09-18",))
     assert "refresh_mode" not in legacy  # absent means legacy, mirroring input_mode's own convention
 
     refresh_plan = _cache_satisfied_refresh_plan()
-    native = nightly_plan("/root/investing-plan", "2026-09-18",
+    native = nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18",
                           manifest_ref="artifact:fake", expected_population=("FAKE|x|2026-09-18",),
                           refresh_mode="native", refresh_plan=refresh_plan)
     assert native["refresh_mode"] == "native"
@@ -134,7 +134,7 @@ def test_refresh_mode_is_explicit_and_inspectable_on_the_saved_plan():
 
 def test_native_refresh_mode_needs_a_pinned_plan_at_plan_time():
     with pytest.raises(OpsError, match="native refresh mode needs a pinned refresh plan"):
-        nightly_plan("/root/investing-plan", "2026-09-18", manifest_ref="artifact:fake",
+        nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18", manifest_ref="artifact:fake",
                     expected_population=("FAKE|x|2026-09-18",), refresh_mode="native")
 
 
@@ -143,7 +143,7 @@ def test_end_to_end_plan_document_drives_which_action_is_submitted(tmp_path):
     (`plan["refresh_mode"]`) is exactly what decides the submitted action --
     not a second, separately-tracked flag."""
     refresh_plan = _cache_satisfied_refresh_plan()
-    plan = nightly_plan("/root/investing-plan", "2026-09-18", manifest_ref="artifact:fake",
+    plan = nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18", manifest_ref="artifact:fake",
                         expected_population=("FAKE|x|2026-09-18",),
                         refresh_mode="native", refresh_plan=refresh_plan)
     requests = build_legacy_job_requests(

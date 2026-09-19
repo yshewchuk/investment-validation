@@ -232,6 +232,7 @@ class TestBuildCalendar:
     def tc(self):
         return TradingCalendar(pd.date_range("2023-01-02", "2025-12-31", freq="B"))
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_agreement_flag_marks_doubly_confirmed_events(self):
         orats = pd.DataFrame(
             {
@@ -260,6 +261,7 @@ class TestBuildCalendar:
         # …and so are oquants-only ones, flagged rather than dropped.
         assert (~out["src_orats"] & out["src_oquants"]).sum() == 1
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_event_id_is_ticker_and_date(self):
         orats = pd.DataFrame(
             {
@@ -473,6 +475,7 @@ class TestForwardCalendar:
             }
         )
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_a_forward_source_adds_events_orats_cannot_have(self):
         out = build_calendar(
             orats=self._orats(),
@@ -485,6 +488,7 @@ class TestForwardCalendar:
         assert row["session_src"] == "nasdaq"
         assert bool(row["src_nasdaq"]) and not bool(row["src_orats"])
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_orats_outranks_the_forward_sources_on_session(self):
         """Once ORATS carries the event, its anncTod is the answer — a forward
         guess must not survive alongside the authority."""
@@ -508,6 +512,7 @@ class TestForwardCalendar:
         assert row["session_src"] == "orats"
         assert row["annc_tod"] == "1630"
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_yfinance_outranks_nasdaq(self):
         """yfinance keeps the announcement TIME on historical rows, so its
         session is gradeable after the fact; Nasdaq's never is."""
@@ -519,6 +524,7 @@ class TestForwardCalendar:
         assert out.iloc[0]["session"] == "AMC"
         assert out.iloc[0]["session_src"] == "yfinance"
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_a_session_nobody_supplies_stays_null(self):
         """`time-not-supplied` must not become a guess: the scorer skips events
         with no session, and a wrong one shifts entry and exit by a day."""
@@ -529,6 +535,7 @@ class TestForwardCalendar:
         assert pd.isna(out.iloc[0]["session"])
         assert pd.isna(out.iloc[0]["session_src"])
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_rival_forward_dates_are_flagged_and_both_kept(self):
         out = build_calendar(
             orats=pd.DataFrame(columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]),
@@ -538,6 +545,7 @@ class TestForwardCalendar:
         assert len(out) == 2, "a disagreement must never be resolved by dropping a row"
         assert out["date_conflict"].all()
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_a_normal_quarterly_cadence_is_not_a_conflict(self):
         out = build_calendar(
             orats=pd.DataFrame(columns=["ticker", "event_date", "annc_tod", "session", "updated_at"]),
@@ -545,6 +553,7 @@ class TestForwardCalendar:
         )
         assert not out["date_conflict"].any()
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_an_orats_confirmed_event_is_never_a_conflict(self):
         """History is left alone: a fiscal-calendar change really can put two
         prints close together, and ORATS is the authority on what happened."""
@@ -560,6 +569,7 @@ class TestForwardCalendar:
         out = build_calendar(orats=orats)
         assert not out["date_conflict"].any()
 
+    @pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
     def test_explicit_frames_do_not_pull_the_local_cache(self):
         """A caller handing over frames wants a closed, reproducible world."""
         out = build_calendar(orats=self._orats())

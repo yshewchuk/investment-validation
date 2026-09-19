@@ -27,7 +27,7 @@ from playwright.sync_api import expect
 
 from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
 
-pytestmark = pytest.mark.xdist_group("serial")
+pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]  # drives a real Playwright browser or needs node/npm (ui/ build)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_ROOT = REPO_ROOT / "ui"

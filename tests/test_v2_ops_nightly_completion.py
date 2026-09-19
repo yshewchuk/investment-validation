@@ -86,6 +86,8 @@ from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit, submit
 from engine.v2.ops.supervisor import Service, _verify_decision_evidence
 from tests.ops_support import TEST_POLICY, run_until, sample
 
+pytestmark = pytest.mark.heavy_host  # launches real multi-GB workers; run alone on a quiet box
+
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"
