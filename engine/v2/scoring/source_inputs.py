@@ -8,6 +8,10 @@ from typing import Any, Mapping, Sequence
 from engine.v2.domain.generation import DISABLED, STRATEGIES
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
 from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact
+from engine.v2.models.residual_artifact import (
+    DriverResidualPoolArtifact,
+    PairedResidualPoolArtifact,
+)
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
     bucket_population_hash,
@@ -87,6 +91,15 @@ _PAYOFF_RECIPE_FIELDS = frozenset({
 # `_model_block`.
 _PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({"before", "draw_count", "seed"})
 _MODEL_RESIDUAL_RECIPE_FIELDS = frozenset({"deciles", "min_pool"})
+# Frozen residual pools (P5-4). Each declared slot names the causal key the
+# request expects; ``content_hash`` optionally pins the exact artifact the
+# release holds. The stage refuses (MODEL_NOT_READY) on any disagreement.
+_DRIVER_RESIDUAL_SLOTS = frozenset({"driver", "runup_move"})
+_DRIVER_RESIDUAL_KEY_FIELDS = frozenset({"role", "model_id", "fold", "content_hash"})
+_PAIRED_RESIDUAL_RECIPE_FIELDS = frozenset({
+    "move_model_id", "crush_model_id", "cutoff", "content_hash", "draws",
+    "pre_iv30", "dte_exit",
+})
 _SIZE_STRATEGIES = frozenset({
     "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7",
     "CTR5",
@@ -172,6 +185,21 @@ class SourceBundle:
     # default, and every Phase 4 capture) leaves win_model exactly as before.
     recalibration_declared: bool = False
     recalibration_artifact: "RecalibrationMapArtifact | None" = None
+    # Frozen driver residual pools (P5-4, engine.v2.models.residual_artifact),
+    # keyed by slot ("driver"; STR-RUNUP also "runup_move"). Declared by a
+    # non-empty recipe (slot -> expected {role, model_id, fold[, content_hash]})
+    # or non-empty artifacts; mutually exclusive with model_residual_rows/
+    # runup_move_residual_rows/model_residual_recipe, which stay the
+    # compatibility path for bundles that declare neither (Phase 4 captures).
+    model_residual_artifact_recipe: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    model_residual_artifacts: Mapping[str, "DriverResidualPoolArtifact | None"] = field(
+        default_factory=dict)
+    # Frozen paired (err_move, err_crush) pool for the planned-exit simulation
+    # (P5-4). Declared by a non-empty recipe or a supplied artifact; the
+    # simulation then runs planned-exit from the artifact alone, after a full
+    # causal-key check -- never from request rows or a context-scoped rebuild.
+    paired_residual_recipe: Mapping[str, Any] = field(default_factory=dict)
+    paired_residual_artifact: "PairedResidualPoolArtifact | None" = None
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -359,20 +387,10 @@ def _artifact_model_block(
             "payoff_artifact_recipe/payoff_artifact cannot combine with "
             "payoff_recipe/payoff_source_rows (the source-rows compatibility path)"
         )
-    _reject_answers("model_residual_rows", bundle.model_residual_rows)
-    _reject_answers("runup_move_residual_rows", bundle.runup_move_residual_rows)
-    residual_recipe = _bounded_recipe(
-        "model_residual_recipe", bundle.model_residual_recipe,
-        _MODEL_RESIDUAL_RECIPE_FIELDS,
-    )
     return {
         "payoff_recipe": dict(artifact_recipe),
         "payoff_artifact": bundle.payoff_artifact,
-        "model_residual_recipe": residual_recipe,
-        "model_residual_rows": [dict(row) for row in bundle.model_residual_rows],
-        "runup_move_residual_rows": [
-            dict(row) for row in bundle.runup_move_residual_rows
-        ],
+        **_residual_members(bundle),
     }
 
 
@@ -382,13 +400,59 @@ def _compatibility_model_block(bundle: SourceBundle, recipe: Mapping[str, Any]) 
     if not recipe:
         if (bundle.payoff_source_rows or bundle.model_residual_rows
                 or bundle.model_residual_recipe
-                or bundle.runup_move_residual_rows):
+                or bundle.runup_move_residual_rows
+                or _driver_artifacts_declared(bundle)):
             raise ValueError(
                 "payoff_source_rows/model_residual_*/runup_move_residual_rows "
                 "supplied without a payoff_recipe"
             )
         return {}
     _reject_answers("payoff_source_rows", bundle.payoff_source_rows)
+    return {
+        "payoff_recipe": recipe,
+        "payoff_source_rows": [dict(row) for row in bundle.payoff_source_rows],
+        **_residual_members(bundle),
+    }
+
+
+def _driver_artifacts_declared(bundle: SourceBundle) -> bool:
+    return bool(bundle.model_residual_artifact_recipe or bundle.model_residual_artifacts)
+
+
+def _driver_artifact_members(bundle: SourceBundle) -> dict[str, Any]:
+    """The P5-4 frozen driver-pool members of the model block."""
+    if (bundle.model_residual_rows or bundle.runup_move_residual_rows
+            or bundle.model_residual_recipe):
+        raise ValueError(
+            "model_residual_artifact_recipe/model_residual_artifacts cannot combine "
+            "with model_residual_rows/runup_move_residual_rows/model_residual_recipe"
+        )
+    unknown = sorted(
+        (set(bundle.model_residual_artifact_recipe) | set(bundle.model_residual_artifacts))
+        - _DRIVER_RESIDUAL_SLOTS
+    )
+    if unknown:
+        raise ValueError(f"unknown model residual artifact slots: {unknown}")
+    for slot, artifact in bundle.model_residual_artifacts.items():
+        if artifact is not None and not isinstance(artifact, DriverResidualPoolArtifact):
+            raise ValueError(f"model_residual_artifacts[{slot}] must be a DriverResidualPoolArtifact")
+    keys = {
+        str(slot): _bounded_recipe(
+            f"model_residual_artifact_recipe.{slot}", expected, _DRIVER_RESIDUAL_KEY_FIELDS,
+        )
+        for slot, expected in bundle.model_residual_artifact_recipe.items()
+    }
+    return {
+        "model_residual_artifact_recipe": keys,
+        "model_residual_artifacts": dict(bundle.model_residual_artifacts),
+    }
+
+
+def _residual_members(bundle: SourceBundle) -> dict[str, Any]:
+    """The driver residual members of either model block: frozen artifacts
+    when declared (P5-4), else the request-supplied rows exactly as before."""
+    if _driver_artifacts_declared(bundle):
+        return _driver_artifact_members(bundle)
     _reject_answers("model_residual_rows", bundle.model_residual_rows)
     _reject_answers("runup_move_residual_rows", bundle.runup_move_residual_rows)
     residual_recipe = _bounded_recipe(
@@ -396,13 +460,48 @@ def _compatibility_model_block(bundle: SourceBundle, recipe: Mapping[str, Any]) 
         _MODEL_RESIDUAL_RECIPE_FIELDS,
     )
     return {
-        "payoff_recipe": recipe,
-        "payoff_source_rows": [dict(row) for row in bundle.payoff_source_rows],
         "model_residual_recipe": residual_recipe,
         "model_residual_rows": [dict(row) for row in bundle.model_residual_rows],
         "runup_move_residual_rows": [
             dict(row) for row in bundle.runup_move_residual_rows
         ],
+    }
+
+
+def _simulation_block(bundle: SourceBundle) -> dict[str, Any]:
+    """The simulation recipe; with a declared frozen paired pool (P5-4), a
+    planned-exit simulation over that artifact alone.
+
+    Undeclared (empty ``paired_residual_recipe`` and no artifact): the
+    bounded ``residual_recipe`` exactly as before. Declared: the recipe's
+    key fields become the causal key the stage checks the artifact against;
+    a terminal-spot recipe cannot be combined with it (two simulations for
+    one row), and a missing artifact is carried as ``None`` so the stage
+    refuses MODEL_NOT_READY rather than this builder dropping the request.
+    """
+    simulation = _bounded_recipe(
+        "residual_recipe", bundle.residual_recipe, _RESIDUAL_RECIPE_FIELDS,
+    )
+    recipe = _bounded_recipe(
+        "paired_residual_recipe", bundle.paired_residual_recipe,
+        _PAIRED_RESIDUAL_RECIPE_FIELDS,
+    )
+    artifact = bundle.paired_residual_artifact
+    if not recipe and artifact is None:
+        return simulation
+    if artifact is not None and not isinstance(artifact, PairedResidualPoolArtifact):
+        raise ValueError("paired_residual_artifact must be a PairedResidualPoolArtifact")
+    if simulation.get("terminal_spots") is not None or simulation.get("mode") not in (
+        None, "planned_exit",
+    ):
+        raise ValueError("paired_residual_* declares a planned-exit simulation; "
+                         "residual_recipe cannot also declare a terminal one")
+    key = {name: recipe[name] for name in ("move_model_id", "crush_model_id", "cutoff",
+                                           "content_hash") if name in recipe}
+    extras = {name: recipe[name] for name in ("draws", "pre_iv30", "dte_exit") if name in recipe}
+    return {
+        **simulation, **extras, "mode": "planned_exit",
+        "paired_residual_key": key, "paired_residual_artifact": artifact,
     }
 
 
@@ -520,9 +619,7 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
         "source_metadata": dict(bundle.metadata),
     }
     forecast = _forecast_block(bundle, strategy)
-    simulation = _bounded_recipe(
-        "residual_recipe", bundle.residual_recipe, _RESIDUAL_RECIPE_FIELDS,
-    )
+    simulation = _simulation_block(bundle)
     model = _model_block(bundle)
     analogs = _analog_block(bundle)
     gate = _gate_block(bundle.gate_recipe)
