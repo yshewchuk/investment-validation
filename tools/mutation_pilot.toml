@@ -47,8 +47,11 @@ deselect = [
     "tests/test_v2_dashboard_preview.py::test_l02_browser_frame_pins_r1_then_reload_shows_r2",
 ]
 # Tracked files copied into the work copy (git ls-files of these paths).
-# Some targeted tests import checks/ (test_phase4_acceptance_independence).
-copy = ["engine", "tests", "checks", "tools"]
+# "." is every tracked file, the same tree a CI checkout has (no data/, which
+# is never tracked). Tests read more than engine/tests/checks/tools: e.g.
+# test_v2_models_training_recipes parses experiments/EXP-169_*/run.py, and
+# failed in CI run 35448350995 when only those four trees were copied.
+copy = ["."]
 
 [modules.no_fit]
 why = "One process-wide flag decides whether a legacy fit/train/cache-write may run during scoring; a flipped default or restore silently re-enables fitting in serving."

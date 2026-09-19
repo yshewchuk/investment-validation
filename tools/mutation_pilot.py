@@ -9,7 +9,7 @@ in, so running it from the repo would put a mutated copy of ``engine/`` (whose
 tool instead runs every module in its own work copy OUTSIDE the repo:
 
     $MUTATION_PILOT_HOME/<module>/          (default ~/.cache/investing-plan-mutation-pilot)
-        engine/ tests/ checks/ tools/       tracked files only, synced from the repo
+        <every tracked file>                synced from the repo (a clean clone, minus .git)
         setup.cfg                           generated [mutmut] section for this module
         mutants/                            mutmut's own state and results
 
@@ -143,6 +143,8 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
         sys.exit(f"{name} is excluded: {mod['excluded']}")
     tracked_list = _tracked(defaults["copy"])
     tracked = set(tracked_list)
+    # Top-level entries of the copy: what mutmut must also copy into mutants/.
+    tops = sorted({rel.split("/", 1)[0] for rel in tracked_list})
     mutate, tests = mutate_files(cfg, name, tracked_list), test_files(cfg, name, tracked_list)
     for rel in sorted(tracked):
         src, dst = REPO / rel, work / rel
@@ -152,7 +154,7 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-    for root in defaults["copy"]:
+    for root in (t for t in tops if (work / t).is_dir()):
         for path in (work / root).rglob("*"):
             if path.is_file() and "__pycache__" not in path.parts \
                     and str(path.relative_to(work)) not in tracked:
@@ -166,7 +168,7 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
              + lines("only_mutate", mutate)
              # mutmut copies source_paths and tests/ into mutants/ by itself;
              # every other copied tree must be listed to be importable there.
-             + lines("also_copy", [c for c in defaults["copy"] if c not in ("engine", "tests")] or ["tests"])
+             + lines("also_copy", [t for t in tops if t not in ("engine", "tests")] or ["tests"])
              + lines("pytest_add_cli_args_test_selection", tests)
              + lines("pytest_add_cli_args", defaults["pytest_args"]
                      + [f"--deselect={d}" for d in defaults.get("deselect", [])])
