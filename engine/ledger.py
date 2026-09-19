@@ -700,7 +700,8 @@ def score_outcomes(through=None, *, resolved_at=None, finality_fn=None) -> dict:
 # --------------------------------------------------------------------------
 
 
-def scored_pairs() -> pd.DataFrame:
+def scored_pairs(predictions: Sequence[Mapping[str, Any]] | None = None,
+                  outcomes: Sequence[Mapping[str, Any]] | None = None) -> pd.DataFrame:
     """Predicted vs realized, ONE ROW PER TRADE.
 
     Built from :func:`canonical_predictions`, not from the raw outcome file.
@@ -709,14 +710,21 @@ def scored_pairs() -> pd.DataFrame:
     replayed trade. Counting the rows weights the calibration toward whatever
     sat on the board longest, and deduplicating the OUTCOMES arbitrarily can
     report a trade as gate-withheld when the verdict at its entry was a pass.
+
+    ``predictions``/``outcomes`` (P6-3) override the jsonl-ledger read with
+    caller-supplied rows — the v2 catalog-backed caller in
+    :mod:`engine.v2.ledger.legacy_adapter` feeds catalog-sourced rows here so
+    this exact pure function computes identical numbers whichever storage
+    committed them. ``None`` (every caller before P6-3) keeps reading the
+    jsonl ledger unchanged.
     """
     resolved: dict[str, dict] = {}
-    for outcome in read_outcomes():           # file order is chronological
+    for outcome in (read_outcomes() if outcomes is None else outcomes):  # chronological order
         if outcome.get("status") == "resolved":
             resolved[outcome["row_id"]] = outcome
 
     rows = []
-    for pred in canonical_predictions():
+    for pred in canonical_predictions(predictions):
         outcome = resolved.get(pred["row_id"])
         if outcome is None:
             continue
