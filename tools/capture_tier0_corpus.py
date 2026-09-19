@@ -98,7 +98,11 @@ from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
 from engine.v2.foundation import to_document  # noqa: E402
-from engine.v2.foundation.canonical import NONFINITE_KEY, tag_nonfinite  # noqa: E402
+from engine.v2.foundation.canonical import (  # noqa: E402
+    NONFINITE_KEY,
+    stream_content_hash,
+    tag_nonfinite,
+)
 from engine.v2.models import (  # noqa: E402
     FrozenInference,
     InferenceRequest,
@@ -1308,8 +1312,16 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
         "covers": sorted(set(covers)),
         "notes": notes,
         "payload": payload,
-        "payload_hash": content_hash(payload, fragments=_SHARED_TRACE_DOCUMENTS),
-        "request_hash": content_hash(request),
+        # Streamed (engine.v2.foundation.canonical.stream_content_hash): a
+        # chooser payload repeats a shared pool once per member, and the
+        # batch content_hash builds ONE joined canonical-JSON string over the
+        # whole (fragments-deduped-for-rendering-only, still fully expanded
+        # in the final text) payload to hash it. stream_content_hash feeds
+        # hashlib incrementally from the same chunks instead -- byte- and
+        # digest-identical (tests/test_v2_ops_foundation.py), never a
+        # multi-GB string.
+        "payload_hash": stream_content_hash(payload, fragments=_SHARED_TRACE_DOCUMENTS),
+        "request_hash": stream_content_hash(request),
         # contracts §2.2: the envelope is excluded from the payload hash, so a
         # replay reproduces the payload without reproducing the elapsed time.
         "envelope": {
@@ -1655,6 +1667,81 @@ def _untag_nonfinite_shared(value: Any) -> Any:
         _SHARED_TRACE_DOCUMENTS.register_shared((result,))
         return result
     return value
+
+
+#: `_prepare_normalized_shared`'s per-pair memo, mapping id(original
+#: container) -> (original, prepared). See that function's docstring.
+_PrepareCache = dict
+
+
+def _prepare_normalized_shared(value: Any, cache: dict[int, tuple[Any, Any]]) -> Any:
+    """`tag_nonfinite`, but reusing one prepared copy per input container
+    instead of rebuilding on every occurrence -- the write-side counterpart
+    to `_untag_nonfinite_shared` above, same identity-cache shape, same
+    reason: a `dyn_sv_choice` pair's `legacy_trace`/`input_trace` embeds one
+    shared fold pool once per ranked member (the SAME Python object, by
+    identity, at every occurrence within one candidate). Plain
+    `tag_nonfinite` (`engine.v2.foundation.canonical._normalize`) has no
+    identity fast path: it unconditionally rebuilds every dict/list into a
+    fresh object, so tagging a pair whose payload holds that shared pool 11
+    times independently re-materializes 11 separate copies of it -- exactly
+    the jump `write()` measured going from attach's finished RSS to the OOM
+    inside its own pair-file write. A leaf value (anything that is not a
+    dict/list/tuple) is `tag_nonfinite(value)` exactly, since `_normalize`'s
+    own leaf handling already reduces to `_scalar(value)` for a non-container
+    input -- see `engine/v2/foundation/canonical.py`.
+
+    `cache` is scoped to ONE candidate (created fresh per pair in `write()`):
+    sharing only matters within a pair's own payload, and a fresh dict per
+    call avoids unbounded growth across a whole capture run. Safe against
+    `id()` reuse the same way `_untag_nonfinite_shared`/`_SharedTraceDocuments`
+    already are: the cache entry keeps the ORIGINAL object alive
+    (`(value, result)`) so its id cannot be recycled while the entry lives.
+    """
+    if isinstance(value, dict):
+        key = id(value)
+        cached = cache.get(key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
+        result = {str(k): _prepare_normalized_shared(v, cache) for k, v in value.items()}
+        cache[key] = (value, result)
+        return result
+    if isinstance(value, (list, tuple)):
+        key = id(value)
+        cached = cache.get(key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
+        result = [_prepare_normalized_shared(v, cache) for v in value]
+        cache[key] = (value, result)
+        return result
+    return tag_nonfinite(value)
+
+
+def _write_pair_file(path: Path, pair: dict) -> int:
+    """Write one pair's JSON exactly as
+    ``json.dumps(tag_nonfinite(pair), indent=2, sort_keys=True, allow_nan=False) + "\\n"``
+    would, byte for byte, but never as one materialized string.
+
+    ``_prepare_normalized_shared`` tags/normalizes ``pair`` once, reusing the
+    same prepared object at every occurrence of a shared container (a
+    chooser's shared fold pool, embedded once per member) instead of
+    rebuilding it per occurrence. ``json.JSONEncoder.iterencode`` (the pure
+    Python path, since ``indent`` is set) then walks that already-deduped
+    tree and yields the rendered text piece by piece straight to the file
+    handle -- there is no ``json.dumps`` call and no final ``str.join``.
+    Revisiting the same prepared object at each of its occurrences still
+    costs the CPU of re-rendering that text (the output file legitimately
+    repeats it once per member), but never holds more than one occurrence's
+    text in memory at a time.
+    """
+    cache: dict[int, tuple[Any, Any]] = {}
+    prepared = _prepare_normalized_shared(pair, cache)
+    encoder = json.JSONEncoder(indent=2, sort_keys=True, allow_nan=False)
+    with path.open("w") as fh:
+        for chunk in encoder.iterencode(prepared):
+            fh.write(chunk)
+        fh.write("\n")
+    return path.stat().st_size
 
 
 class _SpillPickler(pickle.Pickler):
@@ -2697,21 +2784,31 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         # dropped to null and never as a bare Infinity. content_hash already
         # hashes that same form, so every recorded hash is unchanged; readers
         # decode it with untag_nonfinite.
+        #
+        # `_prepare_normalized_shared` (not plain `tag_nonfinite`) so a
+        # chooser's shared fold pool, embedded once per ranked member, is
+        # tagged ONCE and reused at every occurrence -- see its docstring.
+        # `checkpoint` feeds both this pair's `legacy_trace` field AND the
+        # case document below; preparing it once here means both consumers
+        # share the same deduped object instead of each re-expanding it.
+        prep_cache: dict[int, tuple[Any, Any]] = {}
         checkpoint = cand.get("legacy_trace")
         if checkpoint is not None:
-            checkpoint = tag_nonfinite(checkpoint)
+            checkpoint = _prepare_normalized_shared(checkpoint, prep_cache)
+        input_trace = _hydrate_trace(cand.get("input_trace"))
         pair = make_pair(
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
             record_kind=cand["kind"], duration=cand["duration"],
             legacy_trace=checkpoint,
-            input_trace=_hydrate_trace(cand.get("input_trace")),
+            input_trace=input_trace,
             legacy_input_hash=cand.get("legacy_input_hash"),
             strict_trace_gap=strict_gaps.get(str(cand["fixture_id"])),
             relations=cand.get("relations"),
         )
-        text = json.dumps(tag_nonfinite(pair), indent=2, sort_keys=True,
-                          allow_nan=False) + "\n"
-        (pairs_dir / f"{cand['fixture_id']}.json").write_text(text)
+        pair_path = pairs_dir / f"{cand['fixture_id']}.json"
+        pair_bytes = _write_pair_file(pair_path, pair)
+        print(f"[corpus] wrote pair {cand['fixture_id']}: "
+              f"{pair_bytes / 1e6:.1f} MB, rss {_rss_gb():.2f}G", flush=True)
         manifest_pairs[cand["fixture_id"]] = {
             "payload_hash": pair["payload_hash"],
             "request_hash": pair["request_hash"],
@@ -2731,6 +2828,12 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
                     "checkpoint": checkpoint,
                 },
             )
+        # Hydrate/prepare one pair at a time and drop it before the next --
+        # `pair`/`checkpoint`/`input_trace` are the only things this
+        # iteration grew (the spilled trace was hydrated above), so nothing
+        # else needs releasing.
+        del pair, checkpoint, input_trace, prep_cache
+        gc.collect()
 
     missing = sorted(set(required_axes()) - set(index))
     doc = {
