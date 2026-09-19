@@ -407,3 +407,123 @@ def test_bundle_refuses_rows_and_artifacts_together_and_unknown_slots():
     with pytest.raises(ValueError, match="unknown model residual artifact slots"):
         build_native_score_inputs(_model_bundle(
             model_residual_artifact_recipe={"other": _DRIVER_KEY}))
+
+
+# ---------------------------------------------------------------------------
+# mutation-pilot triage: the 400-row universe above is below 10 x 250 rows,
+# so every draw there falls back to the whole pool and the decile bucket
+# (which reads the artifact's prediction column) is never exercised.
+# ---------------------------------------------------------------------------
+
+
+def _bucketing_universe(days: int = 3000):
+    rng = np.random.default_rng(29)
+    forecasts, outcomes, crush = [], [], []
+    for index, day in enumerate(pd.date_range("2018-01-01", periods=days, freq="D")):
+        ticker, stamp = TICKERS[index % 3], str(day.date())
+        forecasts.append({"ticker": ticker, "event_date": stamp,
+                          "pred_abs_move": float(rng.uniform(2.0, 12.0)),
+                          "pred_iv_crush_30": -20.0})
+        outcomes.append({"ticker": ticker, "event_date": stamp,
+                         "abs_move": float(rng.uniform(0, 12))})
+        crush.append({"ticker": ticker, "event_date": stamp,
+                      "crush_pct_iv30": float(rng.uniform(-45, 0))})
+    return forecasts, outcomes, crush
+
+
+def test_frozen_pool_large_enough_to_bucket_matches_legacy_expected_pnl():
+    artifact = build_paired_residual_pool_artifact(
+        *_bucketing_universe(), move_model_id=KEY["move_model_id"],
+        crush_model_id=KEY["crush_model_id"], cutoff=KEY["cutoff"], lineage=LINEAGE)
+    assert len(artifact.rows) >= 10 * 250
+    frozen = application.score_one(_request(), _planned(_artifact_sim(artifact)))
+    assert _simulated(frozen)
+    inputs = _planned(_artifact_sim(artifact))
+    priced = price(inputs.geometry, {
+        (leg.right, leg.strike, leg.expiry): {"bid": leg.bid, "ask": leg.ask}
+        for leg in inputs.pricing.legs}, 0.5)
+    history = pd.DataFrame(_rows(artifact))
+    history["event_date"] = pd.to_datetime(history["event_date"])
+    legacy = pnl_sim.expected_pnl(
+        exit_legs=[{"strike": leg.strike, "qty": leg.quantity,
+                    "side": "sell" if leg.side == "buy" else "buy"} for leg in priced.legs],
+        spot=100.0, entry_cost=priced.entry_cost, pre_iv30=40.0, pred_abs_move=7.0,
+        pred_iv_crush=-20.0, dte_exit=9.0, event_date=pd.Timestamp("2026-09-16").normalize(),
+        pool=pnl_sim.ResidualPool(history), key="STR-THRU",
+    )
+    assert _sim(frozen) == tuple(legacy[field] for field in _SIM_FIELDS)
+
+
+def test_paired_arrays_are_the_artifacts_columns_and_survive_cache_eviction():
+    from engine.v2.models.residual_artifact import make_paired_residual_pool_artifact
+    from engine.v2.scoring import native_residuals
+
+    artifacts = [
+        make_paired_residual_pool_artifact(
+            move_model_id=KEY["move_model_id"], crush_model_id=KEY["crush_model_id"],
+            cutoff=KEY["cutoff"], lineage=LINEAGE,
+            rows=[("2026-01-02", "AAA", 5.0 + i, 0.25, -3.0),
+                  ("2026-01-01", "BBB", 4.0, -0.5 - i, 2.0)])
+        for i in range(6)  # more distinct pools than the array cache holds
+    ]
+    for i, artifact in enumerate(artifacts):
+        arrays, flag = native_residuals.paired_arrays_from_artifact(_artifact_sim(artifact))
+        assert flag is None
+        dates, predicted, move, crush = arrays
+        assert [str(d) for d in dates] == ["2026-01-01", "2026-01-02"]
+        assert predicted.tolist() == [4.0, 5.0 + i]
+        assert move.tolist() == [-0.5 - i, 0.25]
+        assert crush.tolist() == [2.0, -3.0]
+
+
+def _driver_block(artifact):
+    from engine.v2.scoring import native_residuals
+
+    return {native_residuals.RESIDUAL_ARTIFACTS_FIELD: {"driver": artifact},
+            native_residuals.RESIDUAL_KEYS_FIELD: {"driver": dict(_DRIVER_KEY)}}
+
+
+def _plain_driver(flat, buckets=None, min_pool=3):
+    from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
+
+    return make_driver_residual_pool_artifact(
+        role="size", model_id="m1", fold="2026-09-01", flat_residuals=flat,
+        buckets=buckets, deciles=2, min_pool=min_pool, lineage=LINEAGE)
+
+
+def test_driver_pool_honours_the_frozen_min_pool_like_legacy():
+    """registry.ModelArtifact.residual_pool: a bucket thinner than min_pool
+    falls back to the flat pool."""
+    from engine.v2.scoring import native_residuals
+
+    buckets = {"edges": [-np.inf, 5.0, np.inf], "pools": [[0.1, 0.2], [0.3, 0.4, 0.5]]}
+    artifact = _plain_driver([9.0, 8.0, 7.0, 6.0], buckets=buckets, min_pool=3)
+    thin, _ = native_residuals.driver_pool_from_artifact(_driver_block(artifact), "driver", 1.0)
+    full, _ = native_residuals.driver_pool_from_artifact(_driver_block(artifact), "driver", 6.0)
+    assert thin.tolist() == [9.0, 8.0, 7.0, 6.0]
+    assert full.tolist() == [0.3, 0.4, 0.5]
+
+
+def test_driver_pool_empty_is_missing_residuals_and_one_residual_is_a_pool():
+    from engine.v2.scoring import native_residuals
+
+    empty = native_residuals.driver_pool_from_artifact(
+        _driver_block(_plain_driver([])), "driver", 1.0)
+    assert empty == (None, "MISSING_MODEL_RESIDUALS")
+    pool, flag = native_residuals.driver_pool_from_artifact(
+        _driver_block(_plain_driver([0.7])), "driver", 1.0)
+    assert flag is None and pool.tolist() == [0.7]
+
+
+def test_identity_view_replaces_only_frozen_artifacts_at_any_depth():
+    from engine.v2.scoring import native_residuals
+
+    artifact = _plain_driver([0.1])
+    view = native_residuals.identity_view({
+        "mode": "planned_exit", "draws": 64, "outer": artifact,
+        "nested": {"driver": artifact, "note": "kept", "deeper": {"x": 1}},
+    })
+    assert view == {
+        "mode": "planned_exit", "draws": 64, "outer": str(artifact),
+        "nested": {"driver": str(artifact), "note": "kept", "deeper": {"x": 1}},
+    }

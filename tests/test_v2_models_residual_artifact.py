@@ -424,3 +424,65 @@ def test_paired_artifact_rejects_nan_but_keeps_infinite_values(tmp_path):
     assert infinite.rows[0][3] == float("inf")
     assert FrozenStateLoader(tmp_path).load(_write(tmp_path, infinite)) == infinite
     assert isinstance(_build(*_universe()), PairedResidualPoolArtifact)
+
+
+# ---------------------------------------------------------------------------
+# keys, day normalization, flat-only pools, document shape
+# (mutation-pilot triage: behaviour no test above pinned)
+# ---------------------------------------------------------------------------
+
+
+def test_pool_keys_carry_every_part_and_normalize_timestamps_to_days():
+    from engine.v2.models.residual_artifact import driver_residual_pool_key
+
+    assert driver_residual_pool_key("size", "m1", "2024-05-01T00:00:00") == (
+        "size", "m1", "2024-05-01")
+    assert driver_residual_pool_key("size", "m1", None) == ("size", "m1", None)
+    assert paired_residual_pool_key("mv", "cr", pd.Timestamp("2024-06-01")) == (
+        "mv", "cr", "2024-06-01")
+    assert paired_residual_pool_key("mv", "cr", None) == ("mv", "cr", None)
+
+
+def test_paired_rows_are_dated_by_day_and_an_undated_pool_stays_undated():
+    artifact = make_paired_residual_pool_artifact(
+        move_model_id="m", crush_model_id="c", cutoff=None, lineage=LINEAGE,
+        rows=[("2024-01-01T00:00:00", "AAA", 1.0, 0.1, 0.2)])
+    assert artifact.rows[0][0] == "2024-01-01"
+    assert artifact.cutoff is None
+    assert artifact.key == ("m", "c", None)
+    assert artifact.payload()["n"] == 1
+
+
+def test_paired_artifact_rejects_a_nan_prediction():
+    """NaN is missing in every numeric column, the prediction included."""
+    with pytest.raises(ResidualArtifactError, match="NaN"):
+        make_paired_residual_pool_artifact(
+            move_model_id="m", crush_model_id="c", cutoff=None, lineage=LINEAGE,
+            rows=[("2024-01-01", "AAA", float("nan"), 0.1, 0.2)])
+
+
+def test_paired_document_without_columns_is_refused_as_an_artifact_error():
+    from engine.v2.models.residual_artifact import residual_artifact_from_document
+
+    document = _build(*_universe(days=20)).payload()
+    del document["columns"]
+    with pytest.raises(ResidualArtifactError):
+        residual_artifact_from_document(document)
+
+
+def test_flat_only_driver_pool_has_no_buckets_and_round_trips(tmp_path):
+    from engine.v2.models.residual_artifact import (
+        make_driver_residual_pool_artifact,
+        residual_artifact_from_document,
+    )
+
+    flat = make_driver_residual_pool_artifact(
+        role="size", model_id="m", fold=None, flat_residuals=[0.1, -0.2, 0.3],
+        buckets=None, deciles=10, min_pool=30, lineage=LINEAGE)
+    assert flat.fold is None
+    assert flat.key == ("size", "m", None)
+    payload = flat.payload()
+    assert payload["buckets"] is None
+    assert payload["n"] == 3
+    assert residual_artifact_from_document(payload) == flat
+    assert FrozenStateLoader(tmp_path).load(_write(tmp_path, flat, "flat.json")) == flat

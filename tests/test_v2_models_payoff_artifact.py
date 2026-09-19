@@ -241,3 +241,60 @@ def test_loader_refuses_an_unknown_schema_version(tmp_path):
     ref = PayoffArtifactRef(path="future.json", content_hash=digest)
     with pytest.raises(PayoffArtifactError):
         PayoffArtifactLoader(tmp_path).load(ref)
+
+
+# ---------------------------------------------------------------------------
+# provenance fields the tests above never read back (mutation-pilot triage)
+# ---------------------------------------------------------------------------
+
+
+def test_surface_artifact_records_cutoff_window_r_and_key():
+    """A surface artifact's cutoff is its fold identity (the key); losing it
+    would let a wrong-fold surface match any request."""
+    artifact = make_payoff_surface_artifact(
+        _SURFACE_FIT, alpha=0.5, cutoff="2026-09-16",
+        window=("2020-01-01", "2026-09-01"),
+    )
+    assert artifact.cutoff == "2026-09-16"
+    assert (artifact.window_start, artifact.window_end) == ("2020-01-01", "2026-09-01")
+    assert artifact.r == pytest.approx(0.31)
+    assert artifact.key == ("STR-RUNUP", 0.5, "2026-09-16")
+    undated = make_payoff_surface_artifact(_SURFACE_FIT, alpha=0.5)
+    assert undated.content_hash != artifact.content_hash
+
+
+def test_loader_round_trips_a_dated_surface_artifact(tmp_path):
+    artifact = make_payoff_surface_artifact(
+        _SURFACE_FIT, alpha=0.5, cutoff="2026-09-16",
+        window=("2020-01-01", "2026-09-01"),
+    )
+    ref = _write(tmp_path, "surface_dated.json", artifact)
+    loaded = PayoffArtifactLoader(tmp_path).load(ref)
+    assert loaded == artifact
+    assert loaded.cutoff == "2026-09-16"
+    assert (loaded.window_start, loaded.window_end) == ("2020-01-01", "2026-09-01")
+
+
+def test_line_artifact_records_r_and_accepts_a_fit_without_r(tmp_path):
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    assert artifact.r == pytest.approx(0.42)
+    no_r = make_payoff_line_artifact(
+        {k: v for k, v in _LINE_FIT.items() if k != "r"},
+        strategy="STR-THRU", driver="abs_move", alpha=0.5,
+    )
+    assert no_r.r is None
+    assert no_r.content_hash != artifact.content_hash
+    ref = _write(tmp_path, "line_no_r.json", no_r)
+    assert PayoffArtifactLoader(tmp_path).load(ref) == no_r
+
+
+def test_artifact_alpha_is_rounded_like_its_key():
+    """The payload's alpha is rounded to 4 places, the same as
+    ``payoff_artifact_key``, so the stored alpha and the key agree."""
+    artifact = make_payoff_line_artifact(
+        _LINE_FIT, strategy="STR-THRU", driver="abs_move", alpha=0.123456,
+    )
+    assert artifact.alpha == 0.1235
+    assert artifact.key[1] == artifact.alpha
