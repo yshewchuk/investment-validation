@@ -659,7 +659,7 @@ question = "Research tools read the mutable legacy Tier-2 store. Should P6-2 mov
 # ------------------------------------------------------------- exclusions
 
 [[excluded]]
-ids = ["cli:tools/baseline_export.py", "cli:tools/capture_tier0_corpus.py", "cli:tools/replay_tier1.py"]
+ids = ["cli:tools/baseline_export.py", "cli:tools/capture_attach_probe.py", "cli:tools/capture_tier0_corpus.py", "cli:tools/replay_tier1.py"]
 reason = "Phase 0/1 baseline and corpus capture/verification tooling; evidence producers, not consumers."
 
 [[excluded]]
