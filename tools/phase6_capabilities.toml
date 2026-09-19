@@ -667,6 +667,10 @@ ids = ["cli:tools/mutation_pilot.py", "cli:tools/mutation_report.py", "cli:tools
 reason = "Mutation-testing CI tooling."
 
 [[excluded]]
+ids = ["cli:tools/oc_check.py"]
+reason = "Agent-delegation check wrapper (gates + bounded tests for an agent worktree); development tooling, not a consumer."
+
+[[excluded]]
 ids = ["cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py"]
 reason = "Phase 4/5/6 migration preparation and inventory tooling."
 
