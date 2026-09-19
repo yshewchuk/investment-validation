@@ -113,3 +113,44 @@ def test_accepts_typed_native_execution_with_complete_real_receipts(tmp_path):
         "finding_ids": [],
         "findings": [],
     }
+
+
+def _with_excluded(excluded) -> dict:
+    evidence = _complete_evidence()
+    for section in ("saved_release_comparison", "native_parity"):
+        evidence[section]["population"]["excluded"] = deepcopy(excluded)
+    return evidence
+
+
+def test_accepts_only_approved_excluded_kinds(tmp_path):
+    from checks.phase4_real import PHASE4_EXCLUDED_RECORD_KINDS
+
+    approved = {kind: 3 for kind in PHASE4_EXCLUDED_RECORD_KINDS}
+    result = audit(_safe_root(tmp_path), _with_excluded(approved))
+
+    assert result["ok"] is True
+
+
+def test_flags_an_excluded_kind_not_approved_by_phase4_real(tmp_path):
+    result = audit(_safe_root(tmp_path),
+                   _with_excluded({"research_replay": 2, "dyn_sv_choice": 5}))
+
+    assert result["finding_ids"] == ["P4N-002", "P4N-003"]
+    for finding in result["findings"]:
+        facts = " ".join(finding["facts"])
+        assert "population_excluded_unapproved_kinds=['dyn_sv_choice']" in facts
+        assert "research_replay" not in facts
+
+
+def test_flags_malformed_excluded_population(tmp_path):
+    root = _safe_root(tmp_path)
+    not_mapping = audit(root, _with_excluded(["research_replay"]))
+    bad_count = audit(root, _with_excluded({"research_replay": -1}))
+    bool_count = audit(root, _with_excluded({"research_replay": True}))
+
+    assert not_mapping["finding_ids"] == ["P4N-002", "P4N-003"]
+    assert "population_excluded_type=list" in " ".join(not_mapping["findings"][0]["facts"])
+    for result in (bad_count, bool_count):
+        assert result["finding_ids"] == ["P4N-002", "P4N-003"]
+        assert "population_excluded_bad_counts=['research_replay']" in " ".join(
+            result["findings"][1]["facts"])

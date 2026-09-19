@@ -158,6 +158,31 @@ def _receipt(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _excluded_problems(population: Any) -> list[str]:
+    """Problems with ``population.excluded``: it must be a mapping of record
+    kind -> non-negative int count, and every kind must be one the Phase 4
+    gate is allowed to drop (``checks.phase4_real.PHASE4_EXCLUDED_RECORD_KINDS``).
+    An absent ``excluded`` means nothing was dropped."""
+    from checks.phase4_real import PHASE4_EXCLUDED_RECORD_KINDS
+
+    excluded = population.get("excluded") if isinstance(population, dict) else None
+    if excluded is None:
+        return []
+    if not isinstance(excluded, dict):
+        return [f"population_excluded_type={type(excluded).__name__}"]
+    problems = []
+    unapproved = sorted(str(kind) for kind in excluded
+                        if kind not in PHASE4_EXCLUDED_RECORD_KINDS)
+    if unapproved:
+        problems.append(f"population_excluded_unapproved_kinds={unapproved}")
+    bad = sorted(str(kind) for kind, count in excluded.items()
+                 if not (isinstance(count, int) and not isinstance(count, bool)
+                         and count >= 0))
+    if bad:
+        problems.append(f"population_excluded_bad_counts={bad}")
+    return problems
+
+
 def _saved_release_finding(evidence: dict[str, Any]) -> dict[str, Any] | None:
     comparison = evidence.get("saved_release_comparison")
     if not isinstance(comparison, dict):
@@ -189,6 +214,7 @@ def _saved_release_finding(evidence: dict[str, Any]) -> dict[str, Any] | None:
     problems = []
     if not (_positive_int(expected) and expected == compared):
         problems.append(f"population_expected={expected!r},compared={compared!r}")
+    problems.extend(_excluded_problems(population))
     if comparison.get("complete") is not True:
         problems.append(f"complete={comparison.get('complete')!r}")
     if not REQUIRED_DIMENSIONS.issubset(dimensions):
@@ -248,6 +274,7 @@ def _parity_finding(evidence: dict[str, Any]) -> dict[str, Any] | None:
         problems.append(f"same_input_hashes={parity.get('same_input_hashes')!r}")
     if not (_positive_int(expected) and expected == compared):
         problems.append(f"population_expected={expected!r},compared={compared!r}")
+    problems.extend(_excluded_problems(population))
     if not REQUIRED_STAGES.issubset(stages):
         problems.append(f"missing_stages={sorted(REQUIRED_STAGES - stages)}")
     if not REQUIRED_DIMENSIONS.issubset(dimensions):
