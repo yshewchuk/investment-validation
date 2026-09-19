@@ -224,6 +224,77 @@ def test_merged_model_inputs_accepts_a_legitimately_nonfinite_feature():
     assert merged["mcap_log"] == 10.0
 
 
+def test_merged_model_inputs_accepts_a_missing_daily_state_feature_as_nan():
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="implied_t1",
+        driver_vector={"im": None, "mcap_log": 10.0},
+        gate_vector=None,
+    )}
+
+    merged = _merged_model_inputs(candidate)
+
+    assert merged["mcap_log"] == 10.0
+    assert math.isnan(merged["im"])
+
+
+def test_role_feature_vectors_accepts_a_missing_daily_state_feature_as_nan():
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="implied_t1",
+        driver_vector={"im": None, "mcap_log": 10.0},
+        gate_vector=None,
+    )}
+
+    vectors = _role_feature_vectors(candidate)
+
+    assert vectors["implied_t1"]["mcap_log"] == 10.0
+    assert math.isnan(vectors["implied_t1"]["im"])
+
+
+def test_merged_model_inputs_still_refuses_a_missing_non_daily_state_feature():
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="implied_t1",
+        driver_vector={"im": None, "some_other_feature": None},
+        gate_vector=None,
+    )}
+
+    with pytest.raises(
+        StrictTraceCaptureError,
+        match=r"feature implied_t1\.some_other_feature is missing or nonnumeric",
+    ):
+        _merged_model_inputs(candidate)
+
+
+def test_merged_model_inputs_does_not_conflict_on_two_missing_daily_state_readings():
+    features_value = {
+        "feature_vector": {
+            "implied_t1": {"im": None},
+            "runup_move": {"im": None},
+        },
+        "missing_mask": {
+            "implied_t1": {"im": True},
+            "runup_move": {"im": True},
+        },
+        "model_identity": {
+            "implied_t1": {"model_id": "implied-1"},
+            "runup_move": {"model_id": "runup-1"},
+        },
+    }
+    candidate = {"legacy_trace": {
+        "schema_version": "phase4_legacy_diagnostic_checkpoint.v1.0",
+        "disposition": {"status": "completed", "flags": []},
+        "checkpoints": {
+            "features": {
+                "value": features_value,
+                "content_hash": content_hash(features_value),
+            },
+        },
+    }}
+
+    merged = _merged_model_inputs(candidate)
+
+    assert math.isnan(merged["im"])
+
+
 def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
     legacy = request_to_dict(ScoreRequest(
         ticker="ABC", strategy="STR-THRU", as_of=pd.Timestamp("2026-09-16"),
