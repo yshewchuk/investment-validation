@@ -73,6 +73,7 @@ REPLAY_V2_PACKAGES = (
     "engine/v2/features",
     "engine/v2/foundation",
     "engine/v2/models",
+    "engine/v2/models/training",
     "engine/v2/registry",
     "engine/v2/scoring",
 )

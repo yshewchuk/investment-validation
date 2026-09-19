@@ -1151,6 +1151,7 @@ def test_tampered_object_byte_is_refused_with_nothing_left_writable(tmp_path):
     object_path = Path(store.root) / "objects" / digest[:2] / digest
     corrupted = bytearray(object_path.read_bytes())
     corrupted[0] ^= 0xFF
+    object_path.chmod(0o644)
     object_path.write_bytes(bytes(corrupted))
 
     dest_root = tmp_path / "legacy_root"
@@ -1273,6 +1274,7 @@ def test_pinned_ref_object_corrupted_between_build_and_materialize_is_refused(tm
     object_path = Path(store.root) / "objects" / digest[:2] / digest
     corrupted = bytearray(object_path.read_bytes())
     corrupted[0] ^= 0xFF
+    object_path.chmod(0o644)
     object_path.write_bytes(bytes(corrupted))
 
     dest_root = tmp_path / "legacy_root"

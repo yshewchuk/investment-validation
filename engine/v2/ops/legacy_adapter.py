@@ -981,7 +981,7 @@ def run_legacy_script(root, script, args=()):
     if tuple(args):
         raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
     import subprocess
-    command = ["/usr/bin/python3", "-u", str(script_path), "--no-ledger"]
+    command = [sys.executable, "-u", str(script_path), "--no-ledger"]
     return subprocess.run(command, cwd=base, check=False,
                           capture_output=True, text=True, timeout=3600)
 
@@ -1026,7 +1026,7 @@ def verify_export_generation(generation_dir, repo_root, *, timeout=120):
         link_root.mkdir()
         os.symlink(Path(generation_dir).resolve(), link_root / "ledger")
         env = dict(os.environ, INVESTING_PLAN_ROOT=str(link_root))
-        result = subprocess.run(["/usr/bin/python3", "-c", _VERIFY_GENERATION_SCRIPT],
+        result = subprocess.run([sys.executable, "-c", _VERIFY_GENERATION_SCRIPT],
                                 cwd=str(repo_root), env=env, capture_output=True, text=True,
                                 timeout=timeout)
     return _json_stdout(result, "export generation failed the compatibility read-back")
@@ -1039,7 +1039,7 @@ def run_legacy_rebuild(candidate_root, repo_root, *, tables=None, sample=None, t
     """
     import subprocess
 
-    command = ["/usr/bin/python3", "-m", "engine.data.rebuild"]
+    command = [sys.executable, "-m", "engine.data.rebuild"]
     for table in tables or ():
         command += ["--table", table]
     if sample is not None:
@@ -1062,7 +1062,7 @@ def run_engineering_gate(repo_root, *, timeout=600):
     import subprocess
 
     script = Path(repo_root) / "checks" / "rearchitecture_phase1_gate.py"
-    result = subprocess.run(["/usr/bin/python3", str(script)], cwd=str(repo_root),
+    result = subprocess.run([sys.executable, str(script)], cwd=str(repo_root),
                             capture_output=True, text=True, timeout=timeout)
     return _json_stdout(result, "engineering gate produced no JSON")
 
@@ -1108,7 +1108,7 @@ def run_security_scan(bundle_path, repo_root, env_root=None, *, timeout=120):
     import subprocess
 
     result = subprocess.run(
-        ["/usr/bin/python3", "-c", _SECURITY_SCAN_SCRIPT, str(bundle_path),
+        [sys.executable, "-c", _SECURITY_SCAN_SCRIPT, str(bundle_path),
          str(env_root if env_root is not None else repo_root)],
         cwd=str(repo_root), capture_output=True, text=True, timeout=timeout)
     return _json_stdout(result, "security scan produced no JSON")
