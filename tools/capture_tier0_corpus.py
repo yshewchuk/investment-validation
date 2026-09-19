@@ -46,6 +46,8 @@ re-run the choice; tie-breaking depends on that order.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import itertools
 import json
 import math
@@ -1702,6 +1704,21 @@ def _rss_gb() -> float:
     return 0.0
 
 
+def _malloc_trim() -> None:
+    """Return glibc's freed-but-unreturned heap arenas to the OS.
+
+    ``gc.collect()`` only reclaims Python objects; on glibc, memory those
+    objects held often stays resident in the allocator's own arenas until
+    something calls ``malloc_trim``, so RSS can stay high even after nothing
+    live remains. A no-op on musl or any libc without the symbol -- this is
+    a memory-reporting nicety, never a correctness requirement.
+    """
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def _cleanup_trace_spill() -> None:
     global _TRACE_SPILL_DIR
     if _TRACE_SPILL_DIR is not None:
@@ -2749,6 +2766,102 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     return doc
 
 
+def _gather_candidates(
+    scorer, as_of: pd.Timestamp, args: argparse.Namespace,
+    strategies: tuple[str, ...] | None,
+) -> tuple[list[dict], dict[str, list[str]], str]:
+    """Score every pass and return the covering subset ``select()`` keeps.
+
+    Everything built here -- ``forward``/``boundaries`` (the candidate
+    frames), ``chain_keys``/``chain_index`` and the full ``candidates`` list
+    -- lives only in this function's own frame. The caller (``main``) never
+    holds a reference to any of them: it gets back exactly what
+    ``attach_strict_probe``/``chooser_trace``/``strict_trace_one``/``write``
+    need and nothing else. That is what lets ``main`` drop ``scorer`` itself
+    (the panel + replayed trades) the moment this returns, well before the
+    strict-trace attach step that measured the RSS growth.
+    """
+    forward = _events(as_of, args.forward_days, args.max_events)
+    print(f"[corpus] forward events: {len(forward)}", flush=True)
+    boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
+    print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
+
+    # One ChainIndex, built up front, for every pass that prices a
+    # request: forward, boundary, the two rescore passes (pinned/strike,
+    # coarse ladder), and research_replay_pass's own disabled-strategy
+    # replay. 2026-09-18: an instrumented run measured boundary_pass
+    # alone streaming its own fresh ChainIndex per request (transients up
+    # to +673 MB/call) because it reached Scorer.score with
+    # chain_index=None every time; the rescore passes had the same shape
+    # of gap. 2026-09-19: research_replay_pass had the identical gap one
+    # level down -- it calls replay_mod.replay_one directly (never
+    # Scorer.score), so _forward_chain_keys/_boundary_chain_keys's own
+    # DISABLED_STRATEGIES skip does not cover it; it needs its own
+    # _research_replay_chain_keys union, added here rather than left as
+    # a second, separately-timed load late in the pipeline. See
+    # boundary_pass's/_rescore's/research_replay_pass's own docstrings
+    # for why a combined, superset index resolves every key identically
+    # to a fresh per-call one -- this changes nothing about which quote
+    # a row prices against, only when and how many times it is loaded.
+    chain_keys = _forward_chain_keys(scorer, forward, as_of, strategies)
+    chain_keys |= _boundary_chain_keys(scorer, boundaries, strategies)
+    chain_keys |= _research_replay_chain_keys(scorer, boundaries, strategies)
+    chain_index = (
+        replay_mod.load_chain_index(chain_keys, progress_every=0)
+        if chain_keys else None
+    )
+
+    candidates = forward_pass(
+        scorer, forward, as_of, args.quote_max_age, strategies,
+        index=chain_index,
+    )
+    print(f"[corpus] forward scores: {len(candidates)}", flush=True)
+
+    candidates += boundary_pass(scorer, boundaries, strategies, index=chain_index)
+
+    candidates += pinned_and_strike_pass(scorer, candidates, index=chain_index)
+    candidates += coarse_ladder_pass(scorer, candidates, index=chain_index)
+    if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
+        candidates += dyn_sv_pass(candidates)
+    candidates += research_replay_pass(
+        scorer, boundaries, strategies=strategies, index=chain_index,
+    )
+    print(f"[corpus] candidates: {len(candidates)}", flush=True)
+
+    chosen, index = select(candidates)
+    # Only `chosen` -- `select()`'s small covering subset, never
+    # `candidates` itself -- needs its real `legacy_trace` content back;
+    # everything from here on (`attach_strict_probe`, `write`) reads it
+    # directly off `cand`. Every OTHER candidate's checkpoint content
+    # stays on disk, unread, for the rest of the run.
+    _shared_hydration_cache: dict[str, Any] = {}
+    for cand in chosen:
+        for holder in (cand, *(cand.get("members") or ())):
+            trace = _hydrate_trace(holder.get("legacy_trace"))
+            _reconcile_shared_trace_content(trace, _shared_hydration_cache)
+            holder["legacy_trace"] = trace
+    return chosen, index, scorer.snapshot
+
+
+def _dump_selected(path: Path, chosen: list[dict], index: dict[str, list[str]],
+                   as_of: pd.Timestamp, snapshot: str) -> None:
+    """``CAPTURE_DUMP_SELECTED``: pickle exactly what ``attach_strict_probe``/
+    ``write`` need, so ``tools/capture_attach_probe.py`` can replay the
+    strict-trace attach step offline against a fixed, already-selected
+    corpus -- without rebuilding the Scorer (panel + replayed trades) or
+    re-running candidate selection. Opt-in and diagnostic only: nothing in
+    the normal capture path reads this file back.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        pickle.dump(
+            {"chosen": chosen, "index": index, "as_of": as_of, "snapshot": snapshot},
+            fh, protocol=pickle.HIGHEST_PROTOCOL,
+        )
+    print(f"[corpus] CAPTURE_DUMP_SELECTED: wrote {len(chosen)} chosen "
+          f"candidates to {path}", flush=True)
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default=None,
@@ -2792,65 +2905,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     # holding it in `candidates` for the rest of this function; the `finally`
     # below removes that spill directory whether the run finishes or raises.
     try:
-        forward = _events(as_of, args.forward_days, args.max_events)
-        print(f"[corpus] forward events: {len(forward)}", flush=True)
-        boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
-        print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
-
-        # One ChainIndex, built up front, for every pass that prices a
-        # request: forward, boundary, the two rescore passes (pinned/strike,
-        # coarse ladder), and research_replay_pass's own disabled-strategy
-        # replay. 2026-09-18: an instrumented run measured boundary_pass
-        # alone streaming its own fresh ChainIndex per request (transients up
-        # to +673 MB/call) because it reached Scorer.score with
-        # chain_index=None every time; the rescore passes had the same shape
-        # of gap. 2026-09-19: research_replay_pass had the identical gap one
-        # level down -- it calls replay_mod.replay_one directly (never
-        # Scorer.score), so _forward_chain_keys/_boundary_chain_keys's own
-        # DISABLED_STRATEGIES skip does not cover it; it needs its own
-        # _research_replay_chain_keys union, added here rather than left as
-        # a second, separately-timed load late in the pipeline. See
-        # boundary_pass's/_rescore's/research_replay_pass's own docstrings
-        # for why a combined, superset index resolves every key identically
-        # to a fresh per-call one -- this changes nothing about which quote
-        # a row prices against, only when and how many times it is loaded.
-        chain_keys = _forward_chain_keys(scorer, forward, as_of, strategies)
-        chain_keys |= _boundary_chain_keys(scorer, boundaries, strategies)
-        chain_keys |= _research_replay_chain_keys(scorer, boundaries, strategies)
-        chain_index = (
-            replay_mod.load_chain_index(chain_keys, progress_every=0)
-            if chain_keys else None
-        )
-
-        candidates = forward_pass(
-            scorer, forward, as_of, args.quote_max_age, strategies,
-            index=chain_index,
-        )
-        print(f"[corpus] forward scores: {len(candidates)}", flush=True)
-
-        candidates += boundary_pass(scorer, boundaries, strategies, index=chain_index)
-
-        candidates += pinned_and_strike_pass(scorer, candidates, index=chain_index)
-        candidates += coarse_ladder_pass(scorer, candidates, index=chain_index)
-        if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
-            candidates += dyn_sv_pass(candidates)
-        candidates += research_replay_pass(
-            scorer, boundaries, strategies=strategies, index=chain_index,
-        )
-        print(f"[corpus] candidates: {len(candidates)}", flush=True)
-
-        chosen, index = select(candidates)
-        # Only `chosen` -- `select()`'s small covering subset, never
-        # `candidates` itself -- needs its real `legacy_trace` content back;
-        # everything from here on (`attach_strict_probe`, `write`) reads it
-        # directly off `cand`. Every OTHER candidate's checkpoint content
-        # stays on disk, unread, for the rest of the run.
-        _shared_hydration_cache: dict[str, Any] = {}
-        for cand in chosen:
-            for holder in (cand, *(cand.get("members") or ())):
-                trace = _hydrate_trace(holder.get("legacy_trace"))
-                _reconcile_shared_trace_content(trace, _shared_hydration_cache)
-                holder["legacy_trace"] = trace
+        chosen, index, snapshot = _gather_candidates(scorer, as_of, args, strategies)
+        dump_path = os.environ.get("CAPTURE_DUMP_SELECTED")
+        if dump_path:
+            _dump_selected(Path(dump_path), chosen, index, as_of, snapshot)
+        # Goal 1 (RSS): nothing from here on needs the scorer (panel +
+        # replayed trades) -- `write`/`attach_strict_probe`/`chooser_trace`/
+        # `strict_trace_one` take only `chosen`, `index`, `as_of` and this
+        # plain snapshot string, never the Scorer itself (verified by
+        # reading every one of their signatures). Drop it explicitly: a bare
+        # `del` alone does not shrink RSS, `gc.collect()` frees reference
+        # cycles a plain refcount drop would miss, and glibc keeps freed
+        # arenas resident until something calls `malloc_trim`.
+        del scorer
+        gc.collect()
+        _malloc_trim()
         if args.out:
             out_dir = Path(args.out)
         else:
@@ -2859,7 +2928,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             out_dir = DEFAULT_OUT / version
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         doc = write(
-            out_dir, chosen, index, as_of, scorer.snapshot,
+            out_dir, chosen, index, as_of, snapshot,
             replace_existing=args.replace,
             strict_trace=args.strict_phase4_trace,
         )
