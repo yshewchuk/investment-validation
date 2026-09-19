@@ -5,13 +5,25 @@ second, differently-nested reference to the same shared pool (nested
 fragments). The old algorithm is reconstructed here ONLY as the oracle --
 production streams via `capture._write_pair_file`/`_prepare_normalized_shared`
 and `DiskCheckpointSink.write_case`'s streaming path.
+
+The tests below this point cover the SEPARATE fix that stores a
+`_SHARED_TRACE_DOCUMENTS`-registered document once per corpus version under
+`shared/<digest>.json`, referenced (`{"$shared": digest}`) at every
+occurrence instead of expanded again -- the fix for a chooser pair file that
+carried a full copy of the same fold pool once per ranked member. The
+fixtures above never call `register_shared`, so `_prepare_normalized_shared`
+still fully expands them (deduped only by LOCAL identity within one call);
+that is deliberate and unaffected by the fix below, which only activates for
+a node genuinely registered as shared.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import pandas as pd
 
+import checks.tier0_corpus as t0
 import tools.capture_tier0_corpus as capture
 from engine.v2.foundation.canonical import content_hash
 from tools.phase4_checkpoint_sink import _json_bytes
@@ -204,3 +216,155 @@ def test_shared_pool_is_one_object_not_duplicated_after_preparing(tmp_path) -> N
     prepared_pools.append(prepared["elsewhere"]["deep"]["ref"])
     first = prepared_pools[0]
     assert all(p is first for p in prepared_pools)
+
+
+# --------------------------------------------------------------------------
+# a REGISTERED shared document is hoisted into shared/ and referenced
+# --------------------------------------------------------------------------
+
+
+def _registered_chooser_candidate(fixture_id: str, members: int = 11) -> tuple[dict, dict]:
+    """A `_chooser_legacy_trace`, but the pool is registered with
+    `_SHARED_TRACE_DOCUMENTS` the way `engine.score`'s real collector would
+    (`Phase4TraceCollector._document`'s `shared()` helper) -- the identity
+    check `write()`'s new hoisting logic keys off. Returns ``(candidate,
+    pool)``.
+    """
+    trace = _chooser_legacy_trace(members=members)
+    pool = trace["checkpoints"]["chooser"]["value"]["members"][0]["pool"]
+    capture._SHARED_TRACE_DOCUMENTS.register_shared((pool,))
+    request = {"strategy": "dynamic_short_vol", "ticker": "ABC"}
+    record = {"strategy": "dynamic_short_vol", "ticker": "ABC"}
+    return {
+        "fixture_id": fixture_id, "covers": ["strategy:dynamic_short_vol"],
+        "request": request, "record": record, "kind": "dyn_sv_choice",
+        "duration": 0.2, "legacy_trace": trace,
+    }, pool
+
+
+def test_a_registered_shared_pool_is_hoisted_and_referenced(tmp_path) -> None:
+    """The pair file written for a REGISTERED shared pool carries zero
+    copies of it (only references); `shared/` carries exactly one file;
+    `payload_hash` is byte-identical to the OLD, fully-expanded oracle; and
+    loading the pair back resolves every occurrence to ONE shared Python
+    object whose content matches the original pool -- the identity and
+    hash-value proofs the fix exists to satisfy.
+    """
+    candidate, pool = _registered_chooser_candidate("dyn_sv_shared_001")
+    try:
+        out_dir = tmp_path / "corpus"
+        doc = capture.write(
+            out_dir, [candidate],
+            {"strategy:dynamic_short_vol": ["dyn_sv_shared_001"]},
+            pd.Timestamp("2026-01-01"), "snap-1",
+        )
+
+        oracle_pair, _ = _rebuild_pair(candidate)
+        written_text = (out_dir / "pairs" / "dyn_sv_shared_001.json").read_text()
+
+        # No expanded copy of the pool anywhere in the pair file: every
+        # occurrence is a small reference instead.
+        assert written_text.count('"tag": "pool"') == 0
+        assert written_text.count(capture.SHARED_REF_KEY) == 12  # 11 members + summary
+        # The old fully-expanded pair would carry 12 copies of the ~1.7KB
+        # pool (>20KB); the referenced pair carries none of it.
+        assert len(written_text) < 6000
+
+        shared_files = sorted((out_dir / "shared").glob("*.json"))
+        assert len(shared_files) == 1
+        assert doc["shared_documents"] == [
+            "sha256:" + shared_files[0].stem
+        ]
+
+        written_pair = json.loads(written_text)
+        assert written_pair["payload_hash"] == oracle_pair["payload_hash"]
+        assert doc["pairs"]["dyn_sv_shared_001"]["payload_hash"] == oracle_pair["payload_hash"]
+
+        corpus = t0.load(out_dir)
+        loaded_payload = corpus.pairs["dyn_sv_shared_001"]["payload"]
+        # The re-hash proof `checks/tier0_corpus.py` itself relies on
+        # (its "digest" check, §7.3 item 3): plain content_hash, no
+        # fragments, over the RESOLVED payload reproduces payload_hash.
+        assert content_hash(loaded_payload) == oracle_pair["payload_hash"]
+
+        members = loaded_payload["legacy_trace"]["checkpoints"]["chooser"]["value"]["members"]
+        pools = [m["pool"] for m in members]
+        summary = loaded_payload["legacy_trace"]["checkpoints"]["chooser"]["value"][
+            "summary"]["by_fold"]["fold-0"]["details"][0]["pool_ref"]
+        pools.append(summary)
+        first = pools[0]
+        assert all(p is first for p in pools)  # one shared object, not 12 copies
+        # Its expanded recompute matches the source pool -- tag_nonfinite'd,
+        # since that is the JSON-safe form a real file round-trips through.
+        assert first == capture.tag_nonfinite(pool)
+    finally:
+        capture._cleanup_trace_spill()
+
+
+def test_the_case_document_also_references_the_shared_pool(tmp_path) -> None:
+    candidate, pool = _registered_chooser_candidate("dyn_sv_shared_002")
+    try:
+        out_dir = tmp_path / "corpus"
+        capture.write(
+            out_dir, [candidate],
+            {"strategy:dynamic_short_vol": ["dyn_sv_shared_002"]},
+            pd.Timestamp("2026-01-01"), "snap-1",
+        )
+        case_text = (
+            out_dir / "checkpoints" / "cases" / "dyn_sv_shared_002.json"
+        ).read_text()
+        assert case_text.count('"tag":"pool"') == 0  # compact separators, no spaces
+        assert case_text.count(capture.SHARED_REF_KEY) == 12
+    finally:
+        capture._cleanup_trace_spill()
+
+
+def test_two_pairs_served_by_the_same_fold_write_the_shared_file_once(tmp_path) -> None:
+    """Two DIFFERENT DYN-SV choosers sharing the SAME served fold pool (the
+    measured 09-19 scenario: both 11-member choosers) write it once, not
+    once per pair."""
+    trace_a = _chooser_legacy_trace(members=11)
+    pool = trace_a["checkpoints"]["chooser"]["value"]["members"][0]["pool"]
+    capture._SHARED_TRACE_DOCUMENTS.register_shared((pool,))
+    trace_b = {
+        "schema_version": "phase4_legacy_diagnostic_checkpoint.v1.0",
+        "disposition": {"status": "completed", "flags": []},
+        "checkpoints": {
+            "chooser": {
+                "value": {"members": [{"member_index": i, "pool": pool, "rank": i}
+                                       for i in range(11)],
+                          "summary": {}},
+                "content_hash": "sha256:" + "3" * 64,
+            },
+        },
+    }
+    candidate_a = {
+        "fixture_id": "dyn_sv_a", "covers": ["strategy:dynamic_short_vol"],
+        "request": {"strategy": "dynamic_short_vol", "ticker": "A"},
+        "record": {"strategy": "dynamic_short_vol", "ticker": "A"},
+        "kind": "dyn_sv_choice", "duration": 0.2, "legacy_trace": trace_a,
+    }
+    candidate_b = {
+        "fixture_id": "dyn_sv_b", "covers": ["strategy:dynamic_short_vol"],
+        "request": {"strategy": "dynamic_short_vol", "ticker": "B"},
+        "record": {"strategy": "dynamic_short_vol", "ticker": "B"},
+        "kind": "dyn_sv_choice", "duration": 0.2, "legacy_trace": trace_b,
+    }
+    try:
+        out_dir = tmp_path / "corpus"
+        doc = capture.write(
+            out_dir, [candidate_a, candidate_b],
+            {"strategy:dynamic_short_vol": ["dyn_sv_a", "dyn_sv_b"]},
+            pd.Timestamp("2026-01-01"), "snap-1",
+        )
+        assert len(doc["shared_documents"]) == 1
+        assert len(list((out_dir / "shared").glob("*.json"))) == 1
+
+        corpus = t0.load(out_dir)
+        pool_a = corpus.pairs["dyn_sv_a"]["payload"]["legacy_trace"][
+            "checkpoints"]["chooser"]["value"]["members"][0]["pool"]
+        pool_b = corpus.pairs["dyn_sv_b"]["payload"]["legacy_trace"][
+            "checkpoints"]["chooser"]["value"]["members"][0]["pool"]
+        assert pool_a is pool_b
+    finally:
+        capture._cleanup_trace_spill()

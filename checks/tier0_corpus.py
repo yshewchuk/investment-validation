@@ -82,7 +82,8 @@ from engine.v2.diagnosis import (  # noqa: E402
 )
 
 __all__ = ["Corpus", "load", "run", "main", "derive_covers", "seeded_controls",
-           "derived_uncovered", "TIME_BUDGET_SECONDS"]
+           "derived_uncovered", "TIME_BUDGET_SECONDS", "CorpusFormatError",
+           "SHARED_REF_KEY", "SHARED_DOCUMENT_SCHEMA_VERSION"]
 
 DEFAULT_CORPUS = ROOT / "fixtures" / "tier0"
 
@@ -115,6 +116,102 @@ class Corpus:
         return self.pairs[fixture_id]["payload"]["request"]
 
 
+#: A pair's payload may embed a frozen document `tools/capture_tier0_corpus.py`
+#: identified as shared (a served fold pool, residual pool or payoff fit) by
+#: reference instead of in full: `{SHARED_REF_KEY: "sha256:<64 hex>"}` and
+#: NOTHING else in that dict. This module carries the SAME two literals as
+#: `tools/capture_tier0_corpus.py` independently rather than importing them
+#: -- this module must run in a bare checkout with no pandas, no store and no
+#: models (module docstring), and the writer needs all three. One
+#: convention, not two (see `engine/v2/foundation/canonical.py`'s
+#: `NONFINITE_KEY` docstring for the same argument); kept in sync by
+#: `tests/test_tier0_shared_documents.py`.
+SHARED_REF_KEY = "$shared"
+SHARED_DOCUMENT_SCHEMA_VERSION = "tier0_shared_document.v1.0"
+
+
+class CorpusFormatError(ValueError):
+    """A pair's shared-document reference, or the shared document itself,
+    does not match the format this loader understands. Raised loudly --
+    never silently skipped or replaced with a partial value."""
+
+
+def _resolve_shared(node: Any, shared_dir: Path, cache: dict[str, Any],
+                     resolving: set[str]) -> Any:
+    """Walk ``node``, replacing every ``{SHARED_REF_KEY: digest}`` reference
+    with the ONE Python object ``_load_shared_document`` reads for that
+    digest -- the same object at every occurrence, restoring the capture's
+    own in-memory sharing (``cache`` is keyed by digest and shared across
+    every pair one :func:`load` call reads). A dict carrying ``SHARED_REF_KEY``
+    alongside any other key is an unknown reference shape: refused loudly,
+    never silently treated as ordinary data. An old-format document with no
+    reference nodes at all passes through unchanged.
+    """
+    if isinstance(node, dict):
+        if SHARED_REF_KEY in node:
+            if set(node) != {SHARED_REF_KEY}:
+                raise CorpusFormatError(
+                    "unknown shared-reference shape (expected only "
+                    f"{SHARED_REF_KEY!r}): {sorted(node)}")
+            digest = node[SHARED_REF_KEY]
+            if not isinstance(digest, str) or not digest.startswith("sha256:"):
+                raise CorpusFormatError(f"malformed shared digest: {digest!r}")
+            resolved = cache.get(digest)
+            if resolved is None:
+                if digest in resolving:
+                    raise CorpusFormatError(f"cyclic shared-document reference: {digest}")
+                resolving.add(digest)
+                try:
+                    resolved = _load_shared_document(shared_dir, digest, cache, resolving)
+                finally:
+                    resolving.discard(digest)
+                cache[digest] = resolved
+            return resolved
+        return {k: _resolve_shared(v, shared_dir, cache, resolving) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_resolve_shared(v, shared_dir, cache, resolving) for v in node]
+    return node
+
+
+def _load_shared_document(shared_dir: Path, digest: str, cache: dict[str, Any],
+                           resolving: set[str]) -> Any:
+    """Read, verify and resolve one ``shared/<hex>.json`` document.
+
+    A missing file, a malformed body, an unsupported schema version, a
+    ``digest`` field that disagrees with the requested digest, or content
+    that does not hash back to it are all hard refusals -- never a silent
+    skip or a partial/best-effort value.
+    """
+    hexpart = digest.split(":", 1)[-1]
+    path = shared_dir / f"{hexpart}.json"
+    if not path.is_file():
+        raise CorpusFormatError(f"missing shared document for {digest}: {path}")
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise CorpusFormatError(f"unreadable shared document {digest}: {exc}") from exc
+    if not isinstance(doc, dict) or set(doc) != {"schema_version", "digest", "value"}:
+        raise CorpusFormatError(f"malformed shared document {digest}: {path}")
+    if doc.get("schema_version") != SHARED_DOCUMENT_SCHEMA_VERSION:
+        raise CorpusFormatError(
+            f"unsupported shared document schema {doc.get('schema_version')!r} "
+            f"for {digest}")
+    if doc.get("digest") != digest:
+        raise CorpusFormatError(
+            f"shared document {path} declares digest {doc.get('digest')!r}, "
+            f"expected {digest}")
+    # A shared document may itself reference another (nested sharing):
+    # resolve those FIRST, so the hash below is taken over the same fully
+    # expanded logical value the writer computed `digest` from.
+    value = _resolve_shared(doc["value"], shared_dir, cache, resolving)
+    actual = content_hash(value)
+    if actual != digest:
+        raise CorpusFormatError(
+            f"shared document {path} content does not match its digest: "
+            f"{actual} != {digest}")
+    return value
+
+
 def resolve_corpus(root: Path) -> Path:
     """The version directory a corpus root points at.
 
@@ -137,11 +234,29 @@ def resolve_corpus(root: Path) -> Path:
 
 
 def load(root: Path) -> Corpus:
-    """Read the corpus: the index, and every pair file under ``pairs/``."""
+    """Read the corpus: the index, and every pair file under ``pairs/``.
+
+    A pair's payload may embed a shared frozen document by reference
+    (``{SHARED_REF_KEY: "sha256:..."}``) instead of in full -- see
+    ``_resolve_shared``. Every reference in the pairs this ONE call loads
+    resolves to a SINGLE Python object per digest, read once from
+    ``root/shared/<hex>.json`` and cached across every pair, so repeated
+    occurrences (a chooser's 11 ranked members, or two pairs served by the
+    same fold) share that object by identity again -- restoring the
+    capture's own in-memory sharing instead of duplicating it per pair. A
+    missing or digest-mismatched shared file, or an unrecognized reference
+    shape, is a hard refusal (``CorpusFormatError``), never a silent skip.
+    An OLD-format corpus with no ``shared/`` directory and no reference
+    nodes loads unchanged: nothing in it is reference-shaped, so nothing
+    here does anything but pass values through.
+    """
     index = json.loads((root / "INDEX.json").read_text())
+    shared_dir = root / "shared"
+    shared_cache: dict[str, Any] = {}
     pairs = {}
     for path in sorted((root / "pairs").glob("*.json")):
         pair = json.loads(path.read_text())
+        pair = _resolve_shared(pair, shared_dir, shared_cache, set())
         pairs[pair["fixture_id"]] = pair
     return Corpus(root=root, index=index, pairs=pairs)
 
