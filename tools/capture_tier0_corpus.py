@@ -1434,13 +1434,21 @@ def _candidate(request, raw: dict | None, record: dict, took: float, *,
             "legacy_trace": stored_trace}
 
 
-def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
-                 quote_max_age: int,
-                 strategies: tuple[str, ...] | None = None) -> list[dict]:
-    """Every strategy on every forward event, as the board's scoring loop does."""
-    strategy_names = _score_strategies(strategies)
+def _forward_chain_keys(
+    scorer, events: pd.DataFrame, as_of: pd.Timestamp,
+    strategies: tuple[str, ...] | None = None,
+) -> set[tuple[str, pd.Timestamp]]:
+    """Every ``(ticker, date)`` :func:`forward_pass`'s own scoring will look
+    up — computed before any chain I/O, exactly as :class:`engine.replay.
+    ChainIndex`'s own docstring asks: the plan first, then one filtered read.
+
+    A disabled strategy (``score_mod.DISABLED_STRATEGIES``) is skipped here:
+    ``Scorer.score`` returns for it before ever reaching ``_price_entry``
+    (the ``UNVALIDATED_STRUCTURE``/superseded early-return), so planning its
+    chain keys would load data no request ever reads.
+    """
     keys: set[tuple[str, pd.Timestamp]] = set()
-    for strategy in strategy_names:
+    for strategy in _score_strategies(strategies):
         if strategy in score_mod.DISABLED_STRATEGIES:
             continue
         plan = replay_mod.plan_events(
@@ -1454,7 +1462,25 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
             newest = None
         if newest is not None:
             keys.add((ticker, pd.Timestamp(newest).normalize()))
-    index = replay_mod.load_chain_index(keys, progress_every=0) if keys else None
+    return keys
+
+
+def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
+                 quote_max_age: int,
+                 strategies: tuple[str, ...] | None = None,
+                 index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
+    """Every strategy on every forward event, as the board's scoring loop does.
+
+    ``index`` lets a caller supply one ``ChainIndex`` covering more than just
+    this pass (see ``main()``, which unions this with :func:`boundary_pass`'s
+    and the rescore passes' own keys into a single up-front load) — a strict
+    superset of what this function would build for itself resolves every key
+    it queries identically, so passing one in never changes a scored row.
+    """
+    strategy_names = _score_strategies(strategies)
+    if index is None:
+        keys = _forward_chain_keys(scorer, events, as_of, strategies)
+        index = replay_mod.load_chain_index(keys, progress_every=0) if keys else None
 
     out: list[dict] = []
     for row in events.itertuples(index=False):
@@ -1473,8 +1499,31 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
     return out
 
 
+def _boundary_chain_keys(
+    scorer, events: pd.DataFrame, strategies: tuple[str, ...] | None = None,
+) -> set[tuple[str, pd.Timestamp]]:
+    """Every ``(ticker, date)`` :func:`boundary_pass`'s own scoring will look
+    up — the same pattern as :func:`_forward_chain_keys`, over boundary
+    events instead of forward ones. No ``latest_chain_date`` fallback here:
+    unlike forward requests, a boundary ``ScoreRequest`` never sets
+    ``quote_max_age_sessions`` (it is a PAST event, scored at its own
+    decision close, never an upcoming one needing a stale-quote substitute),
+    so ``_price_entry``'s fallback branch is unreachable for it regardless.
+    """
+    keys: set[tuple[str, pd.Timestamp]] = set()
+    for strategy in _score_strategies(strategies):
+        if strategy in score_mod.DISABLED_STRATEGIES:
+            continue
+        plan = replay_mod.plan_events(
+            STRUCTURES[strategy](), events, calendar=scorer.calendar
+        )
+        keys |= plan.chain_keys
+    return keys
+
+
 def boundary_pass(scorer, events: pd.DataFrame,
-                  strategies: tuple[str, ...] | None = None) -> list[dict]:
+                  strategies: tuple[str, ...] | None = None,
+                  index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
     """Past events, scored at their own decision close, for the two boundaries.
 
     ``as_of`` is the structure's DECISION date, resolved through the calendar,
@@ -1482,7 +1531,22 @@ def boundary_pass(scorer, events: pd.DataFrame,
     ``engine.audit`` refuses it. These are also where the priced:S axes are
     won: in the forward window the forecast-sized families come back
     NO_FORECAST with empty legs.
+
+    2026-09-18: an instrumented capture run measured this pass's own
+    ``_price_entry`` calls building a FRESH ``ChainIndex`` per boundary
+    request (transients up to +673 MB/call, the net climbing in steps) —
+    every request reached ``Scorer.score`` with ``chain_index=None``, so
+    ``_price_entry`` streamed its own 1-2-key ``load_chain_index`` call
+    against the whole ``option_chains`` table every time. ``index`` (built
+    once, up front — see ``_boundary_chain_keys`` and ``main()``) is exactly
+    :func:`forward_pass`'s own fix for the identical shape of problem,
+    applied here: a superset index resolves every key this pass ever queries
+    identically to a fresh per-call one, so output is unchanged.
     """
+    if index is None:
+        keys = _boundary_chain_keys(scorer, events, strategies)
+        index = replay_mod.load_chain_index(keys, progress_every=0) if keys else None
+
     out: list[dict] = []
     for strategy in _score_strategies(strategies):
         structure = STRUCTURES[strategy]()
@@ -1495,7 +1559,7 @@ def boundary_pass(scorer, events: pd.DataFrame,
                 session=str(row["session"]), fill=MID, chain_as_of=as_of,
             )
             try:
-                raw, record, took, trace = _score(scorer, request)
+                raw, record, took, trace = _score(scorer, request, index=index)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 print(f"[corpus]   skipped {row['ticker']} {strategy}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
@@ -1508,16 +1572,29 @@ def boundary_pass(scorer, events: pd.DataFrame,
     return out
 
 
-def _rescore(scorer, source: dict, label: str, **changes) -> dict | None:
+def _rescore(scorer, source: dict, label: str,
+            index: "replay_mod.ChainIndex | None" = None, **changes) -> dict | None:
     """Re-score a captured request with some fields changed — same clock.
 
     The changed request inherits the source's ``as_of``, ``chain_as_of`` and
     quote-age policy, so a pinned or strike variant of a historical row is
     scored at that row's decision date rather than today's.
+
+    ``changes`` only ever sets ``structure_params``/``strike`` (never
+    ``event_date``/``as_of``/``chain_as_of`` — see ``phase4_required_folds``'s
+    docstring in ``tools/prepare_phase4_tier4_caches.py`` and this module's
+    own test coverage for that invariant), and ``_price_entry``'s chain-date
+    resolution (``quote_date``/``exit_date``) depends only on ``event_date``/
+    ``session``/the structure's own offsets — never on ``structure_params``/
+    ``strike``. So a rescored request always needs EXACTLY the same chain
+    keys its source did, already resolved once when the source itself was
+    scored: an ``index`` built from the source passes' own combined keys (see
+    ``main()``) covers every rescore here, with no per-call chain load and no
+    change to which quote a row prices against.
     """
     request = replace(request_from_dict(source["request"]), **changes)
     try:
-        raw, record, took, trace = _score(scorer, request)
+        raw, record, took, trace = _score(scorer, request, index=index)
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         print(f"[corpus]   {label} skip {request.ticker} {request.strategy}: "
               f"{type(exc).__name__}: {exc}", flush=True)
@@ -1536,7 +1613,8 @@ def _anchor_strike(record: dict) -> float | None:
     return float(strike) if isinstance(strike, (int, float)) else None
 
 
-def pinned_and_strike_pass(scorer, scored: list[dict], limit: int = 8) -> list[dict]:
+def pinned_and_strike_pass(scorer, scored: list[dict], limit: int = 8,
+                           index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
     """Re-score priced rows with their geometry pinned, and at a listed strike.
 
     The pinned pair is the `e845f3e` regression case made permanent: a replay
@@ -1546,6 +1624,10 @@ def pinned_and_strike_pass(scorer, scored: list[dict], limit: int = 8) -> list[d
 
     The strike pair asks for a strike the source's legs resolved to — a real
     listed strike, not a computed moneyness the chain would snap away from.
+
+    ``index``: see ``_rescore``'s docstring — every rescore here needs exactly
+    the chain keys its source already resolved, so ``main()``'s combined
+    forward+boundary index covers this pass with no per-call chain load.
     """
     out: list[dict] = []
     for source in scored:
@@ -1553,13 +1635,13 @@ def pinned_and_strike_pass(scorer, scored: list[dict], limit: int = 8) -> list[d
         params = record.get("structure_params")
         if not priced(record) or not isinstance(params, dict) or not params:
             continue
-        pinned = _rescore(scorer, source, "pinned",
+        pinned = _rescore(scorer, source, "pinned", index=index,
                           structure_params={k: v for k, v in params.items() if v is not None})
         if pinned is not None:
             pinned["relations"] = {"pinned_from": content_hash(source["request"])}
             out.append(pinned)
         listed = _anchor_strike(record)
-        at_strike = (_rescore(scorer, source, "strike", strike=listed)
+        at_strike = (_rescore(scorer, source, "strike", index=index, strike=listed)
                      if listed is not None else None)
         if at_strike is not None:
             out.append(at_strike)
@@ -1572,20 +1654,23 @@ def pinned_and_strike_pass(scorer, scored: list[dict], limit: int = 8) -> list[d
 _COARSE_WIDTHS = (0.002, 0.004, 0.006, 0.01)
 
 
-def coarse_ladder_pass(scorer, scored: list[dict]) -> list[dict]:
+def coarse_ladder_pass(scorer, scored: list[dict],
+                       index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
     """Ask for a width the ticker's listed ladder cannot carry.
 
     §7.1 requires a coarse ladder and it cannot be waited for, so it is
     *requested* — a real ``structure_params`` width, through the real entry
     point, narrow enough that two legs resolve onto one contract. Asking for a
     refusal is not the same as inventing one.
+
+    ``index``: see ``pinned_and_strike_pass``'s docstring.
     """
     for source in scored:
         record = source["record"]
         if record.get("spot") is None or record.get("strategy") not in ("TWIN-P5", "TWIN-P"):
             continue
         for width in _COARSE_WIDTHS:
-            got = _rescore(scorer, source, "coarse",
+            got = _rescore(scorer, source, "coarse", index=index,
                            structure_params={"width_moneyness": width})
             if got is None:
                 break
@@ -1632,13 +1717,50 @@ def dyn_sv_pass(candidates: list[dict]) -> list[dict]:
     return out
 
 
+def _research_replay_chain_keys(
+    scorer, events: pd.DataFrame, strategies: tuple[str, ...] | None = None,
+) -> set[tuple[str, pd.Timestamp]]:
+    """Every ``(ticker, date)`` :func:`research_replay_pass`'s own
+    ``replay_one`` calls will look up, for CAL-P and CND-P specifically.
+
+    ``_forward_chain_keys``/``_boundary_chain_keys`` deliberately SKIP
+    ``score_mod.DISABLED_STRATEGIES`` — for THOSE passes that is correct,
+    because a disabled strategy never reaches ``_price_entry`` through
+    ``Scorer.score`` (it returns early). ``research_replay_pass`` is a
+    different entry point: it calls ``replay_mod.replay_one`` directly, with
+    no scorer short-circuit, so it genuinely needs CAL-P's/CND-P's own chain
+    keys — this function is the disabled-strategy counterpart the other two
+    do not, and must not, provide.
+    """
+    keys: set[tuple[str, pd.Timestamp]] = set()
+    for strategy in score_mod.DISABLED_STRATEGIES:
+        if strategies is not None and strategy not in strategies:
+            continue
+        plan = replay_mod.plan_events(
+            STRUCTURES[strategy](), events, calendar=scorer.calendar
+        )
+        keys |= plan.chain_keys
+    return keys
+
+
 def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
-                         strategies: tuple[str, ...] | None = None) -> list[dict]:
+                         strategies: tuple[str, ...] | None = None,
+                         index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
     """Price CAL-P and CND-P under research, where the scorer refuses them.
 
     §7.1 requires both to appear as *refusals* on the production path and to
     *replay* under research. That is a different entry point with a different
     record, and conflating the two would lose the distinction.
+
+    2026-09-19: this pass used to build its own fresh ``ChainIndex`` per
+    ``DISABLED_STRATEGIES`` entry (up to two full streamed table scans, late
+    in the pipeline, on top of whatever forward/boundary/rescore had already
+    accumulated) -- the same "fresh index per pass" shape already fixed for
+    ``boundary_pass``/``_rescore``. ``index`` (a superset built once in
+    ``main()`` via ``_research_replay_chain_keys``, unioned into the same
+    combined ``ChainIndex`` the other passes share) resolves every key this
+    pass ever queries identically to a fresh per-strategy one, so a caller
+    that supplies it changes nothing about which rows come back.
     """
     out: list[dict] = []
     for strategy in score_mod.DISABLED_STRATEGIES:
@@ -1646,11 +1768,14 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
             continue
         structure = STRUCTURES[strategy]()
         plan = replay_mod.plan_events(structure, events, calendar=scorer.calendar)
-        index = replay_mod.load_chain_index(plan.chain_keys, progress_every=0)
+        pass_index = (
+            index if index is not None
+            else replay_mod.load_chain_index(plan.chain_keys, progress_every=0)
+        )
         taken = 0
         for row in plan.frame.to_dict("records"):
             started = time.monotonic()
-            rows, skip = replay_mod.replay_one(structure, row, index,
+            rows, skip = replay_mod.replay_one(structure, row, pass_index,
                                                include_legs=True)
             if not rows:
                 continue
@@ -1969,21 +2094,48 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         forward = _events(as_of, args.forward_days, args.max_events)
         print(f"[corpus] forward events: {len(forward)}", flush=True)
+        boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
+        print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
+
+        # One ChainIndex, built up front, for every pass that prices a
+        # request: forward, boundary, the two rescore passes (pinned/strike,
+        # coarse ladder), and research_replay_pass's own disabled-strategy
+        # replay. 2026-09-18: an instrumented run measured boundary_pass
+        # alone streaming its own fresh ChainIndex per request (transients up
+        # to +673 MB/call) because it reached Scorer.score with
+        # chain_index=None every time; the rescore passes had the same shape
+        # of gap. 2026-09-19: research_replay_pass had the identical gap one
+        # level down -- it calls replay_mod.replay_one directly (never
+        # Scorer.score), so _forward_chain_keys/_boundary_chain_keys's own
+        # DISABLED_STRATEGIES skip does not cover it; it needs its own
+        # _research_replay_chain_keys union, added here rather than left as
+        # a second, separately-timed load late in the pipeline. See
+        # boundary_pass's/_rescore's/research_replay_pass's own docstrings
+        # for why a combined, superset index resolves every key identically
+        # to a fresh per-call one -- this changes nothing about which quote
+        # a row prices against, only when and how many times it is loaded.
+        chain_keys = _forward_chain_keys(scorer, forward, as_of, strategies)
+        chain_keys |= _boundary_chain_keys(scorer, boundaries, strategies)
+        chain_keys |= _research_replay_chain_keys(scorer, boundaries, strategies)
+        chain_index = (
+            replay_mod.load_chain_index(chain_keys, progress_every=0)
+            if chain_keys else None
+        )
+
         candidates = forward_pass(
             scorer, forward, as_of, args.quote_max_age, strategies,
+            index=chain_index,
         )
         print(f"[corpus] forward scores: {len(candidates)}", flush=True)
 
-        boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
-        print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
-        candidates += boundary_pass(scorer, boundaries, strategies)
+        candidates += boundary_pass(scorer, boundaries, strategies, index=chain_index)
 
-        candidates += pinned_and_strike_pass(scorer, candidates)
-        candidates += coarse_ladder_pass(scorer, candidates)
+        candidates += pinned_and_strike_pass(scorer, candidates, index=chain_index)
+        candidates += coarse_ladder_pass(scorer, candidates, index=chain_index)
         if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
             candidates += dyn_sv_pass(candidates)
         candidates += research_replay_pass(
-            scorer, boundaries, strategies=strategies,
+            scorer, boundaries, strategies=strategies, index=chain_index,
         )
         print(f"[corpus] candidates: {len(candidates)}", flush=True)
 
