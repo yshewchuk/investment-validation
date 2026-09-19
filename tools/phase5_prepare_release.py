@@ -3,8 +3,11 @@
 
 Reads (never writes) the champion registry and ``data/models/*.joblib``, the
 Tier-4 serving folds under ``data/models/tier4``, P5-3 training-job outputs
-(``payoff_artifact.json`` per calibration fold) and any pre-built P5-4 frozen
-states. Writes one release root (layout: ``checks/phase5_release.py``) under
+(``payoff_artifact.json`` and ``recalibration_artifact.json`` per calibration
+fold, under ``--training-root``) and the frozen states the training job's
+``--state`` writes (driver and paired residual pools, via ``--frozen-state``).
+The admissible-depth table is built here from ``legacy_n_admissible_table()``.
+Which calibration folds to train: ``tools/phase5_calibration_keys.py``. Writes one release root (layout: ``checks/phase5_release.py``) under
 ``--out``, which may not be inside ``data/``:
 
 * the seven champion bindings are staged through
@@ -171,13 +174,32 @@ def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str
     return found
 
 
+#: ``tools/phase5_training_job.py --state`` writes a ``<member>.summary.json``
+#: (counts, hash, status) beside each state file; it is not a state.
+SUMMARY_SUFFIX = ".summary.json"
+
+
+def frozen_state_files(paths: Iterable[Path]) -> list[Path]:
+    """Expand ``--frozen-state`` arguments: a file as given, a directory to its
+    ``*.json`` state files. ``*.summary.json`` is skipped either way."""
+    files: list[Path] = []
+    for path in map(Path, paths):
+        candidates = sorted(path.glob("*.json")) if path.is_dir() else [path]
+        files += [item for item in candidates if not item.name.endswith(SUMMARY_SUFFIX)]
+    return files
+
+
 def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
-    """Pre-built P5-4 frozen states (residual pools, tables), by member."""
+    """Pre-built P5-4 frozen states (residual pools, tables), by member.
+
+    The training job's ``--state`` outputs
+    (``driver_residual_pool__<role>.json``, ``paired_residual_pool.json``) are
+    classified by their own schema and role, not by file name.
+    """
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
     found: dict[str, dict[str, bytes]] = {}
-    for path in files:
-        path = Path(path)
+    for path in frozen_state_files(files):
         data = path.read_bytes()
         state = FrozenStateLoader(path.parent).load(
             FrozenStateRef(path=path.name, content_hash=sha256_bytes(data)))
@@ -190,52 +212,6 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
         else:
             member, name = "admissible_table:dyn_sv", f"{state.table_id}|{state.version}"
         found.setdefault(member, {})[name] = data
-    return found
-
-
-#: Model-stage driver pools: STR-THRU reads ``size`` (driver abs_move),
-#: STR-RUNUP reads ``implied_t1`` and ``runup_move`` (engine/score.py).
-DRIVER_POOL_ROLES = ("size", "implied_t1", "runup_move")
-
-
-def champion_driver_pools(inventory: ModelReleaseInventory, *, load,
-                          resolve=lambda ref: Path(ref)) -> dict[str, dict[str, bytes]]:
-    """Freeze each driver champion's own embedded residual pool, unchanged.
-
-    Legacy serves the model stage's draws from the full-refit champion's
-    ``ModelArtifact.residuals`` and ``residual_buckets`` (flat pool plus
-    prediction-decile buckets). Those arrays are wrapped as-is with the
-    layer-3 constructor -- no re-bucketing, no fitting -- keyed
-    ``(role, champion id, fold=None)``, the key the residual artifact module
-    documents for a full-refit champion's own pool. The champion's training
-    cutoff is not recorded anywhere, so the lineage declares the Tier-3 panel
-    with no end bound: any panel correction invalidates it (conservative).
-    """
-    from engine.v2.models.frozen_state import serialize_frozen_state
-    from engine.v2.models.lineage import DataDependency, Lineage
-    from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
-    from engine.v2.scoring import native_payoff
-
-    lineage = Lineage(data=(DataDependency(table="tier3.panel"),))
-    estimators = {item.artifact_id: next(m for m in item.members if m.kind == "estimator")
-                  for item in inventory.artifacts}
-    found: dict[str, dict[str, bytes]] = {}
-    for binding in inventory.bindings:
-        if binding.role not in DRIVER_POOL_ROLES:
-            continue
-        artifact = load(resolve(estimators[binding.artifact_id].artifact_ref))
-        buckets = artifact.residual_buckets or None
-        pool = make_driver_residual_pool_artifact(
-            role=binding.role, model_id=binding.artifact_id, fold=None,
-            flat_residuals=artifact.residuals,
-            buckets=None if buckets is None else {"edges": buckets["edges"],
-                                                  "pools": buckets["pools"]},
-            deciles=native_payoff.DECILES,
-            min_pool=int((buckets or {}).get("min_pool", native_payoff.MIN_POOL)),
-            lineage=lineage,
-        )
-        found[f"driver_residual_pool:{binding.role}"] = {
-            f"{binding.artifact_id}|champion": serialize_frozen_state(pool)}
     return found
 
 
@@ -375,12 +351,7 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
     if modules_available(("engine.v2.models.recalibration_artifact",))[0]:
         _merge(found, recalibration_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.frozen_state",))[0]:
-        from engine.models import registry as legacy_registry
-
         _merge(found, default_admissible_table())
-        _merge(found, champion_driver_pools(
-            inventory, load=legacy_registry.load_artifact,
-            resolve=lambda ref: Path(ref) if Path(ref).is_absolute() else paths.ROOT / ref))
         _merge(found, frozen_state_payloads(args.frozen_state or ()))
     pool = paths.FEATURES / "chooser_analog_pool.parquet"
     if pool.is_file():
@@ -393,9 +364,11 @@ def main(argv=None) -> int:
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--training-root", type=Path, action="append",
-                        help="P5-3 training-job output dir holding payoff_artifact.json files")
+                        help="P5-3 training-job output dir; every payoff_artifact.json "
+                             "and recalibration_artifact.json under it is collected")
     parser.add_argument("--frozen-state", type=Path, action="append",
-                        help="a pre-built P5-4 frozen state JSON (residual pool, table)")
+                        help="a frozen state JSON, or a dir of them (training job --state "
+                             "output; *.summary.json is ignored)")
     parser.add_argument("--tier4-dir", type=Path)
     parser.add_argument("--tier3-snapshot", default="auto",
                         help="Tier-3 snapshot hash selecting servable folds; 'auto' hashes "

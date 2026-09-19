@@ -22,7 +22,9 @@ Paths used below (pick your own; keep them outside the repo and `data/`):
 
     REL=/root/p5-6/release-A          # staged release root
     ACC=/root/p5-6/acceptance-A       # private gate report + evidence
-    TRAIN=/root/p5-3-runs             # P5-3 training-job outputs
+    TRAIN=/root/p5-3-runs             # P5-3 training-job outputs (calibration folds)
+    STATES=/root/p5-3-runs/states     # training-job --state outputs (residual pools)
+    CORPUS=<phase 4 corpus dir>       # the corpus the gate will replay
     LIVE=/root/p5-6/deployment-live   # the live deployment store, if any
 
 ## 1. Prepare the inputs
@@ -33,39 +35,63 @@ Paths used below (pick your own; keep them outside the repo and `data/`):
            --out /root/p5-6/inventory.json
 
    Any `release_issues` or real-file issue refuses the preparer (step 2).
-2. Payoff calibration artifacts: `engine.v2.models.training.run_training_job`
-   writes one `payoff_artifact.json` per calibration fold, but at `926cca9`
-   **no real-data entry point builds a calibration dataset** —
-   `tools/phase5_training_job.py::build_dataset` exits "not built by this job
-   (P5-4 owns calibration fits)" for every `*:calibration` recipe (keys:
-   `payoff_line:STR-THRU:calibration`, `payoff_line:STR-RUNUP:calibration`,
-   `payoff_surface:STR-RUNUP:calibration`; `--list` shows them). Until that
-   entry point exists, a real release has the three payoff members `MISSING`.
-   When it lands, run each recipe **[heavy, supervisor]**:
+2. **Calibration fold keys.** Payoff and recalibration artifacts are keyed
+   per `(strategy, alpha, cutoff)`, and legacy's cutoff is each request's
+   `evidence_cutoff` (STR-THRU: the decision date; STR-RUNUP: its entry
+   date), so one fold per distinct key. Derive the exact keys the Phase 4
+   corpus's traced pairs ask for, and the training-job commands for them
+   **[light]**:
 
-       python3 tools/bounded_run.py --max-rss-gb 5.5 -- python3 -u \
+       INVESTING_PLAN_ROOT=/root/investing-plan python3 tools/phase5_calibration_keys.py \
+           --phase4-corpus $CORPUS --train-root $TRAIN \
+           --out /root/p5-6/calibration-keys.json
+
+   For a live release use the nightly's date instead of a corpus:
+   `--as-of YYYY-MM-DD --alpha 0.5 [--runup-entry-date D ...]` (the board's
+   STR-RUNUP entry dates; the as-of alone does not fix them). Traced pairs
+   with no derivable key are listed under `source.underivable`, never
+   guessed; strategies with no catalog calibration member under
+   `uncatalogued`.
+3. **Calibration folds** **[heavy, supervisor]**, one job at a time, in the
+   printed order: every `--plan-only` job first, then the same jobs without
+   it. Each is one (recipe, alpha) with one `--cutoff` per fold, e.g.
+
+       python3 tools/bounded_run.py --max-rss-gb 2.5 -- python3 -u \
            tools/phase5_training_job.py --recipe payoff_line:STR-THRU:calibration \
-           --out $TRAIN/payoff-line-str-thru
+           --alpha 0.5 --cutoff 2026-09-16 --cutoff 2026-09-17 \
+           --out $TRAIN/payoff_line__STR-THRU__a0.5 --plan-only
 
-   and pass `--training-root $TRAIN` to the preparer, which collects every
-   `payoff_artifact.json` and every `recalibration_artifact.json` under it
-   (the recalibration map, `engine/v2/models/recalibration_artifact.py`, is
-   written by the same training job and has the same dataset gap; the
-   STR-RUNUP map stays unconsumed: v2 refuses it as
-   `UNSUPPORTED_RECALIBRATION`).
-3. P5-4b frozen states (`52ef989`):
-   - **Driver residual pools** (`size`, `implied_t1`, `runup_move`): the
-     preparer freezes each driver champion's own embedded pool
-     (`ModelArtifact.residuals` + `residual_buckets`) unchanged, keyed
-     `(role, champion id, fold=None)`, lineage `tier3.panel` with no end
-     bound. No flag needed.
-   - **Paired residual pool**: no real-data builder calls
-     `build_paired_residual_pool_artifact` yet, so pass a prebuilt JSON with
-     `--frozen-state`; without one the member is `MISSING`.
-   - **Admissible-depth table**: built by the preparer from
-     `legacy_n_admissible_table()`.
-   `--frozen-state` files are classified by `frozen_release.member_kind`
-   (driver pools by their own `role`).
+   Datasets: `tools/phase5_datasets.py` (`payoff_trades()` for the payoff
+   recipes, `recalibration_pairs()` = the cached legacy pairs table for the
+   maps; `--pairs` overrides its path). The STR-RUNUP line and map are
+   catalog-only (no v2 consumer; v2 refuses a declared STR-RUNUP map as
+   `UNSUPPORTED_RECALIBRATION`) and are built at the same keys so the
+   release is complete (my judgement call). The preparer collects every
+   `payoff_artifact.json` and `recalibration_artifact.json` under
+   `--training-root $TRAIN`.
+4. **Frozen residual pools** **[heavy, supervisor]**, plan-only first
+   (writes only the `.summary.json`), then for real:
+
+       for S in driver_residual_pool:size driver_residual_pool:implied_t1 \
+                driver_residual_pool:runup_move; do
+         python3 tools/bounded_run.py --max-rss-gb 2.5 -- python3 -u \
+             tools/phase5_training_job.py --state $S --out $STATES --plan-only
+       done
+       python3 tools/bounded_run.py --max-rss-gb 5.5 -- python3 -u \
+           tools/phase5_training_job.py --state paired_residual_pool --out $STATES --plan-only
+
+   The driver pools are the champions' own embedded pools, wrapped unchanged
+   (`residuals.freeze_stored_driver_residual_pool`); the paired pool is the
+   full-universe `Scorer._residual_pool` (crush table computed a ticker chunk
+   at a time; `--ticker-chunk` lowers memory). Output files are
+   `$STATES/driver_residual_pool__<role>.json` and
+   `$STATES/paired_residual_pool.json`; pass the directory with
+   `--frozen-state $STATES`. The `*.summary.json` beside them are ignored.
+   The admissible-depth table is built by the preparer itself from
+   `legacy_n_admissible_table()`.
+5. After staging (§2), confirm the release holds every derived key
+   **[light]**: rerun step 2 with `--release-root $REL`;
+   `missing_from_release` must be empty for every member.
 
 ## 2. Assemble the staged release
 
@@ -76,7 +102,7 @@ Plan first. It prints one line per catalog member and writes `$REL/plan.json`.
     INVESTING_PLAN_ROOT=/root/investing-plan python3 tools/bounded_run.py \
         --max-rss-gb 1.5 -- python3 -u tools/phase5_prepare_release.py \
         --release-id p5-6-2026-09-18a --out $REL \
-        --training-root $TRAIN [--frozen-state <pool.json> ...] \
+        --training-root $TRAIN --frozen-state $STATES \
         [--incumbent $LIVE] --plan-only
 
 Then the same command without `--plan-only` stages it. Staging goes through
@@ -183,17 +209,14 @@ fallback until cutover; record that decision in the report handoff.
 
 ## 5. Why the gate is red today
 
-At `52ef989` + P5-6 round 2, the full catalog run shows, for a release built
+At `f2b4d88` + P5-6 round 2, the full catalog run shows, for a release built
 from real inputs:
 
-- `P5_MEMBER_MISSING` for the three payoff members and
-  `recalibration_map:STR-THRU` (no real-data calibration dataset entry point,
-  §1.2), which blocks the payoff-line, payoff-surface, recalibration and
-  driver-pool consumers (`P5_CONSUMER_BLOCKED`: the driver-pool probe scores
-  through the staged payoff artifact of its strategy);
-- `P5_MEMBER_MISSING` for `paired_residual_pool` unless `--frozen-state`
-  supplies one (no real-data builder), blocking
-  `simulation.paired_residual_pool`;
+- `P5_MEMBER_MISSING` for any calibration or residual-pool member whose
+  §1 job was not run (the builders exist since `f2b4d88`), which also blocks
+  its consumers (`P5_CONSUMER_BLOCKED`: the driver-pool probe scores through
+  the staged payoff artifact of its strategy, the recalibration probe through
+  the same-key STR-THRU line);
 - `P5_MEMBER_PENDING` for the trailing `pnl_sim` cutoff and the board analog
   matcher (no frozen artifact type yet);
 - `P5_CONSUMER_PENDING` for the consumers without a probe: admissible table
@@ -216,4 +239,4 @@ When a member's artifact type merges, add its builder to
 Synthetic only, no real data:
 
     timeout 600 python3 -m pytest -q -n 2 tests/test_checks_phase5_acceptance.py \
-        tests/test_checks_phase5_phase4_replay.py
+        tests/test_checks_phase5_phase4_replay.py tests/test_phase5_calibration_keys.py

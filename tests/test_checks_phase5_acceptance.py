@@ -518,41 +518,6 @@ def test_lineage_upstream_naming_a_staged_state_passes(tmp_path):
     assert evidence["release_ok"] is True
 
 
-def test_preparer_freezes_champion_pools_unchanged(tmp_path):
-    from types import SimpleNamespace
-
-    import numpy as np
-
-    from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
-
-    keys = (("size", "*"), ("implied_t1", "*"), ("gate", "STR-THRU"))
-    _release_obj, inventory, _payloads = _models("rel", keys=keys)
-    stored = {
-        "m-size-all": SimpleNamespace(
-            residuals=np.array([1.0, -2.0, 0.5]),
-            residual_buckets={"edges": np.array([0.0, 5.0, 10.0]),
-                              "pools": [np.array([1.0]), np.array([-2.0, 0.5])],
-                              "min_pool": 1, "kind": "prediction_decile"}),
-        "m-implied_t1-all": SimpleNamespace(residuals=np.array([0.25]), residual_buckets=None),
-    }
-    # json-linear fixtures share one artifact_ref, so serve in binding order
-    served = iter([stored["m-size-all"], stored["m-implied_t1-all"]])
-
-    def load(path):
-        return next(served)
-
-    found = prep.champion_driver_pools(inventory, load=load)
-    assert sorted(found) == ["driver_residual_pool:implied_t1", "driver_residual_pool:size"]
-    data = found["driver_residual_pool:size"]["m-size-all|champion"]
-    (tmp_path / "pool.json").write_bytes(data)
-    pool = FrozenStateLoader(tmp_path).load(
-        FrozenStateRef(path="pool.json", content_hash=layout.sha256_bytes(data)))
-    assert (pool.role, pool.model_id, pool.fold) == ("size", "m-size-all", None)
-    assert pool.flat_residuals == (1.0, -2.0, 0.5)
-    assert pool.bucket_edges == (0.0, 5.0, 10.0) and pool.min_pool == 1
-    assert pool.lineage.declared
-
-
 def test_preparer_classifies_prebuilt_frozen_states(tmp_path):
     paths = []
     for name, data in (("d.json", _driver_pool("runup_move")), ("p.json", _paired_pool())):
@@ -560,3 +525,18 @@ def test_preparer_classifies_prebuilt_frozen_states(tmp_path):
         paths.append(tmp_path / name)
     found = prep.frozen_state_payloads(paths)
     assert sorted(found) == ["driver_residual_pool:runup_move", "paired_residual_pool"]
+
+
+def test_frozen_state_dir_skips_training_job_summaries(tmp_path):
+    out = tmp_path / "states"
+    out.mkdir()
+    (out / "driver_residual_pool__size.json").write_bytes(_driver_pool("size"))
+    (out / "driver_residual_pool__size.summary.json").write_text('{"state": "x"}')
+    (out / "paired_residual_pool.json").write_bytes(_paired_pool())
+    (out / "paired_residual_pool.summary.json").write_text('{"state": "y"}')
+
+    assert [p.name for p in prep.frozen_state_files([out])] == [
+        "driver_residual_pool__size.json", "paired_residual_pool.json"]
+    assert prep.frozen_state_files([out / "paired_residual_pool.summary.json"]) == []
+    found = prep.frozen_state_payloads([out])
+    assert sorted(found) == ["driver_residual_pool:size", "paired_residual_pool"]
