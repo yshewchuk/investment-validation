@@ -97,23 +97,36 @@ class FrozenStageExecutor:
                 missing_features=missing,
             )
 
+        # Legacy semantics (engine/score.py ``_score_model``/``_score_gate``):
+        # ``features[...].to_numpy(dtype=float)`` turns a missing value (None
+        # or NaN) into NaN, and ``not np.isfinite(X).all()`` then flags
+        # MISSING_FEATURES naming EVERY non-finite column -- NaN and +/-inf
+        # alike -- and declines. So a non-finite value is a missing feature,
+        # not an invalid one (R4-20 gap 4). Only a value that is not a number
+        # at all (legacy's float conversion would raise) is INVALID_FEATURE.
         row: list[float] = []
         for name in binding.feature_order:
+            raw = features[name]
             try:
-                value = float(features[name])
+                value = float("nan") if raw is None else float(raw)
             except (TypeError, ValueError) as exc:
                 raise FrozenStageRefusal(
                     "INVALID_FEATURE",
                     f"frozen model feature is not numeric: {name}",
                     reason_codes=("INVALID_FEATURE",),
                 ) from exc
-            if not isfinite(value):
-                raise FrozenStageRefusal(
-                    "INVALID_FEATURE",
-                    f"frozen model feature is not finite: {name}",
-                    reason_codes=("INVALID_FEATURE",),
-                )
             row.append(value)
+        nonfinite = tuple(
+            name for name, value in zip(binding.feature_order, row)
+            if not isfinite(value)
+        )
+        if nonfinite:
+            raise FrozenStageRefusal(
+                "MISSING_FEATURES",
+                f"non-finite frozen model features: {', '.join(nonfinite)}",
+                reason_codes=("MISSING_FEATURES",),
+                missing_features=nonfinite,
+            )
         return tuple(row)
 
     def _verify(
@@ -235,6 +248,16 @@ class FrozenRecipeExecutor:
         if self._binding is None:
             return ()
         return tuple(member.content_hash for member in self._binding.members)
+
+    @property
+    def adapter(self) -> str | None:
+        """The resolved binding's adapter name, ``None`` when unresolved."""
+        return None if self._binding is None else self._binding.adapter
+
+    @property
+    def feature_order(self) -> tuple[str, ...]:
+        """The resolved binding's feature order, ``()`` when unresolved."""
+        return () if self._binding is None else tuple(self._binding.feature_order)
 
     def __str__(self) -> str:
         if self._executor is None or self._binding is None:

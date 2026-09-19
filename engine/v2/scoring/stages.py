@@ -166,7 +166,9 @@ _ROLE_OUTPUTS = {
     "iv_crush": ("pred_iv_crush", "pred_iv_crush_30"),
     "fair_value": ("model_fair_pct",),
 }
-_INTERNAL_STAGE_FIELDS = frozenset({"executors"})
+# Executor objects are identified in receipts by their str() identity (the
+# gate's ``forecast_recipe``), never deep-copied into an observer document.
+_INTERNAL_STAGE_FIELDS = frozenset({"executors", "forecast_executor"})
 _STRATEGY_FORECAST_ROLES = {
     "STR-THRU": ("driver",),
     "STR-RUNUP": ("implied_t1", "runup_move"),
@@ -526,8 +528,26 @@ def _execute_frozen_forecast(
     return True
 
 
+#: The adapter legacy's Tier-4 fold caches are served through. Legacy
+#: ``tier4.ServingModel.predict`` answers NaN -- silently, no flag -- for a row
+#: with a missing or non-finite feature (engine/data/features/tier4.py), and
+#: every caller treats that NaN as "no forecast": sizing declines NO_FORECAST
+#: (``Scorer._size_from_forecast``), the crush forecast becomes ``None`` and
+#: the simulation is undetermined (``Scorer._crush_forecast`` ->
+#: ``pnl_sim.expected_pnl`` returns ``None``), the gate's forecast columns
+#: stay NaN (``Scorer._forecast_for_gate``).
+TIER4_FOLD_ADAPTER = "tier4-serving-fold.v1"
+#: Forecast outputs whose absence was an undetermined fold forecast (see
+#: above), published so later stages decline the way legacy does.
+_UNDETERMINED_FIELD = "forecast_undetermined"
+
+
+def _missing_feature_refusal(exc: Exception) -> bool:
+    return "MISSING_FEATURES" in tuple(getattr(exc, "reason_codes", ()) or ())
+
+
 def _execute_forecast_executor(
-    executor, field, facts, output, invalid_fields, flags,
+    executor, field, facts, output, invalid_fields, flags, undetermined,
 ) -> None:
     predict = getattr(executor, "predict", None)
     if not callable(predict):
@@ -545,7 +565,17 @@ def _execute_forecast_executor(
             return
         output[field] = value
     except (TypeError, ValueError, KeyError) as exc:
-        if not tuple(getattr(exc, "reason_codes", ()) or ()):
+        if _missing_feature_refusal(exc):
+            # R4-20 gap 4: a missing/non-finite model feature is legacy's
+            # MISSING_FEATURES for a champion model (``_score_model``), and a
+            # silent NaN for a Tier-4 fold (see TIER4_FOLD_ADAPTER). Either
+            # way the output is accounted for, not a second
+            # MISSING_FORECAST_OUTPUT refusal legacy never raises.
+            invalid_fields.add(field)
+            if getattr(executor, "adapter", None) == TIER4_FOLD_ADAPTER:
+                undetermined.add(field)
+                return
+        elif not tuple(getattr(exc, "reason_codes", ()) or ()):
             invalid_fields.add(field)
         _add_executor_refusal(flags, exc, f"INVALID_FORECAST_EXECUTOR:{field}")
 
@@ -568,6 +598,7 @@ def _execute_local_forecast(
     output: dict[str, Any],
     invalid_fields: set[str],
     flags: list[str],
+    undetermined: set[str],
 ) -> bool:
     models = block.get("models", {})
     if not isinstance(models, Mapping):
@@ -585,6 +616,7 @@ def _execute_local_forecast(
             declared = True
             _execute_forecast_executor(
                 executor, field, facts, output, invalid_fields, flags,
+                undetermined,
             )
             continue
         spec = models.get(field, block.get(field))
@@ -602,17 +634,26 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     invalid_fields: set[str] = set()
     if block.get("driver_name") is not None:
         output["driver_name"] = str(block["driver_name"])
+    undetermined: set[str] = set()
     frozen_declared = _execute_frozen_forecast(
         block, output, invalid_fields, flags,
     )
     local_declared = _execute_local_forecast(
-        inputs, block, values, output, invalid_fields, flags,
+        inputs, block, values, output, invalid_fields, flags, undetermined,
     )
     _validate_forecast_roles(
         inputs, output, flags, strategy, invalid_fields,
     )
     if not (frozen_declared or local_declared):
         _add_flag(flags, "MISSING_FORECAST_INPUT")
+    if "forecast_abs_move" in undetermined and "size" in _required_forecast_roles(
+        inputs, strategy,
+    ):
+        # Legacy ``_size_from_forecast``: a NaN fold forecast cannot size the
+        # structure, and the row declines NO_FORECAST.
+        _add_flag(flags, "NO_FORECAST")
+    if undetermined:
+        output[_UNDETERMINED_FIELD] = tuple(sorted(undetermined))
     values.update(output)
     return output
 
@@ -829,6 +870,15 @@ def _black_scholes_put(spot: np.ndarray, strike: float, years: float,
 
 
 def _residual_arrays(raw: Any) -> tuple[np.ndarray, ...]:
+    """The compatibility-path paired pool, as legacy ``ResidualPool`` holds it.
+
+    Legacy drops a row only where ``event_date``, ``pred_abs_move``,
+    ``err_move`` or ``err_crush`` is MISSING (``history.dropna(subset=...)``,
+    engine/pnl_sim.py ``ResidualPool.__init__``): NaN/NaT/None. A +/-inf row
+    stays in the pool, counts toward ``pool_n`` and the decile edges, and can
+    be drawn -- and the simulation then carries it through the same numpy
+    arithmetic legacy does (R4-20 gap 1). So this drops NaN only, never inf.
+    """
     rows: list[tuple[np.datetime64, float, float, float]] = []
     for item in raw or ():
         if not isinstance(item, Mapping):
@@ -840,8 +890,8 @@ def _residual_arrays(raw: Any) -> tuple[np.ndarray, ...]:
             crush = float(item["err_crush"])
         except (KeyError, TypeError, ValueError):
             continue
-        if np.isnat(event_date) or not all(
-            isfinite(value) for value in (prediction, move, crush)
+        if np.isnat(event_date) or any(
+            value != value for value in (prediction, move, crush)
         ):
             continue
         rows.append((event_date, prediction, move, crush))
@@ -960,6 +1010,16 @@ def _planned_parameters(block: Mapping[str, Any], values: Mapping[str, Any],
     missing = [
         name for name, value in parameters.items() if _finite(value) is None
     ]
+    undetermined = set(values.get(_UNDETERMINED_FIELD) or ())
+    silent = {
+        "pred_abs_move": "forecast_abs_move" in undetermined,
+        "pred_iv_crush": bool({"pred_iv_crush", "pred_iv_crush_30"} & undetermined),
+    }
+    if missing and all(silent.get(name, False) for name in missing):
+        # Legacy ``expected_pnl`` returns ``None`` (NONFINITE_INPUT) without
+        # a flag when a fold forecast came back NaN: the simulation is
+        # undetermined, the row is not refused for it (R4-20 gap 4).
+        return None
     event_date = block.get("event_date", values.get("event_date"))
     if event_date is None:
         missing.append("event_date")
@@ -1568,6 +1628,59 @@ def _gate_result(score: float | None, threshold: Any,
     }
 
 
+def _gate_facts(inputs: NativeScoreInputs, values: Mapping[str, Any],
+                block: Mapping[str, Any], requested: tuple[str, ...] | None,
+                flags: list[str]) -> dict[str, Any] | None:
+    """The gate's inputs: ``_facts`` plus the derived columns a gate names
+    (R4-20 gap 3; engine/score.py ``Scorer._gate_feature_frame``).
+
+    Like legacy, a GROUP (the five forecast columns, the three analog
+    columns) is derived when the gate names at least one of its columns that
+    the base feature vector does not carry -- and then legacy writes EVERY
+    column of the group, overwriting a base value of the same name. So does
+    this. ``requested`` is the gate's feature list, or ``None`` when the
+    executor cannot say (then the analog group is derived, and the forecast
+    group when declared).
+    ``None`` is returned after flagging when a named forecast column has no
+    declared source, or the forecast binding cannot be served.
+    """
+    from engine.v2.scoring import native_gate_features as derived
+
+    facts = _facts(inputs, values)
+    base = inputs.features.get("model_inputs")
+    base = base if isinstance(base, Mapping) else {}
+
+    def wanted(names: tuple[str, ...]) -> list[str]:
+        return [name for name in names if name not in base
+                and (requested is None or name in requested)]
+
+    if wanted(derived.GATE_ANALOG_COLUMNS):
+        facts.update(derived.gate_analog_columns(values))
+    forecast = wanted(derived.GATE_FORECAST_COLUMNS)
+    executor = block.get("forecast_executor")
+    if not forecast or (requested is None and executor is None):
+        return facts
+    if executor is None:
+        _add_flag(flags, "MISSING_GATE_INPUT:forecast")
+        return None
+    pool = block.get("forecast_pool")
+    band = {"pred_abs_move_p10", "pred_abs_move_p90", "pred_abs_move_sd"}
+    if pool is None and requested is not None and band & set(requested):
+        _add_flag(flags, "MISSING_GATE_INPUT:forecast_pool")
+        return None
+    try:
+        served = _finite(executor.predict(facts).get("pred_abs_move"))
+    except (TypeError, ValueError, KeyError) as exc:
+        if not _missing_feature_refusal(exc):
+            _add_executor_refusal(flags, exc, "INVALID_GATE_FORECAST")
+            return None
+        # A fold row with a missing/non-finite feature serves NaN (legacy
+        # ``ServingModel.predict``): every forecast column stays NaN.
+        served = None
+    facts.update(derived.gate_forecast_columns(served, pool, facts.get("im")))
+    return facts
+
+
 def _execute_gate_executor(inputs: NativeScoreInputs,
                            values: Mapping[str, Any],
                            block: Mapping[str, Any],
@@ -1580,8 +1693,13 @@ def _execute_gate_executor(inputs: NativeScoreInputs,
     if executor is None or not callable(getattr(executor, "predict", None)):
         _add_flag(flags, "INVALID_GATE_EXECUTOR")
         return {}
+    order = getattr(executor, "feature_order", None)
+    requested = tuple(order) if order else None
+    facts = _gate_facts(inputs, values, block, requested, flags)
+    if facts is None:
+        return {}
     try:
-        result = executor.predict(_facts(inputs, values))
+        result = executor.predict(facts)
         if isinstance(result, Mapping):
             score = result.get("gate_score")
             if score is None and len(result) == 1:
@@ -1603,8 +1721,13 @@ def _execute_gate_model(inputs: NativeScoreInputs,
     if not isinstance(model, Mapping):
         _add_flag(flags, "INVALID_GATE_MODEL")
         return {}
+    coefficients = model.get("coefficients")
+    requested = tuple(coefficients) if isinstance(coefficients, Mapping) else ()
+    facts = _gate_facts(inputs, values, block, requested, flags)
+    if facts is None:
+        return {}
     try:
-        score = _linear(model, _facts(inputs, values), "gate")
+        score = _linear(model, facts, "gate")
     except ValueError as exc:
         _add_flag(flags, str(exc))
         return {}
@@ -1637,6 +1760,53 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
         if not any(block.get(field) is not None for field in _GATE_OUTPUTS):
             _add_flag(flags, "MISSING_GATE_INPUT")
             return output
+    values.update(output)
+    return output
+
+
+def _execute_chooser(inputs: NativeScoreInputs, name: str,
+                     values: dict[str, Any], flags: list[str]) -> dict[str, Any]:
+    """The DYN-SV chooser champion over this candidate (R4-20 gap 5).
+
+    engine/score.py ``Scorer._score_chooser``: the champion's features are
+    read by name (``_chooser_frame``); any missing or non-finite one
+    declines the ranking with the ADVISORY ``CHOOSER_MISSING_FEATURES`` --
+    the row stays scored, only ``chooser_score`` is absent. Otherwise
+    ``chooser_score`` is the frozen binding's prediction (no refit). The
+    columns ``_chooser_frame`` reads straight off the scoring pass are
+    derived here; every other one comes from the declared feature vector.
+    """
+    from engine.v2.scoring import native_gate_features as derived
+
+    block = inputs.chooser
+    executors = block.get("executors")
+    if executors is None:
+        output = {key: value for key, value in block.items()
+                  if key not in _OWNED_OUTPUTS and key != "flags"}
+        values.update(output)
+        return output
+    executor = executors.get("chooser_score") if isinstance(executors, Mapping) else None
+    if executor is None or not callable(getattr(executor, "predict", None)):
+        _add_flag(flags, "INVALID_CHOOSER_EXECUTOR")
+        return {}
+    facts = _facts(inputs, values)
+    base = inputs.features.get("model_inputs")
+    base = base if isinstance(base, Mapping) else {}
+    facts.update({key: value for key, value in
+                  derived.chooser_direct_columns(name, values, flags).items()
+                  if key not in base})
+    try:
+        score = _finite(executor.predict(facts).get("chooser_score"))
+    except (TypeError, ValueError, KeyError) as exc:
+        if _missing_feature_refusal(exc):
+            _add_flag(flags, "CHOOSER_MISSING_FEATURES")
+        else:
+            _add_executor_refusal(flags, exc, "INVALID_CHOOSER_EXECUTOR")
+        return {}
+    if score is None:
+        _add_flag(flags, "CHOOSER_MISSING_FEATURES")
+        return {}
+    output = {"chooser_score": score}
     values.update(output)
     return output
 
@@ -1704,23 +1874,21 @@ def _append_late_stages(
              "simulation": simulation},
             gate, observer,
         )
-        for stage, block in (
-            ("chooser", inputs.chooser), ("diagnostics", inputs.diagnostics),
-        ):
-            output = (
-                _merge_diagnostics(values, block)
-                if stage == "diagnostics"
-                else {
-                    key: value for key, value in block.items()
-                    if key not in _OWNED_OUTPUTS and key != "flags"
-                }
-            )
-            if stage != "diagnostics":
-                values.update(output)
-            _emit_stage(
-                executed, stage, {"prior": executed[-1].output_hash}, output,
-                observer,
-            )
+        chooser = _execute_chooser(inputs, geometry.strategy, values, flags)
+        chooser_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
+        if isinstance(inputs.chooser.get("executors"), Mapping):
+            # A frozen chooser recipe is identified by its binding (the
+            # executor's str()), exactly like the gate's.
+            chooser_inputs["inputs"] = {
+                "binding_id": inputs.chooser.get("binding_id"),
+                "executors": {key: str(value) for key, value
+                              in inputs.chooser["executors"].items()},
+            }
+        _emit_stage(executed, "chooser", chooser_inputs, chooser, observer)
+        _emit_stage(
+            executed, "diagnostics", {"prior": executed[-1].output_hash},
+            _merge_diagnostics(values, inputs.diagnostics), observer,
+        )
     for block in blocks:
         for item in block.get("flags") or ():
             _add_flag(flags, item)

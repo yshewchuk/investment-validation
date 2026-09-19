@@ -72,6 +72,11 @@ _FROZEN_OUTPUT_ROLES = {
     "pred_iv_crush_30": frozenset({"iv_crush"}),
     "model_fair_pct": frozenset({"fair_value"}),
     "gate_score": frozenset({"gate"}),
+    # The forecast-analog gate's own ``pred_abs_move`` (R4-20 gap 3): the
+    # Tier-4 size fold legacy ``Scorer._forecast_for_gate`` serves.
+    "pred_abs_move": frozenset({"size"}),
+    # The DYN-SV chooser champion (R4-20 gap 5), ``dyn_sv_chooser_v1_1``.
+    "chooser_score": frozenset({"chooser"}),
 }
 _RESIDUAL_RECIPE_FIELDS = frozenset({
     "mode", "terminal_spots", "weights", "capital_at_risk", "pnl_cutoff",
@@ -108,7 +113,18 @@ _BUCKET_ANALOG_RECIPE_FIELDS = frozenset({
 })
 _GATE_RECIPE_FIELDS = frozenset({
     "model", "threshold", "recipe_id", "artifact_ref", "artifact_hashes",
+    # R4-20 gap 3: the size-fold binding the gate's derived forecast columns
+    # come from, as {"binding_id"[, "output"]}.
+    "forecast",
 }) | _FROZEN_RECIPE_FIELDS
+# The served size fold's held-out pool, the band's source (legacy
+# ``ServingModel.pool_pred``/``pool_res``/``interval_floor``).
+_GATE_FORECAST_POOL_FIELDS = frozenset({"predictions", "residuals", "interval_floor"})
+# engine/score.py DYNAMIC_MENU: the only strategies legacy ever asks the
+# chooser to score (``Scorer.score``: ``if request.strategy in DYNAMIC_MENU``).
+_CHOOSER_STRATEGIES = frozenset({
+    "TWIN-P", "TWIN-P5", "CND-PS", "BFLY-P", "BFLY-P5", "RAMP7", "CTR5",
+})
 # Payoff-calibration/model-layer recipe fields. ``before`` is the decision's
 # evidence cutoff (a raw fact, matched against each row's own exit_date by
 # the native stage -- see stages.py's ``_execute_model``/``native_payoff.
@@ -255,6 +271,16 @@ class SourceBundle:
     # MODEL_NOT_READY at execution; it never falls back to another model.
     frozen_inference: "FrozenInference | None" = None
     model_release: "ModelRelease | None" = None
+    # R4-20 gap 3: the served size fold's held-out pool behind the gate's
+    # ``pred_abs_move_p10``/``_p90``/``_sd`` -- ``{"predictions",
+    # "residuals"[, "interval_floor"]}``, the fold's own ``pool_pred``/
+    # ``pool_res`` in stored order (a model-owned population, like
+    # ``model_residual_rows``; never this row's answer). Empty: undeclared.
+    gate_forecast_pool: Mapping[str, Any] = field(default_factory=dict)
+    # R4-20 gap 5: the DYN-SV chooser champion as a frozen release binding,
+    # ``{"binding_id"[, "output"]}``, for a DYNAMIC_MENU candidate. Empty:
+    # no chooser ranking is requested (legacy with no chooser champion).
+    chooser_recipe: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -439,8 +465,40 @@ def _bounded_recipe(
     return dict(values)
 
 
+def _gate_forecast_members(bundle: SourceBundle, gate: dict[str, Any]) -> dict[str, Any]:
+    """The gate's derived-forecast inputs (R4-20 gap 3), popped off ``gate``.
+
+    ``forecast`` names the size-fold binding; ``gate_forecast_pool`` is that
+    fold's pool. Both are optional -- a gate naming no forecast column needs
+    neither, and one that does but lacks them is refused at execution.
+    """
+    members: dict[str, Any] = {}
+    forecast = gate.pop("forecast", None)
+    if forecast is not None:
+        if not _is_frozen_recipe(forecast):
+            raise ValueError("gate_recipe.forecast must name a frozen binding")
+        executor = _frozen_recipe_executor(bundle, "pred_abs_move", forecast)
+        members["forecast_executor"] = executor
+        members["forecast_recipe"] = str(executor)
+    pool = _bounded_recipe("gate_forecast_pool", bundle.gate_forecast_pool,
+                           _GATE_FORECAST_POOL_FIELDS)
+    if pool:
+        predictions = tuple(float(value) for value in pool.get("predictions", ()))
+        residuals = tuple(float(value) for value in pool.get("residuals", ()))
+        if len(predictions) != len(residuals):
+            raise ValueError("gate_forecast_pool predictions and residuals differ in length")
+        floor = pool.get("interval_floor", 0.0)
+        members["forecast_pool"] = {
+            "predictions": predictions, "residuals": residuals,
+            "interval_floor": None if floor is None else _finite_number(
+                floor, "gate_forecast_pool.interval_floor"),
+        }
+    return members
+
+
 def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
     gate = _bounded_recipe("gate_recipe", bundle.gate_recipe, _GATE_RECIPE_FIELDS)
+    gate.update(_gate_forecast_members(bundle, gate))
     if _is_frozen_recipe(gate):
         if gate.get("model") is not None:
             raise ValueError("gate_recipe cannot name both a binding and a linear model")
@@ -461,6 +519,30 @@ def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
         gate.get("threshold"), "gate_recipe.threshold",
     )
     return gate
+
+
+def _chooser_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
+    """The DYN-SV chooser champion as a frozen recipe (R4-20 gap 5).
+
+    Empty unless declared. Declared for a strategy outside legacy's
+    DYNAMIC_MENU it is a malformed bundle: legacy never scores the chooser
+    there. The binding runs through FrozenInference like every other frozen
+    recipe -- verified members, no refit, MODEL_NOT_READY when unresolved.
+    """
+    if not bundle.chooser_recipe:
+        return {}
+    if strategy not in _CHOOSER_STRATEGIES:
+        raise ValueError(f"chooser_recipe declared for {strategy}, which is not a "
+                         "DYN-SV menu candidate")
+    config = _bounded_recipe("chooser_recipe", bundle.chooser_recipe, _FROZEN_RECIPE_FIELDS)
+    if not _is_frozen_recipe(config):
+        raise ValueError("chooser_recipe must name a frozen binding")
+    return {
+        "binding_id": str(config["binding_id"]),
+        "executors": {
+            "chooser_score": _frozen_recipe_executor(bundle, "chooser_score", config),
+        },
+    }
 
 
 def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
@@ -733,6 +815,7 @@ def _declaration_receipts(
     analogs: Mapping[str, Any],
     simulation: Mapping[str, Any],
     gate: Mapping[str, Any],
+    chooser: Mapping[str, Any],
 ) -> tuple[StageReceipt, ...]:
     pending = {"execution": "native-runtime"}
     declarations = (
@@ -745,7 +828,7 @@ def _declaration_receipts(
         ("analogs", {"recipe": analogs}, pending),
         ("simulation", {"recipe": simulation}, pending),
         ("gate", {"recipe": gate}, pending),
-        ("chooser", {}, pending),
+        ("chooser", {"recipe": chooser}, pending),
         ("serialization", {"source_ref": source_ref}, pending),
     )
     return tuple(receipt(stage, inputs, output)
@@ -791,9 +874,10 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
     model = _model_block(bundle)
     analogs = _analog_block(bundle)
     gate = _gate_block(bundle)
+    chooser = _chooser_block(bundle, strategy)
     receipts = _declaration_receipts(
         bundle.source_ref, strategy, context, features, forecast, quotes,
-        model, analogs, simulation, gate,
+        model, analogs, simulation, gate, chooser,
     )
     return NativeScoreInputs(
         context=context,
@@ -805,7 +889,7 @@ def build_native_score_inputs(bundle: SourceBundle) -> NativeScoreInputs:
         analogs=analogs,
         simulation=simulation,
         gate=gate,
-        chooser={},
+        chooser=chooser,
         diagnostics={},
         source_ref=bundle.source_ref,
         stage_receipts=receipts,

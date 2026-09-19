@@ -35,7 +35,6 @@ Causal keys:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.foundation.canonical import content_hash, untag_nonfinite
@@ -174,8 +173,11 @@ def _paired_row(row: Sequence[Any]) -> tuple[str, str, float, float, float]:
     if len(row) != len(PAIRED_COLUMNS):
         raise ResidualArtifactError(f"paired row must have {len(PAIRED_COLUMNS)} columns")
     frozen = (str(row[0])[:10], str(row[1]), float(row[2]), float(row[3]), float(row[4]))
-    if not all(isfinite(value) for value in frozen[2:]):
-        raise ResidualArtifactError("paired pool values must be finite")
+    # NaN is a MISSING value: legacy ResidualPool drops it (``dropna``), so a
+    # builder that lets one through was built wrong. +/-inf is not missing:
+    # legacy keeps such a row and simulates it (R4-20 gap 1), so it is frozen.
+    if any(value != value for value in frozen[2:]):
+        raise ResidualArtifactError("paired pool values must not be NaN")
     return frozen
 
 

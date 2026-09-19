@@ -409,9 +409,18 @@ def test_correction_invalidates_later_pools_and_the_rebuild_is_exact():
                for k, v in before.items())
 
 
-def test_paired_artifact_rejects_non_finite_values():
-    with pytest.raises(ResidualArtifactError):
+def test_paired_artifact_rejects_nan_but_keeps_infinite_values(tmp_path):
+    """R4-20 gap 1: legacy ``ResidualPool`` drops only MISSING (NaN) rows, so
+    a NaN reaching the artifact is a builder defect, while a +/-inf error is
+    a real legacy pool row that must be frozen, hashed and round-tripped."""
+    with pytest.raises(ResidualArtifactError, match="NaN"):
         make_paired_residual_pool_artifact(
             move_model_id="m", crush_model_id="c", cutoff=None,
-            rows=[("2024-01-01", "AAA", 1.0, float("inf"), 0.0)], lineage=LINEAGE)
+            rows=[("2024-01-01", "AAA", 1.0, float("nan"), 0.0)], lineage=LINEAGE)
+    infinite = make_paired_residual_pool_artifact(
+        move_model_id="m", crush_model_id="c", cutoff=None, lineage=LINEAGE,
+        rows=[("2024-01-01", "AAA", 1.0, float("inf"), 0.0),
+              ("2024-01-02", "BBB", float("-inf"), 0.5, float("-inf"))])
+    assert infinite.rows[0][3] == float("inf")
+    assert FrozenStateLoader(tmp_path).load(_write(tmp_path, infinite)) == infinite
     assert isinstance(_build(*_universe()), PairedResidualPoolArtifact)
