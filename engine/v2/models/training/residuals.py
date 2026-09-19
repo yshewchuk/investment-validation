@@ -25,6 +25,7 @@ performs only the per-prediction bucket lookup.
 """
 from __future__ import annotations
 
+from datetime import date
 from math import isfinite
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -141,6 +142,35 @@ def _day(value: Any) -> str:
     return str(value)[:10]
 
 
+def _parse_day(value: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _cutoff_bound(cutoff: Any) -> date | None:
+    """The build's parsed cutoff: ``None`` only when there is none. A given
+    cutoff that does not parse (malformed text, ``""``, NaT) is a caller
+    error and raises -- it must never read as "no cutoff" and admit every
+    row."""
+    if cutoff is None:
+        return None
+    bound = _parse_day(cutoff)
+    if bound is None:
+        raise ValueError(f"paired residual pool cutoff {cutoff!r} is not a date")
+    return bound
+
+
+def _causal(day: str, bound: date | None) -> bool:
+    """Dated strictly before ``bound`` (always, without one); an undated
+    row cannot be shown causal, so it is dropped given a cutoff."""
+    if bound is None:
+        return True
+    parsed = _parse_day(day)
+    return parsed is not None and parsed < bound
+
+
 def _present_field(row: Mapping[str, Any], name: str) -> float | None:
     """A row's float, or ``None`` where it is MISSING (absent, unparsable,
     None or NaN). +/-inf is present: the legacy paired pool drops only
@@ -168,11 +198,11 @@ def _index(rows: Iterable[Mapping[str, Any]], column: str) -> dict[tuple[str, st
 def _paired_rows(forecasts, outcomes, crush, cutoff) -> list[tuple]:
     realized_move = _index(outcomes, "abs_move")
     realized_crush = _index(crush, "crush_pct_iv30")
-    bound = None if cutoff is None else _day(cutoff)
+    bound = _cutoff_bound(cutoff)
     rows: list[tuple] = []
     for forecast in forecasts:
         key = (str(forecast["ticker"]), _day(forecast["event_date"]))
-        if bound is not None and key[1] >= bound:
+        if not _causal(key[1], bound):
             continue
         pred_move = _present_field(forecast, "pred_abs_move")
         pred_crush = _present_field(forecast, "pred_iv_crush_30")

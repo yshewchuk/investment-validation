@@ -147,6 +147,54 @@ def test_paired_pool_cutoff_excludes_events_on_or_after_it():
             rows=[("2024-01-01", "AAA", 1.0, 0.0, 0.0)], lineage=LINEAGE)
 
 
+# A given cutoff that does not parse is a build-time caller error (found by
+# mutation triage): it used to compare as text, so "not-a-date", "NaT" and
+# pd.NaT admitted every row (all sort before "n"/"N" as dates) and "" admitted
+# none. Legacy's pd.Timestamp(cutoff) raises on the same values.
+_MALFORMED_CUTOFFS = ["not-a-date", "", "NaT", pd.NaT]
+
+
+@pytest.mark.parametrize("cutoff", _MALFORMED_CUTOFFS, ids=repr)
+def test_paired_pool_builder_raises_on_a_malformed_cutoff(cutoff):
+    forecasts, outcomes, crush = _universe()
+    with pytest.raises(ValueError, match="not a date"):
+        _build(forecasts, outcomes, crush, cutoff=cutoff)
+
+
+@pytest.mark.parametrize("cutoff", _MALFORMED_CUTOFFS, ids=repr)
+def test_paired_pool_artifact_raises_on_a_malformed_cutoff(cutoff):
+    for rows in ([], [("2024-01-01", "AAA", 1.0, 0.0, 0.0)]):
+        with pytest.raises(ResidualArtifactError, match="not a date"):
+            make_paired_residual_pool_artifact(
+                move_model_id="m", crush_model_id="c", cutoff=cutoff,
+                rows=rows, lineage=LINEAGE)
+
+
+def test_a_valid_cutoff_keeps_the_same_rows_whatever_its_form():
+    """200 daily events from 2024-01-01: 152 fall before 2024-06-01 (the
+    one NaN forecast is on 2024-02-03 and never pairs). A Timestamp or a
+    full ISO timestamp names the same day and keeps the same rows."""
+    forecasts, outcomes, crush = _universe()
+    artifact = _build(forecasts, outcomes, crush)
+    assert len(artifact.rows) == 152
+    assert artifact.rows[-1][0] == "2024-05-31"
+    for same_day in (pd.Timestamp(CUTOFF), "2024-06-01T00:00:00"):
+        other = _build(forecasts, outcomes, crush, cutoff=same_day)
+        assert other.rows == artifact.rows
+        assert other.cutoff == CUTOFF
+
+
+def test_paired_pool_artifact_compares_parsed_days_and_refuses_undated_rows():
+    ok = make_paired_residual_pool_artifact(
+        move_model_id="m", crush_model_id="c", cutoff=pd.Timestamp("2024-01-02"),
+        rows=[("2024-01-01", "AAA", 1.0, 0.0, 0.0)], lineage=LINEAGE)
+    assert ok.cutoff == "2024-01-02"
+    with pytest.raises(ResidualArtifactError, match="on/after"):
+        make_paired_residual_pool_artifact(
+            move_model_id="m", crush_model_id="c", cutoff="2024-01-02",
+            rows=[("not-a-day", "AAA", 1.0, 0.0, 0.0)], lineage=LINEAGE)
+
+
 # ---------------------------------------------------------------------------
 # request context cannot change frozen state; equivalent rebuilds agree
 # ---------------------------------------------------------------------------
