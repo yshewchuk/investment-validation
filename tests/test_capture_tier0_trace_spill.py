@@ -190,6 +190,161 @@ def test_spilling_and_hydrating_produces_byte_identical_written_output(tmp_path)
         capture._cleanup_trace_spill()
 
 
+def _sample_trace_with_residuals(*, big: int = 0, seed: int = 0) -> dict:
+    """A trace shaped like `_sample_trace`, plus the OTHER family of content
+    `engine.score._Predocumented` shares by reference: the residual
+    population, embedded at both the ``simulation`` checkpoint AND
+    ``native_recipes.simulation.residuals`` (see `capture_simulation`).
+    """
+    trace = _sample_trace(big=big)
+    residuals = [
+        {"row_id": f"res{seed}-{i}", "ret": 0.001 * (i + seed)}
+        for i in range(big)
+    ]
+    trace["checkpoints"]["simulation"] = {
+        "value": {"horizon": {}, "residual_population": residuals},
+        "content_hash": "sha256:" + "1" * 64,
+    }
+    trace["checkpoints"]["source_inputs"]["value"]["native_recipes"]["simulation"] = {
+        "residuals": residuals,
+    }
+    return trace
+
+
+class TestReconcileSharedTraceContent:
+    """2026-09-18: the spill fix (above) spills each candidate's
+    `legacy_trace` with its OWN `pickle.dump()` call, which cannot see
+    sharing ACROSS candidates -- only within one call. `engine.score`
+    deliberately shares two families of content by reference across
+    candidates that hit the same cache (`_Predocumented`, residual
+    population and analog recipe source rows): independently hydrating two
+    `chosen` candidates that shared one of these objects before spilling
+    reads back two separate full copies, silently reintroducing (in a new
+    form) the duplication the spill fix exists to remove. `main()` restores
+    the original sharing with `_reconcile_shared_trace_content`.
+    """
+
+    def test_shares_identical_source_rows_across_hydrated_candidates(self) -> None:
+        trace_a = _sample_trace(big=100)
+        trace_b = _sample_trace(big=100)  # identical content, distinct objects
+        cand_a = capture._candidate({"t": "A"}, None, {}, 0.0, legacy_trace=trace_a)
+        cand_b = capture._candidate({"t": "B"}, None, {}, 0.0, legacy_trace=trace_b)
+        try:
+            cache: dict = {}
+            hydrated_a = capture._hydrate_trace(cand_a["legacy_trace"])
+            capture._reconcile_shared_trace_content(hydrated_a, cache)
+            hydrated_b = capture._hydrate_trace(cand_b["legacy_trace"])
+            capture._reconcile_shared_trace_content(hydrated_b, cache)
+
+            rows_a = hydrated_a["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+            rows_b = hydrated_b["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+            # Genuinely the SAME object, not merely equal -- an equality
+            # check alone would pass even with two full copies retained.
+            assert rows_a is rows_b
+            assert rows_a == trace_a["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+        finally:
+            capture._cleanup_trace_spill()
+
+    def test_does_not_conflate_distinct_content(self) -> None:
+        trace_a = _sample_trace(big=20)
+        trace_b = _sample_trace(big=25)  # different row count -> different content
+        cand_a = capture._candidate({"t": "A"}, None, {}, 0.0, legacy_trace=trace_a)
+        cand_b = capture._candidate({"t": "B"}, None, {}, 0.0, legacy_trace=trace_b)
+        try:
+            cache: dict = {}
+            hydrated_a = capture._hydrate_trace(cand_a["legacy_trace"])
+            capture._reconcile_shared_trace_content(hydrated_a, cache)
+            hydrated_b = capture._hydrate_trace(cand_b["legacy_trace"])
+            capture._reconcile_shared_trace_content(hydrated_b, cache)
+
+            rows_a = hydrated_a["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+            rows_b = hydrated_b["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+            assert rows_a is not rows_b
+            assert rows_a == trace_a["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+            assert rows_b == trace_b["checkpoints"]["source_inputs"]["value"][
+                "native_recipes"]["analogs"]["source_rows"]
+        finally:
+            capture._cleanup_trace_spill()
+
+    def test_unifies_the_two_within_candidate_residual_paths(self) -> None:
+        """`residual_population` and `native_recipes.simulation.residuals`
+        must end up as ONE object even if they arrive as separate-but-equal
+        objects (e.g. two independently spilled candidates that each held
+        their own already-reconciled copy going into a later merge step).
+        """
+        trace = _sample_trace_with_residuals(big=15, seed=1)
+        # Force them to be distinct-but-equal objects, as if pickle's
+        # within-call memo were not what produced the sharing this time.
+        import copy
+        trace["checkpoints"]["source_inputs"]["value"]["native_recipes"][
+            "simulation"]["residuals"] = copy.deepcopy(
+            trace["checkpoints"]["simulation"]["value"]["residual_population"])
+        cache: dict = {}
+        capture._reconcile_shared_trace_content(trace, cache)
+        pop = trace["checkpoints"]["simulation"]["value"]["residual_population"]
+        res = trace["checkpoints"]["source_inputs"]["value"]["native_recipes"][
+            "simulation"]["residuals"]
+        assert pop is res
+
+    def test_no_op_on_none_or_traces_missing_the_shared_paths(self) -> None:
+        cache: dict = {}
+        capture._reconcile_shared_trace_content(None, cache)
+        assert cache == {}
+        bare = {"schema_version": "x", "checkpoints": {}}
+        capture._reconcile_shared_trace_content(bare, cache)
+        assert cache == {}
+        assert bare == {"schema_version": "x", "checkpoints": {}}
+
+    def test_reconciled_content_still_writes_byte_identical_output(
+        self, tmp_path,
+    ) -> None:
+        import json
+
+        import pandas as pd
+
+        trace = _sample_trace(big=30)
+
+        def _build(request, record):
+            return {
+                "fixture_id": "case-1", "covers": ["strategy:STR-THRU"],
+                "request": request, "record": record, "kind": "score_result",
+                "duration": 0.1,
+            }
+
+        request = {"strategy": "STR-THRU", "ticker": "ABC"}
+        record = {"strategy": "STR-THRU", "ticker": "ABC"}
+
+        direct = _build(request, record)
+        direct["legacy_trace"] = trace
+
+        cand = capture._candidate(request, {}, record, 0.1, legacy_trace=trace)
+        via = _build(request, record)
+        try:
+            hydrated = capture._hydrate_trace(cand["legacy_trace"])
+            capture._reconcile_shared_trace_content(hydrated, {})
+            via["legacy_trace"] = hydrated
+
+            direct_dir = tmp_path / "direct"
+            recon_dir = tmp_path / "recon"
+            capture.write(direct_dir, [direct], {"strategy:STR-THRU": ["case-1"]},
+                          pd.Timestamp("2026-01-01"), "snap-1")
+            capture.write(recon_dir, [via], {"strategy:STR-THRU": ["case-1"]},
+                          pd.Timestamp("2026-01-01"), "snap-1")
+
+            direct_pair = json.loads((direct_dir / "pairs" / "case-1.json").read_text())
+            recon_pair = json.loads((recon_dir / "pairs" / "case-1.json").read_text())
+            assert direct_pair["payload"] == recon_pair["payload"]
+            assert direct_pair["payload_hash"] == recon_pair["payload_hash"]
+        finally:
+            capture._cleanup_trace_spill()
+
+
 def test_many_large_spilled_traces_keep_the_candidate_list_small() -> None:
     """The retention regression this whole fix targets: N candidates with
     substantial `legacy_trace` content must not multiply the in-memory

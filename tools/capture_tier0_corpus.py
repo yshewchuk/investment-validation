@@ -890,6 +890,95 @@ def _cleanup_trace_spill() -> None:
         _TRACE_SPILL_DIR = None
 
 
+# `engine.score.Phase4TraceCollector` shares two families of content BY
+# REFERENCE across every candidate that hits the same underlying cache --
+# `_Predocumented` (see its docstring) exists to stop the collector's own
+# sanitizing passes from re-copying:
+#   * the residual population before a fixed cutoff (`ResidualPool.
+#     documented_population`) -- identical across every pinned/strike/
+#     coarse-ladder rescore of the SAME boundary event, since they all share
+#     its date;
+#   * the analog "recipe" source rows (`phase4_recipe_cache`, see
+#     `capture_analog_inputs`'s docstring) -- identical across every
+#     candidate sharing a (strategy, alpha, as_of) causal key, which
+#     `select()` commonly keeps MORE than one of: a chosen pinned/strike
+#     candidate's source is explicitly re-added to `chosen` alongside it,
+#     and `_rescore` always inherits the source's `as_of`/`strategy`.
+#
+# `_document` unwraps `_Predocumented` to the plain shared object itself
+# (`value.value`), so by the time a candidate's `legacy_trace` reaches
+# `_candidate()` the sharing is invisible except as the SAME object embedded
+# at more than one path. Spilling each candidate independently (separate
+# `pickle.dump()` calls) does not break sharing WITHIN one candidate's own
+# trace -- pickle's per-call memo still reconstructs one object for both
+# paths on load -- but it CANNOT see across candidates: two independent
+# `pickle.dump()` calls share no memo, so hydrating two `chosen` candidates
+# that shared one object in memory before spilling reads back two separate
+# full copies. `_reconcile_shared_trace_content` restores the original
+# sharing after hydration, keyed on content (not `id()`: `pickle.load()`
+# builds fresh objects every time, so no pre-spill identity survives to key
+# on) using the same `content_hash` the trace machinery already hashes this
+# exact content with elsewhere in this file.
+_SHARED_CONTENT_GROUPS: tuple[tuple[tuple[str, ...], ...], ...] = (
+    (
+        ("checkpoints", "simulation", "value", "residual_population"),
+        ("checkpoints", "source_inputs", "value", "native_recipes",
+         "simulation", "residuals"),
+    ),
+    (
+        ("checkpoints", "source_inputs", "value", "native_recipes",
+         "analogs", "source_rows"),
+    ),
+)
+
+_MISSING = object()
+
+
+def _get_in(root: Any, path: tuple[str, ...]) -> Any:
+    node = root
+    for part in path:
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
+
+
+def _set_in(root: Any, path: tuple[str, ...], value: Any) -> None:
+    node = root
+    for part in path[:-1]:
+        node = node[part]
+    node[path[-1]] = value
+
+
+def _reconcile_shared_trace_content(
+    trace: dict, cache: dict[str, Any],
+) -> None:
+    """Re-share content across hydrated candidates that shared it pre-spill.
+
+    ``cache`` is a single dict the caller keeps across every candidate it
+    hydrates this run, keyed on ``content_hash`` of the shared value. Content
+    that resolves to a hash already in ``cache`` is REPLACED in place with
+    the earlier candidate's object, so every hydrated candidate that shared
+    an object before spilling shares ONE object again after hydration --
+    the written output is unaffected either way (`write` only ever reads
+    values, never object identity), only the retained memory is.
+    """
+    if not isinstance(trace, dict):
+        return
+    for group in _SHARED_CONTENT_GROUPS:
+        present = [path for path in group if _get_in(trace, path) is not _MISSING]
+        if not present:
+            continue
+        value = _get_in(trace, present[0])
+        digest = content_hash(value)
+        cached = cache.get(digest)
+        resolved = cached if cached is not None else value
+        for path in present:
+            _set_in(trace, path, resolved)
+        if cached is None:
+            cache[digest] = value
+
+
 def _score(scorer, request, *, index=None) -> tuple[dict, dict, float, dict]:
     """``(raw as_dict, jsonable record, seconds)`` through ``Scorer.score``.
 
@@ -1478,8 +1567,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         # everything from here on (`attach_strict_probe`, `write`) reads it
         # directly off `cand`. Every OTHER candidate's checkpoint content
         # stays on disk, unread, for the rest of the run.
+        _shared_hydration_cache: dict[str, Any] = {}
         for cand in chosen:
-            cand["legacy_trace"] = _hydrate_trace(cand.get("legacy_trace"))
+            trace = _hydrate_trace(cand.get("legacy_trace"))
+            _reconcile_shared_trace_content(trace, _shared_hydration_cache)
+            cand["legacy_trace"] = trace
         if args.out:
             out_dir = Path(args.out)
         else:

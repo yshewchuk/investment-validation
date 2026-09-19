@@ -56,6 +56,34 @@ AnalogEvidenceHook = Callable[[dict[str, Any]], None]
 #: Below this, an empirical distribution is an anecdote. The guide's threshold.
 MIN_ANALOGS = 30
 
+#: Combined byte budget for `AnalogMatcher`'s causal-family cache
+#: (`_causal_pools` + `_causal_row_caches` + `phase4_recipe_cache`,
+#: evicted together — see `AnalogMatcher.MAX_CAUSAL_CACHE`'s comment for why
+#: a fixed key-count cap cannot bound this: per-key cost tracks how large
+#: that as_of's matched population is, and the 2026-09-18 diagnostic runs
+#: measured it varying roughly 10x key to key (run 3: +5 keys -> +770 MB;
+#: elsewhere in the same run, +30 keys -> +350 MB). 600 MB leaves headroom
+#: under the 5.5 GB bounded-run cap alongside the ~2 GB fixed panel/context
+#: baseline and the matcher's OTHER (small, bounded) caches.
+CAUSAL_CACHE_BUDGET_BYTES = 600 * 1024 * 1024
+
+#: `_causal_row_caches`/`phase4_recipe_cache` grow lazily, one row at a time,
+#: as candidates touch rows -- unlike `_causal_pools`' own DataFrame (whose
+#: exact byte cost `pool.memory_usage(deep=True).sum()` gives directly at
+#: insertion time), their EVENTUAL size for a key is not known when that
+#: key is first cached. `len(pool)` -- the key's full causal-filtered
+#: population -- is used as a conservative upper bound (a widened match can
+#: reach the entire population; see `AnalogMatcher.match`'s "matched set up
+#: to 17,666 -- the entire population" note), multiplied by an average
+#: bytes/row measured on the 2026-09-18 diagnostic run (280cf7c, run 4):
+#: 506,512 new rows between two checkpoints, `_causal_row_caches` grew
+#: 199.01 MB (393 B/row), `phase4_recipe_cache` grew 302.84 MB (598 B/row).
+#: Overestimating (most keys never touch their whole population) means
+#: evicting a bit earlier than strictly necessary, never later -- the safe
+#: direction for a memory cap.
+CAUSAL_ROW_CACHE_BYTES_PER_ROW = 393
+RECIPE_CACHE_BYTES_PER_ROW = 598
+
 #: Dimensions are dropped in this order, most-specific first. Moneyness goes
 #: first because the evidence base is ATM-centric anyway; the implied tercile
 #: goes last because it is the dimension most predictive of the return.
@@ -576,32 +604,51 @@ class AnalogMatcher:
         self.phase4_recipe_cache: dict[
             tuple[str, float, pd.Timestamp | None], tuple[str | None, Any]
         ] = {}
-        #: Cache ceiling, in entries. Sized from the workload, not from a round
-        #: number: a full three-week board (3,120 rows) generates **34** distinct
-        #: keys — 31 entry dates x 2 scoreable strategies — so 64 clears the
-        #: working set outright and the cap never binds where the cache pays.
+        #: 2026-09-18, revised: a fixed KEY-COUNT ceiling cannot bound this
+        #: cache's memory, because per-key cost is not fixed. The comment
+        #: this replaced quoted "16.6 MB/key combined" from one run's
+        #: average — but a real 40-forward-event strict capture (run 3)
+        #: measured +5 keys costing +770 MB in one step and, later in the
+        #: SAME run, +30 keys costing +350 MB in another: roughly 10x
+        #: variance in per-key cost depending on how large that as_of's
+        #: matched population is. A 64-key cap sized to the SMALL end of
+        #: that range does nothing to bound a run that happens to visit the
+        #: large end; that gap is what let a 5.5 GB bounded-run cap breach
+        #: even after `_documented_pools`/`_documented_causal` were removed
+        #: and every candidate's checkpoint content stopped being pinned in
+        #: `tools/capture_tier0_corpus.py`'s `candidates` list (see that
+        #: module's spill mechanism).
         #:
-        #: The ceiling matters because an entry is not small, and an entry's
-        #: cost is not just `_causal_pools`' own DataFrame slice. Measured on
-        #: the 2026-09-18 diagnostic run (38 keys reached, all three caches
-        #: below evicted in lockstep with it): `_causal_pools` 5.8 MB/key,
-        #: `_causal_row_caches` 4.3 MB/key, `phase4_recipe_cache` 6.5 MB/key
-        #: — 16.6 MB/key combined. (An earlier version of this comment quoted
-        #: 6.2 MB/key and ~575 MB worst case from `_causal_pools` alone; that
-        #: undercounted the row-level caches below it, which did not exist
-        #: yet when the number was written. It also predates the 2026-09-18
-        #: fix that removed a FOURTH, purely duplicative cache at this key
-        #: shape — `_documented_causal` — measured at 12.7 MB/key on top of
-        #: the three above; see the row-cache comment for that removal.) At
-        #: 64 entries, 16.6 MB/key projects to **~1.06 GB** worst case — the
-        #: actual budget this cap buys today, not the stale 575 MB figure.
+        #: Eviction is now byte-aware and least-recently-used instead:
+        #: `_causal_pools`' own DataFrame is priced exactly
+        #: (`memory_usage(deep=True)`) at insertion; `_causal_row_caches`/
+        #: `phase4_recipe_cache`, which grow lazily row-by-row and are not
+        #: yet full at insertion time, are priced by `len(pool)` (the key's
+        #: whole causal population — a conservative upper bound; a widened
+        #: match can reach it entirely) times a measured average bytes/row
+        #: (`CAUSAL_ROW_CACHE_BYTES_PER_ROW`, `RECIPE_CACHE_BYTES_PER_ROW`,
+        #: module level). `_evict_causal_cache_until_under_budget` pops the
+        #: least-recently-touched key — `match()` now refreshes a key's
+        #: position on every cache HIT, not just on insert — until the
+        #: combined estimate is back under `CAUSAL_CACHE_BUDGET_BYTES`
+        #: (600 MB). `MAX_CAUSAL_CACHE` remains as a loose, much higher
+        #: backstop against key-count/dict overhead in a degenerate
+        #: many-tiny-keys workload; the byte budget is what actually binds
+        #: for every workload measured so far.
         #:
-        #: Nothing was gained by a higher cap. The paths that would fill 256
-        #: keys — `recalibrate.build_pairs` (~1,000 scattered decision dates),
-        #: the calibration sampler (300) — barely repeat an as_of, so they get
-        #: almost no hits regardless; the slots above the board's working set
-        #: are pure cost.
-        self.MAX_CAUSAL_CACHE = 64
+        #: Eviction only costs RECOMPUTATION, never a different answer: a
+        #: cache miss on an evicted key re-filters/re-buckets `_causal_pools`'
+        #: entry (the ~19s/3,120-row-board cost this cache exists to avoid
+        #: paying per candidate, scaled down to one as_of) and re-runs
+        #: `to_dict`/`json.dumps`/`sha256` for whichever rows the NEXT
+        #: candidate on that key touches (`_causal_row_caches`' own memoized
+        #: work) — bounded, one-time-per-revisit costs, not a content
+        #: change: a re-served row is byte-identical to the one evicted.
+        self.MAX_CAUSAL_CACHE = 512
+        self._causal_cache_bytes: dict[
+            tuple[str, float, pd.Timestamp | None], int
+        ] = {}
+        self._causal_cache_total_bytes = 0
 
     # -- request buckets ---------------------------------------------------
 
@@ -631,6 +678,32 @@ class AnalogMatcher:
             # were fit on all years, future ones included.
             "implied_ratio": implied_ratio,
         }
+
+    # -- causal-family cache eviction ---------------------------------------
+
+    def _evict_causal_cache_until_under_budget(self) -> None:
+        """Pop the least-recently-touched causal-family key until the
+        combined estimated size is back at or under `CAUSAL_CACHE_BUDGET_BYTES`.
+
+        `_causal_pools` is iterated in insertion order, which `match()` keeps
+        equal to recency order by deleting and re-inserting a key on every
+        cache HIT (see the call site) — so `next(iter(...))` is always the
+        least-recently-used key, not just the oldest-inserted one. Eviction
+        never changes an answer: a re-visited key rebuilds byte-identical
+        content (see `MAX_CAUSAL_CACHE`'s comment for the recompute cost).
+        """
+        while (self._causal_pools
+               and (self._causal_cache_total_bytes > CAUSAL_CACHE_BUDGET_BYTES
+                    or len(self._causal_pools) > self.MAX_CAUSAL_CACHE)):
+            evicted = next(iter(self._causal_pools))
+            self._causal_pools.pop(evicted)
+            # Kept in lockstep with _causal_pools: a row cache or
+            # recipe-cache entry for a pool that no longer exists would grow
+            # unbounded, never evicted, for a scan that touches many as_of
+            # dates (recalibrate.build_pairs, the calibration sampler).
+            self._causal_row_caches.pop(evicted, None)
+            self.phase4_recipe_cache.pop(evicted, None)
+            self._causal_cache_total_bytes -= self._causal_cache_bytes.pop(evicted, 0)
 
     # -- matching ----------------------------------------------------------
 
@@ -721,6 +794,12 @@ class AnalogMatcher:
             cached = self._causal_pools.get(cache_key)
             if cached is not None:
                 pool, edges = cached
+                # Refresh recency: a plain dict already preserves insertion
+                # order, and deleting + re-inserting the SAME key moves it to
+                # the end (most-recently-used), which is all the LRU eviction
+                # below needs — no OrderedDict required.
+                del self._causal_pools[cache_key]
+                self._causal_pools[cache_key] = cached
             else:
                 pool = pool[pool["exit_date"] < ts]
                 edges = None
@@ -740,17 +819,16 @@ class AnalogMatcher:
                         implied_tercile=_bucket(pool["implied_ratio"], edges,
                                                 ("low", "mid", "high"))
                     )
-                if len(self._causal_pools) >= self.MAX_CAUSAL_CACHE:
-                    evicted = next(iter(self._causal_pools))
-                    self._causal_pools.pop(evicted)
-                    # Kept in lockstep with _causal_pools: a row cache or
-                    # recipe-cache entry for a pool that no longer exists
-                    # would grow unbounded, never evicted, for a scan that
-                    # touches many as_of dates (recalibrate.build_pairs, the
-                    # calibration sampler).
-                    self._causal_row_caches.pop(evicted, None)
-                    self.phase4_recipe_cache.pop(evicted, None)
                 self._causal_pools[cache_key] = (pool, edges)
+                row_count = len(pool)
+                estimate = (
+                    int(pool.memory_usage(deep=True).sum())
+                    + row_count * CAUSAL_ROW_CACHE_BYTES_PER_ROW
+                    + row_count * RECIPE_CACHE_BYTES_PER_ROW
+                )
+                self._causal_cache_bytes[cache_key] = estimate
+                self._causal_cache_total_bytes += estimate
+                self._evict_causal_cache_until_under_budget()
             ratio = buckets.get("implied_ratio")
             if ratio is not None and edges is not None:
                 buckets = dict(buckets)
