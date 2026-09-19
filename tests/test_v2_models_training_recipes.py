@@ -140,8 +140,9 @@ def test_recipe_constants_mirror_legacy_modules():
     recal = _recipe("recalibration_map", "STR-THRU", "calibration")
     assert recal.estimator.params["min_pairs"] == recalibrate.MIN_PAIRS
     owners = {k.role: r.fit_owner for k, r in RECIPES.items() if k.output == "calibration"}
-    assert owners["recalibration_map"] == OWNER_P5_4  # no frozen recalibration builder yet
-    assert owners["payoff_line"] == owners["payoff_surface"] != OWNER_P5_4
+    # All five calibration surfaces are fitted by the job through P5-4 builders.
+    assert owners["recalibration_map"] == owners["payoff_line"] == owners["payoff_surface"]
+    assert owners["payoff_line"] != OWNER_P5_4
 
 
 def _exp169():
@@ -603,7 +604,7 @@ def test_payoff_surface_recipe_fits_the_p5_4_frozen_artifact(tmp_path):
     assert membership["n_train"] == expected.n
 
 
-def test_payoff_fold_under_min_trades_is_skipped_and_recalibration_stays_a_seam(tmp_path):
+def test_payoff_fold_under_min_trades_is_skipped_and_recalibration_plans_receipts(tmp_path):
     trades = _payoff_trades()
     line = _recipe("payoff_line", "STR-THRU", "calibration")
     result = run_training_job(line, trades, tmp_path / "early", cutoffs=("2020-02-01",), alpha=0.5)
@@ -612,7 +613,7 @@ def test_payoff_fold_under_min_trades_is_skipped_and_recalibration_stays_a_seam(
 
     recal = _recipe("recalibration_map", "STR-THRU", "calibration")
     pairs = trades.assign(raw_win=0.5, outcome=1.0)
-    with pytest.raises(UnsupportedEstimator):
+    with pytest.raises(UnsupportedEstimator, match="fill alpha"):
         run_training_job(recal, pairs, tmp_path / "fit", cutoffs=("2021-01-01",))
     result = run_training_job(recal, pairs, tmp_path / "plan", plan_only=True,
                               cutoffs=("2021-01-01",), alpha=0.5)

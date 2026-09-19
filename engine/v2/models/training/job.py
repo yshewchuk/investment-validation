@@ -35,7 +35,12 @@ import numpy as np
 import pandas as pd
 
 from . import fold_store as store
-from .calibration import PAYOFF_KINDS, fit_payoff_fold
+from .calibration import (
+    PAYOFF_KINDS,
+    RECALIBRATION_KINDS,
+    fit_payoff_fold,
+    fit_recalibration_fold,
+)
 from .estimators import UnsupportedEstimator, fit_recipe_estimator, forbid_fitting
 from .folds import dataset_fingerprint, plan_folds, prepare_dataset
 from .receipts import fold_receipts, receipt_issues
@@ -73,6 +78,13 @@ def _fit_payoff(recipe, prepared, fold, alpha, partial) -> str:
     return "fitted" if written else "skipped"
 
 
+def _fit_recalibration(recipe, prepared, fold, alpha, partial) -> str:
+    fitted = fit_recalibration_fold(recipe, prepared.frame.iloc[fold.train], alpha=alpha,
+                                    before=fold.cutoff.date().isoformat(), out_dir=partial)
+    # Below min_pairs the artifact freezes legacy's "no map": raw win ships.
+    return "fitted" if fitted else "passthrough"
+
+
 def _summary(recipe, out_dir, outcomes) -> dict:
     summary = {"recipe_id": recipe.recipe_id, "recipe_fingerprint": recipe_fingerprint(recipe),
                "folds": {o.fold_id: o.status for o in outcomes}}
@@ -94,7 +106,7 @@ def _prepare(recipe, dataset, *, plan_only, cutoffs, alpha, extra_filters):
         raise UnsupportedEstimator(
             f"{recipe.recipe_id} is fitted by {recipe.fit_owner}; run it with plan_only=True "
             "for its receipts")
-    if recipe.estimator.kind in PAYOFF_KINDS and alpha is None:
+    if recipe.estimator.kind in (*PAYOFF_KINDS, *RECALIBRATION_KINDS) and alpha is None:
         raise UnsupportedEstimator(f"{recipe.recipe_id} needs the request's fill alpha")
     if alpha is not None:
         extra_filters = (*extra_filters, RowFilter("fill_alpha", "isclose", float(alpha)))
@@ -113,6 +125,8 @@ def _build_fold(recipe, prepared, fold, *, fit, plan_only, alpha, partial) -> st
         return "skipped"
     if recipe.estimator.kind in PAYOFF_KINDS:
         return _fit_payoff(recipe, prepared, fold, alpha, partial)
+    if recipe.estimator.kind in RECALIBRATION_KINDS:
+        return _fit_recalibration(recipe, prepared, fold, alpha, partial)
     _fit_fold(recipe, prepared, fold, fit, partial)
     return "fitted"
 
@@ -125,9 +139,8 @@ def run_training_job(recipe: TrainingRecipe, dataset: pd.DataFrame, out_dir, *,
     ``plan_only`` writes both receipts per fold and fits nothing — the cheap
     first pass over real data. ``cutoffs``/``extra_filters`` serve the
     ``request_cutoff`` calibration recipes; ``alpha`` is their per-request
-    fill alpha (a ``fill_alpha`` isclose filter, as legacy). The payoff
-    recipes are fitted through P5-4's frozen-artifact builders; the
-    recalibration maps stay receipt-only. ``fit(recipe, X, y)`` is
+    fill alpha (a ``fill_alpha`` isclose filter, as legacy). The payoff and
+    recalibration recipes are fitted through P5-4's frozen-artifact builders. ``fit(recipe, X, y)`` is
     injectable for tests; the default is the native estimator.
     """
     forbid_fitting("engine.v2.models.training.job.run_training_job")

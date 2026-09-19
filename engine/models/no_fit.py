@@ -22,6 +22,10 @@ the one switch that rigs every legacy path reachable from a score request:
 - ``engine/recalibrate.py::fit_recalibration`` — the ``IsotonicRegression``
   win-rate recalibration ``Scorer.score`` runs on demand (``Scorer
   .recalibration``, reached from ``_score_model``).
+- ``engine/models/registry.py::Registry.save`` — the ``registry.json``
+  manifest write behind ``register``/promotion.
+- ``engine/recalibrate.py::build_pairs`` — scores a sample and writes the
+  ``recalibration_pairs.parquet`` cache.
 
 This lives under legacy ``engine/`` rather than ``engine/v2/models`` on
 purpose: ``checks/import_layers.py`` rule 3 ("legacy never imports v2")

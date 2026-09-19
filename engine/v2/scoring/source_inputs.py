@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
+from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
     bucket_population_hash,
@@ -162,6 +163,15 @@ class SourceBundle:
     # the FIRST driver's (``implied_t1``) pool. Ignored by every strategy
     # with only one driver.
     runup_move_residual_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    # Frozen win-rate recalibration map (P5-4, legacy Scorer.recalibration):
+    # a verified, already-loaded RecalibrationMapArtifact. Declared by
+    # ``recalibration_declared=True`` or a non-None artifact; the model stage
+    # then checks its full causal key (strategy, fill alpha, the payoff
+    # recipe's ``before``) and applies it to win_model -- or refuses with
+    # MODEL_NOT_READY when it is missing or mismatched. Undeclared (the
+    # default, and every Phase 4 capture) leaves win_model exactly as before.
+    recalibration_declared: bool = False
+    recalibration_artifact: "RecalibrationMapArtifact | None" = None
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -421,8 +431,28 @@ def _model_block(bundle: SourceBundle) -> dict[str, Any]:
         "payoff_recipe", bundle.payoff_recipe, _PAYOFF_RECIPE_FIELDS,
     )
     if bool(artifact_recipe) or bundle.payoff_artifact is not None:
-        return _artifact_model_block(bundle, artifact_recipe, recipe)
-    return _compatibility_model_block(bundle, recipe)
+        block = _artifact_model_block(bundle, artifact_recipe, recipe)
+    else:
+        block = _compatibility_model_block(bundle, recipe)
+    return _with_recalibration_block(bundle, block)
+
+
+def _with_recalibration_block(bundle: SourceBundle, block: dict[str, Any]) -> dict[str, Any]:
+    """Add the P5-4 recalibration declaration to a model block.
+
+    The key ``recalibration_artifact`` is present (even as ``None``) only
+    when declared, exactly like ``payoff_artifact``; an undeclared bundle's
+    block is returned unchanged.
+    """
+    declared = bool(bundle.recalibration_declared) or bundle.recalibration_artifact is not None
+    if not declared:
+        return block
+    artifact = bundle.recalibration_artifact
+    if artifact is not None and not isinstance(artifact, RecalibrationMapArtifact):
+        raise ValueError("recalibration_artifact must be a RecalibrationMapArtifact")
+    if not block:
+        raise ValueError("recalibration_artifact declared without a payoff recipe")
+    return {**block, "recalibration_artifact": artifact}
 
 
 def _declaration_receipts(

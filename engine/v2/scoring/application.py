@@ -662,15 +662,28 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     record = replace(record, model_artifact_ids=artifact_hashes,
                      evidence_refs=tuple(dict.fromkeys((*request.dependency_refs,
                                                          *release_ids, *binding_ids))))
+    if any(getattr(result, "status", None) != "READY" for result in results):
+        record = replace(record, reason_codes=tuple(dict.fromkeys(
+            (*record.reason_codes, *_inference_refusal_reasons(results)))),
+                         validation_status="refused", readiness="refused")
+    return with_score_id(record)
+
+
+def _inference_refusal_reasons(results) -> tuple[str, ...]:
+    """The refusal codes a not-READY frozen inference puts on the record.
+
+    A frozen model that could not be served says so by name (P5-2
+    acceptance: missing artifact -> MODEL_NOT_READY), ahead of the inference
+    detail codes (ARTIFACT_INVALID, BINDING_NOT_FOUND, ...).
+    """
     reasons = tuple(
         reason
         for result in results
         for reason in (getattr(result, "reason_codes", ()) or ())
     )
-    if any(getattr(result, "status", None) != "READY" for result in results):
-        record = replace(record, reason_codes=tuple(dict.fromkeys((*record.reason_codes, *reasons))),
-                         validation_status="refused", readiness="refused")
-    return with_score_id(record)
+    if any(getattr(result, "status", None) == "MODEL_NOT_READY" for result in results):
+        reasons = ("MODEL_NOT_READY", *reasons)
+    return reasons
 
 
 def score_one(request: ScoreRequest, inputs: NativeScoreInputs, *,
