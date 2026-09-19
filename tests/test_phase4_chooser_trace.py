@@ -644,3 +644,31 @@ def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash
     # finite__`` tag, never a bare NaN/Infinity `write()` would reject.
     tagged = tag_nonfinite(trace)
     assert json.loads(json.dumps(tagged, allow_nan=False)) == tagged
+
+
+def test_a_pair_over_a_shared_chooser_document_hashes_like_the_plain_digest(
+        chooser_root, tmp_path, monkeypatch):  # noqa: F811
+    _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    path, digest = _artifact(tmp_path)
+    members = [_shared_chooser_member(source, tmp_path, i, path=path, digest=digest)
+              for i in range(2)]
+    candidate = {
+        "fixture_id": "dyn-shared", "kind": "dyn_sv_choice", "covers": [],
+        "request": {"kind": "dyn_sv_resolution",
+                    "entry_point": "engine.score.dynamic_short_vol",
+                    "menu": ["TWIN-P"], "frame": "forward",
+                    "frame_rows": [{"request": m["request"], "record": m["record"]}
+                                   for m in members]},
+        "record": {}, "duration": 0.0, "relations": {},
+        "members": [{**m, "kind": "score_result"} for m in members],
+    }
+
+    # `chooser_trace` registers the fold pool both members share (by identity)
+    # with `_SHARED_TRACE_DOCUMENTS`; `make_pair` hashes the payload with that
+    # memo. The digest must stay the plain, no-`fragments` recomputation.
+    trace = chooser_trace(candidate, "snapshot-1", tmp_path / "release")
+    pair = make_pair(candidate["fixture_id"], [], candidate["request"], candidate["record"],
+                     record_kind="dyn_sv_choice", duration=0.0,
+                     input_trace=trace, legacy_input_hash=trace["shared_input_hash"])
+    assert pair["payload_hash"] == content_hash(pair["payload"])
