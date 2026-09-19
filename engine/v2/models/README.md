@@ -97,8 +97,13 @@ imports the same artifact type plus the no-fit guard constructors to build one
 from causal source rows. engine.v2.ops.cli imports the no-fit guard
 (`no_fit_guard`) for the read-only `ops rescore` command. `tools/phase5_inventory.py`
 (not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
+engine.v2.serving.operations (P6-4) imports the deployment pointer
+(`current_pointer`, `resolve_release`, plus the two refusal exception types)
+to serve the deployed model release read-only at `/models/release.json` --
+never fits or promotes anything, only resolves the one pointer already on
+disk.
 
-<!-- consumers: engine.v2.scoring, engine.v2.models.training, engine.v2.ops -->
+<!-- consumers: engine.v2.scoring, engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
 ## Usage
 

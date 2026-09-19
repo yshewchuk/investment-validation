@@ -452,13 +452,13 @@ id = "models-release-page"
 area = "models"
 capability = "Show the deployed model release (ids, folds, dependencies) matching the scores on the board"
 old = []
-new = ["MISSING", "py:engine/v2/models/deployment.py::current_release"]
-producer = "Phase 5 deployment pointer; not read by serving"
-identity = "ModelRelease release_id"
-tests = ["tests/test_v2_models_deployment.py"]
-disposition = "missing"
+new = ["route:v2-ops GET /models/release.json", "route:v2-ops GET /models/release", "py:engine/v2/models/deployment.py::current_pointer", "py:engine/v2/models/deployment.py::resolve_release"]
+producer = "Phase 5 deployment pointer (engine/v2/models/deployment.py), read once per request by the ops server"
+identity = "ModelRelease release_id, resolved from the SAME current_pointer() read as its dependencies"
+tests = ["tests/test_v2_ops_serving_model_release.py", "tests/test_v2_models_deployment.py"]
+disposition = "native"
 owner = "P6-4"
-notes = "System design §11 Evidence/recovery: matching deployment/model page. No v2 view or API reads the deployment pointer."
+notes = "System design §11 Evidence/recovery: matching deployment/model page. /models/release.json (auth) returns release_id, deployment_id, members (model id/role/strategy/decision clock/adapter/artifact digests) and dependencies (previous_release_id, promotion action/time); /models/release (no HTTP auth, matches the shell routes) is a small page that fetches it. No release deployed, an unconfigured root, and an unresolvable pointer are three distinct named refusals, never an empty success."
 
 [[row]]
 id = "models-training"
