@@ -86,3 +86,47 @@ Honest list, so nobody has to rediscover it:
 - **`engine/calendar.py`** loaders (~78%) — the holiday rules, session mapping
   and day arithmetic are covered; `load_orats_earnings` / `load_oquants_event_dates`
   are I/O over the real cache and run in the acceptance layer.
+
+## Mutation-testing pilot
+
+A pilot, not monitoring: it answers whether the targeted tests would notice a
+silent arithmetic or logic slip in six critical modules. Tool: mutmut 3.8.0,
+installed per user (`pip install --user --break-system-packages mutmut==3.8.0`).
+Config: `tools/mutation_pilot.toml` (modules, why each, their test files,
+per-mutant timeout). Driver and report: `tools/mutation_pilot.py`.
+
+- Each module mutates only its own files and runs only its own test files.
+  Never the whole suite, never xdist. mutmut narrows each mutant further to the
+  tests that executed the mutated function.
+- All state lives outside the repo in
+  `~/.cache/investing-plan-mutation-pilot/<module>/` (override with
+  `MUTATION_PILOT_HOME`; the tool refuses a path inside a checkout). The work
+  copy holds tracked `engine/ tests/ checks/ tools/` only, so there's no `data/`.
+- Runs are resumable. A rerun re-tests only functions whose source changed.
+  `--fresh` wipes that module's state.
+
+Run one module at a time, as a scheduled heavy job:
+
+    python3 tools/mutation_pilot.py count            # mutant counts only, no tests
+    python3 tools/bounded_run.py --max-rss-gb 2 --min-free-gb 0.5 --cores 2 -- \
+        python3 -u tools/mutation_pilot.py run <module>
+    python3 tools/mutation_pilot.py report [<module> ...] [--no-diffs]
+
+`report` prints, per module and per file: total, killed, survived, timeout,
+no-tests, other and not-yet-run counts, plus the score
+(killed + timeout) / checked. It then lists each survivor as `file:line` with
+the mutation diff. It prints code only.
+
+What to know before reading a score:
+
+- mutmut 3 does not mutate decorated functions (`@property`,
+  `@contextmanager`) or module-level constants. So `no_fit_guard` and the
+  artifacts' `key` properties are outside the score. The key *builders*
+  (`payoff_artifact_key` and similar) are in it.
+- `process_isolation = forkserver` is load-bearing. mutmut's default `fork`
+  forks every mutant from the process that already ran the tests, so state
+  those tests left behind leaks into each mutant. In the smoke run, no_fit's
+  thread-local flag made killable mutants read as survived. BLAS threads
+  started before the fork hung others into false timeouts.
+- A "no tests" mutant sits in a function that no targeted test executes. It
+  counts against the score, the same as a survivor.
