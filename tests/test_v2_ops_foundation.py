@@ -115,6 +115,42 @@ def test_the_seeded_hash_regression_is_detectable():
     assert content_hash([repr(v) for v in value]) != digest
 
 
+# The GOLDEN floats above hold no negative number, no value with n == 0
+# (0.1 <= |x| < 1) and no multi-digit mantissa in exponent form. The expected
+# strings are ECMAScript Number::toString (RFC 8785 §3.2.2.2), e.g. in node
+# String(-1.5), String(0.5), String(1.5e-7), String(-2.25e+22).
+@pytest.mark.parametrize("value, expected", [
+    (-1.5, "-1.5"),
+    (-3.0, "-3"),
+    (0.5, "0.5"),
+    (-0.015, "-0.015"),
+    (1.5e-7, "1.5e-7"),
+    (1.25e-7, "1.25e-7"),
+    (-2.25e22, "-2.25e+22"),
+])
+def test_canonical_number_layout_matches_ecmascript(value, expected):
+    assert canonical_json(value) == expected
+    assert canonical_json({"x": value}) == '{"x":' + expected + "}"
+
+
+def test_non_json_leaves_serialize_by_their_string_form():
+    """Dates, Decimals and similar leaves hash over ``str(value)``: two
+    different dates must never share one content hash."""
+    from datetime import date
+    from decimal import Decimal
+
+    assert canonical_json({"d": date(2026, 9, 19)}) == '{"d":"2026-09-19"}'
+    assert canonical_json([Decimal("1.10")]) == '["1.10"]'
+    assert content_hash(date(2026, 9, 19)) != content_hash(date(2026, 9, 20))
+
+
+def test_keys_with_lone_surrogates_sort_by_utf16_code_units():
+    """JCS orders keys by UTF-16 code units. A lone-surrogate key sorts as its
+    own unit (D800 < D83D DE00 < E000) instead of raising."""
+    doc = {"": 1, "\U0001F600": 2, "\ud800": 3}
+    assert canonical_json(doc) == '{"\ud800":3,"\U0001F600":2,"":1}'
+
+
 # --------------------------------------------------------------------------
 # clocks
 # --------------------------------------------------------------------------

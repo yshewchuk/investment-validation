@@ -61,6 +61,14 @@ def test_guard_on_raises_and_restores_on_exit():
     assert fitting_forbidden() is False
 
 
+def test_guard_error_names_the_tripped_call_site():
+    """``forbid_fitting``'s contract: ``path`` names the call site so a test or
+    an error log can tell which path tripped without guessing."""
+    with no_fit_guard():
+        with pytest.raises(RuntimeFitForbidden, match="engine.probe.fit_fold"):
+            forbid_fitting("engine.probe.fit_fold")
+
+
 def test_guard_nesting_restores_outer_state_not_off():
     with no_fit_guard():
         with no_fit_guard():
