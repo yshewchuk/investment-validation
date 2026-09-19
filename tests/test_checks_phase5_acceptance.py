@@ -164,7 +164,19 @@ def _state_payloads() -> dict[str, dict[str, bytes]]:
         "paired_residual_pool": {"size_v1_4|iv_crush_v1_gbm|2026-09-01": _paired_pool()},
         "admissible_table:dyn_sv": {"dyn_sv.n_admissible_by_depth|v1": serialize_frozen_state(
             legacy_n_admissible_table())},
+        "chooser_analog_pool": {"features.chooser_analog_pool|2026-09-01":
+                                serialize_frozen_state(_chooser_pool())},
     }
+
+
+def _chooser_pool():
+    from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
+
+    rows = [{"strategy": "TWIN-P", "exit_date": f"2026-0{1 + i % 8}-1{i % 9}", "pnl": i - 20.0,
+             "exp_pnl_sim": 0.1 * i, "width_over_forecast": 1.0, "n_legs": 7.0,
+             "anchor_over_spot": 1.0, "rel_spread": 0.1} for i in range(40)]
+    return build_chooser_analog_pool_artifact(
+        rows, pool_id="features.chooser_analog_pool", cutoff="2026-09-01", lineage=LINEAGE)
 
 
 #: A reduced catalog whose every member can be built here: payoff,
@@ -193,6 +205,8 @@ CONSUMERS = {
     "simulation.paired_residual_pool": gate.CONSUMERS["simulation.paired_residual_pool"],
     "features.tier4_serving_folds": _stub_probe("tier4_folds:size",
                                                 "features.tier4_serving_folds"),
+    "chooser.admissible_table": gate.CONSUMERS["chooser.admissible_table"],
+    "chooser.analog_pool": gate.CONSUMERS["chooser.analog_pool"],
 }
 
 
@@ -245,7 +259,7 @@ def test_complete_release_passes(tmp_path):
     for role in ("size", "implied_t1", "runup_move"):
         assert ("model_stage.driver_residual_pool", f"driver_residual_pool:{role}") in consumers
     assert ("simulation.paired_residual_pool", "paired_residual_pool") in consumers
-    assert evidence["lineage"] == {"status": "ok", "states": 5, "valid": 5}
+    assert evidence["lineage"] == {"status": "ok", "states": 6, "valid": 6}
     assert all(r["status"] == "ok" for r in evidence["consumers"])
     # both (alpha, cutoff) folds of the line were scored, each by its own key
     assert sum(1 for c, m in [(r["consumer"], r["member_id"]) for r in evidence["consumers"]]
@@ -396,11 +410,11 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     assert "P5_CONSUMER_PENDING" in evidence["finding_codes"]
     pending = {r["consumer"] for r in evidence["consumers"] if r["status"] == "PENDING"}
     assert "analogs.board_analog_matcher" not in pending  # a real probe since P5-4 analogs
-    assert "chooser.analog_pool" in pending
     assert "model_stage.recalibration" not in pending  # a real probe since 3dea05e
     assert "model_stage.driver_residual_pool" not in pending  # real since 52ef989
     assert "simulation.paired_residual_pool" not in pending
-    assert "chooser.admissible_table" in pending  # no v2 consumer reads it yet
+    assert "chooser.admissible_table" not in pending  # the native chooser reads it
+    assert "chooser.analog_pool" not in pending
     by_id = {r["member_id"]: r for r in evidence["members"]}
     for member_id in ("board_analog_matcher", "recalibration_map:STR-RUNUP",
                       "trailing_pnl_cutoff"):
@@ -542,3 +556,33 @@ def test_frozen_state_dir_skips_training_job_summaries(tmp_path):
     assert prep.frozen_state_files([out / "paired_residual_pool.summary.json"]) == []
     found = prep.frozen_state_payloads([out])
     assert sorted(found) == ["driver_residual_pool:size", "paired_residual_pool"]
+
+
+def test_chooser_consumers_resolve_and_refuse_when_missing(tmp_path):
+    root = _release(tmp_path)
+    evidence = _run(tmp_path, root)
+    rows = [r for r in evidence["consumers"]
+            if r["consumer"] in ("chooser.admissible_table", "chooser.analog_pool")]
+    assert {r["consumer"] for r in rows} == {"chooser.admissible_table", "chooser.analog_pool"}
+    assert all(r["status"] == "ok" for r in rows), rows
+
+
+def test_preparer_builds_the_chooser_pool_from_its_parquet(tmp_path):
+    import pandas as pd
+
+    from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
+
+    frame = pd.DataFrame([{"strategy": "CTR5", "entry_date": pd.Timestamp("2026-01-02"),
+                           "exit_date": pd.Timestamp(f"2026-02-{1 + i:02d}"), "pnl": float(i),
+                           "exp_pnl_sim": 0.5, "width_over_forecast": 1.0, "n_legs": 5.0,
+                           "anchor_over_spot": 1.0, "rel_spread": 0.2} for i in range(12)])
+    frame.to_parquet(tmp_path / "chooser_analog_pool.parquet", index=False)
+    found = prep.chooser_pool_payloads(tmp_path / "chooser_analog_pool.parquet")
+    (name, data), = found["chooser_analog_pool"].items()
+    assert name == "features.chooser_analog_pool|2026-02-13"
+    (tmp_path / "pool.json").write_bytes(data)
+    pool = FrozenStateLoader(tmp_path).load(FrozenStateRef(path="pool.json",
+                                                          content_hash=_hash(data)))
+    assert [row[1] for row in pool.rows_for("CTR5")] == [float(i) for i in range(12)]
+    assert prep.frozen_state_payloads([tmp_path / "pool.json"]) == found
+    assert prep.chooser_pool_payloads(tmp_path / "absent.parquet") == {}

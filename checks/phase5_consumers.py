@@ -371,6 +371,53 @@ def _probe_board_analog(ctx: ReleaseContext) -> list[dict]:
     return rows
 
 
+_CHOOSER_QUOTES = {("P", float(strike), "2026-09-18"): {"bid": 1.0, "ask": 1.2}
+                   for strike in range(80, 121, 2)}
+
+
+def _chooser_bundle(ctx: ReleaseContext, binding_id: str, recipe: dict, **state):
+    """A TWIN-P menu candidate whose chooser declares one frozen state."""
+    from engine.v2.models.loader import FrozenInference
+    from engine.v2.scoring.source_inputs import SourceBundle
+
+    return SourceBundle(
+        source_ref="p5-6-chooser-probe", strategy="TWIN-P",
+        context={"ticker": "P5PROBE", "event_date": "2026-09-16",
+                 "entry_date": "2026-09-16", "exit_date": "2026-09-09",
+                 "expiry": "2026-09-18", "spot": 100.0},
+        raw_quotes=_CHOOSER_QUOTES, feature_vector={}, feature_missing_mask={},
+        model_identity={"size": {"model_id": "probe"}},
+        forecast_recipes={"forecast_abs_move": {"intercept": 6.0, "coefficients": {}}},
+        model_artifact_refs={"forecast_abs_move": "sha256:probe-size"},
+        residual_recipe={}, analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        chooser_recipe={"binding_id": binding_id, **recipe},
+        frozen_inference=FrozenInference(deployment_root(ctx.release_root)),
+        model_release=ctx.model_release, **state,
+    )
+
+
+def _chooser_probe(member_id: str, consumer: str, field: str, key_of):
+    """The chooser stage reading one frozen state by its declared key; the
+    staged chooser binding scores (or declines on the probe's absent
+    features), and a declared-but-absent state is MODEL_NOT_READY."""
+    def probe(ctx: ReleaseContext) -> list[dict]:
+        state = ctx.states.get(member_id)
+        chooser = [b for b in ctx.model_release.bindings if b.role == "chooser"]
+        if state is None or len(chooser) != 1:
+            return _blocked(consumer, member_id)
+        rows = []
+        for artifact in state["artifacts"]:
+            recipe = {field.removeprefix("chooser_"): key_of(artifact)}
+            flags = _score("TWIN-P", 0.5, _chooser_bundle(
+                ctx, chooser[0].binding_id, recipe, **{field: artifact})).reason_codes
+            missing = _score("TWIN-P", 0.5, _chooser_bundle(
+                ctx, chooser[0].binding_id, recipe)).reason_codes
+            rows.append(_row(consumer, member_id, flags, missing))
+        return rows
+    return probe
+
+
 #: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
 CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "frozen_stage_executor": _probe_frozen_executor,
@@ -381,14 +428,15 @@ CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "model_stage.driver_residual_pool": _probe_driver_pools,
     "simulation.paired_residual_pool": _probe_paired_pool,
     "model_stage.recalibration": _probe_recalibration,
-    # No v2 scoring stage reads the n_admissible table yet (legacy serves
-    # the chooser feature in engine/score.py); PENDING until one does.
-    "chooser.admissible_table": None,
+    "chooser.admissible_table": _chooser_probe(
+        "admissible_table:dyn_sv", "chooser.admissible_table", "chooser_admissible_table",
+        lambda table: {"table_id": table.table_id, "version": table.version,
+                       "content_hash": table.content_hash}),
     "gate.trailing_cutoff": None,
-    # The DYN-SV chooser's k-NN analog pool is a different shape from the
-    # board matcher (EXP-161 nearest neighbours over candidate features, not
-    # bucket widening over a causal trade slice); it is defined separately.
-    "chooser.analog_pool": None,
+    "chooser.analog_pool": _chooser_probe(
+        "chooser_analog_pool", "chooser.analog_pool", "chooser_analog_pool",
+        lambda pool: {"pool_id": pool.pool_id, "cutoff": pool.cutoff,
+                      "content_hash": pool.content_hash}),
     "analogs.board_analog_matcher": _probe_board_analog,
     "features.tier4_serving_folds": None,
 }

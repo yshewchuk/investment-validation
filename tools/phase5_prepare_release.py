@@ -6,7 +6,8 @@ Tier-4 serving folds under ``data/models/tier4``, P5-3 training-job outputs
 (``payoff_artifact.json`` and ``recalibration_artifact.json`` per calibration
 fold, under ``--training-root``) and the frozen states the training job's
 ``--state`` writes (driver and paired residual pools, via ``--frozen-state``).
-The admissible-depth table is built here from ``legacy_n_admissible_table()``.
+The admissible-depth table is built here from ``legacy_n_admissible_table()``,
+and the frozen chooser analog pool from ``data/features/chooser_analog_pool.parquet``.
 Which calibration folds to train: ``tools/phase5_calibration_keys.py``. Writes one release root (layout: ``checks/phase5_release.py``) under
 ``--out``, which may not be inside ``data/``:
 
@@ -213,6 +214,8 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
         elif schema.startswith("board_analog_pool"):
             member = "board_analog_matcher"
             name = f"{state.strategy}|{state.alpha:.4f}|{state.cutoff}"
+        elif schema.startswith("chooser_analog_pool"):
+            member, name = "chooser_analog_pool", f"{state.pool_id}|{state.cutoff}"
         else:
             member, name = "admissible_table:dyn_sv", f"{state.table_id}|{state.version}"
         found.setdefault(member, {})[name] = data
@@ -226,6 +229,34 @@ def default_admissible_table() -> dict[str, dict[str, bytes]]:
     table = legacy_n_admissible_table()
     return {"admissible_table:dyn_sv": {
         f"{table.table_id}|{table.version}": serialize_frozen_state(table)}}
+
+
+#: The chooser analog pool's id in a release (its source file, by name).
+CHOOSER_POOL_ID = "features.chooser_analog_pool"
+
+
+def chooser_pool_payloads(path: Path) -> dict[str, dict[str, bytes]]:
+    """The frozen chooser analog pool built from ``tools/build_chooser_pool.py``'s
+    parquet, in its stored order. The pool is static, so its causal cutoff is
+    the day after its last exit: every row it holds is inside the key."""
+    import pandas as pd
+
+    from engine.v2.models.frozen_state import serialize_frozen_state
+    from engine.v2.models.lineage import DataDependency, Lineage
+    from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
+
+    if not Path(path).is_file():
+        return {}
+    frame = pd.read_parquet(path)
+    exits = pd.to_datetime(frame["exit_date"]).dropna()
+    if exits.empty:
+        return {}
+    cutoff = str((exits.max().normalize() + pd.Timedelta(days=1)).date())
+    pool = build_chooser_analog_pool_artifact(
+        frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=cutoff,
+        lineage=Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=cutoff),)))
+    return {"chooser_analog_pool": {f"{pool.pool_id}|{pool.cutoff}":
+                                    serialize_frozen_state(pool)}}
 
 
 def tier4_fold_payloads(tier4_dir: Path, model_ids: Mapping[str, str], snapshot: str | None,
@@ -357,9 +388,8 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
     if modules_available(("engine.v2.models.frozen_state",))[0]:
         _merge(found, default_admissible_table())
         _merge(found, frozen_state_payloads(args.frozen_state or ()))
-    pool = paths.FEATURES / "chooser_analog_pool.parquet"
-    if pool.is_file():
-        found["chooser_analog_pool"] = {pool.name: pool.read_bytes()}
+    if modules_available(("engine.v2.models.chooser_analog_pool",))[0]:
+        _merge(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
     return release, inventory, payloads, build_states(found)
 
 

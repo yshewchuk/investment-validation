@@ -114,7 +114,7 @@ def _producer_prediction(executor: Any, facts: Mapping[str, Any]) -> float | Non
         raise _NotReady(reasons or ("INVALID_CHOOSER_PRODUCER",)) from exc
 
 
-def _number(value: Any) -> float:
+def _as_float(value: Any) -> float:
     if value is None:
         return _NAN
     try:
@@ -159,7 +159,7 @@ def _derive(block, facts, strategy, values, quotes, flags) -> dict[str, float]:
     out = chooser_direct_columns(strategy, values, flags)
     out["entry_cost_pct"] = columns.entry_cost_pct(values.get("entry_cost"),
                                                    values.get("spot"))
-    m = _number(values.get("forecast_abs_move"))
+    m = _as_float(values.get("forecast_abs_move"))
     band = columns.size_band_columns(m, (block.get(FOLD_POOLS_FIELD) or {})
                                      .get("pred_abs_move"))
     out.update(band)
@@ -171,7 +171,7 @@ def _derive(block, facts, strategy, values, quotes, flags) -> dict[str, float]:
     out.update(columns.knn_analog_columns(pool, strategy, facts.get("entry_date"), out))
     out.update(_producers(block, facts))
     out["tier4_forecast_edge"] = columns.forecast_edge(
-        m, _number(facts.get("or_implied")))
+        m, _as_float(facts.get("or_implied")))
     return out
 
 

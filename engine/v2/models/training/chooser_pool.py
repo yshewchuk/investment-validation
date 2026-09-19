@@ -56,7 +56,7 @@ def _exit_day(value: Any) -> str | None:
     return str(day)
 
 
-def _number(value: Any) -> float:
+def _as_float(value: Any) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -68,10 +68,10 @@ def _kept(row: Mapping[str, Any], bound: str | None) -> tuple[str, tuple] | None
     if strategy is None or strategy != strategy:
         return None
     day = _exit_day(row.get("exit_date"))
-    pnl = _number(row.get("pnl"))
+    pnl = _as_float(row.get("pnl"))
     if day is None or pnl != pnl:
         return None
-    dims = tuple(_number(row.get(name)) for name in CHOOSER_ANALOG_DIMS)
+    dims = tuple(_as_float(row.get(name)) for name in CHOOSER_ANALOG_DIMS)
     if not all(isfinite(value) for value in dims):
         return None
     if bound is not None and day >= bound:

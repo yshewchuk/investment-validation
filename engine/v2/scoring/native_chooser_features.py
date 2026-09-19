@@ -83,7 +83,7 @@ _ARRAY_CACHE: dict[str, dict[str, tuple[np.ndarray, ...]]] = {}
 _ARRAY_CACHE_LIMIT = 4
 
 
-def _number(value: Any) -> float:
+def _as_float(value: Any) -> float:
     """legacy ``float(x) if x is not None else nan`` (NaN stays NaN)."""
     if value is None:
         return _NAN
@@ -97,7 +97,7 @@ def entry_cost_pct(cost: Any, spot: Any) -> float:
     """``entry_cost / spot_entry * 100`` in float64, as legacy's pandas does
     (a zero spot gives +/-inf or NaN, never an exception)."""
     with np.errstate(divide="ignore", invalid="ignore"):
-        return float(np.float64(_number(cost)) / np.float64(_number(spot)) * 100.0)
+        return float(np.float64(_as_float(cost)) / np.float64(_as_float(spot)) * 100.0)
 
 
 def size_band_columns(m: float, pool: Mapping[str, Any] | None) -> dict[str, float]:
@@ -193,7 +193,7 @@ def _put_quotes(quotes: Mapping[Any, Mapping[str, Any]], expiry: str):
             strike = float(parts[1])
         except (TypeError, ValueError):
             continue
-        rows.append((strike, _number(quote.get("bid")), _number(quote.get("ask"))))
+        rows.append((strike, _as_float(quote.get("bid")), _as_float(quote.get("ask"))))
     return rows
 
 

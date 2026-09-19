@@ -81,6 +81,7 @@ class StateSpec:
 _PAYOFF = ("engine.v2.models.payoff_artifact",)
 _RESIDUAL = ("engine.v2.models.residual_artifact", "engine.v2.models.frozen_state")
 _ADMISSIBLE = ("engine.v2.models.admissible_table", "engine.v2.models.frozen_state")
+_CHOOSER_POOL = ("engine.v2.models.chooser_analog_pool", "engine.v2.models.frozen_state")
 #: The frozen recalibration-map artifact (P5-4, merged at 3dea05e).
 RECALIBRATION_MODULES = ("engine.v2.models.recalibration_artifact",)
 #: The frozen board analog-matcher population (P5-4): one
@@ -116,8 +117,9 @@ STATE_SPECS: tuple[StateSpec, ...] = (
               "chooser.admissible_table", "P5-4 n_admissible table"),
     StateSpec("trailing_pnl_cutoff", "threshold", ("*",), TRAILING_CUTOFF_MODULES,
               "gate.trailing_cutoff", "no frozen artifact type yet"),
-    StateSpec("chooser_analog_pool", "residual", ("DYN-SV",), (),
-              "chooser.analog_pool", "data/features/chooser_analog_pool.parquet"),
+    StateSpec("chooser_analog_pool", "residual", ("DYN-SV",), _CHOOSER_POOL,
+              "chooser.analog_pool",
+              "P5-4 chooser analog pool, built from data/features/chooser_analog_pool.parquet"),
     StateSpec("board_analog_matcher", "residual", ("*",), ANALOG_MODULES,
               "analogs.board_analog_matcher",
               "training job --state board_analog_matcher (one object per causal key)"),
