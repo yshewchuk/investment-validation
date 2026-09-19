@@ -37,7 +37,10 @@ from engine.v2.models.residual_artifact import (
 )
 from engine.v2.scoring import native_payoff
 
-__all__ = ["build_driver_residual_pool_artifact", "build_paired_residual_pool_artifact"]
+from .legacy_adapter import forbid_fitting as forbid_legacy_fitting
+
+__all__ = ["build_driver_residual_pool_artifact", "build_paired_residual_pool_artifact",
+           "freeze_stored_driver_residual_pool"]
 
 
 def _require_lineage(lineage: Lineage) -> None:
@@ -89,6 +92,47 @@ def build_driver_residual_pool_artifact(
     return make_driver_residual_pool_artifact(
         role=role, model_id=model_id, fold=fold, flat_residuals=residuals,
         buckets=buckets, deciles=deciles, min_pool=min_pool, lineage=lineage,
+    )
+
+
+def freeze_stored_driver_residual_pool(
+    flat_residuals: Sequence[float],
+    buckets: Mapping[str, Any] | None,
+    *,
+    role: str,
+    model_id: str,
+    lineage: Lineage,
+    fold: Any = None,
+    deciles: int = native_payoff.DECILES,
+) -> DriverResidualPoolArtifact | None:
+    """Freeze a pool that was ALREADY bucketed at training time, as stored.
+
+    A full-refit champion (``engine.models.registry.ModelArtifact``) keeps
+    only its flat held-out residuals and the decile buckets
+    ``registry.bucket_residuals`` built from them -- the predictions are gone
+    once the artifact is saved, so :func:`build_driver_residual_pool_artifact`
+    cannot rebuild the buckets. This wraps the stored arrays unchanged
+    (legacy ``ModelArtifact.residual_pool`` serves exactly these), keeping
+    only finite flat residuals as ``ModelArtifact.__post_init__`` does.
+    ``min_pool`` is the stored bucket floor, or ``native_payoff.MIN_POOL``
+    when the champion carries no buckets (it is then unused). ``None`` when
+    no finite residual exists (legacy raises ``RegistryError`` there).
+    """
+    forbid_legacy_fitting("engine.v2.models.training.residuals.freeze_stored_driver_residual_pool")
+    forbid_fitting("engine.v2.models.training.residuals.freeze_stored_driver_residual_pool")
+    _require_lineage(lineage)
+    flat = [float(value) for value in flat_residuals if isfinite(float(value))]
+    if not flat:
+        return None
+    frozen = None
+    min_pool = native_payoff.MIN_POOL
+    if buckets:
+        min_pool = int(buckets.get("min_pool", 0))
+        frozen = {"edges": [float(edge) for edge in buckets["edges"]],
+                  "pools": [[float(value) for value in pool] for pool in buckets["pools"]]}
+    return make_driver_residual_pool_artifact(
+        role=role, model_id=model_id, fold=fold, flat_residuals=flat, buckets=frozen,
+        deciles=deciles, min_pool=min_pool, lineage=lineage,
     )
 
 
