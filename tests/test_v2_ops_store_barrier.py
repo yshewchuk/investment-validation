@@ -7,7 +7,6 @@ input between the launching tick and the finishing tick.
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +31,7 @@ from engine.v2.ops.store_barrier import (
 )
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy, submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import POLICY, TEST_POLICY, catalog, request, sample
+from tests.ops_support import POLICY, TEST_POLICY, AdmissionWatch, catalog, request, run_until, sample
 
 
 def _kind(name, mode):
@@ -254,21 +253,15 @@ def _run_supervisor(root, *, mutate, complete):
                       code_source=repo, store_root=prod)
     try:
         service.start()
-        assert service.tick() is True  # claimed and launched, read set pinned
+        if service.tick() is not True:  # claimed and launched, read set pinned
+            AdmissionWatch(conn, job.job_id).check(final=True)  # RESOURCE WAIT, if that is why
+            pytest.fail("first tick did not claim the job")
         attempt_id = conn.execute("SELECT attempt_id FROM attempts").fetchone()[0]
         assert conn.execute("SELECT read_set_complete FROM store_read_pins WHERE attempt_id=?",
                             (attempt_id,)).fetchone()[0] == int(complete)
         if mutate:
             pinned.write_bytes(b"mutated while the worker ran")
-        state = "running"
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline:
-            service.tick()
-            state = conn.execute("SELECT state FROM jobs WHERE job_id=?",
-                                 (job.job_id,)).fetchone()[0]
-            if state in ("succeeded", "failed", "blocked", "cancelled"):
-                break
-            time.sleep(0.05)
+        run_until(service, conn, job.job_id, timeout=90)
         row = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
                            (job.job_id,)).fetchone()
         return {"state": row[0], "failure": row[1],

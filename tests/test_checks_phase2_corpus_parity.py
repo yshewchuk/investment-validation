@@ -55,7 +55,7 @@ from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root  # noqa: E402
 from engine.v2.ops.snapshot_stages import MANIFEST_OUTPUT  # noqa: E402
 from engine.v2.ops.submission import NamespacePolicy  # noqa: E402
-from tests.ops_support import TEST_POLICY  # noqa: E402
+from tests.ops_support import TEST_POLICY, run_until  # noqa: E402
 from tests.test_v2_data_import import build_legacy_store  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
@@ -68,6 +68,23 @@ EVENT_DATE = f"{YEAR}-06-01"
 #: harness now refuses ``import``/``control-missing-analogs`` when a
 #: ``source_root``'s SNAPSHOT hash does not equal the corpus's own).
 SNAPSHOT_HASH = "sha256:test-snapshot-0001"
+
+
+@pytest.fixture(autouse=True)
+def _bounded_admission_wait(monkeypatch):
+    """The harness's own ``_run_to_terminal`` polls a real ``Service`` for up to
+    1800 s per job, which is right for a real D14 run waiting its turn for
+    memory. Here it hid every admission stall: under ``taskset -c 0-3`` the
+    5-CPU ``legacy_score`` profile can never be admitted, and a test that takes
+    10 s sat asleep for the whole 1800 s. ``tests.ops_support.run_until`` is
+    the same tick/poll loop with the same terminal states and the same
+    deadline; it only fails the test, with the queue reason, once the wait is
+    known to be environmental."""
+    def run_to_terminal(service, conn, job_id, timeout=1800):
+        return run_until(service, conn, job_id, timeout=timeout,
+                         states=corpus_parity._TERMINAL)
+
+    monkeypatch.setattr(corpus_parity, "_run_to_terminal", run_to_terminal)
 
 
 def _set_legacy_snapshot(store_root: Path, value: str | None) -> None:

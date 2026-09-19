@@ -45,7 +45,7 @@ from engine.v2.ops.profiles import profile_named
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, get_job, job_id_for, submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import TEST_POLICY
+from tests.ops_support import TEST_POLICY, AdmissionWatch, run_until
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -248,12 +248,8 @@ def _submit(conn, clock, *, key, scenario, dependency_job_ids=()):
 
 
 def _run_until(conn, service, job_id, states, timeout=15):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        service.tick()
-        if get_job(conn, job_id).state in states:
-            return get_job(conn, job_id)
-        time.sleep(0.05)
+    if run_until(service, conn, job_id, timeout=timeout, states=states) in states:
+        return get_job(conn, job_id)
     raise AssertionError(f"{job_id} did not reach {states} within {timeout}s "
                          f"(last state: {get_job(conn, job_id).state})")
 
@@ -297,10 +293,14 @@ def test_retryable_typed_failure_is_retried(tmp_path, monkeypatch):
     # Proof this was actually retried, not just left non-failed: a second
     # attempt launches once the retry delay (1s, artifact_check's policy)
     # elapses.
+    watch = AdmissionWatch(conn, job_id)
     deadline = time.monotonic() + 10
     while get_job(conn, job_id).attempt_count < 2 and time.monotonic() < deadline:
         service.tick()
+        watch.check()
         time.sleep(0.05)
+    if get_job(conn, job_id).attempt_count < 2:
+        watch.check(final=True)
     assert get_job(conn, job_id).attempt_count >= 2
 
 

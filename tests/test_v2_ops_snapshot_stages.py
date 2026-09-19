@@ -19,7 +19,6 @@ import os
 import stat
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -53,7 +52,7 @@ from engine.v2.ops.stages import BARRIER_ONLY_REASONS, SNAPSHOT_BACKED_KINDS, re
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
 from tests.data_scan_support import RECEIPT, contract_for, fake_hash, publish_and_inspect
-from tests.ops_support import TEST_POLICY
+from tests.ops_support import TEST_POLICY, run_until
 from tests.test_v2_data_legacy_materialization import (
     _EE_COMMON,
     PANEL_ROWS,
@@ -129,14 +128,7 @@ class Case:
         service = self.service()
         service.start()
         try:
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                service.tick()
-                state = self.state(job_id)
-                if state in ("succeeded", "failed", "blocked", "cancelled"):
-                    return state
-                time.sleep(0.05)
-            return self.state(job_id)
+            return run_until(service, self.conn, job_id, timeout=timeout)
         finally:
             service.close()
 
