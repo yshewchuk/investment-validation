@@ -1300,13 +1300,50 @@ def dyn_sv_pass(candidates: list[dict]) -> list[dict]:
     return out
 
 
+def _research_replay_chain_keys(
+    scorer, events: pd.DataFrame, strategies: tuple[str, ...] | None = None,
+) -> set[tuple[str, pd.Timestamp]]:
+    """Every ``(ticker, date)`` :func:`research_replay_pass`'s own
+    ``replay_one`` calls will look up, for CAL-P and CND-P specifically.
+
+    ``_forward_chain_keys``/``_boundary_chain_keys`` deliberately SKIP
+    ``score_mod.DISABLED_STRATEGIES`` — for THOSE passes that is correct,
+    because a disabled strategy never reaches ``_price_entry`` through
+    ``Scorer.score`` (it returns early). ``research_replay_pass`` is a
+    different entry point: it calls ``replay_mod.replay_one`` directly, with
+    no scorer short-circuit, so it genuinely needs CAL-P's/CND-P's own chain
+    keys — this function is the disabled-strategy counterpart the other two
+    do not, and must not, provide.
+    """
+    keys: set[tuple[str, pd.Timestamp]] = set()
+    for strategy in score_mod.DISABLED_STRATEGIES:
+        if strategies is not None and strategy not in strategies:
+            continue
+        plan = replay_mod.plan_events(
+            STRUCTURES[strategy](), events, calendar=scorer.calendar
+        )
+        keys |= plan.chain_keys
+    return keys
+
+
 def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
-                         strategies: tuple[str, ...] | None = None) -> list[dict]:
+                         strategies: tuple[str, ...] | None = None,
+                         index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
     """Price CAL-P and CND-P under research, where the scorer refuses them.
 
     §7.1 requires both to appear as *refusals* on the production path and to
     *replay* under research. That is a different entry point with a different
     record, and conflating the two would lose the distinction.
+
+    2026-09-19: this pass used to build its own fresh ``ChainIndex`` per
+    ``DISABLED_STRATEGIES`` entry (up to two full streamed table scans, late
+    in the pipeline, on top of whatever forward/boundary/rescore had already
+    accumulated) -- the same "fresh index per pass" shape already fixed for
+    ``boundary_pass``/``_rescore``. ``index`` (a superset built once in
+    ``main()`` via ``_research_replay_chain_keys``, unioned into the same
+    combined ``ChainIndex`` the other passes share) resolves every key this
+    pass ever queries identically to a fresh per-strategy one, so a caller
+    that supplies it changes nothing about which rows come back.
     """
     out: list[dict] = []
     for strategy in score_mod.DISABLED_STRATEGIES:
@@ -1314,11 +1351,14 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
             continue
         structure = STRUCTURES[strategy]()
         plan = replay_mod.plan_events(structure, events, calendar=scorer.calendar)
-        index = replay_mod.load_chain_index(plan.chain_keys, progress_every=0)
+        pass_index = (
+            index if index is not None
+            else replay_mod.load_chain_index(plan.chain_keys, progress_every=0)
+        )
         taken = 0
         for row in plan.frame.to_dict("records"):
             started = time.monotonic()
-            rows, skip = replay_mod.replay_one(structure, row, index,
+            rows, skip = replay_mod.replay_one(structure, row, pass_index,
                                                include_legs=True)
             if not rows:
                 continue
@@ -1632,17 +1672,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
 
         # One ChainIndex, built up front, for every pass that prices a
-        # request: forward, boundary, and the two rescore passes (pinned/
-        # strike, coarse ladder). 2026-09-18: an instrumented run measured
-        # boundary_pass alone streaming its own fresh ChainIndex per request
-        # (transients up to +673 MB/call) because it reached Scorer.score
-        # with chain_index=None every time; the rescore passes have the same
-        # shape of gap. See boundary_pass's/_rescore's own docstrings for why
-        # a combined, superset index resolves every key identically to a
-        # fresh per-call one -- this changes nothing about which quote a row
-        # prices against, only when and how many times it is loaded.
+        # request: forward, boundary, the two rescore passes (pinned/strike,
+        # coarse ladder), and research_replay_pass's own disabled-strategy
+        # replay. 2026-09-18: an instrumented run measured boundary_pass
+        # alone streaming its own fresh ChainIndex per request (transients up
+        # to +673 MB/call) because it reached Scorer.score with
+        # chain_index=None every time; the rescore passes had the same shape
+        # of gap. 2026-09-19: research_replay_pass had the identical gap one
+        # level down -- it calls replay_mod.replay_one directly (never
+        # Scorer.score), so _forward_chain_keys/_boundary_chain_keys's own
+        # DISABLED_STRATEGIES skip does not cover it; it needs its own
+        # _research_replay_chain_keys union, added here rather than left as
+        # a second, separately-timed load late in the pipeline. See
+        # boundary_pass's/_rescore's/research_replay_pass's own docstrings
+        # for why a combined, superset index resolves every key identically
+        # to a fresh per-call one -- this changes nothing about which quote
+        # a row prices against, only when and how many times it is loaded.
         chain_keys = _forward_chain_keys(scorer, forward, as_of, strategies)
         chain_keys |= _boundary_chain_keys(scorer, boundaries, strategies)
+        chain_keys |= _research_replay_chain_keys(scorer, boundaries, strategies)
         chain_index = (
             replay_mod.load_chain_index(chain_keys, progress_every=0)
             if chain_keys else None
@@ -1661,7 +1709,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
             candidates += dyn_sv_pass(candidates)
         candidates += research_replay_pass(
-            scorer, boundaries, strategies=strategies,
+            scorer, boundaries, strategies=strategies, index=chain_index,
         )
         print(f"[corpus] candidates: {len(candidates)}", flush=True)
 

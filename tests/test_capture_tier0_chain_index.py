@@ -1,4 +1,5 @@
-"""Regression tests for the 2026-09-18 boundary/rescore ChainIndex fix.
+"""Regression tests for the 2026-09-18 boundary/rescore ChainIndex fix, and
+the 2026-09-19 research_replay_pass follow-up.
 
 An instrumented capture run (``scratch/diag_capture_serving.py``) measured
 ``boundary_pass``'s own ``_price_entry`` calls building a FRESH ``ChainIndex``
@@ -44,7 +45,12 @@ class _FakeScorer:
 
 
 class _FakeStructure:
-    """A stand-in `Structure` — never introspected, only passed through."""
+    """A stand-in `Structure` — never introspected beyond `to_dict()`,
+    which `research_replay_pass` calls to build its own request record.
+    """
+
+    def to_dict(self) -> dict:
+        return {"kind": "fake"}
 
 
 class _FakePlan:
@@ -310,3 +316,88 @@ def test_coarse_ladder_pass_threads_index_into_rescore(monkeypatch):
 
     assert len(result) == 1
     assert calls[0][1] is given_index
+
+
+# -- _research_replay_chain_keys / research_replay_pass ---------------------
+#
+# 2026-09-19: research_replay_pass had the identical "fresh index per pass"
+# gap as boundary_pass/_rescore, one level down -- it calls
+# replay_mod.replay_one directly (never Scorer.score), so it is NOT covered
+# by _forward_chain_keys'/_boundary_chain_keys' DISABLED_STRATEGIES skip
+# (that skip is correct for THEM: a disabled strategy never reaches
+# _price_entry through Scorer.score). _research_replay_chain_keys is the
+# disabled-strategy counterpart those two must not provide, and
+# research_replay_pass now accepts a caller-supplied index the same way
+# boundary_pass does.
+
+
+def test_research_replay_chain_keys_collects_disabled_strategies_only(fakes):
+    """Unlike `_boundary_chain_keys`, this walks `DISABLED_STRATEGIES` --
+    "DIS" here -- and does NOT skip it; its whole point is the keys the
+    other two functions must not plan.
+    """
+    keys = capture._research_replay_chain_keys(_FakeScorer(), _events_for("DIS"), ["DIS"])
+
+    assert keys == {_key("ZZZ", "1999-01-01")}
+
+
+def test_research_replay_chain_keys_respects_strategy_filter(fakes):
+    """A `strategies` filter that excludes the disabled strategy leaves
+    nothing to plan -- no plan is built at all.
+    """
+    keys = capture._research_replay_chain_keys(_FakeScorer(), _events_for("DIS"), ["S1"])
+
+    assert keys == set()
+    assert fakes["plan_events"] == []
+
+
+def test_research_replay_pass_builds_exactly_one_index_per_strategy_when_none_given(
+    fakes, monkeypatch,
+):
+    many_rows = pd.DataFrame([{"row": i} for i in range(5)])
+    plan = _FakePlan(many_rows, {_key("ZZZ", "1999-01-01")})
+    monkeypatch.setattr(
+        capture.replay_mod, "plan_events",
+        lambda structure, events, calendar=None: plan,
+    )
+    replay_calls = []
+
+    def fake_replay_one(structure, row, index, *, include_legs=True):
+        replay_calls.append(index)
+        return ([{"leg": "x"}], None)
+
+    monkeypatch.setattr(capture.replay_mod, "replay_one", fake_replay_one)
+
+    out = capture.research_replay_pass(_FakeScorer(), _events_for("DIS"), limit=8,
+                                       strategies=["DIS"])
+
+    assert len(fakes["load_chain_index"]) == 1  # one DISABLED_STRATEGIES entry
+    assert len(out) == 5
+    used_indexes = {id(index) for index in replay_calls}
+    assert len(used_indexes) == 1  # every row shared the ONE index built
+
+
+def test_research_replay_pass_reuses_a_caller_supplied_index_with_zero_new_loads(
+    fakes, monkeypatch,
+):
+    many_rows = pd.DataFrame([{"row": i} for i in range(5)])
+    plan = _FakePlan(many_rows, {_key("ZZZ", "1999-01-01")})
+    monkeypatch.setattr(
+        capture.replay_mod, "plan_events",
+        lambda structure, events, calendar=None: plan,
+    )
+    replay_calls = []
+
+    def fake_replay_one(structure, row, index, *, include_legs=True):
+        replay_calls.append(index)
+        return ([{"leg": "x"}], None)
+
+    monkeypatch.setattr(capture.replay_mod, "replay_one", fake_replay_one)
+
+    given_index = capture.replay_mod.ChainIndex({})
+    out = capture.research_replay_pass(_FakeScorer(), _events_for("DIS"), limit=8,
+                                       strategies=["DIS"], index=given_index)
+
+    assert fakes["load_chain_index"] == []  # never builds its own
+    assert len(out) == 5
+    assert all(index is given_index for index in replay_calls)
