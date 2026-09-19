@@ -77,7 +77,12 @@ def _reject_answers(
                 and path[-2] == "forecast"
                 and path[-1] in _FORECAST_ROLE_CONTAINERS
             )
-            if name in _ANSWER_FIELDS and not role_declaration:
+            role_feature_vector = (
+                len(path) >= 3
+                and path[-3] == "features"
+                and path[-2] == "role_model_inputs"
+            )
+            if name in _ANSWER_FIELDS and not (role_declaration or role_feature_vector):
                 location = ".".join((*path, name))
                 raise ReleaseAssemblyError(f"{location}: calculated answer")
             _reject_answers(child, (*path, name))

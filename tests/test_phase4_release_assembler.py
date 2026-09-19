@@ -276,3 +276,41 @@ def test_calculated_answers_are_rejected_but_forecast_roles_are_allowed():
             observations=_observations(),
             resources=[],
         )
+
+
+def test_role_model_input_feature_named_like_an_answer_is_allowed():
+    request = _request()
+    inputs, shared = _native_inputs(request)
+    inputs["features"]["role_model_inputs"] = {
+        "gate": {"entry_cost_pct": 4.2, "spot": 100.0},
+    }
+    shared["native_inputs"]["features"] = copy.deepcopy(inputs["features"])
+    inputs["source_ref"] = content_hash(shared)
+
+    trace = assemble_input_trace(
+        request=request,
+        shared_inputs=shared,
+        native_inputs=inputs,
+        observations=_observations(),
+        resources=[],
+    )
+
+    role_gate = trace["native_inputs"]["features"]["role_model_inputs"]["gate"]
+    assert role_gate["entry_cost_pct"] == 4.2
+
+
+def test_answer_field_directly_under_features_is_still_rejected():
+    request = _request()
+    inputs, shared = _native_inputs(request)
+    inputs["features"]["entry_cost_pct"] = 4.2
+    shared["native_inputs"]["features"] = copy.deepcopy(inputs["features"])
+    inputs["source_ref"] = content_hash(shared)
+
+    with pytest.raises(ReleaseAssemblyError, match="calculated answer"):
+        assemble_input_trace(
+            request=request,
+            shared_inputs=shared,
+            native_inputs=inputs,
+            observations=_observations(),
+            resources=[],
+        )
