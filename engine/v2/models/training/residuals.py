@@ -12,9 +12,10 @@ Paired pool: the legacy construction is ``Scorer._residual_pool``
 event_date)`` with the panel's realized ``abs_move`` and the crush table's
 realized ``crush_pct_iv30``; ``err_move = abs_move - pred_abs_move`` and
 ``err_crush = crush_pct_iv30 - pred_iv_crush_30``; rows missing either error
-dropped. :func:`build_paired_residual_pool_artifact` is that arithmetic over
-rows the CALLER supplies in full. It takes no scorer context of any kind:
-legacy scoped the crush table to the tickers a Scorer happened to load, and
+dropped (missing means NaN: legacy's ``dropna`` keeps an infinite error).
+:func:`build_paired_residual_pool_artifact` is that arithmetic over rows
+the CALLER supplies in full. It takes no scorer context of any kind: legacy
+scoped the crush table to the tickers a Scorer happened to load, and
 that scoping is exactly what made the pool move with context. The causal
 cutoff is explicit too -- events dated on/after ``cutoff`` never enter.
 
@@ -140,12 +141,24 @@ def _day(value: Any) -> str:
     return str(value)[:10]
 
 
+def _present_field(row: Mapping[str, Any], name: str) -> float | None:
+    """A row's float, or ``None`` where it is MISSING (absent, unparsable,
+    None or NaN). +/-inf is present: the legacy paired pool drops only
+    missing values (``dropna``), so an infinite error is kept (R4-20 gap 1).
+    """
+    try:
+        value = float(row[name])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None if value != value else value
+
+
 def _index(rows: Iterable[Mapping[str, Any]], column: str) -> dict[tuple[str, str], list[float]]:
     """``(ticker, day) -> [values]``, keeping duplicates (an inner merge's
     cartesian semantics, exactly as ``pandas.merge`` would pair them)."""
     index: dict[tuple[str, str], list[float]] = {}
     for row in rows:
-        value = _finite_field(row, column)
+        value = _present_field(row, column)
         if value is None:
             continue
         index.setdefault((str(row["ticker"]), _day(row["event_date"])), []).append(value)
@@ -161,14 +174,15 @@ def _paired_rows(forecasts, outcomes, crush, cutoff) -> list[tuple]:
         key = (str(forecast["ticker"]), _day(forecast["event_date"]))
         if bound is not None and key[1] >= bound:
             continue
-        pred_move = _finite_field(forecast, "pred_abs_move")
-        pred_crush = _finite_field(forecast, "pred_iv_crush_30")
+        pred_move = _present_field(forecast, "pred_abs_move")
+        pred_crush = _present_field(forecast, "pred_iv_crush_30")
         if pred_move is None or pred_crush is None:
             continue
         for move in realized_move.get(key, ()):
             for crush_value in realized_crush.get(key, ()):
                 err_move, err_crush = move - pred_move, crush_value - pred_crush
-                if isfinite(err_move) and isfinite(err_crush):
+                # Legacy ``dropna``: inf - inf is NaN and drops; a lone inf stays.
+                if err_move == err_move and err_crush == err_crush:
                     rows.append((key[1], key[0], pred_move, err_move, err_crush))
     return rows
 
