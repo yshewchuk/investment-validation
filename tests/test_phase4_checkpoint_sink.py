@@ -9,6 +9,9 @@ from tools.phase4_checkpoint_sink import (
     CheckpointSinkError,
     DiskCheckpointSink,
     SCHEMA_VERSION,
+    _iter_json_chunks,
+    _json_bytes,
+    _sha256_bytes,
 )
 
 
@@ -164,3 +167,105 @@ def test_stale_temp_files_are_removed_without_touching_completed_cases(tmp_path:
     assert not root_temp.exists()
     assert not case_temp.exists()
     assert sink.completed_case_ids() == ("complete",)
+
+
+# --------------------------------------------------------------------------
+# streaming case writer: byte-identical to the whole-document oracle
+# --------------------------------------------------------------------------
+
+
+def _chooser_like_case(*, members: int = 11, rows: int = 500) -> dict:
+    """A case document shaped like a DYN-SV chooser's: many members, each
+    embedding the SAME (by content) large shared pool -- the pattern that
+    repeats shared pools once per member in the real corpus writer.
+    """
+    shared_pool = {
+        "predictions": [0.001 * i for i in range(rows)],
+        # write_case's documents are already NaN-safe by the time they get
+        # here (the corpus writer tags non-finite floats before embedding a
+        # checkpoint) -- a real fixture never carries a raw NaN/Inf.
+        "residuals": [{"__nonfinite__": "nan"} if i % 97 == 0 else -0.002 * i
+                      for i in range(rows)],
+        "note": "pool with unicode éé and emoji \U0001F600",
+    }
+    return {
+        "case_id": "dyn_sv_choice_001",
+        "strategy": "dynamic_short_vol",
+        "covers": ["strategy:dynamic_short_vol"],
+        "record_kind": "dyn_sv_choice",
+        "checkpoint": {
+            "members": [
+                {"member_index": i, "pool": shared_pool, "rank": i,
+                 "score": None if i == 0 else 1.5 - 0.01 * i}
+                for i in range(members)
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize("case_document", [
+    {"score": 1.25, "ready": True, "strategy": "STR-THRU", "branches": ["ties"]},
+    {"nested": {"a": [1, 2, {"b": None}], "c": [1, 2]}},
+    {"unicode": "éé\U0001F600", "empty_list": [], "empty_dict": {}},
+    _chooser_like_case(),
+])
+def test_iter_json_chunks_matches_the_whole_document_oracle(case_document) -> None:
+    """`_iter_json_chunks` must produce the exact same bytes as `_json_bytes`
+    -- proof the streaming path is not a different (even if superficially
+    similar) serialization.
+    """
+    oracle = _json_bytes(case_document)
+    streamed = b"".join(_iter_json_chunks(case_document))
+    assert streamed == oracle
+    assert _sha256_bytes(streamed) == _sha256_bytes(oracle)
+
+
+def test_write_case_streamed_digest_and_bytes_match_the_oracle(tmp_path: Path) -> None:
+    case_document = _chooser_like_case()
+    sink = DiskCheckpointSink(tmp_path)
+    digest = sink.write_case("dyn_sv_choice_001", case_document)
+
+    oracle_bytes = _json_bytes(case_document)
+    assert digest == _sha256_bytes(oracle_bytes)
+    written = (tmp_path / "cases" / "dyn_sv_choice_001.json").read_bytes()
+    assert written == oracle_bytes
+
+
+def test_write_case_streaming_never_holds_the_whole_document_as_one_object(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Guard against a `write_case` that quietly reassembles one big
+    str/bytes object before writing/hashing it. Wrap `hashlib.sha256` to
+    record every `update()` call: streaming calls it many times, each far
+    smaller than the document; a hidden join would call it once with
+    everything.
+    """
+    import hashlib as hashlib_module
+
+    calls = []
+    real_sha256 = hashlib_module.sha256
+
+    class _Recording:
+        def __init__(self):
+            self._h = real_sha256()
+
+        def update(self, chunk):
+            calls.append(len(chunk))
+            self._h.update(chunk)
+
+        def hexdigest(self):
+            return self._h.hexdigest()
+
+    case_document = _chooser_like_case(members=11, rows=2000)
+    sink = DiskCheckpointSink(tmp_path)
+
+    monkeypatch.setattr(hashlib_module, "sha256", _Recording)
+    try:
+        digest = sink.write_case("dyn_sv_choice_001", case_document)
+    finally:
+        monkeypatch.setattr(hashlib_module, "sha256", real_sha256)
+
+    assert digest == _sha256_bytes(_json_bytes(case_document))
+    total = sum(calls)
+    assert len(calls) > 10, f"only {len(calls)} update() calls -- looks joined, not streamed"
+    assert max(calls) < total // 2, "one update() call carried most of the document"

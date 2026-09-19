@@ -14,7 +14,7 @@ import re
 import stat
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 from engine.v2.foundation import content_hash
 
@@ -86,6 +86,29 @@ def _json_bytes(value: Any) -> bytes:
     ).encode("utf-8") + b"\n"
 
 
+#: The exact `json.dumps` settings `_json_bytes` uses, reused so the two
+#: never drift.
+_CASE_ENCODER_KWARGS = dict(
+    allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+)
+
+
+def _iter_json_chunks(value: Any) -> Iterator[bytes]:
+    """Stream the exact same bytes `_json_bytes(value)` would return, as
+    UTF-8 chunks, so a large case document (a chooser's multi-member
+    checkpoint) is never held as one big `str`/`bytes` object. Byte-identical
+    to `_json_bytes` -- both are `json.dumps` with the same settings; this
+    one is fed to the file/hash piece by piece instead of joined first
+    (`json.JSONEncoder.iterencode` yields incrementally with or without the C
+    accelerator -- see `tests/test_phase4_checkpoint_sink.py`).
+    """
+    _validate_json(value)
+    encoder = json.JSONEncoder(**_CASE_ENCODER_KWARGS)
+    for piece in encoder.iterencode(value):
+        yield piece.encode("utf-8")
+    yield b"\n"
+
+
 def _sha256_bytes(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
@@ -134,6 +157,31 @@ def _atomic_write(path: Path, data: bytes) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _atomic_write_stream(path: Path, chunks: Iterable[bytes]) -> str:
+    """`_atomic_write`, but for a `chunks` iterator instead of one `bytes`
+    object already in hand: each chunk is written and hashed as it arrives,
+    so the full document is never assembled in memory just to write it.
+    Returns the `sha256:<hex>` digest over the concatenated chunks -- the
+    same value `_sha256_bytes(b"".join(chunks))` would have returned.
+    """
+    digest = hashlib.sha256()
+    temporary = path.parent / ("." + path.name + "." + uuid.uuid4().hex + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            for chunk in chunks:
+                handle.write(chunk)
+                digest.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return "sha256:" + digest.hexdigest()
 
 
 class DiskCheckpointSink:
@@ -205,19 +253,28 @@ class DiskCheckpointSink:
         return dict(definition)
 
     def write_case(self, case_id: str, case_document: Any) -> str:
-        """Atomically write one finite JSON case and return its content hash."""
+        """Atomically write one finite JSON case and return its content hash.
+
+        The common case -- a brand new case_id, e.g. a chooser's multi-member
+        checkpoint that repeats a shared fold pool once per member -- streams
+        straight to disk (`_atomic_write_stream`/`_iter_json_chunks`): no
+        whole-document `str`/`bytes` object is built just to write or hash it.
+        A resumed run's duplicate case_id is rare and its documents are not
+        the multi-GB ones, so that path keeps the original whole-document
+        comparison (`_json_bytes`), unchanged, as the stricter check.
+        """
         case_id = _identifier(case_id, "case_id")
-        data = _json_bytes(case_document)
-        digest = _sha256_bytes(data)
         path = self.cases_dir / (case_id + ".json")
         if path.exists() or path.is_symlink():
             if path.is_symlink() or not path.is_file():
                 _fail("case_id", "existing case path is unsafe")
+            data = _json_bytes(case_document)
+            digest = _sha256_bytes(data)
             actual = _sha256_file(path)
             if actual != digest or path.read_bytes() != data:
                 _fail("case_id", "conflicting duplicate for " + case_id)
         else:
-            _atomic_write(path, data)
+            digest = _atomic_write_stream(path, _iter_json_chunks(case_document))
         recorded = self._cases.get(case_id)
         if recorded is not None and recorded != digest:
             _fail("case_id", "hash conflict for " + case_id)
