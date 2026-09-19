@@ -1045,3 +1045,47 @@ def test_runup_artifact_leaked_future_fold_cutoff_gives_model_not_ready():
     assert "MODEL_NOT_READY" in record.reason_codes
     assert record.resolved_request.get("exp_pnl_model") is None
     assert record.validation_status == "refused"
+
+
+# ---------------------------------------------------------------------------
+# A malformed causal cutoff fails closed (found by mutation triage,
+# native_payoff._parse_day#6): it used to parse to None and read as "no
+# cutoff", fitting on every row including post-cutoff ones. Legacy
+# fit_payoff / fit_runup_payoff raise on the same values.
+# ---------------------------------------------------------------------------
+
+_MALFORMED_CUTOFFS = ["not-a-date", "", "NaT", pd.NaT]
+
+
+@pytest.mark.parametrize("before", _MALFORMED_CUTOFFS, ids=repr)
+def test_fit_payoff_line_refuses_a_malformed_cutoff(before):
+    rows = _rows_from_trades(_synthetic_trades(300, seed=7))
+    assert native_payoff.fit_payoff_line(rows) is not None  # no cutoff: fits
+    assert native_payoff.fit_payoff_line(rows, before=before) is None
+    trades = _synthetic_trades(300, seed=7)
+    with pytest.raises(Exception):
+        fit_payoff(trades, "STR-THRU", alpha=0.5, before=before)
+
+
+@pytest.mark.parametrize("before", _MALFORMED_CUTOFFS, ids=repr)
+def test_fit_runup_payoff_surface_refuses_a_malformed_cutoff(before):
+    trades = _synthetic_runup_trades(300, seed=7)
+    rows = _runup_rows_from_trades(trades)
+    assert native_payoff.fit_runup_payoff_surface(rows) is not None
+    assert native_payoff.fit_runup_payoff_surface(rows, before=before) is None
+    with pytest.raises(Exception):
+        fit_runup_payoff(trades, alpha=0.5, before=before)
+
+
+def test_malformed_cutoff_withholds_the_model_number_end_to_end():
+    good = dict(payoff_source_rows=_GOOD_PAYOFF_ROWS,
+                model_residual_rows=_ZERO_MODEL_RESIDUAL_ROWS)
+    dated = application.score_one(_request(), build_native_score_inputs(_bundle(
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16,
+                       "before": "2026-09-16"}, **good)))
+    assert dated.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
+    record = application.score_one(_request(), build_native_score_inputs(_bundle(
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16,
+                       "before": "not-a-date"}, **good)))
+    assert "NO_PAYOFF_MAP" in record.reason_codes
+    assert record.resolved_request.get("exp_pnl_model") is None

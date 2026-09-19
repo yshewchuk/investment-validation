@@ -92,6 +92,28 @@ def _parse_day(value: Any) -> np.datetime64 | None:
     return None if np.isnat(day) else day
 
 
+def _causal_cutoff(before: Any) -> tuple[bool, np.datetime64 | None]:
+    """``(usable, cutoff)`` for a fit's ``before``.
+
+    ``None`` is "no cutoff" (fit through the end, as legacy). A given cutoff
+    that does not parse (malformed text, ``""``, NaT) is unusable: it must
+    fail closed, never read as "no cutoff" and admit post-cutoff rows.
+    Legacy's ``pd.Timestamp(before)`` raises on the same values.
+    """
+    if before is None:
+        return True, None
+    cutoff = _parse_day(before)
+    return cutoff is not None, cutoff
+
+
+def _closed_before(row: Mapping[str, Any], cutoff: np.datetime64 | None) -> bool:
+    """The row's trade closed strictly before ``cutoff`` (always, without one)."""
+    if cutoff is None:
+        return True
+    exit_day = _parse_day(row.get("exit_date"))
+    return exit_day is not None and exit_day < cutoff
+
+
 def fit_payoff_line(
     rows: Sequence[Mapping[str, Any]] | None,
     *,
@@ -108,20 +130,19 @@ def fit_payoff_line(
     (engine/payoff.py:317-319, ``exit_date < before``) -- the same causal
     rule legacy applies, so a row dated on or after the cutoff never reaches
     the fit. Returns ``None`` (mirroring ``PayoffError``) when fewer than
-    ``min_trades`` rows survive filtering.
+    ``min_trades`` rows survive filtering, and when ``before`` is given but
+    is not a parseable date (legacy raises; ``None`` means no cutoff).
     """
     forbid_fitting("engine.v2.scoring.native_payoff.fit_payoff_line")
-    cutoff = _parse_day(before) if before is not None else None
+    usable, cutoff = _causal_cutoff(before)
+    if not usable:
+        return None
     driver: list[float] = []
     spot: list[float] = []
     exit_value: list[float] = []
     for row in rows or ():
-        if not isinstance(row, Mapping):
+        if not isinstance(row, Mapping) or not _closed_before(row, cutoff):
             continue
-        if cutoff is not None:
-            exit_day = _parse_day(row.get("exit_date"))
-            if exit_day is None or not (exit_day < cutoff):
-                continue
         try:
             d = float(row["driver"])
             s = float(row["spot_entry"])
@@ -362,22 +383,21 @@ def fit_runup_payoff_surface(
     ``spot_exit``, ``strike`` and ``exit_value``. ``before`` restricts to
     trades closed strictly before it, the same causal rule
     :func:`fit_payoff_line` applies. Returns ``None`` (mirroring
-    ``PayoffError``) when fewer than ``min_trades`` rows survive filtering.
+    ``PayoffError``) when fewer than ``min_trades`` rows survive filtering,
+    and when ``before`` is given but is not a parseable date.
     """
     forbid_fitting("engine.v2.scoring.native_payoff.fit_runup_payoff_surface")
-    cutoff = _parse_day(before) if before is not None else None
+    usable, cutoff = _causal_cutoff(before)
+    if not usable:
+        return None
     implied: list[float] = []
     spot_entry: list[float] = []
     spot_exit: list[float] = []
     strike: list[float] = []
     exit_value: list[float] = []
     for row in rows or ():
-        if not isinstance(row, Mapping):
+        if not isinstance(row, Mapping) or not _closed_before(row, cutoff):
             continue
-        if cutoff is not None:
-            exit_day = _parse_day(row.get("exit_date"))
-            if exit_day is None or not (exit_day < cutoff):
-                continue
         try:
             im = float(row["driver"])
             se = float(row["spot_entry"])
