@@ -94,10 +94,11 @@ The engine.v2.scoring package imports the verified frozen inference contract
 and loader for stage bound model execution, and (P5-4) the payoff-calibration
 artifact type read by the model stage's frozen path. engine.v2.models.training
 imports the same artifact type plus the no-fit guard constructors to build one
-from causal source rows. `tools/phase5_inventory.py` (not a v2 package, so not
-part of this graph) is the P5-1 inventory's CLI.
+from causal source rows. engine.v2.ops.cli imports the no-fit guard
+(`no_fit_guard`) for the read-only `ops rescore` command. `tools/phase5_inventory.py`
+(not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
 
-<!-- consumers: engine.v2.scoring, engine.v2.models.training -->
+<!-- consumers: engine.v2.scoring, engine.v2.models.training, engine.v2.ops -->
 
 ## Usage
 

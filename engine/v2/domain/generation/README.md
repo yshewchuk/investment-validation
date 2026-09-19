@@ -36,9 +36,11 @@ a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
 engine.v2.scoring imports the generator and pricing functions for native
-geometry and same-input comparisons.
+geometry and same-input comparisons. engine.v2.ops.cli imports `Geometry` and
+`Pricing` to reconstruct a captured `NativeScoreInputs` document for the
+read-only `ops rescore` command.
 
-<!-- consumers: engine.v2.scoring -->
+<!-- consumers: engine.v2.scoring, engine.v2.ops -->
 
 ## Usage
 

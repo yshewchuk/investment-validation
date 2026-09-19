@@ -12,6 +12,7 @@ from engine.v2.foundation import (
     SystemClock,
     content_hash,
     ensure_directory,
+    from_document,
     parse_timestamp,
     to_document,
 )
@@ -144,6 +145,25 @@ def _add_refresh_mode_arguments(plan):
                            "(to_document()'d); required with --refresh-mode native")
 
 
+def _add_reconcile_command(commands):
+    """The ``ops reconcile`` subparser, split out of :func:`parser` to keep
+    that function under the line budget."""
+    reconcile = commands.add_parser("reconcile")
+    reconcile.add_argument("--root", default=argparse.SUPPRESS)
+    reconcile.add_argument("job_id")
+    reconcile.add_argument("--expected-attempt", required=True)
+
+
+def _add_rescore_command(commands):
+    """The read-only ``ops rescore`` subparser (see :func:`rescore_command`)."""
+    rescore = commands.add_parser("rescore")
+    rescore.add_argument("--request", type=Path, required=True,
+                         help="a ScoreRequest canonical JSON document (to_document output)")
+    rescore.add_argument("--native-inputs", type=Path, required=True,
+                         help="a NativeScoreInputs canonical JSON document (to_document output); "
+                              "already-captured data only, no provider pulls, no fitting")
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", default="data/operations")
@@ -191,6 +211,7 @@ def parser():
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
+    _add_rescore_command(commands)
     capture = commands.add_parser("capture-inputs")
     capture.add_argument("--as-of", required=True)
     capture.add_argument("--tickers", default="")
@@ -201,10 +222,7 @@ def parser():
     capture.add_argument("--year-end", type=int, required=True)
     capture.add_argument("--source-root", required=True, type=Path)
     capture.add_argument("--output", required=True, type=Path)
-    reconcile = commands.add_parser("reconcile")
-    reconcile.add_argument("--root", default=argparse.SUPPRESS)
-    reconcile.add_argument("job_id")
-    reconcile.add_argument("--expected-attempt", required=True)
+    _add_reconcile_command(commands)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
     _add_price_refresh_command(commands)
@@ -561,6 +579,47 @@ def refresh_action(root: Path, payload, *, clock=None) -> tuple[int, dict]:
         return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
     finally:
         conn.close()
+
+
+def _load_native_score_inputs(doc: dict):
+    from engine.v2.domain.generation import Geometry, Pricing
+    from engine.v2.scoring.stages import NativeScoreInputs, StageReceipt
+
+    geometry = from_document(Geometry, doc["geometry"]) if doc.get("geometry") is not None else None
+    pricing = from_document(Pricing, doc["pricing"]) if doc.get("pricing") is not None else None
+    receipts = tuple(from_document(StageReceipt, row) for row in doc["stage_receipts"])
+    kwargs = dict(
+        context=doc["context"], features=doc["features"], forecast=doc["forecast"],
+        geometry=geometry, pricing=pricing, analogs=doc["analogs"], simulation=doc["simulation"],
+        gate=doc["gate"], chooser=doc["chooser"], diagnostics=doc.get("diagnostics", {}),
+        source_ref=doc["source_ref"], stage_receipts=receipts,
+    )
+    if "model" in doc:
+        kwargs["model"] = doc["model"]
+    return NativeScoreInputs(**kwargs)
+
+
+def rescore_command(args):
+    """Read-only ad-hoc rescore: no provider pulls, no fitting.
+
+    ``args.request`` / ``args.native_inputs`` are paths to JSON files
+    already produced elsewhere from already-captured data:
+    ``args.request`` is ``to_document(a ScoreRequest)``; ``args.native_inputs``
+    is ``to_document(a NativeScoreInputs)``. The one ticker/event this scores
+    is identified by whatever ``event_id``/``context`` those documents
+    already carry -- this command never resolves a ticker/event to data
+    itself.
+    """
+    from engine.v2.contracts import ScoreRequest
+    from engine.v2.models.no_fit import no_fit_guard
+    from engine.v2.scoring.application import score_one
+
+    request_doc = json.loads(args.request.read_text())
+    native_doc = json.loads(args.native_inputs.read_text())
+    request = from_document(ScoreRequest, request_doc)
+    inputs = _load_native_score_inputs(native_doc)
+    with no_fit_guard():
+        return score_one(request, inputs)
 
 
 # --------------------------------------------------------------------------
@@ -961,6 +1020,8 @@ def main(argv=None):
             document = capture_command(args)
         elif args.command == "price-refresh":
             document = price_refresh_command(args, root)
+        elif args.command == "rescore":
+            document = rescore_command(args)
         else:
             if args.command == "init":
                 ensure_directory(root)
