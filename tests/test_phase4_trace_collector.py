@@ -547,11 +547,14 @@ def test_capture_frozen_records_once_shares_pools_and_refuses_conflicts() -> Non
     assert frozen["fold_pools"]["pred_abs_move"] is pool.value  # shared, not copied
     assert frozen["declarations"] == {"gate": {"binding": "gate"}}
 
-    with pytest.raises(ValueError, match="bindings.fold:size"):
-        collector.capture_frozen(bindings={"fold:size": {**binding, "model_id": "other"}})
-    with pytest.raises(ValueError, match="fold_pools.pred_abs_move"):
-        collector.capture_frozen(fold_pools={"pred_abs_move": _Predocumented(
-            {"predictions": [9.0], "residuals": [0.0], "interval_floor": None})})
+    # A different second value never raises inside legacy scoring (the row
+    # would be lost): the first value stays and the conflict is recorded.
+    collector.capture_frozen(bindings={"fold:size": {**binding, "model_id": "other"}})
+    collector.capture_frozen(fold_pools={"pred_abs_move": _Predocumented(
+        {"predictions": [9.0], "residuals": [0.0], "interval_floor": None})})
+    frozen = _checkpoint_value(collector, "source_inputs")["frozen"]
+    assert frozen["bindings"]["fold:size"]["model_id"] == "m"
+    assert frozen["conflicts"] == ["bindings.fold:size", "fold_pools.pred_abs_move"]
     # A later frozen record refreshes the checkpoint group.
     collector.capture_frozen(declarations={"recalibration": {"fitted": False}})
     frozen = _checkpoint_value(collector, "source_inputs")["frozen"]
@@ -581,6 +584,7 @@ def test_crush_capture_names_the_source_legacy_used(tmp_path) -> None:
     scorer = Scorer.__new__(Scorer)
     served = _Served(tmp_path / "crush.joblib")
     scorer._serving = lambda fold, produces="pred_abs_move": served
+    scorer._phase4_tier4_sha = "digest-1"
     request = ScoreRequest(ticker="ABC", strategy="TWIN-P",
                            as_of=pd.Timestamp("2026-09-02"),
                            event_date=pd.Timestamp("2026-09-10"))
@@ -598,7 +602,10 @@ def test_crush_capture_names_the_source_legacy_used(tmp_path) -> None:
 
     value, frozen = run({("ABC", pd.Timestamp("2026-09-10")): -12.5})
     assert value == -12.5
-    assert frozen["declarations"]["forecast:pred_iv_crush_30"]["source"] == "stored_tier4"
+    stored = frozen["declarations"]["forecast:pred_iv_crush_30"]
+    assert stored == {"source": "stored_tier4", "value": -12.5, "row": {
+        "table": "tier4_forecasts", "table_sha256": "digest-1", "ticker": "ABC",
+        "event_date": "2026-09-10"}}
     assert frozen["bindings"] == {}
 
     value, frozen = run({})
@@ -606,9 +613,10 @@ def test_crush_capture_names_the_source_legacy_used(tmp_path) -> None:
     binding = frozen["bindings"]["fold:iv_crush"]
     assert (binding["role"], binding["adapter"], binding["output_names"]) == (
         "iv_crush", "tier4-serving-fold.v1", ["pred_iv_crush_30"])
-    assert binding["inputs"] == {"a": 1.0, "b": None}
+    assert frozen["inputs"]["fold:iv_crush@crush"] == {"a": 1.0, "b": None}
     assert frozen["declarations"]["forecast:pred_iv_crush_30"] == {
-        "source": "served_fold", "binding": "fold:iv_crush", "output": "pred_iv_crush_30"}
+        "source": "served_fold", "binding": "fold:iv_crush", "output": "pred_iv_crush_30",
+        "site": "crush"}
     assert frozen["fold_pools"] == {}  # the crush band is never read
     # The file digest is taken once per served fold, not per candidate.
     run({})
@@ -621,6 +629,6 @@ def test_fold_recording_is_inert_without_a_collector(tmp_path) -> None:
     result = ScoreResult(ticker="ABC", strategy="TWIN-P", as_of=pd.Timestamp("2026-09-02"))
     recorded = scorer._phase4_record_fold(
         SimpleNamespace(strategy="TWIN-P", decision_offset=None), result, served,
-        pd.DataFrame({"a": [1.0]}))
+        pd.DataFrame({"a": [1.0]}), site="sizing")
     assert recorded is False and served.calls == 0
     assert not hasattr(scorer, "_phase4_fold_records")

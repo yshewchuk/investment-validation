@@ -60,7 +60,7 @@ from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -639,37 +639,58 @@ def frozen_source_declarations(
     deployment_id: str,
     source_root: Path | None = None,
     chooser_analog_pool: Any = None,
+    release_states: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """``SourceBundle`` keyword arguments from a capture's ``source_inputs.frozen``.
 
     R4-18/R4-19: turns what the legacy scorer recorded (the bindings that
     served each forecast, the gate and the chooser; the served folds' pools;
-    the recalibration map and the chooser keys) into the frozen declarations
-    native scoring reads. Nothing here recomputes a value: bindings are
-    copied by digest into ``release_root`` (``package_frozen_resources``,
-    the same identity-derived binding ids the strict probe uses), pools and
-    the map are the recorded ones, and the admissible table is declared only
-    when the recorded breakpoints equal the frozen v1 table.
+    the payoff fit, the champion residual pools, the recalibration map and
+    the chooser keys) into the frozen declarations native scoring reads.
+    Nothing here recomputes a value: bindings are copied by digest into
+    ``release_root`` (``package_frozen_resources``, the same identity-derived
+    binding ids the strict probe uses), and every pool, fit and map is the
+    recorded one.
+
+    ``release_states``: frozen artifacts from the release (payoff line/surface,
+    driver residual pools, recalibration maps). One whose key AND content
+    equal what legacy used is declared instead of the inline copy, pinned to
+    its content hash; one with the key but other content is refused (the
+    release is not what legacy served). Without one, the recorded state is
+    frozen inline (pure wrappers, no fit).
+
+    Feature rows: each consumer's declaration names the call site whose
+    input row it used. A column two consumed sites recorded differently
+    cannot be one ``feature_vector`` and is refused, as is any conflict the
+    collector noted (``frozen.conflicts``).
 
     Returned keys: ``frozen_inference``, ``model_release``,
-    ``forecast_recipes`` (binding-named recipes only), ``gate_recipe`` and
-    ``gate_forecast_pool``, ``chooser_recipe``/``chooser_fold_pools``/
-    ``chooser_admissible_table``/``chooser_analog_pool``,
-    ``recalibration_declared``/``recalibration_artifact``, the recorded
-    ``feature_vector``/``feature_missing_mask`` rows, and ``unresolved``:
-    what legacy used that cannot be declared (the stored crush forecast).
-    The chooser's k-NN pool is only KEYED from the capture (pool id and
-    cutoff); the artifact itself comes from the release and is passed in
-    as ``chooser_analog_pool``, whose key must match.
+    ``forecast_recipes`` (binding-named recipes only), ``stored_forecasts``,
+    ``gate_recipe``/``gate_forecast_pool``, ``chooser_recipe``/
+    ``chooser_fold_pools``/``chooser_admissible_table``/
+    ``chooser_analog_pool``, ``payoff_artifact_recipe``/``payoff_artifact``,
+    ``model_residual_artifact_recipe``/``model_residual_artifacts``,
+    ``recalibration_declared``/``recalibration_artifact``,
+    ``feature_vector``/``feature_missing_mask``. The chooser's k-NN pool is
+    only KEYED from the capture; the artifact comes from the release
+    (``chooser_analog_pool``), whose key must match.
     """
     from engine.v2.foundation.canonical import untag_nonfinite
+    from engine.v2.models.lineage import DataDependency, Lineage
+    from engine.v2.scoring.source_inputs import stored_forecast_row_hash
 
     source = _checkpoint_value(candidate, "source_inputs")
     frozen = untag_nonfinite(dict(source.get("frozen") or {}))
     bindings = dict(frozen.get("bindings") or {})
     pools = dict(frozen.get("fold_pools") or {})
+    states = dict(frozen.get("states") or {})
+    inputs = dict(frozen.get("inputs") or {})
     declared = dict(frozen.get("declarations") or {})
-    out: dict[str, Any] = {"unresolved": []}
+    conflicts = list(frozen.get("conflicts") or ())
+    if conflicts:
+        raise StrictTraceCaptureError(
+            f"legacy recorded different values for {sorted(conflicts)}")
+    out: dict[str, Any] = {}
     if not bindings and not declared:
         return out
 
@@ -701,42 +722,66 @@ def frozen_source_declarations(
             raise StrictTraceCaptureError(f"declared fold pool {name} was not recorded")
         return dict(pools[name])
 
-    # Feature rows: each binding's recorded inputs plus the chooser's
-    # primitives. A column recorded twice with different values is a defect.
+    def state(name: Any) -> dict[str, Any]:
+        if name not in states:
+            raise StrictTraceCaptureError(f"declared state {name} was not recorded")
+        return dict(states[name])
+
+    # -- feature rows, per consumed call site ---------------------------------
     vector: dict[str, float] = {}
     missing: dict[str, bool] = {}
+    origin: dict[str, str] = {}
 
-    def feature(name: str, value: Any) -> None:
-        if value is None:
-            if name in vector:
-                raise StrictTraceCaptureError(f"feature {name} recorded both set and missing")
-            missing[name] = True
+    def feature(name: str, value: Any, where: str) -> None:
+        number = None if value is None else float(value)
+        if name in origin:
+            held = None if missing.get(name) else vector.get(name)
+            if held != number:
+                raise StrictTraceCaptureError(
+                    f"feature {name} differs between {origin[name]} and {where}")
             return
-        number = float(value)
-        if vector.get(name, number) != number or missing.get(name):
-            raise StrictTraceCaptureError(f"feature {name} recorded with different values")
-        vector[name], missing[name] = number, False
+        origin[name] = where
+        if number is None:
+            missing[name] = True
+        else:
+            vector[name], missing[name] = number, False
 
-    for slot in sorted(bindings):
-        for name, value in (bindings[slot].get("inputs") or {}).items():
-            feature(str(name), value)
+    def consume(entry: Mapping[str, Any]) -> None:
+        if "site" not in entry:
+            return
+        key = f"{entry['binding']}@{entry.get('site')}"
+        if key not in inputs:
+            raise StrictTraceCaptureError(f"no recorded input row {key}")
+        for name, value in sorted(inputs[key].items()):
+            feature(str(name), value, key)
+
+    for key in sorted(declared):
+        entry = declared[key]
+        if isinstance(entry, Mapping) and key != "chooser_primitives":
+            consume(entry)
     for name, value in (declared.get("chooser_primitives") or {}).items():
-        feature(str(name), value)
+        feature(str(name), value, "chooser_primitives")
     out["feature_vector"] = {name: vector[name] for name in sorted(vector)}
     out["feature_missing_mask"] = dict(sorted(missing.items()))
 
-    forecasts = {}
+    # -- forecasts ------------------------------------------------------------
+    forecasts, stored = {}, {}
     for key, entry in sorted(declared.items()):
         if not key.startswith("forecast:"):
             continue
         target = key.split(":", 1)[1]
         if entry.get("source") == "stored_tier4":
-            out["unresolved"].append(f"{target}: stored Tier-4 value, no binding")
+            row = dict(entry["row"])
+            stored[target] = {"value": float(entry["value"]), "row": row,
+                              "row_hash": stored_forecast_row_hash(row, entry["value"])}
             continue
         forecasts[target] = ref(entry)
     if forecasts:
         out["forecast_recipes"] = forecasts
+    if stored:
+        out["stored_forecasts"] = stored
 
+    # -- gate -------------------------------------------------------------------
     gate = declared.get("gate")
     if gate is not None:
         recipe = {**ref(gate), "threshold": gate.get("threshold")}
@@ -746,6 +791,7 @@ def frozen_source_declarations(
             out["gate_forecast_pool"] = pool(forecast["pool"])
         out["gate_recipe"] = recipe
 
+    # -- chooser ----------------------------------------------------------------
     chooser = declared.get("chooser")
     if chooser is not None:
         from engine.v2.models.admissible_table import legacy_n_admissible_table
@@ -789,6 +835,32 @@ def frozen_source_declarations(
                 out["chooser_analog_pool"] = chooser_analog_pool
         out["chooser_recipe"] = recipe
 
+    # -- the model layer (payoff, driver pools, recalibration) ---------------------
+    lineage = Lineage(data=(DataDependency(table="phase4.capture.legacy_served"),))
+    payoff = declared.get("payoff")
+    if payoff is not None:
+        fit = state(payoff["state"])
+        inline = _inline_payoff_artifact(fit)
+        artifact = _release_match(release_states, inline, _payoff_content)
+        out["payoff_artifact_recipe"] = {
+            "before": payoff["before"], "seed": payoff["seed"],
+            "draw_count": payoff["draw_count"]}
+        out["payoff_artifact"] = artifact
+        residual_recipe, residual_artifacts = {}, {}
+        for key, entry in sorted(declared.items()):
+            if not key.startswith("model_residual:"):
+                continue
+            slot = key.split(":", 1)[1]
+            recorded = state(entry["state"])
+            inline = _inline_driver_pool(recorded, lineage)
+            chosen = _release_match(release_states, inline, _driver_pool_content)
+            residual_artifacts[slot] = chosen
+            residual_recipe[slot] = {"role": chosen.role, "model_id": chosen.model_id,
+                                     "fold": chosen.fold,
+                                     "content_hash": chosen.content_hash}
+        out["model_residual_artifact_recipe"] = residual_recipe
+        out["model_residual_artifacts"] = residual_artifacts
+
     recal = declared.get("recalibration")
     if recal is not None:
         from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
@@ -797,11 +869,77 @@ def frozen_source_declarations(
             "n": recal["n"], "base_rate": recal["base_rate"],
             "x_thresholds": recal["x_thresholds"], "y_thresholds": recal["y_thresholds"],
         }
-        out["recalibration_declared"] = True
-        out["recalibration_artifact"] = make_recalibration_map_artifact(
+        inline = make_recalibration_map_artifact(
             fit, strategy=recal["strategy"], alpha=recal["alpha"],
             cutoff=recal["cutoff"], min_pairs=recal["min_pairs"])
+        out["recalibration_declared"] = True
+        out["recalibration_artifact"] = _release_match(
+            release_states, inline, _recalibration_content)
     return out
+
+
+def _payoff_content(artifact: Any) -> Any:
+    common = (artifact.n, artifact.resid_sd, artifact.r, tuple(artifact.residuals))
+    if hasattr(artifact, "coefficients"):
+        return ("surface", tuple(artifact.coefficients), *common)
+    return ("line", artifact.driver, artifact.intercept, artifact.slope, *common)
+
+
+def _driver_pool_content(artifact: Any) -> Any:
+    return (artifact.min_pool, tuple(artifact.flat_residuals), artifact.bucket_edges,
+            artifact.bucket_pools)
+
+
+def _recalibration_content(artifact: Any) -> Any:
+    return (artifact.fitted, artifact.n, artifact.base_rate, tuple(artifact.x_thresholds),
+            tuple(artifact.y_thresholds), artifact.min_pairs)
+
+
+def _release_match(release_states: Sequence[Any], inline: Any, content) -> Any:
+    """The release's artifact for ``inline``'s key when its content equals
+    what legacy used; ``inline`` when the release holds none. A release
+    artifact with the key but other content is refused."""
+    for candidate in release_states:
+        if type(candidate) is not type(inline) or candidate.key != inline.key:
+            continue
+        if content(candidate) != content(inline):
+            raise StrictTraceCaptureError(
+                f"release {type(inline).__name__} {inline.key} is not what legacy used")
+        return candidate
+    return inline
+
+
+def _inline_payoff_artifact(fit: Mapping[str, Any]) -> Any:
+    from engine.v2.models.payoff_artifact import (
+        make_payoff_line_artifact,
+        make_payoff_surface_artifact,
+    )
+
+    common = {"n": fit["n"], "resid_sd": fit["resid_sd"], "r": fit["r"],
+              "residuals": fit["residuals"]}
+    if fit["kind"] == "surface":
+        return make_payoff_surface_artifact(
+            {**common, "coefficients": fit["coefficients"]},
+            strategy=fit["strategy"], alpha=fit["alpha"], cutoff=fit["cutoff"])
+    return make_payoff_line_artifact(
+        {**common, "intercept": fit["intercept"], "slope": fit["slope"]},
+        strategy=fit["strategy"], driver=fit["driver"], alpha=fit["alpha"],
+        cutoff=fit["cutoff"])
+
+
+def _inline_driver_pool(recorded: Mapping[str, Any], lineage: Any) -> Any:
+    from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
+    from engine.v2.scoring import native_payoff
+
+    buckets = recorded.get("buckets")
+    return make_driver_residual_pool_artifact(
+        role=recorded["role"], model_id=recorded["model_id"], fold=None,
+        flat_residuals=recorded["flat_residuals"],
+        buckets=None if not buckets else {"edges": buckets["edges"],
+                                          "pools": buckets["pools"]},
+        deciles=native_payoff.DECILES,
+        min_pool=(int(buckets["min_pool"]) if buckets else native_payoff.MIN_POOL),
+        lineage=lineage)
 
 
 # --------------------------------------------------------------------------

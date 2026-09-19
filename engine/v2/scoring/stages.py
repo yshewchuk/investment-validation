@@ -610,7 +610,14 @@ def _execute_local_forecast(
     if not isinstance(executors, Mapping):
         _add_flag(flags, "INVALID_FORECAST_EXECUTORS")
         executors = {}
+    stored = block.get("stored") or {}
     for field in _FORECAST_OUTPUTS:
+        if field in stored:
+            # Legacy ``Scorer._crush_forecast``: a stored Tier-4 value for the
+            # event wins, and no fold is served.
+            declared = True
+            output[field] = float(stored[field]["value"])
+            continue
         executor = executors.get(field)
         if executor is not None:
             declared = True

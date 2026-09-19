@@ -744,7 +744,8 @@ def test_gate_capture_records_binding_output_forecast_fold_and_pool(gate_root):
         "gate", ["gate_score"], "joblib-estimator.v1")
     assert gate["artifact_sha256"] == _sha(root / "gate.joblib")
     # Only the base-frame columns: the forecast/analog ones are derived.
-    assert gate["inputs"] == {"mean_prior_abs_move": 6.2, "iv30": 55.0, "im": 5.5}
+    assert frozen["inputs"]["gate@gate"] == {"mean_prior_abs_move": 6.2, "iv30": 55.0,
+                                             "im": 5.5}
     fold = frozen["bindings"]["fold:size"]
     served_path = tier4._serving_path("size_synthetic", FOLD, "abc123")
     assert (fold["role"], fold["adapter"], fold["output_names"]) == (
@@ -752,15 +753,17 @@ def test_gate_capture_records_binding_output_forecast_fold_and_pool(gate_root):
     assert (fold["artifact"], fold["artifact_sha256"]) == (
         str(served_path), tier4.store.file_sha256(served_path))
     assert fold["feature_order"] == list(r4.FOLD_FEATURES)
-    assert fold["inputs"] == {name: r4.ROW[name] for name in r4.FOLD_FEATURES}
+    assert frozen["inputs"]["fold:size@gate"] == {
+        name: r4.ROW[name] for name in r4.FOLD_FEATURES}
     recorded = frozen["fold_pools"]["pred_abs_move"]
     assert recorded["predictions"] == pool[0].tolist()
     assert recorded["residuals"] == pool[1].tolist()
     assert recorded["interval_floor"] == 0.0
     assert frozen["declarations"]["gate"] == {
-        "binding": "gate", "output": "gate_score", "threshold": 0.5}
+        "binding": "gate", "output": "gate_score", "threshold": 0.5, "site": "gate"}
     assert frozen["declarations"]["gate_forecast"] == {
-        "binding": "fold:size", "output": "pred_abs_move", "pool": "pred_abs_move"}
+        "binding": "fold:size", "output": "pred_abs_move", "pool": "pred_abs_move",
+        "site": "gate"}
 
 
 def test_gate_from_the_captured_bundle_equals_legacy(gate_root, tmp_path):
@@ -869,7 +872,7 @@ def test_chooser_capture_records_producers_pools_keys_and_17_primitives(
         assert (binding["role"], binding["adapter"], binding["output_names"]) == (
             role, "tier4-serving-fold.v1", [output])
         assert declarations[f"chooser_fold:{output}"] == {
-            "binding": f"fold:{role}", "output": output, "pool": output}
+            "binding": f"fold:{role}", "output": output, "pool": output, "site": "chooser"}
         assert frozen["fold_pools"][output] == {
             "predictions": pool[0].tolist(), "residuals": pool[1].tolist(),
             "interval_floor": floor}
@@ -1003,7 +1006,7 @@ def _payoff_trades(n=300, seed=3) -> pd.DataFrame:
     })
 
 
-def _legacy_model(pairs, collector=None):
+def _legacy_model(pairs, collector=None, buckets=None):
     """engine/score.py ``Scorer._score_model`` on a shell scorer: a constant
     driver, real ``fit_payoff`` over synthetic trades, real
     ``Scorer.recalibration`` over synthetic pairs."""
@@ -1013,6 +1016,7 @@ def _legacy_model(pairs, collector=None):
     model = DummyRegressor(strategy="constant", constant=5.0).fit([[0.0]], [5.0])
     artifact = registry.ModelArtifact(model=model, role="size", features=("x",),
                                       residuals=DRIVER_RESIDUALS, target="abs_move")
+    artifact.residual_buckets = buckets
     entry = SimpleNamespace(id="size_synthetic", decision_offset=None)
     scorer.model = lambda role, *args, **kwargs: (entry, artifact) if role == "size" else None
     scorer.trades = _payoff_trades()
@@ -1107,3 +1111,220 @@ def test_recorded_frozen_block_round_trips_through_json(gate_root):
     _result, candidate = _captured_gate(root, pool, r4.ROW)
     frozen = _frozen(candidate)
     assert untag_nonfinite(json.loads(json.dumps(frozen, allow_nan=False))) == frozen
+
+
+# -- round 2: per-site inputs, stored crush, the payoff layer --------------------------
+
+
+def _fold_at_sites(root, pool, sizing_row, gate_row):
+    """The size fold recorded by the sizing and the gate call sites, each
+    with the frame that site was handed."""
+    collector = _collector()
+    scorer = object.__new__(Scorer)
+    served = r4._served(root, pool)
+    request = SimpleNamespace(strategy="STR-THRU", decision_offset=None)
+    result = r4._Result(_phase4_checkpoint_collector=collector)
+    scorer._phase4_record_fold(
+        request, result, served, pd.DataFrame([sizing_row]), site="sizing",
+        declarations={"forecast:forecast_abs_move": {
+            "binding": "fold:size", "output": "pred_abs_move", "site": "sizing"}})
+    scorer._phase4_record_fold(
+        request, result, served, pd.DataFrame([gate_row]), site="gate",
+        declarations={"gate_forecast": {
+            "binding": "fold:size", "output": "pred_abs_move", "pool": "pred_abs_move",
+            "site": "gate"}})
+    return _candidate(collector)
+
+
+def test_a_fold_fed_different_rows_at_two_sites_is_recorded_per_site(gate_root, tmp_path):
+    root, pool = gate_root
+    other = {**r4.ROW, "iv30": 61.0}
+    candidate = _fold_at_sites(root, pool, r4.ROW, other)  # never raises
+    frozen = _frozen(candidate)
+    assert frozen["conflicts"] == []
+    assert frozen["inputs"]["fold:size@sizing"]["iv30"] == r4.ROW["iv30"]
+    assert frozen["inputs"]["fold:size@gate"]["iv30"] == 61.0
+    assert frozen["declarations"]["gate_forecast"]["site"] == "gate"
+    # One feature_vector cannot serve both consumers with different rows.
+    with pytest.raises(StrictTraceCaptureError,
+                       match="iv30 differs between fold:size@forecast|iv30 differs"):
+        _declared(candidate, tmp_path)
+
+    agreeing = _fold_at_sites(root, pool, r4.ROW, dict(r4.ROW))
+    declared = _declared(agreeing, tmp_path)
+    assert declared["feature_vector"] == {name: r4.ROW[name] for name in r4.FOLD_FEATURES}
+
+
+def test_a_conflicting_second_record_never_raises_and_the_converter_refuses_it(
+        gate_root, tmp_path):
+    root, pool = gate_root
+    collector = _collector()
+    collector.capture_frozen(declarations={"gate": {"binding": "gate", "output": "a"}})
+    collector.capture_frozen(declarations={"gate": {"binding": "gate", "output": "b"}})
+    with pytest.raises(StrictTraceCaptureError, match="declarations.gate"):
+        _declared(_candidate(collector), tmp_path)
+
+
+def _captured_crush(stored_value):
+    collector = _collector()
+    scorer = object.__new__(Scorer)
+    scorer._crush = {("AAA", pd.Timestamp(r4.EVENT)): stored_value}
+    scorer._phase4_tier4_sha = "sha256:" + "c" * 64
+    request = SimpleNamespace(ticker="AAA", strategy="STR-THRU", decision_offset=None)
+    result = r4._Result(_phase4_checkpoint_collector=collector)
+    value = Scorer._crush_forecast(scorer, request, result, None)
+    return value, _candidate(collector)
+
+
+def _crush_native(declared, **extra):
+    bundle = SourceBundle(
+        source_ref="capture-crush", strategy="STR-THRU", context=dict(r4.STR_THRU_CONTEXT),
+        raw_quotes=r4.STR_THRU_QUOTES, feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "synthetic"}},
+        forecast_recipes={"driver_prediction": {"intercept": 6.0, "coefficients": {}},
+                          **extra},
+        model_artifact_refs={"driver_prediction": "sha256:driver",
+                             **{name: "sha256:crush" for name in extra}},
+        residual_recipe={}, analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        stored_forecasts=declared.get("stored_forecasts", {}))
+    return r4._score(bundle, "STR-THRU")
+
+
+def test_stored_crush_from_the_captured_bundle_equals_legacy(tmp_path):
+    legacy, candidate = _captured_crush(-17.25)
+    assert legacy == -17.25
+    declared = _declared(candidate, tmp_path)
+    stored = declared["stored_forecasts"]["pred_iv_crush_30"]
+    assert stored["value"] == legacy
+    assert stored["row"] == {"table": "tier4_forecasts", "table_sha256": "sha256:" + "c" * 64,
+                             "ticker": "AAA", "event_date": r4.EVENT}
+    _record, seen = _crush_native(declared)
+    assert seen["forecast"]["pred_iv_crush_30"] == legacy
+    # Legacy prefers the stored row over the served fold: so does native.
+    _record, seen = _crush_native(
+        declared, pred_iv_crush_30={"intercept": -3.0, "coefficients": {}})
+    assert seen["forecast"]["pred_iv_crush_30"] == legacy
+    # Planted defect: a value that does not match its row identity is refused.
+    tampered = {"stored_forecasts": {"pred_iv_crush_30": {**stored, "value": -1.0}}}
+    with pytest.raises(ValueError, match="row_hash"):
+        _crush_native(tampered)
+
+
+def _buckets():
+    rng = np.random.default_rng(17)
+    predictions = rng.uniform(1.0, 12.0, 200)
+    residuals = rng.normal(0.0, 1.0 + 0.2 * predictions, 200)
+    return registry.bucket_residuals(predictions, residuals, deciles=4, min_pool=20)
+
+
+@pytest.mark.parametrize("bucketed", [False, True])
+def test_win_model_end_to_end_from_the_captured_bundle(tmp_path, bucketed):
+    """The model layer from recorded state only: the payoff fit legacy served,
+    the champion residual pool it drew from, its seed and the recalibration
+    map. No hand-supplied rows, residuals or seed."""
+    collector = _collector()
+    result, _seed = _legacy_model(_recal_pairs(), collector,
+                                  buckets=_buckets() if bucketed else None)
+    declared = _declared(_candidate(collector), tmp_path)
+    assert "payoff_source_rows" not in declared and "payoff_recipe" not in declared
+    record = _model_native(declared)
+    assert record.resolved_request["exp_pnl_model"] == result.exp_pnl_model
+    assert record.resolved_request["win_model"] == result.win_model
+    assert result.win_model != result.win_model_raw
+
+    # Planted defect: the other residual pool moves the answer.
+    other = dict(declared)
+    pool = declared["model_residual_artifacts"]["driver"]
+    buckets = pool.buckets and {
+        "edges": pool.buckets["edges"],
+        "pools": [[2.0 * v for v in row] for row in pool.buckets["pools"]]}
+    moved = _inline_pool_like(pool, [2.0 * v for v in pool.flat_residuals], buckets=buckets)
+    other["model_residual_artifacts"] = {"driver": moved}
+    other["model_residual_artifact_recipe"] = {"driver": {
+        **declared["model_residual_artifact_recipe"]["driver"],
+        "content_hash": moved.content_hash}}
+    assert _model_native(other).resolved_request["exp_pnl_model"] != result.exp_pnl_model
+
+
+def test_release_states_are_pinned_when_they_hold_what_legacy_used(tmp_path):
+    from engine.v2.models.lineage import DataDependency, Lineage
+    from engine.v2.models.payoff_artifact import make_payoff_line_artifact
+    from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
+
+    collector = _collector()
+    result, _seed = _legacy_model(_recal_pairs(), collector)
+    candidate = _candidate(collector)
+    inline = _declared(candidate, tmp_path)
+    line, recal = inline["payoff_artifact"], inline["recalibration_artifact"]
+    pool = inline["model_residual_artifacts"]["driver"]
+    # The release's own copies: same key and content, other provenance.
+    release_line = make_payoff_line_artifact(
+        {"n": line.n, "resid_sd": line.resid_sd, "r": line.r, "residuals": line.residuals,
+         "intercept": line.intercept, "slope": line.slope},
+        strategy=line.strategy, driver=line.driver, alpha=line.alpha, cutoff=line.cutoff,
+        window=("2020-01-01", "2026-09-16"))
+    release_recal = make_recalibration_map_artifact(
+        {"n": recal.n, "base_rate": recal.base_rate, "x_thresholds": recal.x_thresholds,
+         "y_thresholds": recal.y_thresholds},
+        strategy=recal.strategy, alpha=recal.alpha, cutoff=recal.cutoff,
+        min_pairs=recal.min_pairs, window=("2020-01-01", "2026-09-16"))
+    release_pool = _inline_pool_like(pool, pool.flat_residuals, lineage=Lineage(
+        data=(DataDependency(table="models.registry"),)))
+    assert release_line.content_hash != line.content_hash
+
+    pinned = _declared(candidate, tmp_path,
+                       release_states=(release_line, release_recal, release_pool))
+    assert pinned["payoff_artifact"] is release_line
+    assert pinned["recalibration_artifact"] is release_recal
+    assert pinned["model_residual_artifacts"]["driver"] is release_pool
+    assert pinned["model_residual_artifact_recipe"]["driver"]["content_hash"] == (
+        release_pool.content_hash)
+    record = _model_native(pinned)
+    assert record.resolved_request["win_model"] == result.win_model
+
+    # A release state under the same key but with other content is refused.
+    wrong = make_payoff_line_artifact(
+        {"n": line.n, "resid_sd": line.resid_sd, "r": line.r, "residuals": line.residuals,
+         "intercept": line.intercept + 0.01, "slope": line.slope},
+        strategy=line.strategy, driver=line.driver, alpha=line.alpha, cutoff=line.cutoff)
+    with pytest.raises(StrictTraceCaptureError, match="not what legacy used"):
+        _declared(candidate, tmp_path, release_states=(wrong,))
+
+
+def _inline_pool_like(pool, flat, lineage=None, buckets=None):
+    from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
+
+    return make_driver_residual_pool_artifact(
+        role=pool.role, model_id=pool.model_id, fold=pool.fold, flat_residuals=flat,
+        buckets=pool.buckets if buckets is None else buckets, deciles=pool.deciles, min_pool=pool.min_pool,
+        lineage=pool.lineage if lineage is None else lineage)
+
+
+def _model_native(declared):
+    bundle = SourceBundle(
+        source_ref="capture-model", strategy="STR-THRU",
+        context={"ticker": "AAA", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+                 "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0},
+        raw_quotes={("C", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 3.0},
+                    ("P", 100.0, "2026-09-18"): {"bid": 1.0, "ask": 3.0}},
+        feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "size_synthetic"}},
+        forecast_recipes={"driver_prediction": {"intercept": 5.0, "coefficients": {}}},
+        model_artifact_refs={"driver_prediction": "sha256:m1"},
+        residual_recipe={"terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),
+                         "capital_at_risk": 1.0},
+        analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        payoff_artifact_recipe=declared["payoff_artifact_recipe"],
+        payoff_artifact=declared["payoff_artifact"],
+        model_residual_artifact_recipe=declared["model_residual_artifact_recipe"],
+        model_residual_artifacts=declared["model_residual_artifacts"],
+        recalibration_declared=declared.get("recalibration_declared", False),
+        recalibration_artifact=declared.get("recalibration_artifact"))
+    request = V2ScoreRequest(
+        event_id="evt-model", calendar_revision="cal-1", strategy_version="STR-THRU",
+        deployment_id="dep-1", decision_clock_id="entry-close",
+        requested_decision_at="2026-09-16", snapshot_id="snap-1", mode="replay",
+        fill_model={"alpha": 0.5})
+    return application.score_one(request, build_native_score_inputs(bundle))

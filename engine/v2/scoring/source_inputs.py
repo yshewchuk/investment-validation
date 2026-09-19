@@ -6,8 +6,8 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
-from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
 from engine.v2.models.admissible_table import AdmissibleDepthTable
+from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
 from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.models.contracts import ModelBinding, ModelRelease
 from engine.v2.models.loader import FrozenInference
@@ -313,6 +313,14 @@ class SourceBundle:
     chooser_fold_pools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     chooser_analog_pool: "ChooserAnalogPoolArtifact | None" = None
     chooser_admissible_table: "AdmissibleDepthTable | None" = None
+    # R4-20 (c): a forecast legacy read from the STORED Tier-4 table instead
+    # of serving a fold (``Scorer._crush_forecast`` prefers the stored
+    # ``pred_iv_crush_30`` whenever the table holds a non-NaN value for the
+    # event). ``{"pred_iv_crush_30": {"value", "row": {"table",
+    # "table_sha256", "ticker", "event_date"}, "row_hash"}}``: ``row_hash``
+    # is the content hash of ``{"row", "value"}`` and is checked at build.
+    # A stored value wins over any recipe for the same output, as in legacy.
+    stored_forecasts: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -362,6 +370,39 @@ def _linear_recipe(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Outputs legacy may read from the stored Tier-4 table (``_crush_forecast``).
+_STORED_FORECAST_OUTPUTS = frozenset({"pred_iv_crush_30"})
+_STORED_FORECAST_FIELDS = frozenset({"value", "row", "row_hash"})
+_STORED_ROW_FIELDS = frozenset({"table", "table_sha256", "ticker", "event_date"})
+
+
+def stored_forecast_row_hash(row: Mapping[str, Any], value: float) -> str:
+    """The identity a stored forecast declaration carries: its source row
+    and value, content-hashed together."""
+    from engine.v2.foundation import content_hash
+
+    return content_hash({"row": dict(row), "value": float(value)})
+
+
+def _stored_forecasts(bundle: SourceBundle) -> dict[str, dict[str, Any]]:
+    unknown = sorted(set(bundle.stored_forecasts) - _STORED_FORECAST_OUTPUTS)
+    if unknown:
+        raise ValueError(f"unsupported stored forecast outputs: {unknown}")
+    stored: dict[str, dict[str, Any]] = {}
+    for output, declared in bundle.stored_forecasts.items():
+        name = f"stored_forecasts.{output}"
+        config = _bounded_recipe(name, declared, _STORED_FORECAST_FIELDS)
+        row = _bounded_recipe(f"{name}.row", config.get("row") or {}, _STORED_ROW_FIELDS)
+        if set(row) != _STORED_ROW_FIELDS:
+            raise ValueError(f"{name}.row must name {sorted(_STORED_ROW_FIELDS)}")
+        value = _finite_number(config.get("value"), f"{name}.value")
+        if config.get("row_hash") != stored_forecast_row_hash(row, value):
+            raise ValueError(f"{name}.row_hash does not match its row and value")
+        stored[str(output)] = {"value": value, "row": row,
+                               "row_hash": str(config["row_hash"])}
+    return stored
+
+
 def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     unknown = sorted(set(bundle.forecast_recipes) - _FORECAST_OUTPUTS)
     if unknown:
@@ -400,6 +441,9 @@ def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     }
     if executors:
         block["executors"] = executors
+    stored = _stored_forecasts(bundle)
+    if stored:
+        block["stored"] = stored
     return block
 
 
