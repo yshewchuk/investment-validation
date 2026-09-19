@@ -169,6 +169,11 @@ _ROLE_OUTPUTS = {
 # Executor objects are identified in receipts by their str() identity (the
 # gate's ``forecast_recipe``), never deep-copied into an observer document.
 _INTERNAL_STAGE_FIELDS = frozenset({"executors", "forecast_executor"})
+# Source-only feature fields: part of the features block (and so of its
+# hashes and receipts), never merged into the record's values. The strict
+# capture's per-role model rows (``role_model_inputs``) are what frozen
+# inference was fed for each binding; they are inputs, not record fields.
+_SOURCE_ONLY_FEATURE_FIELDS = frozenset({"role_model_inputs"})
 _STRATEGY_FORECAST_ROLES = {
     "STR-THRU": ("driver",),
     "STR-RUNUP": ("implied_t1", "runup_move"),
@@ -288,6 +293,7 @@ def _merge_stage(values: dict[str, Any], block: Mapping[str, Any]) -> None:
     values.update({key: value for key, value in block.items()
                    if key not in _OWNED_OUTPUTS
                    and key not in _INTERNAL_STAGE_FIELDS
+                   and key not in _SOURCE_ONLY_FEATURE_FIELDS
                    and key != "flags"})
 
 

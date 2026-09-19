@@ -43,6 +43,8 @@ _BINDING_KEYS = frozenset({
     "decision_clock_id", "adapter", "feature_order", "output_names", "members",
 })
 _MEMBER_KEYS = frozenset({"name", "resource_id"})
+#: Roles whose feature vector is their own, not the forecast-family merge.
+_ROLE_PRIVATE_VECTORS = frozenset({"gate", "chooser"})
 _ANSWER_FIELDS = {
     "context": frozenset({"legs", "selected_contracts", "entry_cost", "gate_pass"}),
     "features": frozenset({
@@ -162,19 +164,48 @@ def _feature_rows(
     bindings: Sequence[ModelBinding],
     release_id: str,
 ) -> tuple[InferenceRequest, ...]:
-    features = inputs.features.get("model_inputs")
-    if not isinstance(features, Mapping):
+    """One inference row per binding, in the binding's own feature order.
+
+    A strict capture records the row each binding was fed per role
+    (``features.role_model_inputs``): the gate model's vector lives only in
+    its own ``gate_inputs`` checkpoint, never in the merged forecast-family
+    ``model_inputs``, and a same-named column may hold another value there.
+    When the trace carries per-role rows, each binding reads ONLY its own
+    role's row. A trace without them can still feed the forecast-family
+    roles from ``model_inputs`` (the merge refuses a cross-role conflict), but
+    never a gate or chooser binding.
+    """
+    merged = inputs.features.get("model_inputs")
+    if not isinstance(merged, Mapping):
         raise FrozenBridgeError("native inputs require features.model_inputs")
+    role_rows = inputs.features.get("role_model_inputs")
+    if role_rows is not None and not isinstance(role_rows, Mapping):
+        raise FrozenBridgeError("features.role_model_inputs: expected object")
     requests = []
     for binding in bindings:
+        role = binding.role.split(":", 1)[0]
+        if role_rows is not None:
+            vector = role_rows.get(binding.role, role_rows.get(role))
+            if not isinstance(vector, Mapping):
+                raise FrozenBridgeError(
+                    f"binding {binding.binding_id}: no captured row for role {binding.role}"
+                )
+        elif role in _ROLE_PRIVATE_VECTORS:
+            raise FrozenBridgeError(
+                f"binding {binding.binding_id}: role {role} needs its own captured "
+                "row (features.role_model_inputs); the merged model_inputs is "
+                "not its feature vector"
+            )
+        else:
+            vector = merged
         row = []
         for name in binding.feature_order:
-            if name not in features:
+            if name not in vector:
                 raise FrozenBridgeError(
                     f"binding {binding.binding_id}: missing feature {name}"
                 )
             try:
-                value = float(features[name])
+                value = float(vector[name])
             except (TypeError, ValueError) as exc:
                 raise FrozenBridgeError(
                     f"binding {binding.binding_id}: nonnumeric feature {name}"

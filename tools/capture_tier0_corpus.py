@@ -566,12 +566,19 @@ def _captured_blocks(candidate: Mapping[str, Any],
     recipes.setdefault("analogs", {"mode": "not_applicable"})
     recipes.setdefault("simulation", {"mode": "not_applicable"})
     recipes.setdefault("gate", {"mode": "not_applicable"})
+    features = {
+        "model_inputs": _merged_model_inputs(candidate),
+        "source_features": source_features,
+    }
+    if source.get("model_bindings"):
+        # The row each frozen binding is fed, per role (the gate's own
+        # vector is not in the merged ``model_inputs``). Kept in the
+        # source-bound features block so the replay
+        # (checks/phase4_frozen_bridge.py) feeds every binding this row.
+        features["role_model_inputs"] = _role_feature_vectors(candidate)
     return {
         "context": context,
-        "features": {
-            "model_inputs": _merged_model_inputs(candidate),
-            "source_features": source_features,
-        },
+        "features": features,
         "forecast": dict(recipes["forecast"]),
         "geometry": None,
         "pricing": None,
@@ -657,7 +664,9 @@ def _frozen_runtime(
     # features private to its own role (e.g. the gate model's own vector),
     # which the merge — built only from the forecast-family `features`
     # checkpoint — never carries. See `_role_feature_vectors`.
-    role_vectors = _role_feature_vectors(candidate)
+    role_vectors = inputs.features.get("role_model_inputs")
+    if not isinstance(role_vectors, Mapping):
+        role_vectors = _role_feature_vectors(candidate)
     inference_requests = []
     for binding in bindings:
         vector = role_vectors.get(binding.role)
