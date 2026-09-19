@@ -21,11 +21,13 @@ Given a release root written by ``tools/phase5_prepare_release.py`` (layout:
 4. **Rollback.** On a scratch copy of the deployment pointer state, promote
    the candidate, roll back, and check the pointer resolves to the incumbent
    again with byte-identical manifest bytes and untouched history.
-5. **Phase 4.** With ``--phase4-corpus``, count the corpus pairs carrying an
-   input trace. Integrated frozen-release replay of those traces is not
-   implemented yet, so a supplied corpus is always a PENDING finding. Without
-   one the subject is ``NOT_RUN`` and the best status is ``RELEASE_PASS``,
-   never ``PASS``.
+5. **Phase 4.** With ``--phase4-corpus``, every traced pair is verified by
+   Phase 4's own trace verifier, its frozen model bindings are rebound by
+   content hash to the staged release's objects, and it is scored with
+   ``application.score_frozen`` under both no-fit guards; the runtime stage
+   receipts must equal the captured ones
+   (:mod:`checks.phase5_phase4_replay`). Without a corpus the subject is
+   ``NOT_RUN`` and the best status is ``RELEASE_PASS``, never ``PASS``.
 6. **Report.** A value-free private report (ids, statuses, codes and counts
    only) through ``engine.report.Report``, refused inside the repo.
 
@@ -51,6 +53,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.phase5_consumers import CONSUMERS, ReleaseContext  # noqa: E402
+from checks.phase5_phase4_replay import REPLAY_CODES, replay_corpus  # noqa: E402
 from checks.phase5_release import (  # noqa: E402
     EXPECTED_MODEL_BINDINGS,
     MISSING,
@@ -93,7 +96,6 @@ ROLLBACK_NO_INCUMBENT = "P5_ROLLBACK_NO_INCUMBENT"
 ROLLBACK_CANDIDATE_LIVE = "P5_ROLLBACK_CANDIDATE_ALREADY_DEPLOYED"
 ROLLBACK_NOT_EXACT = "P5_ROLLBACK_NOT_EXACT"
 PROMOTE_REFUSED = "P5_PROMOTE_REFUSED"
-PHASE4_PENDING = "P5_PHASE4_PENDING"
 REPORT_INCOMPLETE = "P5_REPORT_INCOMPLETE"
 
 FINDING_CODES = (
@@ -103,7 +105,7 @@ FINDING_CODES = (
     CONSUMER_UNRESOLVED, CONSUMER_NO_REFUSAL, CONSUMER_ERROR, CONSUMER_PENDING,
     CONSUMER_BLOCKED, RUNTIME_FIT, MODEL_CACHE_WRITE, GUARD_CONTROL_FAILED,
     ROLLBACK_NO_INCUMBENT, ROLLBACK_CANDIDATE_LIVE, ROLLBACK_NOT_EXACT,
-    PROMOTE_REFUSED, PHASE4_PENDING, REPORT_INCOMPLETE,
+    PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
 )
 
 
@@ -553,19 +555,28 @@ def _round_trip(root: Path, candidate: str, first_deployment: bool, findings) ->
 # --------------------------------------------------------------------------
 
 
-def _phase4_subject(corpus: Path | None, findings: _Findings) -> dict:
+def _phase4_subject(corpus: Path | None, release_root: Path, model_release,
+                    manifest: Mapping[str, Any], watch_dirs: list[Path],
+                    findings: _Findings) -> dict:
+    """Replay the corpus's traced pairs from the staged release, no fitting."""
     if corpus is None:
         return {"status": "NOT_RUN"}
-    from checks.tier0_corpus import load, resolve_corpus
-
-    loaded = load(resolve_corpus(corpus))
-    pairs = list(loaded.pairs.values())
-    traced = sum(1 for pair in pairs if (pair.get("payload") or {}).get("input_trace"))
-    findings.add(PHASE4_PENDING, "phase4",
-                 f"{traced}/{len(pairs)} pairs carry input_trace; integrated frozen-release "
-                 "replay is not implemented yet")
-    return {"status": "PENDING", "pairs": len(pairs), "traced": traced,
-            "corpus_hash": loaded.index.get("corpus_hash")}
+    if model_release is None:  # already a P5_MODEL_RELEASE_INVALID finding
+        return {"status": "BLOCKED"}
+    with guarded_scoring(watch_dirs) as watch:
+        summary, rows = replay_corpus(corpus, release_root, model_release, manifest)
+    for code, subject, detail in rows:
+        findings.add(code, subject, detail)
+    for path in sorted(set(watch.fit_paths)):
+        findings.add(RUNTIME_FIT, "phase4_replay", path)
+    if watch.dump_calls:
+        findings.add(MODEL_CACHE_WRITE, "phase4_replay", f"joblib.dump x{watch.dump_calls}")
+    for path in watch.changed_files:
+        findings.add(MODEL_CACHE_WRITE, "phase4_replay", path)
+    if watch.fit_paths or watch.dump_calls or watch.changed_files:
+        summary["status"] = "FAIL"
+    summary["fit_attempts"] = len(watch.fit_paths)
+    return summary
 
 
 # --------------------------------------------------------------------------
@@ -584,6 +595,9 @@ def _report_rows(evidence: dict) -> dict[str, list[list[str]]]:
              **evidence["rollback"].get("checks", {}),
              "lineage_graph_valid": evidence["lineage"].get("status")
              in ("ok", "NOT_APPLICABLE")}.items())],
+        "phase4": [[name, str(count)] for name, count in
+                   (evidence["phase4"].get("dispositions") or {}).items()]
+        + [["status", str(evidence["phase4"].get("status"))]],
         "findings": [[f["code"], f["subject"], f["detail"]] for f in evidence["findings"]],
     }
 
@@ -626,6 +640,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
                      rows["members"]),
             _section("Score consumers", ["consumer", "members", "status"], rows["consumers"]),
             _section("No-fit and rollback controls", ["control", "result"], rows["controls"]),
+            _section("Phase 4 replay", ["disposition", "pairs"], rows["phase4"]),
             _section("Findings", ["code", "subject", "detail"], rows["findings"]),
         ],
     }
@@ -634,7 +649,7 @@ def write_report(evidence: dict, report_dir: Path) -> Path:
 
 def _report_is_complete(text: str, evidence: dict) -> bool:
     headers = ("## 0. Verdict", "## 8. Provenance", "Release members", "Score consumers",
-               "No-fit and rollback controls", "Findings")
+               "No-fit and rollback controls", "Phase 4 replay", "Findings")
     if not all(header in text for header in headers):
         return False
     return all("| " + " | ".join(row) + " |" in text
@@ -681,15 +696,16 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
     state_rows, loaded = _state_member_rows(release_root, manifest, findings, state_specs)
     evidence["members"] += state_rows
     evidence["lineage"] = _lineage_subject(loaded, findings)
+    dirs = list(watch_dirs) if watch_dirs is not None else _default_watch_dirs(release_root)
     if model_release is not None:
         ctx = ReleaseContext(release_root=release_root, model_release=model_release,
                              states=loaded)
-        dirs = list(watch_dirs) if watch_dirs is not None else _default_watch_dirs(release_root)
         evidence["consumers"], evidence["scoring_pass"] = _scoring_pass(
             ctx, CONSUMERS if consumers is None else consumers, dirs, findings)
         evidence["rollback"] = _rollback_round_trip(
             release_root, release_id, first_deployment, findings)
-    evidence["phase4"] = _phase4_subject(phase4_corpus, findings)
+    evidence["phase4"] = _phase4_subject(phase4_corpus, release_root, model_release,
+                                         manifest, dirs, findings)
     return _finish(evidence, findings, report_dir, started)
 
 
