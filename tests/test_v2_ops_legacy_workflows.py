@@ -1,5 +1,6 @@
 """Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28)."""
 import json
+from pathlib import Path
 
 import pytest
 
