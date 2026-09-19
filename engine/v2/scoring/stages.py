@@ -1836,10 +1836,12 @@ def _execute_chooser(inputs: NativeScoreInputs, name: str,
     declines the ranking with the ADVISORY ``CHOOSER_MISSING_FEATURES`` --
     the row stays scored, only ``chooser_score`` is absent. Otherwise
     ``chooser_score`` is the frozen binding's prediction (no refit). The
-    columns ``_chooser_frame`` reads straight off the scoring pass are
-    derived here; every other one comes from the declared feature vector.
+    columns ``_chooser_frame`` computes are derived by ``native_chooser``
+    from the pass and the block's declared frozen state; the primitive ones
+    come from the declared feature vector, which also wins for any derived
+    column it declares (the compatibility path).
     """
-    from engine.v2.scoring import native_gate_features as derived
+    from engine.v2.scoring.native_chooser import derive_chooser_columns
 
     block = inputs.chooser
     executors = block.get("executors")
@@ -1855,9 +1857,11 @@ def _execute_chooser(inputs: NativeScoreInputs, name: str,
     facts = _facts(inputs, values)
     base = inputs.features.get("model_inputs")
     base = base if isinstance(base, Mapping) else {}
-    facts.update({key: value for key, value in
-                  derived.chooser_direct_columns(name, values, flags).items()
-                  if key not in base})
+    derived = derive_chooser_columns(block, facts, name, values,
+                                     _quote_map(inputs, name), flags)
+    if derived is None:
+        return {}
+    facts.update({key: value for key, value in derived.items() if key not in base})
     try:
         score = _finite(executor.predict(facts).get("chooser_score"))
     except (TypeError, ValueError, KeyError) as exc:
@@ -1943,10 +1947,13 @@ def _append_late_stages(
         if isinstance(inputs.chooser.get("executors"), Mapping):
             # A frozen chooser recipe is identified by its binding (the
             # executor's str()), exactly like the gate's.
+            from engine.v2.scoring.native_chooser import identity_view
+
             chooser_inputs["inputs"] = {
                 "binding_id": inputs.chooser.get("binding_id"),
                 "executors": {key: str(value) for key, value
                               in inputs.chooser["executors"].items()},
+                **identity_view(inputs.chooser),
             }
         _emit_stage(executed, "chooser", chooser_inputs, chooser, observer)
         _emit_stage(

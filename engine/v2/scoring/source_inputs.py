@@ -7,6 +7,8 @@ from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
+from engine.v2.models.admissible_table import AdmissibleDepthTable
+from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.models.contracts import ModelBinding, ModelRelease
 from engine.v2.models.loader import FrozenInference
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
@@ -30,7 +32,7 @@ from engine.v2.scoring.stages import (
     receipt,
 )
 
-__all__ = ["SourceBundle", "build_native_score_inputs"]
+__all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool"]
 
 _ANSWER_FIELDS = frozenset({
     "legs", "selected_legs", "selected_contracts", "resolved_legs",
@@ -79,6 +81,10 @@ _FROZEN_OUTPUT_ROLES = {
     "pred_abs_move": frozenset({"size"}),
     # The DYN-SV chooser champion (R4-20 gap 5), ``dyn_sv_chooser_v1_1``.
     "chooser_score": frozenset({"chooser"}),
+    # The chooser's other Tier-4 producer columns (legacy
+    # ``Scorer._chooser_frame``): the implied_t1 and runup_move serving folds.
+    "pred_im_t1_d14": frozenset({"implied_t1"}),
+    "pred_runup_abs_move_d14": frozenset({"runup_move"}),
 }
 _RESIDUAL_RECIPE_FIELDS = frozenset({
     "mode", "terminal_spots", "weights", "capital_at_risk", "pnl_cutoff",
@@ -297,6 +303,16 @@ class SourceBundle:
     # ``{"binding_id"[, "output"]}``, for a DYNAMIC_MENU candidate. Empty:
     # no chooser ranking is requested (legacy with no chooser champion).
     chooser_recipe: Mapping[str, Any] = field(default_factory=dict)
+    # The chooser's derived columns (R4-20 remaining gap (a); see
+    # ``native_chooser``). ``chooser_fold_pools``: the served Tier-4 folds'
+    # held-out pools by output (``pred_abs_move``, ``pred_im_t1_d14``,
+    # ``pred_runup_abs_move_d14``), each shaped like ``gate_forecast_pool``.
+    # ``chooser_analog_pool``/``chooser_admissible_table``: the frozen k-NN
+    # population and n_admissible table, checked against the keys
+    # ``chooser_recipe["analog_pool"]``/``["admissible_table"]`` declare.
+    chooser_fold_pools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    chooser_analog_pool: "ChooserAnalogPoolArtifact | None" = None
+    chooser_admissible_table: "AdmissibleDepthTable | None" = None
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -496,20 +512,28 @@ def _gate_forecast_members(bundle: SourceBundle, gate: dict[str, Any]) -> dict[s
         executor = _frozen_recipe_executor(bundle, "pred_abs_move", forecast)
         members["forecast_executor"] = executor
         members["forecast_recipe"] = str(executor)
-    pool = _bounded_recipe("gate_forecast_pool", bundle.gate_forecast_pool,
-                           _GATE_FORECAST_POOL_FIELDS)
+    pool = fold_pool("gate_forecast_pool", bundle.gate_forecast_pool)
     if pool:
-        predictions = tuple(float(value) for value in pool.get("predictions", ()))
-        residuals = tuple(float(value) for value in pool.get("residuals", ()))
-        if len(predictions) != len(residuals):
-            raise ValueError("gate_forecast_pool predictions and residuals differ in length")
-        floor = pool.get("interval_floor", 0.0)
-        members["forecast_pool"] = {
-            "predictions": predictions, "residuals": residuals,
-            "interval_floor": None if floor is None else _finite_number(
-                floor, "gate_forecast_pool.interval_floor"),
-        }
+        members["forecast_pool"] = pool
     return members
+
+
+def fold_pool(name: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    """A served Tier-4 fold's held-out pool (``pool_pred``/``pool_res``/
+    ``interval_floor``) as declared source rows; ``{}`` when undeclared."""
+    pool = _bounded_recipe(name, values, _GATE_FORECAST_POOL_FIELDS)
+    if not pool:
+        return {}
+    predictions = tuple(float(value) for value in pool.get("predictions", ()))
+    residuals = tuple(float(value) for value in pool.get("residuals", ()))
+    if len(predictions) != len(residuals):
+        raise ValueError(f"{name} predictions and residuals differ in length")
+    floor = pool.get("interval_floor", 0.0)
+    return {
+        "predictions": predictions, "residuals": residuals,
+        "interval_floor": None if floor is None else _finite_number(
+            floor, f"{name}.interval_floor"),
+    }
 
 
 def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
@@ -538,27 +562,11 @@ def _gate_block(bundle: SourceBundle) -> dict[str, Any]:
 
 
 def _chooser_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
-    """The DYN-SV chooser champion as a frozen recipe (R4-20 gap 5).
+    """The DYN-SV chooser champion and its derived-column inputs
+    (``chooser_inputs.chooser_block``)."""
+    from engine.v2.scoring.chooser_inputs import chooser_block
 
-    Empty unless declared. Declared for a strategy outside legacy's
-    DYNAMIC_MENU it is a malformed bundle: legacy never scores the chooser
-    there. The binding runs through FrozenInference like every other frozen
-    recipe -- verified members, no refit, MODEL_NOT_READY when unresolved.
-    """
-    if not bundle.chooser_recipe:
-        return {}
-    if strategy not in _CHOOSER_STRATEGIES:
-        raise ValueError(f"chooser_recipe declared for {strategy}, which is not a "
-                         "DYN-SV menu candidate")
-    config = _bounded_recipe("chooser_recipe", bundle.chooser_recipe, _FROZEN_RECIPE_FIELDS)
-    if not _is_frozen_recipe(config):
-        raise ValueError("chooser_recipe must name a frozen binding")
-    return {
-        "binding_id": str(config["binding_id"]),
-        "executors": {
-            "chooser_score": _frozen_recipe_executor(bundle, "chooser_score", config),
-        },
-    }
+    return chooser_block(bundle, strategy)
 
 
 def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
