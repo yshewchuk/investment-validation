@@ -114,7 +114,8 @@ identity = "backup receipt bound to the committed decision generation"
 tests = ["tests/test_v2_ops_effects_backup.py", "tests/test_private_mirror.py"]
 disposition = "native"
 owner = "P6-5"
-notes = "The legacy --backup git push + private-mirror sync has no v2 stage (ops/backup.py: remote mirroring out of scope); tools/private_mirror.py stays the operator CLI."
+decision = "UD-3"
+notes = "UD-3: the legacy --backup git push + private-mirror sync has no v2 stage (ops/backup.py: remote mirroring out of scope); tools/private_mirror.py stays the operator CLI, confirmed."
 
 [[row]]
 id = "nightly-engineering-gate"
@@ -356,30 +357,30 @@ id = "board-refresh-action"
 area = "board"
 capability = "Desk action: re-run the nightly without publishing"
 old = ["route:legacy-app POST /api/refresh"]
-new = ["cli:ops plan", "cli:ops submit"]
+new = ["cli:ops plan", "cli:ops submit", "route:v2-ops POST /actions/refresh"]
 producer = "supervised nightly plan/submit"
 identity = "job ids of the submitted plan"
-tests = ["tests/test_v2_ops_nightly_completion.py"]
-disposition = "CLI-with-user-acceptance-needed"
+tests = ["tests/test_v2_ops_nightly_completion.py", "tests/test_v2_ops_cli_refresh_action.py", "tests/test_v2_ops_serving.py"]
+disposition = "native"
 owner = "P6-4"
 interactive = true
 decision = "UD-1"
-notes = "No authenticated operator POST in the v2 API/ops server; a CLI replaces a browser button."
+notes = "UD-1 (keep both): the CLI stays the documented path (ops plan/ops submit); POST /actions/refresh adds a token-protected route on the operations server that submits the same supervised nightly plan and returns a job id, never running the refresh inline."
 
 [[row]]
 id = "board-adhoc-rescore"
 area = "board"
 capability = "Desk action: ad-hoc re-score of one ticker/strategy at an off-ladder strike or expiry"
 old = ["route:legacy-app GET /api/score"]
-new = ["MISSING", "py:engine/v2/scoring/application.py::score_one"]
-producer = "legacy engine.score.score in the request process"
-identity = "none (unpinned, in-process scorer)"
-tests = ["tests/test_score.py"]
-disposition = "missing"
+new = ["cli:ops rescore", "route:v2-ops POST /actions/whatif", "route:v2-ops GET /actions/whatif/*", "py:engine/v2/scoring/application.py::score_one"]
+producer = "adhoc_rescore supervised job (engine/v2/ops/worker.py::_dispatch_adhoc_rescore) under the v2 no-fit guard"
+identity = "job id from the what-if submission; result route binds to the server's pinned current release_id"
+tests = ["tests/test_v2_ops_cli_rescore.py", "tests/test_v2_ops_cli_whatif.py", "tests/test_v2_ops_worker_adhoc_rescore.py", "tests/test_v2_ops_serving.py"]
+disposition = "native"
 owner = "P6-4"
 interactive = true
 decision = "UD-2"
-notes = "score_one exists as a Python callable only; no route, CLI or job returns a result."
+notes = "UD-2 (keep both): `ops rescore` prints score_one's canonical record for one already-captured (ScoreRequest, NativeScoreInputs) pair read-only; POST /actions/whatif submits the same rescore as a supervised job and GET /actions/whatif/<job_id>?release_id=<id> fetches the finished record, refusing unless release_id matches the server's current release."
 
 # --------------------------------------------------------------- strategy
 
