@@ -198,3 +198,25 @@ def test_frozen_recording_redocuments_only_its_section() -> None:
         assert group == Phase4TraceCollector._document(trace._source_bundle)
     finally:
         capture._cleanup_trace_spill()
+
+
+def test_shared_texts_do_not_thrash_when_a_candidate_outgrows_the_budget() -> None:
+    """A plain LRU smaller than one candidate's shared working set misses on
+    every access of the cyclic candidate pattern (re-rendering everything per
+    candidate); texts used by the current or previous hash are kept."""
+    from engine.v2.foundation.canonical import content_hash
+
+    import tools.capture_tier0_corpus as capture
+
+    pools = [[float(i + j) for i in range(50)] for j in range(4)]
+    registry = capture._SharedTraceDocuments(text_budget=100)
+    registry.register_shared(pools)
+    for candidate in range(6):
+        document = {"frozen": {"pools": pools, "candidate": candidate}}
+        assert registry(document) == content_hash(document)
+    assert registry.renders == len(pools)
+    # Texts nobody has used for two hashes are dropped back under budget.
+    for _ in range(3):
+        registry({"frozen": {"pools": pools[:1]}})
+    assert registry.renders == len(pools)
+    assert registry._text_size <= len(registry._texts[id(pools[0])][0])

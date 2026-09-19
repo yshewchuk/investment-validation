@@ -85,14 +85,27 @@ def _number(value: float) -> str:
     if value == 0.0:
         return "0"  # and -0.0: ES6 renders negative zero as "0"
     sign = "-" if value < 0 else ""
-    tup = Decimal(repr(abs(value))).as_tuple()
-    digits = "".join(str(d) for d in tup.digits)
-    e = int(tup.exponent)
-    while len(digits) > 1 and digits.endswith("0"):
-        digits = digits[:-1]
-        e += 1
-    k = len(digits)
-    n = k + e
+    if type(value) is float:
+        # The digits and the decimal point straight from repr's text
+        # ("d.ddde±x", "ddd.ddd" or "0.000ddd"): the same m and n the Decimal
+        # path below derives, without building a Decimal per float (a
+        # capture hashes ~10^5-10^6 floats per document).
+        mantissa, _, exponent = repr(abs(value)).partition("e")
+        whole, _, fraction = mantissa.partition(".")
+        raw = whole + fraction
+        digits = raw.lstrip("0")
+        n = len(whole) + (int(exponent) if exponent else 0) - (len(raw) - len(digits))
+        digits = digits.rstrip("0")
+        k = len(digits)
+    else:  # a float subclass: the original, general path
+        tup = Decimal(repr(abs(value))).as_tuple()
+        digits = "".join(str(d) for d in tup.digits)
+        e = int(tup.exponent)
+        while len(digits) > 1 and digits.endswith("0"):
+            digits = digits[:-1]
+            e += 1
+        k = len(digits)
+        n = k + e
     if k <= n <= 21:
         return sign + digits + "0" * (n - k)
     if 0 < n <= 21:

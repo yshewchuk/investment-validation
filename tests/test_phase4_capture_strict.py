@@ -402,7 +402,7 @@ def test_frozen_runtime_refuses_a_binding_missing_a_feature_by_name(tmp_path):
 
 
 def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
-                           path, digest, strategy="STR-THRU"):
+                           path, digest, strategy="STR-THRU", absolute=False):
     expiry = "2026-09-18"
     event_date = "2026-09-17"
     legacy_request = ScoreRequest(
@@ -418,6 +418,8 @@ def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
         path, digest, role="gate", feature_order=list(gate_vector),
         output_names=["gate_score"], model_id=f"gate-{ticker}",
     )
+    if absolute:  # as the real registry and Tier-4 caches record them
+        driver_binding["artifact"] = gate_binding["artifact"] = str(path)
     source_inputs_value = {
         "context": {
             "ticker": ticker, "event_date": event_date,
@@ -453,10 +455,10 @@ def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,
 
 
 def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypatch):
-    # attach_strict_probe resolves captured artifact paths beneath the
-    # module's own ROOT; point it at this test's tmp_path instead of the
-    # real repo so the artifact stays self-contained.
-    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    # attach_strict_probe resolves captured artifact paths beneath the data
+    # root (engine.paths.ROOT); point it at this test's tmp_path instead of
+    # the real repo so the artifact stays self-contained.
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
     path, digest = _artifact(tmp_path)
     chosen = [
         _full_strict_candidate(
@@ -479,6 +481,43 @@ def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypat
     assert len(score_ids) == 2
 
 
+def test_strict_probe_resolves_artifacts_under_the_data_root_not_the_code_root(
+        tmp_path, monkeypatch):
+    """A worktree run: the code checkout (the tool's ROOT) is not the data
+    root (``engine.paths.ROOT``, INVESTING_PLAN_ROOT) the artifacts live
+    under, and the captured paths are absolute under the data root."""
+    from tools.phase4_frozen_resources import package_frozen_resources
+
+    code_root, data_root = tmp_path / "worktree", tmp_path / "data_root"
+    (data_root / "data" / "models").mkdir(parents=True)
+    code_root.mkdir()
+    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", code_root)
+    monkeypatch.setattr("engine.paths.ROOT", data_root)
+    path, digest = _artifact(data_root / "data" / "models")
+
+    def chosen():
+        return [_full_strict_candidate(
+            fixture_id="case-0", ticker="AAA", driver_vector={"x": 2.0},
+            gate_vector={"x": 9.0, "n_prior": 5.0}, path=path, digest=digest,
+            absolute=True)]
+
+    candidates = chosen()
+    attached, gaps = attach_strict_probe(candidates, "snapshot-1", tmp_path / "release")
+    assert (list(attached), gaps) == (["case-0"], {})
+    # The frozen-resources default is the data root too, not the cwd.
+    monkeypatch.chdir(code_root)
+    binding = _model_binding(path, digest, role="gate", feature_order=["x"],
+                             output_names=["gate_score"], model_id="gate-AAA")
+    binding["artifact"] = str(path)
+    package_frozen_resources(model_bindings=[binding], deployment_id="dep",
+                             release_root=tmp_path / "release-2")
+
+    # Planted defect: resolving against the code checkout is the 09-19 failure.
+    monkeypatch.setattr("engine.paths.ROOT", code_root)
+    with pytest.raises(StrictTraceCaptureError, match="escapes source root"):
+        attach_strict_probe(chosen(), "snapshot-1", tmp_path / "release-3")
+
+
 # --------------------------------------------------------------------------
 # Multi-strategy capture and honest per-case gaps: the CLI used to require
 # exactly one of STR-THRU/STR-RUNUP, and attach_strict_probe used to abort
@@ -492,7 +531,7 @@ def test_attach_strict_probe_traces_every_selected_candidate(tmp_path, monkeypat
 
 
 def test_attach_strict_probe_traces_every_dyn_sv_menu_strategy_in_one_pass(tmp_path, monkeypatch):
-    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
     path, digest = _artifact(tmp_path)
     strategies = ("STR-THRU", "STR-RUNUP", "TWIN-P", "CTR5")
     assert set(strategies) <= STRICT_TRACE_SUPPORTED_STRATEGIES
@@ -514,7 +553,7 @@ def test_attach_strict_probe_traces_every_dyn_sv_menu_strategy_in_one_pass(tmp_p
 def test_attach_strict_probe_records_a_typed_gap_and_still_traces_the_rest(tmp_path, monkeypatch):
     # CAL-P is disabled (research-only): canonical_v2_request must refuse it
     # by name, and that refusal must land as a gap on ONLY that row.
-    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
     path, digest = _artifact(tmp_path)
     good = _full_strict_candidate(
         fixture_id="case-good", ticker="AAA", strategy="STR-THRU",
@@ -539,7 +578,7 @@ def test_attach_strict_probe_records_a_typed_gap_and_still_traces_the_rest(tmp_p
 
 
 def test_attach_strict_probe_refuses_only_when_nothing_at_all_traced(tmp_path, monkeypatch):
-    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
     path, digest = _artifact(tmp_path)
     unsupported = _full_strict_candidate(
         fixture_id="case-bad", ticker="ZZZ", strategy="CAL-P",
@@ -579,7 +618,7 @@ def test_write_persists_a_gap_pair_and_a_traced_pair_in_the_same_corpus(tmp_path
     # traceable row and one unsupported row must write BOTH pairs, the first
     # complete and the second an honest gap — never an empty output
     # directory and never a fabricated trace on the second.
-    monkeypatch.setattr("tools.capture_tier0_corpus.ROOT", tmp_path)
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
     path, digest = _artifact(tmp_path)
     good = _full_strict_candidate(
         fixture_id="case-good", ticker="AAA", strategy="STR-THRU",

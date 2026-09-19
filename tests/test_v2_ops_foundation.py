@@ -289,3 +289,46 @@ def test_tag_nonfinite_leaves_ordinary_values_unchanged():
     value = {"a": [1, 2.5, "x", None, True], "b": {"c": 3}}
     assert tag_nonfinite(value) == value
     assert untag_nonfinite(tag_nonfinite(value)) == value
+
+
+def test_fast_number_layout_matches_the_decimal_path():
+    """``_number`` reads m and n from ``repr``; it must render every double
+    exactly as the Decimal-based layout it replaced (random bit patterns,
+    ordinary values and the JCS boundary cases)."""
+    import random
+    import struct
+    from decimal import Decimal
+
+    from engine.v2.foundation.canonical import _number
+
+    def reference(value):
+        if value == 0.0:
+            return "0"
+        sign = "-" if value < 0 else ""
+        tup = Decimal(repr(abs(value))).as_tuple()
+        digits = "".join(str(d) for d in tup.digits)
+        e = int(tup.exponent)
+        while len(digits) > 1 and digits.endswith("0"):
+            digits, e = digits[:-1], e + 1
+        k, n = len(digits), len(digits) + e
+        if k <= n <= 21:
+            return sign + digits + "0" * (n - k)
+        if 0 < n <= 21:
+            return sign + digits[:n] + "." + digits[n:]
+        if -6 < n <= 0:
+            return sign + "0." + "0" * (-n) + digits
+        mantissa = digits[0] + ("." + digits[1:] if k > 1 else "")
+        return f"{sign}{mantissa}e{'+' if n - 1 >= 0 else '-'}{abs(n - 1)}"
+
+    rng = random.Random(7)
+    values = [1e21, 1e20, 9.999999999999999e20, 1e-6, 1e-7, 1.5e-6, 5e-324,
+              2.2250738585072014e-308, 1.7976931348623157e308, 0.1, 100.0, 1.0,
+              1e22, 0.000001234, 12.5, 1e16, 1.2345e16, 123456789012345680000.0]
+    values += [-v for v in values]
+    for _ in range(20000):
+        v = struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0]
+        if v == v and abs(v) != float("inf"):
+            values.append(v)
+    values += [rng.gauss(0.0, 1.0) * 10 ** rng.randint(-8, 8) for _ in range(20000)]
+    values += [float(rng.randint(-10**7, 10**7)) for _ in range(5000)]
+    assert [_number(v) for v in values] == [reference(v) for v in values]

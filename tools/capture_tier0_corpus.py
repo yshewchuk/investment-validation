@@ -65,8 +65,20 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+#: The CODE checkout (imports, default output). Model artifacts live under
+#: the DATA root instead (``_artifact_source_root``); from a worktree the two
+#: differ.
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+def _artifact_source_root() -> Path:
+    """Where captured model artifacts are resolved: ``engine.paths.ROOT``
+    (honours ``INVESTING_PLAN_ROOT``), the root the registry and the Tier-4
+    serving caches build their paths from -- not this file's checkout."""
+    from engine import paths
+
+    return Path(paths.ROOT)
 
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
@@ -701,7 +713,8 @@ def frozen_source_declarations(
             model_bindings=[bindings[slot] for slot in slots],
             deployment_id=deployment_id,
             release_root=Path(release_root),
-            source_root=ROOT if source_root is None else Path(source_root),
+            source_root=(_artifact_source_root() if source_root is None
+                         else Path(source_root)),
         )
         by_role = {row["role"]: row["binding_id"]
                    for row in package.sidecar_document["bindings"]}
@@ -1210,14 +1223,18 @@ class _SharedTraceDocuments:
 
     Values are held until ``reset`` (the run's end); ``engine.score`` caches
     the same objects for the Scorer's life, so this adds no copies. Rendered
-    texts are kept in a small LRU bounded by total size.
+    texts are kept least-recently-used first, bounded by total size except
+    for what the last two hashes used (see ``canonical``). ``renders``
+    counts the texts rendered (a test and benchmark handle).
     """
 
     def __init__(self, text_budget: int = 16_000_000) -> None:
         self._held: dict[int, Any] = {}
-        self._texts: dict[int, str] = {}
+        self._texts: dict[int, tuple[str, int]] = {}
         self._text_size = 0
         self._text_budget = int(text_budget)
+        self._generation = 0
+        self.renders = 0
 
     def register_shared(self, values: Iterable[Any]) -> None:
         for value in values:
@@ -1230,17 +1247,28 @@ class _SharedTraceDocuments:
         key = id(node)
         if self._held.get(key) is not node:
             return None
-        text = self._texts.pop(key, None)
-        if text is None:
-            text = render(node)
-            self._text_size += len(text)
-        self._texts[key] = text  # most recently used last
-        while self._text_size > self._text_budget and len(self._texts) > 1:
+        entry = self._texts.pop(key, None)
+        if entry is None:
+            self.renders += 1
+            entry = (render(node), self._generation)
+            self._text_size += len(entry[0])
+        self._texts[key] = (entry[0], self._generation)  # most recent last
+        # Over budget: drop least recently used texts, but never one the
+        # current or previous hash used. A plain LRU smaller than one
+        # candidate's working set (a DYN-SV row touches three folds and two
+        # champions' pools) misses on EVERY access of a cyclic pattern, i.e.
+        # re-renders everything per candidate, which is the cost removed here.
+        while self._text_size > self._text_budget:
             oldest = next(iter(self._texts))
-            self._text_size -= len(self._texts.pop(oldest))
-        return text
+            text, used = self._texts[oldest]
+            if used >= self._generation - 1:
+                break
+            del self._texts[oldest]
+            self._text_size -= len(text)
+        return entry[0]
 
     def __call__(self, value: Any) -> str:
+        self._generation += 1
         # Shared values sit only in the source_inputs group's `frozen`
         # section (or are hashed directly, by reconcile); every other group
         # takes the plain path, which is faster on content with none.
@@ -1883,7 +1911,7 @@ def attach_strict_probe(
                     model_bindings=bindings,
                     deployment_id=request.deployment_id,
                     release_root=release_root,
-                    source_root=ROOT,
+                    source_root=_artifact_source_root(),
                 )
                 request = replace(request, model_artifact_refs=package.request_refs)
             inputs, shared_inputs = native_inputs_from_capture(candidate, request)

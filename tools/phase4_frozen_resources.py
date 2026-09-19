@@ -237,14 +237,21 @@ def package_frozen_resources(
 ) -> FrozenResourcePackage:
     """Copy frozen artifacts and emit a strict Phase 4 release sidecar.
 
-    Relative captured artifact paths are resolved beneath ``source_root``
-    (the current working directory by default).  Generated resource paths are
+    Captured artifact paths are resolved beneath ``source_root`` (by
+    default the data root, ``engine.paths.ROOT``, which honours
+    ``INVESTING_PLAN_ROOT``: the registry and the Tier-4 serving caches build
+    their paths from it, and from a worktree it is not the code checkout or
+    the working directory).  Generated resource paths are
     always relative to ``release_root`` and contain only verified digests.
     """
     deployment = _nonempty(deployment_id, "deployment_id")
     if not isinstance(model_bindings, (list, tuple)) or not model_bindings:
         raise FrozenResourceError("model_bindings: expected nonempty list")
-    source_base = Path.cwd() if source_root is None else Path(source_root)
+    if source_root is None:
+        from engine import paths
+
+        source_root = paths.ROOT
+    source_base = Path(source_root)
     release_base = Path(release_root)
     release_base.mkdir(parents=True, exist_ok=True)
 
