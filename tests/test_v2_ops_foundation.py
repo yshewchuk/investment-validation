@@ -32,7 +32,9 @@ from engine.v2.foundation import (  # noqa: E402
     content_hash,
     format_timestamp,
     from_document,
+    iter_canonical_json,
     parse_timestamp,
+    stream_content_hash,
     tag_nonfinite,
     to_document,
     untag_nonfinite,
@@ -150,6 +152,100 @@ def test_keys_with_lone_surrogates_sort_by_utf16_code_units():
     doc = {"": 1, "\U0001F600": 2, "\ud800": 3}
     assert canonical_json(doc) == '{"\ud800":3,"\U0001F600":2,"":1}'
 
+
+
+# --------------------------------------------------------------------------
+# streaming canonicalizer: byte-identical to the batch oracle above
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", sorted(GOLDEN))
+def test_streaming_canonical_matches_the_batch_oracle(name):
+    """`iter_canonical_json`/`stream_content_hash` must reproduce the exact
+    same text and digest as the batch `canonical_json`/`content_hash` -- the
+    whole point of the streaming path is that it is never allowed to differ.
+    """
+    value, canonical, digest = GOLDEN[name]
+    streamed = "".join(iter_canonical_json(value))
+    assert streamed == canonical
+    assert stream_content_hash(value) == digest
+
+
+def test_streaming_matches_on_a_shared_fragment_document():
+    """A node registered with a fragments object (the corpus writer's
+    `_SharedTraceDocuments`) must stream to the exact same bytes/digest as
+    the batch path, whether it is embedded once or many times."""
+
+    class _Fragments:
+        def __init__(self):
+            self._held = set()
+
+        def register(self, value):
+            self._held.add(id(value))
+
+        def canonical(self, node, render):
+            if id(node) not in self._held:
+                return None
+            return render(node)
+
+    shared = {"pool": [1.5, float("nan"), float("inf"), -0.0, 1e21, 1e-7, "e"]}
+    frag = _Fragments()
+    frag.register(shared)
+    doc = {"members": [shared, shared, {"other": shared}],
+           "solo": [shared, 1, None, True, False]}
+
+    batch_text = canonical_json(doc, fragments=frag)
+    batch_hash = content_hash(doc, fragments=frag)
+    streamed_text = "".join(iter_canonical_json(doc, fragments=frag))
+    streamed_hash = stream_content_hash(doc, fragments=frag)
+
+    assert streamed_text == batch_text
+    assert streamed_hash == batch_hash
+    # And the no-fragments path (no eager whole-tree normalize) matches too.
+    assert "".join(iter_canonical_json(doc)) == canonical_json(doc)
+    assert stream_content_hash(doc) == content_hash(doc)
+
+
+def test_streaming_hash_updates_incrementally_not_from_one_joined_string(monkeypatch):
+    """Guard against a `stream_content_hash` that quietly joins the chunks
+    into one string before hashing -- the whole reason it exists is that a
+    chooser pair's repeated shared pools must never be materialized as one
+    document-sized string. Wrap `hashlib.sha256` to record every `update()`
+    call: a real streaming hash calls it many times, each far smaller than
+    the whole document; a hidden join would call it exactly once with
+    everything.
+    """
+    import hashlib as hashlib_module
+
+    calls = []
+    real_sha256 = hashlib_module.sha256
+
+    class _Recording:
+        def __init__(self):
+            self._h = real_sha256()
+
+        def update(self, chunk):
+            calls.append(len(chunk))
+            self._h.update(chunk)
+
+        def hexdigest(self):
+            return self._h.hexdigest()
+
+    big_leaf = "y" * 20_000
+    value = {"a": [big_leaf, big_leaf, big_leaf, big_leaf, big_leaf],
+             "b": {"c": [big_leaf] * 5, "d": list(range(500))}}
+    expected = content_hash(value)
+
+    monkeypatch.setattr(hashlib_module, "sha256", _Recording)
+    try:
+        got = stream_content_hash(value)
+    finally:
+        monkeypatch.setattr(hashlib_module, "sha256", real_sha256)
+
+    assert got == expected
+    total = sum(calls)
+    assert len(calls) > 10, f"only {len(calls)} update() calls -- looks joined, not streamed"
+    assert max(calls) < total // 2, "one update() call carried most of the document"
 
 # --------------------------------------------------------------------------
 # clocks

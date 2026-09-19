@@ -33,10 +33,11 @@ import hashlib
 import json
 import math
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterator
 
 __all__ = ["canonical_json", "content_hash", "CONTENT_HASH_PREFIX",
-           "NONFINITE_KEY", "tag_nonfinite", "untag_nonfinite"]
+           "NONFINITE_KEY", "tag_nonfinite", "untag_nonfinite",
+           "iter_canonical_json", "stream_content_hash"]
 
 #: contracts §2.1: ContentHash is ``sha256:`` plus the full 64-hex digest.
 CONTENT_HASH_PREFIX = "sha256:"
@@ -196,6 +197,75 @@ def content_hash(value: Any, *, fragments: Any = None) -> str:
     text = canonical_json(value, fragments=fragments)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"{CONTENT_HASH_PREFIX}{digest}"
+
+
+def iter_canonical_json(value: Any, *, fragments: Any = None) -> Iterator[str]:
+    """Stream :func:`canonical_json`'s text as chunks, never joined.
+
+    Byte-for-byte identical to ``canonical_json(value, fragments=fragments)``
+    when the yielded pieces are concatenated -- proven in
+    ``tests/test_v2_ops_foundation.py`` by comparing this against that
+    function (the oracle) over the same fixtures ``canonical_json`` is
+    already pinned against, plus large/shared/nonfinite ones the batch path
+    would rather not build as one string.
+
+    This does the SAME per-node work ``_serialize_shared`` already does
+    (``_scalar`` at every leaf, ``fragments.canonical`` at every container,
+    UTF-16-code-unit key order) but recurses directly over ``value`` instead
+    of building the result with ``str.join``, so no single Python object ever
+    holds more than one node's rendered text. A cache hit under ``fragments``
+    still yields that fragment's whole cached text as one chunk -- bounded by
+    ``_SharedTraceDocuments``'s own text budget, not by document size.
+    """
+    if not isinstance(value, _CONTAINERS):
+        yield _serialize(_scalar(value))
+        return
+    cached = fragments.canonical(value, _plain) if fragments is not None else None
+    if cached is not None:
+        yield cached
+        return
+    if isinstance(value, dict):
+        members = {str(k): v for k, v in value.items()}
+        items = sorted(members.items(),
+                       key=lambda kv: kv[0].encode("utf-16-be", "surrogatepass"))
+        yield "{"
+        first = True
+        for k, v in items:
+            yield ("" if first else ",") + json.dumps(k, ensure_ascii=False) + ":"
+            first = False
+            if isinstance(v, _CONTAINERS):
+                yield from iter_canonical_json(v, fragments=fragments)
+            else:
+                yield _serialize(_scalar(v))
+        yield "}"
+        return
+    # a list or tuple: order preserved, never sorted (contracts §2.2)
+    yield "["
+    first = True
+    for v in value:
+        if not first:
+            yield ","
+        first = False
+        if isinstance(v, _CONTAINERS):
+            yield from iter_canonical_json(v, fragments=fragments)
+        else:
+            yield _serialize(_scalar(v))
+    yield "]"
+
+
+def stream_content_hash(value: Any, *, fragments: Any = None) -> str:
+    """``content_hash``, but the sha256 is fed chunk by chunk from
+    :func:`iter_canonical_json` -- no whole-document string is ever built.
+    Byte-identical digest to ``content_hash(value, fragments=fragments)``
+    because it hashes the exact same UTF-8 bytes, just incrementally: every
+    yielded chunk is a complete Python ``str`` (never a partial character),
+    so encoding each chunk and concatenating the results is the same as
+    encoding the one joined string would have been.
+    """
+    digest = hashlib.sha256()
+    for chunk in iter_canonical_json(value, fragments=fragments):
+        digest.update(chunk.encode("utf-8"))
+    return f"{CONTENT_HASH_PREFIX}{digest.hexdigest()}"
 
 
 def tag_nonfinite(value: Any) -> Any:
