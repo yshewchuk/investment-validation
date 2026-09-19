@@ -79,7 +79,22 @@ MIN_ANALOGS = 30
 #: number. Both families now share this ONE budget and total (see
 #: `AnalogMatcher._evict_analog_cache_until_under_budget`), so this name
 #: measures actual combined resident cost, not just the causal slice of it.
-CAUSAL_CACHE_BUDGET_BYTES = 600 * 1024 * 1024
+#:
+#: 2026-09-19, lowered 600 MB -> 400 MB: a synthetic benchmark
+#: (scratch/bench_analog_budget.py, untracked -- one population, one
+#: strategy/alpha, 200 distinct as_of cutoffs, each causal pool sized to
+#: the matcher's own accounting) measured ~2.25 MB/causal-key, so 600 MB
+#: holds ~266 concurrent keys and 400 MB ~177. Sweeping the same 200 keys
+#: twice: at 600 MB nothing evicts; at 400 MB, 19 of 200 evict and force a
+#: quantile+bucket recompute on the second pass, costing ~21-28 ms/evicted
+#: key against a ~80 ms/call cost (`_summarize`'s bootstrap) that runs
+#: regardless of cache state -- roughly a 3% steady-state slowdown in the
+#: worst case measured. A real capture's causal-key cardinality (a handful
+#: of strategies x `engine.replay.ALPHA_GRID` (5) x the boundary events'
+#: own as_of dates, typically under a few dozen) sits well under 177, so
+#: 400 MB is very unlikely to force any recompute in practice while
+#: freeing ~200 MB of headroom under the bounded-run cap.
+CAUSAL_CACHE_BUDGET_BYTES = 400 * 1024 * 1024
 
 #: `_causal_row_caches`/`phase4_recipe_cache` grow lazily, one row at a time,
 #: as candidates touch rows -- unlike `_causal_pools`' own DataFrame (whose

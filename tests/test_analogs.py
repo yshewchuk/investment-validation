@@ -595,3 +595,18 @@ class TestPopulationPoolCache:
             assert ("STR-THRU", 0.9) in matcher._pools
         finally:
             analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
+
+
+def test_causal_cache_budget_is_400mb_not_600mb():
+    """2026-09-19: lowered from 600 MB to 400 MB after a synthetic
+    benchmark (scratch/bench_analog_budget.py, untracked) measured the
+    cost -- ~2.25 MB/causal-key, so 400 MB still holds ~177 concurrent
+    keys, comfortably above a real capture's causal-key cardinality (a
+    handful of strategies x ALPHA_GRID(5) x the boundary events' own as_of
+    dates). See CAUSAL_CACHE_BUDGET_BYTES's own docstring for the full
+    numbers. A regression back to 600 MB would silently give up the ~200
+    MB of headroom this round was measured and committed to free.
+    """
+    from engine import analogs as analogs_mod
+
+    assert analogs_mod.CAUSAL_CACHE_BUDGET_BYTES == 400 * 1024 * 1024
