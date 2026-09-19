@@ -622,6 +622,88 @@ def rescore_command(args):
         return score_one(request, inputs)
 
 
+_PENDING_JOB_STATES = ("queued", "running", "retry_wait")
+_STOPPED_JOB_STATES = ("failed", "cancelling", "cancelled", "blocked")
+
+
+def whatif_action(root: Path, payload, *, clock=None) -> tuple[int, dict]:
+    """Submit a supervised ad-hoc rescore job; never scores inline.
+
+    ``payload`` is ``{"request": to_document(ScoreRequest), "native_inputs":
+    to_document(NativeScoreInputs)}``. Both documents are published as
+    verified artifacts and bound into the job's ``input_bindings`` --
+    ``adhoc_rescore`` (engine/v2/ops/worker.py) reads them back from its own
+    staging directory; this function never calls score_one itself. The
+    idempotency key is the content hash of the payload, so an identical
+    repeat POST resolves to the SAME job (submission.py's
+    idempotency-by-digest rule) instead of a duplicate.
+    """
+    from engine.v2.contracts import JobSpec, SubmitRequest
+    from engine.v2.ops.checkpoints import register_artifact
+    from engine.v2.ops.profiles import profile_named
+
+    clock = clock or SystemClock()
+    if not isinstance(payload, dict) or "request" not in payload or "native_inputs" not in payload:
+        return 400, {"error": "request and native_inputs are both required"}
+    store = ArtifactStore(root)
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        request_ref = store.publish_bytes(
+            json.dumps(payload["request"], sort_keys=True).encode(), schema_ref="score_request.v1.0")
+        native_ref = store.publish_bytes(
+            json.dumps(payload["native_inputs"], sort_keys=True).encode(),
+            schema_ref="native_score_inputs.v1.0")
+        with transaction(conn):
+            register_artifact(conn, request_ref, None, clock)
+            register_artifact(conn, native_ref, None, clock)
+        profile = profile_named(DEFAULT_POLICY, "io_fetch")
+        repo_root = Path(__file__).resolve().parents[3]
+        job = JobSpec(
+            kind="adhoc_rescore",
+            implementation_ref=content_hash(worker_source_manifest(repo_root)),
+            spec_hash=None,
+            environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
+            parameters={"expected_ids": ["adhoc_rescore"],
+                       "input_bindings": {"request.json": request_ref.artifact_id,
+                                          "native_inputs.json": native_ref.artifact_id}},
+            input_refs=(request_ref.artifact_id, native_ref.artifact_id),
+            output_namespace="shadow", resource_class="io_fetch", retry_policy_ref="bounded",
+            checkpoint_contract_ref="adhoc_rescore_record.v1.0")
+        idempotency_key = content_hash(payload)
+        policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+        receipt = submit(conn, registry(), policy, SubmitRequest(
+            namespace="shadow", idempotency_key=idempotency_key, principal="operator", job=job),
+            clock=clock)
+        return 202, to_document(receipt)
+    except OpsError as exc:
+        return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
+    finally:
+        conn.close()
+
+
+def whatif_result_action(root: Path, job_id: str, *, clock=None) -> tuple[int, dict]:
+    """Fetch a finished ad-hoc rescore job's canonical record, or its state
+    while it is not yet finished. Never runs any computation itself."""
+    clock = clock or SystemClock()
+    store = ArtifactStore(root)
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        receipt = get_job(conn, job_id)
+        if receipt.state in _PENDING_JOB_STATES:
+            return 202, {"state": receipt.state}
+        if receipt.state in _STOPPED_JOB_STATES:
+            return 409, {"state": receipt.state,
+                         "failure": to_document(receipt.failure) if receipt.failure else None}
+        if not receipt.output_refs:
+            return 500, {"error": "job succeeded with no output artifact"}
+        ref = artifact(conn, store, receipt.output_refs[0])
+        return 200, json.loads(store.read_verified(ref))
+    except OpsError as exc:
+        return _status_for(exc.problem.category), {"problem": to_document(exc.problem)}
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # snapshot import/promotion/rollback (P2-7/Task7b, §7/§10)
 # --------------------------------------------------------------------------

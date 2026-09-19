@@ -7,7 +7,7 @@ import http.server
 import json
 import mimetypes
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
 
@@ -99,6 +99,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
         if path.startswith("/legacy/"):
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
+        if path.startswith("/actions/whatif/"):
+            return self._whatif_result_route(config, path)
         if path == "/release/current.json":
             return self._current_json_route(config)
         if path == "/release/current":
@@ -112,6 +114,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         path = unquote(urlsplit(self.path).path)
         if path == "/actions/refresh":
             return self._refresh_route(config)
+        if path == "/actions/whatif":
+            return self._whatif_submit_route(config)
         return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
 
     def _refresh_route(self, config):
@@ -126,6 +130,44 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             status, body = config.submit_refresh(payload)
         except Exception:
             return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"refresh action failed\n", "text/plain")
+        data = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        return self._send(HTTPStatus(status), data, "application/json")
+
+    def _whatif_submit_route(self, config):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        if config.submit_whatif is None:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"whatif not configured\n", "text/plain")
+        payload, error = self._read_json_body(max_bytes=65536)
+        if error is not None:
+            return self._send(HTTPStatus.BAD_REQUEST, error, "text/plain")
+        try:
+            status, body = config.submit_whatif(payload)
+        except Exception:
+            return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"whatif action failed\n", "text/plain")
+        data = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        return self._send(HTTPStatus(status), data, "application/json")
+
+    def _whatif_result_route(self, config, path):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        if config.fetch_whatif is None:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"whatif not configured\n", "text/plain")
+        job_id = path.removeprefix("/actions/whatif/")
+        query = parse_qs(urlsplit(self.path).query)
+        release_id = (query.get("release_id") or [None])[0]
+        if not job_id or not release_id:
+            return self._send(HTTPStatus.BAD_REQUEST, b"job id and release_id are required\n", "text/plain")
+        try:
+            current = _resolve_current_id(config)
+        except (ArtifactError, OSError, ValueError):
+            current = None
+        if current is None or release_id != current:
+            return self._send(HTTPStatus.CONFLICT, b"release_id is not the current release\n", "text/plain")
+        try:
+            status, body = config.fetch_whatif(job_id)
+        except Exception:
+            return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, b"whatif result fetch failed\n", "text/plain")
         data = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         return self._send(HTTPStatus(status), data, "application/json")
 
@@ -222,10 +264,12 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
 
 
 def create_server(address, *, token: str, health_path: Path | str, release_root: Path | str,
-                  frozen_at: str = "unknown", submit_refresh=None):
+                  frozen_at: str = "unknown", submit_refresh=None, submit_whatif=None,
+                  fetch_whatif=None):
     config = type("Config", (), {"token": token, "health_path": Path(health_path),
                                   "release_root": Path(release_root), "frozen_at": frozen_at,
-                                  "submit_refresh": submit_refresh})
+                                  "submit_refresh": submit_refresh, "submit_whatif": submit_whatif,
+                                  "fetch_whatif": fetch_whatif})
     server = http.server.ThreadingHTTPServer(address, OperationsHandler)
     server.config = config
     return server

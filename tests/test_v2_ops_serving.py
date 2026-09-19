@@ -176,3 +176,54 @@ def test_refresh_forwards_stub_status(tmp_path):
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
+
+
+def test_whatif_requires_auth(tmp_path):
+    server, thread, base = _serve_refresh(
+        tmp_path, submit_whatif=lambda payload: (202, {"job_id": "job_x"}))
+    try:
+        with pytest.raises(HTTPError) as error:
+            _post(base + "/actions/whatif", {"request": {}, "native_inputs": {}})
+        assert error.value.code == 401
+    finally:
+        server.shutdown(); thread.join(timeout=2); server.server_close()
+
+
+def test_whatif_submit_forwards_to_stub(tmp_path):
+    server, thread, base = _serve_refresh(
+        tmp_path, submit_whatif=lambda payload: (202, {"job_id": "job_x", "seen": payload}))
+    try:
+        response = _post(base + "/actions/whatif", {"request": {"a": 1}, "native_inputs": {"b": 2}},
+                         token="secret")
+        assert response.status == 202
+        body = json.loads(response.read())
+        assert body["job_id"] == "job_x"
+        assert body["seen"] == {"request": {"a": 1}, "native_inputs": {"b": 2}}
+    finally:
+        server.shutdown(); thread.join(timeout=2); server.server_close()
+
+
+def test_whatif_result_requires_matching_release_id(tmp_path):
+    (tmp_path / "CURRENT").write_text("r1")
+    (tmp_path / "releases" / "r1").mkdir(parents=True, exist_ok=True)
+    server, thread, base = _serve_refresh(
+        tmp_path, fetch_whatif=lambda job_id: (200, {"job_id": job_id}))
+    try:
+        with pytest.raises(HTTPError) as error:
+            _get(base + "/actions/whatif/job_x?release_id=wrong", token="secret")
+        assert error.value.code == 409
+        response = _get(base + "/actions/whatif/job_x?release_id=r1", token="secret")
+        assert response.status == 200
+        assert json.loads(response.read()) == {"job_id": "job_x"}
+    finally:
+        server.shutdown(); thread.join(timeout=2); server.server_close()
+
+
+def test_whatif_result_not_configured(tmp_path):
+    server, thread, base = _serve_refresh(tmp_path)
+    try:
+        with pytest.raises(HTTPError) as error:
+            _get(base + "/actions/whatif/job_x?release_id=r1", token="secret")
+        assert error.value.code == 503
+    finally:
+        server.shutdown(); thread.join(timeout=2); server.server_close()

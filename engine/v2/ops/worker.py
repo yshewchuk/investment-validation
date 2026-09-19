@@ -163,6 +163,8 @@ def dispatch(worker, parameters, root, *, envelope=None):
                 "coverage": output}
     if worker == "decision_evidence":
         return _dispatch_decision_evidence(parameters, root)
+    if worker == "adhoc_rescore":
+        return _dispatch_adhoc_rescore(parameters, root)
     if worker in ("snapshot_import", "legacy_rebuild_candidate"):
         return _dispatch_snapshot_import(worker, parameters, root)
     if worker in ("ledger_export", "engineering_gate", "publication", "backup"):
@@ -214,6 +216,33 @@ def _dispatch_decision_evidence(parameters, root):
          "schema": "decision_evidence.v1.0"}],
         "completed_ids": list(parameters["expected_ids"]),
         "no_work": not parameters["expected_ids"]}
+
+
+def _dispatch_adhoc_rescore(parameters, root):
+    """P6 UD-2: re-score one already-captured (ScoreRequest,
+    NativeScoreInputs) pair under the v2 no-fit guard. Both documents were
+    materialized into staging by ``executor._materialize_inputs`` from
+    ``parameters["input_bindings"]`` before this runs -- this function never
+    fetches or fits anything, purely a bounded local computation, exactly
+    like ``_dispatch_decision_evidence`` above.
+    """
+    from engine.v2.contracts import ScoreRequest
+    from engine.v2.foundation import from_document, to_document
+    from engine.v2.models.no_fit import no_fit_guard
+    from engine.v2.ops.cli import _load_native_score_inputs
+    from engine.v2.scoring.application import score_one
+
+    request_doc = json.loads((root / "request.json").read_text())
+    native_doc = json.loads((root / "native_inputs.json").read_text())
+    request = from_document(ScoreRequest, request_doc)
+    inputs = _load_native_score_inputs(native_doc)
+    with no_fit_guard():
+        record = score_one(request, inputs)
+    (root / "record.json").write_text(
+        json.dumps(to_document(record), sort_keys=True, separators=(",", ":")))
+    return {"outputs": [{"name": "record", "path": "record.json",
+                        "schema": "adhoc_rescore_record.v1.0"}],
+            "completed_ids": list(parameters["expected_ids"])}
 
 
 def _dispatch_snapshot_import(worker, parameters, root):
