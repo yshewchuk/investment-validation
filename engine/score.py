@@ -511,17 +511,17 @@ class Phase4TraceCollector:
         """Capture the causal analog population and executable bucket recipe.
 
         ``recipe_cache`` is the trimmed-projection counterpart of
-        ``AnalogMatcher._documented_causal``/``_causal_pools`` — pass
-        ``scorer.matcher.phase4_recipe_cache`` (persists for the scoring
-        run, evicted in lockstep with the matcher's own causal caches).
-        ``causal["rows"]`` is already shared BY REFERENCE across every
-        candidate matching the same (strategy, alpha, as_of) bucket (see
-        `AnalogMatcher`'s own docstrings), but without this cache each
-        candidate still re-walked all of it — up to the FULL causal
-        population, not just the matched subset — into its own fresh
-        ``normalized_rows``/``population_hash``, and retained that copy for
-        the rest of the run. That per-candidate rebuild-and-retain, not the
-        (already-shared) causal block itself, was the measured driver of the
+        ``AnalogMatcher``'s own ``_causal_pools``/``_causal_row_caches`` —
+        pass ``scorer.matcher.phase4_recipe_cache`` (persists for the
+        scoring run, evicted in lockstep with the matcher's own causal
+        caches). ``causal["rows"]`` itself is rebuilt fresh on every
+        candidate (`AnalogMatcher.match`'s row-level cache only memoizes the
+        per-row `to_dict`/`json.dumps`/`sha256` work underneath it, not the
+        ``causal`` block object), so without THIS cache each candidate still
+        re-walked all of it — up to the FULL causal population, not just the
+        matched subset — into its own fresh ``normalized_rows``/
+        ``population_hash``, and retained that copy for the rest of the run.
+        That per-candidate rebuild-and-retain was the measured driver of the
         forward-pass RSS climb in a 40-forward-event strict capture: every
         candidate reaches this method via `_score_analogs`. With the cache,
         candidates sharing a (strategy, alpha, as_of) key share one
@@ -549,7 +549,7 @@ class Phase4TraceCollector:
 
         # `evidence["cutoff"]` is `_AnalogMatchEvidence`'s own isoformat
         # string of the SAME normalized timestamp `AnalogMatcher.match`
-        # keys its `_causal_pools`/`_documented_causal`/eviction on
+        # keys its `_causal_pools`/`_causal_row_caches`/eviction on
         # (`pd.Timestamp(as_of).normalize()`). Reconstructing the Timestamp
         # here — not keying on the string — is what makes `evicted` (a
         # `(strategy, alpha, Timestamp)` tuple `AnalogMatcher` pops on

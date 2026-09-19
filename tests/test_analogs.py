@@ -419,27 +419,61 @@ class TestCausalPoolCache:
         assert len(matcher._causal_pools) == 2
 
     def test_cache_cap_is_sized_to_the_board_not_to_a_round_number(self):
-        """The cap is a memory ceiling with two sides, both measured.
+        """`MAX_CAUSAL_CACHE` is now a loose backstop, not the memory bound.
 
-        A cached entry is not small: it holds a filtered, re-bucketed copy of
-        the (strategy, alpha) pool — 6.2 MB on average and ~9 MB for recent
-        dates, where few trades have been excluded yet.
+        2026-09-18, revised: a real 40-forward-event strict capture measured
+        per-key cost varying roughly 10x key to key (run 3: +5 keys -> +770
+        MB; elsewhere in the same run, +30 keys -> +350 MB), so a fixed
+        key-count ceiling cannot bound this cache's memory — a workload that
+        happens to visit large-population keys blows through any count cap
+        sized for the small end of that range, and one sized for the large
+        end wastes slots everywhere else. `CAUSAL_CACHE_BUDGET_BYTES`
+        (module level) is the actual memory ceiling now (see
+        `test_byte_budget_evicts_before_the_key_count_cap_would` below);
+        `MAX_CAUSAL_CACHE` only guards against unbounded DICT overhead from
+        a degenerate many-tiny-keys workload, so it can stay generous.
 
-        LOWER bound: a full three-week board (3,120 rows) generates 34 distinct
-        (strategy, alpha, as_of) keys — 31 entry dates x 2 scoreable strategies.
-        A cap below that makes the cache evict entries the board is still using,
-        on the one path where the cache actually pays.
-
-        UPPER bound: the original 256 measured at 1.6 GB, which took the Scorer
-        from 2.5 GB to 4.1 GB on a 7.8 GB box. Those slots bought nothing: the
-        paths that would fill them (build_pairs, ~1,000 scattered decision
-        dates; the calibration sampler, 300) barely repeat an as_of and get
-        almost no hits regardless.
-
-        Raising this past the upper bound should mean the workload changed, not
-        that a bigger number looked safer.
+        LOWER bound unchanged: a full three-week board (3,120 rows)
+        generates 34 distinct (strategy, alpha, as_of) keys — 31 entry dates
+        x 2 scoreable strategies. A cap below that makes the cache evict
+        entries the board is still using, on the one path where the cache
+        actually pays.
         """
         cap = self._matcher().MAX_CAUSAL_CACHE
         assert cap >= 40, "cap sits below the measured 34-key board working set"
-        assert cap <= 96, (
-            "256 entries measured at 1.6 GB on a 7.8 GB box; keep the ceiling bounded")
+        # The byte budget is the real ceiling; the count backstop just needs
+        # to stay well above the board's own working set (34) without being
+        # so low it competes with the byte budget for which one binds first
+        # in the normal (small-to-moderate per-key cost) case.
+        assert cap <= 4096, "key-count backstop should not itself need scaling"
+
+    def test_byte_budget_evicts_before_the_key_count_cap_would(self):
+        """A handful of LARGE per-key pools must evict on bytes alone, well
+        under the key-count backstop — the exact gap a count-only cap left
+        open (measured: 5 keys costing 770 MB in one real run).
+        """
+        from engine import analogs as analogs_mod
+
+        wide = pd.concat([
+            trades(4000, ret=0.05, mcap=5e9, dte=5, year=2020 + i)
+            for i in range(6)
+        ], ignore_index=True)
+        matcher = AnalogMatcher(bucket_frame(wide))
+        buckets = matcher.buckets_for(
+            mcap_usd=5e9, dte=5, moneyness_pct=0.0, implied_ratio=1.0)
+        original_budget = analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+        analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = 2_000_000  # force eviction fast
+        try:
+            for i in range(6):
+                matcher.match("STR-THRU", buckets, alpha=0.5,
+                              as_of=f"{2030 + i}-01-01")
+            # Well under the count backstop (which never fired here) and
+            # under 6 -- the budget evicted keys long before the count cap
+            # would have needed to.
+            assert len(matcher._causal_pools) < 6
+            assert matcher._causal_cache_total_bytes <= (
+                analogs_mod.CAUSAL_CACHE_BUDGET_BYTES
+                + max(matcher._causal_cache_bytes.values(), default=0)
+            )
+        finally:
+            analogs_mod.CAUSAL_CACHE_BUDGET_BYTES = original_budget
