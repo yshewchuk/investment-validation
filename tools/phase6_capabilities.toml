@@ -297,7 +297,8 @@ identity = "none"
 tests = ["tests/test_replay.py", "tests/test_v2_scoring_application.py"]
 disposition = "missing"
 owner = "P6-2"
-notes = "v2 application.replay re-scores a frozen decision; research trade replay on real prices still runs engine.replay."
+decision = "UD-4"
+notes = "v2 application.replay re-scores a frozen decision; research trade replay on real prices still runs engine.replay. Deferred: no experiments run during the migration (user, 2026-09-19); the runner stays legacy until after cutover."
 
 [[row]]
 id = "research-tools"
@@ -310,7 +311,8 @@ identity = "none: read the mutable legacy store"
 tests = ["tests/test_polygon_fills.py", "tests/test_fill_quality.py", "tests/test_build_trades.py", "tests/test_log_diagnostics.py"]
 disposition = "missing"
 owner = "P6-2"
-notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-materialized read set) so research reads the official data."
+decision = "UD-4"
+notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-materialized read set) so research reads the official data. Deferred: no experiments run during the migration (user, 2026-09-19); tools stay on the legacy Tier-2 store until after cutover."
 
 # ------------------------------------------------------------------ board
 
