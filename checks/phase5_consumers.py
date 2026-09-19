@@ -294,6 +294,83 @@ def _probe_paired_pool(ctx: ReleaseContext) -> list[dict]:
     return rows
 
 
+_ANALOG_QUERY = {"mcap_bucket": "1-10B", "dte_band": "1-3", "moneyness_band": "ATM",
+                 "implied_ratio": 1.0}
+
+
+def _analog_recipe(pool, **overrides) -> dict:
+    recipe = {"cutoff": pool.cutoff, "content_hash": pool.content_hash, "min_analogs": 30,
+              "bootstrap_draws": 0, "ci_quantiles": (0.05, 0.95),
+              "seed_snapshot": "p5-6-probe", "request_key": "p5-6-probe"}
+    recipe.update(overrides)
+    return recipe
+
+
+def _analog_bundle(pool, *, artifact):
+    """A source-only STR-THRU bundle whose only declared population is the
+    frozen board analog pool (the shape of tests/test_v2_models_board_analog)."""
+    from engine.v2.scoring.source_inputs import SourceBundle
+
+    return SourceBundle(
+        source_ref="p5-6-analog-probe",
+        context={"ticker": "P5PROBE", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+                 "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0},
+        raw_quotes=_PROBE_QUOTES, feature_vector={}, feature_missing_mask={},
+        model_identity={"driver": {"model_id": "probe"}},
+        forecast_recipes={"driver_prediction": {"intercept": 1.0, "coefficients": {}}},
+        model_artifact_refs={"driver_prediction": "sha256:probe-driver"},
+        residual_recipe={}, analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+        analog_query=dict(_ANALOG_QUERY), analog_artifact_recipe=_analog_recipe(pool),
+        analog_artifact=artifact,
+    )
+
+
+def _analog_direct(pool, artifact) -> tuple[bool, bool]:
+    """The analog stage's own reader, for a strategy the probe bundle cannot
+    score end to end: ``(resolved, refused_when_missing)``."""
+    from engine.v2.scoring.native_analog import evaluate_frozen_analogs
+
+    def run(item):
+        return evaluate_frozen_analogs(artifact=item, recipe=_analog_recipe(pool),
+                                       query_features=_ANALOG_QUERY, strategy=pool.strategy,
+                                       alpha=pool.alpha)
+
+    result, flag = run(artifact)
+    _, missing = run(None)
+    return result is not None and flag is None, missing == "MODEL_NOT_READY"
+
+
+def _probe_board_analog(ctx: ReleaseContext) -> list[dict]:
+    """The native analog stage reading the frozen board analog matcher.
+
+    Every staged ``(strategy, alpha, cutoff)`` pool is read under its full
+    causal key and release pin: STR-THRU end to end through ``score_one``
+    (resolved = the analog stage ran with no MODEL_NOT_READY), other
+    strategies through the stage's own reader. Removing the artifact must
+    give MODEL_NOT_READY.
+    """
+    consumer, member_id = "analogs.board_analog_matcher", "board_analog_matcher"
+    state = ctx.states.get(member_id)
+    if state is None:
+        return _blocked(consumer, member_id)
+    rows = []
+    for pool in state["artifacts"]:
+        if pool.strategy == "STR-THRU":
+            record = _score("STR-THRU", pool.alpha, _analog_bundle(pool, artifact=pool))
+            missing = _score("STR-THRU", pool.alpha, _analog_bundle(pool, artifact=None))
+            refused = "MODEL_NOT_READY" in missing.reason_codes
+            resolved = ("MODEL_NOT_READY" not in record.reason_codes
+                        and "n_analogs" in record.resolved_request)
+            detail = "" if resolved else ",".join(record.reason_codes)
+        else:
+            resolved, refused = _analog_direct(pool, pool)
+            detail = "" if resolved else "frozen analog reader did not resolve"
+        rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                     "refused_when_missing": refused, "detail": detail})
+    return rows
+
+
 #: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
 CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "frozen_stage_executor": _probe_frozen_executor,
@@ -308,7 +385,10 @@ CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     # the chooser feature in engine/score.py); PENDING until one does.
     "chooser.admissible_table": None,
     "gate.trailing_cutoff": None,
+    # The DYN-SV chooser's k-NN analog pool is a different shape from the
+    # board matcher (EXP-161 nearest neighbours over candidate features, not
+    # bucket widening over a causal trade slice); it is defined separately.
     "chooser.analog_pool": None,
-    "analogs.board_analog_matcher": None,
+    "analogs.board_analog_matcher": _probe_board_analog,
     "features.tier4_serving_folds": None,
 }

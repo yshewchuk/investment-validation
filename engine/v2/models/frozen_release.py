@@ -1,4 +1,4 @@
-"""Release members for P5-4 frozen state (residual pools, calibration tables).
+"""Release members for P5-4 frozen state (residual/analog pools, calibration tables).
 
 A frozen state's serialized bytes hash to its own ``content_hash``
 (``frozen_state.serialize_frozen_state``), so a release pins it exactly like
@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from engine.v2.models.admissible_table import ADMISSIBLE_DEPTH_TABLE_V1
+from engine.v2.models.analog_artifact import BOARD_ANALOG_POOL_ARTIFACT_V1
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.models.releases import ArtifactInventoryMember
 from engine.v2.models.residual_artifact import (
@@ -26,6 +27,7 @@ _MEMBER_KIND = {
     DRIVER_RESIDUAL_POOL_ARTIFACT_V1: "residual_bucket",
     PAIRED_RESIDUAL_POOL_ARTIFACT_V1: "paired_simulation",
     ADMISSIBLE_DEPTH_TABLE_V1: "calibration",
+    BOARD_ANALOG_POOL_ARTIFACT_V1: "residual",
 }
 
 

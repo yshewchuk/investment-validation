@@ -83,8 +83,10 @@ _RESIDUAL = ("engine.v2.models.residual_artifact", "engine.v2.models.frozen_stat
 _ADMISSIBLE = ("engine.v2.models.admissible_table", "engine.v2.models.frozen_state")
 #: The frozen recalibration-map artifact (P5-4, merged at 3dea05e).
 RECALIBRATION_MODULES = ("engine.v2.models.recalibration_artifact",)
-#: No frozen analog-matcher state exists anywhere yet.
-ANALOG_MODULES = ("engine.v2.models.analog_artifact",)
+#: The frozen board analog-matcher population (P5-4): one
+#: ``BoardAnalogPoolArtifact`` per (strategy, alpha, cutoff), loaded through
+#: ``FrozenStateLoader``.
+ANALOG_MODULES = ("engine.v2.models.analog_artifact", "engine.v2.models.frozen_state")
 #: No frozen trailing-cutoff artifact type exists yet.
 TRAILING_CUTOFF_MODULES = ("engine.v2.models.trailing_cutoff_artifact",)
 
@@ -117,7 +119,8 @@ STATE_SPECS: tuple[StateSpec, ...] = (
     StateSpec("chooser_analog_pool", "residual", ("DYN-SV",), (),
               "chooser.analog_pool", "data/features/chooser_analog_pool.parquet"),
     StateSpec("board_analog_matcher", "residual", ("*",), ANALOG_MODULES,
-              "analogs.board_analog_matcher", "no frozen analog state yet"),
+              "analogs.board_analog_matcher",
+              "training job --state board_analog_matcher (one object per causal key)"),
     *(StateSpec(f"tier4_folds:{role}", "estimator", ("*",), (),
                 "features.tier4_serving_folds", "data/models/tier4 serving folds")
       for role in TIER4_ROLES),

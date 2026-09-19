@@ -6,6 +6,7 @@ from math import isfinite
 from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
+from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
 from engine.v2.models.contracts import ModelBinding, ModelRelease
 from engine.v2.models.loader import FrozenInference
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
@@ -20,6 +21,7 @@ from engine.v2.scoring.frozen_executor import (
 )
 from engine.v2.scoring.native_analog import (
     BUCKET_RECIPE_SCHEMA,
+    FROZEN_ANALOG_RECIPE_FIELDS,
     bucket_population_hash,
 )
 from engine.v2.scoring.stages import (
@@ -205,6 +207,20 @@ class SourceBundle:
     analog_source_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     # This request's own bucket membership (no outcome, no legacy answer).
     analog_query: Mapping[str, Any] = field(default_factory=dict)
+    # Frozen board analog matcher (P5-4, engine.v2.models.analog_artifact):
+    # a verified, already-loaded BoardAnalogPoolArtifact -- the causal
+    # (strategy, alpha, cutoff) slice of the FULL-universe analog population.
+    # Declared by a non-empty recipe (native_analog.FROZEN_ANALOG_RECIPE_FIELDS:
+    # the request's evidence ``cutoff``, an optional ``content_hash`` release
+    # pin, and legacy match()'s own arguments) or a supplied artifact. The
+    # analog stage then reads the artifact after a full causal-key check and
+    # never rebuilds a pool; a missing or mismatched artifact is
+    # MODEL_NOT_READY. ``analog_query`` then carries mcap_bucket, dte_band,
+    # moneyness_band and the RAW implied_ratio (the stage buckets it on the
+    # artifact's frozen edges). Mutually exclusive with analog_recipe/
+    # analog_source_rows, the declared-rows compatibility path.
+    analog_artifact_recipe: Mapping[str, Any] = field(default_factory=dict)
+    analog_artifact: "BoardAnalogPoolArtifact | None" = None
     # Payoff-calibration/model layer (exp_pnl_model, win_model), mirroring
     # the analog fields above exactly: a recipe describes the fit, the rows
     # are real PRIOR trades' own outcomes (driver, spot_entry, exit_value,
@@ -557,6 +573,12 @@ def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     must not reclassify a declared-but-unfed recipe as not-applicable, and
     must not fabricate rows to satisfy it.
     """
+    frozen = _bounded_recipe(
+        "analog_artifact_recipe", bundle.analog_artifact_recipe,
+        FROZEN_ANALOG_RECIPE_FIELDS,
+    )
+    if frozen or bundle.analog_artifact is not None:
+        return _frozen_analog_block(bundle, frozen)
     config = _bounded_recipe(
         "analog_recipe", bundle.analog_recipe,
         _ANALOG_RECIPE_FIELDS | _BUCKET_ANALOG_RECIPE_FIELDS,
@@ -586,6 +608,28 @@ def _analog_block(bundle: SourceBundle) -> dict[str, Any]:
     return {
         "recipe": recipe,
         "source_rows": [dict(row) for row in bundle.analog_source_rows],
+        "query_features": dict(bundle.analog_query),
+    }
+
+
+def _frozen_analog_block(bundle: SourceBundle, recipe: dict[str, Any]) -> dict[str, Any]:
+    """The P5-4 frozen board analog matcher branch of ``_analog_block``.
+
+    The artifact is carried as given -- ``None`` included, so the stage
+    refuses MODEL_NOT_READY rather than this builder dropping the request or
+    falling back to declared rows.
+    """
+    if bundle.analog_recipe or bundle.analog_source_rows:
+        raise ValueError("analog_source_rows/analog_recipe (the compatibility path) cannot "
+                         "combine with analog_artifact_recipe/analog_artifact")
+    artifact = bundle.analog_artifact
+    if artifact is not None and not isinstance(artifact, BoardAnalogPoolArtifact):
+        raise ValueError("analog_artifact must be a BoardAnalogPoolArtifact")
+    _reject_answers("analog_artifact_recipe", recipe)
+    _reject_answers("analog_query", bundle.analog_query)
+    return {
+        "analog_artifact": artifact,
+        "analog_artifact_recipe": recipe,
         "query_features": dict(bundle.analog_query),
     }
 

@@ -395,7 +395,8 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     assert evidence["status"] == "FAIL"
     assert "P5_CONSUMER_PENDING" in evidence["finding_codes"]
     pending = {r["consumer"] for r in evidence["consumers"] if r["status"] == "PENDING"}
-    assert "analogs.board_analog_matcher" in pending
+    assert "analogs.board_analog_matcher" not in pending  # a real probe since P5-4 analogs
+    assert "chooser.analog_pool" in pending
     assert "model_stage.recalibration" not in pending  # a real probe since 3dea05e
     assert "model_stage.driver_residual_pool" not in pending  # real since 52ef989
     assert "simulation.paired_residual_pool" not in pending
@@ -422,7 +423,8 @@ def test_preparer_marks_every_catalog_state(tmp_path):
     assert set(by_id) == {s.member_id for s in layout.STATE_SPECS}
     assert by_id["payoff_line:STR-THRU"].status == "MISSING"
     assert by_id["payoff_line:STR-THRU"].detail == "no training root"
-    assert by_id["board_analog_matcher"].status == "PENDING"
+    assert by_id["board_analog_matcher"].status == "MISSING"  # type landed; no member built
+    assert by_id["trailing_pnl_cutoff"].status == "PENDING"
 
 
 def test_preparer_selects_current_snapshot_folds(tmp_path):

@@ -1562,15 +1562,78 @@ def _recalibrated_output(
     return {**output, "win_model": artifact.transform(output["win_model"])}
 
 
+#: The analog block field that declares the frozen board analog matcher.
+ANALOG_ARTIFACT_FIELD = "analog_artifact"
+ANALOG_ARTIFACT_RECIPE_FIELD = "analog_artifact_recipe"
+
+
+def _execute_frozen_analogs(
+    block: Mapping[str, Any],
+    strategy: str | None,
+    values: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    from engine.v2.scoring.native_analog import evaluate_frozen_analogs
+
+    if block.get("source_rows") is not None:
+        _add_flag(flags, "MODEL_NOT_READY")  # two populations declared: never pick one
+        return {}
+    try:
+        result, flag = evaluate_frozen_analogs(
+            artifact=block.get(ANALOG_ARTIFACT_FIELD),
+            recipe=block.get(ANALOG_ARTIFACT_RECIPE_FIELD) or {},
+            query_features=block.get("query_features"),
+            strategy=strategy,
+            alpha=_finite(values.get("fill")),
+        )
+    except (TypeError, ValueError) as exc:
+        _add_flag(flags, str(exc))
+        return {}
+    if flag is not None:
+        _add_flag(flags, flag)
+        return {}
+    output = {
+        "exp_pnl_analog": result.exp_pnl_analog,
+        "win_analog": result.win_analog,
+        "ci_low": result.ci_low,
+        "ci_high": result.ci_high,
+        "n_analogs": result.n_analogs,
+    }
+    values.update(output)
+    return output
+
+
+def _analog_identity(block: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The frozen analog artifact's identity for the stage receipt, or
+    ``None`` on the undeclared/declared-rows paths (receipts unchanged)."""
+    if ANALOG_ARTIFACT_FIELD not in block:
+        return None
+    artifact = block.get(ANALOG_ARTIFACT_FIELD)
+    return {"artifact": None if artifact is None else str(artifact),
+            "recipe": dict(block.get(ANALOG_ARTIFACT_RECIPE_FIELD) or {}),
+            "query_features": dict(block.get("query_features") or {})}
+
+
 def _execute_analogs(
     inputs: NativeScoreInputs,
     values: dict[str, Any],
     flags: list[str],
+    strategy: str | None = None,
 ) -> dict[str, Any]:
-    """Calculate analog summaries from a hash-bound source population."""
+    """Calculate analog summaries from a hash-bound source population.
+
+    A block carrying ``analog_artifact`` (even ``None``) declared the P5-4
+    frozen board analog matcher (``source_inputs._analog_block``): the pool
+    is read from that artifact after a full causal-key check against this
+    request's strategy, fill alpha and evidence cutoff, and a missing or
+    mismatched artifact is MODEL_NOT_READY -- never a rebuild, never the
+    declared-rows path below, which stays the compatibility path.
+    """
     block = inputs.analogs
     if block.get("mode") == "not_applicable":
         return {}
+    if ANALOG_ARTIFACT_FIELD in block:
+        return _execute_frozen_analogs(block, strategy, values, flags)
     recipe = block.get("recipe")
     source_rows = block.get("source_rows")
     query_features = block.get("query_features")
@@ -1850,11 +1913,12 @@ def _append_late_stages(
             executed, "model", {"prior": executed[-1].output_hash},
             model_output, observer,
         )
-        analog_output = _execute_analogs(inputs, values, flags)
-        _emit_stage(
-            executed, "analogs", {"prior": executed[-1].output_hash},
-            analog_output, observer,
-        )
+        analog_output = _execute_analogs(inputs, values, flags, geometry.strategy)
+        analog_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
+        analog_identity = _analog_identity(inputs.analogs)
+        if analog_identity is not None:
+            analog_inputs["inputs"] = analog_identity
+        _emit_stage(executed, "analogs", analog_inputs, analog_output, observer)
         simulation = _execute_simulation(
             inputs, values, geometry, pricing, flags,
         )

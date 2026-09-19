@@ -367,3 +367,64 @@ Preparer hook (P5-6): collect `recalibration_artifact.json` from
 `--training-root` as it does `payoff_artifact.json`; the state JSONs
 (`<out>/<member with : as __>.json`, not the `.summary.json` beside them) go
 through `--frozen-state` unchanged.
+
+## Board analog matcher (frozen state)
+
+Delivered 2026-09-19. Files: `engine/v2/models/analog_artifact.py` (layer 3,
+`BoardAnalogPoolArtifact`, loaded through `FrozenStateLoader`, release kind
+`residual`), `engine/v2/models/training/analogs.py` (layer 6 builder),
+`native_analog.evaluate_frozen_analogs` plus the frozen branch of
+`stages._execute_analogs`, `SourceBundle.analog_artifact_recipe` /
+`analog_artifact`, `tools/phase5_datasets.board_analog_trades`,
+`tools/phase5_training_job.py --state board_analog_matcher`, and the
+`analogs.board_analog_matcher` probe in `checks/phase5_consumers.py`. Tests:
+`tests/test_v2_models_board_analog.py`.
+
+- **State and key.** One artifact per causal key `(strategy, alpha at 4dp,
+  cutoff)`, where cutoff is the request's evidence cutoff. It holds legacy
+  `AnalogMatcher.match`'s causal slice (`exit_date < cutoff`) already
+  re-bucketed on the slice's own tercile edges, plus the causal edges and the
+  population edges that legacy uses when the slice is empty or there is no
+  cutoff. Rows are `(trade_id, event_date, exit_date, 4 bucket labels, ret)`,
+  ordered by trade id. A non-finite return is stored as `None`, and the row
+  still counts toward `min_analogs` as it does in legacy.
+- **Population.** `board_analog_trades` runs legacy `Scorer._enrich`
+  unchanged over the FULL panel. A bounded Scorer merges only the panel it
+  loaded, so other tickers lose their market-cap and implied-ratio buckets
+  (the context-width defect). The test builds a scoped legacy Scorer. It gets
+  the same key with a different content hash, and its answers really move.
+  The release pin (`content_hash` in the recipe) refuses it with
+  MODEL_NOT_READY.
+- **Scoring.** The stage checks strategy (geometry), fill alpha (pricing),
+  the recipe cutoff and the optional pin. A missing or mismatched artifact
+  gives MODEL_NOT_READY and is never rebuilt. The declared-rows path stays
+  the compatibility path, and combining the two refuses. The query carries
+  the three labels plus the RAW implied ratio, which the stage buckets on the
+  artifact's edges. The bootstrap seed is legacy `_seed` over the
+  re-bucketed query (`seed_snapshot`, `request_key` in the recipe).
+- **Parity.** Native from the artifact equals legacy `match` bit for bit on
+  every summary field, the CI included. This holds across 2 strategies x
+  2 alphas x 5 cutoffs (none, empty, thin, mid, all) and random queries with
+  missing dimensions, and through `score_one`.
+- **Recorded legacy defect.** `AnalogMatcher.match` loops
+  `len(WIDENING_ORDER) + 1 - len(unavailable)` times, but `unavailable` can
+  hold `mcap_bucket`, which is not in the widening order. So a query with no
+  market cap whose ladder cannot reach `min_analogs` raises
+  `AssertionError("unreachable")`. Both native paths finish the ladder
+  instead. The test allows exactly that case.
+- **Lineage.** Every artifact declares `tier2.trades`, `tier3.panel` and
+  `tier2.daily_market` with no time bound, because the population edges read
+  every trade, future ones included (legacy behaviour). Any correction to
+  those tables therefore invalidates all analog states.
+- **Real data** (not run; heavy):
+  `python3 -u tools/phase5_training_job.py --state board_analog_matcher --alpha 0.5 --cutoff <day> [--cutoff ...] [--strategy S ...] --out DIR --plan-only`
+  reads only two trades columns and prints the keys and an RSS estimate of
+  about 2.5 GB. That estimate comes from measured components: the slim
+  trades frame is 175 MB / 526,621 rows and the panel is 85 MB, with budgets
+  for the legs partition and the daily chunk. The full run is the same
+  command without `--plan-only`, under `tools/bounded_run.py --max-rss-gb 3.5`.
+  The preparer's `--frozen-state DIR` classifies the outputs as
+  `board_analog_matcher`, naming each `strategy|alpha|cutoff`.
+- **Chooser k-NN pool** (`chooser_analog_pool`) has a different shape
+  (EXP-161 nearest neighbours over candidate features, not bucket widening
+  over a causal slice). It is left PENDING for the chooser-features work.

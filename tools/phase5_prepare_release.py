@@ -193,7 +193,8 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
     """Pre-built P5-4 frozen states (residual pools, tables), by member.
 
     The training job's ``--state`` outputs
-    (``driver_residual_pool__<role>.json``, ``paired_residual_pool.json``) are
+    (``driver_residual_pool__<role>.json``, ``paired_residual_pool.json``,
+    ``board_analog_matcher__<strategy>__<alpha>__<cutoff>.json``) are
     classified by their own schema and role, not by file name.
     """
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
@@ -209,6 +210,9 @@ def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
         elif schema.startswith("paired_residual_pool"):
             member = "paired_residual_pool"
             name = f"{state.move_model_id}|{state.crush_model_id}|{state.cutoff}"
+        elif schema.startswith("board_analog_pool"):
+            member = "board_analog_matcher"
+            name = f"{state.strategy}|{state.alpha:.4f}|{state.cutoff}"
         else:
             member, name = "admissible_table:dyn_sv", f"{state.table_id}|{state.version}"
         found.setdefault(member, {})[name] = data
