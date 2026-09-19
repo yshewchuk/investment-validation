@@ -1669,11 +1669,6 @@ def _untag_nonfinite_shared(value: Any) -> Any:
     return value
 
 
-#: `_prepare_normalized_shared`'s per-pair memo, mapping id(original
-#: container) -> (original, prepared). See that function's docstring.
-_PrepareCache = dict
-
-
 def _prepare_normalized_shared(value: Any, cache: dict[int, tuple[Any, Any]]) -> Any:
     """`tag_nonfinite`, but reusing one prepared copy per input container
     instead of rebuilding on every occurrence -- the write-side counterpart
