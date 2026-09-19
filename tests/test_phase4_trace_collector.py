@@ -521,3 +521,106 @@ def test_refusal_omits_unexecuted_groups_and_default_path_is_invariant() -> None
     assert checkpoint["disposition"]["status"] == "refused"
     assert checkpoint["disposition"]["flags"] == ["UNVALIDATED_STRUCTURE"]
     assert checkpoint["checkpoints"] == {}
+
+
+# -- R4-18/R4-19: source_inputs.frozen ---------------------------------------------
+
+
+def test_capture_frozen_records_once_shares_pools_and_refuses_conflicts() -> None:
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    pool = _Predocumented({"predictions": [1.0, 2.0], "residuals": [0.5, -0.5],
+                           "interval_floor": None})
+    binding = {"role": "size", "model_id": "m", "inputs": {"x": 1.0, "y": None}}
+    # Before any source bundle exists, nothing is checkpointed yet.
+    collector.capture_frozen(bindings={"fold:size": binding},
+                             fold_pools={"pred_abs_move": pool},
+                             declarations={"gate": {"binding": "gate"}})
+    assert "source_inputs" not in collector.diagnostic_checkpoint()["checkpoints"]
+
+    collector.capture_source_bundle(context={"ticker": "ABC"})
+    # The same values again (another call site of the same request): no-op.
+    collector.capture_frozen(bindings={"fold:size": dict(binding)},
+                             fold_pools={"pred_abs_move": pool},
+                             declarations={"gate": {"binding": "gate"}})
+    frozen = _checkpoint_value(collector, "source_inputs")["frozen"]
+    assert frozen["bindings"]["fold:size"] == binding
+    assert frozen["fold_pools"]["pred_abs_move"] is pool.value  # shared, not copied
+    assert frozen["declarations"] == {"gate": {"binding": "gate"}}
+
+    with pytest.raises(ValueError, match="bindings.fold:size"):
+        collector.capture_frozen(bindings={"fold:size": {**binding, "model_id": "other"}})
+    with pytest.raises(ValueError, match="fold_pools.pred_abs_move"):
+        collector.capture_frozen(fold_pools={"pred_abs_move": _Predocumented(
+            {"predictions": [9.0], "residuals": [0.0], "interval_floor": None})})
+    # A later frozen record refreshes the checkpoint group.
+    collector.capture_frozen(declarations={"recalibration": {"fitted": False}})
+    frozen = _checkpoint_value(collector, "source_inputs")["frozen"]
+    assert frozen["declarations"]["recalibration"] == {"fitted": False}
+
+
+class _Served:
+    """A served Tier-4 fold with a real cache file behind ``artifact_ref``."""
+
+    def __init__(self, path, features=("a", "b"), floor=0.0):
+        self.model_id, self.fold_start, self.tier3_snapshot = "fold_m", pd.Timestamp(
+            "2026-09-01"), "snap"
+        self.features, self.interval_floor = features, floor
+        self.pool_pred, self.pool_res = np.array([1.0, 2.0]), np.array([0.25, -0.5])
+        self.path = path
+        self.calls = 0
+
+    def artifact_ref(self):
+        self.calls += 1
+        return self.path, "ab" * 32
+
+    def predict(self, features):
+        return np.array([0.3])
+
+
+def test_crush_capture_names_the_source_legacy_used(tmp_path) -> None:
+    scorer = Scorer.__new__(Scorer)
+    served = _Served(tmp_path / "crush.joblib")
+    scorer._serving = lambda fold, produces="pred_abs_move": served
+    request = ScoreRequest(ticker="ABC", strategy="TWIN-P",
+                           as_of=pd.Timestamp("2026-09-02"),
+                           event_date=pd.Timestamp("2026-09-10"))
+    features = pd.DataFrame({"a": [1.0], "b": [float("nan")]})
+
+    def run(stored):
+        scorer._crush = stored
+        collector = Phase4TraceCollector(content_hasher=content_hash)
+        collector.capture_source_bundle(context={"ticker": "ABC"})
+        result = ScoreResult(ticker="ABC", strategy="TWIN-P", as_of=request.as_of,
+                             event_date=request.event_date)
+        result._phase4_checkpoint_collector = collector
+        value = scorer._crush_forecast(request, result, features)
+        return value, _checkpoint_value(collector, "source_inputs")["frozen"]
+
+    value, frozen = run({("ABC", pd.Timestamp("2026-09-10")): -12.5})
+    assert value == -12.5
+    assert frozen["declarations"]["forecast:pred_iv_crush_30"]["source"] == "stored_tier4"
+    assert frozen["bindings"] == {}
+
+    value, frozen = run({})
+    assert value == pytest.approx(0.3)
+    binding = frozen["bindings"]["fold:iv_crush"]
+    assert (binding["role"], binding["adapter"], binding["output_names"]) == (
+        "iv_crush", "tier4-serving-fold.v1", ["pred_iv_crush_30"])
+    assert binding["inputs"] == {"a": 1.0, "b": None}
+    assert frozen["declarations"]["forecast:pred_iv_crush_30"] == {
+        "source": "served_fold", "binding": "fold:iv_crush", "output": "pred_iv_crush_30"}
+    assert frozen["fold_pools"] == {}  # the crush band is never read
+    # The file digest is taken once per served fold, not per candidate.
+    run({})
+    assert served.calls == 1
+
+
+def test_fold_recording_is_inert_without_a_collector(tmp_path) -> None:
+    scorer = Scorer.__new__(Scorer)
+    served = _Served(tmp_path / "crush.joblib")
+    result = ScoreResult(ticker="ABC", strategy="TWIN-P", as_of=pd.Timestamp("2026-09-02"))
+    recorded = scorer._phase4_record_fold(
+        SimpleNamespace(strategy="TWIN-P", decision_offset=None), result, served,
+        pd.DataFrame({"a": [1.0]}))
+    assert recorded is False and served.calls == 0
+    assert not hasattr(scorer, "_phase4_fold_records")

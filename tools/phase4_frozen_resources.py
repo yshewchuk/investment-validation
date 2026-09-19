@@ -209,7 +209,7 @@ def _normalized_binding(
     digest = _digest(digest_value, f"{label}.artifact_sha256")
     source = _safe_source(artifact_value, source_root, f"{label}.artifact")
     adapter = _nonempty(raw.get("adapter", _DEFAULT_ADAPTER), f"{label}.adapter")
-    if adapter not in {"joblib-estimator.v1", "json-linear.v1"}:
+    if adapter not in {"joblib-estimator.v1", "json-linear.v1", "tier4-serving-fold.v1"}:
         raise FrozenResourceError(f"{label}.adapter: unsupported {adapter}")
     return {
         "model_id": _nonempty(raw.get("model_id"), f"{label}.model_id"),

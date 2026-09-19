@@ -77,6 +77,7 @@ from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
 from engine.v2.foundation import to_document  # noqa: E402
+from engine.v2.foundation.canonical import tag_nonfinite  # noqa: E402
 from engine.v2.models import FrozenInference, InferenceRequest, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.scoring import application as v2_application  # noqa: E402
@@ -108,6 +109,9 @@ REFUSAL_CODES = {code: code for code in (
 )}
 
 MODEL_ROLES = ("size", "implied_t1", "runup_move", "iv_crush", "gate", "chooser")
+
+#: The chooser's 17 primitive inputs (legacy ``Scorer._chooser_frame``).
+CHOOSER_PRIMITIVE_COLUMNS = tuple(score_mod.Scorer._CHOOSER_PRIMITIVES)
 
 #: ``ScoreRequest`` fields serialized as dates.
 _DATE_FIELDS = frozenset({"as_of", "event_date", "expiry", "chain_as_of"})
@@ -419,7 +423,14 @@ def _role_feature_vectors(candidate: Mapping[str, Any]) -> dict[str, dict[str, f
             ranking.get("feature_vector") if isinstance(ranking, Mapping) else None
         )
         if isinstance(chooser_vector, Mapping) and chooser_vector:
-            _add("chooser", chooser_vector)
+            # Only the 17 primitive columns (R4-20 gap (a)): native derives
+            # the other 50, and a declared derived column would override the
+            # native derivation (the compatibility path). The regime values
+            # are the ones `_chooser_frame` filled through `_regime_extra`.
+            _add("chooser", {
+                name: chooser_vector[name]
+                for name in CHOOSER_PRIMITIVE_COLUMNS if name in chooser_vector
+            })
 
     return vectors
 
@@ -558,33 +569,8 @@ def _frozen_runtime(
     inputs: NativeScoreInputs,
     candidate: Mapping[str, Any],
 ) -> tuple[FrozenInference, ModelRelease, tuple[InferenceRequest, ...]]:
-    resources = {row["resource_id"]: row for row in package.resource_rows}
-    bindings = []
-    for raw in package.sidecar_document["bindings"]:
-        members = tuple(
-            ArtifactMember(
-                name=member["name"],
-                path=resources[member["resource_id"]]["path"],
-                content_hash=resources[member["resource_id"]]["sha256"],
-            )
-            for member in raw["members"]
-        )
-        bindings.append(ModelBinding(
-            binding_id=raw["binding_id"],
-            model_id=raw["model_id"],
-            role=raw["role"],
-            strategy_id=raw["strategy_id"],
-            decision_clock_id=raw["decision_clock_id"],
-            adapter=raw["adapter"],
-            feature_order=tuple(raw["feature_order"]),
-            output_names=tuple(raw["output_names"]),
-            members=members,
-        ))
-    release = ModelRelease(
-        release_id=package.sidecar_document["release_id"],
-        deployment_id=request.deployment_id,
-        bindings=tuple(bindings),
-    )
+    release = _package_release(package, request.deployment_id)
+    bindings = release.bindings
     # Each binding's row must come from THAT binding's own captured per-role
     # feature vector, never the cross-role merged dict
     # (`inputs.features["model_inputs"]`): a binding's feature_order can name
@@ -613,6 +599,209 @@ def _frozen_runtime(
             rows=(tuple(vector[name] for name in binding.feature_order),),
         ))
     return FrozenInference(release_root), release, tuple(inference_requests)
+
+
+def _package_release(package: FrozenResourcePackage, deployment_id: str) -> ModelRelease:
+    """The ``ModelRelease`` a frozen resource package's sidecar describes."""
+    resources = {row["resource_id"]: row for row in package.resource_rows}
+    bindings = []
+    for raw in package.sidecar_document["bindings"]:
+        members = tuple(
+            ArtifactMember(
+                name=member["name"],
+                path=resources[member["resource_id"]]["path"],
+                content_hash=resources[member["resource_id"]]["sha256"],
+            )
+            for member in raw["members"]
+        )
+        bindings.append(ModelBinding(
+            binding_id=raw["binding_id"],
+            model_id=raw["model_id"],
+            role=raw["role"],
+            strategy_id=raw["strategy_id"],
+            decision_clock_id=raw["decision_clock_id"],
+            adapter=raw["adapter"],
+            feature_order=tuple(raw["feature_order"]),
+            output_names=tuple(raw["output_names"]),
+            members=members,
+        ))
+    return ModelRelease(
+        release_id=package.sidecar_document["release_id"],
+        deployment_id=deployment_id,
+        bindings=tuple(bindings),
+    )
+
+
+def frozen_source_declarations(
+    candidate: Mapping[str, Any],
+    *,
+    release_root: Path,
+    deployment_id: str,
+    source_root: Path | None = None,
+    chooser_analog_pool: Any = None,
+) -> dict[str, Any]:
+    """``SourceBundle`` keyword arguments from a capture's ``source_inputs.frozen``.
+
+    R4-18/R4-19: turns what the legacy scorer recorded (the bindings that
+    served each forecast, the gate and the chooser; the served folds' pools;
+    the recalibration map and the chooser keys) into the frozen declarations
+    native scoring reads. Nothing here recomputes a value: bindings are
+    copied by digest into ``release_root`` (``package_frozen_resources``,
+    the same identity-derived binding ids the strict probe uses), pools and
+    the map are the recorded ones, and the admissible table is declared only
+    when the recorded breakpoints equal the frozen v1 table.
+
+    Returned keys: ``frozen_inference``, ``model_release``,
+    ``forecast_recipes`` (binding-named recipes only), ``gate_recipe`` and
+    ``gate_forecast_pool``, ``chooser_recipe``/``chooser_fold_pools``/
+    ``chooser_admissible_table``/``chooser_analog_pool``,
+    ``recalibration_declared``/``recalibration_artifact``, the recorded
+    ``feature_vector``/``feature_missing_mask`` rows, and ``unresolved``:
+    what legacy used that cannot be declared (the stored crush forecast).
+    The chooser's k-NN pool is only KEYED from the capture (pool id and
+    cutoff); the artifact itself comes from the release and is passed in
+    as ``chooser_analog_pool``, whose key must match.
+    """
+    from engine.v2.foundation.canonical import untag_nonfinite
+
+    source = _checkpoint_value(candidate, "source_inputs")
+    frozen = untag_nonfinite(dict(source.get("frozen") or {}))
+    bindings = dict(frozen.get("bindings") or {})
+    pools = dict(frozen.get("fold_pools") or {})
+    declared = dict(frozen.get("declarations") or {})
+    out: dict[str, Any] = {"unresolved": []}
+    if not bindings and not declared:
+        return out
+
+    ids: dict[str, str] = {}
+    if bindings:
+        slots = sorted(bindings)
+        package = package_frozen_resources(
+            model_bindings=[bindings[slot] for slot in slots],
+            deployment_id=deployment_id,
+            release_root=Path(release_root),
+            source_root=ROOT if source_root is None else Path(source_root),
+        )
+        by_role = {row["role"]: row["binding_id"]
+                   for row in package.sidecar_document["bindings"]}
+        ids = {slot: by_role[_LEGACY_ROLE_ALIASES.get(bindings[slot]["role"],
+                                                      bindings[slot]["role"])]
+               for slot in slots}
+        out["frozen_inference"] = FrozenInference(Path(release_root))
+        out["model_release"] = _package_release(package, deployment_id)
+
+    def ref(entry: Mapping[str, Any]) -> dict[str, str]:
+        slot = str(entry.get("binding"))
+        if slot not in ids:
+            raise StrictTraceCaptureError(f"declared binding {slot} was not recorded")
+        return {"binding_id": ids[slot], "output": str(entry["output"])}
+
+    def pool(name: Any) -> dict[str, Any]:
+        if name not in pools:
+            raise StrictTraceCaptureError(f"declared fold pool {name} was not recorded")
+        return dict(pools[name])
+
+    # Feature rows: each binding's recorded inputs plus the chooser's
+    # primitives. A column recorded twice with different values is a defect.
+    vector: dict[str, float] = {}
+    missing: dict[str, bool] = {}
+
+    def feature(name: str, value: Any) -> None:
+        if value is None:
+            if name in vector:
+                raise StrictTraceCaptureError(f"feature {name} recorded both set and missing")
+            missing[name] = True
+            return
+        number = float(value)
+        if vector.get(name, number) != number or missing.get(name):
+            raise StrictTraceCaptureError(f"feature {name} recorded with different values")
+        vector[name], missing[name] = number, False
+
+    for slot in sorted(bindings):
+        for name, value in (bindings[slot].get("inputs") or {}).items():
+            feature(str(name), value)
+    for name, value in (declared.get("chooser_primitives") or {}).items():
+        feature(str(name), value)
+    out["feature_vector"] = {name: vector[name] for name in sorted(vector)}
+    out["feature_missing_mask"] = dict(sorted(missing.items()))
+
+    forecasts = {}
+    for key, entry in sorted(declared.items()):
+        if not key.startswith("forecast:"):
+            continue
+        target = key.split(":", 1)[1]
+        if entry.get("source") == "stored_tier4":
+            out["unresolved"].append(f"{target}: stored Tier-4 value, no binding")
+            continue
+        forecasts[target] = ref(entry)
+    if forecasts:
+        out["forecast_recipes"] = forecasts
+
+    gate = declared.get("gate")
+    if gate is not None:
+        recipe = {**ref(gate), "threshold": gate.get("threshold")}
+        forecast = declared.get("gate_forecast")
+        if forecast is not None:
+            recipe["forecast"] = ref(forecast)
+            out["gate_forecast_pool"] = pool(forecast["pool"])
+        out["gate_recipe"] = recipe
+
+    chooser = declared.get("chooser")
+    if chooser is not None:
+        from engine.v2.models.admissible_table import legacy_n_admissible_table
+
+        recipe: dict[str, Any] = ref(chooser)
+        producers, fold_pools = {}, {}
+        for key, entry in sorted(declared.items()):
+            if not key.startswith("chooser_fold:"):
+                continue
+            output = key.split(":", 1)[1]
+            fold_pools[output] = pool(entry["pool"])
+            if "binding" in entry:
+                producers[output] = ref(entry)
+        if producers:
+            recipe["producers"] = producers
+        out["chooser_fold_pools"] = fold_pools
+        table_record = declared.get("chooser_admissible_table")
+        if table_record is not None:
+            table = legacy_n_admissible_table()
+            recorded = tuple(tuple(float(v) for v in pair)
+                             for pair in table_record["breakpoints"])
+            if (recorded != tuple(table.breakpoints)
+                    or float(table_record["fallback"]) != float(table.fallback)):
+                raise StrictTraceCaptureError(
+                    "legacy n_admissible table differs from the frozen v1 table")
+            recipe["admissible_table"] = {"table_id": table.table_id,
+                                          "version": table.version,
+                                          "content_hash": table.content_hash}
+            out["chooser_admissible_table"] = table
+        pool_record = declared.get("chooser_analog_pool")
+        if pool_record is not None:
+            from tools.phase5_prepare_release import CHOOSER_POOL_ID
+
+            key = {"pool_id": CHOOSER_POOL_ID, "cutoff": pool_record["cutoff"]}
+            recipe["analog_pool"] = key
+            if chooser_analog_pool is not None:
+                if (chooser_analog_pool.pool_id, chooser_analog_pool.cutoff) != (
+                        key["pool_id"], key["cutoff"]):
+                    raise StrictTraceCaptureError(
+                        "supplied chooser analog pool carries another key")
+                out["chooser_analog_pool"] = chooser_analog_pool
+        out["chooser_recipe"] = recipe
+
+    recal = declared.get("recalibration")
+    if recal is not None:
+        from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
+
+        fit = None if not recal["fitted"] else {
+            "n": recal["n"], "base_rate": recal["base_rate"],
+            "x_thresholds": recal["x_thresholds"], "y_thresholds": recal["y_thresholds"],
+        }
+        out["recalibration_declared"] = True
+        out["recalibration_artifact"] = make_recalibration_map_artifact(
+            fit, strategy=recal["strategy"], alpha=recal["alpha"],
+            cutoff=recal["cutoff"], min_pairs=recal["min_pairs"])
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -928,6 +1117,12 @@ _SHARED_CONTENT_GROUPS: tuple[tuple[tuple[str, ...], ...], ...] = (
     (
         ("checkpoints", "source_inputs", "value", "native_recipes",
          "analogs", "source_rows"),
+    ),
+    # The served Tier-4 folds' pools (R4-19), one list per fold shared by
+    # every candidate the fold served.
+    *(
+        (("checkpoints", "source_inputs", "value", "frozen", "fold_pools", output),)
+        for output in ("pred_abs_move", "pred_im_t1_d14", "pred_runup_abs_move_d14")
     ),
 )
 
@@ -1432,16 +1627,26 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
 
     manifest_pairs = {}
     for cand in chosen:
+        # A +/-inf residual (legacy ResidualPool keeps it, R4-20 gap 1) is
+        # written in the repo's canonical non-finite form,
+        # {"__nonfinite__": "inf"} (engine.v2.foundation.canonical), never
+        # dropped to null and never as a bare Infinity. content_hash already
+        # hashes that same form, so every recorded hash is unchanged; readers
+        # decode it with untag_nonfinite.
+        checkpoint = cand.get("legacy_trace")
+        if checkpoint is not None:
+            checkpoint = tag_nonfinite(checkpoint)
         pair = make_pair(
             cand["fixture_id"], cand["covers"], cand["request"], cand["record"],
             record_kind=cand["kind"], duration=cand["duration"],
-            legacy_trace=cand.get("legacy_trace"),
+            legacy_trace=checkpoint,
             input_trace=cand.get("input_trace"),
             legacy_input_hash=cand.get("legacy_input_hash"),
             strict_trace_gap=strict_gaps.get(str(cand["fixture_id"])),
             relations=cand.get("relations"),
         )
-        text = json.dumps(pair, indent=2, sort_keys=True) + "\n"
+        text = json.dumps(tag_nonfinite(pair), indent=2, sort_keys=True,
+                          allow_nan=False) + "\n"
         (pairs_dir / f"{cand['fixture_id']}.json").write_text(text)
         manifest_pairs[cand["fixture_id"]] = {
             "payload_hash": pair["payload_hash"],
@@ -1450,7 +1655,6 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "covers": pair["covers"],
             "trace_disposition": pair["payload"].get("trace_disposition", "absent"),
         }
-        checkpoint = cand.get("legacy_trace")
         if checkpoint is not None:
             checkpoint_sink.write_case(
                 cand["fixture_id"],
