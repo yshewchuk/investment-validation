@@ -200,6 +200,7 @@ def test_l02_http_pinned_urls_survive_a_current_switch(tmp_path):
 
 
 @pytest.mark.xdist_group("serial")
+@pytest.mark.browser  # drives a real Playwright browser or needs node/npm (ui/ build)
 def test_l02_browser_frame_pins_r1_then_reload_shows_r2(tmp_path):
     _write_bundle(tmp_path, "r1")
     _write_bundle(tmp_path, "r2")

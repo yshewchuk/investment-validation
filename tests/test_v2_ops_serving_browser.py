@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 from engine.v2.serving.operations import create_server
 
 # Drives a real Playwright browser (see tests/conftest.py's grouping rule).
-pytestmark = pytest.mark.xdist_group("serial")
+pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]  # drives a real Playwright browser or needs node/npm (ui/ build)
 
 
 @pytest.mark.parametrize("browser_name", ["chromium"])

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
 
 from engine.v2.contracts import (
     CoverageKey,
@@ -151,6 +152,7 @@ def _refresh_input(tmp_path, parent_id, generation, plan_hash, revisions, raws,
     return root, params
 
 
+@pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
 def test_frozen_curated_append_correction_tombstone_and_noop_replay(tmp_path):
     base_path = Path("data/curated/daily_market/year=2026/part-0018.parquet")
     append_path = Path("data/curated/daily_market/year=2026/part-0017.parquet")

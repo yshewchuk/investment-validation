@@ -32,6 +32,7 @@ from engine.v2.ops.incremental_data import RefreshParameters
 from tests.ops_support import catalog
 
 
+@pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
 def test_generic_earnings_events_candidate_commits_atomically(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")

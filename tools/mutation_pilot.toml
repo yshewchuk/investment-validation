@@ -45,10 +45,6 @@ deselect = [
     "tests/test_v2_data_incremental_persistence.py::test_frozen_curated_append_correction_tombstone_and_noop_replay",
     "tests/test_v2_data_incremental_tables.py::test_frozen_curated_tables_use_the_same_merge_rules",
     "tests/test_v2_dashboard_preview.py::test_l02_browser_frame_pins_r1_then_reload_shows_r2",
-    # Runs the real engineering gate, which needs a git checkout and system-Python dependencies.
-    "tests/test_v2_ops_effect_receipt_collision.py::test_engineering_gate_runs_supervised_and_binds_the_gate_document_not_the_receipt",
-    # Runs the real engineering gate, which needs a git checkout and system-Python dependencies.
-    "tests/test_v2_ops_effects_graph.py::test_engineering_gate_effect_runs_the_real_gate_excluding_coverage",
 ]
 # Tracked files copied into the work copy (git ls-files of these paths).
 # "." is every tracked file, the same tree a CI checkout has (no data/, which

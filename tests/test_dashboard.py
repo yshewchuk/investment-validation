@@ -1319,6 +1319,8 @@ class TestChainRefreshCoversTheGap:
     and a night that did not run.
     """
 
+    pytestmark = pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
+
     class _Fetcher:
         def __init__(self):
             self.asked = []
@@ -2169,6 +2171,8 @@ class TestPanelStalenessGuard:
     so the only way to catch it is to measure the coverage rather than trust
     the steps.
     """
+
+    pytestmark = pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
 
     def _install(self, monkeypatch, panel_max, printed_dates):
         import pandas as pd

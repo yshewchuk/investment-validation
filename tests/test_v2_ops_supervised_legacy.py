@@ -29,6 +29,8 @@ from engine.v2.ops.supervisor import Service
 from engine.v2.ledger.decisions import set_authority
 from tests.ops_support import TEST_POLICY, run_until
 
+pytestmark = pytest.mark.heavy_host  # launches real multi-GB workers; run alone on a quiet box
+
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-12"

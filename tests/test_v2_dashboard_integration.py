@@ -59,7 +59,7 @@ from tests.test_v2_serving_publication_binding import (  # noqa: E402
     _stage_files,
 )
 
-pytestmark = pytest.mark.xdist_group("serial")
+pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]  # drives a real Playwright browser or needs node/npm (ui/ build)
 
 TOKEN = "integration-secret-9c2e"
 TOKEN_COOKIE = "operations_token"

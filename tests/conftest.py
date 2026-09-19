@@ -28,7 +28,23 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+#: Tests that need a resource GitHub Actions does not have. CI
+#: (.github/workflows/tests.yml) deselects every one of these; the local
+#: complement run in tests/README.md ("CI tests") covers the rest. Every mark
+#: carries a one-line reason comment where it is applied.
+#: tests/test_tests_ci.py checks that the workflow's -m expression names
+#: exactly these and that tests/README.md documents each one.
+LOCAL_ONLY_MARKERS = {
+    "needs_data": "reads the real data/ root (gitignored, absent in CI and worktrees)",
+    "needs_corpus": "reads fixtures/tier0 or another untracked fixture tree",
+    "heavy_host": "launches real multi-GB workers; run alone on a quiet box",
+    "browser": "drives a real Playwright browser or needs node/npm (ui/ build)",
+}
+
+
 def pytest_configure(config):
+    for name, why in LOCAL_ONLY_MARKERS.items():
+        config.addinivalue_line("markers", f"{name}: local only, {why}")
     # Registered here (not just by the xdist plugin) so the mark is silent
     # even when pytest-xdist is absent -- e.g. `pytest -p no:xdist`.
     config.addinivalue_line(

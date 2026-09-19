@@ -56,6 +56,7 @@ def test_generic_merge_refuses_equal_rank_conflict():
     assert exc.value.code == "IDENTITY_CONFLICT"
 
 
+@pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
 def test_frozen_curated_tables_use_the_same_merge_rules():
     mapping = build_legacy_mapping()
     sources = {

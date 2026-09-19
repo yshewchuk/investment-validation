@@ -2,10 +2,14 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from checks import phase4_real
 from checks.phase4_completion_review import review
 from checks.phase4_real import build_evidence
 from checks.rearchitecture_phase4_gate import check as foundation_gate
+
+pytestmark = pytest.mark.needs_corpus  # reads fixtures/tier0 or another untracked fixture tree
 
 ROOT = Path(__file__).resolve().parents[1]
 

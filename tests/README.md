@@ -150,11 +150,9 @@ per-mutant timeout). Driver and report: `tools/mutation_pilot.py`.
 Run one module at a time, as a scheduled heavy job:
 
     python3 tools/mutation_pilot.py count            # mutant counts only, no tests
-    python3 tools/bounded_run.py --max-rss-gb 2 --min-free-gb 0.5 --cores 4 -- \
+    python3 tools/bounded_run.py --max-rss-gb 2 --min-free-gb 0.5 --cores 2 -- \
         python3 -u tools/mutation_pilot.py run <module>
     python3 tools/mutation_pilot.py report [<module> ...] [--no-diffs]
-
-Note: ops modules need 4 or more CPUs, because real-Service tests admit against affinity minus 1.
 
 `report` prints, per module and per file: total, killed, survived, timeout,
 no-tests, other and not-yet-run counts, plus the score

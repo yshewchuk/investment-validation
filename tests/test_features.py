@@ -547,6 +547,8 @@ class TestZ252Guard:
 class TestPanelFeaturesStaleMarketBlock:
     """The panel's market block is baked at the event date and cannot be re-aimed."""
 
+    pytestmark = pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
+
     @pytest.fixture
     def context(self):
         from engine.calendar import trading_calendar
@@ -604,6 +606,8 @@ class TestLiveFeaturesBoundedByTheDecision:
     had not existed before that day's rebuild, so the leak was unreachable
     until the data caught up.
     """
+
+    pytestmark = pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
 
     @pytest.fixture
     def context(self):

@@ -1,6 +1,8 @@
 """Focused tests for measured Phase 3B real-run acceptance controls."""
 from __future__ import annotations
 
+import pytest
+
 from engine.v2.contracts import SnapshotRef, TableContract
 from engine.v2.data import build_legacy_mapping
 from engine.v2.foundation import ArtifactStore, content_hash, from_document
@@ -20,6 +22,7 @@ def _snapshot():
         finality_receipt_refs=(), knowledge_mode_by_table={})
 
 
+@pytest.mark.needs_data  # reads the real data/ root (gitignored, absent in CI and worktrees)
 def test_table_run_reopens_persisted_clean_rebuild_and_downstream_scan(tmp_path):
     clock = phase3b_real._AcceptanceClock()
     conn = open_catalog(tmp_path / "catalog.sqlite3", clock=clock)
