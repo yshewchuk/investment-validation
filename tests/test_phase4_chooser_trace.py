@@ -369,12 +369,9 @@ def test_calibration_keys_come_from_every_member_of_a_choice(tmp_path, monkeypat
         assert key[0] == "STR-THRU"
 
 
-def test_a_menu_row_with_a_frozen_chooser_traces_and_replays_identically(
-        chooser_root, tmp_path, monkeypatch):  # noqa: F811
-    """Capture -> phase4_real round trip of one DYN-SV menu row carrying the
-    frozen chooser: the chooser release and pool are declared resources, the
-    request names their refs, and the replayed stage receipts (the chooser's
-    binding and state identities included) equal the captured ones."""
+def _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch):  # noqa: F811
+    """``(pair, captured trace, native record)`` of one TWIN-P menu row whose
+    trace carries the frozen chooser, published under ``tmp_path/published``."""
     import shutil
 
     from tools.capture_tier0_corpus import strict_trace_one
@@ -393,15 +390,93 @@ def test_a_menu_row_with_a_frozen_chooser_traces_and_replays_identically(
     checkpoint["content_hash"] = content_hash(checkpoint["value"])
 
     trace, native = strict_trace_one(candidate, "snapshot-1", tmp_path / "captured")
-    assert set(trace["native_inputs"]["chooser"]) == {FROZEN_CHOOSER_FIELD}
-    # driver + gate bindings, then the chooser and its two producer folds
-    assert len(set(trace["request"]["model_artifact_refs"])) == 5
-
     shutil.copytree(tmp_path / "captured", tmp_path / "published")
     pair = {"payload": {"request": candidate["request"], "input_trace": trace,
                         "input_trace_hash": trace["trace_hash"],
                         "legacy_input_hash": trace["shared_input_hash"]}}
+    return pair, trace, native
+
+
+def test_a_menu_row_with_a_frozen_chooser_traces_and_replays_identically(
+        chooser_root, tmp_path, monkeypatch):  # noqa: F811
+    """Capture -> phase4_real round trip of one DYN-SV menu row carrying the
+    frozen chooser: the chooser release and pool are declared resources, the
+    request names their refs, and the replayed stage receipts (the chooser's
+    binding and state identities included) equal the captured ones."""
+    pair, trace, native = _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch)
+    assert set(trace["native_inputs"]["chooser"]) == {FROZEN_CHOOSER_FIELD}
+    # driver + gate bindings, then the chooser and its two producer folds
+    assert len(set(trace["request"]["model_artifact_refs"])) == 5
+
     verified = phase4_real._verified_trace_bundle(pair, tmp_path / "published")
     assert "executors" in verified["inputs"].chooser
     replayed, _receipts, _ids = phase4_real._replayed_member(verified)
     assert replayed.score_id == native.score_id
+
+
+def _stage_everything(verified, corpus_root, release_root):
+    """Stage every model member, the chooser pool and table: ``staged`` map."""
+    from checks import phase5_release as layout
+    from engine.v2.models.frozen_state import serialize_frozen_state
+
+    staged = {}
+    chooser = verified["frozen_chooser"]
+    for release, label in ((verified["frozen_replay"].release, "model"),
+                           (chooser.release, "tier4_folds:chooser")):
+        for binding in release.bindings:
+            for member in binding.members:
+                digest, _ = layout.write_object(
+                    release_root, (corpus_root / member.path).read_bytes())
+                assert digest == member.content_hash
+                staged[digest] = f"{label}:{binding.role}"
+    for state, member_id in ((chooser.analog_pool, "chooser_analog_pool"),
+                             (chooser.admissible_table, "admissible_table:dyn_sv")):
+        digest, _ = layout.write_object(release_root, serialize_frozen_state(state))
+        staged[digest] = member_id
+    return staged
+
+
+def test_phase5_replay_serves_the_frozen_chooser_from_the_staged_release(
+        chooser_root, tmp_path, monkeypatch):  # noqa: F811
+    """The P5-6 replay rebinds the chooser champion, its producer folds, the
+    k-NN pool and the n_admissible table to the staged release by content
+    hash; the pair replays, and each missing piece is ``member_absent``."""
+    from checks import phase5_phase4_replay as replay
+    from checks import phase5_release as layout
+
+    pair, _trace, _native = _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch)
+    corpus = tmp_path / "published"
+    verified = phase4_real._verified_trace_bundle(pair, corpus)
+    staged_root = tmp_path / "staged"
+    staged = _stage_everything(verified, corpus, staged_root)
+
+    row = replay._replay_pair(pair, corpus, staged_root, staged)
+    assert row["disposition"] == "replayed", row
+    assert {"chooser_analog_pool", "admissible_table:dyn_sv",
+            "tier4_folds:chooser:chooser"} <= set(row["members"])
+
+    chooser = verified["frozen_chooser"]
+    champion = next(b for b in chooser.release.bindings if b.role == "chooser")
+    for dropped, marker in ((champion.members[0].content_hash, champion.binding_id),
+                            (chooser.analog_pool.content_hash, "chooser:analog_pool")):
+        without = {h: m for h, m in staged.items() if h != dropped}
+        if marker == "chooser:analog_pool":
+            without = {h: m for h, m in staged.items() if m != "chooser_analog_pool"}
+        row = replay._replay_pair(pair, corpus, staged_root, without)
+        assert row["disposition"] == "member_absent", row
+        assert marker in row["detail"]
+
+    # The staged bytes are what the rebuilt champion executes (this synthetic
+    # menu row declines the ranking, so drive the executor directly): with the
+    # staged object removed it refuses, although the corpus copy is intact.
+    block, absent, _used = replay.rebind_chooser(chooser, verified["request"], staged_root,
+                                                 staged)
+    assert absent == [] and block["analog_pool"] is not None
+    facts = {name: 0.0 for name in champion.feature_order}
+    assert "chooser_score" in block["executors"]["chooser_score"].predict(facts)
+    (layout.deployment_root(staged_root)
+     / layout.object_relpath(champion.members[0].content_hash)).unlink()
+    block, _absent, _used = replay.rebind_chooser(chooser, verified["request"], staged_root,
+                                                  staged)
+    with pytest.raises(Exception):  # noqa: B017 -- any refusal: the bytes are gone
+        block["executors"]["chooser_score"].predict(facts)

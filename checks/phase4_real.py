@@ -1801,6 +1801,7 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
         "captured_stages": tuple(_REQUIRED_TRACE_STAGES),
         "captured_receipts": tuple(captured_receipts),
         "frozen_replay": frozen_replay,
+        "frozen_chooser": frozen_chooser,
     }
 
 
