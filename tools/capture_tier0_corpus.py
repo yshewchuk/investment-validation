@@ -1306,7 +1306,7 @@ def make_pair(fixture_id: str, covers: list[str], request: dict, record: dict,
         "covers": sorted(set(covers)),
         "notes": notes,
         "payload": payload,
-        "payload_hash": content_hash(payload),
+        "payload_hash": content_hash(payload, fragments=_SHARED_TRACE_DOCUMENTS),
         "request_hash": content_hash(request),
         # contracts §2.2: the envelope is excluded from the payload hash, so a
         # replay reproduces the payload without reproducing the elapsed time.
