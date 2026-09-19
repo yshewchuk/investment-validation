@@ -1,0 +1,857 @@
+# P6-1 capability declarations, read by tools/phase6_inventory.py.
+#
+# Discovery (the tool) finds every consumer entrypoint in the source; this
+# file says which capability each belongs to, its disposition and owner.
+# checks/phase6_inventory.py fails when a discovered entrypoint has no row
+# or exclusion, a row lacks a disposition/owner, or a claimed new
+# entrypoint or test does not resolve.
+#
+# Entrypoint references:
+#   route:<app> <METHOD> <path>   legacy-app | v2-api | v2-ops
+#   view:legacy #/<area>/<view>   view:ui #<route name>
+#   control:legacy <element id>   the legacy SPA's filter/picker controls
+#   cli:<file> | cli:<prog> <sub> engine.ledger / ops subcommands
+#   nightly:legacy <step>         nightly:v2 <stage>
+#   action:legacy_<name>          effect:<name>
+#   writer:<file>::<symbol>       legacy ledger/report/export/backup writers
+#   py:<file>::<symbol>           a callable, checked with ast
+#   doc:<file>                    an operator procedure document
+#   MISSING                       no v2 path yet (disposition = missing)
+#
+# Dispositions: native | compatibility-adapter |
+#   CLI-with-user-acceptance-needed | missing | dormant-historical
+# Owners: P6-2 | P6-3 | P6-4 | P6-5 | P6-6 | 8A | post-cutover
+# active = false marks a dormant historical reader, not an official-path
+# dependency. interactive = true marks an existing interactive action.
+
+# ---------------------------------------------------------------- nightly
+
+[[row]]
+id = "nightly-orchestration"
+area = "nightly"
+capability = "Nightly orchestration: plan, universe, single-run lock, submit and supervise the EOD graph"
+old = ["cli:engine/dashboard/nightly.py", "nightly:legacy universe"]
+new = ["cli:ops plan", "cli:ops submit", "cli:ops serve", "py:engine/v2/ops/nightly.py::build_legacy_job_requests", "cli:engine/v2/ops/__main__.py"]
+producer = "engine/v2/ops supervisor (Service) over the shadow nightly DAG; every stage a legacy_* job kind"
+identity = "plan implementation_ref + decision_clock (generation pin); pinned snapshot head with --input-mode snapshot"
+tests = ["tests/test_v2_ops_nightly_completion.py", "tests/test_v2_ops_supervised_legacy.py", "tests/test_dashboard.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+notes = "build_nightly_plan refuses any mode but shadow; the graph's stages still call legacy through legacy_* actions."
+
+[[row]]
+id = "nightly-refresh"
+area = "nightly"
+capability = "Nightly data refresh: calendar, chains, prices, history backfill, computed moves"
+old = ["nightly:legacy refresh", "nightly:legacy backfill", "nightly:legacy moves", "cli:engine/data/pulls/forward_calendar.py", "cli:engine/data/pulls/computed_moves.py"]
+new = ["nightly:v2 refresh", "nightly:v2 materialize", "cli:ops price-refresh", "cli:ops price-history", "cli:ops price-history capture", "cli:ops snapshot", "cli:ops snapshot plan-import", "cli:ops snapshot submit", "cli:ops snapshot promote", "cli:ops snapshot rollback", "cli:ops capture-inputs"]
+producer = "incremental_refresh job (opt-in --refresh-mode native) and snapshot import/promote; default refresh_mode stays legacy"
+identity = "snapshot manifest id / promoted snapshot head; RefreshPlan document hash"
+tests = ["tests/test_v2_ops_incremental_refresh_wiring.py", "tests/test_v2_ops_snapshot_stages.py", "tests/test_v2_ops_price_history.py", "tests/test_data_price_refresh.py", "tests/test_computed_moves.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+notes = "Native refresh exists but is opt-in; ops price-refresh wraps legacy price_refresh (adapter edges); computed moves and the forward calendar pull have no v2 job."
+
+[[row]]
+id = "nightly-features"
+area = "nightly"
+capability = "Tier-3 panel and Tier-4 forecast rebuild before scoring"
+old = ["nightly:legacy tiers", "cli:engine/data/rebuild.py", "cli:engine/data/features/tier4.py"]
+new = ["MISSING", "nightly:v2 features"]
+producer = "legacy engine.data.rebuild / engine.data.features.tier4 only"
+identity = "none: Tier 4 is whatever was last written (no snapshot binding)"
+tests = ["tests/test_tier4.py", "tests/test_panel.py"]
+disposition = "missing"
+owner = "P6-2"
+notes = "The bounded GRAPH names a features stage, but no job kind implements it and _DAG_STAGES omits it; the v2 nightly scores against the last legacy Tier-4 write."
+
+[[row]]
+id = "nightly-score"
+area = "nightly"
+capability = "Score the calendar, validate refreshed inputs, and build the explorer strike ladder"
+old = ["nightly:legacy score", "nightly:legacy validate", "nightly:legacy ladder"]
+new = ["nightly:v2 score", "action:legacy_score", "action:legacy_score_requests", "py:engine/v2/scoring/application.py::score_batch"]
+producer = "legacy_score action (pinned engine.score.score_calendar) inside a supervised worker; native score_batch not wired into the nightly"
+identity = "score.json artifact bound to job id, implementation_ref and legacy input manifest"
+tests = ["tests/test_v2_ops_supervised_legacy.py", "tests/test_v2_scoring_application.py", "tests/test_score.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+notes = "P6-2 swaps legacy_score for the Phase 4 kernel with the Phase 5 frozen deployment."
+
+[[row]]
+id = "nightly-selfcheck"
+area = "nightly"
+capability = "Bundle self-check: re-score sampled board rows directly through the engine before publish"
+old = ["nightly:legacy selfcheck", "cli:engine/dashboard/selfcheck.py"]
+new = ["nightly:v2 selfcheck", "action:legacy_selfcheck"]
+producer = "legacy_selfcheck action (engine.dashboard.selfcheck) over the staged bundle"
+identity = "selfcheck report bound to the projection job output"
+tests = ["tests/test_v2_ops_supervised_legacy.py", "tests/test_dashboard.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+
+[[row]]
+id = "nightly-publish"
+area = "nightly"
+capability = "Atomic publication of the rendered bundle with secret scan and gates"
+old = ["nightly:legacy publish", "writer:engine/dashboard/publish.py::publish_bundle", "writer:engine/dashboard/publish.py::LocalPublisher.publish"]
+new = ["nightly:v2 publication", "effect:publication_effect", "py:engine/v2/ops/publication.py::publish_local", "cli:tools/v2_dashboard_publish.py"]
+producer = "publication coordinator effect: fenced local release plus monotone CURRENT pointer"
+identity = "release_id bound to decision, projection, engineering and security gates"
+tests = ["tests/test_v2_ops_effects_graph.py", "tests/test_v2_dashboard_publish.py", "tests/test_v2_serving_publication_binding.py"]
+disposition = "native"
+owner = "P6-2"
+notes = "Native for the local release; remote delivery is the separate export-remote-delivery row."
+
+[[row]]
+id = "nightly-backup"
+area = "nightly"
+capability = "Nightly backup after decisions commit"
+old = ["nightly:legacy backup", "cli:tools/private_mirror.py", "writer:tools/private_mirror.py::sync"]
+new = ["nightly:v2 backup", "effect:backup_effect", "py:engine/v2/ops/backup.py::run_backup"]
+producer = "backup coordinator effect: consistent SQLite backup plus referenced objects, local only"
+identity = "backup receipt bound to the committed decision generation"
+tests = ["tests/test_v2_ops_effects_backup.py", "tests/test_private_mirror.py"]
+disposition = "native"
+owner = "P6-5"
+notes = "The legacy --backup git push + private-mirror sync has no v2 stage (ops/backup.py: remote mirroring out of scope); tools/private_mirror.py stays the operator CLI."
+
+[[row]]
+id = "nightly-engineering-gate"
+area = "nightly"
+capability = "Code-budget/engineering gate that withholds publication and counts the failure streak"
+old = []
+new = ["nightly:v2 engineering", "nightly:v2 engineering_gate", "effect:engineering_gate_effect"]
+producer = "engineering_gate coordinator effect running checks/ over HEAD"
+identity = "engineering receipt bound into the publication gates"
+tests = ["tests/test_v2_ops_engineering.py", "tests/test_v2_ops_engineering_history.py"]
+disposition = "native"
+owner = "P6-2"
+notes = "v2-only protection (system design §4.7); no legacy counterpart."
+
+# -------------------------------------------------------------- decisions
+
+[[row]]
+id = "decisions-predictions"
+area = "decisions"
+capability = "Freeze predictions before rendering (idempotent row ids, late backfilled nights flagged)"
+old = ["nightly:legacy ledger", "cli:engine/ledger.py", "cli:engine.ledger snapshot", "writer:engine/ledger.py::snapshot", "writer:engine/ledger.py::write_predictions"]
+new = ["nightly:v2 decision_commit", "action:legacy_decisions", "py:engine/v2/ops/decision_commit.py::commit_decisions"]
+producer = "decision_commit: catalog decisions table; rows built by legacy build_prediction_rows"
+identity = "decision_id + generation_ref + bound score artifact"
+tests = ["tests/test_v2_ops_authority.py", "tests/test_v2_ops_same_session_replan.py", "tests/test_ledger.py"]
+disposition = "compatibility-adapter"
+owner = "P6-3"
+notes = "Shadow authority only; the official ledger stays legacy until Phase 7."
+
+[[row]]
+id = "decisions-validation"
+area = "decisions"
+capability = "Validate decisions by replaying them from frozen inputs before commit"
+old = []
+new = ["nightly:v2 decision_validation", "nightly:v2 decision_replay", "nightly:v2 decision_evidence", "action:legacy_decision_replay", "py:engine/v2/ops/decision_validation.py"]
+producer = "legacy_decision_replay action (legacy scorer in a fresh process) plus decision_evidence"
+identity = "decision evidence bound to score and finality outputs"
+tests = ["tests/test_v2_ops_decision_validation_order.py", "tests/test_v2_ops_replay_scope.py"]
+disposition = "compatibility-adapter"
+owner = "P6-3"
+
+[[row]]
+id = "decisions-supersede"
+area = "decisions"
+capability = "Reasoned superseding entry for an immutable bad decision"
+old = ["writer:engine/ledger.py::supersede"]
+new = ["py:engine/v2/ledger/decisions.py::insert"]
+producer = "decisions.insert with supersedes + supersede_reason"
+identity = "decision_id chain"
+tests = ["tests/test_v2_ops_authority.py", "tests/test_ledger.py"]
+disposition = "native"
+owner = "P6-3"
+notes = "Both sides are Python callables with no operator command; parity of access."
+
+[[row]]
+id = "decisions-settlement"
+area = "decisions"
+capability = "Settle predictions whose events passed; missing finality blocks settlement"
+old = ["nightly:legacy settle", "cli:engine.ledger score", "writer:engine/ledger.py::score_outcomes"]
+new = ["nightly:v2 settlement", "action:legacy_settlement", "py:engine/v2/ops/decision_commit.py::import_settlement_candidates_in_transaction"]
+producer = "legacy_settlement action (engine.ledger.score_outcomes) imported into the catalog"
+identity = "outcome generation_ref + settlement watermark"
+tests = ["tests/test_v2_ops_outcome_session_backfill_wiring.py", "tests/test_v2_ops_critical_review.py", "tests/test_ledger.py"]
+disposition = "compatibility-adapter"
+owner = "P6-3"
+
+[[row]]
+id = "decisions-ledger-export"
+area = "decisions"
+capability = "Export canonical decisions/outcomes in the legacy ledger file format for legacy readers"
+old = ["py:engine/ledger.py::read_predictions", "py:engine/ledger.py::read_outcomes"]
+new = ["nightly:v2 ledger_export", "nightly:v2 export", "effect:ledger_export_effect", "py:engine/v2/ledger/export.py::export_generation"]
+producer = "ledger_export coordinator effect (purposes legacy_import + shadow)"
+identity = "ledger generation tarball bound to the decision generation"
+tests = ["tests/test_v2_ops_effects_graph.py", "tests/test_v2_ops_effects.py"]
+disposition = "compatibility-adapter"
+owner = "P6-3"
+
+[[row]]
+id = "decisions-history-import"
+area = "decisions"
+capability = "Bootstrap a catalog with the historical legacy prediction/outcome ledger"
+old = ["py:engine/ledger.py::read_predictions"]
+new = ["cli:ops ledger", "cli:ops ledger import-history", "py:engine/v2/ops/ledger_history_import.py::import_history"]
+producer = "ledger_history_import into decisions/decision_imports"
+identity = "import digest per legacy ledger file"
+tests = ["tests/test_v2_ops_ledger_history_import.py"]
+disposition = "compatibility-adapter"
+owner = "P6-3"
+
+[[row]]
+id = "decisions-calibration"
+area = "decisions"
+capability = "Regenerate the ledger calibration report and health.json from settled predictions"
+old = ["cli:engine.ledger calibrate", "writer:engine/ledger.py::calibrate", "writer:engine/ledger.py::write_health"]
+new = ["MISSING"]
+producer = "legacy engine.ledger.calibrate only"
+identity = "none"
+tests = ["tests/test_ledger.py"]
+disposition = "missing"
+owner = "P6-3"
+notes = "No v2 job recomputes calibration/health from canonical decisions; legacy_render only reads a ledger-generation health artifact."
+
+[[row]]
+id = "decisions-status"
+area = "decisions"
+capability = "Ledger status summary (counts, duplicates, pending settlement)"
+old = ["cli:engine.ledger status"]
+new = ["MISSING"]
+producer = "legacy engine.ledger.status"
+identity = "none"
+tests = ["tests/test_ledger.py"]
+disposition = "missing"
+owner = "P6-3"
+notes = "No ops command summarizes the catalog decisions/outcomes the way engine.ledger status does."
+
+# ------------------------------------------------------------------ books
+
+[[row]]
+id = "books-view"
+area = "books"
+capability = "Hypothetical book and its contrarian (declined) counterpart, with strategy/recommended filters"
+old = ["cli:engine/portfolio.py", "view:legacy #/trades/book", "control:legacy bk-f-strategy", "control:legacy bk-f-recommended"]
+new = ["route:v2-ops GET /book", "route:v2-ops GET /release/*"]
+producer = "legacy render.build_book inside legacy_render over the exported ledger generation"
+identity = "compatibility bundle inside the published release_id"
+tests = ["tests/test_portfolio.py", "tests/test_dashboard.py", "tests/test_v2_ops_serving.py"]
+disposition = "compatibility-adapter"
+owner = "P6-3"
+
+[[row]]
+id = "books-funding"
+area = "books"
+capability = "Book totals, capital per trade and funding computed against canonical records"
+old = ["cli:engine/portfolio.py"]
+new = ["MISSING"]
+producer = "legacy engine.portfolio.build_book/summarize only"
+identity = "none"
+tests = ["tests/test_portfolio.py"]
+disposition = "missing"
+owner = "P6-3"
+notes = "No v2 accounting over catalog decisions; P6-3 must show totals agree with the existing accounting."
+
+# --------------------------------------------------------------- research
+
+[[row]]
+id = "research-experiments"
+area = "research"
+capability = "Preregistered experiment runs through evaluate(): run log, testing ledger, --no-ledger smoke"
+old = ["cli-family:experiments/*/run.py", "writer:engine/evaluate.py::evaluate", "writer:engine/evaluate.py::append_run_log"]
+new = ["cli:ops plan", "py:engine/v2/ops/experiments.py::run_experiment"]
+producer = "supervised experiment job: legacy runner via the declared command adapter (EXP-182 only)"
+identity = "spec_hash + input manifest + runner manifest"
+tests = ["tests/test_experiments.py", "tests/test_v2_ops_runner_onboarding.py", "tests/test_evaluate.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+notes = "Only EXP-182 is onboarded; other runners run by filesystem path outside the supervisor."
+
+[[row]]
+id = "research-reports"
+area = "research"
+capability = "Generated REPORT.md with figures, fill sensitivity, sample funnel and accuracy checklist"
+old = ["writer:engine/report.py::Report.write", "writer:engine/report.py::fig_equity", "writer:engine/report.py::fig_by_year", "writer:engine/report.py::fig_mc_fan", "writer:engine/report.py::fig_mc_fan_paths", "writer:engine/report.py::fig_alpha_curve", "writer:engine/report.py::fig_stress_grid", "writer:engine/report.py::fig_reliability"]
+new = ["py:engine/v2/ops/experiments.py::run_experiment"]
+producer = "legacy engine.report inside the runner; the v2 job records the report as evidence"
+identity = "report bytes hash in the experiment receipt"
+tests = ["tests/test_report.py", "tests/test_experiments.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+
+[[row]]
+id = "research-replay"
+area = "research"
+capability = "Replay selected trades on real prices through the same kernel as serving"
+old = ["py:engine/replay.py::replay"]
+new = ["MISSING", "py:engine/v2/scoring/application.py::replay"]
+producer = "legacy engine.replay"
+identity = "none"
+tests = ["tests/test_replay.py", "tests/test_v2_scoring_application.py"]
+disposition = "missing"
+owner = "P6-2"
+notes = "v2 application.replay re-scores a frozen decision; research trade replay on real prices still runs engine.replay."
+
+[[row]]
+id = "research-tools"
+area = "research"
+capability = "Research data tools: real-fill pull and quality, trade table build/prune, signal screen, log diagnostics"
+old = ["cli:engine/data/pulls/polygon_fills.py", "cli:tools/fill_quality.py", "cli:engine/build_trades.py", "cli:tools/reconcile_trades.py", "cli:tools/signal_screen.py", "cli:tools/log_diagnostics.py"]
+new = ["MISSING"]
+producer = "legacy Tier-2 store readers/writers (engine.data.store)"
+identity = "none: read the mutable legacy store"
+tests = ["tests/test_polygon_fills.py", "tests/test_fill_quality.py", "tests/test_build_trades.py", "tests/test_log_diagnostics.py"]
+disposition = "missing"
+owner = "P6-2"
+notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-materialized read set) so research reads the official data."
+
+# ------------------------------------------------------------------ board
+
+[[row]]
+id = "board-list"
+area = "board"
+capability = "Upcoming-prints board: strategy/gate/ticker filters, out-of-domain and disabled toggles, ranking"
+old = ["route:legacy-app GET /api/board", "route:legacy-app GET /api/meta", "view:legacy #/trades/board", "control:legacy f-strategy", "control:legacy f-gate", "control:legacy f-ticker", "control:legacy f-ood", "control:legacy f-disabled"]
+new = ["route:v2-api GET /api/v1/events", "route:v2-api GET /api/v1/releases/current", "route:v2-api GET /api/v1/releases/{release_id}", "view:ui #board", "route:v2-ops GET /board", "cli:engine/v2/serving/api.py"]
+producer = "serving projections built by the Phase 3 bridge from the legacy score.json + rendered bundle"
+identity = "release_id (projection binding), cursor bound to release and filters"
+tests = ["tests/test_v2_serving_api.py", "tests/test_v2_serving_projections.py", "tests/test_checks_phase3_api_pagination.py", "tests/test_v2_dashboard_browser.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+notes = "The v2 API filters date/ticker/strategy/verdict; gate, out-of-domain and disabled toggles exist only in the compatibility shell."
+
+[[row]]
+id = "board-deep-links"
+area = "board"
+capability = "Deep links and back/forward that reopen a view (and ticker) in a pinned release"
+old = ["view:legacy #/trades/explorer", "view:legacy #/models/modelx"]
+new = ["view:ui #event", "view:ui #score", "route:v2-ops GET /release/current.json", "route:v2-ops GET /"]
+producer = "React hash routes carry release_id; the shell pins one release and forwards legacy hashes into its frame"
+identity = "release_id in the URL / pinned once per shell session"
+tests = ["tests/test_v2_dashboard_browser.py", "tests/test_v2_ops_serving_browser.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+notes = "Legacy #/trades/explorer/<TICKER> links work only through the shell frame."
+
+[[row]]
+id = "board-compat-shell"
+area = "board"
+capability = "Serve the dashboard bundle (desk server on 8711)"
+old = ["route:legacy-app MOUNT /", "cli:dashboard/earnings_app.py"]
+new = ["route:v2-ops GET /", "route:v2-ops GET /release/current", "route:v2-ops GET /release/*", "route:v2-ops GET /legacy/*", "cli:engine/v2/dashboard/preview.py"]
+producer = "operations server serving immutable compatibility bundles under a health banner"
+identity = "release_id resolved once from CURRENT"
+tests = ["tests/test_v2_ops_serving.py", "tests/test_v2_dashboard_preview.py", "tests/test_checks_phase3_preview.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+
+[[row]]
+id = "board-refresh-action"
+area = "board"
+capability = "Desk action: re-run the nightly without publishing"
+old = ["route:legacy-app POST /api/refresh"]
+new = ["cli:ops plan", "cli:ops submit"]
+producer = "supervised nightly plan/submit"
+identity = "job ids of the submitted plan"
+tests = ["tests/test_v2_ops_nightly_completion.py"]
+disposition = "CLI-with-user-acceptance-needed"
+owner = "P6-4"
+interactive = true
+decision = "UD-1"
+notes = "No authenticated operator POST in the v2 API/ops server; a CLI replaces a browser button."
+
+[[row]]
+id = "board-adhoc-rescore"
+area = "board"
+capability = "Desk action: ad-hoc re-score of one ticker/strategy at an off-ladder strike or expiry"
+old = ["route:legacy-app GET /api/score"]
+new = ["MISSING", "py:engine/v2/scoring/application.py::score_one"]
+producer = "legacy engine.score.score in the request process"
+identity = "none (unpinned, in-process scorer)"
+tests = ["tests/test_score.py"]
+disposition = "missing"
+owner = "P6-4"
+interactive = true
+decision = "UD-2"
+notes = "score_one exists as a Python callable only; no route, CLI or job returns a result."
+
+# --------------------------------------------------------------- strategy
+
+[[row]]
+id = "strategy-derivation"
+area = "strategy"
+capability = "Strategy definitions and per-row derivation (gate terms, thresholds, worked example)"
+old = ["view:legacy #/models/derivation", "control:legacy d-strategy", "control:legacy d-row"]
+new = ["route:v2-ops GET /derivation", "py:engine/v2/registry/strategies.py::default_registry"]
+producer = "legacy render.build_strategies inside legacy_render; native registry not surfaced"
+identity = "compatibility bundle inside the published release_id"
+tests = ["tests/test_dashboard.py", "tests/test_v2_registry_scoring.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+
+[[row]]
+id = "strategy-score-detail"
+area = "strategy"
+capability = "Per-event strategy scores, refusal codes, legs/order ticket and payoff"
+old = ["route:legacy-app GET /api/ticker/{sym}"]
+new = ["route:v2-api GET /api/v1/events/{event_id}/scores", "route:v2-api GET /api/v1/scores/{score_id}", "view:ui #event", "view:ui #score"]
+producer = "LegacyScoreBridge rows (Phase 3 bridge) published as immutable objects"
+identity = "release_id + score_id; lazy detail with ETag"
+tests = ["tests/test_v2_serving_api.py", "tests/test_v2_serving_bridge.py", "tests/test_checks_phase3_browser.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+notes = "Replace the bridge's legacy-score input with the canonical projection."
+
+[[row]]
+id = "strategy-explorer"
+area = "strategy"
+capability = "Explorer: strike grid for a ticker, detail and order ticket"
+old = ["view:legacy #/trades/explorer", "control:legacy x-ticker"]
+new = ["route:v2-ops GET /explorer", "route:v2-ops GET /release/*"]
+producer = "legacy ticker payload (strike_ladder rows) inside the compatibility bundle"
+identity = "compatibility bundle inside the published release_id"
+tests = ["tests/test_dashboard.py", "tests/test_v2_ops_serving.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+
+# ----------------------------------------------------------------- models
+
+[[row]]
+id = "models-evidence-stage"
+area = "models"
+capability = "Build the model-evidence payload (per-feature stats, scatter samples) nightly"
+old = ["nightly:legacy model_evidence", "cli:engine/dashboard/model_evidence.py", "writer:engine/dashboard/model_evidence.py::build_model_evidence"]
+new = ["nightly:v2 model_evidence", "action:legacy_model_evidence"]
+producer = "legacy_model_evidence action (engine.dashboard.model_evidence)"
+identity = "model_evidence artifact bound to the job; not to a Phase 5 release"
+tests = ["tests/test_dashboard_model_evidence.py", "tests/test_v2_ops_render_parity.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+
+[[row]]
+id = "models-explorer"
+area = "models"
+capability = "Model explorer: model/feature pickers, inputs, shape and caveats"
+old = ["view:legacy #/models/modelx", "control:legacy m-model", "control:legacy m-feature"]
+new = ["route:v2-ops GET /models", "route:v2-ops GET /release/*"]
+producer = "legacy data/models.js inside the compatibility bundle"
+identity = "compatibility bundle inside the published release_id"
+tests = ["tests/test_dashboard_model_evidence.py", "tests/test_v2_ops_serving.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+
+[[row]]
+id = "models-release-page"
+area = "models"
+capability = "Show the deployed model release (ids, folds, dependencies) matching the scores on the board"
+old = []
+new = ["MISSING", "py:engine/v2/models/deployment.py::current_release"]
+producer = "Phase 5 deployment pointer; not read by serving"
+identity = "ModelRelease release_id"
+tests = ["tests/test_v2_models_deployment.py"]
+disposition = "missing"
+owner = "P6-4"
+notes = "System design §11 Evidence/recovery: matching deployment/model page. No v2 view or API reads the deployment pointer."
+
+[[row]]
+id = "models-training"
+area = "models"
+capability = "Retrain current model roles and register candidates"
+old = ["cli:engine/models/training/train_all.py", "cli:tools/build_chooser_pool.py"]
+new = ["cli:tools/phase5_training_job.py", "py:engine/v2/models/deployment.py::promote"]
+producer = "P5-3 supervised training job over legacy dataset builders; P5-5 staged deployment"
+identity = "training receipt + staged ModelRelease id"
+tests = ["tests/test_training.py", "tests/test_v2_models_deployment.py", "tests/test_v2_models_phase5_datasets.py"]
+disposition = "compatibility-adapter"
+owner = "P6-2"
+notes = "Phase 5 owns the lifecycle; P6-2 wires it as an ops job."
+
+# ---------------------------------------------------------------- history
+
+[[row]]
+id = "history-analogs"
+area = "history"
+capability = "Historical prints and analog list for a ticker"
+old = ["route:legacy-app GET /api/ticker/{sym}", "view:legacy #/trades/explorer"]
+new = ["route:v2-ops GET /explorer", "route:v2-ops GET /release/*"]
+producer = "legacy ticker payload inside the compatibility bundle"
+identity = "compatibility bundle inside the published release_id"
+tests = ["tests/test_dashboard.py", "tests/test_analogs.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+notes = "v2 projections carry only n_analogs/win_analog-style fields; the history and analog list exist only in the legacy ticker payload."
+
+# ------------------------------------------------------------- operations
+
+[[row]]
+id = "operations-flags"
+area = "operations"
+capability = "Flags: gate triggers, date changes/conflicts, calibration drift, staleness, quota reserve"
+old = ["nightly:legacy flags", "route:legacy-app GET /api/flags"]
+new = ["route:v2-ops GET /flags", "route:v2-api GET /api/v1/operations", "py:engine/v2/ops/render_inputs.py::render_flags"]
+producer = "render_inputs.render_flags plus legacy flag helpers (_panel_staleness_flags, _date_conflict_flag) via adapters"
+identity = "flags.json in the release bundle; operations document names its release_id"
+tests = ["tests/test_v2_ops_render_parity.py", "tests/test_v2_serving_api.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+
+[[row]]
+id = "operations-finality"
+area = "operations"
+capability = "Resolve the final session and covered tickers before scoring/settlement"
+old = ["nightly:legacy finality"]
+new = ["nightly:v2 finality", "action:legacy_finality", "py:engine/v2/ops/finality.py::resolve_final_session"]
+producer = "native engine/v2/ops/finality.py inside the legacy_finality job kind"
+identity = "finality receipt bound to the materialization root"
+tests = ["tests/test_v2_ops_finality.py", "tests/test_finality.py"]
+disposition = "native"
+owner = "P6-2"
+
+[[row]]
+id = "operations-health"
+area = "operations"
+capability = "Health: model/calibration health view, selfcheck result, job and publication health"
+old = ["route:legacy-app GET /api/health", "view:legacy #/models/health"]
+new = ["cli:ops health", "cli:ops doctor", "cli:ops init", "route:v2-ops GET /health.json", "route:v2-api GET /api/v1/operations", "route:v2-ops GET /flags"]
+producer = "ops health document (operations_health.v1.0) and the legacy health view in the bundle"
+identity = "health generated_at + release_id; scope-current, not release-pinned"
+tests = ["tests/test_v2_ops_health.py", "tests/test_v2_ops_serving.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+notes = "Model/calibration health remains the legacy-rendered view."
+
+[[row]]
+id = "operations-quotas"
+area = "operations"
+capability = "Provider quota state and reserve"
+old = ["py:engine/dashboard/render.py::quota_state"]
+new = ["py:engine/v2/ops/provider_budget.py::reserve", "route:v2-ops GET /release/*"]
+producer = "legacy quota_state adapter inside legacy_render; v2 provider_budget enforces but does not publish"
+identity = "meta.json in the release bundle"
+tests = ["tests/test_v2_ops_provider_admission.py", "tests/test_ledger.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+notes = "The displayed quota comes from the legacy store; v2 account-level budget state is not shown anywhere."
+
+[[row]]
+id = "operations-jobs"
+area = "operations"
+capability = "Job inspection and control: get, logs, explain, cancel, resume, reconcile"
+old = ["py:engine/dashboard/nightly.py::single_run_lock"]
+new = ["cli:ops get", "cli:ops logs", "cli:ops explain", "cli:ops cancel", "cli:ops resume", "cli:ops reconcile", "cli:engine/v2/ops/worker.py"]
+producer = "catalog jobs/attempts tables"
+identity = "job_id / attempt_id / fence"
+tests = ["tests/test_v2_ops_explain_from_logs.py", "tests/test_v2_ops_recovery_ownership.py", "tests/test_dashboard.py"]
+disposition = "native"
+owner = "P6-2"
+notes = "Legacy had only a lock and a run report; browser job buttons are post-cutover (8B)."
+
+# ----------------------------------------------------------------- export
+
+[[row]]
+id = "export-bundle"
+area = "export"
+capability = "Render the self-contained bundle (.json + .js wrappers, opens from file://)"
+old = ["nightly:legacy render", "writer:engine/dashboard/render.py::render_bundle"]
+new = ["nightly:v2 projection", "action:legacy_render", "cli:tools/v2_dashboard_project.py", "cli:tools/v2_dashboard_verified_input.py"]
+producer = "legacy_render action (engine.dashboard.render.render_bundle) then the Phase 3 projection"
+identity = "bundle content hash inside the release"
+tests = ["tests/test_v2_ops_render_parity.py", "tests/test_v2_serving_projections.py", "tests/test_v2_serving_legacy_bundle.py"]
+disposition = "compatibility-adapter"
+owner = "P6-4"
+
+[[row]]
+id = "export-offline-file"
+area = "export"
+capability = "Offline single-file export of a pinned release (phone without network)"
+old = ["writer:engine/dashboard/render.py::write_single_file"]
+new = ["MISSING"]
+producer = "legacy write_single_file over the local bundle"
+identity = "bundle as-of only"
+tests = ["tests/test_dashboard.py"]
+disposition = "missing"
+owner = "P6-5"
+notes = "No v2 export packages a pinned release with live actions disabled (system design §9)."
+
+[[row]]
+id = "export-remote-delivery"
+area = "export"
+capability = "Authenticated remote snapshot for phone access (Cloudflare Access), with access probe"
+old = ["nightly:legacy publish", "doc:dashboard/README.md"]
+new = ["MISSING", "nightly:v2 delivery"]
+producer = "legacy CommandPublisher + access_probe"
+identity = "remote release stamp"
+tests = ["tests/test_dashboard.py"]
+disposition = "missing"
+owner = "P6-5"
+notes = "publication.py: remote targets need their own conditional-write adapter and are not enabled; the delivery stage has no job kind."
+
+[[row]]
+id = "export-restore-drill"
+area = "export"
+capability = "Restore a deployment from backup, replay an original score offline, reconcile ledger/report"
+old = ["doc:RECOVERY.md"]
+new = ["MISSING", "py:engine/v2/ops/backup.py::restore_backup"]
+producer = "ops/backup.restore_backup (restore only)"
+identity = "backup receipt"
+tests = ["tests/test_v2_ops_effects_backup.py"]
+disposition = "missing"
+owner = "P6-5"
+notes = "restore_backup exists; the drill (restore, offline replay, ledger/report reconcile) does not."
+
+# ------------------------------------------------------ dormant historical
+
+[[row]]
+id = "dormant-sep2026-pull"
+area = "research"
+capability = "One-time Sep-2026 ORATS pull plan and T-2 decision-chain arms"
+old = ["cli:engine/data/pulls/sep2026_plan.py"]
+new = []
+producer = "legacy pull planner"
+identity = "none"
+tests = ["tests/test_pull_plan.py"]
+disposition = "dormant-historical"
+owner = "8A"
+active = false
+
+[[row]]
+id = "dormant-orats-cache-migration"
+area = "research"
+capability = "One-shot import of old ORATS strike pulls into the Tier-1 cache"
+old = ["cli:tools/migrate_orats_cache.py"]
+new = []
+producer = "legacy Tier-1 fetch store"
+identity = "none"
+tests = []
+disposition = "dormant-historical"
+owner = "8A"
+active = false
+
+# ------------------------------------------------------- user decisions
+
+[[user_decision]]
+id = "UD-1"
+rows = ["board-refresh-action"]
+question = "Accept `ops plan nightly` + `ops submit` (CLI) in place of the desk's POST /api/refresh button, or require an authenticated operator POST route in P6-4 (spec: a CLI needs explicit user acceptance)."
+
+[[user_decision]]
+id = "UD-2"
+rows = ["board-adhoc-rescore"]
+question = "The desk's GET /api/score ad-hoc re-score has no v2 path. Options: (a) a P6-4 supervised what-if job returning a job id, (b) a CLI over engine.v2.scoring.application.score_one with user acceptance, (c) defer to 8B as part of the strike explorer, accepting a capability gap at cutover."
+
+[[user_decision]]
+id = "UD-3"
+rows = ["nightly-backup"]
+question = "The legacy nightly --backup ran git push + private-mirror sync; the v2 backup is local-only by design. Confirm the code/private mirror stays an operator CLI (tools/private_mirror.py) and is not a nightly stage."
+
+[[user_decision]]
+id = "UD-4"
+rows = ["research-tools", "research-replay"]
+question = "Research tools read the mutable legacy Tier-2 store. Should P6-2 move them to pinned v2 snapshot reads before cutover, or may they keep a frozen legacy-materialized read set as a dormant-historical path until 8A?"
+
+# ------------------------------------------------------------- exclusions
+
+[[excluded]]
+ids = ["cli:tools/baseline_export.py", "cli:tools/capture_tier0_corpus.py", "cli:tools/replay_tier1.py"]
+reason = "Phase 0/1 baseline and corpus capture/verification tooling; evidence producers, not consumers."
+
+[[excluded]]
+ids = ["cli:tools/mutation_pilot.py", "cli:tools/mutation_report.py", "cli:tools/mutation_results.py"]
+reason = "Mutation-testing CI tooling."
+
+[[excluded]]
+ids = ["cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py"]
+reason = "Phase 4/5/6 migration preparation and inventory tooling."
+
+[[excluded]]
+ids = ["cli:tools/bounded_run.py"]
+reason = "Resource-bounded process runner used by every heavy job; infrastructure, not a capability."
+
+# --------------------------------------------------------- adapter edges
+
+# Ledger removal_phase label -> owning phase. Open phases keep their label;
+# closed-phase labels (phase-1, phase-2) are re-owned by the phase that now
+# holds the migration.
+[edge_owner_map]
+"phase-4 scoring extraction" = "P4"
+"phase-4 feature extraction" = "P4"
+"phase-4 extraction" = "P4"
+"phase-4 data extraction" = "P4"
+"phase-4 evaluation extraction" = "P6-2"
+"phase-5 model extraction" = "P5"
+"phase-5 scoring extraction" = "P5"
+"phase-5 native training/serving extraction" = "P5"
+"phase-5 experiment orchestration extraction" = "P5"
+"phase-6 serving extraction" = "P6-4"
+"phase-3 ingestion" = "P3B"
+"phase-2 data access" = "P3B"
+"phase-1 ledger authority migration" = "P6-3"
+
+[edge_consumer_map]
+"engine.v2.ops.legacy_adapter" = "supervised legacy_* nightly job kinds (engine/v2/ops/nightly.py)"
+"engine.v2.data.legacy_adapter" = "snapshot import and legacy materialization (engine/v2/data)"
+"engine.v2.scoring.compatibility" = "Phase 4 compatibility scoring seam"
+"engine.v2.models.inventory" = "P5-1 model inventory report (tools/phase5_inventory.py)"
+"engine.v2.models.training.legacy_adapter" = "no-fit guard shared with the legacy scorer"
+
+[[edge_override]]
+id = "edge:engine.v2.ops.legacy_adapter::engine.dashboard.nightly.refresh_calendar_data"
+owner = "P3B"
+notes = "Refresh belongs to the incremental data path."
+
+[[edge_override]]
+id = "edge:engine.v2.ops.legacy_adapter::engine.dashboard.nightly.validate_refresh"
+owner = "P3B"
+
+[[edge_override]]
+id = "edge:engine.v2.ops.legacy_adapter::engine.data.finality._market_wide_complete"
+active = false
+notes = "Comparison baseline only."
+
+[[edge_override]]
+id = "edge:engine.v2.ops.legacy_adapter::engine.data.finality._coverage_frame"
+active = false
+notes = "Comparison baseline only."
+
+[[edge_override]]
+id = "edge:engine.v2.models.inventory::engine.models.registry"
+active = false
+notes = "Report-only reader."
+
+[[edge_override]]
+id = "edge:engine.v2.models.inventory::engine.paths"
+active = false
+notes = "Report-only reader."
+
+[[edge]]
+id = "edge:engine/v2/serving/bridge.py"
+kind = "phase3-bridge"
+module = "engine/v2/serving/bridge.py"
+reads = "verified legacy score.json and rendered bundle rows (via legacy_bundle), Phase 2 event refs"
+consumer = "serving projections -> v2 API and React board/detail"
+owner = "P6-4"
+notes = "Replace the legacy-score input with a canonical projection; keep release ids and read contracts."
+
+[[edge]]
+id = "edge:engine/v2/serving/legacy_bundle.py"
+kind = "file-format"
+module = "engine/v2/serving/legacy_bundle.py"
+reads = "bundle data/board.json|.js, data/meta.json|.js, data/tickers/{T}.json|.js and the bundle manifest"
+consumer = "bridge; tools/v2_dashboard_project.py"
+owner = "P6-4"
+
+[[edge]]
+id = "edge:engine/v2/serving/operations.py"
+kind = "compatibility-view"
+module = "engine/v2/serving/operations.py"
+reads = "published releases/<id>/ legacy bundle bytes and the health sidecar"
+consumer = "operations shell (board/explorer/book/models/derivation/flags views)"
+owner = "P6-4"
+notes = "Compatibility pages may stay after cutover but must read the current native release through this adapter."
+
+[[edge]]
+id = "edge:tools/v2_dashboard_project.py"
+kind = "file-format"
+module = "tools/v2_dashboard_project.py"
+reads = "saved score.json, rendered bundle dir, Phase 2 catalog and store"
+consumer = "projection publication (P3-1b/P3-4)"
+owner = "P6-4"
+
+[[edge]]
+id = "edge:tools/v2_dashboard_verified_input.py"
+kind = "file-format"
+module = "tools/v2_dashboard_verified_input.py"
+reads = "a delivered Phase 2 release (bundle and score artifacts)"
+consumer = "projection publication input"
+owner = "P6-4"
+
+[[edge]]
+id = "edge:engine/v2/ops/render_inputs.py"
+kind = "file-format"
+module = "engine/v2/ops/render_inputs.py"
+reads = "ledger-generation tarball, model evidence artifact, prior selfcheck report"
+consumer = "legacy_render action"
+owner = "P6-4"
+
+[[edge]]
+id = "edge:engine/v2/ops/legacy_actions.py"
+kind = "legacy-runtime"
+module = "engine/v2/ops/legacy_actions.py"
+reads = "allowlisted legacy action names only"
+consumer = "worker dispatch of legacy_* job kinds"
+owner = "P6-2"
+
+[[edge]]
+id = "edge:engine/v2/data/legacy_materialization.py"
+kind = "file-format"
+module = "engine/v2/data/legacy_materialization.py"
+reads = "pinned snapshot tables; writes the legacy tree layout the legacy scorer reads"
+consumer = "materialize stage before legacy_* actions"
+owner = "P6-2"
+
+[[edge]]
+id = "edge:engine/v2/data/legacy_nightly_read_plan.py"
+kind = "file-format"
+module = "engine/v2/data/legacy_nightly_read_plan.py"
+reads = "declares data/raw/fetch/**, daily_market and option_chains for barrier-only legacy stages"
+consumer = "legacy_finality / legacy_score read sets"
+owner = "P6-2"
+
+[[edge]]
+id = "edge:engine/v2/data/legacy_mapping.py"
+kind = "file-format"
+module = "engine/v2/data/legacy_mapping.py"
+reads = "legacy table schemas (through data/legacy_adapter) and legacy_annotations.json"
+consumer = "snapshot import table contracts"
+owner = "8A"
+notes = "Retained for historical artifact readability; physical removal in 8A."
+
+[[edge]]
+id = "edge:engine/v2/models/adapters.py"
+kind = "file-format"
+module = "engine/v2/models/adapters.py"
+reads = "verified frozen legacy-format model artifacts (joblib members)"
+consumer = "Phase 5 frozen inference (loader)"
+owner = "8A"
+notes = "Active once frozen inference serves; retained until artifacts are re-serialized."
+
+[[edge]]
+id = "edge:engine/v2/ledger/export.py"
+kind = "file-format"
+module = "engine/v2/ledger/export.py"
+reads = "catalog decisions/outcomes; writes legacy ledger predictions/outcomes files"
+consumer = "legacy book/render readers via ledger_export"
+owner = "P6-3"
+
+[[edge]]
+id = "edge:engine/v2/ops/ledger_history_import.py"
+kind = "file-format"
+module = "engine/v2/ops/ledger_history_import.py"
+reads = "legacy ledger predictions/*.jsonl and outcomes files"
+consumer = "ops ledger import-history (catalog bootstrap)"
+owner = "P6-3"
+active = false
+notes = "One-time bootstrap reader, not in the nightly."
+
+[[edge]]
+id = "edge:engine/models/training/chooser.py"
+kind = "legacy-reader"
+module = "engine/models/training/chooser.py"
+reads = "experiments/EXP-169_menu7prime_confirmation/run.py loaded by filesystem path"
+consumer = "legacy chooser training/serving (DYN-SV)"
+owner = "P4"
+notes = "Phase 4 exit: production imports no experiment runner."
+
+[[edge]]
+id = "edge:tools/phase5_training_job.py"
+kind = "legacy-runtime"
+module = "tools/phase5_training_job.py"
+reads = "legacy dataset builders over the Tier-2/3/4 store"
+consumer = "P5-3 supervised training job"
+owner = "P5"
