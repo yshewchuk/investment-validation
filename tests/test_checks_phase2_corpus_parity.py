@@ -173,10 +173,11 @@ if envelope["worker"] == "legacy_score_requests":
     path = os.path.join(staging, envelope["parameters"]["requests_path"])
     entries = json.loads(open(path).read())
     rows = [{"request_id": e["canary_id"], "record": CANNED[e["canary_id"]]} for e in entries]
-    with open(path, "w") as fh:
+    out = os.path.join(staging, "score_requests_output.json")
+    with open(out, "w") as fh:
         json.dump({"rows": rows, "expected_population": len(entries)}, fh)
     result = {"outputs": [{"name": envelope["worker"],
-                           "path": envelope["parameters"]["requests_path"],
+                           "path": "score_requests_output.json",
                            "schema": "legacy_action.v1.0"}],
               "completed_ids": list(envelope["parameters"]["expected_ids"])}
 else:
