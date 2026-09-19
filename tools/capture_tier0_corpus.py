@@ -2451,6 +2451,7 @@ def chooser_trace(
     if not isinstance(members, list) or len(members) != len(frame_rows):
         raise StrictTraceCaptureError(
             "dyn_sv_choice candidate does not carry every ranked member's checkpoint")
+    print(f"[corpus] chooser {candidate.get('fixture_id')}: {len(members)} members, rss {_rss_gb():.2f}G", flush=True)
     traced = []
     for index, (row, member) in enumerate(zip(frame_rows, members, strict=True)):
         if content_hash(member.get("request")) != content_hash(row.get("request")):
@@ -2459,6 +2460,7 @@ def chooser_trace(
             trace, native = strict_trace_one(member, snapshot, release_root)
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             raise StrictTraceCaptureError(f"member {index}: {exc}") from exc
+        print(f"[corpus]   member {index}: strategy {member.get('request', {}).get('strategy')} rss {_rss_gb():.2f}G resources {len(trace.get('resources') or ())} bindings {len(((trace.get('metadata') or {}).get('frozen_inference') or {}).get('binding_ids') or ())}", flush=True)
         traced.append({
             "member_index": index,
             "request_hash": content_hash(row["request"]),
