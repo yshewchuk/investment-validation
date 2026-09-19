@@ -2843,6 +2843,25 @@ def _gather_candidates(
     return chosen, index, scorer.snapshot
 
 
+def _dump_selected(path: Path, chosen: list[dict], index: dict[str, list[str]],
+                   as_of: pd.Timestamp, snapshot: str) -> None:
+    """``CAPTURE_DUMP_SELECTED``: pickle exactly what ``attach_strict_probe``/
+    ``write`` need, so ``tools/capture_attach_probe.py`` can replay the
+    strict-trace attach step offline against a fixed, already-selected
+    corpus -- without rebuilding the Scorer (panel + replayed trades) or
+    re-running candidate selection. Opt-in and diagnostic only: nothing in
+    the normal capture path reads this file back.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        pickle.dump(
+            {"chosen": chosen, "index": index, "as_of": as_of, "snapshot": snapshot},
+            fh, protocol=pickle.HIGHEST_PROTOCOL,
+        )
+    print(f"[corpus] CAPTURE_DUMP_SELECTED: wrote {len(chosen)} chosen "
+          f"candidates to {path}", flush=True)
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default=None,
@@ -2887,6 +2906,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     # below removes that spill directory whether the run finishes or raises.
     try:
         chosen, index, snapshot = _gather_candidates(scorer, as_of, args, strategies)
+        dump_path = os.environ.get("CAPTURE_DUMP_SELECTED")
+        if dump_path:
+            _dump_selected(Path(dump_path), chosen, index, as_of, snapshot)
         # Goal 1 (RSS): nothing from here on needs the scorer (panel +
         # replayed trades) -- `write`/`attach_strict_probe`/`chooser_trace`/
         # `strict_trace_one` take only `chosen`, `index`, `as_of` and this
