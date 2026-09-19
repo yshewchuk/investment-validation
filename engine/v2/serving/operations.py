@@ -10,12 +10,23 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
+from engine.v2.models.deployment import (
+    DeploymentError,
+    ReleaseNotStaged,
+    current_pointer,
+    resolve_release,
+)
 
 HTTPStatus = http.HTTPStatus
 
-__all__ = ["OperationsHandler", "create_server", "shell_document"]
+__all__ = ["OperationsHandler", "create_server", "model_release_page_document", "shell_document"]
 
 _VIEWS = ("board", "explorer", "book", "models", "derivation", "flags")
+
+MODEL_RELEASE_VIEW_V1 = "model_release_view.v1.0"
+MODEL_RELEASE_NOT_CONFIGURED = "MODEL_RELEASE_NOT_CONFIGURED"
+MODEL_RELEASE_NOT_DEPLOYED = "MODEL_RELEASE_NOT_DEPLOYED"
+MODEL_RELEASE_POINTER_UNRESOLVED = "MODEL_RELEASE_POINTER_UNRESOLVED"
 
 
 def _safe_file(root: Path, relative: str) -> Path:
@@ -85,6 +96,103 @@ window.addEventListener('hashchange',route); init();
     return html.encode()
 
 
+def _model_release_document(root: Path) -> tuple[HTTPStatus, dict]:
+    """The body ``/models/release.json`` serves, and the status to send it with.
+
+    Reads ``current_pointer`` exactly once; every field below is derived from
+    THAT pointer's ``release_id``, so a promotion racing this call can never
+    produce a body whose ``dependencies.previous_release_id`` names a
+    different release than the top-level ``release_id`` itself -- the same
+    "resolve once, reuse everywhere" rule ``_resolve_current_id`` documents
+    for the board release pointer. No release ever deployed and an
+    unresolvable pointer are distinct, explicit refusals -- never an empty
+    success.
+    """
+    try:
+        pointer = current_pointer(root)
+    except (OSError, ValueError):
+        return HTTPStatus.SERVICE_UNAVAILABLE, {
+            "schema_version": MODEL_RELEASE_VIEW_V1, "status": "unavailable",
+            "reason_code": "MODEL_RELEASE_POINTER_UNREADABLE", "release_id": None,
+        }
+    if pointer is None:
+        return HTTPStatus.OK, {
+            "schema_version": MODEL_RELEASE_VIEW_V1, "status": "refused",
+            "reason_code": MODEL_RELEASE_NOT_DEPLOYED, "release_id": None,
+        }
+    try:
+        release = resolve_release(root, pointer.release_id)
+    except (ReleaseNotStaged, DeploymentError, OSError, ValueError):
+        return HTTPStatus.SERVICE_UNAVAILABLE, {
+            "schema_version": MODEL_RELEASE_VIEW_V1, "status": "unavailable",
+            "reason_code": MODEL_RELEASE_POINTER_UNRESOLVED, "release_id": pointer.release_id,
+        }
+    members = [
+        {
+            "binding_id": binding.binding_id,
+            "model_id": binding.model_id,
+            "role": binding.role,
+            "strategy_id": binding.strategy_id,
+            "decision_clock_id": binding.decision_clock_id,
+            "adapter": binding.adapter,
+            "artifacts": [
+                {"name": member.name, "content_hash": member.content_hash}
+                for member in binding.members
+            ],
+        }
+        for binding in sorted(release.bindings, key=lambda binding: binding.binding_id)
+    ]
+    return HTTPStatus.OK, {
+        "schema_version": MODEL_RELEASE_VIEW_V1, "status": "deployed",
+        "release_id": release.release_id, "deployment_id": release.deployment_id,
+        "members": members,
+        "dependencies": {
+            "previous_release_id": pointer.previous_release_id,
+            "promotion_action": pointer.action,
+            "promoted_at": pointer.at,
+        },
+    }
+
+
+def model_release_page_document() -> bytes:
+    """Small standalone page for the deployed model release (P6-4).
+
+    Fetches ``/models/release.json`` client-side -- the SAME resolve-once
+    document the JSON route serves -- and renders it as-is via
+    ``textContent`` only (no ``innerHTML``, nothing here builds HTML out of
+    server data). A refusal (``status`` other than ``"deployed"``) renders as
+    an explicit message, never as an empty table.
+    """
+    html = '''<!doctype html><meta charset="utf-8"><title>Model release</title>
+<style>body{margin:0;font:14px sans-serif;padding:16px}#summary.refused{color:#a33}
+pre{background:#f4f4f4;padding:8px;overflow:auto}</style>
+<h1>Deployed model release</h1>
+<div id="summary">loading...</div>
+<pre id="detail"></pre>
+<script>
+async function load(){
+  const summary=document.querySelector('#summary'), detail=document.querySelector('#detail');
+  try{
+    const r=await fetch('/models/release.json',{credentials:'same-origin'});
+    const j=await r.json();
+    detail.textContent=JSON.stringify(j,null,2);
+    if(j.status==='deployed'){
+      summary.textContent='release '+j.release_id+' (deployment '+j.deployment_id+')';
+      summary.className='';
+    } else {
+      summary.textContent='no release deployed: '+(j.reason_code||'UNKNOWN');
+      summary.className='refused';
+    }
+  }catch(e){
+    summary.textContent='model release unavailable';
+    summary.className='refused';
+  }
+}
+load();
+</script>'''
+    return html.encode()
+
+
 class OperationsHandler(http.server.BaseHTTPRequestHandler):
     """Handler factory state is assigned by ``create_server``; no ops imports."""
 
@@ -99,6 +207,10 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
         if path.startswith("/legacy/"):
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
+        if path == "/models/release.json":
+            return self._model_release_json_route(config)
+        if path == "/models/release":
+            return self._send(HTTPStatus.OK, model_release_page_document(), "text/html")
         if path.startswith("/actions/whatif/"):
             return self._whatif_result_route(config, path)
         if path == "/release/current.json":
@@ -214,6 +326,18 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         except (ArtifactError, OSError, ValueError):
             return self._send(HTTPStatus.NOT_FOUND, b"unknown release\n", "text/plain")
 
+    def _model_release_json_route(self, config):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        if config.model_release_root is None:
+            document = {"schema_version": MODEL_RELEASE_VIEW_V1, "status": "refused",
+                       "reason_code": MODEL_RELEASE_NOT_CONFIGURED, "release_id": None}
+            status = HTTPStatus.OK
+        else:
+            status, document = _model_release_document(Path(config.model_release_root))
+        body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        return self._send(status, body, "application/json")
+
     def _release_route(self, config, path):
         if not self._authorized():
             return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
@@ -265,11 +389,14 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
 
 def create_server(address, *, token: str, health_path: Path | str, release_root: Path | str,
                   frozen_at: str = "unknown", submit_refresh=None, submit_whatif=None,
-                  fetch_whatif=None):
+                  fetch_whatif=None, model_release_root: Path | str | None = None):
     config = type("Config", (), {"token": token, "health_path": Path(health_path),
                                   "release_root": Path(release_root), "frozen_at": frozen_at,
                                   "submit_refresh": submit_refresh, "submit_whatif": submit_whatif,
-                                  "fetch_whatif": fetch_whatif})
+                                  "fetch_whatif": fetch_whatif,
+                                  "model_release_root": (Path(model_release_root)
+                                                          if model_release_root is not None
+                                                          else None)})
     server = http.server.ThreadingHTTPServer(address, OperationsHandler)
     server.config = config
     return server
