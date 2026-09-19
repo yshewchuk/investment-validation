@@ -152,6 +152,25 @@ def payoff_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes
     return found
 
 
+def recalibration_payloads(training_roots: Iterable[Path]) -> dict[str, dict[str, bytes]]:
+    """``recalibration_artifact.json`` files from P5-3 job outputs, verified."""
+    from engine.v2.models.recalibration_artifact import (
+        RecalibrationArtifactLoader,
+        RecalibrationArtifactRef,
+    )
+    from engine.v2.models.training.calibration import RECALIBRATION_ARTIFACT_FILE
+
+    found: dict[str, dict[str, bytes]] = {}
+    for base in training_roots:
+        for path in sorted(Path(base).rglob(RECALIBRATION_ARTIFACT_FILE)):
+            data = path.read_bytes()
+            artifact = RecalibrationArtifactLoader(path.parent).load(
+                RecalibrationArtifactRef(path=path.name, content_hash=sha256_bytes(data)))
+            name = f"{artifact.strategy}|{artifact.alpha}|{artifact.cutoff}"
+            found.setdefault(f"recalibration_map:{artifact.strategy}", {})[name] = data
+    return found
+
+
 def frozen_state_payloads(files: Iterable[Path]) -> dict[str, dict[str, bytes]]:
     """Pre-built P5-4 frozen states (residual pools, tables), by member."""
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
@@ -301,6 +320,8 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
                                      feature_ids, snapshot, args.fold_month))
     if modules_available(("engine.v2.models.payoff_artifact",))[0]:
         found.update(payoff_payloads(args.training_root or ()))
+    if modules_available(("engine.v2.models.recalibration_artifact",))[0]:
+        found.update(recalibration_payloads(args.training_root or ()))
     if modules_available(("engine.v2.models.frozen_state",))[0]:
         found.update(default_admissible_table())
         found.update(frozen_state_payloads(args.frozen_state or ()))

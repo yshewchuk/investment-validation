@@ -195,6 +195,14 @@ def _typed_load(spec: StateSpec, release_root: Path, obj: Mapping[str, Any]):
 
         return PayoffArtifactLoader(root).load(
             PayoffArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
+    if spec.member_id.startswith("recalibration_map:"):
+        from engine.v2.models.recalibration_artifact import (
+            RecalibrationArtifactLoader,
+            RecalibrationArtifactRef,
+        )
+
+        return RecalibrationArtifactLoader(root).load(
+            RecalibrationArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
     if "engine.v2.models.frozen_state" in spec.modules:
         from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
@@ -342,11 +350,15 @@ def _probe_bundle(strategy: str, artifact, cutoff):
     )
 
 
-def _score_flags(strategy: str, artifact, alpha: float, cutoff) -> tuple[str, ...]:
+def _score_flags(strategy: str, artifact, alpha: float, cutoff,
+                 **bundle_overrides) -> tuple[str, ...]:
     from engine.v2.scoring import application
     from engine.v2.scoring.source_inputs import build_native_score_inputs
 
-    inputs = build_native_score_inputs(_probe_bundle(strategy, artifact, cutoff))
+    bundle = _probe_bundle(strategy, artifact, cutoff)
+    if bundle_overrides:
+        bundle = dataclasses.replace(bundle, **bundle_overrides)
+    inputs = build_native_score_inputs(bundle)
     record = application.score_one(_probe_request(strategy, alpha), inputs)
     return tuple(record.reason_codes)
 
@@ -368,6 +380,39 @@ def _payoff_probe(member_id: str, strategy: str, consumer: str):
     return probe
 
 
+def _probe_recalibration(ctx: ReleaseContext) -> list[dict]:
+    """The STR-THRU model stage applying a frozen recalibration map.
+
+    Legacy applies the map on the payoff path with the same
+    ``(strategy, alpha, cutoff)`` key, so each staged map is scored together
+    with the staged payoff line of that key. A map with no such line is a
+    release defect (the stage could never reach it), reported as unresolved.
+    """
+    consumer, member_id = "model_stage.recalibration", "recalibration_map:STR-THRU"
+    state = ctx.states.get(member_id)
+    lines = ctx.states.get("payoff_line:STR-THRU")
+    if state is None or lines is None:
+        return [{"consumer": consumer, "member_id": member_id, "blocked": True}]
+    by_key = {line.key: line for line in lines["artifacts"]}
+    rows = []
+    for recal in state["artifacts"]:
+        line = by_key.get(recal.key)
+        if line is None:
+            rows.append({"consumer": consumer, "member_id": member_id, "resolved": False,
+                         "refused_when_missing": True,
+                         "detail": "no staged payoff_line:STR-THRU with the same key"})
+            continue
+        flags = _score_flags("STR-THRU", line, line.alpha, line.cutoff,
+                             recalibration_artifact=recal)
+        missing = _score_flags("STR-THRU", line, line.alpha, line.cutoff,
+                               recalibration_declared=True)
+        resolved = not ({"MODEL_NOT_READY", "NO_PAYOFF_MAP"} & set(flags))
+        rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                     "refused_when_missing": "MODEL_NOT_READY" in missing,
+                     "detail": "" if resolved else ",".join(flags)})
+    return rows
+
+
 #: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
 CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "frozen_stage_executor": _probe_frozen_executor,
@@ -377,7 +422,7 @@ CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
         "payoff_surface:STR-RUNUP", "STR-RUNUP", "model_stage.payoff_surface"),
     "model_stage.driver_residual_pool": None,
     "simulation.paired_residual_pool": None,
-    "model_stage.recalibration": None,
+    "model_stage.recalibration": _probe_recalibration,
     "chooser.admissible_table": None,
     "gate.trailing_cutoff": None,
     "chooser.analog_pool": None,

@@ -28,10 +28,12 @@ from engine.v2.models import (
     stage_release,
 )
 from engine.v2.models.payoff_artifact import serialize_payoff_artifact
+from engine.v2.models.recalibration_artifact import serialize_recalibration_artifact
 from engine.v2.models.training.payoff import (
     build_payoff_line_artifact,
     build_payoff_surface_artifact,
 )
+from engine.v2.models.training.recalibration import build_recalibration_map_artifact
 from tools import phase5_prepare_release as prep
 
 CLOCK = "legacy.entry_close.v1"
@@ -86,6 +88,24 @@ def _models(release_id: str, *, intercept: float = 1.0,
     return release, inventory, payloads
 
 
+def _recal_pairs(n: int = 400, seed: int = 3):
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    raw = rng.uniform(0.0, 1.0, n)
+    return pd.DataFrame({
+        "strategy": "STR-THRU", "fill_alpha": 0.5, "event_id": [f"E{i}" for i in range(n)],
+        "exit_date": pd.Timestamp("2019-01-01") + pd.to_timedelta(rng.integers(0, 600, n), "D"),
+        "raw_win": raw, "outcome": (rng.uniform(0, 1, n) < 0.3 + 0.4 * raw).astype(float),
+    })
+
+
+def _recal(alpha: float = 0.5, before=None) -> bytes:
+    return serialize_recalibration_artifact(build_recalibration_map_artifact(
+        _recal_pairs(), strategy="STR-THRU", alpha=alpha, before=before))
+
+
 def _state_payloads() -> dict[str, dict[str, bytes]]:
     line = build_payoff_line_artifact(_ROWS, strategy="STR-THRU", driver="abs_move",
                                       alpha=0.5, min_trades=2)
@@ -96,12 +116,15 @@ def _state_payloads() -> dict[str, dict[str, bytes]]:
         "payoff_line:STR-THRU": {"a": serialize_payoff_artifact(line),
                                  "b": serialize_payoff_artifact(dated)},
         "payoff_surface:STR-RUNUP": {"a": serialize_payoff_artifact(surface)},
+        # keyed like the undated line: (STR-THRU, 0.5, no cutoff)
+        "recalibration_map:STR-THRU": {"a": _recal()},
         "tier4_folds:size": {"m_202609_abcdefabcdef.joblib": b"fold-bytes"},
     }
 
 
-#: A reduced catalog whose every member can be built here: the two payoff
-#: states (real typed loader + real v2 consumer) and one raw state.
+#: A reduced catalog whose every member can be built here: the payoff and
+#: recalibration states (real typed loaders + real v2 consumers) and one raw
+#: state.
 SPECS = tuple(s for s in layout.STATE_SPECS if s.member_id in _state_payloads())
 
 
@@ -120,6 +143,7 @@ CONSUMERS = {
     "frozen_stage_executor": gate.CONSUMERS["frozen_stage_executor"],
     "model_stage.payoff_line": gate.CONSUMERS["model_stage.payoff_line"],
     "model_stage.payoff_surface": gate.CONSUMERS["model_stage.payoff_surface"],
+    "model_stage.recalibration": gate.CONSUMERS["model_stage.recalibration"],
     "features.tier4_serving_folds": _stub_probe("tier4_folds:size",
                                                 "features.tier4_serving_folds"),
 }
@@ -170,6 +194,7 @@ def test_complete_release_passes(tmp_path):
     consumers = {(r["consumer"], r["member_id"]) for r in evidence["consumers"]}
     assert ("model_stage.payoff_line", "payoff_line:STR-THRU") in consumers
     assert ("model_stage.payoff_surface", "payoff_surface:STR-RUNUP") in consumers
+    assert ("model_stage.recalibration", "recalibration_map:STR-THRU") in consumers
     assert all(r["status"] == "ok" for r in evidence["consumers"])
     # both (alpha, cutoff) folds of the line were scored, each by its own key
     assert sum(1 for c, m in [(r["consumer"], r["member_id"]) for r in evidence["consumers"]]
@@ -319,10 +344,10 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     assert evidence["status"] == "FAIL"
     assert "P5_CONSUMER_PENDING" in evidence["finding_codes"]
     pending = {r["consumer"] for r in evidence["consumers"] if r["status"] == "PENDING"}
-    assert {"simulation.paired_residual_pool", "model_stage.recalibration",
-            "analogs.board_analog_matcher"} <= pending
+    assert "analogs.board_analog_matcher" in pending
+    assert "model_stage.recalibration" not in pending  # a real probe since 3dea05e
     by_id = {r["member_id"]: r for r in evidence["members"]}
-    for member_id in ("board_analog_matcher", "recalibration_map:STR-THRU",
+    for member_id in ("board_analog_matcher", "recalibration_map:STR-RUNUP",
                       "trailing_pnl_cutoff"):
         assert by_id[member_id]["status"] in ("PENDING", "MISSING")
         assert by_id[member_id]["verdict"] in ("P5_MEMBER_PENDING", "P5_MEMBER_MISSING")
@@ -364,3 +389,38 @@ def test_preparer_refuses_out_inside_data(monkeypatch, tmp_path):
     with pytest.raises(prep.PrepareRefused):
         prep._refuse_data_dir(tmp_path / "data" / "release")
     prep._refuse_data_dir(tmp_path / "elsewhere")
+
+
+def test_recalibration_map_without_matching_payoff_line_is_unresolved(tmp_path):
+    states = _state_payloads()
+    states["recalibration_map:STR-THRU"] = {"a": _recal(alpha=0.75)}
+    evidence = _run(tmp_path, _release(tmp_path, states=states))
+
+    assert "P5_CONSUMER_UNRESOLVED" in evidence["finding_codes"]
+    row = next(f for f in evidence["findings"] if f["code"] == "P5_CONSUMER_UNRESOLVED")
+    assert row["subject"] == "model_stage.recalibration"
+
+
+def test_missing_recalibration_member_is_missing_not_pending(tmp_path):
+    states = _state_payloads()
+    del states["recalibration_map:STR-THRU"]
+    evidence = _run(tmp_path, _release(tmp_path, states=states))
+
+    row = next(r for r in evidence["members"] if r["member_id"] == "recalibration_map:STR-THRU")
+    assert row["status"] == "MISSING"
+    assert {"P5_MEMBER_MISSING", "P5_CONSUMER_BLOCKED"} <= set(evidence["finding_codes"])
+
+
+def test_preparer_collects_recalibration_and_payoff_artifacts(tmp_path):
+    fold = tmp_path / "train" / "recal" / "folds" / "c1"
+    fold.mkdir(parents=True)
+    (fold / "recalibration_artifact.json").write_bytes(_recal())
+    (fold / "payoff_artifact.json").write_bytes(_state_payloads()["payoff_line:STR-THRU"]["a"])
+    recal = prep.recalibration_payloads([tmp_path / "train"])
+    payoff = prep.payoff_payloads([tmp_path / "train"])
+
+    assert list(recal) == ["recalibration_map:STR-THRU"]
+    assert list(payoff) == ["payoff_line:STR-THRU"]
+    (fold / "recalibration_artifact.json").write_bytes(b"{}")
+    with pytest.raises(ValueError):
+        prep.recalibration_payloads([tmp_path / "train"])

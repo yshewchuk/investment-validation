@@ -81,8 +81,7 @@ class StateSpec:
 _PAYOFF = ("engine.v2.models.payoff_artifact",)
 _RESIDUAL = ("engine.v2.models.residual_artifact", "engine.v2.models.frozen_state")
 _ADMISSIBLE = ("engine.v2.models.admissible_table", "engine.v2.models.frozen_state")
-#: Module names the recalibration artifact is expected under. It is being
-#: built on another branch; until one of these imports, the member is PENDING.
+#: The frozen recalibration-map artifact (P5-4, merged at 3dea05e).
 RECALIBRATION_MODULES = ("engine.v2.models.recalibration_artifact",)
 #: No frozen analog-matcher state exists anywhere yet.
 ANALOG_MODULES = ("engine.v2.models.analog_artifact",)
@@ -98,8 +97,11 @@ STATE_SPECS: tuple[StateSpec, ...] = (
               "model_stage.payoff_surface", "P5-3 calibration job payoff_artifact.json"),
     StateSpec("recalibration_map:STR-THRU", "calibration", ("STR-THRU",),
               RECALIBRATION_MODULES, "model_stage.recalibration", "recalibration artifact"),
+    # Legacy never recalibrates STR-RUNUP (engine/score.py), and the v2 model
+    # stage refuses a declared map there (UNSUPPORTED_RECALIBRATION): the P5-3
+    # recipe still builds it, so it is staged for replay but has no consumer.
     StateSpec("recalibration_map:STR-RUNUP", "calibration", ("STR-RUNUP",),
-              RECALIBRATION_MODULES, "model_stage.recalibration", "recalibration artifact"),
+              RECALIBRATION_MODULES, None, "recalibration artifact"),
     StateSpec("driver_residual_pool:size", "residual_bucket", ("STR-THRU",), _RESIDUAL,
               "model_stage.driver_residual_pool", "P5-4 driver residual pool"),
     StateSpec("driver_residual_pool:implied_t1", "residual_bucket", ("STR-RUNUP",), _RESIDUAL,
