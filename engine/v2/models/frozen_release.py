@@ -20,6 +20,7 @@ from engine.v2.models.residual_artifact import (
     DRIVER_RESIDUAL_POOL_ARTIFACT_V1,
     PAIRED_RESIDUAL_POOL_ARTIFACT_V1,
 )
+from engine.v2.models.trailing_cutoff_artifact import TRAILING_CUTOFF_ARTIFACT_V1
 
 __all__ = ["inventory_member", "member_kind", "release_member"]
 
@@ -31,6 +32,8 @@ _MEMBER_KIND = {
     BOARD_ANALOG_POOL_ARTIFACT_V1: "residual",
     # checks/phase5_release.py ``chooser_analog_pool`` (kind "residual").
     CHOOSER_ANALOG_POOL_ARTIFACT_V1: "residual",
+    # checks/phase5_release.py ``trailing_pnl_cutoff`` (kind "threshold").
+    TRAILING_CUTOFF_ARTIFACT_V1: "threshold",
 }
 
 

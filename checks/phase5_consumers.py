@@ -418,6 +418,66 @@ def _chooser_probe(member_id: str, consumer: str, field: str, key_of):
     return probe
 
 
+def _entry_rule_inputs(event_date: str):
+    """Native inputs of a priced TWIN-P row with a simulated expectation,
+    whose gate is then declared as its entry rule."""
+    from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
+
+    return build_native_score_inputs(SourceBundle(
+        source_ref="p5-6-entry-rule-probe", strategy="TWIN-P",
+        context={"ticker": "P5PROBE", "event_date": event_date, "entry_date": "2026-09-16",
+                 "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0},
+        raw_quotes=_CHOOSER_QUOTES, feature_vector={}, feature_missing_mask={},
+        model_identity={"size": {"model_id": "probe"}},
+        forecast_recipes={"forecast_abs_move": {"intercept": 6.0, "coefficients": {}}},
+        model_artifact_refs={"forecast_abs_move": "sha256:probe-size"},
+        residual_recipe={"terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),
+                         "capital_at_risk": 1.0},
+        analog_recipe={},
+        gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
+    ))
+
+
+def _probe_trailing_cutoff(ctx: ReleaseContext) -> list[dict]:
+    """The native entry-rule gate reading each staged trailing cutoff.
+
+    A TWIN-P row dated in the artifact's month is scored end to end with the
+    gate declared as its entry rule over the staged artifact, pinned to its
+    hash. Resolved: no MODEL_NOT_READY, and a verdict exactly when the
+    artifact holds a bar (market cap, spread and expectation are all known,
+    so only a bar-less month leaves the rule undetermined). Declaring the
+    same key with the artifact taken away must give MODEL_NOT_READY.
+    """
+    from engine.v2.scoring.native_entry_rule import entry_rule_block
+
+    consumer, member_id = "gate.trailing_cutoff", "trailing_pnl_cutoff"
+    state = ctx.states.get(member_id)
+    if state is None:
+        return _blocked(consumer, member_id)
+    rows = []
+    for cutoff in state["artifacts"]:
+        inputs = _entry_rule_inputs(cutoff.month[:8] + "15")
+        record = _score_inputs(inputs, entry_rule_block(
+            "TWIN-P", mcap_usd=5e10, cutoff=cutoff))
+        missing = _score_inputs(inputs, entry_rule_block(
+            "TWIN-P", mcap_usd=5e10, cutoff=None, month=cutoff.month))
+        verdict = record.gate_terms.get("gate_pass")
+        resolved = ("MODEL_NOT_READY" not in record.reason_codes
+                    and (verdict is not None) == (cutoff.cutoff is not None))
+        rows.append({"consumer": consumer, "member_id": member_id, "resolved": resolved,
+                     "refused_when_missing": "MODEL_NOT_READY" in missing.reason_codes,
+                     "detail": "" if resolved else ",".join(record.reason_codes)})
+    return rows
+
+
+def _score_inputs(inputs, gate: dict):
+    from dataclasses import replace
+
+    from engine.v2.scoring import application
+
+    return application.score_one(_probe_request("TWIN-P", 0.5), replace(inputs, gate=gate))
+
+
 #: consumer id -> probe. ``None`` means no probe exists yet: PENDING.
 CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
     "frozen_stage_executor": _probe_frozen_executor,
@@ -432,7 +492,7 @@ CONSUMERS: dict[str, Callable[[ReleaseContext], list[dict]] | None] = {
         "admissible_table:dyn_sv", "chooser.admissible_table", "chooser_admissible_table",
         lambda table: {"table_id": table.table_id, "version": table.version,
                        "content_hash": table.content_hash}),
-    "gate.trailing_cutoff": None,
+    "gate.trailing_cutoff": _probe_trailing_cutoff,
     "chooser.analog_pool": _chooser_probe(
         "chooser_analog_pool", "chooser.analog_pool", "chooser_analog_pool",
         lambda pool: {"pool_id": pool.pool_id, "cutoff": pool.cutoff,

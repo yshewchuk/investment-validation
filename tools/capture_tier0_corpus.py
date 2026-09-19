@@ -96,15 +96,25 @@ from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
 from engine.v2.foundation import to_document  # noqa: E402
 from engine.v2.foundation.canonical import tag_nonfinite  # noqa: E402
-from engine.v2.models import FrozenInference, InferenceRequest, ModelBinding, ModelRelease  # noqa: E402
+from engine.v2.models import (  # noqa: E402
+    FrozenInference,
+    InferenceRequest,
+    ModelBinding,
+    ModelRelease,
+)
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.scoring import application as v2_application  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
-    NativeScoreInputs, StageObservation, receipt,
+    NativeScoreInputs,
+    StageObservation,
+    receipt,
 )
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
+from tools.phase4_frozen_resources import (  # noqa: E402
+    FrozenResourcePackage,
+    package_frozen_resources,
+)
 from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
-from tools.phase4_frozen_resources import FrozenResourcePackage, package_frozen_resources  # noqa: E402
 from tools.phase4_request_translation import (  # noqa: E402
     LegacyRequestTranslationError,
     canonical_request_from_legacy,
@@ -616,6 +626,46 @@ def native_inputs_from_capture(
     return inputs, shared_inputs
 
 
+def entry_rule_gate_block(candidate: Mapping[str, Any], strategy: str,
+                          event_date: Any) -> dict[str, Any] | None:
+    """The native entry-rule gate block for a row legacy gated by a rule.
+
+    Legacy ``Scorer._apply_entry_rule`` records ``gate_inputs`` with
+    ``kind == "entry_rule"`` and the facts it evaluated. Two of them are
+    declared here, neither an answer: ``mcap_usd`` (market state; native has
+    no other source for it) and the trailing ``pnl_cutoff`` bar legacy served,
+    frozen as a :class:`TrailingCutoffArtifact` for the event's month, the key
+    legacy's ``pnl_sim.trailing_cutoff(history, event_date)`` computes it on
+    (no bar recorded = ``cutoff=None``, as legacy served none). The other
+    facts are derived natively: ``exp_pnl_sim`` by the simulation stage and
+    ``rel_spread`` from the priced legs; ``cost``/``w``/``peak`` are read by
+    no live rule. ``None`` when the row reached no entry rule.
+    """
+    from engine.v2.foundation.canonical import untag_nonfinite
+    from engine.v2.models.trailing_cutoff_artifact import (
+        cutoff_month,
+        make_trailing_cutoff_artifact,
+    )
+    from engine.v2.models.training.trailing_cutoff import trailing_cutoff_lineage
+    from engine.v2.scoring.native_entry_rule import entry_rule_block
+
+    gate = _checkpoint_value_optional(candidate, "gate_inputs")
+    if not isinstance(gate, Mapping) or gate.get("kind") != "entry_rule":
+        return None
+    if gate.get("rule_identity") != f"entry-rule:{strategy}":
+        raise StrictTraceCaptureError(
+            f"entry rule {gate.get('rule_identity')!r} recorded for {strategy}")
+    facts = untag_nonfinite(dict(gate.get("facts") or {}))
+    if event_date is None:
+        raise StrictTraceCaptureError("entry rule row has no event_date")
+    month = cutoff_month(event_date)
+    cutoff = make_trailing_cutoff_artifact(
+        month=month, cutoff=_finite_or_none(facts.get("pnl_cutoff")),
+        lineage=trailing_cutoff_lineage(month))
+    return entry_rule_block(strategy, mcap_usd=_finite_or_none(facts.get("mcap_usd")),
+                            cutoff=cutoff)
+
+
 def _captured_blocks(candidate: Mapping[str, Any],
                      request: V2ScoreRequest,
                      frozen_chooser: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -654,6 +704,13 @@ def _captured_blocks(candidate: Mapping[str, Any],
             f"source_inputs context missing {missing_context}"
         )
     recipes = dict(recipes)
+    entry_rule = entry_rule_gate_block(candidate, request.strategy_version,
+                                       context.get("event_date"))
+    if entry_rule is not None:
+        if "gate" in recipes:
+            raise StrictTraceCaptureError(
+                "gate_inputs recorded an entry rule and a model gate recipe")
+        recipes["gate"] = entry_rule
     recipes.setdefault("analogs", {"mode": "not_applicable"})
     recipes.setdefault("simulation", {"mode": "not_applicable"})
     recipes.setdefault("gate", {"mode": "not_applicable"})

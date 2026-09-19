@@ -88,8 +88,11 @@ RECALIBRATION_MODULES = ("engine.v2.models.recalibration_artifact",)
 #: ``BoardAnalogPoolArtifact`` per (strategy, alpha, cutoff), loaded through
 #: ``FrozenStateLoader``.
 ANALOG_MODULES = ("engine.v2.models.analog_artifact", "engine.v2.models.frozen_state")
-#: No frozen trailing-cutoff artifact type exists yet.
-TRAILING_CUTOFF_MODULES = ("engine.v2.models.trailing_cutoff_artifact",)
+#: The entry-rule gate's frozen trailing ``pnl_sim`` cutoff (P5-4): one
+#: ``TrailingCutoffArtifact`` per event month, loaded through
+#: ``FrozenStateLoader``.
+TRAILING_CUTOFF_MODULES = ("engine.v2.models.trailing_cutoff_artifact",
+                           "engine.v2.models.frozen_state")
 
 STATE_SPECS: tuple[StateSpec, ...] = (
     StateSpec("payoff_line:STR-THRU", "calibration", ("STR-THRU",), _PAYOFF,
@@ -116,7 +119,8 @@ STATE_SPECS: tuple[StateSpec, ...] = (
     StateSpec("admissible_table:dyn_sv", "calibration", ("DYN-SV",), _ADMISSIBLE,
               "chooser.admissible_table", "P5-4 n_admissible table"),
     StateSpec("trailing_pnl_cutoff", "threshold", ("*",), TRAILING_CUTOFF_MODULES,
-              "gate.trailing_cutoff", "no frozen artifact type yet"),
+              "gate.trailing_cutoff",
+              "training job --state trailing_pnl_cutoff (one object per event month)"),
     StateSpec("chooser_analog_pool", "residual", ("DYN-SV",), _CHOOSER_POOL,
               "chooser.analog_pool",
               "P5-4 chooser analog pool, built from data/features/chooser_analog_pool.parquet"),

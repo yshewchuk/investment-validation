@@ -47,6 +47,10 @@ Which legacy selection each builder mirrors:
   (``ModelArtifact.residuals``/``residual_buckets``) that
   ``ModelArtifact.residual_draws`` serves in ``Scorer._score_model`` /
   ``_score_runup_model``, loaded through ``Registry.load_champion``.
+* :func:`pnl_sim_history` -- ``engine.pnl_sim.load_history()``, the stored
+  ``exp_pnl_sim`` series ``Scorer._simulated_pnl`` reads for the entry-rule
+  gate's trailing cutoff (``pnl_sim.trailing_cutoff``). ``None`` when the
+  file was never built, which legacy serves as "no bar".
 
 Nothing here fits anything or writes anything.
 """
@@ -69,6 +73,7 @@ __all__ = [
     "file_digest",
     "paired_pool_inputs",
     "payoff_trades",
+    "pnl_sim_history",
     "recalibration_pairs",
 ]
 
@@ -166,6 +171,21 @@ def recalibration_pairs(path=None) -> pd.DataFrame:
         raise SystemExit("recalibration pairs table is missing or empty "
                          f"({path or recalibrate.PAIRS_PATH}); legacy ships the raw win")
     return pairs
+
+
+# --------------------------------------------------------------------------
+# trailing pnl_sim cutoff: the stored history
+# --------------------------------------------------------------------------
+
+
+def pnl_sim_history(path=None) -> pd.DataFrame | None:
+    """``pnl_sim.load_history(path)``, the two columns the cutoff reads."""
+    from engine import pnl_sim
+
+    history = pnl_sim.load_history(path)
+    if history is None:
+        return None
+    return history[["event_date", "exp_pnl_sim"]]
 
 
 # --------------------------------------------------------------------------

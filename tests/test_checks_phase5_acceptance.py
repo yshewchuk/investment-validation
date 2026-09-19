@@ -166,7 +166,20 @@ def _state_payloads() -> dict[str, dict[str, bytes]]:
             legacy_n_admissible_table())},
         "chooser_analog_pool": {"features.chooser_analog_pool|2026-09-01":
                                 serialize_frozen_state(_chooser_pool())},
+        "trailing_pnl_cutoff": {
+            f"features.pnl_sim_history|{cutoff.month}": serialize_frozen_state(cutoff)
+            for cutoff in _trailing_cutoffs()},
     }
+
+
+def _trailing_cutoffs():
+    """One month with a bar and one without (a thin window)."""
+    from engine.v2.models.training.trailing_cutoff import build_trailing_cutoff_artifact
+
+    rows = [{"event_date": f"2026-0{3 + i % 5}-{10 + i % 15}", "exp_pnl_sim": 0.01 * (i % 37)}
+            for i in range(600)]
+    return (build_trailing_cutoff_artifact(rows, month="2026-09-01"),
+            build_trailing_cutoff_artifact(rows, month="2026-01-01"))
 
 
 def _chooser_pool():
@@ -207,6 +220,7 @@ CONSUMERS = {
                                                 "features.tier4_serving_folds"),
     "chooser.admissible_table": gate.CONSUMERS["chooser.admissible_table"],
     "chooser.analog_pool": gate.CONSUMERS["chooser.analog_pool"],
+    "gate.trailing_cutoff": gate.CONSUMERS["gate.trailing_cutoff"],
 }
 
 
@@ -259,7 +273,8 @@ def test_complete_release_passes(tmp_path):
     for role in ("size", "implied_t1", "runup_move"):
         assert ("model_stage.driver_residual_pool", f"driver_residual_pool:{role}") in consumers
     assert ("simulation.paired_residual_pool", "paired_residual_pool") in consumers
-    assert evidence["lineage"] == {"status": "ok", "states": 6, "valid": 6}
+    assert ("gate.trailing_cutoff", "trailing_pnl_cutoff") in consumers
+    assert evidence["lineage"] == {"status": "ok", "states": 8, "valid": 8}
     assert all(r["status"] == "ok" for r in evidence["consumers"])
     # both (alpha, cutoff) folds of the line were scored, each by its own key
     assert sum(1 for c, m in [(r["consumer"], r["member_id"]) for r in evidence["consumers"]]
@@ -415,9 +430,9 @@ def test_full_catalog_never_skips_a_member(tmp_path):
     assert "simulation.paired_residual_pool" not in pending
     assert "chooser.admissible_table" not in pending  # the native chooser reads it
     assert "chooser.analog_pool" not in pending
+    assert "gate.trailing_cutoff" not in pending  # the native entry-rule gate reads it
     by_id = {r["member_id"]: r for r in evidence["members"]}
-    for member_id in ("board_analog_matcher", "recalibration_map:STR-RUNUP",
-                      "trailing_pnl_cutoff"):
+    for member_id in ("board_analog_matcher", "recalibration_map:STR-RUNUP"):
         assert by_id[member_id]["status"] in ("PENDING", "MISSING")
         assert by_id[member_id]["verdict"] in ("P5_MEMBER_PENDING", "P5_MEMBER_MISSING")
 
@@ -438,7 +453,7 @@ def test_preparer_marks_every_catalog_state(tmp_path):
     assert by_id["payoff_line:STR-THRU"].status == "MISSING"
     assert by_id["payoff_line:STR-THRU"].detail == "no training root"
     assert by_id["board_analog_matcher"].status == "MISSING"  # type landed; no member built
-    assert by_id["trailing_pnl_cutoff"].status == "PENDING"
+    assert by_id["trailing_pnl_cutoff"].status == "MISSING"  # type landed; no member built
 
 
 def test_preparer_selects_current_snapshot_folds(tmp_path):
