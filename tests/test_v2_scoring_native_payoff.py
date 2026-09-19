@@ -1089,3 +1089,373 @@ def test_malformed_cutoff_withholds_the_model_number_end_to_end():
                        "before": "not-a-date"}, **good)))
     assert "NO_PAYOFF_MAP" in record.reason_codes
     assert record.resolved_request.get("exp_pnl_model") is None
+
+
+# ---------------------------------------------------------------------------
+# mutation-pilot triage: legacy behaviour the parity tests above never hit
+# (dirty rows, degenerate fits, tiny samples, bucket boundaries, cost <= 0).
+# Every expected value comes from the legacy function on the same input.
+# ---------------------------------------------------------------------------
+
+import warnings  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def _quiet():
+    """Degenerate fits warn (RankWarning, ddof); legacy warns identically."""
+    with warnings.catch_warnings(), np.errstate(all="ignore"):
+        warnings.simplefilter("ignore")
+        yield
+
+
+def _assert_line_matches_legacy(native, legacy):
+    assert native is not None
+    assert native["n"] == legacy.n
+    assert native["intercept"] == pytest.approx(legacy.intercept, rel=1e-12, abs=1e-15)
+    assert native["slope"] == pytest.approx(legacy.slope, rel=1e-12, abs=1e-15)
+    if legacy.r is None:
+        assert native["r"] is None
+    else:
+        assert native["r"] == pytest.approx(legacy.r, rel=1e-12)
+    if np.isnan(legacy.resid_sd):
+        assert np.isnan(native["resid_sd"])
+    else:
+        assert native["resid_sd"] == pytest.approx(legacy.resid_sd, rel=1e-9, abs=1e-15)
+    np.testing.assert_allclose(native["residuals"], legacy.residuals, atol=1e-15)
+
+
+# One bad field per row (and small positive spots, which stay): legacy's
+# ``ok`` mask drops exactly the rows with a non-finite value or spot <= 0.
+_DIRTY_LINE = [
+    {"driver": float("nan"), "spot_entry": 100.0, "exit_value": 3.0},
+    {"driver": 5.0, "spot_entry": float("nan"), "exit_value": 3.0},
+    {"driver": 5.0, "spot_entry": 100.0, "exit_value": float("nan")},
+    {"driver": 5.0, "spot_entry": 100.0, "exit_value": float("inf")},
+    {"driver": 5.0, "spot_entry": 0.0, "exit_value": 3.0},
+    {"driver": 5.0, "spot_entry": -1.0, "exit_value": 3.0},
+    {"driver": 5.0, "spot_entry": 0.5, "exit_value": 0.02},
+    {"driver": 1.0, "spot_entry": 0.9, "exit_value": 0.01},
+]
+
+
+def test_fit_payoff_line_drops_exactly_legacy_dirty_rows_and_skips_junk_first():
+    trades = _synthetic_trades(250, seed=5)
+    dirty = pd.DataFrame([dict(row, strategy="STR-THRU", fill_alpha=0.5,
+                               exit_date=pd.Timestamp("2019-12-01"), abs_move=row["driver"])
+                          for row in _DIRTY_LINE]).drop(columns="driver")
+    legacy = fit_payoff(pd.concat([dirty, trades], ignore_index=True), "STR-THRU", alpha=0.5)
+    # Rows legacy's frame cannot even hold come FIRST: skipping them must not
+    # end the scan.
+    junk = ["not a mapping", {"spot_entry": 100.0, "exit_value": 3.0},
+            {"driver": "abc", "spot_entry": 100.0, "exit_value": 3.0}]
+    rows = junk + [dict(row, exit_date="2019-12-01") for row in _DIRTY_LINE]
+    native = native_payoff.fit_payoff_line(rows + _rows_from_trades(trades))
+    assert legacy.n == 252
+    _assert_line_matches_legacy(native, legacy)
+
+
+def _line_trades(driver, exit_value) -> pd.DataFrame:
+    return pd.DataFrame({
+        "strategy": "STR-THRU", "fill_alpha": 0.5, "abs_move": driver,
+        "spot_entry": 100.0, "exit_value": exit_value,
+        "exit_date": pd.date_range("2020-01-01", periods=len(driver), freq="D"),
+    })
+
+
+@pytest.mark.parametrize("case", ["constant driver", "constant exit", "narrow driver"])
+def test_fit_payoff_line_correlation_is_none_exactly_when_legacys_is(case):
+    rng = np.random.default_rng(2)
+    driver = rng.uniform(0.0, 8.0, 250)
+    exit_value = 2.0 + 0.4 * driver + rng.normal(0.0, 1.0, 250)
+    if case == "constant driver":
+        driver = np.full(250, 4.0)
+    elif case == "constant exit":
+        exit_value = np.full(250, 25.0)  # y = 0.25 exactly: std is exactly 0
+    else:  # 0 < std < 1: still a correlation
+        driver = rng.uniform(0.0, 1.0, 250)
+    trades = _line_trades(driver, exit_value)
+    with _quiet():
+        legacy = fit_payoff(trades, "STR-THRU", alpha=0.5)
+        native = native_payoff.fit_payoff_line(_rows_from_trades(trades))
+    assert (legacy.r is None) == (case != "narrow driver")
+    _assert_line_matches_legacy(native, legacy)
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_fit_payoff_line_residual_sd_at_two_and_three_trades(n):
+    trades = _synthetic_trades(n, seed=9)
+    with _quiet():
+        legacy = fit_payoff(trades, "STR-THRU", alpha=0.5, min_trades=2)
+        native = native_payoff.fit_payoff_line(_rows_from_trades(trades), min_trades=2)
+    assert np.isnan(legacy.resid_sd) == (n == 2)
+    _assert_line_matches_legacy(native, legacy)
+
+
+def test_fit_residual_cap_and_seed_are_honoured():
+    """stages passes both from the payoff recipe; the default is legacy's.
+    The cap samples the unsorted residuals, so a capped fit is a sorted
+    subset of the uncapped one and different seeds keep different subsets."""
+    fits = {
+        "line": (native_payoff.fit_payoff_line,
+                 _rows_from_trades(_synthetic_trades(300, seed=7))),
+        "surface": (native_payoff.fit_runup_payoff_surface,
+                    _runup_rows_from_trades(_synthetic_runup_trades(300, seed=7))),
+    }
+    for fit, rows in fits.values():
+        uncapped = fit(rows, max_residuals=10**6)["residuals"]
+        assert uncapped.size == 300
+        capped = {seed: fit(rows, max_residuals=10, residual_seed=seed)["residuals"]
+                  for seed in (1, 2)}
+        for kept in capped.values():
+            assert kept.size == 10
+            assert np.all(np.diff(kept) >= 0)
+            assert np.isin(kept, uncapped).all()
+        assert not np.array_equal(capped[1], capped[2])
+
+
+def test_fit_payoff_line_reads_full_timestamp_dates_and_cutoffs():
+    trades = _synthetic_trades(300, seed=7)
+    rows = _rows_from_trades(trades)
+    stamped = [dict(row, exit_date=row["exit_date"] + "T15:30:00") for row in rows]
+    cutoff = str(trades["exit_date"].iloc[250].date())
+    day = native_payoff.fit_payoff_line(rows, before=cutoff)
+    for native in (native_payoff.fit_payoff_line(stamped, before=cutoff),
+                   native_payoff.fit_payoff_line(rows, before=cutoff + "T00:00:00"),
+                   native_payoff.fit_payoff_line(rows, before=cutoff + " 00:00:00")):
+        assert native["n"] == day["n"] == 250
+        assert native["slope"] == day["slope"]
+
+
+# -- STR-RUNUP surface ------------------------------------------------------
+
+
+def _assert_surface_matches_legacy(native, legacy):
+    assert native is not None
+    assert native["n"] == legacy.n
+    np.testing.assert_allclose(native["coefficients"], legacy.coefficients,
+                               rtol=1e-9, atol=1e-12)
+    if legacy.r is None:
+        assert native["r"] is None
+    else:
+        assert native["r"] == pytest.approx(legacy.r, rel=1e-9)
+    if np.isnan(legacy.resid_sd):
+        assert np.isnan(native["resid_sd"])
+    else:
+        assert native["resid_sd"] == pytest.approx(legacy.resid_sd, rel=1e-6, abs=1e-15)
+    np.testing.assert_allclose(native["residuals"], legacy.residuals, atol=1e-12)
+
+
+_GOOD_RUNUP = {"driver": 4.0, "spot_entry": 100.0, "spot_exit": 101.0, "strike": 100.0,
+               "exit_value": 3.0}
+_DIRTY_RUNUP = [
+    dict(_GOOD_RUNUP, **{field: bad})
+    for field in ("driver", "spot_entry", "spot_exit", "strike", "exit_value")
+    for bad in (float("nan"), float("inf"))
+] + [
+    dict(_GOOD_RUNUP, **{field: bad})
+    for field in ("spot_entry", "spot_exit", "strike") for bad in (0.0, -1.0)
+] + [  # small positive prices stay
+    dict(_GOOD_RUNUP, spot_entry=0.5, exit_value=0.02),
+    dict(_GOOD_RUNUP, spot_exit=0.6, strike=0.55),
+    dict(_GOOD_RUNUP, spot_exit=0.5, strike=0.52),
+]
+
+
+def test_fit_runup_surface_drops_exactly_legacy_dirty_rows_and_skips_junk_first():
+    trades = _synthetic_runup_trades(250, seed=5)
+    dirty = pd.DataFrame([dict(row, strategy="STR-RUNUP", fill_alpha=0.5, im_t1=row["driver"],
+                               exit_date=pd.Timestamp("2019-12-01"))
+                          for row in _DIRTY_RUNUP]).drop(columns="driver")
+    legacy = fit_runup_payoff(pd.concat([dirty, trades], ignore_index=True), alpha=0.5)
+    junk = [None, dict(_GOOD_RUNUP, strike="abc"),
+            {k: v for k, v in _GOOD_RUNUP.items() if k != "spot_exit"}]
+    rows = junk + [dict(row, exit_date="2019-12-01") for row in _DIRTY_RUNUP]
+    native = native_payoff.fit_runup_payoff_surface(rows + _runup_rows_from_trades(trades))
+    assert legacy.n == 253
+    _assert_surface_matches_legacy(native, legacy)
+
+
+def test_fit_runup_surface_correlation_is_none_for_a_constant_target_like_legacy():
+    trades = _synthetic_runup_trades(250, seed=4)
+    trades["exit_value"] = 25.0  # target 0.25 exactly: std is exactly 0
+    with _quiet():
+        legacy = fit_runup_payoff(trades, alpha=0.5)
+        native = native_payoff.fit_runup_payoff_surface(_runup_rows_from_trades(trades))
+    assert legacy.r is None
+    _assert_surface_matches_legacy(native, legacy)
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_fit_runup_surface_residual_sd_at_two_and_three_trades(n):
+    trades = _synthetic_runup_trades(n, seed=9)
+    with _quiet():
+        legacy = fit_runup_payoff(trades, alpha=0.5, min_trades=2)
+        native = native_payoff.fit_runup_payoff_surface(
+            _runup_rows_from_trades(trades), min_trades=2)
+    assert np.isnan(legacy.resid_sd) == (n == 2)
+    assert np.isnan(native["resid_sd"]) == (n == 2)
+    assert native["n"] == legacy.n
+
+
+# -- residual buckets and pool selection -----------------------------------
+
+
+def _assert_buckets_match_legacy(native, legacy):
+    if legacy is None:
+        assert native is None
+        return
+    np.testing.assert_array_equal(native["edges"], legacy["edges"])
+    assert native["min_pool"] == legacy["min_pool"]
+    assert len(native["pools"]) == len(legacy["pools"])
+    for mine, theirs in zip(native["pools"], legacy["pools"]):
+        np.testing.assert_array_equal(mine, theirs)
+
+
+@pytest.mark.parametrize("case", ["exactly 2500", "2499", "100 rows", "nan rows",
+                                  "two values", "three values"])
+def test_bucket_residual_pool_matches_legacy_at_its_boundaries(case):
+    rng = np.random.default_rng(8)
+    n = {"2499": 2499, "100 rows": 100}.get(case, 2500)
+    pred = rng.normal(5.0, 2.0, n)
+    res = rng.normal(0.0, 1.0, n)
+    if case == "nan rows":  # 2500 finite pairs plus pairs missing one side
+        pred = np.concatenate([pred, [np.nan, 1.0, np.inf]])
+        res = np.concatenate([res, [0.5, np.nan, 0.5]])
+    elif case == "two values":  # quantile edges {0, 0.5, 1}: two buckets
+        pred = np.repeat([0.0, 1.0], 1250)
+    elif case == "three values":  # edges fall ON values: right-closed ties
+        pred = np.repeat([0.0, 1.0, 2.0], [600, 1300, 600])
+    native = native_payoff.bucket_residual_pool(pred, res)
+    legacy = bucket_residuals(pred, res)
+    assert (legacy is None) == (case in ("2499", "100 rows"))
+    _assert_buckets_match_legacy(native, legacy)
+
+
+def _artifact(flat, buckets):
+    return ModelArtifact(model=None, role="size", features=(), residuals=flat,
+                         target="abs_move", residual_buckets=buckets)
+
+
+def test_residual_pool_for_matches_legacy_selection_at_its_boundaries():
+    flat = np.arange(10.0)
+    thin = np.arange(4.0)
+    exact = np.arange(5.0) + 100.0
+    buckets = {"edges": np.array([-np.inf, 1.0, 2.0, np.inf]),
+               "pools": [thin, exact, np.arange(6.0) + 200.0], "min_pool": 5}
+    legacy = _artifact(flat, buckets)
+    # NaN prediction -> flat; on an edge -> the bucket above (right-closed);
+    # a pool of exactly min_pool is used; a thinner one falls back.
+    for point in (float("nan"), None, 0.0, 1.0, 1.5, 2.0, 9.0):
+        np.testing.assert_array_equal(
+            native_payoff.residual_pool_for(buckets, point, flat)[0],
+            legacy.residual_pool(point)[0])
+    assert native_payoff.residual_pool_for(buckets, 1.0, flat)[0] is exact
+    assert native_payoff.residual_pool_for(buckets, 0.5, flat)[0] is flat
+    assert native_payoff.residual_pool_for(buckets, float("nan"), flat)[0] is flat
+
+    # A mapping without min_pool never falls back, even for an empty pool.
+    empty = np.array([])
+    bare = {"edges": buckets["edges"], "pools": [thin, empty, exact]}
+    legacy_bare = _artifact(flat, bare)
+    for point in (0.5, 1.5, 2.5):
+        np.testing.assert_array_equal(
+            native_payoff.residual_pool_for(bare, point, flat)[0],
+            legacy_bare.residual_pool(point)[0])
+    assert native_payoff.residual_pool_for(bare, 1.5, flat)[0] is empty
+
+
+def test_driver_residual_pool_matches_legacy_artifact_with_its_own_split():
+    """deciles=5, min_pool=100 over 600 rows buckets; legacy's defaults would
+    not (600 < 10 * 250), so a dropped argument shows."""
+    rng = np.random.default_rng(12)
+    pred = rng.normal(5.0, 2.0, 600)
+    res = rng.normal(0.0, 1.0, 600)
+    legacy = _artifact(res, bucket_residuals(pred, res, deciles=5, min_pool=100))
+    junk = ["not a mapping", {"prediction": "x", "residual": 1.0},
+            {"prediction": float("nan"), "residual": 9.0},
+            {"prediction": 5.0, "residual": float("inf")}]
+    rows = junk + [{"prediction": p, "residual": r} for p, r in zip(pred, res)]
+    for point in (1.0, 5.0, 9.0):
+        native = native_payoff.driver_residual_pool(rows, point, deciles=5, min_pool=100)
+        expected, label = legacy.residual_pool(point)
+        assert label.startswith("bucket")
+        np.testing.assert_array_equal(native, expected)
+    # No prediction: the flat pool, which holds only complete finite pairs.
+    np.testing.assert_array_equal(
+        native_payoff.driver_residual_pool(rows, None, deciles=5, min_pool=100), res)
+
+
+def test_driver_residual_pool_drops_rows_with_a_missing_prediction_before_bucketing():
+    rng = np.random.default_rng(13)
+    pred = rng.normal(5.0, 2.0, 2500)
+    res = rng.normal(0.0, 1.0, 2500)
+    rows = [{"prediction": p, "residual": r} for p, r in zip(pred, res)]
+    rows += [{"prediction": float("nan"), "residual": 50.0 + i} for i in range(300)]
+    legacy = _artifact(res, bucket_residuals(pred, res))
+    for point in (1.0, 5.0, 9.0):
+        np.testing.assert_array_equal(native_payoff.driver_residual_pool(rows, point),
+                                      legacy.residual_pool(point)[0])
+
+
+# -- exit value and the zero-cost guard ------------------------------------
+
+
+def test_payoff_exit_value_floors_at_zero_like_legacy():
+    payoff = PayoffMap(strategy="STR-THRU", driver="abs_move", alpha=0.5, intercept=-0.05,
+                       slope=0.01, resid_sd=0.01, n=250, r=0.9, residuals=np.zeros(3))
+    drivers = [0.0, 2.0, 5.0, 8.0]
+    native = native_payoff.payoff_exit_value(drivers, 100.0, -0.05, 0.01)
+    np.testing.assert_array_equal(native, payoff.exit_value(drivers, 100.0))
+    assert native[0] == 0.0 and native[-1] == pytest.approx(3.0)
+
+
+_COEFFICIENTS = (0.02, 0.004, 0.001, 0.0005, 0.0007, 0.0003)
+
+
+@pytest.mark.parametrize("cost", [0.0, -1.0, 0.5])
+def test_simulated_returns_are_nan_for_non_positive_cost_like_legacy(cost):
+    thru = native_payoff.simulate_model_returns(
+        7.0, [-0.5, 0.5], [0.0, 0.01], 0.02, 0.004, 100.0, cost, 50,
+        np.random.default_rng(1))
+    payoff = PayoffMap(strategy="STR-THRU", driver="abs_move", alpha=0.5, intercept=0.02,
+                       slope=0.004, resid_sd=0.01, n=250, r=0.9,
+                       residuals=np.array([0.0, 0.01]))
+    legacy_rng = np.random.default_rng(1)
+    draws = 7.0 + legacy_rng.choice([-0.5, 0.5], size=50, replace=True)
+    legacy = simulate_returns(draws, payoff, 100.0, cost, payoff.residual_draws(50, legacy_rng))
+    assert thru.shape == legacy.shape == (50,)
+    np.testing.assert_array_equal(thru, legacy)
+    assert np.isnan(thru).all() == (cost <= 0)
+
+    runup = native_payoff.simulate_runup_model_returns(
+        7.0, 3.0, [-0.5, 0.5], [-0.2, 0.2], _COEFFICIENTS, [0.0, 0.01],
+        100.0, 100.0, cost, 7.0, 50, np.random.default_rng(1))
+    assert runup.shape == (50,)
+    assert np.isnan(runup).all() == (cost <= 0)
+    if cost > 0:
+        assert np.isfinite(runup).all()
+
+
+def test_runup_draws_floor_implied_and_move_at_zero_like_legacy():
+    """Small points and pools straddling zero: legacy clips negative draws to
+    exactly 0, not to any positive value."""
+    implied_pool = np.array([-0.4, -0.1, 0.2, 0.5])
+    move_pool = np.array([-0.6, -0.2, 0.1, 0.4])
+    payoff_residuals = np.array([-0.01, 0.0, 0.01])
+    point_implied, point_move, spot, strike, cost, draws, days = (
+        0.3, 0.3, 100.0, 100.0, 1.0, 400, 7.0)
+    payoff = RunupPayoffSurface(alpha=0.5, coefficients=_COEFFICIENTS, resid_sd=0.01, n=250,
+                                r=0.9, residuals=payoff_residuals)
+    rng = np.random.default_rng(21)
+    implied = np.maximum(point_implied + rng.choice(implied_pool, size=draws, replace=True),
+                         0.0)
+    move_d14 = point_move + rng.choice(move_pool, size=draws, replace=True)
+    move = legacy_scale_runup_move(np.maximum(move_d14, 0.0), days)
+    signed = rng.choice((-1.0, 1.0), size=draws) * move
+    legacy = simulate_runup_returns(implied, signed, payoff, spot=spot, strike=strike,
+                                    cost=cost, payoff_noise=payoff.residual_draws(draws, rng))
+    native = native_payoff.simulate_runup_model_returns(
+        point_implied, point_move, implied_pool, move_pool, _COEFFICIENTS, payoff_residuals,
+        spot, strike, cost, days, draws, np.random.default_rng(21))
+    np.testing.assert_array_equal(native, legacy)
