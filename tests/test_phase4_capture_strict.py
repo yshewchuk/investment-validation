@@ -1590,3 +1590,95 @@ def test_probe_still_refuses_unrecorded_or_contradictory_quote_domains(
     request = canonical_v2_request(candidate, "snapshot-1")
     with pytest.raises(StrictTraceCaptureError, match=message):
         native_inputs_from_capture(candidate, request)
+
+
+# ---------------------------------------------------------------------------
+# Tier-0 vetting gaps 005 (CAL-P) and 009 (CND-P), 2026-09-19: a disabled
+# strategy is refused before any stage. Legacy now records a request-only
+# source bundle, the probe emits a minimal trace from it, and Phase 4 compares
+# native's own refusal with legacy's instead of marking the row incomparable.
+# ---------------------------------------------------------------------------
+
+
+def _disabled_candidate(strategy: str, fixture_id: str) -> dict:
+    scorer = score_mod.Scorer.__new__(score_mod.Scorer)
+    scorer.snapshot = "snap-test"
+    legacy_request = ScoreRequest(
+        ticker="ZZZ", strategy=strategy, as_of=pd.Timestamp("2026-09-16"),
+        event_date=pd.Timestamp("2026-09-17"), session="AMC", fill=MID,
+    )
+    collector = Phase4TraceCollector(retain_full_trace=False,
+                                     content_hasher=content_hash)
+    result = scorer.score(legacy_request, trace=collector)
+    return {
+        "fixture_id": fixture_id, "covers": [], "kind": "score_result",
+        "record": result.as_dict(), "request": request_to_dict(legacy_request),
+        "duration": 0.0, "relations": {},
+        "legacy_trace": collector.diagnostic_checkpoint(),
+        "event_id": f"ZZZ_2026-09-17_{strategy}",
+    }
+
+
+@pytest.mark.parametrize("strategy", sorted(score_mod.DISABLED_STRATEGIES))
+def test_disabled_strategy_row_is_traced_and_compared_not_incomparable(
+        tmp_path, monkeypatch, strategy):
+    from checks.tier0_corpus import load
+
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    good = _full_strict_candidate(
+        fixture_id="case-good", ticker="AAA", driver_vector={"x": 2.0},
+        gate_vector={"x": 9.0, "n_prior": 5.0}, path=path, digest=digest,
+    )
+    disabled = _disabled_candidate(strategy, "case-disabled")
+
+    doc = write(tmp_path / "out", [good, disabled], {}, pd.Timestamp("2026-09-16"),
+                "snapshot-1", strict_trace=True)
+
+    assert doc["pairs"]["case-disabled"]["trace_disposition"] == "complete"
+    corpus = load(tmp_path / "out")
+    payload = corpus.pairs["case-disabled"]["payload"]
+    assert payload["request"]["strategy"] == strategy
+    native_inputs = payload["input_trace"]["native_inputs"]
+    assert native_inputs["context"]["quotes"] == {}
+    assert native_inputs["features"]["model_inputs"] == {}
+    release, _parity = phase4_real._native_parity(corpus)
+    row = next(r for r in release["dispositions"]
+               if r["fixture_id"] == "case-disabled")
+    # Compared, never passed through: parity reports whether the refusals
+    # match (the flags check), it is not decided here.
+    assert row["disposition"] == "compared", row.get("reason")
+
+
+def test_request_only_bundle_is_accepted_only_as_the_whole_disabled_trace(tmp_path):
+    disabled = _disabled_candidate("CAL-P", "case-disabled")
+    request = canonical_v2_request(disabled, "snapshot-1")
+    inputs, _shared = native_inputs_from_capture(disabled, request)
+    record = application.score_one(request, inputs)
+    assert "UNVALIDATED_STRUCTURE" in record.reason_codes
+
+    # Planted defect 1: a request-only bundle next to groups legacy recorded
+    # from later stages is not a request-only row.
+    extra = copy.deepcopy(disabled)
+    features = {"feature_vector": {}, "missing_mask": {}, "model_identity": {}}
+    extra["legacy_trace"]["checkpoints"]["features"] = {
+        "value": features, "content_hash": content_hash(features),
+    }
+    with pytest.raises(StrictTraceCaptureError, match="alongside other checkpoint"):
+        canonical_v2_request(extra, "snapshot-1")
+
+    # Planted defect 2: without the request-only bundle a disabled row is
+    # still unsupported, never traced from nothing.
+    bare = copy.deepcopy(disabled)
+    bare["legacy_trace"]["checkpoints"] = {}
+    with pytest.raises(StrictTraceCaptureError, match="does not support CAL-P"):
+        canonical_v2_request(bare, "snapshot-1")
+
+    # Planted defect 3: a request-only bundle claiming an enabled strategy.
+    enabled = copy.deepcopy(disabled)
+    enabled["request"]["strategy"] = "STR-THRU"
+    row = enabled["legacy_trace"]["checkpoints"]["source_inputs"]
+    row["value"]["context"]["strategy"] = "STR-THRU"
+    row["content_hash"] = content_hash(row["value"])
+    with pytest.raises(StrictTraceCaptureError, match="enabled STR-THRU"):
+        native_inputs_from_capture(enabled, canonical_v2_request(enabled, "snapshot-1"))

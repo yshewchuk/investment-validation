@@ -772,6 +772,18 @@ class Phase4TraceCollector:
     #: finished. ``priced``: the structure priced on them.
     QUOTE_STATUSES = ("not_reached", "empty", "recorded", "priced")
 
+    def capture_request_only_bundle(self, context: Mapping[str, Any]) -> None:
+        """The source bundle of a row legacy refuses before any stage runs
+        (a disabled strategy): only the request's own facts, no quotes
+        (``quote_status`` ``not_reached``), and ``scope`` ``request_only`` so
+        a reader knows nothing else was ever going to be recorded."""
+        if self._checkpoint_groups:
+            raise ValueError(
+                "a request-only source bundle must be the only checkpoint"
+            )
+        self._source_bundle["scope"] = "request_only"
+        self.capture_source_bundle(context=context, quote_status="not_reached")
+
     def capture_source_bundle(self, *, context: Mapping[str, Any] | None = None,
                               quote_domain: Any = None,
                               quote_status: str | None = None,
@@ -1536,6 +1548,16 @@ class Scorer:
                 result.session = request.session
             result.flag("UNVALIDATED_STRUCTURE")
             result.detail = DISABLED_STRATEGIES[request.strategy]
+            if trace is not None:
+                # Nothing below runs, so the request is the whole source: a
+                # request-only bundle lets native reach its own refusal from
+                # the same request, and parity compare the two.
+                trace.capture_request_only_bundle({
+                    "ticker": request.ticker,
+                    "strategy": request.strategy,
+                    "event_date": result.event_date,
+                    "session": result.session,
+                })
             return self._finish_phase4_trace(trace, result, "disabled strategy")
         if request.strategy not in STRUCTURES:
             raise KeyError(f"unknown strategy {request.strategy!r}")

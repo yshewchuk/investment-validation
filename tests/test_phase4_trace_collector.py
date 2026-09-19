@@ -521,7 +521,15 @@ def test_refusal_omits_unexecuted_groups_and_default_path_is_invariant() -> None
     )
     assert checkpoint["disposition"]["status"] == "refused"
     assert checkpoint["disposition"]["flags"] == ["UNVALIDATED_STRUCTURE"]
-    assert checkpoint["checkpoints"] == {}
+    # Tier-0 gaps 005/009: nothing ran, so the only group is the request-only
+    # source bundle native refuses from.
+    assert set(checkpoint["checkpoints"]) == {"source_inputs"}
+    source = _checkpoint_value(collector, "source_inputs")
+    assert source["scope"] == "request_only"
+    assert source["context"] == {"ticker": "ABC", "strategy": "CAL-P",
+                                 "event_date": "2026-01-08", "session": "AMC"}
+    assert (source["quote_domain"], source["quote_status"]) == ([], "not_reached")
+    assert not source["model_bindings"] and not source["native_recipes"]
 
 
 # -- R4-18/R4-19: source_inputs.frozen ---------------------------------------------
