@@ -191,6 +191,7 @@ _SIM_MIN_SPOT_FRACTION = 1e-4
 # thresholds are reproduced as literals and cited by file:line instead.
 ATM_TOLERANCE_PCT = 2.0     # engine/score.py:204
 WIDE_MARKET_RATIO = 0.5     # engine/fills.py:25
+BAD_QUOTE_COST_PCT = 30.0   # engine/fills.py:34
 GATE_MCAP_FLOOR = 1e9       # engine/score.py:199
 
 # -- Model layer (payoff calibration -> exp_pnl_model/win_model) ------------
@@ -381,6 +382,36 @@ def _check_wide_market(pricing: Pricing, flags: list[str]) -> None:
         if wide:
             _add_flag(flags, "WIDE_MARKET")
             return
+
+
+def _check_bad_quote(pricing: Pricing, flags: list[str]) -> None:
+    """BAD_QUOTE -- engine/score.py ``_price_entry`` (EXP-117).
+
+    Mirrors legacy exactly: once the structure priced, and only when the
+    spot is nonzero and the cost exists, ``entry_cost / spot * 100 >
+    BAD_QUOTE_COST_PCT`` flags the row. Legacy then leaves before the model,
+    analog, gate and chooser layers (``Scorer.score``'s BAD_QUOTE exit);
+    :func:`_append_late_stages` withholds the same layers.
+    """
+    if pricing.refusal is not None:
+        return
+    spot = _finite(pricing.spot)
+    cost = _finite(pricing.entry_cost)
+    if not spot or cost is None:
+        return
+    if cost / spot * 100.0 > BAD_QUOTE_COST_PCT:
+        _add_flag(flags, "BAD_QUOTE")
+
+
+#: The late stages legacy never reaches on a BAD_QUOTE row, and the output
+#: native records for each of them instead of executing it.
+_BAD_QUOTE_WITHHELD = {"withheld": "BAD_QUOTE"}
+#: Forecast outputs a BAD_QUOTE row does not carry: legacy serves every
+#: forecast role but ``size`` from the layers after its BAD_QUOTE exit.
+_BAD_QUOTE_WITHHELD_FIELDS = ("driver_name",) + tuple(sorted({
+    output for role, outputs in _ROLE_OUTPUTS.items() if role != "size"
+    for output in outputs
+}))
 
 
 def _check_extrapolated(geometry: Geometry, pricing: Pricing,
@@ -1893,6 +1924,28 @@ def _simulation_identity(block: Mapping[str, Any]) -> Mapping[str, Any]:
     return identity_view(block)
 
 
+def _withhold_bad_quote_stages(
+    inputs: NativeScoreInputs,
+    values: dict[str, Any],
+    executed: list[StageReceipt],
+    observer: StageObserver | None,
+) -> None:
+    """Legacy's BAD_QUOTE exit: no model, analog, gate or chooser numbers,
+    and none of the forecasts only those layers serve (every role but the
+    pre-pricing ``size``). The row keeps its pricing and features."""
+    for field in _BAD_QUOTE_WITHHELD_FIELDS:
+        values.pop(field, None)
+    for stage in ("model", "analogs", "simulation", "gate", "chooser"):
+        _emit_stage(
+            executed, stage, {"prior": executed[-1].output_hash},
+            dict(_BAD_QUOTE_WITHHELD), observer,
+        )
+    _emit_stage(
+        executed, "diagnostics", {"prior": executed[-1].output_hash},
+        _merge_diagnostics(values, inputs.diagnostics), observer,
+    )
+
+
 def _append_late_stages(
     inputs: NativeScoreInputs,
     values: dict[str, Any],
@@ -1918,6 +1971,8 @@ def _append_late_stages(
                 executed, stage, {"prior": executed[-1].output_hash}, block,
                 observer,
             )
+    elif "BAD_QUOTE" in flags:
+        _withhold_bad_quote_stages(inputs, values, executed, observer)
     else:
         model_output = _execute_model(inputs, geometry.strategy, values, flags)
         _emit_stage(
@@ -2003,6 +2058,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     )
     _publish_pricing(values, geometry, pricing, alpha)
     _check_wide_market(pricing, flags)
+    _check_bad_quote(pricing, flags)
     _check_extrapolated(geometry, pricing, flags)
     _append_late_stages(
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
