@@ -431,7 +431,7 @@ def test_captured_price_sources_produce_runup_features_not_nan(tmp_path):
     copy_read_set(fixture, staging, [ref.path for ref in manifest.file_refs])
 
     result = subprocess.run(
-        ["/usr/bin/python3", "-c", _RUNUP_SCRIPT, str(staging),
+        [sys.executable, "-c", _RUNUP_SCRIPT, str(staging),
          json.dumps([px_ticker, tier1_ticker])],
         cwd=str(ROOT), capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-4000:]
@@ -527,7 +527,7 @@ print(json.dumps(outcome))
 
 def _run_finality_subprocess(staging: Path, *, tickers=(TICKER,)):
     result = subprocess.run(
-        ["/usr/bin/python3", "-c", _FINALITY_SCRIPT, str(staging), SESSION, json.dumps(list(tickers))],
+        [sys.executable, "-c", _FINALITY_SCRIPT, str(staging), SESSION, json.dumps(list(tickers))],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr[-4000:]
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -624,7 +624,7 @@ def test_legacy_decisions_succeeds_with_empty_legacy_read_set(tmp_path):
     (staging / "decision_plan.json").write_text(json.dumps({
         "session": SESSION, "decision_clock": SESSION + "T21:00:00+00:00"}))
 
-    result = subprocess.run(["/usr/bin/python3", "-c", _DECISIONS_SCRIPT, str(staging), SESSION],
+    result = subprocess.run([sys.executable, "-c", _DECISIONS_SCRIPT, str(staging), SESSION],
                             cwd=str(ROOT), capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr[-4000:]
     outcome = json.loads(result.stdout.strip().splitlines()[-1])

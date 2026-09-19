@@ -90,7 +90,7 @@ def test_report_discloses_the_known_red_test_alongside_the_gate_pass(tmp_path, r
     assert "R3B-7" in text
 
 
-def test_report_reaches_its_default_location_and_the_private_mirror():
+def test_report_reaches_its_default_location_and_the_private_mirror(real_run):
     exit_code = phase3b_report.main([])
     assert exit_code == 0
 
