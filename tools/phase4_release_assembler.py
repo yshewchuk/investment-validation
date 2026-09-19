@@ -185,7 +185,8 @@ def assemble_input_trace(*, request: Mapping[str, Any], shared_inputs: Mapping[s
                          native_inputs: Mapping[str, Any], observations: Sequence[Any],
                          resources: Sequence[Mapping[str, Any]],
                          metadata: Mapping[str, Any] | None = None,
-                         mappings: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+                         mappings: Sequence[Mapping[str, Any]] | None = None,
+                         shared_documents: Sequence[Any] = ()) -> dict[str, Any]:
     """Build the strict trace consumed by ``checks.phase4_real``."""
     request_hash = _request_hash(request)
     if shared_inputs.get("request") != request:
@@ -247,18 +248,27 @@ def assemble_input_trace(*, request: Mapping[str, Any], shared_inputs: Mapping[s
             "owner": item.receipt.owner,
         }
     native_hash = content_hash(native_inputs)
+    # `memo`: pre-seeded with every object `shared_documents` names, so
+    # `deepcopy` below reuses THOSE specific objects by reference (its own
+    # `id(x) in memo` fast path) instead of copying them -- everything else
+    # still gets an independent deep copy, unchanged. Values and hashes are
+    # identical either way; only which Python object holds a shared value
+    # changes. See `tools/capture_tier0_corpus.py`'s `_untag_nonfinite_
+    # shared`/`_SharedTraceDocuments` for why this matters for a DYN-SV
+    # chooser trace, whose members can share large served Tier-4 fold pools.
+    memo = {id(value): value for value in shared_documents}
     body = {
         "schema_version": TRACE_SCHEMA,
-        "request": deepcopy(dict(request)),
+        "request": deepcopy(dict(request), memo),
         "request_hash": request_hash,
-        "shared_inputs": deepcopy(dict(shared_inputs)),
+        "shared_inputs": deepcopy(dict(shared_inputs), memo),
         "shared_input_hash": shared_hash,
         "native_input_hash": native_hash,
-        "native_inputs": deepcopy(dict(native_inputs)),
+        "native_inputs": deepcopy(dict(native_inputs), memo),
         "native_inputs_hash": native_hash,
         "input_translation": _translation(shared_inputs, native_inputs, mappings),
         "stages": stages,
-        "resources": deepcopy(list(resources)),
+        "resources": deepcopy(list(resources), memo),
         "metadata": dict(metadata or {}),
     }
     body["trace_hash"] = content_hash(body)

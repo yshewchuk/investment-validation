@@ -15,6 +15,7 @@ Two layers, both on synthetic inputs:
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -30,7 +31,7 @@ from checks.phase4_frozen_bridge import (
     prepare_frozen_chooser,
     with_frozen_chooser,
 )
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, tag_nonfinite
 from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.scoring import application
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
@@ -50,7 +51,9 @@ from tools.capture_tier0_corpus import (
     _chooser_consumed_rows,
     _hydrate_trace,
     _package_resources,
+    _untag_nonfinite_shared,
     attach_strict_probe,
+    chooser_trace,
     frozen_chooser_declaration,
     make_pair,
 )
@@ -481,3 +484,163 @@ def test_phase5_replay_serves_the_frozen_chooser_from_the_staged_release(
                                                   staged)
     with pytest.raises(Exception):  # noqa: B017 -- any refusal: the bytes are gone
         block["executors"]["chooser_score"].predict(facts)
+
+
+# -- P6: chooser trace memory shape (fold pools shared, not copied per member) --------
+#
+# Tier-0 capture v11 (a45f14a, real capture) measured a DYN-SV chooser with 11
+# menu members climbing from 3.15G to 4.42G resident over its 7 members that
+# carry a frozen chooser (0.11-0.26G EACH), then dying past the 5.5G cap
+# inside `chooser_trace`'s own `body`/`content_hash(body)`/return -- no
+# further per-member line was printed. `_frozen_block` called plain
+# `untag_nonfinite` on each member's OWN captured `source_inputs.frozen`
+# block, which has no identity fast path: every member serialized its own
+# fresh copy of the SAME served Tier-4 fold pool, and every bare
+# `content_hash` on a structure nesting that pool (`_checkpoint_value`, the
+# per-member `legacy_checkpoint_hash`, `source_ref`, and the final chooser
+# `trace_hash`) re-normalized and re-serialized it from scratch, once per
+# occurrence. These tests pin the fix: `_untag_nonfinite_shared` reuses one
+# converted object per input identity (restoring what `_reconcile_shared_
+# trace_content` already unifies across a chosen chooser's members before
+# `chooser_trace` runs), and every hash the fix touches stays byte-identical
+# to a plain, no-``fragments`` recomputation over the exact same structure.
+
+
+def test_untag_nonfinite_shared_matches_the_plain_function_value_for_value():
+    from engine.v2.foundation.canonical import untag_nonfinite
+
+    cases = [
+        {"a": 1.0, "b": [1, 2, {"__nonfinite__": "inf"}]},
+        {"__nonfinite__": "-inf"},
+        {"__nonfinite__": "not-a-number"},  # malformed: ValueError, falls through
+        {"nested": {"pools": [{"__nonfinite__": "nan"}, 0.0, -0.0]}, "s": "x"},
+        [1, [2, [3, {"__nonfinite__": "inf"}]]],
+        "plain string", 3, True, None,
+    ]
+    for case in cases:
+        got, want = _untag_nonfinite_shared(case), untag_nonfinite(case)
+
+        def _same(a, b):
+            if isinstance(a, float) and isinstance(b, float) and a != a and b != b:
+                return True  # NaN != NaN
+            if isinstance(a, dict):
+                return isinstance(b, dict) and a.keys() == b.keys() and all(
+                    _same(a[k], b[k]) for k in a)
+            if isinstance(a, list):
+                return isinstance(b, list) and len(a) == len(b) and all(
+                    _same(x, y) for x, y in zip(a, b))
+            return a == b
+
+        assert _same(got, want), (case, got, want)
+
+
+def test_untag_nonfinite_shared_reuses_one_object_for_the_same_shared_input():
+    # Simulates what `_reconcile_shared_trace_content` guarantees for a real
+    # capture's `chosen` set: two members' OWN top-level "frozen" wrappers
+    # differ (never the same object -- `_frozen_block` builds a fresh
+    # `dict(...)` per call), but the served fold pool nested inside them is
+    # the identical object.
+    shared_pool = {"residuals": [1.0, 2.0, {"__nonfinite__": "inf"}]}
+    member_a = {"fold_pools": {"pred_abs_move": shared_pool}, "other": 1}
+    member_b = {"fold_pools": {"pred_abs_move": shared_pool}, "other": 2}
+
+    result_a = _untag_nonfinite_shared(member_a)
+    result_b = _untag_nonfinite_shared(member_b)
+
+    assert result_a is not result_b  # the member wrappers are NOT shared
+    assert result_a["fold_pools"]["pred_abs_move"] is result_b["fold_pools"]["pred_abs_move"]
+
+    # Negative control: equal CONTENT at a different identity is not merged
+    # (the cache keys on id(), never on equality).
+    lookalike = {"fold_pools": {"pred_abs_move": dict(shared_pool)}, "other": 3}
+    result_c = _untag_nonfinite_shared(lookalike)
+    assert result_c["fold_pools"]["pred_abs_move"] == result_a["fold_pools"]["pred_abs_move"]
+    assert result_c["fold_pools"]["pred_abs_move"] is not result_a["fold_pools"]["pred_abs_move"]
+
+
+def test_untag_nonfinite_shared_registers_converted_containers_for_fragment_hashing():
+    import tools.capture_tier0_corpus as capture
+
+    try:
+        shared_pool = {"residuals": [1.0, 2.0, 3.0]}
+        converted = _untag_nonfinite_shared({"fold_pools": {"x": shared_pool}})
+        pool = converted["fold_pools"]["x"]
+        assert capture._SHARED_TRACE_DOCUMENTS.shared(pool)
+
+        document_one = {"frozen": {"a": pool}}
+        document_two = {"frozen": {"a": pool, "b": pool}}
+        assert capture._SHARED_TRACE_DOCUMENTS(document_one) == content_hash(document_one)
+        renders_before = capture._SHARED_TRACE_DOCUMENTS.renders
+        assert capture._SHARED_TRACE_DOCUMENTS(document_two) == content_hash(document_two)
+        # `pool` was rendered once for document_one and reused for BOTH of
+        # document_two's occurrences: no additional render for `document_two`.
+        assert capture._SHARED_TRACE_DOCUMENTS.renders == renders_before
+    finally:
+        capture._cleanup_trace_spill()
+
+
+def _shared_chooser_member(source, tmp_path, index, *, path, digest):
+    """A synthetic TWIN-P menu row whose ``frozen`` block is the SAME object
+    as every other member built this way (as ``_reconcile_shared_trace_
+    content`` guarantees across a real chooser's ``chosen`` members)."""
+    candidate = _full_strict_candidate(
+        fixture_id=f"twin{index}", ticker="AAA", strategy="TWIN-P",
+        driver_vector={"x": 2.0 + index}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest)
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    for binding in checkpoint["value"]["model_bindings"]:
+        binding["decision_clock"] = CLOCK
+        binding["strategy"] = "TWIN-P"
+    checkpoint["value"]["frozen"] = source["frozen"]
+    checkpoint["content_hash"] = content_hash(checkpoint["value"])
+    candidate["record"] = {"strategy": "TWIN-P", "ticker": "AAA",
+                           "event_date": "2026-09-17", "session": "AMC",
+                           "strike_offset": None}
+    return candidate
+
+
+def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash_stays_byte_identical(
+        chooser_root, tmp_path, monkeypatch):  # noqa: F811
+    _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    path, digest = _artifact(tmp_path)
+    members = [_shared_chooser_member(source, tmp_path, i, path=path, digest=digest)
+              for i in range(2)]
+    candidate = {
+        "fixture_id": "dyn-shared", "kind": "dyn_sv_choice", "covers": [],
+        "request": {"kind": "dyn_sv_resolution",
+                    "entry_point": "engine.score.dynamic_short_vol",
+                    "menu": ["TWIN-P"], "frame": "forward",
+                    "frame_rows": [{"request": m["request"], "record": m["record"]}
+                                   for m in members]},
+        "record": {}, "duration": 0.0, "relations": {},
+        "members": [{**m, "kind": "score_result"} for m in members],
+    }
+
+    trace = chooser_trace(candidate, "snapshot-1", tmp_path / "release")
+
+    pools = [member["input_trace"]["native_inputs"]["chooser"][FROZEN_CHOOSER_FIELD]["fold_pools"]
+            for member in trace["members"]]
+    assert len(pools) == 2
+    assert set(pools[0]) == {"pred_abs_move", "pred_im_t1_d14", "pred_runup_abs_move_d14"}
+    # Memory shape: `frozen_chooser_declaration` still wraps each output in
+    # its own small `dict(...)` per member (cheap: a handful of pointers),
+    # but the actual served predictions/residuals arrays inside it -- what
+    # a45f14a measured growing 0.11-0.26G per member -- must be the ONE
+    # object every member shares, not an independent copy each. This is
+    # what `_untag_nonfinite_shared` restores.
+    for output in pools[0]:
+        for field in ("predictions", "residuals"):
+            first, second = pools[0][output][field], pools[1][output][field]
+            assert first is second, (output, field)
+            assert first == second and len(first) > 0
+
+    # The hash the fix touches must stay byte-identical to a plain, no-
+    # ``fragments`` recomputation over the exact same body.
+    body = {k: v for k, v in trace.items() if k != "trace_hash"}
+    assert trace["trace_hash"] == content_hash(body)
+    # Strict-JSON-safe (contracts §2.1): every non-finite float converted by
+    # `_untag_nonfinite_shared` must still be writable as a real ``__non
+    # finite__`` tag, never a bare NaN/Infinity `write()` would reject.
+    tagged = tag_nonfinite(trace)
+    assert json.loads(json.dumps(tagged, allow_nan=False)) == tagged

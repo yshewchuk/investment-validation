@@ -96,7 +96,7 @@ from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
 from engine.v2.diagnosis import content_hash  # noqa: E402
 from engine.v2.foundation import to_document  # noqa: E402
-from engine.v2.foundation.canonical import tag_nonfinite  # noqa: E402
+from engine.v2.foundation.canonical import NONFINITE_KEY, tag_nonfinite  # noqa: E402
 from engine.v2.models import (  # noqa: E402
     FrozenInference,
     InferenceRequest,
@@ -297,7 +297,15 @@ def _checkpoint_value(candidate: Mapping[str, Any], name: str) -> Mapping[str, A
     if not isinstance(row, Mapping) or not isinstance(row.get("value"), Mapping):
         raise StrictTraceCaptureError(f"legacy checkpoint missing {name}")
     value = row["value"]
-    if row.get("content_hash") != content_hash(value):
+    # `_SHARED_TRACE_DOCUMENTS` (not bare `content_hash`): a checkpoint's
+    # "source_inputs" value nests the served Tier-4 fold pools every menu
+    # member of the SAME chooser shares by identity (R4-18/R4-19); every
+    # chooser member calls this at least once, so a bare `content_hash` here
+    # re-normalizes and re-serializes that shared content from scratch, once
+    # per member, instead of reusing the canonical text `engine.score`
+    # already rendered once for it. Byte-identical either way (`fragments`
+    # only saves work -- see `canonical_json`'s docstring).
+    if row.get("content_hash") != _SHARED_TRACE_DOCUMENTS(value):
         raise StrictTraceCaptureError(f"legacy checkpoint hash mismatch: {name}")
     return value
 
@@ -581,10 +589,8 @@ def _finite_or_none(raw: Any) -> float | None:
 
 
 def _frozen_block(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    from engine.v2.foundation.canonical import untag_nonfinite
-
     source = _checkpoint_value(candidate, "source_inputs")
-    return untag_nonfinite(dict(source.get("frozen") or {}))
+    return _untag_nonfinite_shared(dict(source.get("frozen") or {}))
 
 
 def _chooser_consumed_rows(candidate: Mapping[str, Any]) -> dict[str, float | None]:
@@ -661,7 +667,14 @@ def native_inputs_from_capture(
         blocks = _captured_blocks(candidate, request, frozen_chooser)
     request_doc = to_document(request)
     shared_inputs = {"request": request_doc, "native_inputs": blocks}
-    source_ref = content_hash(shared_inputs)
+    # `fragments=`: a chooser member's ``blocks["chooser"]`` nests the frozen
+    # chooser's fold pools (:func:`_frozen_block`/`_untag_nonfinite_shared`),
+    # shared by identity across every menu member the fold served. The
+    # top-level ``shared_inputs`` dict has no "frozen" key itself, so
+    # ``_SHARED_TRACE_DOCUMENTS``'s own shallow heuristic would take the
+    # plain path here; passing ``fragments=`` directly still finds and
+    # reuses the nested shared node. Byte-identical either way.
+    source_ref = content_hash(shared_inputs, fragments=_SHARED_TRACE_DOCUMENTS)
     declarations = tuple(
         receipt(stage, {"source_ref": source_ref}, {"execution": "native-runtime"})
         for stage in (
@@ -858,6 +871,7 @@ def package_strict_trace(
         observations=observations,
         resources=list(resources or ()),
         metadata=metadata,
+        shared_documents=_SHARED_TRACE_DOCUMENTS.held_values(),
     )
     return trace, native
 
@@ -1566,6 +1580,10 @@ class _SharedTraceDocuments:
             self.shared(value) or (isinstance(value, dict) and "frozen" in value))
         return content_hash(value, fragments=self if scoped else None)
 
+    def held_values(self) -> tuple[Any, ...]:
+        """Every object currently registered as shared (by identity)."""
+        return tuple(self._held.values())
+
     def reset(self) -> None:
         self._held.clear()
         self._texts.clear()
@@ -1573,6 +1591,68 @@ class _SharedTraceDocuments:
 
 
 _SHARED_TRACE_DOCUMENTS = _SharedTraceDocuments()
+
+
+#: ``untag_nonfinite`` conversions, memoized by the identity of the dict/list
+#: container converted. Keyed on ``id()`` with the original object held
+#: alongside it (so the id cannot be reused by an unrelated object while the
+#: entry lives), the same safety argument ``_SharedTraceDocuments._held``
+#: relies on.
+_UNTAG_SHARED_CACHE: dict[int, tuple[Any, Any]] = {}
+
+
+def _untag_nonfinite_shared(value: Any) -> Any:
+    """``engine.v2.foundation.canonical.untag_nonfinite``, but reusing one
+    converted copy per input container instead of rebuilding on every call.
+
+    A ``dyn_sv_choice`` pair traces every ranked menu member from ITS OWN
+    captured checkpoint (:func:`_frozen_block`, called per member), but the
+    served Tier-4 fold pools nested inside those checkpoints (R4-18/R4-19)
+    are the SAME object across every member the fold served -- registered
+    shared during scoring, or unified by content when a candidate is
+    hydrated (``_reconcile_shared_trace_content``, above), before any
+    chooser trace runs. Plain ``untag_nonfinite`` has no identity fast path:
+    it unconditionally rebuilds every dict/list into a fresh object, so
+    calling it once per member on a shared input silently re-materializes
+    one independent copy of that pool PER MEMBER even though every input is
+    the identical object -- exactly the growth measured across a chooser's
+    non-trivial members (a45f14a's per-member RSS log). Converted VALUES are
+    unchanged; this only changes which Python object holds them. Containers
+    that were never shared (a fresh top-level wrapper dict, most of a
+    candidate's own declarations) get a fresh ``id()`` every call and simply
+    miss the cache, at no extra cost over the plain function.
+
+    Every freshly built container is also registered with
+    ``_SHARED_TRACE_DOCUMENTS`` (harmless if it is never hashed with
+    ``fragments=``: an unused registration costs one dict entry), so a later
+    ``content_hash(..., fragments=_SHARED_TRACE_DOCUMENTS)`` over a structure
+    embedding it more than once (:func:`chooser_trace`'s ``body``) renders
+    its canonical text once, not once per occurrence.
+    """
+    if isinstance(value, dict):
+        key = id(value)
+        cached = _UNTAG_SHARED_CACHE.get(key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
+        if set(value) == {NONFINITE_KEY} and isinstance(value[NONFINITE_KEY], str):
+            try:
+                return float(value[NONFINITE_KEY])
+            except ValueError:
+                pass
+        result = {k: _untag_nonfinite_shared(v) for k, v in value.items()}
+        _UNTAG_SHARED_CACHE[key] = (value, result)
+        _SHARED_TRACE_DOCUMENTS.register_shared((result,))
+        return result
+    if isinstance(value, list):
+        key = id(value)
+        cached = _UNTAG_SHARED_CACHE.get(key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
+        result = [_untag_nonfinite_shared(v) for v in value]
+        _UNTAG_SHARED_CACHE[key] = (value, result)
+        _SHARED_TRACE_DOCUMENTS.register_shared((result,))
+        return result
+    return value
 
 
 class _SpillPickler(pickle.Pickler):
@@ -1628,6 +1708,7 @@ def _cleanup_trace_spill() -> None:
         shutil.rmtree(_TRACE_SPILL_DIR, ignore_errors=True)
         _TRACE_SPILL_DIR = None
     _SHARED_TRACE_DOCUMENTS.reset()
+    _UNTAG_SHARED_CACHE.clear()
 
 
 # `engine.score.Phase4TraceCollector` shares two families of content BY
@@ -2417,7 +2498,13 @@ def strict_trace_one(
         resources=resources,
         metadata={
             "capture_mode": "bounded-strict-probe",
-            "legacy_checkpoint_hash": content_hash(candidate["legacy_trace"]),
+            # `fragments=`: `candidate["legacy_trace"]` nests the same shared
+            # fold pools/states `_checkpoint_value` above already hashes with
+            # `_SHARED_TRACE_DOCUMENTS`; hashing the full trace bare here
+            # would re-normalize and re-serialize that content from scratch
+            # once more, per member. Byte-identical either way.
+            "legacy_checkpoint_hash": content_hash(
+                candidate["legacy_trace"], fragments=_SHARED_TRACE_DOCUMENTS),
             "frozen_inference": package.trace_declaration if package else None,
         },
         frozen_runtime=runtime,
@@ -2451,6 +2538,7 @@ def chooser_trace(
     if not isinstance(members, list) or len(members) != len(frame_rows):
         raise StrictTraceCaptureError(
             "dyn_sv_choice candidate does not carry every ranked member's checkpoint")
+    print(f"[corpus] chooser {candidate.get('fixture_id')}: {len(members)} members, rss {_rss_gb():.2f}G", flush=True)
     traced = []
     for index, (row, member) in enumerate(zip(frame_rows, members, strict=True)):
         if content_hash(member.get("request")) != content_hash(row.get("request")):
@@ -2459,6 +2547,7 @@ def chooser_trace(
             trace, native = strict_trace_one(member, snapshot, release_root)
         except (StrictTraceCaptureError, TypeError, ValueError) as exc:
             raise StrictTraceCaptureError(f"member {index}: {exc}") from exc
+        print(f"[corpus]   member {index}: strategy {member.get('request', {}).get('strategy')} rss {_rss_gb():.2f}G resources {len(trace.get('resources') or ())} bindings {len(((trace.get('metadata') or {}).get('frozen_inference') or {}).get('binding_ids') or ())}", flush=True)
         traced.append({
             "member_index": index,
             "request_hash": content_hash(row["request"]),
@@ -2472,7 +2561,18 @@ def chooser_trace(
         "shared_input_hash": content_hash(
             [item["legacy_input_hash"] for item in traced]),
     }
-    return {**body, "trace_hash": content_hash(body)}
+    # `fragments=`: every member with a frozen chooser embeds that chooser's
+    # fold pools inline (`_captured_blocks`'s "chooser" block); members the
+    # SAME fold served share that pool by identity (`_untag_nonfinite_shared`
+    # above). A bare `content_hash` here re-normalizes and re-serializes
+    # every member's full input_trace independently in one pass over the
+    # whole body -- measured as the single largest jump in a chooser trace's
+    # RSS (per-member log stopped at 4.42G; the process was killed climbing
+    # past 5.5G with no further per-member line printed, i.e. inside this
+    # call). `fragments=` renders each shared node's canonical text once and
+    # reuses it for every later occurrence in the SAME call; the hash is
+    # byte-identical either way (`canonical_json`'s own guarantee).
+    return {**body, "trace_hash": content_hash(body, fragments=_SHARED_TRACE_DOCUMENTS)}
 
 
 def attach_strict_probe(
