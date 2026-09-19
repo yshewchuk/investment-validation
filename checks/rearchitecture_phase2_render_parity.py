@@ -268,14 +268,14 @@ def run_bounded(argv, *, max_rss_gb, cwd, env, poll_s=2, timeout=1800):
     exit 137 -- never a hang: the watchdog polls every ``poll_s`` seconds and
     kills the tree itself, so this call always returns within ``timeout``.
     """
-    command = ["/usr/bin/python3", str(ROOT / "tools" / "bounded_run.py"),
+    command = [sys.executable, str(ROOT / "tools" / "bounded_run.py"),
               "--max-rss-gb", str(max_rss_gb), "--poll-s", str(poll_s), "--", *argv]
     return subprocess.run(command, cwd=str(cwd), env=env, capture_output=True, text=True,
                           timeout=timeout)
 
 
 def _run_worker_subprocess(mode, job_file, out_dir, *, max_rss_gb, env, repo_root):
-    argv = ["/usr/bin/python3", str(repo_root / "checks" / "rearchitecture_phase2_render_parity.py"),
+    argv = [sys.executable, str(repo_root / "checks" / "rearchitecture_phase2_render_parity.py"),
            "--worker", mode, str(job_file), str(out_dir)]
     proc = run_bounded(argv, max_rss_gb=max_rss_gb, cwd=repo_root, env=env)
     result_path = Path(out_dir) / "result.json"
