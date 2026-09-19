@@ -49,7 +49,7 @@ def _require_lineage(lineage: Lineage) -> None:
                          "(data dependencies and/or upstream states)")
 
 
-def _number(row: Mapping[str, Any], name: str) -> float | None:
+def _finite_field(row: Mapping[str, Any], name: str) -> float | None:
     try:
         value = float(row[name])
     except (KeyError, TypeError, ValueError):
@@ -80,7 +80,7 @@ def build_driver_residual_pool_artifact(
     for row in rows or ():
         if not isinstance(row, Mapping):
             continue
-        prediction, residual = _number(row, "prediction"), _number(row, "residual")
+        prediction, residual = _finite_field(row, "prediction"), _finite_field(row, "residual")
         if prediction is not None and residual is not None:
             predictions.append(prediction)
             residuals.append(residual)
@@ -145,7 +145,7 @@ def _index(rows: Iterable[Mapping[str, Any]], column: str) -> dict[tuple[str, st
     cartesian semantics, exactly as ``pandas.merge`` would pair them)."""
     index: dict[tuple[str, str], list[float]] = {}
     for row in rows:
-        value = _number(row, column)
+        value = _finite_field(row, column)
         if value is None:
             continue
         index.setdefault((str(row["ticker"]), _day(row["event_date"])), []).append(value)
@@ -161,8 +161,8 @@ def _paired_rows(forecasts, outcomes, crush, cutoff) -> list[tuple]:
         key = (str(forecast["ticker"]), _day(forecast["event_date"]))
         if bound is not None and key[1] >= bound:
             continue
-        pred_move = _number(forecast, "pred_abs_move")
-        pred_crush = _number(forecast, "pred_iv_crush_30")
+        pred_move = _finite_field(forecast, "pred_abs_move")
+        pred_crush = _finite_field(forecast, "pred_iv_crush_30")
         if pred_move is None or pred_crush is None:
             continue
         for move in realized_move.get(key, ()):
