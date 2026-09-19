@@ -1479,3 +1479,114 @@ def _model_native(declared):
         requested_decision_at="2026-09-16", snapshot_id="snap-1", mode="replay",
         fill_model={"alpha": 0.5})
     return application.score_one(request, build_native_score_inputs(bundle))
+
+
+# ---------------------------------------------------------------------------
+# Tier-0 vetting gaps 001/012/003 (2026-09-19): rows that stop before, at, or
+# inside pricing. Legacy now records the resolved context and HOW FAR the
+# chain lookup got (``source_inputs.quote_status``); the strict probe accepts
+# an explicitly empty quote domain, and native reaches its own refusal.
+# ---------------------------------------------------------------------------
+
+
+def _stopped_candidate(tmp_path, *, quote_status, quote_domain=(), spot=None,
+                       fixture_id="case-stopped"):
+    path, digest = _artifact(tmp_path)
+    candidate = _full_strict_candidate(
+        fixture_id=fixture_id, ticker="AAA",
+        driver_vector={"x": 2.0, "n_prior": 5.0},
+        gate_vector={"x": 2.0, "n_prior": 5.0}, path=path, digest=digest,
+    )
+    row = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    value = row["value"]
+    value["context"] = {
+        "ticker": "AAA", "strategy": "STR-THRU", "event_date": "2026-09-17",
+        "session": "AMC", "entry_date": "2026-09-16", "exit_date": "2026-09-18",
+        "as_of": "2026-09-16", "quote_date": "2026-09-16",
+    }
+    if spot is not None:
+        value["context"]["spot"] = spot
+    value["quote_domain"] = list(quote_domain)
+    if quote_status is None:
+        value.pop("quote_status", None)
+    else:
+        value["quote_status"] = quote_status
+    row["content_hash"] = content_hash(value)
+    return candidate
+
+
+def _probe_native(candidate, tmp_path, monkeypatch):
+    """Run the real probe; return (attached, gaps, native record or None)."""
+    import tools.capture_tier0_corpus as capture
+
+    seen = {}
+    real = capture.package_strict_trace
+
+    def recording(request, *args, **kwargs):
+        trace, native = real(request, *args, **kwargs)
+        seen[request.event_id] = native
+        return trace, native
+
+    monkeypatch.setattr(capture, "package_strict_trace", recording)
+    path, digest = _artifact(tmp_path, "good.joblib")
+    good = _full_strict_candidate(
+        fixture_id="case-good", ticker="BBB",
+        driver_vector={"x": 2.0}, gate_vector={"x": 9.0, "n_prior": 5.0},
+        path=path, digest=digest,
+    )
+    attached, gaps = attach_strict_probe([good, candidate], "snapshot-1",
+                                         tmp_path / "release")
+    return attached, gaps, seen.get(candidate["event_id"])
+
+
+@pytest.mark.parametrize("quote_status", ["empty", "not_reached"])
+def test_probe_traces_a_row_with_an_explicitly_empty_quote_domain(
+        tmp_path, monkeypatch, quote_status):
+    """001 (NO_CHAIN) and 012 (NO_FORECAST before pricing): no quotes and no
+    spot, recorded on purpose. The probe traces the row and native refuses
+    with its own code; parity, not the probe, compares it to legacy's."""
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    candidate = _stopped_candidate(tmp_path, quote_status=quote_status)
+
+    attached, gaps, native = _probe_native(candidate, tmp_path, monkeypatch)
+
+    assert "case-stopped" in attached, gaps
+    assert candidate["input_trace"]["native_inputs"]["context"]["quotes"] == {}
+    assert native is not None and native.reason_codes
+
+
+def test_probe_traces_a_row_whose_pricer_raised_without_a_spot(tmp_path, monkeypatch):
+    """003 (COARSE_LADDER): the quotes are recorded, pricing raised, so there
+    is no spot; the resolved exit_date is now in the context."""
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    candidate = _stopped_candidate(tmp_path, quote_status="recorded", quote_domain=[
+        {"right": "C", "strike": 100.0, "expiry": "2026-09-18", "bid": 1.0, "ask": 2.0},
+    ])
+
+    attached, gaps, native = _probe_native(candidate, tmp_path, monkeypatch)
+
+    assert "case-stopped" in attached, gaps
+    assert native.reason_codes
+
+
+_ONE_QUOTE = [{"right": "C", "strike": 100.0, "expiry": "2026-09-18",
+               "bid": 1.0, "ask": 2.0}]
+
+
+@pytest.mark.parametrize(("quote_status", "quote_domain", "spot", "message"), [
+    # Planted defect: an empty domain that legacy never said was empty is a
+    # capture that never recorded quotes, not an empty lookup.
+    (None, [], 100.0, "quote_domain is empty"),
+    ("empty", _ONE_QUOTE, None, "is not empty"),
+    ("recorded", [], None, "quote_domain is empty"),
+    # A priced row must still carry its spot.
+    ("priced", _ONE_QUOTE, None, r"missing \['spot'\]"),
+    ("bogus", [], None, "unknown quote_status"),
+])
+def test_probe_still_refuses_unrecorded_or_contradictory_quote_domains(
+        tmp_path, quote_status, quote_domain, spot, message):
+    candidate = _stopped_candidate(tmp_path, quote_status=quote_status,
+                                   quote_domain=quote_domain, spot=spot)
+    request = canonical_v2_request(candidate, "snapshot-1")
+    with pytest.raises(StrictTraceCaptureError, match=message):
+        native_inputs_from_capture(candidate, request)

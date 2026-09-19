@@ -289,7 +289,23 @@ def _checkpoint_value_optional(candidate: Mapping[str, Any], name: str) -> Mappi
     return _checkpoint_value(candidate, name)
 
 
-def _quote_map(rows: Any) -> dict[str, dict[str, float]]:
+#: ``source_inputs.quote_status`` values under which legacy recorded NO quote
+#: domain on purpose (``engine.score.Phase4TraceCollector.QUOTE_STATUSES``).
+_EMPTY_QUOTE_STATUSES = frozenset({"empty", "not_reached"})
+
+
+def _quote_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, float]]:
+    """The native quote map. An empty domain is accepted only when legacy
+    recorded WHY it is empty (lookup found no chain, or the row never reached
+    pricing); an empty domain with no recorded status was never captured."""
+    if quote_status in _EMPTY_QUOTE_STATUSES:
+        if rows != []:
+            raise StrictTraceCaptureError(
+                f"quote_status {quote_status} but quote_domain is not empty"
+            )
+        return {}
+    if quote_status not in (None, "recorded", "priced"):
+        raise StrictTraceCaptureError(f"unknown quote_status {quote_status!r}")
     if not isinstance(rows, list) or not rows:
         raise StrictTraceCaptureError("source_inputs.quote_domain is empty")
     quotes: dict[str, dict[str, float]] = {}
@@ -445,11 +461,16 @@ def native_inputs_from_capture(
         if key not in context and source_features.get(key) is not None:
             context[key] = source_features[key]
     context["strategy"] = request.strategy_version
-    context["quotes"] = _quote_map(source.get("quote_domain"))
-    missing_context = sorted(
-        key for key in ("ticker", "event_date", "entry_date", "exit_date", "spot")
-        if context.get(key) is None
-    )
+    quote_status = source.get("quote_status")
+    context["quotes"] = _quote_map(source.get("quote_domain"), quote_status)
+    # A spot exists only once legacy priced the structure. A row whose chain
+    # lookup came back empty, that never reached pricing, or whose pricer
+    # raised has none, and native refuses it with its own code; a capture
+    # that predates quote_status keeps the old requirement.
+    required = ["ticker", "event_date", "entry_date", "exit_date"]
+    if quote_status in (None, "priced"):
+        required.append("spot")
+    missing_context = sorted(key for key in required if context.get(key) is None)
     if missing_context:
         raise StrictTraceCaptureError(
             f"source_inputs context missing {missing_context}"
