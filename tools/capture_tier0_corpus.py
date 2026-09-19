@@ -90,6 +90,7 @@ from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
 from engine import score as score_mod  # noqa: E402
 from engine.data import store  # noqa: E402
+from engine.features import DAILY_STATE_COLUMNS  # noqa: E402
 from engine.fills import MID  # noqa: E402
 from engine.structures import STRUCTURES  # noqa: E402
 from engine.v2.contracts import ScoreRequest as V2ScoreRequest  # noqa: E402
@@ -419,6 +420,26 @@ _LEGACY_ROLE_ALIASES = {
     "forecast_sizing": "size",
 }
 
+#: ``engine.features.daily_state_frame`` creates EVERY one of these columns
+#: for every row up front (``out[column] = np.nan``) and fills them where
+#: coverage exists, so a captured ``None`` here is a genuinely-unquoted value
+#: (legacy ``_score_model`` scores it as raw NaN; the frozen models train on
+#: NaN), not a structurally absent column like ``has_implied_quote``, whose
+#: ``None`` means the whole market-context block never merged.
+_ALWAYS_PRESENT_DAILY_STATE_FEATURES = frozenset(DAILY_STATE_COLUMNS)
+
+
+def _same_feature_value(a: float, b: float) -> bool:
+    """``a == b``, with two NaN readings counting as the same value."""
+    if math.isnan(a) and math.isnan(b):
+        return True
+    return a == b
+
+
+def _dicts_match_nan_safe(a: dict, b: dict) -> bool:
+    """Keywise :func:`_same_feature_value` comparison of two feature dicts."""
+    return set(a) == set(b) and all(_same_feature_value(a[k], b[k]) for k in a)
+
 
 def _coerce_feature_value(role: str, name: str, raw: Any) -> float:
     if isinstance(raw, Mapping):
@@ -438,6 +459,17 @@ def _coerce_feature_value(role: str, name: str, raw: Any) -> float:
         raise StrictTraceCaptureError(
             f"feature {role}.{name} is missing or nonnumeric"
         )
+    if raw is None and name in _ALWAYS_PRESENT_DAILY_STATE_FEATURES:
+        # engine.features.daily_state_frame unconditionally creates every
+        # DAILY_STATE_COLUMNS column for every row, so the column itself is
+        # never structurally absent here -- only a per-row value can be
+        # genuinely unquoted (e.g. no options market quoted `im` that day).
+        # This capture path is not (yet) tagged the way the sibling
+        # forecast_sizing/size path above is (that tagging is per-role, done
+        # at capture time in engine/score.py's _size_feature_capture_value,
+        # not universal), so a bare None reaching here is legacy's own real
+        # NaN, not a structurally-absent column like has_implied_quote.
+        return float("nan")
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
@@ -460,7 +492,7 @@ def _merged_model_inputs(candidate: Mapping[str, Any]) -> dict[str, float]:
             raise StrictTraceCaptureError(f"feature vector {role} is malformed")
         for name, raw in vector.items():
             value = _coerce_feature_value(str(role), str(name), raw)
-            if name in merged and merged[name] != value:
+            if name in merged and not _same_feature_value(merged[name], value):
                 raise StrictTraceCaptureError(
                     f"feature {name} differs across model roles"
                 )
@@ -488,7 +520,7 @@ def _role_feature_vectors(candidate: Mapping[str, Any]) -> dict[str, dict[str, f
             str(name): _coerce_feature_value(role, str(name), raw)
             for name, raw in raw_vector.items()
         }
-        if role in vectors and vectors[role] != coerced:
+        if role in vectors and not _dicts_match_nan_safe(vectors[role], coerced):
             raise StrictTraceCaptureError(
                 f"feature role {role} captured twice with different values"
             )
