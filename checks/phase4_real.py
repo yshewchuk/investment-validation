@@ -24,6 +24,7 @@ from checks.phase4_checkpoints import CheckpointError, load_bundle  # noqa: E402
 from checks.phase4_frozen_bridge import prepare_frozen_replay  # noqa: E402
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
+from engine.analogs import AnalogMatcher  # noqa: E402
 from engine.fills import MID  # noqa: E402
 from engine.models.registry import artifact_sha256, load_registry  # noqa: E402
 from engine.pnl_sim import ResidualPool, expected_pnl  # noqa: E402
@@ -58,6 +59,7 @@ from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash, score_id  # noqa: E402
+from engine.v2.scoring.native_analog import legacy_bucket_bootstrap_seed  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
     StageReceipt,
@@ -199,14 +201,143 @@ def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
     )
 
 
-def _numerical_independence_control() -> dict[str, bool]:
-    """Poison supplied stage outputs so preservation cannot certify parity."""
+#: R4-5 analog control. A synthetic legacy trades frame in the shape
+#: ``engine.analogs.AnalogMatcher`` consumes. Three rows match the query
+#: exactly, three more only after ``moneyness_band`` is widened (one with no
+#: realized return), one belongs to another strategy and one closes after the
+#: decision; the last two must never reach either side's population.
+_ANALOG_CONTROL_STRATEGY = "STR-THRU"
+_ANALOG_CONTROL_ALPHA = 0.5
+_ANALOG_CONTROL_AS_OF = "2026-09-16"
+_ANALOG_CONTROL_SNAPSHOT = "snapshot-tier0"
+_ANALOG_CONTROL_REQUEST_KEY = "phase4-event"
+_ANALOG_CONTROL_DIMENSIONS = (
+    "mcap_bucket", "moneyness_band", "dte_band", "implied_tercile",
+)
+_ANALOG_CONTROL_WIDENING = ("moneyness_band", "dte_band", "implied_tercile")
+_ANALOG_CONTROL_QUERY = {
+    "mcap_bucket": "1-10B", "moneyness_band": "ATM",
+    "dte_band": "4-10", "implied_tercile": "mid",
+}
+_ANALOG_CONTROL_MIN_ANALOGS = 3
+_ANALOG_CONTROL_BOOTSTRAP = 64
+#: Every analog number a record carries: the two simulation-dimension analog
+#: outputs plus the three ``_ANALOG_FIELDS``.
+_ANALOG_VIEW_FIELDS = (
+    "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
+)
+
+
+def _analog_control_frame() -> pd.DataFrame:
+    common = {
+        "strategy": _ANALOG_CONTROL_STRATEGY, "fill_alpha": _ANALOG_CONTROL_ALPHA,
+        "mcap_bucket": "1-10B", "dte_band": "4-10", "implied_tercile": "mid",
+    }
+    rows = [
+        ("exact-a", "ATM", 0.10, "2026-08-03"),
+        ("exact-b", "ATM", 0.20, "2026-08-04"),
+        ("exact-c", "ATM", -0.05, "2026-08-05"),
+        ("wide-a", "2-5%", -0.10, "2026-08-06"),
+        ("wide-b", "2-5%", 0.30, "2026-08-07"),
+        ("wide-missing", "2-5%", float("nan"), "2026-08-10"),
+        ("future", "ATM", 9.99, "2026-10-01"),
+    ]
+    records = [
+        common | {"event_id": event_id, "moneyness_band": band, "ret": ret,
+                  "exit_date": exit_date}
+        for event_id, band, ret, exit_date in rows
+    ]
+    records.append(common | {
+        "event_id": "other-strategy", "strategy": "STR-RUNUP",
+        "moneyness_band": "ATM", "ret": 0.90, "exit_date": "2026-08-03",
+    })
+    frame = pd.DataFrame(records)
+    frame["exit_date"] = pd.to_datetime(frame["exit_date"])
+    return frame
+
+
+def _legacy_analog_expected() -> dict[str, Any]:
+    """The legacy side: ``AnalogMatcher.match`` on the synthetic frame."""
+    result = AnalogMatcher(
+        _analog_control_frame(), snapshot=_ANALOG_CONTROL_SNAPSHOT,
+    ).match(
+        _ANALOG_CONTROL_STRATEGY, dict(_ANALOG_CONTROL_QUERY),
+        alpha=_ANALOG_CONTROL_ALPHA, as_of=_ANALOG_CONTROL_AS_OF,
+        min_analogs=_ANALOG_CONTROL_MIN_ANALOGS,
+        bootstrap=_ANALOG_CONTROL_BOOTSTRAP,
+        request_key=_ANALOG_CONTROL_REQUEST_KEY,
+    )
+    return {
+        "exp_pnl_analog": result.mean, "win_analog": result.win_rate,
+        "ci_low": result.ci_low, "ci_high": result.ci_high,
+        "n_analogs": result.n,
+    }
+
+
+def _analog_control_source() -> dict[str, Any]:
+    """Answer-free ``SourceBundle`` analog fields for the same population.
+
+    Source rows are the frame restricted to the requested strategy and fill
+    and closed strictly before the decision, the boundary
+    ``LegacyBucketRecipe`` documents. No legacy output is read: the bootstrap
+    seed is derived from the request identity, as legacy derives it.
+    """
+    frame = _analog_control_frame()
+    causal = frame[
+        (frame["strategy"] == _ANALOG_CONTROL_STRATEGY)
+        & (frame["fill_alpha"] == _ANALOG_CONTROL_ALPHA)
+        & (frame["exit_date"] < pd.Timestamp(_ANALOG_CONTROL_AS_OF))
+    ]
+    rows = tuple(
+        {
+            "row_id": row["event_id"],
+            **{name: row[name] for name in _ANALOG_CONTROL_DIMENSIONS},
+            "realized_return": None if pd.isna(row["ret"]) else float(row["ret"]),
+        }
+        for row in causal.to_dict("records")
+    )
+    recipe = {
+        "bucket_dimensions": _ANALOG_CONTROL_DIMENSIONS,
+        "widening_order": _ANALOG_CONTROL_WIDENING,
+        "min_analogs": _ANALOG_CONTROL_MIN_ANALOGS,
+        "alpha": _ANALOG_CONTROL_ALPHA,
+        "bootstrap_draws": _ANALOG_CONTROL_BOOTSTRAP,
+        "bootstrap_seed": legacy_bucket_bootstrap_seed(
+            snapshot=_ANALOG_CONTROL_SNAPSHOT,
+            strategy=_ANALOG_CONTROL_STRATEGY,
+            alpha=_ANALOG_CONTROL_ALPHA,
+            buckets=_ANALOG_CONTROL_QUERY,
+            request_key=_ANALOG_CONTROL_REQUEST_KEY,
+        ),
+        "ci_quantiles": (0.05, 0.95),
+    }
+    return {
+        "analog_recipe": recipe,
+        "analog_source_rows": rows,
+        "analog_query": dict(_ANALOG_CONTROL_QUERY),
+    }
+
+
+def _analog_view(scored) -> dict[str, Any]:
+    resolved = dict(scored.resolved_request)
+    return {name: resolved.get(name) for name in _ANALOG_VIEW_FIELDS}
+
+
+def _analog_agrees(expected: Mapping[str, Any], scored) -> bool:
+    """Compare under the exact policy the saved-release parity uses."""
+    return _compare_dimension(
+        dict(expected), _analog_view(scored), "analogs",
+    )["agree"]
+
+
+def _numerical_independence_source() -> SourceBundle:
+    """The answer-free source bundle every independence assertion scores."""
     expiry = "2026-09-18"
     quotes = {
         ("C", 100.0, expiry): {"bid": 1.0, "ask": 3.0},
         ("P", 100.0, expiry): {"bid": 1.0, "ask": 3.0},
     }
-    source = SourceBundle(
+    return SourceBundle(
         source_ref="phase4-independent-numerical-input",
         context={
             "ticker": "PHASE4",
@@ -259,24 +390,28 @@ def _numerical_independence_control() -> dict[str, bool]:
              "exit_date": "2026-09-10"},
         ],
         model_residual_rows=[{"prediction": 7.0, "residual": 0.0}],
-        # No analog recipe: this control asserts independent recomputation
-        # of forecast/simulation/gate/model only (see the assertions below --
-        # none of them reads `analogs`, `ci_low`, `ci_high` or `n_analogs`).
-        # Its ticker ("PHASE4") and event dates are synthetic fixture values
-        # with no real prior-event bucket population behind them, so
-        # satisfying a non-empty analog_recipe here would mean fabricating
-        # analog_source_rows -- exactly what `_analog_block`'s own docstring
-        # in source_inputs.py forbids. A non-empty recipe with no rows is a
-        # genuine defect (MISSING_ANALOG_INPUT); declaring no recipe at all
-        # is the honest not-applicable path for a control that was never
-        # testing analogs.
-        analog_recipe={},
+        # Analog layer (R4-5): the legacy bucket recipe over a synthetic
+        # prior-trade population, declared in the same answer-free way as the
+        # payoff rows above. The legacy side of the comparison is
+        # engine.analogs.AnalogMatcher run on the SAME synthetic frame
+        # (_legacy_analog_expected); nothing it returns reaches this bundle.
+        **_analog_control_source(),
         gate_recipe={
             "model": {"intercept": 0.0, "coefficients": {"exp_pnl_sim": 1.0}},
             "threshold": 0.0,
             "recipe_id": "phase4-gate-v1",
         },
     )
+
+
+def _numerical_independence_control() -> dict[str, Any]:
+    """Poison supplied stage outputs so preservation cannot certify parity.
+
+    Analog stage (R4-5): the native record's analog numbers must agree with
+    ``engine.analogs.AnalogMatcher`` on the same synthetic population, and
+    each planted analog defect must make that comparison fail.
+    """
+    source = _numerical_independence_source()
     executable = build_native_score_inputs(source)
     request = _request()
     expected = application.score_one(request, executable)
@@ -287,6 +422,9 @@ def _numerical_independence_control() -> dict[str, bool]:
         gate={"gate_score": 994.0, "gate_threshold": 995.0,
               "gate_pass": False},
         model={"exp_pnl_model": 991.5, "win_model": 0.0},
+        analogs={**executable.analogs, "exp_pnl_analog": 996.0,
+                 "win_analog": 0.0, "ci_low": 997.0, "ci_high": 998.0,
+                 "n_analogs": 999},
     )
     scored = application.score_one(request, poisoned)
     preservation_only = (
@@ -296,6 +434,51 @@ def _numerical_independence_control() -> dict[str, bool]:
     model_preservation_only = (
         scored.resolved_request.get("exp_pnl_model") == 991.5
         or scored.resolved_request.get("win_model") == 0.0
+    )
+    poisoned_analogs = _analog_view(scored)
+    analog_preservation_only = (
+        poisoned_analogs["exp_pnl_analog"] == 996.0
+        or poisoned_analogs["ci_low"] == 997.0
+        or poisoned_analogs["ci_high"] == 998.0
+        or poisoned_analogs["n_analogs"] == 999
+    )
+    legacy_analogs = _legacy_analog_expected()
+    analog_parity = _analog_agrees(legacy_analogs, expected)
+    # Planted analog defects: each must make the same comparison disagree.
+    # Source rows are rebuilt through the builder, so the population hash
+    # follows the perturbation and the native stage really recomputes on it;
+    # the tampered case edits a row AFTER the builder bound its hash.
+    rows = source.analog_source_rows
+    perturbed_rows = tuple(
+        {**row, "realized_return": 0.35} if row["row_id"] == "exact-b" else row
+        for row in rows
+    )
+    tampered_rows = [dict(row) for row in executable.analogs["source_rows"]]
+    tampered_rows[0]["realized_return"] = 0.35
+    planted = {
+        "perturbed_source_row": build_native_score_inputs(
+            replace(source, analog_source_rows=perturbed_rows)),
+        "changed_min_analogs": build_native_score_inputs(replace(
+            source, analog_recipe={**source.analog_recipe, "min_analogs": 4})),
+        "changed_bootstrap_seed": build_native_score_inputs(replace(
+            source, analog_recipe={
+                **source.analog_recipe,
+                "bootstrap_seed": source.analog_recipe["bootstrap_seed"] + 1,
+            })),
+        "tampered_bound_row": replace(executable, analogs={
+            **executable.analogs, "source_rows": tampered_rows}),
+    }
+    planted_detected = {
+        name: not _analog_agrees(
+            legacy_analogs, application.score_one(request, inputs))
+        for name, inputs in planted.items()
+    }
+    analogs_recomputed = (
+        analog_parity
+        and isinstance(legacy_analogs["n_analogs"], int)
+        and legacy_analogs["n_analogs"] >= _ANALOG_CONTROL_MIN_ANALOGS
+        and legacy_analogs["ci_low"] is not None
+        and not analog_preservation_only
     )
     independently_recomputed = (
         expected.validation_status == "scored"
@@ -311,6 +494,10 @@ def _numerical_independence_control() -> dict[str, bool]:
         and scored.validation_status == "refused"
         and not preservation_only
         and not model_preservation_only
+        and analogs_recomputed
+    )
+    any_preservation = (
+        preservation_only or model_preservation_only or analog_preservation_only
     )
     return {
         "copied_outputs_absent": (
@@ -328,10 +515,14 @@ def _numerical_independence_control() -> dict[str, bool]:
                 "exp_pnl_model", "win_model",
             ))
             and not executable.chooser
+            and all(key not in executable.analogs for key in _ANALOG_VIEW_FIELDS)
         ),
-        "preservation_only_detected": preservation_only or model_preservation_only,
-        "preservation_only_rejected": not (preservation_only or model_preservation_only),
+        "preservation_only_detected": any_preservation,
+        "preservation_only_rejected": not any_preservation,
         "independent_recomputation": independently_recomputed,
+        "analog_independent_recomputation": analogs_recomputed,
+        "analog_planted_defects": planted_detected,
+        "analog_planted_defects_rejected": all(planted_detected.values()),
     }
 
 
@@ -1950,6 +2141,10 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         **factory_structure_controls,
         "native_outputs_independently_recomputed":
             numerical_independence["independent_recomputation"],
+        "native_analogs_independently_recomputed":
+            numerical_independence["analog_independent_recomputation"],
+        "analog_corruption_rejected":
+            numerical_independence["analog_planted_defects_rejected"],
         "simulation_expiry_parity": simulation_acceptance["expiry_parity"],
         "simulation_pre_expiry_parity": simulation_acceptance["pre_expiry_parity"],
         "simulation_material_time_value": simulation_acceptance["material_time_value"],
@@ -2019,6 +2214,8 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
             "numeric_forecast_parity": native_parity["dimension_agreement"]["forecasts"],
             "native_outputs_independently_recomputed":
                 numerical_independence["independent_recomputation"],
+            "native_analogs_independently_recomputed":
+                numerical_independence["analog_independent_recomputation"],
             "expiry_simulation_parity": simulation_acceptance["expiry_parity"],
             "pre_expiry_simulation_parity": simulation_acceptance["pre_expiry_parity"],
             "material_time_value": simulation_acceptance["material_time_value"],
@@ -2065,6 +2262,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         "factory_geometry_corruption_rejected", "factory_expiry_corruption_rejected",
         "factory_fill_corruption_rejected",
         "native_outputs_independently_recomputed", "preservation_only_rejected",
+        "native_analogs_independently_recomputed", "analog_corruption_rejected",
         "simulation_expiry_parity", "simulation_pre_expiry_parity",
         "simulation_material_time_value", "simulation_fill_propagation",
         "executable_recipe_binding", "strict_gate_semantics",
