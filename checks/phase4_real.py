@@ -39,7 +39,7 @@ from engine.structures import (  # noqa: E402
     StructureError,
     price_structure,
 )
-from engine.v2.contracts import ScoreRequest  # noqa: E402
+from engine.v2.contracts import ScoreRecord, ScoreRequest  # noqa: E402
 from engine.v2.domain.generation import Geometry, Pricing, generate, price  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
     multi_expiry_refusal,
@@ -62,7 +62,7 @@ from engine.v2.models import (  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
-from engine.v2.scoring.identity import request_hash, score_id  # noqa: E402
+from engine.v2.scoring.identity import request_hash, score_id, with_score_id  # noqa: E402
 from engine.v2.scoring.native_analog import legacy_bucket_bootstrap_seed  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
@@ -102,10 +102,6 @@ def _fake_result():
         "gate_score": 0.7, "gate_threshold": 0.6, "gate_pass": True,
         "detail": "", "payoff": {}, "fill": 0.5,
     })
-
-
-def _native(fields):
-    return NativeScoreInputs.from_legacy_fields(fields)
 
 
 def _native_record(record: dict, source_ref: str) -> NativeScoreInputs:
@@ -735,17 +731,63 @@ def _simulation_acceptance_controls() -> dict[str, object]:
     }
 
 
+def _application_control_source() -> SourceBundle:
+    """Answer-free STR-THRU source for the application-layer controls below.
+
+    Built the same native way the independence control is (SourceBundle ->
+    build_native_score_inputs), never NativeScoreInputs.from_legacy_fields
+    (the removed `_native()` compatibility helper this file used to depend
+    on for every side control). Quotes are chosen so the real native
+    straddle pricing lands on entry_cost=5.0 exactly: bid=2.0/ask=3.0 on
+    both legs, alpha=0.5 -> fill = ask - alpha*(ask-bid) = 2.5 per leg,
+    both legs bought, entry_cost = 2.5 + 2.5 = 5.0 (spot=100 ->
+    entry_cost_pct=5.0). implied_move=6.0 and driver_prediction=7.0 (the
+    forecast recipe's intercept, driver_name defaults to "abs_move") give
+    model_vs_market = 7.0 / (6.0 * 0.645), matching financial.py's
+    ORATS_EMOVE_FACTOR.
+    """
+    expiry = "2026-09-18"
+    strike = 100.0
+    quotes = {
+        ("C", strike, expiry): {"bid": 2.0, "ask": 3.0},
+        ("P", strike, expiry): {"bid": 2.0, "ask": 3.0},
+    }
+    return SourceBundle(
+        source_ref="phase4-application-control",
+        context={
+            "ticker": "PHASE4", "event_date": "2026-09-16",
+            "entry_date": "2026-09-16", "exit_date": "2026-09-17",
+            "expiry": expiry, "spot": 100.0, "strike": strike,
+            "implied_move": 6.0,
+        },
+        raw_quotes=quotes,
+        feature_vector={"zero": 0.0},
+        feature_missing_mask={},
+        model_identity={"driver": {"model_id": "phase4-app-driver-v1"}},
+        forecast_recipes={"driver_prediction": {"intercept": 7.0, "coefficients": {}}},
+        model_artifact_refs={"driver_prediction": "sha256:phase4-app-driver"},
+        residual_recipe={
+            "terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),
+            "capital_at_risk": 1.0,
+        },
+        analog_recipe={},
+        gate_recipe={
+            "model": {"intercept": 0.0, "coefficients": {}}, "threshold": 0.0,
+        },
+    )
+
+
 def _application_controls() -> dict[str, bool]:
     started = time.perf_counter()
     request = _request()
-    fields = _fake_result().as_dict()
-    one = application.score_one(request, _native(fields))
-    many = application.score_many(((request, _native(fields)),))[0]
+    inputs = build_native_score_inputs(_application_control_source())
+    one = application.score_one(request, inputs)
+    many = application.score_many(((request, inputs),))[0]
     batch_elapsed_ms = (time.perf_counter() - started) * 1000.0
     altered = _request(fill_model={"alpha": 0.0})
     return {
             "direct_batch_equal": one.score_id == many.score_id,
-            "operational_time_excluded": one.score_id == application.score_one(request, _native(fields)).score_id,
+            "operational_time_excluded": one.score_id == application.score_one(request, inputs).score_id,
             "fill_changes_identity": request_hash(request) != request_hash(altered),
             "zero_is_not_missing": one.null_masks == {"zero": False},
             "financial_values_owned": (
@@ -779,7 +821,8 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
         cutoff_rejected = True
     else:
         cutoff_rejected = False
-    projected = legacy_score_projection(application.score_one(_request(), _native(_fake_result().as_dict())))
+    projected = legacy_score_projection(application.score_one(
+        _request(), build_native_score_inputs(_application_control_source())))
     return {
         "watchlist_scope_preserves_analog_population": request.decision_contexts[0]["analog_population_ref"] == "all-history-v1",
         "cutoff_leak_rejected": cutoff_rejected,
@@ -871,18 +914,51 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
 
 
 def _chooser_controls() -> dict[str, bool]:
-    def candidate(strategy, score, flags=(), gate=True):
-        fields = _fake_result().as_dict()
-        fields.update({"strategy": strategy, "chooser_score": score,
-                       "exp_pnl_sim": score, "flags": flags, "gate_pass": gate,
-                       "width": 4.0})
-        return application.score_one(_request(strategy_version=strategy), _native(fields))
+    """`_choose_dynamic` (application.py) is pure selection logic over
+    already-scored ``ScoreRecord``s -- it never constructs or reads a
+    NativeScoreInputs, so its candidates are built directly as ScoreRecord
+    here rather than routed through NativeScoreInputs.from_legacy_fields
+    (the removed `_native()` compatibility helper this file used to depend
+    on for every side control)."""
+    def candidate(strategy: str, score: float, *, refused: bool = False,
+                  gate_pass: bool = True) -> ScoreRecord:
+        return with_score_id(ScoreRecord(
+            score_id="pending",
+            canonical_request={"strategy_version": strategy},
+            resolved_request={},
+            event_ref={"event_id": "phase4-event"},
+            clock_id="legacy.entry_close.v1",
+            snapshot_ref="snapshot-tier0",
+            dependency_hash="phase4-chooser-control",
+            model_artifact_ids=(),
+            selected_contracts=(),
+            legs=(),
+            entry_exit_plan={},
+            quote_provenance={},
+            forecasts={"exp_pnl_sim": score, "exp_pnl_model": score},
+            uncertainty={},
+            residual_state_ref=None,
+            analog_state_ref=None,
+            payoff_state_ref=None,
+            feature_values={},
+            null_masks={},
+            feature_lineage_refs=(),
+            gate_terms={"gate_pass": gate_pass},
+            chooser_candidates=(),
+            chooser_selection=None,
+            financial_diagnostics={},
+            requested_payoff_views=(),
+            validation_status="refused" if refused else "scored",
+            reason_codes=("MISSING_SPOT",) if refused else (),
+            warnings=(),
+            evidence_refs=(),
+        ))
 
     tie = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.4), candidate("TWIN-P5", 0.4)))
-    selected = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, ("REFUSED",), False),
+    selected = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, refused=True),
                                                         candidate("TWIN-P5", 0.3)))
-    fallback = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, ("REFUSED",), False),))
-    no_regating = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, (), False),))
+    fallback = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, refused=True),))
+    no_regating = application._choose_dynamic(_request(), (candidate("TWIN-P", 0.2, gate_pass=False),))
     return {
         "chooser_tie_control": tie.chooser_selection["status"] == "tie",
         "chooser_missing_competitor_control": selected.chooser_selection["strategy"] == "TWIN-P5",
