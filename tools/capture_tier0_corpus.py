@@ -46,12 +46,15 @@ re-run the choice; tie-breaking depends on that order.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import os
+import pickle
 import platform
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
@@ -790,6 +793,103 @@ def _boundary_events(as_of: pd.Timestamp, per_kind: int, calendar) -> pd.DataFra
     return pd.concat([year, month]).drop_duplicates("event_id").reset_index(drop=True)
 
 
+# --------------------------------------------------------------------------
+# legacy_trace spill: keep every candidate's Phase 4 checkpoint content on
+# disk, not resident, for the run's whole life
+# --------------------------------------------------------------------------
+#
+# `main()` scores every forward/boundary/pinned/strike/coarse/research-replay
+# candidate into ONE list (`candidates`) before `select()` ever runs, and
+# nothing between capture and `select()` reads a candidate's OWN
+# `legacy_trace` again: `select()` covers axes from `record`/`request`/`kind`/
+# `relations` alone (see its docstring), and `_rescore` builds each pinned/
+# strike/coarse variant from `source["request"]`, never `source["legacy_
+# trace"]`. The ONLY code that ever reads a candidate's `legacy_trace`
+# content is `attach_strict_probe` and `write`'s own pairs/checkpoint loop —
+# both of which only run over `chosen`, `select()`'s "minimal covering
+# subset" (a small fraction of everything scored).
+#
+# Measured 2026-09-18 (diag_capture_retention.py, run 4 against 280cf7c):
+# `harness.all_candidates`'s own "UNSAMPLED" deep-size print undercounted
+# `out["candidates"]`'s true content by ~14x at n=445 (2.78 MB reported vs.
+# 38.28 MB in `legacy_trace.analogs.source_rows` ALONE, measured by a direct,
+# non-recursive walk to that one field) because the sizer's nested-level cap
+# stops 3 levels down and `legacy_trace["checkpoints"]["source_inputs"]
+# ["value"]["native_recipes"]["analogs"]["source_rows"]` sits 7 levels below
+# `all_candidates` itself. `matcher._causal_pools`/`_causal_row_caches`/
+# `phase4_recipe_cache` (bounded at MAX_CAUSAL_CACHE=64, needed for scoring
+# itself) only accounted for 38.5% of the RSS climb between two checkpoints
+# in that run; the remainder tracks `out["candidates"]` growing by keeping
+# every candidate's checkpoint content (chain snapshots, documented analog
+# rows, residual population slices — several MB each for a strategy with a
+# large matched population) resident for the rest of the run, for EVERY
+# candidate ever scored, not just the ones `select()` eventually keeps.
+#
+# Spilling removes that: `_candidate()` writes a non-None `legacy_trace` to
+# its own file the moment it is produced and keeps only a small `_SpilledTrace`
+# pointer in the in-memory dict `candidates` holds. `select()`'s covering pass
+# never looks at that pointer. Right after `select()` returns, `chosen` (only)
+# is hydrated back to the real dict before `attach_strict_probe`/`write` run —
+# the exact same content, read back byte-for-byte (`pickle`, not `json`, so no
+# float-precision/NaN-encoding round-trip risk for an internal, same-process,
+# same-Python-version spill), so every downstream consumer sees the identical
+# object it always did and every written file is unchanged.
+
+
+class _SpilledTrace:
+    """A pointer to one candidate's ``legacy_trace``, held on disk instead of
+    resident in the ``candidates`` list. See the module note above.
+    """
+
+    __slots__ = ("path",)
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+
+_TRACE_SPILL_DIR: Path | None = None
+_TRACE_SPILL_COUNTER = itertools.count()
+
+
+def _trace_spill_dir() -> Path:
+    """The run's spill directory, created on first use and removed by
+    ``main`` when the run ends (success or failure).
+    """
+    global _TRACE_SPILL_DIR
+    if _TRACE_SPILL_DIR is None:
+        _TRACE_SPILL_DIR = Path(
+            tempfile.mkdtemp(prefix="capture_tier0_trace_spill_")
+        )
+    return _TRACE_SPILL_DIR
+
+
+def _spill_trace(trace: dict) -> _SpilledTrace:
+    path = _trace_spill_dir() / f"{next(_TRACE_SPILL_COUNTER)}.pkl"
+    with path.open("wb") as fh:
+        pickle.dump(trace, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    return _SpilledTrace(path)
+
+
+def _hydrate_trace(value: Any) -> Any:
+    """Read a spilled ``legacy_trace`` back, unchanged, byte-for-byte.
+
+    A no-op on anything that is not a spill pointer (``None``, or an
+    already-hydrated dict — idempotent, so a caller never needs to know
+    whether an earlier step already hydrated this candidate).
+    """
+    if isinstance(value, _SpilledTrace):
+        with value.path.open("rb") as fh:
+            return pickle.load(fh)
+    return value
+
+
+def _cleanup_trace_spill() -> None:
+    global _TRACE_SPILL_DIR
+    if _TRACE_SPILL_DIR is not None:
+        shutil.rmtree(_TRACE_SPILL_DIR, ignore_errors=True)
+        _TRACE_SPILL_DIR = None
+
+
 def _score(scorer, request, *, index=None) -> tuple[dict, dict, float, dict]:
     """``(raw as_dict, jsonable record, seconds)`` through ``Scorer.score``.
 
@@ -817,10 +917,15 @@ def _score(scorer, request, *, index=None) -> tuple[dict, dict, float, dict]:
 def _candidate(request, raw: dict | None, record: dict, took: float, *,
                kind: str = "score_result", frame: str | None = None,
                relations: dict | None = None, legacy_trace: dict | None = None) -> dict:
+    # Spilled immediately, not held: see the module note above `_score` for
+    # why nothing between here and `select()` needs this candidate's OWN
+    # `legacy_trace` content, and `chosen` (only) is hydrated back after
+    # `select()` runs.
+    stored_trace = _spill_trace(legacy_trace) if legacy_trace is not None else None
     return {"request": request if isinstance(request, dict) else request_to_dict(request),
             "raw": raw, "record": record, "duration": took, "kind": kind,
             "frame": frame, "relations": relations or {},
-            "legacy_trace": legacy_trace}
+            "legacy_trace": stored_trace}
 
 
 def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
@@ -1342,39 +1447,53 @@ def main(argv: Iterable[str] | None = None) -> int:
     scorer = score_mod.Scorer()
     print(f"[corpus] scorer ready in {time.time()-started:.0f}s", flush=True)
 
-    forward = _events(as_of, args.forward_days, args.max_events)
-    print(f"[corpus] forward events: {len(forward)}", flush=True)
-    candidates = forward_pass(
-        scorer, forward, as_of, args.quote_max_age, strategies,
-    )
-    print(f"[corpus] forward scores: {len(candidates)}", flush=True)
+    # `_candidate()` spills every candidate's `legacy_trace` to disk the
+    # moment it is produced (see the module note above `_score`) rather than
+    # holding it in `candidates` for the rest of this function; the `finally`
+    # below removes that spill directory whether the run finishes or raises.
+    try:
+        forward = _events(as_of, args.forward_days, args.max_events)
+        print(f"[corpus] forward events: {len(forward)}", flush=True)
+        candidates = forward_pass(
+            scorer, forward, as_of, args.quote_max_age, strategies,
+        )
+        print(f"[corpus] forward scores: {len(candidates)}", flush=True)
 
-    boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
-    print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
-    candidates += boundary_pass(scorer, boundaries, strategies)
+        boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
+        print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
+        candidates += boundary_pass(scorer, boundaries, strategies)
 
-    candidates += pinned_and_strike_pass(scorer, candidates)
-    candidates += coarse_ladder_pass(scorer, candidates)
-    if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
-        candidates += dyn_sv_pass(candidates)
-    candidates += research_replay_pass(
-        scorer, boundaries, strategies=strategies,
-    )
-    print(f"[corpus] candidates: {len(candidates)}", flush=True)
+        candidates += pinned_and_strike_pass(scorer, candidates)
+        candidates += coarse_ladder_pass(scorer, candidates)
+        if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
+            candidates += dyn_sv_pass(candidates)
+        candidates += research_replay_pass(
+            scorer, boundaries, strategies=strategies,
+        )
+        print(f"[corpus] candidates: {len(candidates)}", flush=True)
 
-    chosen, index = select(candidates)
-    if args.out:
-        out_dir = Path(args.out)
-    else:
-        version = args.version or datetime.now(
-            timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        out_dir = DEFAULT_OUT / version
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    doc = write(
-        out_dir, chosen, index, as_of, scorer.snapshot,
-        replace_existing=args.replace,
-        strict_trace=args.strict_phase4_trace,
-    )
+        chosen, index = select(candidates)
+        # Only `chosen` -- `select()`'s small covering subset, never
+        # `candidates` itself -- needs its real `legacy_trace` content back;
+        # everything from here on (`attach_strict_probe`, `write`) reads it
+        # directly off `cand`. Every OTHER candidate's checkpoint content
+        # stays on disk, unread, for the rest of the run.
+        for cand in chosen:
+            cand["legacy_trace"] = _hydrate_trace(cand.get("legacy_trace"))
+        if args.out:
+            out_dir = Path(args.out)
+        else:
+            version = args.version or datetime.now(
+                timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_dir = DEFAULT_OUT / version
+        out_dir.parent.mkdir(parents=True, exist_ok=True)
+        doc = write(
+            out_dir, chosen, index, as_of, scorer.snapshot,
+            replace_existing=args.replace,
+            strict_trace=args.strict_phase4_trace,
+        )
+    finally:
+        _cleanup_trace_spill()
     if not args.out and out_dir.parent == DEFAULT_OUT:
         _publish_current(DEFAULT_OUT, out_dir.name)
         print(f"[corpus] CURRENT -> {out_dir.name}")
