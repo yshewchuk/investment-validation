@@ -142,7 +142,8 @@ per-mutant timeout). Driver and report: `tools/mutation_pilot.py`.
 - All state lives outside the repo in
   `~/.cache/investing-plan-mutation-pilot/<module>/` (override with
   `MUTATION_PILOT_HOME`; the tool refuses a path inside a checkout). The work
-  copy holds tracked `engine/ tests/ checks/ tools/` only, so there's no `data/`.
+  copy holds every tracked file and nothing else, like a CI checkout, so
+  there's no `data/`.
 - Runs are resumable. A rerun re-tests only functions whose source changed.
   `--fresh` wipes that module's state.
 
