@@ -379,3 +379,41 @@ def test_make_artifact_wraps_a_fit_without_fitting():
         artifact = make_recalibration_map_artifact(fit, strategy="STR-THRU", alpha=0.5,
                                                    cutoff=CUTOFF, min_pairs=MIN_PAIRS)
     assert artifact.fitted and artifact.n == fit["n"]
+
+
+# --------------------------------------------------------------------------
+# provenance fields no test above read back (mutation-pilot triage)
+# --------------------------------------------------------------------------
+
+
+def test_fitted_artifact_freezes_legacys_base_rate():
+    pairs = _pairs()
+    legacy = _legacy(pairs)
+    artifact = build_recalibration_map_artifact(pairs, strategy="STR-THRU", alpha=0.5,
+                                                before=CUTOFF)
+    assert artifact.base_rate == legacy.base_rate
+
+
+def test_window_is_stored_as_iso_days_and_an_unfitted_map_has_none():
+    fit = fit_recalibration_map(_pairs(), "STR-THRU", 0.5, before=CUTOFF)
+    artifact = make_recalibration_map_artifact(
+        fit, strategy="STR-THRU", alpha=0.5, cutoff=CUTOFF, min_pairs=MIN_PAIRS,
+        window=(pd.Timestamp("2019-01-05"), pd.Timestamp("2020-08-30")))
+    assert (artifact.window_start, artifact.window_end) == ("2019-01-05", "2020-08-30")
+    unfitted = build_recalibration_map_artifact(_pairs(n=150), strategy="STR-THRU",
+                                                alpha=0.5, before="2019-03-01")
+    assert (unfitted.window_start, unfitted.window_end) == (None, None)
+
+
+def test_loader_refuses_a_document_missing_a_field(tmp_path):
+    import hashlib
+
+    artifact, _ = _written(tmp_path)
+    document = json.loads(serialize_recalibration_artifact(artifact))
+    del document["base_rate"]
+    body = json.dumps(document).encode("utf-8")
+    (tmp_path / "partial.json").write_bytes(body)
+    ref = RecalibrationArtifactRef(path="partial.json",
+                                   content_hash="sha256:" + hashlib.sha256(body).hexdigest())
+    with pytest.raises(RecalibrationArtifactError, match="missing"):
+        RecalibrationArtifactLoader(tmp_path).load(ref)

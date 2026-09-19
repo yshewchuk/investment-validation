@@ -225,3 +225,13 @@ venv/
 # an allowed directory inherits the code allowances. Blocking the tool's own
 # state directory closes the case that actually occurs.
 .claude/
+
+# Mutation-testing pilot (tools/mutation_pilot.py). Its state lives OUTSIDE the
+# repo, in ~/.cache/investing-plan-mutation-pilot/<module>/. These rules only
+# catch an accidental `mutmut run` from the checkout: mutmut writes a mutated
+# copy of engine/ to ./mutants/, whose .py files the code allowances above
+# would otherwise sweep back in.
+mutants/
+.mutmut-cache
+mutmut-stats.json
+mutmut-debug.log

@@ -147,6 +147,54 @@ def test_paired_pool_cutoff_excludes_events_on_or_after_it():
             rows=[("2024-01-01", "AAA", 1.0, 0.0, 0.0)], lineage=LINEAGE)
 
 
+# A given cutoff that does not parse is a build-time caller error (found by
+# mutation triage): it used to compare as text, so "not-a-date", "NaT" and
+# pd.NaT admitted every row (all sort before "n"/"N" as dates) and "" admitted
+# none. Legacy's pd.Timestamp(cutoff) raises on the same values.
+_MALFORMED_CUTOFFS = ["not-a-date", "", "NaT", pd.NaT]
+
+
+@pytest.mark.parametrize("cutoff", _MALFORMED_CUTOFFS, ids=repr)
+def test_paired_pool_builder_raises_on_a_malformed_cutoff(cutoff):
+    forecasts, outcomes, crush = _universe()
+    with pytest.raises(ValueError, match="not a date"):
+        _build(forecasts, outcomes, crush, cutoff=cutoff)
+
+
+@pytest.mark.parametrize("cutoff", _MALFORMED_CUTOFFS, ids=repr)
+def test_paired_pool_artifact_raises_on_a_malformed_cutoff(cutoff):
+    for rows in ([], [("2024-01-01", "AAA", 1.0, 0.0, 0.0)]):
+        with pytest.raises(ResidualArtifactError, match="not a date"):
+            make_paired_residual_pool_artifact(
+                move_model_id="m", crush_model_id="c", cutoff=cutoff,
+                rows=rows, lineage=LINEAGE)
+
+
+def test_a_valid_cutoff_keeps_the_same_rows_whatever_its_form():
+    """200 daily events from 2024-01-01: 152 fall before 2024-06-01 (the
+    one NaN forecast is on 2024-02-03 and never pairs). A Timestamp or a
+    full ISO timestamp names the same day and keeps the same rows."""
+    forecasts, outcomes, crush = _universe()
+    artifact = _build(forecasts, outcomes, crush)
+    assert len(artifact.rows) == 152
+    assert artifact.rows[-1][0] == "2024-05-31"
+    for same_day in (pd.Timestamp(CUTOFF), "2024-06-01T00:00:00"):
+        other = _build(forecasts, outcomes, crush, cutoff=same_day)
+        assert other.rows == artifact.rows
+        assert other.cutoff == CUTOFF
+
+
+def test_paired_pool_artifact_compares_parsed_days_and_refuses_undated_rows():
+    ok = make_paired_residual_pool_artifact(
+        move_model_id="m", crush_model_id="c", cutoff=pd.Timestamp("2024-01-02"),
+        rows=[("2024-01-01", "AAA", 1.0, 0.0, 0.0)], lineage=LINEAGE)
+    assert ok.cutoff == "2024-01-02"
+    with pytest.raises(ResidualArtifactError, match="on/after"):
+        make_paired_residual_pool_artifact(
+            move_model_id="m", crush_model_id="c", cutoff="2024-01-02",
+            rows=[("not-a-day", "AAA", 1.0, 0.0, 0.0)], lineage=LINEAGE)
+
+
 # ---------------------------------------------------------------------------
 # request context cannot change frozen state; equivalent rebuilds agree
 # ---------------------------------------------------------------------------
@@ -424,3 +472,65 @@ def test_paired_artifact_rejects_nan_but_keeps_infinite_values(tmp_path):
     assert infinite.rows[0][3] == float("inf")
     assert FrozenStateLoader(tmp_path).load(_write(tmp_path, infinite)) == infinite
     assert isinstance(_build(*_universe()), PairedResidualPoolArtifact)
+
+
+# ---------------------------------------------------------------------------
+# keys, day normalization, flat-only pools, document shape
+# (mutation-pilot triage: behaviour no test above pinned)
+# ---------------------------------------------------------------------------
+
+
+def test_pool_keys_carry_every_part_and_normalize_timestamps_to_days():
+    from engine.v2.models.residual_artifact import driver_residual_pool_key
+
+    assert driver_residual_pool_key("size", "m1", "2024-05-01T00:00:00") == (
+        "size", "m1", "2024-05-01")
+    assert driver_residual_pool_key("size", "m1", None) == ("size", "m1", None)
+    assert paired_residual_pool_key("mv", "cr", pd.Timestamp("2024-06-01")) == (
+        "mv", "cr", "2024-06-01")
+    assert paired_residual_pool_key("mv", "cr", None) == ("mv", "cr", None)
+
+
+def test_paired_rows_are_dated_by_day_and_an_undated_pool_stays_undated():
+    artifact = make_paired_residual_pool_artifact(
+        move_model_id="m", crush_model_id="c", cutoff=None, lineage=LINEAGE,
+        rows=[("2024-01-01T00:00:00", "AAA", 1.0, 0.1, 0.2)])
+    assert artifact.rows[0][0] == "2024-01-01"
+    assert artifact.cutoff is None
+    assert artifact.key == ("m", "c", None)
+    assert artifact.payload()["n"] == 1
+
+
+def test_paired_artifact_rejects_a_nan_prediction():
+    """NaN is missing in every numeric column, the prediction included."""
+    with pytest.raises(ResidualArtifactError, match="NaN"):
+        make_paired_residual_pool_artifact(
+            move_model_id="m", crush_model_id="c", cutoff=None, lineage=LINEAGE,
+            rows=[("2024-01-01", "AAA", float("nan"), 0.1, 0.2)])
+
+
+def test_paired_document_without_columns_is_refused_as_an_artifact_error():
+    from engine.v2.models.residual_artifact import residual_artifact_from_document
+
+    document = _build(*_universe(days=20)).payload()
+    del document["columns"]
+    with pytest.raises(ResidualArtifactError):
+        residual_artifact_from_document(document)
+
+
+def test_flat_only_driver_pool_has_no_buckets_and_round_trips(tmp_path):
+    from engine.v2.models.residual_artifact import (
+        make_driver_residual_pool_artifact,
+        residual_artifact_from_document,
+    )
+
+    flat = make_driver_residual_pool_artifact(
+        role="size", model_id="m", fold=None, flat_residuals=[0.1, -0.2, 0.3],
+        buckets=None, deciles=10, min_pool=30, lineage=LINEAGE)
+    assert flat.fold is None
+    assert flat.key == ("size", "m", None)
+    payload = flat.payload()
+    assert payload["buckets"] is None
+    assert payload["n"] == 3
+    assert residual_artifact_from_document(payload) == flat
+    assert FrozenStateLoader(tmp_path).load(_write(tmp_path, flat, "flat.json")) == flat

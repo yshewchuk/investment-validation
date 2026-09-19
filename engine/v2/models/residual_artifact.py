@@ -35,6 +35,7 @@ Causal keys:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import date
 from typing import Any, Mapping, Sequence
 
 from engine.v2.foundation.canonical import content_hash, untag_nonfinite
@@ -74,6 +75,29 @@ class ResidualArtifactError(ValueError):
 
 def _day(value: Any) -> str | None:
     return None if value is None else str(value)[:10]
+
+
+def _parse_day(value: Any) -> date | None:
+    """The calendar day ``value`` names, or ``None`` if it names none
+    (malformed text, ``""``, ``"NaT"``/``pd.NaT``)."""
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _cutoff_day(cutoff: Any) -> date | None:
+    """A paired pool's parsed cutoff: ``None`` only when there is none.
+
+    A given cutoff that does not parse is a caller error and raises; it must
+    never read as "no cutoff" and let post-cutoff rows through the guard.
+    """
+    if cutoff is None:
+        return None
+    parsed = _parse_day(cutoff)
+    if parsed is None:
+        raise ResidualArtifactError(f"paired pool cutoff {cutoff!r} is not a date")
+    return parsed
 
 
 def driver_residual_pool_key(role: str, model_id: str, fold: Any) -> DriverResidualPoolKey:
@@ -226,19 +250,27 @@ def make_paired_residual_pool_artifact(
     The order is the total order ``(event_date, ticker, pred, err_move,
     err_crush)``, so the artifact -- and the simulation's index-based draws
     -- cannot depend on the order a caller happened to assemble rows in.
-    A row dated on/after ``cutoff`` is refused, not dropped: dropping is the
-    builder's causal filter, and an artifact that receives one anyway was
-    built wrong.
+    A row dated on/after ``cutoff`` (or undated, given a cutoff) is refused,
+    not dropped: dropping is the builder's causal filter, and an artifact
+    that receives one anyway was built wrong. Dates compare as parsed days,
+    and a given cutoff that does not parse raises.
     """
     frozen = tuple(sorted(_paired_row(row) for row in rows))
-    bound = _day(cutoff)
-    if bound is not None and any(row[0] >= bound for row in frozen):
+    bound = _cutoff_day(cutoff)
+    if bound is not None and not all(_before(row[0], bound) for row in frozen):
         raise ResidualArtifactError("paired pool row dated on/after its own cutoff")
     draft = PairedResidualPoolArtifact(
         move_model_id=str(move_model_id), crush_model_id=str(crush_model_id),
-        cutoff=bound, rows=frozen, lineage=lineage.canonical(), content_hash="",
+        cutoff=_day(cutoff), rows=frozen, lineage=lineage.canonical(), content_hash="",
     )
     return _with_hash(draft)
+
+
+def _before(day: Any, bound: date) -> bool:
+    """``day`` parses and falls strictly before ``bound`` (an undated row
+    cannot be shown causal, so it fails)."""
+    parsed = _parse_day(day)
+    return parsed is not None and parsed < bound
 
 
 def _with_hash(draft):
