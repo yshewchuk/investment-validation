@@ -18,7 +18,7 @@ from engine.v2.ops import worker as worker_module
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor_cgroup import probe
-from engine.v2.ops.executor_watchdog import observe, process_info, process_table, signal_owned
+from engine.v2.ops.executor_watchdog import find_owners, observe, process_info, process_table, signal_owned
 from engine.v2.ops.health import health
 from engine.v2.ops.lifecycle import record_launch
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
@@ -292,3 +292,43 @@ def test_process_table_skips_a_pid_that_disappears_mid_scan(tmp_path):
     table = process_table("boot", proc=proc)
     assert set(table) == {111}
     assert table[111][0].start_ticks == 12345
+
+
+def test_find_owners_ignores_a_foreign_uid_process_but_still_blocks_on_same_uid(tmp_path):
+    """§ B1's "unreadable environ never excludes" rule is what makes recovery
+    hang forever on a shared, non-root CI runner: every OTHER user's and the
+    init system's own processes have an environ this process cannot read,
+    so ``find_owners`` never returns empty and the attempt never proves dead.
+
+    ``ci-quarantine-same-uid``'s fix scopes the rule to same-uid processes: a
+    fork/exec descendant of our own launch always keeps our uid, so a
+    foreign-uid process cannot be our escaper regardless of environ
+    readability, while a same-uid process with an unreadable environ must
+    still block exactly as before -- this test proves both halves with a
+    synthetic ``/proc`` tree (no real permission enforcement needed: root can
+    read anything, so the foreign-uid case is proved by ownership alone, the
+    same way the real fix decides it).
+    """
+    boot = "boot-uid-test"
+    self_uid = os.getuid()
+    foreign_uid = self_uid + 1
+    session = 222  # deliberately not launch_pid, isolating proof (c)
+
+    proc = tmp_path / "proc"
+    same_uid_pid, foreign_uid_pid = 40001, 40002
+    for pid, uid in ((same_uid_pid, self_uid), (foreign_uid_pid, foreign_uid)):
+        d = proc / str(pid)
+        d.mkdir(parents=True)
+        (d / "stat").write_text(_fake_stat_line(pid, session=session, ppid=1))
+        # No "environ" file at all: read_bytes() raises FileNotFoundError,
+        # the same OSError subclass a real permission-denied read raises.
+        os.chown(d, uid, os.getgid())
+
+    table = process_table(boot, proc=proc)
+    assert set(table) == {same_uid_pid, foreign_uid_pid}
+
+    blockers = {pid for pid, _ in find_owners(
+        boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
+        table=table, proc=proc)}
+    assert same_uid_pid in blockers, "same-uid unreadable environ must still block"
+    assert foreign_uid_pid not in blockers, "a foreign-uid process must be ignored"

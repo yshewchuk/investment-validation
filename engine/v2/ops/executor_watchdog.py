@@ -83,6 +83,14 @@ def _environ_contains(pid: int, marker: str, proc: Path) -> bool | None:
     return marker.encode() in data
 
 
+def _owner_uid(pid: int, proc: Path) -> int | None:
+    """The pid's owning uid, or ``None`` when even that cannot be read."""
+    try:
+        return (proc / str(pid)).stat().st_uid
+    except OSError:
+        return None
+
+
 def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int | None,
                 marker: str, table: dict | None = None, proc: Path = Path("/proc")) -> tuple:
     """Live, non-zombie processes that ownership proof (b)/(c) cannot exclude.
@@ -94,15 +102,29 @@ def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int
     session no longer matches (b), and the no-recorded-identity crash case,
     where there is no ``launch_pid`` to compare against at all. An environ
     that cannot be read never excludes its process (§ B1 house rule: unknown
-    stays quarantined rather than guessed dead).
+    stays quarantined rather than guessed dead) -- UNLESS the process belongs
+    to a different uid than this one: a fork/exec descendant of our own
+    launch always keeps our uid (barring a setuid binary, which the legacy
+    worker tree never runs), so a foreign-uid process categorically cannot be
+    our escaper regardless of whether its environ happens to be readable.
+    This is what lets recovery prove "dead" on a shared, non-root CI runner,
+    where every other user's or the init system's own processes have
+    unreadable environ files that would otherwise block forever.
     """
     table = process_table(boot_id, proc) if table is None else table
+    self_uid = os.getuid()
     blockers = []
     for pid, (identity, _, state, _, session) in table.items():
         if state == "Z":
             continue
         session_owns = (launch_pid is not None and session == launch_pid
                         and identity.start_ticks >= launch_start_ticks)
-        if session_owns or _environ_contains(pid, marker, proc) is not False:
+        if session_owns:
+            blockers.append((pid, identity.start_ticks))
+            continue
+        owner_uid = _owner_uid(pid, proc)
+        if owner_uid is not None and owner_uid != self_uid:
+            continue
+        if _environ_contains(pid, marker, proc) is not False:
             blockers.append((pid, identity.start_ticks))
     return tuple(sorted(blockers))
