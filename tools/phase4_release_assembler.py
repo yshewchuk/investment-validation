@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
 from engine.v2.contracts import ScoreRequest
-from engine.v2.foundation import content_hash, from_document
+from engine.v2.foundation import NONFINITE_KEY, content_hash, from_document
 from engine.v2.scoring.identity import request_hash
 from engine.v2.scoring.source_inputs import _ANSWER_FIELDS
 
@@ -37,6 +37,21 @@ class ReleaseAssemblyError(ValueError):
 
 def _leaves(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple[Any, ...], Any]:
     if isinstance(value, Mapping):
+        # This walk currently only ever sees the PRE-tag document (this
+        # module runs before tools/capture_tier0_corpus.py's
+        # _prepare_normalized_shared tags a nonfinite float as
+        # {NONFINITE_KEY: repr(value)} for the stored JSON), so a raw
+        # NaN/Inf is already an atomic leaf below and this branch is a
+        # no-op today. It exists so this function keeps agreeing with
+        # checks/phase4_real.py's _leaf_values -- the reader-side walk over
+        # the on-disk (already-tagged) form, which MUST stop here (see that
+        # module for why) -- under one definition of "leaf" instead of two
+        # that only coincidentally agree because of call order. If a future
+        # change ever has this run on an already-tagged document, the
+        # recorded path stays correct instead of landing one segment too
+        # deep with a mismatched value_hash.
+        if set(value) == {NONFINITE_KEY} and isinstance(value[NONFINITE_KEY], str):
+            return {path: value}
         if not value:
             return {path: {}}
         result = {}
