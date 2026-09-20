@@ -256,6 +256,17 @@ tests = [
 ]
 
 [modules.data_legacy]
+# Excluded 2026-09-19: this is the bridge that reads the legacy panel/materialization
+# into v2, not the v2 architecture itself. The rearchitecture is deleting this bridge
+# once the migration cuts over (see guides/rearchitecture_phase3b_phase4_remaining.md,
+# "CURRENT switch after consumer checks"), so mutating it is spend on code with no
+# future to protect. It is also the module that made the full weekly run time out:
+# CI run 35458557499 (2026-09-19, push/incremental) shows its mutmut step ran the
+# full 330-minute cap and was killed (run_exit_code -1, 3097/4280 mutants checked
+# before the cutoff) -- exactly the "full run times out after 5.5 hours" symptom.
+# Still listed (never run) so `tests/test_mutation_ci.py` keeps every engine/v2 file
+# owned by exactly one module.
+excluded = "legacy materialization/mapping/reference bridge the rearchitecture deletes on cutover; also the module whose 330-minute mutmut step timeout (CI run 35458557499, 2026-09-19) caused the whole weekly run to time out at 5.5 hours."
 why = "Legacy materialization, mapping, reference inputs and price history: the bridge that feeds legacy-shaped inputs into v2."
 mutate = [
     "engine/v2/data/legacy_*.py",

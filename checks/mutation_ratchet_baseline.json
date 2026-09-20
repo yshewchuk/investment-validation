@@ -1,0 +1,8 @@
+{
+  "schema_version": "mutation_ratchet.v1",
+  "_placeholder": "no weekly full run has completed yet (mutation CI landed 2026-09-19); mode is set to \"full\" only so checks/mutation_ratchet.py's compare() runs its per-module checks against this empty baseline instead of refusing it as MUTATION_BASELINE_NOT_FULL. Every module will report MUTATION_NEW_MODULE_BASELINE_REQUIRED until the first real full run's --output is reviewed and promoted here by hand.",
+  "mode": "full",
+  "run_id": null,
+  "sha": null,
+  "modules": {}
+}
