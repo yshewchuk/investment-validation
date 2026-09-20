@@ -853,9 +853,25 @@ class Phase4TraceCollector:
         if model_bindings:
             captured = self._document(tuple(model_bindings))
             document["model_bindings"].extend(captured)
-            forecast_roles = []
             gate_threshold = None
             for binding in captured:
+                role = str(binding.get("role", "")).split(":", 1)[0]
+                if role == "gate" and binding.get("threshold") is not None:
+                    gate_threshold = binding["threshold"]
+            # `required_roles` must be the UNION of every role captured
+            # across every call on this collector, not just this call's
+            # `captured` bindings -- `capture_source_bundle` is called once
+            # per role (driver, size, implied_t1, runup_move, iv_crush, ...)
+            # over the life of one row's scoring pass, and
+            # `document["model_bindings"]` is the accumulator that already
+            # holds all of them. Deriving from `captured` alone let each
+            # later call's roles REPLACE earlier ones instead of joining
+            # them. Iterating the accumulated list keeps `dict.fromkeys`
+            # ordering the roles by when each was FIRST seen across all
+            # calls, which is what the content hash needs to stay
+            # deterministic.
+            forecast_roles = []
+            for binding in document["model_bindings"]:
                 role = str(binding.get("role", "")).split(":", 1)[0]
                 role = {
                     "abs_move": "driver",
@@ -864,8 +880,6 @@ class Phase4TraceCollector:
                 if role in {"driver", "size", "implied_t1", "runup_move",
                              "iv_crush"}:
                     forecast_roles.append(role)
-                if role == "gate" and binding.get("threshold") is not None:
-                    gate_threshold = binding["threshold"]
             if forecast_roles:
                 document["native_recipes"]["forecast"] = {
                     "required_roles": tuple(dict.fromkeys(forecast_roles)),
