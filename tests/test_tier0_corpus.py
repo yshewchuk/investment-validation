@@ -601,3 +601,133 @@ def test_an_old_format_corpus_has_no_shared_directory_and_loads_unchanged(corpus
     assert not (corpus / "shared").exists()
     loaded = t0.load(corpus)
     assert loaded.pairs["000_TWIN-P5"]["payload"]["record"]["strategy"] == "TWIN-P5"
+
+
+# --------------------------------------------------------------------------
+# shared translation row tables (input_translation.mappings by reference)
+# --------------------------------------------------------------------------
+
+
+def translation_row(shared_path: list, native_path: list, value) -> dict:
+    return {"shared_path": shared_path, "native_path": native_path,
+            "value_hash": content_hash(value)}
+
+
+def write_translation_table(root: Path, rows: list) -> str:
+    """Write ``rows`` under ``root/shared/translations/<hex>.json``, the
+    format ``tools/capture_tier0_corpus.py``'s ``_TranslationTableWriter``
+    writes. Returns the digest (``content_hash(rows)`` over the exact array
+    stored, per ``SHARED_TRANSLATION_TABLE_SCHEMA_VERSION``).
+    """
+    digest = content_hash(rows)
+    tables_dir = root / "shared" / "translations"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    body = {"schema_version": t0.SHARED_TRANSLATION_TABLE_SCHEMA_VERSION,
+            "digest": digest, "rows": rows}
+    (tables_dir / f"{digest.split(':', 1)[-1]}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n")
+    return digest
+
+
+def test_a_rows_reference_reconstructs_the_exact_original_list_in_order(tmp_path):
+    """A member's mappings list, delta-encoded against a larger table (the
+    ~14-row difference measured on a real DYN-SV chooser), reconstructs
+    byte-identically to the ORIGINAL list -- including the ORDER, recovered
+    by re-sorting on ``(repr(shared_path), repr(native_path))``, the exact
+    order ``tools/phase4_release_assembler.py``'s ``_translation`` already
+    produces for an auto-derived ``mappings`` list. ``repr`` of an int list
+    index sorts as TEXT, not numerically (``['p', 10]`` before ``['p', 2]``),
+    so this also proves the loader uses the real sort key, not row-building
+    order.
+    """
+    original = [translation_row(["p", i], ["p", i], i) for i in range(200)]
+    table_rows = list(original)
+    differing = [3, 47, 101, 150]
+    for i in differing:
+        table_rows[i] = translation_row(
+            original[i]["shared_path"], original[i]["native_path"], "table-only-value")
+    digest = write_translation_table(tmp_path / "tier0", table_rows)
+    ref = {
+        t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
+        "omit": [content_hash(table_rows[i]) for i in differing],
+        "extra": [original[i] for i in differing],
+    }
+    p = pair("200_rows", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    corpus = t0.load(root)
+    resolved = corpus.pairs["200_rows"]["payload"]["record"]["extra_field"]
+    expected = sorted(original, key=lambda r: (repr(r["shared_path"]), repr(r["native_path"])))
+    assert resolved == expected
+    assert content_hash(resolved) == content_hash(expected)  # hash-oracle equivalence
+
+
+def test_an_unknown_rows_reference_shape_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    bad_ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
+               "omit": [], "extra": [], "surprise": 1}
+    p = pair("201_bad_shape", request("STR-THRU"), priced("STR-THRU", extra_field=bad_ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_missing_translation_table_refuses_loudly(tmp_path):
+    ref = {t0.ROWS_REF_KEY: "sha256:" + "b" * 64, "order": t0.ROWS_ORDER_SHARED_PATH,
+           "omit": [], "extra": []}
+    p = pair("202_missing_table", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_tampered_translation_table_refuses_loudly(tmp_path):
+    table_rows = [translation_row(["p", i], ["p", i], i) for i in range(5)]
+    digest = write_translation_table(tmp_path / "tier0", table_rows)
+    table_path = (tmp_path / "tier0" / "shared" / "translations"
+                  / f"{digest.split(':', 1)[-1]}.json")
+    doc = json.loads(table_path.read_text())
+    doc["rows"][0]["value_hash"] = "sha256:" + "c" * 64
+    table_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
+           "omit": [], "extra": []}
+    p = pair("203_tampered_table", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_an_unsupported_row_order_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    ref = {t0.ROWS_REF_KEY: digest, "order": "native_path", "omit": [], "extra": []}
+    p = pair("204_bad_order", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_an_omit_of_an_unknown_row_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
+           "omit": ["sha256:" + "d" * 64], "extra": []}
+    p = pair("205_bad_omit", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_an_old_format_plain_mappings_list_loads_unchanged(tmp_path):
+    """A pair captured before this fix carries `mappings` as a plain list,
+    with no `shared/translations/` directory anywhere -- CURRENT is still an
+    old-format corpus. It must load byte-for-byte unchanged.
+    """
+    mappings = [translation_row(["p", i], ["p", i], i) for i in range(5)]
+    p = pair("206_plain_mappings", request("STR-THRU"),
+             priced("STR-THRU", extra_field={"mappings": mappings}))
+    root = build(tmp_path / "tier0", [p])
+    assert not (root / "shared").exists()
+    corpus = t0.load(root)
+    loaded = corpus.pairs["206_plain_mappings"]["payload"]["record"]["extra_field"]["mappings"]
+    assert loaded == mappings
