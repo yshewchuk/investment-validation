@@ -385,6 +385,162 @@ def test_score_captures_boundary_legs_and_cost_before_later_mutation(
     }
 
 
+def test_forecast_sized_entry_rule_run_ends_with_analogs_and_simulation_frozen(
+        monkeypatch) -> None:
+    """Regression for the staleness bug: for a FORECAST_SIZED,
+    entry-rule-gated strategy (TWIN-P5 here; the family also covers CND-PS,
+    TWIN-P, BFLY-P, BFLY-P5, RAMP7, CTR5), the LAST ``capture_source_bundle``
+    call in a real run is the model layer's driver-model binding
+    (``_score_model`` -> ``_phase4_capture_served_model``), which happens
+    BEFORE the analog and simulation layers run. Those layers mutate
+    ``native_recipes`` directly (``capture_analog_inputs``,
+    ``capture_simulation``) and the gate is an arithmetic entry rule, not a
+    model, so no LATER ``capture_source_bundle`` call ever re-snapshots.
+    Before the fix, the frozen ``source_inputs`` checkpoint therefore ended
+    the run missing ``native_recipes.analogs`` and ``.simulation`` even
+    though the live bundle had both. Asserting on the FROZEN checkpoint
+    (never the live ``_source_bundle``) is the point: the live bundle was
+    always right.
+    """
+    monkeypatch.setattr(score_module, "assert_decision_causal", lambda *args, **kwargs: None)
+    scorer = Scorer.__new__(Scorer)
+    scorer.snapshot = "snap-test"
+    scorer.matcher = SimpleNamespace(phase4_recipe_cache={})
+    window = SimpleNamespace(
+        entry_date=pd.Timestamp("2026-01-06"),
+        exit_date=pd.Timestamp("2026-01-09"),
+        decision_date=pd.Timestamp("2026-01-05"),
+    )
+    scorer.calendar = SimpleNamespace(
+        resolve_offsets=lambda *args, **kwargs: window,
+        is_projected=lambda value: False,
+    )
+    scorer._resolve_event = lambda request: (pd.Timestamp("2026-01-08"), "AMC")
+    scorer._structure = lambda request: SimpleNamespace(
+        entry_offset=0, exit_offset=1, decision_offset=None, decided_early=False,
+    )
+    # Already "sized": skip the real Tier-4 fold-serving call this makes in
+    # production. Its own `capture_source_bundle` (model_bindings, role
+    # "forecast_sizing") is not what this test pins -- the model layer's is,
+    # and it is not the last call on this strategy's real path either way.
+    scorer._size_from_forecast = lambda request, result, structure, size=True: (
+        request, structure
+    )
+
+    def price_entry(request, structure, result, chain_index) -> None:
+        result.legs = [{"name": "leg", "side": "buy", "right": "call",
+                        "qty": 1.0, "strike": 100.0, "expiry": "2026-01-16"}]
+        result.entry_cost = 4.25
+        result.spot = 100.0
+        result.quote_date = result.entry_date
+
+    scorer._price_entry = price_entry
+    scorer._features = lambda request, result: pd.DataFrame({"x": [1.0]})
+    scorer._quote_today = lambda ticker, as_of: None
+
+    def score_model(request, result, features) -> None:
+        # The real `_score_model` -> `_phase4_capture_served_model` call for
+        # the driver model: the LAST `capture_source_bundle` call on this
+        # strategy's real path.
+        collector = result._phase4_checkpoint_collector
+        collector.capture_source_bundle(model_bindings=({
+            "model_id": "abs-move-v3", "role": "abs_move",
+            "feature_order": ("x",), "artifact": "models/abs_move.joblib",
+            "artifact_sha256": "a" * 64, "adapter": "joblib-estimator.v1",
+            "output_names": ("driver_prediction",), "strategy": "TWIN-P5",
+            "decision_offset": None, "input_as_of": "2026-01-05",
+        },))
+        result.exp_pnl_model = 0.1
+
+    def score_analogs(request, result, features) -> None:
+        # The real `_score_analogs` only sets this; `score()` itself calls
+        # `capture_analog_inputs` from it (see the call right after
+        # `_score_analogs` in `Scorer.score`).
+        result._phase4_analog_evidence = {
+            "strategy": "TWIN-P5", "alpha": 0.5, "snapshot": "snap-test",
+            "cutoff": "2024-01-01T00:00:00", "request_key": "req-1",
+            "bucket_query": {"mcap_bucket": "large", "moneyness_band": "atm",
+                            "dte_band": "short", "implied_tercile": "mid"},
+            "causal": {"rows": [{
+                "row_id": "r1", "source_index": "r1",
+                "values": {"mcap_bucket": "large", "moneyness_band": "atm",
+                          "dte_band": "short", "implied_tercile": "mid",
+                          "ret": 0.1},
+            }]},
+        }
+
+    def score_gate(request, result, features) -> None:
+        # The real `_apply_entry_rule` -> `_simulated_pnl` -> `_expectation`
+        # call for an entry-rule-gated strategy: it mutates
+        # `_source_bundle["native_recipes"]["simulation"]` and records the
+        # arithmetic verdict, with NO further `capture_source_bundle` call
+        # on this path (the gate is a rule, not a model).
+        collector = result._phase4_checkpoint_collector
+        collector.capture_simulation(
+            horizon={"event_date": "2026-01-08", "dte_exit": 3.0},
+            capital_denominator=4.25,
+            evidence={
+                "draw_count": 2000, "seed": 17,
+                "residual_draw": {
+                    "cutoff": "2026-01-08", "cutoff_index": 1, "bucket_count": 2,
+                    "bucket_index": 0, "eligible_indices": [0], "fallback_used": False,
+                },
+                "residual_rows": [],
+                "residual_population": [{"event_date": "2025-12-01",
+                                        "pred_abs_move": 4.0, "err_move": 0.5,
+                                        "err_crush": -2.0}],
+            },
+        )
+        collector.capture_gate_inputs({
+            "kind": "entry_rule", "rule_identity": "entry-rule:TWIN-P5",
+            "facts": {"exp_pnl_sim": 0.05}, "terms": [],
+        })
+        result.gate_pass = True
+
+    scorer._score_model = score_model
+    scorer._score_analogs = score_analogs
+    scorer._score_gate = score_gate
+    scorer._score_chooser = lambda request, result, features: None
+    scorer._compare_layers = lambda result: None
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+
+    scorer.score(
+        ScoreRequest(
+            ticker="ABC", strategy="TWIN-P5",
+            as_of=pd.Timestamp("2026-01-05"),
+            event_date=pd.Timestamp("2026-01-08"), session="AMC",
+        ),
+        trace=collector,
+    )
+
+    recipes = _checkpoint_value(collector, "source_inputs")["native_recipes"]
+    assert recipes["forecast"]["required_roles"] == ["driver"]
+    assert "analogs" in recipes and recipes["analogs"]["recipe"]["alpha"] == 0.5
+    assert "simulation" in recipes and recipes["simulation"]["mode"] == "planned_exit"
+
+
+def test_analogs_that_genuinely_did_not_match_stay_absent_from_the_frozen_checkpoint() -> None:
+    """The other half of the ordering fix: a stage that finds nothing must
+    stay absent from the FROZEN checkpoint, not just the live bundle --
+    `_refresh_source_inputs` must never fabricate a recipe for a stage that
+    did not produce one. `capture_analog_inputs` returns early (no
+    ``source_rows``) when the causal population is empty, so it never
+    reaches the `native_recipes["analogs"]` assignment or the refresh call
+    after it; this pins that the frozen checkpoint reflects that absence."""
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_source_bundle(context={"ticker": "ABC"})
+    collector.capture_analog_inputs({
+        "strategy": "STR-THRU", "alpha": 0.5, "snapshot": "snap",
+        "cutoff": "2024-01-01T00:00:00", "request_key": "req",
+        "bucket_query": {"mcap_bucket": "large", "moneyness_band": "atm",
+                        "dte_band": "short", "implied_tercile": "mid"},
+        "causal": {"rows": []},
+    })
+
+    recipes = _checkpoint_value(collector, "source_inputs")["native_recipes"]
+    assert "analogs" not in recipes
+
+
 def _residual_pool() -> ResidualPool:
     index = np.arange(600)
     return ResidualPool(pd.DataFrame({

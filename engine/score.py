@@ -559,6 +559,17 @@ class Phase4TraceCollector:
             "pre_iv30": evidence.get("pre_iv30"),
             "residuals": population_rows,
         }
+        # Re-freeze `source_inputs` from this mutation: for a
+        # forecast-sized, entry-rule-gated strategy (CND-PS, TWIN-P,
+        # TWIN-P5, BFLY-P, BFLY-P5, RAMP7, CTR5) this call happens INSIDE
+        # the gate stage (`_apply_entry_rule` -> `_simulated_pnl`), after
+        # `_score_model`'s own `capture_source_bundle` call already froze
+        # the checkpoint without this recipe -- and no later
+        # `capture_source_bundle` call exists on that path to pick it up
+        # (the gate is arithmetic, not model-bound). Without this refresh
+        # the frozen checkpoint permanently missed `native_recipes.simulation`
+        # for every one of those strategies. See `_refresh_source_inputs`.
+        self._refresh_source_inputs()
         self._checkpoint("simulation", {
             "horizon": self._document(horizon),
             "capital_denominator": float(capital_denominator),
@@ -709,6 +720,11 @@ class Phase4TraceCollector:
             "source_rows": _Predocumented(documented_rows),
             "query_features": self._document(buckets),
         }
+        # See the matching comment in `capture_simulation`: this mutates
+        # `_source_bundle["native_recipes"]` directly, after the model
+        # layer's `capture_source_bundle` call may already have frozen the
+        # checkpoint without it. Refresh so the frozen copy picks it up.
+        self._refresh_source_inputs()
 
     def capture_gate_inputs(self, value: Mapping[str, Any]) -> None:
         self._checkpoint("gate_inputs", value)
@@ -788,11 +804,14 @@ class Phase4TraceCollector:
             put("declarations", str(name), self._document(value))
         for name, row in (inputs or {}).items():
             put("inputs", str(name), self._document(row))
-        group = self._checkpoint_groups.get("source_inputs")
-        if group is not None:
-            # Only the frozen section changed: the rest of the group is what
-            # the last `capture_source_bundle` documented, unchanged.
-            group["frozen"] = self._document(frozen)
+        # Route through the shared refresh rather than patching just the
+        # `frozen` key in place: that narrower patch was itself part of the
+        # staleness bug pattern (a hand-written partial re-sync that had to
+        # be remembered at every mutation site). `_refresh_source_inputs`
+        # re-derives the WHOLE group from the current `_source_bundle`, so
+        # it also picks up anything else that mutated since the last
+        # `capture_source_bundle` call, not just this one's `frozen` slice.
+        self._refresh_source_inputs()
 
     #: How far the chain lookup got, recorded next to ``quote_domain`` so an
     #: empty domain says WHY it is empty. ``not_reached``: the row stopped
@@ -861,7 +880,45 @@ class Phase4TraceCollector:
         )
         if found:
             raise ValueError(f"source bundle contains scoring answers: {found}")
-        self._checkpoint_groups["source_inputs"] = self._document(document)
+        self._freeze_source_inputs()
+
+    def _freeze_source_inputs(self) -> None:
+        """Snapshot the ``source_inputs`` checkpoint from the CURRENT,
+        complete state of ``_source_bundle`` -- bootstrapping the group on
+        the first call, refreshing it on every later one.
+
+        ``_source_bundle`` is one persistent dict that every ``capture_*``
+        method mutates in place (``context``/``quote_domain``/``features``/
+        ``model_bindings``/``native_recipes``/``frozen``), across the
+        model, analog, simulation and gate stages, in whatever order this
+        request's strategy runs them. There is no single stage that is
+        always last, so the only ordering-proof rule is: whoever mutates
+        ``_source_bundle`` re-freezes it immediately afterward, from the
+        object itself, not from a value it was handed. See
+        ``_refresh_source_inputs`` for the mutators that are not the first
+        capture of a request.
+        """
+        self._checkpoint_groups["source_inputs"] = self._document(self._source_bundle)
+
+    def _refresh_source_inputs(self) -> None:
+        """Re-freeze ``source_inputs`` after a mutation from a capture
+        method OTHER than ``capture_source_bundle`` (``capture_simulation``,
+        ``capture_analog_inputs``, ``capture_frozen``).
+
+        A no-op before ``capture_source_bundle``'s first call: those methods
+        can run before the request context resolves (``capture_frozen`` in
+        a unit test, or a served-fold binding recorded ahead of pricing),
+        and freezing an incomplete bundle then would fabricate a
+        ``source_inputs`` checkpoint for a row that has not actually
+        reached source capture. Once the group exists, this is the ONLY
+        legal way to update it -- never patch a sub-key of the stored group
+        in place (that per-field patching, once done only for ``frozen``,
+        is the shape of bug this closes: a mutation that updates
+        ``_source_bundle`` but not the frozen copy of it).
+        """
+        if "source_inputs" not in self._checkpoint_groups:
+            return
+        self._freeze_source_inputs()
 
     def record(self, stage: str, inputs: Any, output: Any, *,
                status: str = "completed") -> None:
