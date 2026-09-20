@@ -57,13 +57,13 @@ id = "nightly-features"
 area = "nightly"
 capability = "Tier-3 panel and Tier-4 forecast rebuild before scoring"
 old = ["nightly:legacy tiers", "cli:engine/data/rebuild.py", "cli:engine/data/features/tier4.py"]
-new = ["MISSING", "nightly:v2 features"]
-producer = "legacy engine.data.rebuild / engine.data.features.tier4 only"
-identity = "none: Tier 4 is whatever was last written (no snapshot binding)"
-tests = ["tests/test_tier4.py", "tests/test_panel.py"]
-disposition = "missing"
+new = ["nightly:v2 features", "action:legacy_features"]
+producer = "legacy_features action (engine.data.rebuild panel+tier4 build) inside a supervised worker, in the real DAG between finality and score"
+identity = "features.json receipt records panel_sha256/tier4_sha256 from the build that just ran; legacy_score binds it (nightly.py _legacy_params) and refuses FEATURES_MISSING with no receipt, FEATURES_STALE on a hash mismatch, checked unconditionally at the top of _action_score (not gated behind snapshot input_mode, since the real default nightly plan is input_mode=\"legacy\" and never reaches snapshot_stages.prepare_launch)"
+tests = ["tests/test_tier4.py", "tests/test_panel.py", "tests/test_v2_ops_legacy_features.py"]
+disposition = "compatibility-adapter"
 owner = "P6-2"
-notes = "The bounded GRAPH names a features stage, but no job kind implements it and _DAG_STAGES omits it; the v2 nightly scores against the last legacy Tier-4 write."
+notes = "features is now in _DAG_STAGES/_DAG_PARENTS (between finality and score) and registered as a legacy_features job kind (stages.py, legacy_rebuild resource profile). decision_replay/render/selfcheck/model_evidence also read Tier 3/4 through their own Scorer but are NOT yet guarded by this receipt -- follow-up, not this slice. Per-request Tier-4 serving-fold caches (tier4_coverage.py, _check_tier4_coverage) are a separate, already-existing mechanism, untouched."
 
 [[row]]
 id = "nightly-score"

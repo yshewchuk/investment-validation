@@ -275,10 +275,11 @@ def registry():
     profiles = {"legacy_score": "legacy_score", "legacy_score_requests": "legacy_score",
                 "legacy_decision_replay": "legacy_score",
                 "legacy_finality": "validation",
+                "legacy_features": "legacy_rebuild",
                 "legacy_decisions": "validation", "legacy_settlement": "legacy_rebuild",
                 "legacy_model_evidence": "model_evidence", "legacy_render": "projection",
                 "legacy_selfcheck": "validation"}
-    for action in ("legacy_finality", "legacy_score", "legacy_decisions",
+    for action in ("legacy_finality", "legacy_features", "legacy_score", "legacy_decisions",
                    "legacy_settlement", "legacy_model_evidence", "legacy_render",
                    "legacy_selfcheck", "legacy_score_requests", "legacy_decision_replay"):
         kinds.append(JobKind(

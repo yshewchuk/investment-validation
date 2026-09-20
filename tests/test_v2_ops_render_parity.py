@@ -672,6 +672,7 @@ def test_every_job_binding_names_a_declared_dependency():
 #: silently resolved to the wrong artifact.
 _DECLARED_OUTPUT_NAMES = {
     "legacy_finality": frozenset({"legacy_finality", "legacy_finality_coverage"}),
+    "legacy_features": frozenset({"legacy_features"}),
     "legacy_score": frozenset({"legacy_score"}),
     "legacy_decisions": frozenset({"legacy_decisions"}),
     "legacy_settlement": frozenset({"legacy_settlement"}),

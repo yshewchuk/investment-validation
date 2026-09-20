@@ -36,6 +36,7 @@ from engine.v2.ops.decision_evidence import derive
 from engine.v2.ops.effects_graph import ledger_export_effect, publication_effect
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
+from engine.v2.ops import legacy_adapter
 from engine.v2.ops.legacy_adapter import (
     _action_decision_replay,
     _action_decisions,
@@ -351,6 +352,11 @@ def _stub_scoring(monkeypatch, rows):
 
 def test_action_score_scores_at_the_resolved_session_on_walk_back(monkeypatch, tmp_path):
     (tmp_path / "finality.json").write_text(json.dumps(_finality()))
+    # P6-2: _action_score now refuses without a matching features receipt.
+    (tmp_path / "features.json").write_text(json.dumps(
+        {"panel_sha256": "panel-sha", "tier4_sha256": "tier4-sha"}))
+    monkeypatch.setattr(legacy_adapter, "_current_features_hashes",
+                        lambda: {"panel_sha256": "panel-sha", "tier4_sha256": "tier4-sha"})
     rows = [{"ticker": "FAKE", "strategy": "TWIN-P", "event_date": RESOLVED,
             "strike": 100.0, "expiry": "2026-10-16"}]
     calls = _stub_scoring(monkeypatch, rows)
