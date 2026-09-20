@@ -19,6 +19,7 @@ from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor_cgroup import probe
 from engine.v2.ops.executor_watchdog import find_owners, observe, process_info, process_table, signal_owned
+from engine.v2.ops import executor_watchdog as ew
 from engine.v2.ops.health import health
 from engine.v2.ops.lifecycle import record_launch
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
@@ -257,7 +258,7 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
     assert details == {"exception_type": "RuntimeError",
                        "location": details["location"]}
-    assert details["location"].endswith("test_v2_ops_executor_faults.py:235")
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:236")
     assert "S3CRET-VALUE" not in json.dumps(details)
 
 
@@ -294,7 +295,7 @@ def test_process_table_skips_a_pid_that_disappears_mid_scan(tmp_path):
     assert table[111][0].start_ticks == 12345
 
 
-def test_find_owners_ignores_a_foreign_uid_process_but_still_blocks_on_same_uid(tmp_path):
+def test_find_owners_ignores_a_foreign_uid_process_but_still_blocks_on_same_uid(monkeypatch):
     """§ B1's "unreadable environ never excludes" rule is what makes recovery
     hang forever on a shared, non-root CI runner: every OTHER user's and the
     init system's own processes have an environ this process cannot read,
@@ -304,31 +305,85 @@ def test_find_owners_ignores_a_foreign_uid_process_but_still_blocks_on_same_uid(
     fork/exec descendant of our own launch always keeps our uid, so a
     foreign-uid process cannot be our escaper regardless of environ
     readability, while a same-uid process with an unreadable environ must
-    still block exactly as before -- this test proves both halves with a
-    synthetic ``/proc`` tree (no real permission enforcement needed: root can
-    read anything, so the foreign-uid case is proved by ownership alone, the
-    same way the real fix decides it).
+    still block exactly as before -- this test proves both halves by mocking
+    the uid lookup and the environ read directly (real ``os.chown`` to an
+    arbitrary uid needs root, which a CI runner does not have, so this test
+    never fabricates real file ownership).
     """
     boot = "boot-uid-test"
     self_uid = os.getuid()
     foreign_uid = self_uid + 1
     session = 222  # deliberately not launch_pid, isolating proof (c)
 
-    proc = tmp_path / "proc"
     same_uid_pid, foreign_uid_pid = 40001, 40002
-    for pid, uid in ((same_uid_pid, self_uid), (foreign_uid_pid, foreign_uid)):
-        d = proc / str(pid)
-        d.mkdir(parents=True)
-        (d / "stat").write_text(_fake_stat_line(pid, session=session, ppid=1))
-        # No "environ" file at all: read_bytes() raises FileNotFoundError,
-        # the same OSError subclass a real permission-denied read raises.
-        os.chown(d, uid, os.getgid())
-
-    table = process_table(boot, proc=proc)
-    assert set(table) == {same_uid_pid, foreign_uid_pid}
+    table = {
+        same_uid_pid: (ProcessIdentity(boot_id=boot, pid=same_uid_pid, start_ticks=1,
+                                       process_group=same_uid_pid), 1, "S", 0, session),
+        foreign_uid_pid: (ProcessIdentity(boot_id=boot, pid=foreign_uid_pid, start_ticks=1,
+                                          process_group=foreign_uid_pid), 1, "S", 0, session),
+    }
+    owners = {same_uid_pid: self_uid, foreign_uid_pid: foreign_uid}
+    monkeypatch.setattr(ew, "_owner_uid", lambda pid, proc: owners[pid])
+    monkeypatch.setattr(ew, "_environ_contains", lambda pid, marker, proc: None)  # unreadable, both
 
     blockers = {pid for pid, _ in find_owners(
         boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
-        table=table, proc=proc)}
+        table=table, proc=Path("/proc"))}
     assert same_uid_pid in blockers, "same-uid unreadable environ must still block"
     assert foreign_uid_pid not in blockers, "a foreign-uid process must be ignored"
+
+
+def test_find_owners_never_treats_its_own_process_as_a_blocker(monkeypatch):
+    """A live ancestor of the checking process itself can never be an
+    attempt's escaper (our own lineage predates any attempt we're checking),
+    and Yama's restricted ptrace mode means its environ is permanently
+    unreadable to us regardless of the same-uid rule -- without the
+    ``_ancestor_pids`` exclusion, the calling process's own table entry would
+    show up as an eternal same-uid, unreadable-environ blocker, which is
+    exactly what makes recovery hang forever on a real (non-root) CI runner.
+    """
+    boot = "boot-self-test"
+    self_uid = os.getuid()
+    self_pid = os.getpid()
+    fabricated_ppid = self_pid + 1_000_000  # distinct from any real pid; not in `table`
+    table = {
+        self_pid: (ProcessIdentity(boot_id=boot, pid=self_pid, start_ticks=1,
+                                   process_group=self_pid), fabricated_ppid, "S", 0, 999),
+    }
+    monkeypatch.setattr(ew, "_owner_uid", lambda pid, proc: self_uid)
+    monkeypatch.setattr(ew, "_environ_contains", lambda pid, marker, proc: None)  # unreadable
+
+    blockers = {pid for pid, _ in find_owners(
+        boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
+        table=table, proc=Path("/proc"))}
+    assert self_pid not in blockers, "the checking process's own pid must never block itself"
+
+
+def test_find_owners_ignores_self_but_still_blocks_an_unrelated_same_uid_process(monkeypatch):
+    """The ancestor exclusion in ``_ancestor_pids`` must not overreach: a live,
+    same-uid process that is NOT on the checking process's own ancestor chain
+    is a completely ordinary (b)/(c) candidate and must still block exactly
+    as before when its environ is unreadable. Only the checker's own lineage
+    is exempt -- not every same-uid process on the box -- or this fix would
+    quietly widen the same-uid escaper hole it was meant to close.
+    """
+    boot = "boot-non-ancestor-test"
+    self_uid = os.getuid()
+    self_pid = os.getpid()
+    fabricated_ppid = self_pid + 1_000_000  # the checker's own (fabricated) ancestor chain
+    unrelated_pid = self_pid + 2_000_000  # same uid, but neither our ancestor nor our descendant
+    session = 222  # deliberately not launch_pid, isolating proof (c)
+    table = {
+        self_pid: (ProcessIdentity(boot_id=boot, pid=self_pid, start_ticks=1,
+                                   process_group=self_pid), fabricated_ppid, "S", 0, 999),
+        unrelated_pid: (ProcessIdentity(boot_id=boot, pid=unrelated_pid, start_ticks=1,
+                                        process_group=unrelated_pid), 1, "S", 0, session),
+    }
+    monkeypatch.setattr(ew, "_owner_uid", lambda pid, proc: self_uid)
+    monkeypatch.setattr(ew, "_environ_contains", lambda pid, marker, proc: None)  # unreadable, both
+
+    blockers = {pid for pid, _ in find_owners(
+        boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
+        table=table, proc=Path("/proc"))}
+    assert self_pid not in blockers, "the checker's own pid must still be excluded"
+    assert unrelated_pid in blockers, "a same-uid, non-ancestor process must still block"

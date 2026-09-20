@@ -91,6 +91,30 @@ def _owner_uid(pid: int, proc: Path) -> int | None:
         return None
 
 
+def _ancestor_pids(pid: int, table: dict) -> set[int]:
+    """Every live pid on this process's own ancestor chain, traced through
+    ``table``'s ppid links (including this process itself).
+
+    A live process we are descended from can never be the escaper of an
+    attempt we are now checking: our own lineage predates any attempt we
+    launched. It is also unreadable for a structural reason, not a security
+    one: Yama's restricted ptrace mode (``ptrace_scope=1``, the kernel
+    default on any real, non-root host including a GitHub Actions runner)
+    only lets a process trace its own descendants, never an ancestor, so a
+    same-uid ancestor's ``/proc/<pid>/environ`` is permanently unreadable to
+    us regardless of the same-uid rule above. Without this exclusion,
+    find_owners() always finds at least one "blocker" -- the CI runner's own
+    long-lived same-uid ancestors (its job shell, the actions worker, ...) --
+    and recovery can never prove an attempt dead on a real runner.
+    """
+    seen: set[int] = set()
+    current = pid
+    while current in table and current not in seen:
+        seen.add(current)
+        current = table[current][1]  # ppid
+    return seen
+
+
 def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int | None,
                 marker: str, table: dict | None = None, proc: Path = Path("/proc")) -> tuple:
     """Live, non-zombie processes that ownership proof (b)/(c) cannot exclude.
@@ -110,12 +134,19 @@ def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int
     This is what lets recovery prove "dead" on a shared, non-root CI runner,
     where every other user's or the init system's own processes have
     unreadable environ files that would otherwise block forever.
+
+    A live ancestor of the process running this check is excluded the same way: ptrace's
+    restricted mode denies reading an ancestor's environ regardless of uid, and our own lineage
+    predates any attempt we are now checking, so it can never be that attempt's escaper.
     """
     table = process_table(boot_id, proc) if table is None else table
     self_uid = os.getuid()
+    ancestors = _ancestor_pids(os.getpid(), table)
     blockers = []
     for pid, (identity, _, state, _, session) in table.items():
         if state == "Z":
+            continue
+        if pid in ancestors:
             continue
         session_owns = (launch_pid is not None and session == launch_pid
                         and identity.start_ticks >= launch_start_ticks)
