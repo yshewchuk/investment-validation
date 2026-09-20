@@ -33,7 +33,7 @@ from checks import rearchitecture_phase2_gate as p2gate
 from checks import rearchitecture_phase3_evidence as p3evidence
 from checks import rearchitecture_phase3_evidence_build as p3build
 from checks import rearchitecture_phase3_gate as p3gate
-from checks.rearchitecture_phase3_quality import FIXED_SUITE
+from checks.v2_coverage_ratchet import PHASE3_FIXED_SUITE as FIXED_SUITE
 from checks.rearchitecture_phase3_gate import REGISTRY as REAL_REGISTRY_PATH
 from engine.v2.contracts import (
     ArtifactRef,
@@ -403,7 +403,7 @@ def valid_evidence(tmp_path, *, populate_all=True) -> tuple[dict, Path, Path]:
             "suite": list(FIXED_SUITE),
             "suite_missing": [], "pytest_returncode": 0,
             "packages": json.loads((Path(__file__).resolve().parents[1] /
-                                    "checks/rearchitecture_phase3_coverage_baseline.json").read_text())["packages"],
+                                    "checks/v2_coverage_ratchet_phase3_baseline.json").read_text())["packages"],
         }).encode()),
         "performance_receipt_ref": _ref(artifact_root, "performance_receipt.json", json.dumps({
             "api_latency_p50_ms": 120, "first_usable_page_seconds": 1.4, "bytes": 20000,

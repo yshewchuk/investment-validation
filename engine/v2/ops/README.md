@@ -145,7 +145,7 @@ part of the unit suite (it needs a real `coverage run`, which the fast unit
 tests must not pay for on every run). Run it directly instead:
 
 ```text
-python3 checks/rearchitecture_phase2_coverage.py --measure --output /tmp/p2cov.json
+python3 checks/v2_coverage_ratchet.py --profile phase2 --measure --output /tmp/p2cov.json
 python3 checks/rearchitecture_phase2_gate.py --coverage /tmp/p2cov.json --json
 ```
 
@@ -156,8 +156,8 @@ test only checks the registry against the real tree cheaply (file existence
 plus one `pytest --collect-only`, a few seconds) — it does not run this
 measurement.
 
-Both coverage scripts (`rearchitecture_phase1_coverage.py`,
-`rearchitecture_phase2_coverage.py`) accept an opt-in `--measure --parallel`
+Both coverage profiles (`--profile phase1`, `--profile phase2` of
+`checks/v2_coverage_ratchet.py`) accept an opt-in `--measure --parallel`
 flag that runs the same fixed suite under `-n auto --dist loadgroup` and
 combines every xdist worker's coverage data with coverage.py's own
 multi-process support (`COVERAGE_PROCESS_START` plus the system
@@ -335,6 +335,6 @@ it fails the coverage row with `COVERAGE_EVIDENCE_MISSING` by design (a missing
 check is never green). The green-path command is:
 
 ```text
-python3 checks/rearchitecture_phase1_coverage.py --measure --output /tmp/coverage.json
+python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
 ```

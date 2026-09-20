@@ -13,15 +13,15 @@ Phase 3 gate itself computes them (``rearchitecture_phase1_gate.source_hash``/
 the four pieces of that row nothing else produces:
 
 * ``coverage_receipt_ref``: a REAL ``coverage run`` + ``coverage json`` over
-  a fixed Phase 3 test suite (every file in ``FIXED_SUITE`` that exists on
-  disk), reduced to the SAME per-package ``engine/v2`` line-coverage shape
-  ``checks/rearchitecture_phase1_coverage.py::package_counts`` already
-  produces for Phase 1/2 -- reused, not reimplemented. **Documented gap**: no
-  new baseline-ratchet file is introduced (the strict evidence validator,
-  ``checks/rearchitecture_phase3_evidence.py::_check_coverage_receipt``,
-  only checks ``source_hash == implementation_code_hash``, not a ratchet); a
-  committed Phase 3 coverage baseline is real follow-up work, not silently
-  pretended to exist here.
+  a fixed Phase 3 test suite (every file in ``checks.v2_coverage_ratchet.
+  PHASE3_FIXED_SUITE`` that exists on disk), reduced to the SAME per-package
+  ``engine/v2`` line-coverage shape ``checks/v2_coverage_ratchet.py::
+  package_counts`` already produces for Phase 1/2 -- reused, not
+  reimplemented. Measurement (``phase3_measure_coverage``) and ratchet
+  (``phase3_coverage_findings``, wired in by
+  ``checks/rearchitecture_phase3_evidence.py::_check_coverage_receipt``
+  against the committed ``checks/v2_coverage_ratchet_phase3_baseline.json``)
+  both live in ``checks/v2_coverage_ratchet.py``, not here.
 
 * ``performance_receipt_ref``: real, measured numbers (API p50 latency over
   20 real requests, first-usable-page wall time via a real Playwright
@@ -70,35 +70,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from checks.rearchitecture_phase1_coverage import package_counts  # noqa: E402
 from checks.rearchitecture_phase1_gate import source_files, source_hash  # noqa: E402
 from checks.rearchitecture_phase2_gate import environment_hash as _environment_hash  # noqa: E402
 from checks.rearchitecture_phase3_browser import _get, _mk_app, _start, _stop  # noqa: E402
+from checks.v2_coverage_ratchet import (  # noqa: E402
+    PHASE3_COVERAGE_SCHEMA as COVERAGE_SCHEMA,
+    phase3_measure_coverage as measure_coverage,
+)
 from engine.v2.diagnosis import AGREE, DIFFER, ComparisonReceipt, Envelope, Finding, Population, content_hash  # noqa: E402
 from engine.v2.foundation import to_document  # noqa: E402
 
-COVERAGE_SCHEMA = "phase3_coverage.v1.0"
-BASELINE_SCHEMA = "phase3_coverage_baseline.v1.0"
-BASELINE = ROOT / "checks" / "rearchitecture_phase3_coverage_baseline.json"
 UI_BUILD_KIND = "ui_build_typecheck_parity"
 SECRET_SCAN_KIND = "secret_scan_negative_control"
-
-#: A scope choice (no phase3_acceptance.json "tests" registry exists to
-#: derive this from, unlike phase1/phase2) -- every real test file that
-#: exercises the Phase 3 read API / bridge / projections / UI-facing server
-#: code, kept only if it exists on disk.
-FIXED_SUITE = (
-    "tests/test_v2_serving_api.py",
-    "tests/test_v2_serving_bridge.py",
-    "tests/test_v2_serving_legacy_bundle.py",
-    "tests/test_v2_serving_projections.py",
-    "tests/test_v2_serving_publication_binding.py",
-    "tests/test_v2_dashboard_preview.py",
-    "tests/test_v2_dashboard_browser.py",
-    "tests/test_v2_dashboard_integration.py",
-    "tests/test_checks_phase3_gate.py",
-    "tests/test_v2_dashboard_publish.py",
-)
 
 
 def _finding(findings: list, kind: str, field: str) -> None:
@@ -121,66 +104,15 @@ def _receipt(kind: str, tier: int, left_ref: str, right_ref: str, findings: list
 
 
 # --------------------------------------------------------------------------
-# coverage_receipt_ref
+# coverage_receipt_ref -- measurement (phase3_measure_coverage) and the
+# ratchet (phase3_coverage_findings, plus FIXED_SUITE/BASELINE/*_SCHEMA) now
+# live in checks/v2_coverage_ratchet.py (the phase3 profile of the shared v2
+# coverage ratchet); only COVERAGE_SCHEMA and measure_coverage are needed
+# here, imported above under their original names. coverage_findings is
+# imported directly from checks.v2_coverage_ratchet by
+# checks/rearchitecture_phase3_evidence.py, and FIXED_SUITE by
+# tests/test_checks_phase3_gate.py -- neither goes through this module.
 # --------------------------------------------------------------------------
-
-
-def measure_coverage(root: Path, code_hash: str) -> dict:
-    suite = [f for f in FIXED_SUITE if (root / f).is_file()]
-    missing = [f for f in FIXED_SUITE if f not in suite]
-    with tempfile.TemporaryDirectory(prefix="phase3-cov-") as tmp:
-        cov_json = Path(tmp) / "coverage.json"
-        cov_data = Path(tmp) / ".coverage"
-        run_cmd = [sys.executable, "-m", "coverage", "run", f"--data-file={cov_data}",
-                  "--source=engine/v2", "-m", "pytest", "-q", "-p", "no:cacheprovider", *suite]
-        result = subprocess.run(run_cmd, cwd=root, capture_output=True, text=True, timeout=1200)
-        subprocess.run([sys.executable, "-m", "coverage", "json", f"--data-file={cov_data}",
-                        "-o", str(cov_json)], cwd=root, capture_output=True, text=True)
-        document = json.loads(cov_json.read_text()) if cov_json.is_file() else {"files": {}}
-    packages = package_counts(document, root=root)
-    packages_out = {name: {"percentage": group["percentage"], "executed": group["executed"],
-                           "executable": group["executable"]} for name, group in packages.items()}
-    return {"schema_version": COVERAGE_SCHEMA, "source_hash": code_hash, "suite": suite,
-           "suite_missing": missing, "pytest_returncode": result.returncode,
-           "pytest_tail": "\n".join(result.stdout.splitlines()[-15:]), "packages": packages_out,
-           "baseline_ref": BASELINE.name}
-
-
-def coverage_findings(document: dict, root: Path = ROOT) -> list[dict]:
-    """Reject a stale, partial, or lower-coverage Phase 3 measurement."""
-    findings = []
-    baseline_path = root / BASELINE.relative_to(ROOT)
-    if not baseline_path.is_file():
-        return [{"code": "COVERAGE_BASELINE_MISSING"}]
-    try:
-        baseline = json.loads(baseline_path.read_text())
-    except ValueError:
-        return [{"code": "COVERAGE_BASELINE_INVALID"}]
-    if baseline.get("schema_version") != BASELINE_SCHEMA:
-        return [{"code": "COVERAGE_BASELINE_INVALID"}]
-    expected_suite = [f for f in FIXED_SUITE if (root / f).is_file()]
-    if baseline.get("suite") != list(FIXED_SUITE):
-        return [{"code": "COVERAGE_BASELINE_INVALID"}]
-    if document.get("suite") != expected_suite or document.get("suite_missing"):
-        findings.append({"code": "COVERAGE_SUITE_DRIFT"})
-    if document.get("pytest_returncode") != 0:
-        findings.append({"code": "COVERAGE_TEST_FAILURE"})
-    packages, previous = document.get("packages"), baseline.get("packages")
-    if not isinstance(packages, dict) or set(packages) != set(previous or {}):
-        return findings + [{"code": "COVERAGE_PACKAGE_INVENTORY_DRIFT"}]
-    for name, prior in previous.items():
-        current = packages[name]
-        executed, executable = current.get("executed"), current.get("executable")
-        old_executed, old_executable = prior.get("executed"), prior.get("executable")
-        valid_counts = all(
-            type(v) is int for v in (executed, executable, old_executed, old_executable))
-        if not valid_counts or not 0 <= executed <= executable or not 0 <= old_executed <= old_executable:
-            findings.append({"code": "COVERAGE_COUNTS_INVALID", "package": name})
-        elif executable and old_executable and executed * old_executable < old_executed * executable:
-            findings.append({"code": "COVERAGE_REGRESSION", "package": name,
-                             "previous": [old_executed, old_executable],
-                             "current": [executed, executable]})
-    return findings
 
 
 # --------------------------------------------------------------------------

@@ -33,17 +33,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.rearchitecture_phase1_gate import source_files, source_hash
-from checks.rearchitecture_phase2_coverage import (
-    BASELINE as COVERAGE_BASELINE,
-    REGISTRY,
-    compare as coverage_compare,
-    load_registry,
-    validate_measurement as coverage_validate,
-)
 from checks.rearchitecture_phase2_evidence import validate_evidence
+from checks.v2_coverage_ratchet import (
+    PHASE2_BASELINE as COVERAGE_BASELINE,
+    PHASE2_REGISTRY as REGISTRY,
+    phase2_compare as coverage_compare,
+    phase2_load_registry as load_registry,
+    phase2_validate_measurement as coverage_validate,
+)
 
 PHASE0_SCRIPT = "checks/rearchitecture_phase0_gate.py"
-PHASE1_COVERAGE_SCRIPT = "checks/rearchitecture_phase1_coverage.py"
+PHASE1_COVERAGE_SCRIPT = "checks/v2_coverage_ratchet.py"
+PHASE1_COVERAGE_PROFILE = "phase1"
 PHASE1_GATE_SCRIPT = "checks/rearchitecture_phase1_gate.py"
 
 
@@ -84,8 +85,8 @@ def default_prerequisite_runner(root=ROOT):
     phase0_raw = _run_json([sys.executable, PHASE0_SCRIPT, "--json"], root)
     with tempfile.TemporaryDirectory(prefix="phase2-gate-prereq-") as scratch:
         coverage_path = Path(scratch) / "phase1-coverage.json"
-        subprocess.run([sys.executable, PHASE1_COVERAGE_SCRIPT, "--measure",
-                        "--output", str(coverage_path)],
+        subprocess.run([sys.executable, PHASE1_COVERAGE_SCRIPT, "--profile", PHASE1_COVERAGE_PROFILE,
+                        "--measure", "--output", str(coverage_path)],
                        cwd=root, capture_output=True, check=False, timeout=3600)
         phase1_raw = _run_json([sys.executable, PHASE1_GATE_SCRIPT,
                                 "--coverage", str(coverage_path)], root)

@@ -920,7 +920,7 @@ Suggested test files:
 - `tests/test_v2_data_legacy_adapter.py` — D02, D13–D15;
 - `tests/test_v2_ops_nightly_completion.py` — D18–D20 (ops-owned; the Phase 1
   coverage suite picks it up by its `test_v2_ops_` prefix);
-- `checks/rearchitecture_phase2_coverage.py` and its committed baseline —
+- `checks/v2_coverage_ratchet.py` (`--profile phase2`) and its committed baseline —
   run the fixed Phase 2 suite, bind results to the exact code hash, and enforce
   the per-package coverage ratchet;
 - `checks/rearchitecture_phase2_gate.py` — validates fresh evidence for
@@ -966,9 +966,9 @@ coordinator-side validation entrypoints after those receipts exist:
 
 ```bash
 /usr/bin/python3 -u checks/rearchitecture_phase0_gate.py
-/usr/bin/python3 -u checks/rearchitecture_phase1_coverage.py --measure --output /tmp/phase1-for-phase2-coverage.json
+/usr/bin/python3 -u checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/phase1-for-phase2-coverage.json
 /usr/bin/python3 -u checks/rearchitecture_phase1_gate.py --coverage /tmp/phase1-for-phase2-coverage.json
-/usr/bin/python3 -u checks/rearchitecture_phase2_coverage.py --measure --output /tmp/phase2-coverage.json
+/usr/bin/python3 -u checks/v2_coverage_ratchet.py --profile phase2 --measure --output /tmp/phase2-coverage.json
 /usr/bin/python3 -u checks/rearchitecture_phase2_gate.py --coverage /tmp/phase2-coverage.json --evidence-manifest /tmp/phase2-evidence.json
 ```
 
