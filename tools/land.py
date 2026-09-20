@@ -36,10 +36,6 @@ from pathlib import Path
 #: The real checkout's .env, never a relative path and never the worktree's own.
 DEFAULT_ENV_PATH = Path("/root/investing-plan/.env")
 
-#: Test-only escape hatch: tests/test_land.py sets this to point land at a
-#: synthetic .env inside a tmpdir. Test-only, never set this in normal use.
-ENV_OVERRIDE_VAR = "LAND_TEST_ENV_OVERRIDE"
-
 SECRET_COUNT_RE = re.compile(r"(\d+) secret pattern\(s\) loaded from")
 TEST_TAIL_LINES = 40
 
@@ -64,15 +60,6 @@ def repo_root() -> Path:
         eprint("land: refusing: not inside a git repository")
         sys.exit(1)
     return Path(proc.stdout.strip())
-
-
-def resolve_env_path() -> Path:
-    override = os.environ.get(ENV_OVERRIDE_VAR)
-    path = Path(override) if override else DEFAULT_ENV_PATH
-    if not path.is_file() or not os.access(path, os.R_OK):
-        eprint(f"land: refusing: .env missing or unreadable: {path}")
-        sys.exit(4)
-    return path
 
 
 def save_head(root: Path) -> tuple[str, str]:
@@ -186,7 +173,8 @@ def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, env_path: Path = DEFAULT_ENV_PATH,
+         root: Path | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Merge a branch into main, gate the merge, and push.")
     parser.add_argument("branch", help="branch to merge")
@@ -200,7 +188,8 @@ def main(argv: list[str] | None = None) -> int:
                              "leave HEAD at the new merged commit")
     args = parser.parse_args(argv)
 
-    root = repo_root()
+    if root is None:
+        root = repo_root()
 
     status = git(root, "status", "--porcelain")
     if status.stdout.strip():
@@ -213,8 +202,11 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"land: refusing: branch does not exist: {args.branch}")
         return 2
 
+    if not env_path.is_file() or not os.access(env_path, os.R_OK):
+        eprint(f"land: refusing: .env missing or unreadable: {env_path}")
+        return 4
+
     saved = save_head(root)
-    env_path = resolve_env_path()
 
     try:
         return _run(root, args, saved, env_path)

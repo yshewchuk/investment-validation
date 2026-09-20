@@ -8,16 +8,21 @@ checkout beyond reading those three files, and no test pushes anywhere real.
 """
 from __future__ import annotations
 
-import os
+import importlib.util
+import io
 import shutil
 import subprocess
-import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAND_PY = REPO_ROOT / "tools" / "land.py"
+
+_spec = importlib.util.spec_from_file_location("land", str(LAND_PY))
+land = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(land)
 
 REAL_ENV_BODY = "TESTVAR=some_long_enough_generic_value_123\n"
 ZERO_ENV_BODY = "OQUANTS_COOKIE_NAME=whatever\n"
@@ -66,12 +71,19 @@ def _write_env(tmp_path: Path, name: str, body: str) -> Path:
     return path
 
 
-def _run_land(work: Path, env_path: Path, *args: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["LAND_TEST_ENV_OVERRIDE"] = str(env_path)
-    return subprocess.run(
-        [sys.executable, str(LAND_PY), *args],
-        cwd=str(work), env=env, capture_output=True, text=True)
+class _LandResult:
+    def __init__(self, returncode: int, stdout: str, stderr: str):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _run_land(work: Path, env_path: Path, *args: str) -> _LandResult:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        returncode = land.main(list(args), env_path=env_path, root=work)
+    return _LandResult(returncode, stdout.getvalue(), stderr.getvalue())
 
 
 @pytest.fixture
