@@ -119,6 +119,17 @@ def _number(value: float) -> str:
 
 
 def _serialize(value: Any) -> str:
+    """Render one LEAF value's JSON text -- called as ``_serialize(_scalar(v))``
+    at every leaf of :func:`iter_canonical_json`'s recursion. The list/dict
+    branches below are not a second container-recursion path in practice:
+    the only container `_scalar` ever hands back is the one-level
+    ``{"__nonfinite__": "..."}`` tag for a NaN/Infinity float, so they run at
+    most one level deep, on a value nothing above this function ever built by
+    recursing. They stay so `_serialize` keeps working standalone (the
+    non-finite tag needs somewhere to render), and so callers that already
+    hold a JSON-safe leaf value do not need to reach into `iter_canonical_json`
+    to serialize it.
+    """
     if value is None:
         return "null"
     if value is True:
@@ -157,65 +168,68 @@ def canonical_json(value: Any, *, fragments: Any = None) -> str:
     ``render(node)`` once per shared node) or ``None`` for a node it does
     not hold. The text is byte-identical to the plain path: JCS serializes
     each member and element independently of where it sits.
+
+    Implemented as ``"".join(iter_canonical_json(value, fragments=fragments))``
+    -- :func:`iter_canonical_json` is the ONE recursive serialization
+    definition; this just joins its chunks for callers that need the whole
+    string (e.g. writing canonical bytes to disk). There is no second,
+    string-building recursion to keep in lockstep: `_serialize`'s own
+    list/dict branches are exercised only for the one-level ``__nonfinite__``
+    tag dict `_scalar` produces at a leaf, never for a general nested value
+    (see `_serialize`'s docstring-adjacent comment below).
     """
-    if fragments is None:
-        return _serialize(_normalize(value))
-    return _serialize_shared(value, fragments)
+    return "".join(iter_canonical_json(value, fragments=fragments))
 
 
 def _plain(value: Any) -> str:
-    return _serialize(_normalize(value))
+    """The fragments-free rendering of one node, for a fragments object's
+    cache-miss ``render(node)`` callback. Same chunk generator as everything
+    else, fragments disabled so a cached fragment's OWN text never depends on
+    what else happens to reference it."""
+    return "".join(iter_canonical_json(value))
 
 
 _CONTAINERS = (dict, list, tuple)
 
 
-def _serialize_shared(value: Any, fragments: Any) -> str:
-    if not isinstance(value, _CONTAINERS):
-        return _serialize(_scalar(value))  # a leaf: exactly _plain(value)
-    text = fragments.canonical(value, _plain)
-    if text is not None:
-        return text
-    if isinstance(value, dict):
-        members = {str(k): v for k, v in value.items()}
-        items = sorted(members.items(),
-                       key=lambda kv: kv[0].encode("utf-16-be", "surrogatepass"))
-        body = ",".join(
-            f"{json.dumps(k, ensure_ascii=False)}:"
-            + (_serialize_shared(v, fragments) if isinstance(v, _CONTAINERS)
-               else _serialize(_scalar(v)))
-            for k, v in items)
-        return "{" + body + "}"
-    return "[" + ",".join(
-        _serialize_shared(v, fragments) if isinstance(v, _CONTAINERS)
-        else _serialize(_scalar(v)) for v in value) + "]"
-
-
 def content_hash(value: Any, *, fragments: Any = None) -> str:
-    """``sha256:<64 hex>`` over the canonical JSON of ``value``. ``fragments``
-    (see :func:`canonical_json`) only saves work; the hash is the same."""
-    text = canonical_json(value, fragments=fragments)
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"{CONTENT_HASH_PREFIX}{digest}"
+    """``sha256:<64 hex>`` over the canonical JSON of ``value``, fed
+    incrementally from :func:`iter_canonical_json`'s chunks -- no
+    whole-document string is ever built to compute the hash, only to return
+    it from :func:`canonical_json` when a caller actually wants the text.
+    ``fragments`` (see :func:`canonical_json`) only saves work; the hash is
+    the same."""
+    digest = hashlib.sha256()
+    for chunk in iter_canonical_json(value, fragments=fragments):
+        digest.update(chunk.encode("utf-8"))
+    return f"{CONTENT_HASH_PREFIX}{digest.hexdigest()}"
 
 
 def iter_canonical_json(value: Any, *, fragments: Any = None) -> Iterator[str]:
-    """Stream :func:`canonical_json`'s text as chunks, never joined.
+    """The ONE recursive canonical-JSON serialization definition. Every other
+    entry point in this module -- :func:`canonical_json`, :func:`_plain` and
+    :func:`content_hash`/:func:`stream_content_hash` -- is a thin wrapper
+    around this generator; none of them re-implements container recursion,
+    key ordering or leaf normalization on its own, so there is nothing for a
+    second definition to drift from.
+
+    Recurses directly over ``value`` (``_scalar`` at every leaf,
+    ``fragments.canonical`` at every container, UTF-16-code-unit key order),
+    yielding pieces instead of building the result with ``str.join``, so no
+    single Python object ever holds more than one node's rendered text --
+    the fix for `_serialize`'s old all-at-once recursion, which held every
+    child's string and the joined parent alive at once and cost gigabytes
+    hashing a tier-0 pair's ~359k-row translation block. A cache hit under
+    ``fragments`` still yields that fragment's whole cached text as one
+    chunk -- bounded by ``_SharedTraceDocuments``'s own text budget, not by
+    document size.
 
     Byte-for-byte identical to ``canonical_json(value, fragments=fragments)``
-    when the yielded pieces are concatenated -- proven in
-    ``tests/test_v2_ops_foundation.py`` by comparing this against that
-    function (the oracle) over the same fixtures ``canonical_json`` is
-    already pinned against, plus large/shared/nonfinite ones the batch path
-    would rather not build as one string.
-
-    This does the SAME per-node work ``_serialize_shared`` already does
-    (``_scalar`` at every leaf, ``fragments.canonical`` at every container,
-    UTF-16-code-unit key order) but recurses directly over ``value`` instead
-    of building the result with ``str.join``, so no single Python object ever
-    holds more than one node's rendered text. A cache hit under ``fragments``
-    still yields that fragment's whole cached text as one chunk -- bounded by
-    ``_SharedTraceDocuments``'s own text budget, not by document size.
+    -- trivially true now that ``canonical_json`` is defined as
+    ``"".join(iter_canonical_json(...))``, and pinned in
+    ``tests/test_v2_ops_foundation.py`` against the same GOLDEN fixtures plus
+    a shared-fragment document, so a future edit that reintroduces a second
+    recursion is caught the same way a hash drift would be.
     """
     if not isinstance(value, _CONTAINERS):
         yield _serialize(_scalar(value))
@@ -254,18 +268,14 @@ def iter_canonical_json(value: Any, *, fragments: Any = None) -> Iterator[str]:
 
 
 def stream_content_hash(value: Any, *, fragments: Any = None) -> str:
-    """``content_hash``, but the sha256 is fed chunk by chunk from
-    :func:`iter_canonical_json` -- no whole-document string is ever built.
-    Byte-identical digest to ``content_hash(value, fragments=fragments)``
-    because it hashes the exact same UTF-8 bytes, just incrementally: every
-    yielded chunk is a complete Python ``str`` (never a partial character),
-    so encoding each chunk and concatenating the results is the same as
-    encoding the one joined string would have been.
+    """Same function as :func:`content_hash`, which already hashes
+    incrementally from :func:`iter_canonical_json`'s chunks -- kept as a
+    separate name only so existing callers (`tools/capture_tier0_corpus.py`)
+    that named the streaming path explicitly do not need to change. Do not
+    give this its own hashing loop: that would be exactly the two
+    definitions that can drift the module docstring warns about.
     """
-    digest = hashlib.sha256()
-    for chunk in iter_canonical_json(value, fragments=fragments):
-        digest.update(chunk.encode("utf-8"))
-    return f"{CONTENT_HASH_PREFIX}{digest.hexdigest()}"
+    return content_hash(value, fragments=fragments)
 
 
 def tag_nonfinite(value: Any) -> Any:
