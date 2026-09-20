@@ -121,20 +121,26 @@ from tools.phase4_frozen_resources import (  # noqa: E402
     FrozenResourcePackage,
     package_frozen_resources,
 )
-from tools.phase4_release_assembler import assemble_input_trace  # noqa: E402
+from tools.phase4_release_assembler import (  # noqa: E402
+    TRANSLATION_SCHEMA,
+    assemble_input_trace,
+)
 from tools.phase4_request_translation import (  # noqa: E402
     LegacyRequestTranslationError,
     canonical_request_from_legacy,
 )
 
-#: v1.2 (was v1.1): a pair's payload MAY now embed a shared frozen document
+#: v1.3 (was v1.2): an ``input_translation.mappings`` row list MAY now be
+#: stored as a small delta against a corpus-level shared row table instead
+#: of in full -- see ``ROWS_REF_KEY``/``SHARED_TRANSLATION_TABLE_SCHEMA_VERSION``
+#: below. v1.2 (was v1.1) let a pair's payload embed a shared frozen document
 #: (a served fold pool, residual pool or payoff fit) by reference instead of
 #: in full -- see ``SHARED_REF_KEY``/``SHARED_DOCUMENT_SCHEMA_VERSION`` and
 #: ``guides/rearchitecture_phase0_baseline.md`` Sec 7.4. Nothing reads this
 #: field to gate behaviour (the loader recognizes the reference SHAPE, not
 #: the version string), so the bump is documentary, matching this module's
 #: convention of bumping on every payload-shape change.
-SCHEMA_VERSION = "tier0_pair.v1.2"
+SCHEMA_VERSION = "tier0_pair.v1.3"
 INDEX_VERSION = "tier0_corpus.v1.1"
 DEFAULT_OUT = ROOT / "fixtures" / "tier0"
 
@@ -156,6 +162,45 @@ SHARED_REF_KEY = "$shared"
 #: the exact value ``content_hash``/``_SHARED_TRACE_DOCUMENTS`` already
 #: define, unchanged by how the document happens to be stored on disk.
 SHARED_DOCUMENT_SCHEMA_VERSION = "tier0_shared_document.v1.0"
+
+#: An ``input_translation.mappings`` row list (one row per translated leaf:
+#: ``{"native_path": [...], "shared_path": [...], "value_hash": "sha256:..."}``)
+#: is near-never byte-identical across occurrences the way a whole shared
+#: document is: a DYN-SV chooser's native menu members can each carry
+#: hundreds of thousands of rows, 99.997% identical, but differing by a
+#: handful apiece, so whole-node identity sharing (``SHARED_REF_KEY`` above)
+#: never matches on it -- measured: an 11-member chooser pair file at 1.85 GB,
+#: essentially all ``input_translation``. ``_TranslationTableWriter`` stores
+#: the row CONTENT once per corpus version under
+#: ``shared/translations/<hex>.json`` and gives every occurrence a reference
+#: instead: ``{ROWS_REF_KEY: "sha256:<64 hex>", "order": ROWS_ORDER_SHARED_PATH,
+#: "omit": [<row content-hash>, ...], "extra": [<row>, ...]}`` --
+#: ``omit``/``extra`` are ALWAYS both present (possibly empty), so the shape
+#: is fixed-key. ``checks/tier0_corpus.py`` carries the SAME literals
+#: independently, for the reason ``SHARED_REF_KEY``'s docstring above gives.
+#:
+#: Reconstruction (``checks/tier0_corpus.py``'s ``_resolve_rows_reference``):
+#: start from the referenced table's rows, keyed by each row's OWN content
+#: hash; drop every key named in ``omit``; add every row in ``extra``; sort
+#: the result by ``(repr(shared_path), repr(native_path))``. That sort order
+#: is EXACTLY what ``tools/phase4_release_assembler.py``'s ``_translation``
+#: already produces when ``mappings`` is auto-derived (``sorted(shared_leaves,
+#: key=repr)``, the only path this capture ever calls), so no separate order
+#: record is needed -- ``order`` names which reconstruction rule applies and
+#: lets the loader refuse an unrecognized one instead of guessing.
+ROWS_REF_KEY = "$rows"
+ROWS_ORDER_SHARED_PATH = "shared_path"
+
+#: Schema for one file under a corpus version's ``shared/translations/``
+#: directory: ``{"schema_version": ..., "digest": "sha256:...", "rows": [...]}``,
+#: where ``digest`` is ``content_hash(rows)`` over the exact array stored (a
+#: table's own row order is canonical -- sorted by
+#: ``(repr(shared_path), repr(native_path))`` -- so two independent captures
+#: that union the SAME row content produce the SAME digest and share the
+#: file). Distinct from ``SHARED_DOCUMENT_SCHEMA_VERSION``: a translation
+#: table's ``rows`` is hashed directly (an array), not a generic shared VALUE
+#: reached via ``content_hash``/``_SHARED_TRACE_DOCUMENTS``.
+SHARED_TRANSLATION_TABLE_SCHEMA_VERSION = "tier0_shared_translation_table.v1.0"
 
 #: How a NaN is frozen. Not ``null``: contracts §2.1 forbids sending a missing
 #: value as NaN, and collapsing the two here would lose the distinction between
@@ -1806,6 +1851,146 @@ class _SharedDocumentWriter:
         return {SHARED_REF_KEY: digest}
 
 
+def _translation_row_key(row: Mapping[str, Any]) -> str:
+    """A translation row's own content hash -- its stable identity in a
+    shared row table (see ``ROWS_REF_KEY``'s docstring above)."""
+    return content_hash(row)
+
+
+def _translation_row_sort_key(row: Mapping[str, Any]) -> tuple[str, str]:
+    return (repr(row["shared_path"]), repr(row["native_path"]))
+
+
+class _TranslationTableWriter:
+    """Deduplicate ``input_translation.mappings`` row lists across the whole
+    corpus version, the same way ``_SharedDocumentWriter`` deduplicates whole
+    shared documents -- except a mapping list is almost NEVER byte-identical
+    across occurrences (each ranked chooser member differs from its siblings
+    by a handful of rows out of hundreds of thousands). Whole-node identity
+    sharing therefore never matches on this data; this writer matches on ROW
+    CONTENT instead: each occurrence is stored as a small delta (``omit``/
+    ``extra``) against whichever already-written table it overlaps most
+    with, so the dominant row set pays its full cost exactly once per corpus
+    version, and every later occurrence -- another ranked member, another
+    pair entirely -- pays only for the rows that differ.
+
+    A table, once written, is immutable: a later occurrence's delta never
+    rewrites it, so an earlier pair's reference stays byte-valid no matter
+    how many later pairs reference the same table. ``self._tables`` is kept
+    resident for the writer's whole lifetime (one per corpus version) so a
+    later occurrence can measure its overlap against every table already
+    written -- bounded by the number of DISTINCT large row sets in the
+    corpus, not by the number of members or pairs.
+    """
+
+    def __init__(self, shared_dir: Path) -> None:
+        self.tables_dir = shared_dir / "translations"
+        self.tables_dir.mkdir(parents=True, exist_ok=True)
+        self._tables: dict[str, dict[str, Any]] = {}
+
+    def digests(self) -> tuple[str, ...]:
+        """Every digest written under ``shared/translations/`` so far."""
+        return tuple(self._tables)
+
+    def reference(self, rows: list) -> dict[str, Any]:
+        """``rows`` (one member's full, ordered ``mappings`` list) as a
+        ``{ROWS_REF_KEY: ...}`` delta reference against the best-overlapping
+        table already written, or a freshly written table when no existing
+        one is a net win.
+
+        Reconstruction (``checks/tier0_corpus.py``) always rebuilds a
+        member's row list by re-sorting on ``(repr(shared_path),
+        repr(native_path))`` (``ROWS_ORDER_SHARED_PATH``), the order
+        ``tools/phase4_release_assembler.py``'s ``_translation`` already
+        produces for the ONLY ``mappings`` this capture ever builds
+        (auto-derived, never caller-ordered). If ``rows`` is not ALREADY in
+        that order, compacting it and reconstructing it back would silently
+        change the array's order -- and therefore its content hash, since
+        array order is meaningful (contracts §2.2) -- without changing a
+        single row's content. Refused loudly here instead of trusted.
+        """
+        by_key: dict[str, Any] = {}
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or set(row) != {
+                "native_path", "shared_path", "value_hash",
+            }:
+                raise ValueError(
+                    f"mappings[{index}]: not a translation row: "
+                    f"{sorted(row) if isinstance(row, dict) else type(row).__name__}"
+                )
+            key = _translation_row_key(row)
+            if key in by_key:
+                raise ValueError(f"mappings[{index}]: duplicate row {key}")
+            by_key[key] = row
+        if rows != sorted(rows, key=_translation_row_sort_key):
+            raise ValueError(
+                "mappings is not sorted by (shared_path, native_path); "
+                "row-table compaction relies on that order to reconstruct "
+                "the original list exactly"
+            )
+        best_digest = None
+        best_overlap = -1
+        for digest, table in self._tables.items():
+            overlap = sum(1 for key in by_key if key in table)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_digest = digest
+        if best_digest is not None:
+            table = self._tables[best_digest]
+            omit = sorted(set(table) - set(by_key))
+            extra_keys = sorted(set(by_key) - set(table))
+            if len(omit) + len(extra_keys) < len(by_key):
+                return {
+                    ROWS_REF_KEY: best_digest,
+                    "order": ROWS_ORDER_SHARED_PATH,
+                    "omit": omit,
+                    "extra": [by_key[k] for k in extra_keys],
+                }
+        digest = self._write_table(by_key)
+        return {ROWS_REF_KEY: digest, "order": ROWS_ORDER_SHARED_PATH,
+                "omit": [], "extra": []}
+
+    def _write_table(self, by_key: dict[str, Any]) -> str:
+        rows_sorted = sorted(by_key.values(), key=_translation_row_sort_key)
+        digest = content_hash(rows_sorted)
+        if digest not in self._tables:
+            self._tables[digest] = {
+                _translation_row_key(row): row for row in rows_sorted
+            }
+            body = {"schema_version": SHARED_TRANSLATION_TABLE_SCHEMA_VERSION,
+                    "digest": digest, "rows": rows_sorted}
+            path = self.tables_dir / (digest.split(":", 1)[-1] + ".json")
+            encoder = json.JSONEncoder(indent=2, sort_keys=True, allow_nan=False)
+            with path.open("w") as fh:
+                for chunk in encoder.iterencode(body):
+                    fh.write(chunk)
+                fh.write("\n")
+        return digest
+
+
+def _compact_translation_mappings(node: Any, writer: _TranslationTableWriter) -> None:
+    """Mutate ``node`` in place: replace every ``input_translation.mappings``
+    row list this pair carries with ``writer``'s ``{ROWS_REF_KEY: ...}`` delta
+    reference. Storage-side only: every hash upstream (``translation_hash``,
+    ``native_input_hash``, ``shared_input_hash``, ``trace_hash``,
+    ``payload_hash``) was already computed over the full expanded
+    ``mappings`` list by ``assemble_input_trace``/``make_pair`` before this
+    function ever runs, so no hash changes. Recognizes an
+    ``input_translation`` dict by its own ``schema_version``
+    (``TRANSLATION_SCHEMA``), never by key-guessing, so it cannot mistake an
+    unrelated dict that happens to have a ``mappings`` key for one.
+    """
+    if isinstance(node, dict):
+        if (node.get("schema_version") == TRANSLATION_SCHEMA
+                and isinstance(node.get("mappings"), list)):
+            node["mappings"] = writer.reference(node["mappings"])
+        for value in node.values():
+            _compact_translation_mappings(value, writer)
+    elif isinstance(node, list):
+        for item in node:
+            _compact_translation_mappings(item, writer)
+
+
 def _prepare_normalized_referenced(
     value: Any, cache: dict[int, tuple[Any, Any]], shared_writer: _SharedDocumentWriter,
 ) -> Any:
@@ -2915,6 +3100,12 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     # DYN-SV choosers (both traced here) is written once and both pairs
     # reference it, not just the 11 members within a single pair.
     shared_writer = _SharedDocumentWriter(tmp / "shared")
+    # Same lifetime and reasoning, for `input_translation.mappings` row
+    # lists: a chooser's native members (and any other traced pair from the
+    # same corpus version) share the SAME dominant frozen-chooser row set, so
+    # one writer spanning every candidate lets the SECOND occurrence onward
+    # pay only for its own handful of differing rows.
+    translation_writer = _TranslationTableWriter(tmp / "shared")
     for cand in chosen:
         # A +/-inf residual (legacy ResidualPool keeps it, R4-20 gap 1) is
         # written in the repo's canonical non-finite form,
@@ -2955,6 +3146,11 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         if raw_checkpoint is not None:
             storage_payload["legacy_trace"] = raw_checkpoint
         storage_pair = {**pair, "payload": storage_payload}
+        # Storage-only, after every hash above was already taken over the
+        # full expanded `mappings`: replace each `input_translation.mappings`
+        # this pair carries with a small delta against the corpus's shared
+        # row table (see `_TranslationTableWriter`).
+        _compact_translation_mappings(storage_pair, translation_writer)
         pair_path = pairs_dir / f"{cand['fixture_id']}.json"
         pair_bytes = _write_pair_file(pair_path, storage_pair, shared_writer)
         print(f"[corpus] wrote pair {cand['fixture_id']}: "
@@ -3012,6 +3208,8 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         # (or a test) confirm dedup happened without diffing directory
         # listings. Empty when no candidate carried a shared document.
         "shared_documents": sorted(shared_writer.digests()),
+        # Same, for the row tables under shared/translations/.
+        "shared_translation_tables": sorted(translation_writer.digests()),
     }
     checkpoint_sink.finalize({
         "release_id": out_dir.name,

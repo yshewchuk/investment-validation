@@ -83,7 +83,8 @@ from engine.v2.diagnosis import (  # noqa: E402
 
 __all__ = ["Corpus", "load", "run", "main", "derive_covers", "seeded_controls",
            "derived_uncovered", "TIME_BUDGET_SECONDS", "CorpusFormatError",
-           "SHARED_REF_KEY", "SHARED_DOCUMENT_SCHEMA_VERSION"]
+           "SHARED_REF_KEY", "SHARED_DOCUMENT_SCHEMA_VERSION",
+           "ROWS_REF_KEY", "SHARED_TRANSLATION_TABLE_SCHEMA_VERSION"]
 
 DEFAULT_CORPUS = ROOT / "fixtures" / "tier0"
 
@@ -129,6 +130,17 @@ class Corpus:
 SHARED_REF_KEY = "$shared"
 SHARED_DOCUMENT_SCHEMA_VERSION = "tier0_shared_document.v1.0"
 
+#: `tools/capture_tier0_corpus.py`'s row-table delta reference for an
+#: `input_translation.mappings` list -- see that module's `ROWS_REF_KEY`
+#: docstring for the full shape and reconstruction rule. This module carries
+#: the SAME literals independently, for the reason `SHARED_REF_KEY`'s
+#: docstring above gives.
+ROWS_REF_KEY = "$rows"
+ROWS_ORDER_SHARED_PATH = "shared_path"
+SHARED_TRANSLATION_TABLE_SCHEMA_VERSION = "tier0_shared_translation_table.v1.0"
+_TRANSLATION_ROW_KEYS = frozenset({"native_path", "shared_path", "value_hash"})
+_ROWS_REFERENCE_KEYS = frozenset({ROWS_REF_KEY, "order", "omit", "extra"})
+
 
 class CorpusFormatError(ValueError):
     """A pair's shared-document reference, or the shared document itself,
@@ -137,15 +149,19 @@ class CorpusFormatError(ValueError):
 
 
 def _resolve_shared(node: Any, shared_dir: Path, cache: dict[str, Any],
-                     resolving: set[str]) -> Any:
+                     resolving: set[str], table_cache: dict[str, dict[str, Any]]) -> Any:
     """Walk ``node``, replacing every ``{SHARED_REF_KEY: digest}`` reference
     with the ONE Python object ``_load_shared_document`` reads for that
     digest -- the same object at every occurrence, restoring the capture's
     own in-memory sharing (``cache`` is keyed by digest and shared across
-    every pair one :func:`load` call reads). A dict carrying ``SHARED_REF_KEY``
-    alongside any other key is an unknown reference shape: refused loudly,
-    never silently treated as ordinary data. An old-format document with no
-    reference nodes at all passes through unchanged.
+    every pair one :func:`load` call reads) -- and every
+    ``{ROWS_REF_KEY: digest, ...}`` translation-row delta reference with its
+    reconstructed row list (:func:`_resolve_rows_reference`; ``table_cache``
+    likewise spans every pair one :func:`load` call reads). A dict carrying
+    either reference key alongside an unexpected key set is an unknown
+    reference shape: refused loudly, never silently treated as ordinary
+    data. An old-format document with no reference nodes at all passes
+    through unchanged.
     """
     if isinstance(node, dict):
         if SHARED_REF_KEY in node:
@@ -162,19 +178,24 @@ def _resolve_shared(node: Any, shared_dir: Path, cache: dict[str, Any],
                     raise CorpusFormatError(f"cyclic shared-document reference: {digest}")
                 resolving.add(digest)
                 try:
-                    resolved = _load_shared_document(shared_dir, digest, cache, resolving)
+                    resolved = _load_shared_document(
+                        shared_dir, digest, cache, resolving, table_cache)
                 finally:
                     resolving.discard(digest)
                 cache[digest] = resolved
             return resolved
-        return {k: _resolve_shared(v, shared_dir, cache, resolving) for k, v in node.items()}
+        if ROWS_REF_KEY in node:
+            return _resolve_rows_reference(node, shared_dir, table_cache)
+        return {k: _resolve_shared(v, shared_dir, cache, resolving, table_cache)
+                for k, v in node.items()}
     if isinstance(node, list):
-        return [_resolve_shared(v, shared_dir, cache, resolving) for v in node]
+        return [_resolve_shared(v, shared_dir, cache, resolving, table_cache) for v in node]
     return node
 
 
 def _load_shared_document(shared_dir: Path, digest: str, cache: dict[str, Any],
-                           resolving: set[str]) -> Any:
+                           resolving: set[str],
+                           table_cache: dict[str, dict[str, Any]]) -> Any:
     """Read, verify and resolve one ``shared/<hex>.json`` document.
 
     A missing file, a malformed body, an unsupported schema version, a
@@ -203,13 +224,137 @@ def _load_shared_document(shared_dir: Path, digest: str, cache: dict[str, Any],
     # A shared document may itself reference another (nested sharing):
     # resolve those FIRST, so the hash below is taken over the same fully
     # expanded logical value the writer computed `digest` from.
-    value = _resolve_shared(doc["value"], shared_dir, cache, resolving)
+    value = _resolve_shared(doc["value"], shared_dir, cache, resolving, table_cache)
     actual = content_hash(value)
     if actual != digest:
         raise CorpusFormatError(
             f"shared document {path} content does not match its digest: "
             f"{actual} != {digest}")
     return value
+
+
+def _validate_translation_row(row: Any, label: str) -> None:
+    if not isinstance(row, dict) or set(row) != _TRANSLATION_ROW_KEYS:
+        raise CorpusFormatError(
+            f"{label}: malformed translation row: "
+            f"{sorted(row) if isinstance(row, dict) else type(row).__name__}")
+    for key in ("native_path", "shared_path"):
+        path = row[key]
+        if not isinstance(path, list) or not path:
+            raise CorpusFormatError(f"{label}.{key}: expected nonempty list")
+    value_hash = row["value_hash"]
+    if not isinstance(value_hash, str) or not value_hash.startswith("sha256:"):
+        raise CorpusFormatError(f"{label}.value_hash: malformed digest")
+
+
+def _translation_row_key(row: dict) -> str:
+    return content_hash(row)
+
+
+def _translation_row_sort_key(row: dict) -> tuple[str, str]:
+    return (repr(row["shared_path"]), repr(row["native_path"]))
+
+
+def _load_translation_table(shared_dir: Path, digest: str,
+                             cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Read, verify and index one ``shared/translations/<hex>.json`` table,
+    once per digest per :func:`load` call -- the same hard-refusal contract
+    as :func:`_load_shared_document`: a missing file, a malformed body, an
+    unsupported schema, a declared digest that disagrees with the requested
+    one, a duplicate row, or content that does not hash back to the digest
+    are all raised, never silently skipped.
+    """
+    cached = cache.get(digest)
+    if cached is not None:
+        return cached
+    hexpart = digest.split(":", 1)[-1]
+    path = shared_dir / "translations" / f"{hexpart}.json"
+    if not path.is_file():
+        raise CorpusFormatError(f"missing shared translation table for {digest}: {path}")
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise CorpusFormatError(f"unreadable shared translation table {digest}: {exc}") from exc
+    if not isinstance(doc, dict) or set(doc) != {"schema_version", "digest", "rows"}:
+        raise CorpusFormatError(f"malformed shared translation table {digest}: {path}")
+    if doc.get("schema_version") != SHARED_TRANSLATION_TABLE_SCHEMA_VERSION:
+        raise CorpusFormatError(
+            f"unsupported shared translation table schema "
+            f"{doc.get('schema_version')!r} for {digest}")
+    if doc.get("digest") != digest:
+        raise CorpusFormatError(
+            f"shared translation table {path} declares digest "
+            f"{doc.get('digest')!r}, expected {digest}")
+    rows = doc["rows"]
+    if not isinstance(rows, list):
+        raise CorpusFormatError(f"shared translation table {digest}: rows is not a list")
+    by_key: dict[str, Any] = {}
+    for index, row in enumerate(rows):
+        _validate_translation_row(row, f"{digest}.rows[{index}]")
+        key = _translation_row_key(row)
+        if key in by_key:
+            raise CorpusFormatError(f"shared translation table {digest}: duplicate row {key}")
+        by_key[key] = row
+    actual = content_hash(rows)
+    if actual != digest:
+        raise CorpusFormatError(
+            f"shared translation table {path} content does not match its "
+            f"digest: {actual} != {digest}")
+    cache[digest] = by_key
+    return by_key
+
+
+def _resolve_rows_reference(node: dict, shared_dir: Path,
+                             table_cache: dict[str, dict[str, Any]]) -> list:
+    """Reconstruct a ``mappings`` row list from a ``{ROWS_REF_KEY: ...}``
+    delta reference: the referenced table's rows, minus ``omit``, plus
+    ``extra``, sorted back into the exact original order. See
+    ``tools/capture_tier0_corpus.py``'s ``ROWS_REF_KEY`` docstring for why
+    this sort order reproduces the original list exactly.
+    """
+    if set(node) != _ROWS_REFERENCE_KEYS:
+        raise CorpusFormatError(
+            "unknown translation-row reference shape (expected "
+            f"{sorted(_ROWS_REFERENCE_KEYS)}): {sorted(node)}")
+    digest = node[ROWS_REF_KEY]
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        raise CorpusFormatError(f"malformed shared translation table digest: {digest!r}")
+    order = node["order"]
+    if order != ROWS_ORDER_SHARED_PATH:
+        raise CorpusFormatError(f"unsupported translation-row order: {order!r}")
+    omit = node["omit"]
+    extra = node["extra"]
+    if not isinstance(omit, list) or not all(isinstance(x, str) for x in omit):
+        raise CorpusFormatError("malformed translation-row omit list")
+    if not isinstance(extra, list):
+        raise CorpusFormatError("malformed translation-row extra list")
+    table = _load_translation_table(shared_dir, digest, table_cache)
+    selected = dict(table)
+    seen_omit: set[str] = set()
+    for key in omit:
+        if key not in selected:
+            raise CorpusFormatError(
+                f"translation-row omit references a row not in table {digest}: {key}")
+        if key in seen_omit:
+            raise CorpusFormatError(f"duplicate translation-row omit entry: {key}")
+        seen_omit.add(key)
+        del selected[key]
+    for index, row in enumerate(extra):
+        _validate_translation_row(row, f"extra[{index}]")
+        key = _translation_row_key(row)
+        if key in selected:
+            raise CorpusFormatError(f"extra row duplicates an existing row: {key}")
+        selected[key] = row
+    rows = sorted(selected.values(), key=_translation_row_sort_key)
+    seen_shared_paths: set[tuple] = set()
+    for row in rows:
+        path = tuple(row["shared_path"])
+        if path in seen_shared_paths:
+            raise CorpusFormatError(
+                f"translation table {digest}: duplicate shared_path after "
+                f"reconstruction: {path}")
+        seen_shared_paths.add(path)
+    return rows
 
 
 def resolve_corpus(root: Path) -> Path:
@@ -243,8 +388,15 @@ def load(root: Path) -> Corpus:
     ``root/shared/<hex>.json`` and cached across every pair, so repeated
     occurrences (a chooser's 11 ranked members, or two pairs served by the
     same fold) share that object by identity again -- restoring the
-    capture's own in-memory sharing instead of duplicating it per pair. A
-    missing or digest-mismatched shared file, or an unrecognized reference
+    capture's own in-memory sharing instead of duplicating it per pair.
+    Similarly, an ``input_translation.mappings`` row list may be stored as a
+    small ``{ROWS_REF_KEY: "sha256:...", ...}`` delta against a
+    ``root/shared/translations/<hex>.json`` row table; each such table is
+    likewise read and verified once per digest across every pair one call
+    loads (``table_cache``), and every occurrence gets its own reconstructed
+    row list back (never a shared object, unlike a whole document: each
+    member's delta against the table differs). A missing or
+    digest-mismatched shared file or table, or an unrecognized reference
     shape, is a hard refusal (``CorpusFormatError``), never a silent skip.
     An OLD-format corpus with no ``shared/`` directory and no reference
     nodes loads unchanged: nothing in it is reference-shaped, so nothing
@@ -253,10 +405,11 @@ def load(root: Path) -> Corpus:
     index = json.loads((root / "INDEX.json").read_text())
     shared_dir = root / "shared"
     shared_cache: dict[str, Any] = {}
+    table_cache: dict[str, dict[str, Any]] = {}
     pairs = {}
     for path in sorted((root / "pairs").glob("*.json")):
         pair = json.loads(path.read_text())
-        pair = _resolve_shared(pair, shared_dir, shared_cache, set())
+        pair = _resolve_shared(pair, shared_dir, shared_cache, set(), table_cache)
         pairs[pair["fixture_id"]] = pair
     return Corpus(root=root, index=index, pairs=pairs)
 
