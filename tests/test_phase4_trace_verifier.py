@@ -284,22 +284,53 @@ def test_structurally_different_documents_cannot_claim_complete_translation(
 #: short of a "leaf" by the walker's own (container-recursing) definition.
 @pytest.mark.parametrize("extra_model_inputs,leaf_lookup,tagged_repr", [
     pytest.param(
-        {"nonfinite_feature": {phase4_real.NONFINITE_KEY: "nan"}},
-        ("nonfinite_feature",), "nan", id="top_level-nan",
-    ),
+        {"nonfinite_feature": {phase4_real.NONFINITE_KEY: v}},
+        ("nonfinite_feature",), v, id=f"top_level-{v}",
+    )
+    for v in ("nan", "inf", "-inf")
+] + [
     pytest.param(
-        {"a": {"b": {phase4_real.NONFINITE_KEY: "inf"}}},
-        ("a", "b"), "inf", id="nested-inf",
-    ),
+        {"a": {"b": {phase4_real.NONFINITE_KEY: v}}},
+        ("a", "b"), v, id=f"nested-{v}",
+    )
+    for v in ("nan", "inf", "-inf")
+] + [
     pytest.param(
-        {"series": [1.0, {phase4_real.NONFINITE_KEY: "-inf"}, 3.0]},
-        ("series", 1), "-inf", id="in_list-neg_inf",
-    ),
+        {"series": [1.0, {phase4_real.NONFINITE_KEY: v}, 3.0]},
+        ("series", 1), v, id=f"in_list-{v}",
+    )
+    for v in ("nan", "inf", "-inf")
 ])
 def test_nonfinite_tagged_leaf_resolves_at_its_recorded_path(
     tmp_path, extra_model_inputs, leaf_lookup, tagged_repr,
 ):
     pair = _pair(tmp_path, extra_model_inputs=extra_model_inputs)
+
+    # Pin the FIXTURE itself, independent of _verified_trace_bundle/
+    # _leaf_values: the mapping _translation() (via the same _leaf_values
+    # under test) actually recorded must address the tag dict itself, not
+    # one level into it. Without this, a mutant that deletes the sentinel
+    # branch changes _leaf_values for BOTH the row _translation() builds
+    # here and the row _verified_trace_bundle later re-derives, so the two
+    # would still agree with each other and the test below would pass for
+    # the wrong reason (caught by review: this is the actual regression
+    # this test must not be blind to).
+    expected_path = ["native_inputs", "features", "model_inputs", *leaf_lookup]
+    mappings = pair["payload"]["input_trace"]["input_translation"]["mappings"]
+    row = next(
+        (r for r in mappings if r["native_path"] == expected_path), None,
+    )
+    assert row is not None, (
+        f"no mapping recorded native_path == {expected_path}; got "
+        f"{[r['native_path'] for r in mappings]}"
+    )
+    assert row["shared_path"] == expected_path
+    # Pin value_hash too: it must cover the semantic nonfinite value (the
+    # tag dict as a whole), not a one-level-deeper string leaf a mutant
+    # walker would compute instead.
+    assert row["value_hash"] == content_hash(
+        {phase4_real.NONFINITE_KEY: tagged_repr}
+    )
 
     verified = phase4_real._verified_trace_bundle(pair, tmp_path)
 
@@ -325,12 +356,18 @@ def test_lookalike_one_key_dict_is_not_swallowed_as_a_leaf(tmp_path):
     trace = pair["payload"]["input_trace"]
     translation = trace["input_translation"]
     mappings = translation["mappings"]
+    expected_native_path = [
+        "native_inputs", "features", "model_inputs",
+        "lookalike", "not_the_sentinel",
+    ]
     target_index = next(
-        i for i, row in enumerate(mappings)
-        if row["native_path"] == [
-            "native_inputs", "features", "model_inputs",
-            "lookalike", "not_the_sentinel",
-        ]
+        (i for i, row in enumerate(mappings)
+         if row["native_path"] == expected_native_path),
+        None,
+    )
+    assert target_index is not None, (
+        f"no mapping recorded native_path == {expected_native_path}; got "
+        f"{[row['native_path'] for row in mappings]}"
     )
     row = mappings[target_index]
     row["shared_path"] = row["shared_path"][:-1]
