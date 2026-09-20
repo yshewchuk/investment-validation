@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openrouter/qwen/qwen3.8-flash",
+  "permission": {
+    "bash": {
+      "*": "deny"
+    },
+    "task": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "question": "deny",
+    "skill": "deny",
+    "doom_loop": "deny",
+    "external_directory": "deny",
+    "read": "deny",
+    "edit": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "list": "deny",
+    "lsp": "deny",
+    "todowrite": "deny"
+  }
+}
