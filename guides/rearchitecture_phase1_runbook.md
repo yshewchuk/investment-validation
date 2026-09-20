@@ -234,14 +234,14 @@ command without `--check` (`--force` only over an unrecognized hook).
 ### b. Coverage evidence
 
 ```text
-/usr/bin/python3 checks/rearchitecture_phase1_coverage.py --measure --output /tmp/coverage.json
+/usr/bin/python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 /usr/bin/python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json
 ```
 
 The fixed suite is `tests/test_v2_ops_*.py + tests/test_diagnosis_comparator.py`
 under `coverage run --source=engine/v2`; the measurement records the sorted
 test list and a source hash, and refuses if the tree changes mid-run. The
-ratchet baseline is `checks/rearchitecture_phase1_coverage_baseline.json`
+ratchet baseline is `checks/v2_coverage_ratchet_phase1_baseline.json`
 (`--baseline` to point elsewhere), cut 2026-09-13 at commit `5fc0146`:
 contracts 100%, diagnosis 96.8%, foundation 96.3%, serving 85.3%, ledger
 80.8%, ops 74.1%, empty packages recorded as empty. Cutting a new baseline is
@@ -308,7 +308,7 @@ the 2026-09-13 certification run is recorded in its canary receipt.
 
 ```text
 /usr/bin/python3 checks/rearchitecture_phase0_gate.py
-/usr/bin/python3 checks/rearchitecture_phase1_coverage.py --measure --output /tmp/coverage.json
+/usr/bin/python3 checks/v2_coverage_ratchet.py --profile phase1 --measure --output /tmp/coverage.json
 /usr/bin/python3 checks/rearchitecture_phase1_gate.py --coverage /tmp/coverage.json --output reports/rearchitecture_phase1_gate.json
 ```
 

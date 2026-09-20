@@ -5,7 +5,7 @@ import copy
 import subprocess
 
 from checks import install_hooks
-from checks.rearchitecture_phase1_coverage import SUITE_VERSION, compare
+from checks.v2_coverage_ratchet import PHASE1_SUITE_VERSION as SUITE_VERSION, phase1_compare as compare
 from checks.rearchitecture_phase1_lint import check, run
 
 CONFIG = b'[lint]\nselect = ["E4", "E7", "E9", "F", "I"]\n'

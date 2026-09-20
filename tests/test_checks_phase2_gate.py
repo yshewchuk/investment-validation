@@ -23,11 +23,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from checks import rearchitecture_phase2_coverage as p2cov
 from checks import rearchitecture_phase2_evidence as p2evidence
 from checks import rearchitecture_phase2_gate as p2gate
+from checks import v2_coverage_ratchet as p2cov
 from checks.layer_map import PACKAGES
-from checks.rearchitecture_phase2_coverage import REGISTRY as REAL_REGISTRY_PATH
+from checks.v2_coverage_ratchet import PHASE2_REGISTRY as REAL_REGISTRY_PATH
 from engine.v2.contracts import (
     DatasetVersionRef,
     DependencyEntry,
@@ -93,10 +93,10 @@ def _packages_doc(**overrides) -> dict:
 
 
 def _write_baseline(root: Path, packages: dict, suite_version: str, test_files: list) -> None:
-    baseline = root / "checks/rearchitecture_phase2_coverage_baseline.json"
+    baseline = root / "checks/v2_coverage_ratchet_phase2_baseline.json"
     baseline.parent.mkdir(parents=True, exist_ok=True)
     baseline.write_text(json.dumps({
-        "schema_version": p2cov.SCHEMA_VERSION, "suite_version": suite_version,
+        "schema_version": p2cov.PHASE2_SCHEMA_VERSION, "suite_version": suite_version,
         "test_files": test_files, "source_hash": "sha256:" + "0" * 64, "packages": packages,
         "mode": "serial",
     }))
@@ -121,11 +121,11 @@ def world(tmp_path, registry: dict, *, outcomes=None):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("def test_it():\n    pass\n")
-    suite_version = p2cov.suite_version(test_files)
+    suite_version = p2cov.phase2_suite_version(test_files)
     packages = _packages_doc()
     _write_baseline(root, packages, suite_version, test_files)
     code_hash = p2gate.source_hash(p2gate.source_files(root))
-    measured = {"schema_version": p2cov.SCHEMA_VERSION, "suite_version": suite_version,
+    measured = {"schema_version": p2cov.PHASE2_SCHEMA_VERSION, "suite_version": suite_version,
                 "test_files": test_files, "source_hash": code_hash, "packages": packages,
                 "test_outcomes": _outcomes(registry) if outcomes is None else outcomes}
     coverage_path = tmp_path / "coverage.json"
@@ -288,7 +288,7 @@ def d_ids_with(result, code) -> set:
 # -- registry shape -----------------------------------------------------------
 
 def test_registry_covers_exactly_d01_through_d20():
-    rows = p2cov.load_registry(REAL_REGISTRY_PATH)
+    rows = p2cov.phase2_load_registry(REAL_REGISTRY_PATH)
     assert set(rows) == set(ALL_D_IDS)
 
 
@@ -426,7 +426,7 @@ def test_parallel_mode_baseline_gives_baseline_not_serial_only(tmp_path):
     /proc-race noise as if it belonged there."""
     registry = {"D01": {"tier": 0, "tests": []}}
     w = world(tmp_path, registry)
-    baseline_path = w["root"] / "checks/rearchitecture_phase2_coverage_baseline.json"
+    baseline_path = w["root"] / "checks/v2_coverage_ratchet_phase2_baseline.json"
     baseline = json.loads(baseline_path.read_text())
     baseline["mode"] = "parallel"
     baseline_path.write_text(json.dumps(baseline))
@@ -943,7 +943,7 @@ def test_table_contract_mapping_hash_not_a_real_hash_gives_artifact_shape_invali
 def test_real_registry_fully_valid_evidence_is_ok(tmp_path):
     """Baseline for the table below: the REAL D01-D20 registry, synthetic
     green prerequisites, and otherwise-untouched ``valid_evidence`` is green."""
-    registry = p2cov.load_registry(REAL_REGISTRY_PATH)
+    registry = p2cov.phase2_load_registry(REAL_REGISTRY_PATH)
     w = world(tmp_path, registry)
     evidence, artifacts_dir = valid_evidence(tmp_path, w["root"])
     evidence_path = tmp_path / "evidence_final.json"
@@ -956,7 +956,7 @@ def test_real_registry_fully_valid_evidence_is_ok(tmp_path):
 
 
 def test_removing_each_registry_required_field_in_turn_turns_the_real_gate_red(tmp_path):
-    registry = p2cov.load_registry(REAL_REGISTRY_PATH)
+    registry = p2cov.phase2_load_registry(REAL_REGISTRY_PATH)
     required_fields = {field: d_id for d_id, row in registry.items()
                        for field in row.get("evidence_fields", [])}
     # The four fields the reviewer's repro named must be registry-required now.
@@ -1000,10 +1000,10 @@ def test_removing_each_registry_required_field_in_turn_turns_the_real_gate_red(t
 #
 # `tests/test_checks_phase2_gate.py` itself is not named in any registry row's
 # "tests" list (only tests/test_v2_ops_engineering.py is added implicitly by
-# p2cov.suite()), so nothing here re-enters a suite measurement of this file.
+# p2cov.phase2_suite()), so nothing here re-enters a suite measurement of this file.
 
 def test_real_repo_smoke_matches_registry_against_the_real_tree():
-    registry = p2cov.load_registry(REAL_REGISTRY_PATH)
+    registry = p2cov.phase2_load_registry(REAL_REGISTRY_PATH)
     root = p2gate.ROOT
 
     all_test_paths = sorted({t for row in registry.values() for t in row.get("tests", [])})

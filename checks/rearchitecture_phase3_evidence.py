@@ -292,7 +292,7 @@ def _check_coverage_receipt(doc: dict | None, implementation_code_hash: str | No
         findings.append({"code": "CODE_HASH_MISMATCH", "field": field})
         field_ok[field] = False
         return
-    from checks.rearchitecture_phase3_quality import coverage_findings
+    from checks.v2_coverage_ratchet import phase3_coverage_findings as coverage_findings
     for finding in coverage_findings(doc):
         findings.append({**finding, "field": field})
         field_ok[field] = False

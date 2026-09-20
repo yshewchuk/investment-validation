@@ -195,8 +195,8 @@ venv/
 # Test-runner tooling pins that must NOT be gated with requirements.txt --
 # see requirements-dev.txt's own header for why it is separate.
 !/requirements-dev.txt
-!/checks/rearchitecture_phase1_coverage_baseline.json
-!/checks/rearchitecture_phase2_coverage_baseline.json
+!/checks/v2_coverage_ratchet_phase1_baseline.json
+!/checks/v2_coverage_ratchet_phase2_baseline.json
 !/checks/mutation_ratchet_baseline.json
 
 # The Phase 2 acceptance registry (phase-2 guide §12.1): which tests and,

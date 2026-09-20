@@ -19,8 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from checks import code_budgets, import_layers, install_hooks, package_readmes, repo_hygiene
 from checks.layer_map import PACKAGES
-from checks.rearchitecture_phase1_coverage import BASELINE, compare, validate_measurement
 from checks.rearchitecture_phase1_lint import run as lint
+from checks.v2_coverage_ratchet import (
+    PHASE1_BASELINE as BASELINE,
+    phase1_compare as compare,
+    phase1_validate_measurement as validate_measurement,
+)
 
 
 def source_files(root):
@@ -37,7 +41,7 @@ def source_hash(files):
     return "sha256:" + digest.hexdigest()
 
 
-COVERAGE_COMMAND = ("python3 checks/rearchitecture_phase1_coverage.py --measure "
+COVERAGE_COMMAND = ("python3 checks/v2_coverage_ratchet.py --profile phase1 --measure "
                     "--output <file>; then rerun this gate with --coverage <file>")
 
 
