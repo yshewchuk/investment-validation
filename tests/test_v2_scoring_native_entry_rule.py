@@ -259,6 +259,49 @@ def test_absent_or_mismatched_cutoff_is_model_not_ready():
         {}, ["UNSUPPORTED_GATE_RECIPE:entry_rule"])
 
 
+def test_cutoff_refuses_a_key_with_an_unexpected_field():
+    """The key/document guard in `_cutoff` is
+    `not isinstance(key, Mapping) or set(key) - _KEY_FIELDS or not isinstance(document, Mapping)`:
+    refuse if ANY of the three holds. A key that is a well-formed Mapping, matches the
+    artifact, but carries a field outside {history_id, month, content_hash} makes only the
+    middle term true -- so this refuses under the real OR, but an OR-to-AND mutant on that
+    guard would require all three conditions before refusing, and would wrongly let this
+    key/document pair through as ready."""
+    rows = _history().to_dict("records")
+    march = build_trailing_cutoff_artifact(rows, month="2026-03-01")
+    key = {"history_id": march.history_id, "month": march.month,
+           "content_hash": march.content_hash, "unexpected": "x"}
+    block = {"trailing_cutoff_key": key, "trailing_cutoff": march.payload()}
+    assert native._cutoff(block, "2026-03-16") == (False, None)
+
+
+def test_cutoff_refuses_a_document_that_fails_to_rebuild():
+    """`trailing_cutoff_from_document` raises TrailingCutoffError for an unsupported
+    schema_version; `_cutoff`'s except clause must turn that into the documented refusal
+    (False, None), not swallow it into a passing ready=True and not let it escape uncaught.
+    This kills a mutant that changes the except body's return value or narrows the caught
+    exception types so the error is no longer handled there."""
+    rows = _history().to_dict("records")
+    march = build_trailing_cutoff_artifact(rows, month="2026-03-01")
+    key = {"history_id": march.history_id, "month": march.month}
+    bad_document = {**march.payload(), "schema_version": "not-a-real-schema"}
+    block = {"trailing_cutoff_key": key, "trailing_cutoff": bad_document}
+    assert native._cutoff(block, "2026-03-16") == (False, None)
+
+
+def test_execute_entry_rule_treats_a_malformed_key_as_model_not_ready():
+    """End to end through `execute_entry_rule`: the malformed key from
+    `test_cutoff_refuses_a_key_with_an_unexpected_field` above must surface as the
+    documented MODEL_NOT_READY refusal with no gate verdict, not a silent pass."""
+    rows = _history().to_dict("records")
+    march = build_trailing_cutoff_artifact(rows, month="2026-03-01")
+    key = {"history_id": march.history_id, "month": march.month,
+           "content_hash": march.content_hash, "unexpected": "x"}
+    block = {"mode": "entry_rule", "rule": "TWIN-P", "facts": {"mcap_usd": 5e10},
+             "trailing_cutoff_key": key, "trailing_cutoff": march.payload()}
+    assert _run(block) == ({}, ["MODEL_NOT_READY"])
+
+
 def test_verdicts_dimension_catches_an_off_by_one_cutoff(monkeypatch):
     """A bar one ulp above legacy's flips an at-the-bar row from pass to fail,
     and Phase 4's verdicts comparison reports it; the faithful bar agrees."""
