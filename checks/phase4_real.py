@@ -1034,6 +1034,29 @@ _GATE_FIELDS = ("gate_score", "gate_threshold", "gate_pass")
 #: with no incomparability marker needed.
 _ANALOG_FIELDS = ("ci_low", "ci_high", "n_analogs")
 
+#: Tri-state outcome of a numeric negative control (R4-15 fix, 2026-09-20).
+#: A dimension whose every field is ``None`` for every compared row has
+#: nothing for the control to corrupt -- that is a distinct fact from a
+#: control that ran and was not noticed, and must not collapse onto the same
+#: ``False`` the way it used to.
+_CONTROL_PASSED = "passed"
+_CONTROL_FAILED = "failed"
+_CONTROL_NOT_EXERCISABLE = "not_exercisable"
+
+
+def _numeric_corruption_candidate(values: dict) -> tuple[str, Any] | None:
+    """First ``(field, value)`` the negative control can corrupt, or None.
+
+    Eligible means "not None and int/float/bool" -- a plain number gets
+    ``+1.0``; a bool must be FLIPPED (``not value``), never added to: ``True
+    + 1.0`` silently becomes the float ``2.0``, which is not a corruption a
+    bool-typed comparator path would even see as the same type.
+    """
+    for field, value in values.items():
+        if value is not None and isinstance(value, (int, float)):
+            return field, value
+    return None
+
 
 def _legacy_fair_premium(record: dict) -> float | None:
     """Independently reproduce the frozen renderer financial oracle."""
@@ -2127,6 +2150,20 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "verdicts": False,
         "analogs": False,
     }
+    #: Whether a corruptible field was ever found for this dimension, across
+    #: every compared row -- the fact that used to be lost. Without it,
+    #: "never noticed" (a real comparator blind spot) and "never had
+    #: anything to corrupt" (nothing wrong; the control just never ran) both
+    #: read as the same False.
+    numeric_control_attempted = {name: False for name in numeric_negative_controls}
+    numeric_control_reason = {name: None for name in numeric_negative_controls}
+    #: Counts a compared row toward a dimension's coverage only when the
+    #: ACTUAL (native) side -- the side the control mutates -- has a field
+    #: the control is capable of corrupting (non-None int/float/bool). A
+    #: dimension where the only present field is a type the control cannot
+    #: act on (or where everything is None) must not inflate this count;
+    #: coverage now means "rows this control could have exercised," not
+    #: "rows where the legacy side happened to be non-None."
     numeric_coverage = {name: 0 for name in numeric_negative_controls}
     declared_ids, expected, manifest_bound, excluded = _release_population(corpus)
     excluded_counts = {
@@ -2195,21 +2232,32 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             numeric_findings.append({
                 name: result["finding_fields"] for name, result in numeric.items()
             })
-            expected_numeric, actual_numeric = _numeric_views(member_record, member_native)
+            _, actual_numeric = _numeric_views(member_record, member_native)
             for dimension in numeric_negative_controls:
-                if any(value is not None for value in expected_numeric[dimension].values()):
+                if _numeric_corruption_candidate(actual_numeric[dimension]) is not None:
                     numeric_coverage[dimension] += 1
                 if numeric_negative_controls[dimension]:
                     continue
-                for field, value in actual_numeric[dimension].items():
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
-                        corrupted = copy.deepcopy(actual_numeric)
-                        corrupted[dimension][field] = float(value) + 1.0
-                        result = _compare_numeric_outputs(
-                            member_record, member_native, actual_override=corrupted,
-                        )
-                        numeric_negative_controls[dimension] = not result[dimension]["agree"]
-                        break
+                candidate = _numeric_corruption_candidate(actual_numeric[dimension])
+                if candidate is None:
+                    continue  # nothing corruptible on this row; try the next
+                field, value = candidate
+                numeric_control_attempted[dimension] = True
+                corrupted = copy.deepcopy(actual_numeric)
+                if isinstance(value, bool):
+                    corrupted[dimension][field] = not value
+                else:
+                    corrupted[dimension][field] = float(value) + 1.0
+                result = _compare_numeric_outputs(
+                    member_record, member_native, actual_override=corrupted,
+                )
+                noticed = not result[dimension]["agree"]
+                numeric_negative_controls[dimension] = noticed
+                numeric_control_reason[dimension] = (
+                    f"corrupted {dimension}.{field} "
+                    f"({'flipped bool' if isinstance(value, bool) else 'value + 1.0'}); "
+                    f"comparator {'noticed it' if noticed else 'did NOT notice it'}"
+                )
             for dimension in _STRUCTURAL_DEFECT_DIMENSIONS:
                 if structural_negative_controls[dimension]:
                     continue
@@ -2268,6 +2316,36 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                 chooser_defect_detected = not mutated_selection["chosen_strategy"]
         rows.append(row)
         native_ids.append(native.payload_hash)
+    #: Fold the running bool + attempted/reason tracking into the tri-state
+    #: verdict the evidence carries. ``passed`` overrides everything (a
+    #: later row proving the control works is what stops the search);
+    #: otherwise ``attempted`` distinguishes a REAL miss ("failed": the
+    #: comparator saw a corrupted field and agreed anyway) from a control
+    #: that had nothing to work with ("not_exercisable": no row in this
+    #: corpus ever offered a corruptible field for this dimension).
+    numeric_negative_controls = {
+        dimension: {
+            "state": (
+                _CONTROL_PASSED if passed
+                else _CONTROL_FAILED if numeric_control_attempted[dimension]
+                else _CONTROL_NOT_EXERCISABLE
+            ),
+            "reason": numeric_control_reason[dimension] or (
+                f"no compared row offered a corruptible "
+                f"(non-None int/float/bool) field in {dimension!r}"
+            ),
+        }
+        for dimension, passed in numeric_negative_controls.items()
+    }
+    #: Boolean view for the completion gate and the merged ``controls`` map,
+    #: which downstream code checks with strict ``is True`` (build_evidence's
+    #: final_controls). Only PASSED counts: NOT_EXERCISABLE must not unlock
+    #: completion any more than FAILED does -- a dimension this run could
+    #: never test still has not been proven to notice a defect.
+    numeric_control_ok = {
+        dimension: entry["state"] == _CONTROL_PASSED
+        for dimension, entry in numeric_negative_controls.items()
+    }
     dimensions = (
         "keys", "contracts", "verdicts", "flags", "null_masks",
         "forecasts", "simulation", "financial_diagnostics", "analogs",
@@ -2351,17 +2429,23 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "detected": (
                 compared == expected
                 and all(structural_negative_controls.values())
-                and all(numeric_negative_controls.values())
+                and all(numeric_control_ok.values())
                 and (chooser_defect_detected if chooser_defect_seen else True)
             ),
             "controls": {
-                **structural_negative_controls, **numeric_negative_controls,
+                **structural_negative_controls, **numeric_control_ok,
                 "chooser": chooser_defect_detected if chooser_defect_seen else True,
             },
+            #: The tri-state detail ``controls`` above collapses to a bool:
+            #: state (passed/failed/not_exercisable) and reason per numeric
+            #: dimension, so a review can tell "never noticed a corrupted
+            #: field" apart from "never had a field to corrupt" instead of
+            #: reading both as the same False.
+            "numeric_control_detail": numeric_negative_controls,
             "receipt": content_hash({
                 "comparison": comparison_receipt,
                 "defects": {
-                    **structural_negative_controls, **numeric_negative_controls,
+                    **structural_negative_controls, **numeric_control_ok,
                     "chooser": chooser_defect_detected if chooser_defect_seen else True,
                 },
             }),
