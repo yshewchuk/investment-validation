@@ -234,6 +234,30 @@ def test_source_bundle_declares_canonical_forecast_roles(
     ]
 
 
+def test_source_bundle_unions_forecast_roles_across_repeated_calls() -> None:
+    """`capture_source_bundle` is called once per role over the life of a
+    row's scoring pass (driver, then size, then implied_t1, ...). Each call
+    must ADD its role to `required_roles`, not replace the roles earlier
+    calls contributed -- otherwise only the last call's role survives."""
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_source_bundle(model_bindings=({
+        "role": "abs_move", "model_id": "driver-v1",
+    },))
+    collector.capture_source_bundle(model_bindings=({
+        "role": "runup_move", "model_id": "runup-v1",
+    },))
+    collector.capture_source_bundle(model_bindings=({
+        "role": "implied_t1", "model_id": "implied-v1",
+    },))
+
+    source = _checkpoint_value(collector, "source_inputs")
+
+    # First-seen order across ALL calls, not just the last one.
+    assert source["native_recipes"]["forecast"]["required_roles"] == [
+        "driver", "runup_move", "implied_t1",
+    ]
+
+
 def test_simulation_checkpoint_keeps_causal_residual_population() -> None:
     collector = Phase4TraceCollector(content_hasher=content_hash)
     collector.capture_simulation(
