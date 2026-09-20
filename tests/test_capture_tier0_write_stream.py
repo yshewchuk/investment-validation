@@ -372,14 +372,23 @@ def test_two_pairs_served_by_the_same_fold_write_the_shared_file_once(tmp_path) 
 
 
 # --------------------------------------------------------------------------
-# input_translation.mappings row tables (separate fix: 09-19)
+# input_translation.mappings row tables (separate fix: 09-19, corrected 09-20)
 #
 # A DYN-SV chooser's native members each carry a near-identical
 # `input_translation.mappings` row list (measured: ~359,406 rows per member,
 # 99.997% identical, differing by ~14 rows apiece) -- whole-node identity
 # sharing above never matches on it, since `_translation` builds a fresh row
 # list per member. `_TranslationTableWriter` stores the row content once and
-# gives every occurrence a small `{"$rows": ...}` delta instead.
+# gives every occurrence a compact `{"$rows": ...}` reference instead.
+#
+# 09-20: the first version of this fix assumed `mappings` was always sorted
+# by `(shared_path, native_path)` (what the source code reading suggested)
+# and re-derived order from that sort on load. The real capture refused
+# instead of corrupting a hash (`tools/capture_attach_probe.py` on the real
+# selection dump) -- real order is NEITHER sorted NOR consistent across
+# members. The fixtures below are deliberately built in REVERSED/interleaved
+# order, never ascending-by-path, so this cannot silently regress to the
+# sorted assumption again.
 # --------------------------------------------------------------------------
 
 
@@ -404,19 +413,27 @@ def _chooser_translation_candidate(fixture_id: str, members: int = 7,
     list -- kept for later comparison after `write()` mutates the candidate's
     own `input_trace` in place (storage-side compaction).
     """
-    # `_translation` (`tools/phase4_release_assembler.py`) always hands the
-    # real writer an already-`repr(shared_path)`-sorted list (the only
-    # `mappings` this capture ever builds is auto-derived, never
-    # caller-ordered) -- `_TranslationTableWriter.reference` relies on and
-    # enforces that invariant, so this fixture must respect it too, exactly
-    # as a real capture would.
-    base_rows = sorted(
-        (_translation_row(["c", i], ["c", i], i) for i in range(rows)),
-        key=capture._translation_row_sort_key,
-    )
+    # Deliberately REVERSED path order, not sorted or ascending: real
+    # captured `mappings` order is neither (2026-09-20, real-data probe
+    # refusal against an earlier sort-based design). The writer/loader must
+    # not care what this order is.
+    base_rows = [_translation_row(["c", i], ["c", i], i) for i in range(rows - 1, -1, -1)]
+    # Member 0 keeps `base_rows`' own order (it becomes the anchor, so its
+    # order is what the table ends up stored in). Members 1..`members-1`
+    # each apply a DIFFERENT bijective permutation (a multiplier coprime
+    # with `rows`, so `(i * k) % rows` visits every index exactly once)
+    # before their own content substitutions -- a real member's row order
+    # need not match the table's at all, only in-place content edits would
+    # let a writer that silently canonicalized every member to the table's
+    # order still pass this test (review-2 finding, 2026-09-20).
+    _coprime_multipliers = [37, 41, 43, 47, 49, 51, 53]  # all coprime with 400
     member_row_lists = []
     for m in range(members):
-        member_rows = list(base_rows)
+        if m == 0:
+            member_rows = list(base_rows)
+        else:
+            k = _coprime_multipliers[m % len(_coprime_multipliers)]
+            member_rows = [base_rows[(i * k) % rows] for i in range(rows)]
         for offset in range(differs):
             idx = (m * 37 + offset * 7) % rows
             member_rows[idx] = _translation_row(
@@ -510,10 +527,7 @@ def test_translation_mappings_are_compacted_and_reconstruct_exactly(tmp_path) ->
         assert len(loaded_members) == len(member_row_lists)
         for member, expected_rows in zip(loaded_members, member_row_lists):
             got = member["input_trace"]["input_translation"]["mappings"]
-            expected = sorted(
-                expected_rows,
-                key=lambda r: (repr(r["shared_path"]), repr(r["native_path"])))
-            assert got == expected
+            assert got == expected_rows  # exact order, never re-derived
         # Hash-oracle equivalence: the RESOLVED, fully expanded payload
         # hashes back to the same payload_hash `make_pair` computed over the
         # ORIGINAL, pre-compaction document.
@@ -523,57 +537,69 @@ def test_translation_mappings_are_compacted_and_reconstruct_exactly(tmp_path) ->
 
 
 def test_a_translation_table_writer_prefers_the_best_overlapping_table(tmp_path) -> None:
-    """Given three already-written tables, a new occurrence references
-    whichever one shares the most rows with it -- not merely the first or
-    the most recent -- so a corpus with several distinct dominant row sets
-    (e.g. two different chooser folds) still gets a small delta for each
-    new occurrence of either one.
+    """Given two already-written tables (each in its OWN, unsorted/reversed
+    order), a new occurrence references whichever one shares the most rows
+    with it -- not merely the first or the most recent -- so a corpus with
+    several distinct dominant row sets (e.g. two different chooser folds)
+    still gets a compact reference for each new occurrence of either one.
     """
     writer = capture._TranslationTableWriter(tmp_path / "shared")
-    pool_a = sorted((_translation_row(["a", i], ["a", i], i) for i in range(100)),
-                    key=capture._translation_row_sort_key)
-    pool_b = sorted((_translation_row(["b", i], ["b", i], i) for i in range(100)),
-                    key=capture._translation_row_sort_key)
+    # Interleaved permutations, not ascending/descending runs: `(i * 37) % 100`
+    # and `(i * 41 + 13) % 100` are both permutations of 0..99 (37 and 41 are
+    # coprime with 100) but visit path indices in a scrambled order, so
+    # neither fixture is "more orderly" than the real capture's row order.
+    order_a = [(i * 37) % 100 for i in range(100)]
+    order_b = [(i * 41 + 13) % 100 for i in range(100)]
+    pool_a = [_translation_row(["a", i], ["a", i], i) for i in order_a]
+    pool_b = [_translation_row(["b", i], ["b", i], i) for i in order_b]
     ref_a = writer.reference(pool_a)
     ref_b = writer.reference(pool_b)
-    assert ref_a["omit"] == ref_a["extra"] == []
-    assert ref_b["omit"] == ref_b["extra"] == []
+    assert ref_a["order"] == ref_b["order"] == capture.ROWS_ORDER_IDENTITY
     assert ref_a[capture.ROWS_REF_KEY] != ref_b[capture.ROWS_REF_KEY]
 
-    # A third occurrence differs from pool_b by 3 rows and from pool_a by
-    # every row: it must reference pool_b's table, with a 3-row delta each
-    # way, not pool_a's (which would need a ~100-row delta).
+    # A third occurrence, in pool_b's OWN order, differs from pool_b by 3
+    # rows and from pool_a by every row: it must reference pool_b's table,
+    # with a 3-literal delta, not pool_a's (which would need ~100 literals).
     near_b = list(pool_b)
     for i in (1, 2, 3):
         near_b[i] = _translation_row(
             near_b[i]["shared_path"], near_b[i]["native_path"], f"near-b-{i}")
     ref_near_b = writer.reference(near_b)
     assert ref_near_b[capture.ROWS_REF_KEY] == ref_b[capture.ROWS_REF_KEY]
-    assert len(ref_near_b["omit"]) == 3
-    assert len(ref_near_b["extra"]) == 3
+    assert ref_near_b["order"] == capture.ROWS_ORDER_POSITIONS
+    assert len(ref_near_b["literals"]) == 3
+    assert ref_near_b["sequence"].count("L") == 3
     assert len(writer.digests()) == 2  # no third table written
 
 
-def test_an_unsorted_mappings_list_is_a_hard_refusal(tmp_path) -> None:
-    """Reconstruction always re-sorts by ``(repr(shared_path),
-    repr(native_path))``; compacting a list that is not ALREADY in that
-    order would silently change the array's order (and so its content
-    hash) on the round trip. Caught here rather than trusted.
+def test_writer_accepts_unsorted_and_reversed_mappings_order(tmp_path) -> None:
+    """The bug this fixes (2026-09-20): the real capture's `mappings` order
+    is neither sorted by path nor consistent across members -- the real-data
+    probe refused an earlier design that assumed
+    ``sorted(rows, key=(shared_path, native_path))``. The writer must accept
+    ANY order and store it exactly, with no sortedness check.
     """
-    rows = [_translation_row(["a", 1], ["a", 1], 1),
-            _translation_row(["a", 0], ["a", 0], 0)]  # out of order
+    writer = capture._TranslationTableWriter(tmp_path / "shared")
+    reversed_rows = [_translation_row(["a", i], ["a", i], i) for i in range(20, 0, -1)]
+    ref = writer.reference(reversed_rows)
+    assert ref["order"] == capture.ROWS_ORDER_IDENTITY
+    table_path = next((tmp_path / "shared" / "translations").glob("*.json"))
+    on_disk = json.loads(table_path.read_text())["rows"]
+    assert on_disk == reversed_rows  # stored exactly as given, never re-sorted
+
+
+def test_a_malformed_translation_row_is_a_hard_refusal(tmp_path) -> None:
     writer = capture._TranslationTableWriter(tmp_path / "shared")
     with pytest.raises(ValueError):
-        writer.reference(rows)
+        writer.reference([{"shared_path": ["a", 0], "native_path": ["a", 0]}])  # no value_hash
 
 
-def test_a_duplicate_row_in_one_mappings_list_is_a_hard_refusal(tmp_path) -> None:
-    """Two distinct leaf paths can never legitimately collapse to the same
-    (native_path, shared_path, value_hash) triple within one member (the
-    upstream translation builder already rejects a duplicate path) -- a
-    duplicate row reaching the writer is a data-integrity bug, refused
-    loudly rather than silently dropped (which would corrupt `omit`/`extra`
-    bookkeeping for every later reference against this table).
+def test_a_duplicate_row_within_one_members_mappings_is_a_hard_refusal(tmp_path) -> None:
+    """Two leaf paths cannot legitimately produce the same
+    (native_path, shared_path, value_hash) triple in one member's own
+    `mappings` -- a duplicate means the row-identity key used for overlap
+    matching and position reconstruction is ambiguous, so the writer refuses
+    rather than silently picking one.
     """
     writer = capture._TranslationTableWriter(tmp_path / "shared")
     row = _translation_row(["a", 0], ["a", 0], 0)

@@ -173,33 +173,54 @@ SHARED_DOCUMENT_SCHEMA_VERSION = "tier0_shared_document.v1.0"
 #: essentially all ``input_translation``. ``_TranslationTableWriter`` stores
 #: the row CONTENT once per corpus version under
 #: ``shared/translations/<hex>.json`` and gives every occurrence a reference
-#: instead: ``{ROWS_REF_KEY: "sha256:<64 hex>", "order": ROWS_ORDER_SHARED_PATH,
-#: "omit": [<row content-hash>, ...], "extra": [<row>, ...]}`` --
-#: ``omit``/``extra`` are ALWAYS both present (possibly empty), so the shape
-#: is fixed-key. ``checks/tier0_corpus.py`` carries the SAME literals
-#: independently, for the reason ``SHARED_REF_KEY``'s docstring above gives.
+#: instead, EXACT POSITION for EXACT POSITION -- never re-sorted, never
+#: assumed to follow any particular order. A real capture's ``mappings``
+#: order (from ``tools/phase4_release_assembler.py``'s ``_translation``, the
+#: only path this capture calls) turned out NOT to be
+#: ``sorted(shared_leaves, key=repr)`` on real data, even though the source
+#: reads that way -- 2026-09-20, `tools/capture_attach_probe.py` on the real
+#: selection dump refused with exactly this mismatch. Order is therefore
+#: whatever it is, per member, and is carried explicitly rather than
+#: re-derived:
 #:
-#: Reconstruction (``checks/tier0_corpus.py``'s ``_resolve_rows_reference``):
-#: start from the referenced table's rows, keyed by each row's OWN content
-#: hash; drop every key named in ``omit``; add every row in ``extra``; sort
-#: the result by ``(repr(shared_path), repr(native_path))``. That sort order
-#: is EXACTLY what ``tools/phase4_release_assembler.py``'s ``_translation``
-#: already produces when ``mappings`` is auto-derived (``sorted(shared_leaves,
-#: key=repr)``, the only path this capture ever calls), so no separate order
-#: record is needed -- ``order`` names which reconstruction rule applies and
-#: lets the loader refuse an unrecognized one instead of guessing.
+#: ``{ROWS_REF_KEY: "sha256:<64 hex>", "order": ROWS_ORDER_IDENTITY}`` --
+#: this member's rows ARE the table's rows, in that exact order (the common
+#: case for whichever member/pair FIRST established a table).
+#:
+#: ``{ROWS_REF_KEY: "sha256:<64 hex>", "order": ROWS_ORDER_POSITIONS,
+#: "sequence": "0,1,L0,3,...", "literals": [<row>, ...]}`` -- one token per
+#: row, in this member's ORIGINAL order: a bare integer is a 0-based index
+#: into the table's ``rows`` array, ``L<k>`` is the ``k``-th entry of
+#: ``literals`` (this member's own row, not found in the table). ``sequence``
+#: is a single JSON STRING (comma-joined), not a JSON array: with
+#: hundreds of thousands of rows, one array element per row under this
+#: module's ``indent=2`` pair encoding would cost roughly 3x a plain
+#: comma-joined string in whitespace alone. Measured target: ~2-3 MB of
+#: sequence text for a 359,406-row member, against 117 MB fully expanded.
+#: ``checks/tier0_corpus.py`` carries the SAME literals independently, for
+#: the reason ``SHARED_REF_KEY``'s docstring above gives.
 ROWS_REF_KEY = "$rows"
-ROWS_ORDER_SHARED_PATH = "shared_path"
+ROWS_ORDER_IDENTITY = "identity"
+ROWS_ORDER_POSITIONS = "positions"
+
+#: A reference is only worth writing when it reuses at least this fraction
+#: of what a fresh table would otherwise cost: below this, the per-row
+#: ``sequence`` token overhead (a few bytes per row, paid on EVERY row
+#: whether shared or not) outweighs the bytes actually saved by not
+#: repeating the non-overlapping rows as literals. Two genuinely unrelated
+#: row sets (different events, disjoint frozen-chooser pools) each get their
+#: own fresh table instead of one masquerading as a nearly-all-literal
+#: "reference" to the other.
+_MIN_OVERLAP_FRACTION = 0.5
 
 #: Schema for one file under a corpus version's ``shared/translations/``
 #: directory: ``{"schema_version": ..., "digest": "sha256:...", "rows": [...]}``,
-#: where ``digest`` is ``content_hash(rows)`` over the exact array stored (a
-#: table's own row order is canonical -- sorted by
-#: ``(repr(shared_path), repr(native_path))`` -- so two independent captures
-#: that union the SAME row content produce the SAME digest and share the
-#: file). Distinct from ``SHARED_DOCUMENT_SCHEMA_VERSION``: a translation
-#: table's ``rows`` is hashed directly (an array), not a generic shared VALUE
-#: reached via ``content_hash``/``_SHARED_TRACE_DOCUMENTS``.
+#: where ``digest`` is ``content_hash(rows)`` over the exact array stored, IN
+#: WHATEVER ORDER the member that established this table had it (never
+#: re-sorted -- see ``ROWS_REF_KEY`` above). Distinct from
+#: ``SHARED_DOCUMENT_SCHEMA_VERSION``: a translation table's ``rows`` is
+#: hashed directly (an array), not a generic shared VALUE reached via
+#: ``content_hash``/``_SHARED_TRACE_DOCUMENTS``.
 SHARED_TRANSLATION_TABLE_SCHEMA_VERSION = "tier0_shared_translation_table.v1.0"
 
 #: How a NaN is frozen. Not ``null``: contracts §2.1 forbids sending a missing
@@ -1852,13 +1873,23 @@ class _SharedDocumentWriter:
 
 
 def _translation_row_key(row: Mapping[str, Any]) -> str:
-    """A translation row's own content hash -- its stable identity in a
-    shared row table (see ``ROWS_REF_KEY``'s docstring above)."""
+    """A translation row's own content hash -- its identity for OVERLAP
+    matching (see ``ROWS_REF_KEY``'s docstring above). Never used to
+    reconstruct order: two rows with the same key are content-identical
+    (native_path, shared_path AND value_hash all equal), so it does not
+    matter which position of a matching table holds one -- but position,
+    not content, is what the reference actually records."""
     return content_hash(row)
 
 
-def _translation_row_sort_key(row: Mapping[str, Any]) -> tuple[str, str]:
-    return (repr(row["shared_path"]), repr(row["native_path"]))
+def _validate_translation_row(row: Any, index_label: str) -> None:
+    if not isinstance(row, dict) or set(row) != {
+        "native_path", "shared_path", "value_hash",
+    }:
+        raise ValueError(
+            f"{index_label}: not a translation row: "
+            f"{sorted(row) if isinstance(row, dict) else type(row).__name__}"
+        )
 
 
 class _TranslationTableWriter:
@@ -1866,26 +1897,31 @@ class _TranslationTableWriter:
     corpus version, the same way ``_SharedDocumentWriter`` deduplicates whole
     shared documents -- except a mapping list is almost NEVER byte-identical
     across occurrences (each ranked chooser member differs from its siblings
-    by a handful of rows out of hundreds of thousands). Whole-node identity
-    sharing therefore never matches on this data; this writer matches on ROW
-    CONTENT instead: each occurrence is stored as a small delta (``omit``/
-    ``extra``) against whichever already-written table it overlaps most
-    with, so the dominant row set pays its full cost exactly once per corpus
-    version, and every later occurrence -- another ranked member, another
-    pair entirely -- pays only for the rows that differ.
+    by a handful of rows out of hundreds of thousands, in an order that is
+    real captured data, not derivable from sorting -- see ``ROWS_REF_KEY``'s
+    docstring). Whole-node identity sharing therefore never matches on this
+    data; this writer matches on ROW CONTENT instead, position by position:
+    each occurrence is stored as a compact per-position reference against
+    whichever already-written table it overlaps most with (a bare integer
+    for "this table's row at this position", ``L<k>`` for "this member's own
+    row, not in the table"), so the dominant row set pays its full cost
+    exactly once per corpus version, and every later occurrence -- another
+    ranked member, another pair entirely -- pays only a few bytes per row
+    plus the handful that differ.
 
-    A table, once written, is immutable: a later occurrence's delta never
-    rewrites it, so an earlier pair's reference stays byte-valid no matter
-    how many later pairs reference the same table. ``self._tables`` is kept
-    resident for the writer's whole lifetime (one per corpus version) so a
-    later occurrence can measure its overlap against every table already
-    written -- bounded by the number of DISTINCT large row sets in the
-    corpus, not by the number of members or pairs.
+    A table, once written, is immutable: a later occurrence's reference
+    never rewrites it, so an earlier pair's reference stays byte-valid no
+    matter how many later pairs reference the same table. ``self._tables``
+    is kept resident for the writer's whole lifetime (one per corpus
+    version) so a later occurrence can measure its overlap against every
+    table already written -- bounded by the number of DISTINCT large row
+    sets in the corpus, not by the number of members or pairs.
     """
 
     def __init__(self, shared_dir: Path) -> None:
         self.tables_dir = shared_dir / "translations"
         self.tables_dir.mkdir(parents=True, exist_ok=True)
+        #: digest -> {"rows": [row, ...], "index": {row_key: position}}
         self._tables: dict[str, dict[str, Any]] = {}
 
     def digests(self) -> tuple[str, ...]:
@@ -1893,72 +1929,62 @@ class _TranslationTableWriter:
         return tuple(self._tables)
 
     def reference(self, rows: list) -> dict[str, Any]:
-        """``rows`` (one member's full, ordered ``mappings`` list) as a
-        ``{ROWS_REF_KEY: ...}`` delta reference against the best-overlapping
-        table already written, or a freshly written table when no existing
-        one is a net win.
-
-        Reconstruction (``checks/tier0_corpus.py``) always rebuilds a
-        member's row list by re-sorting on ``(repr(shared_path),
-        repr(native_path))`` (``ROWS_ORDER_SHARED_PATH``), the order
-        ``tools/phase4_release_assembler.py``'s ``_translation`` already
-        produces for the ONLY ``mappings`` this capture ever builds
-        (auto-derived, never caller-ordered). If ``rows`` is not ALREADY in
-        that order, compacting it and reconstructing it back would silently
-        change the array's order -- and therefore its content hash, since
-        array order is meaningful (contracts §2.2) -- without changing a
-        single row's content. Refused loudly here instead of trusted.
+        """``rows`` (one member's full ``mappings`` list, in its REAL
+        captured order -- never assumed or re-derived) as a
+        ``{ROWS_REF_KEY: ...}`` reference against the best-overlapping table
+        already written, or a freshly written table when no existing one
+        overlaps enough to be worth it (``_MIN_OVERLAP_FRACTION``).
         """
-        by_key: dict[str, Any] = {}
+        keys = []
+        seen: set[str] = set()
         for index, row in enumerate(rows):
-            if not isinstance(row, dict) or set(row) != {
-                "native_path", "shared_path", "value_hash",
-            }:
-                raise ValueError(
-                    f"mappings[{index}]: not a translation row: "
-                    f"{sorted(row) if isinstance(row, dict) else type(row).__name__}"
-                )
+            _validate_translation_row(row, f"mappings[{index}]")
             key = _translation_row_key(row)
-            if key in by_key:
+            # Two distinct leaf paths can never legitimately produce the
+            # same (native_path, shared_path, value_hash) triple within one
+            # member -- `_translation` already rejects a duplicate path
+            # upstream. A duplicate row reaching here is a data-integrity
+            # bug, refused loudly rather than silently tolerated.
+            if key in seen:
                 raise ValueError(f"mappings[{index}]: duplicate row {key}")
-            by_key[key] = row
-        if rows != sorted(rows, key=_translation_row_sort_key):
-            raise ValueError(
-                "mappings is not sorted by (shared_path, native_path); "
-                "row-table compaction relies on that order to reconstruct "
-                "the original list exactly"
-            )
+            seen.add(key)
+            keys.append(key)
         best_digest = None
         best_overlap = -1
         for digest, table in self._tables.items():
-            overlap = sum(1 for key in by_key if key in table)
+            table_index = table["index"]
+            overlap = sum(1 for key in keys if key in table_index)
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_digest = digest
-        if best_digest is not None:
+        if (best_digest is not None and rows
+                and best_overlap >= len(rows) * _MIN_OVERLAP_FRACTION):
             table = self._tables[best_digest]
-            omit = sorted(set(table) - set(by_key))
-            extra_keys = sorted(set(by_key) - set(table))
-            if len(omit) + len(extra_keys) < len(by_key):
-                return {
-                    ROWS_REF_KEY: best_digest,
-                    "order": ROWS_ORDER_SHARED_PATH,
-                    "omit": omit,
-                    "extra": [by_key[k] for k in extra_keys],
-                }
-        digest = self._write_table(by_key)
-        return {ROWS_REF_KEY: digest, "order": ROWS_ORDER_SHARED_PATH,
-                "omit": [], "extra": []}
+            table_index = table["index"]
+            tokens: list[str] = []
+            literals: list[Any] = []
+            for key, row in zip(keys, rows):
+                position = table_index.get(key)
+                if position is not None:
+                    tokens.append(str(position))
+                else:
+                    tokens.append(f"L{len(literals)}")
+                    literals.append(row)
+            if not literals and tokens == [str(i) for i in range(len(table["rows"]))]:
+                return {ROWS_REF_KEY: best_digest, "order": ROWS_ORDER_IDENTITY}
+            return {ROWS_REF_KEY: best_digest, "order": ROWS_ORDER_POSITIONS,
+                    "sequence": ",".join(tokens), "literals": literals}
+        digest = self._write_table(rows, keys)
+        return {ROWS_REF_KEY: digest, "order": ROWS_ORDER_IDENTITY}
 
-    def _write_table(self, by_key: dict[str, Any]) -> str:
-        rows_sorted = sorted(by_key.values(), key=_translation_row_sort_key)
-        digest = content_hash(rows_sorted)
+    def _write_table(self, rows: list, keys: list[str]) -> str:
+        digest = content_hash(rows)
         if digest not in self._tables:
             self._tables[digest] = {
-                _translation_row_key(row): row for row in rows_sorted
+                "rows": rows, "index": {key: i for i, key in enumerate(keys)},
             }
             body = {"schema_version": SHARED_TRANSLATION_TABLE_SCHEMA_VERSION,
-                    "digest": digest, "rows": rows_sorted}
+                    "digest": digest, "rows": rows}
             path = self.tables_dir / (digest.split(":", 1)[-1] + ".json")
             encoder = json.JSONEncoder(indent=2, sort_keys=True, allow_nan=False)
             with path.open("w") as fh:
