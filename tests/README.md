@@ -224,8 +224,13 @@ clean test run fails, or the run hits its 330-minute step timeout.
   modules. The only legacy files are the pilot's `engine/pnl_sim.py` and
   `engine/models/no_fit.py`. `contracts` (with `engine/v2/__init__.py` and
   `evaluation/`) is listed as excluded: mutmut generates no mutants there.
-  `tests/test_mutation_ci.py` fails if an `engine/v2` file is in no module, or
-  in two.
+  `data_legacy` (the legacy materialization/mapping/reference bridge into v2)
+  is also excluded (2026-09-19): it is code the rearchitecture deletes on
+  cutover, and it was the module whose 330-minute mutmut step timeout made
+  the weekly full run time out at 5.5 hours (CI run 35458557499). Both stay
+  listed, never run, so `tests/test_mutation_ci.py` still counts their files
+  as owned. `tests/test_mutation_ci.py` fails if an `engine/v2` file is in no
+  module, or in two.
 - **Tests per module** are data-free files only, since CI has no `data/`. Each
   was run alone with no `data/` (2026-09-19). Tests are picked from those that
   import the module, most specific first, up to ~150 s of clean test time
