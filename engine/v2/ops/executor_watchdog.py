@@ -115,6 +115,22 @@ def _ancestor_pids(pid: int, table: dict) -> set[int]:
     return seen
 
 
+def _descendant_pids(roots: set[int], table: dict) -> set[int]:
+    """Every pid transitively descended from any of ``roots`` (each root
+    included), traced forward through ``table``'s ``ppid`` links.
+
+    ``ppid`` comes from ``/proc/<pid>/stat``, which needs no special
+    permission to read (unlike ``environ``), so this walk is exact and cheap
+    regardless of privilege or Yama's ptrace restriction.
+    """
+    live = set(roots)
+    while True:
+        children = {pid for pid, row in table.items() if row[1] in live}
+        if children <= live:
+            return live
+        live |= children
+
+
 def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int | None,
                 marker: str, table: dict | None = None, proc: Path = Path("/proc")) -> tuple:
     """Live, non-zombie processes that ownership proof (b)/(c) cannot exclude.
@@ -131,17 +147,49 @@ def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int
     launch always keeps our uid (barring a setuid binary, which the legacy
     worker tree never runs), so a foreign-uid process categorically cannot be
     our escaper regardless of whether its environ happens to be readable.
-    This is what lets recovery prove "dead" on a shared, non-root CI runner,
-    where every other user's or the init system's own processes have
-    unreadable environ files that would otherwise block forever.
 
     A live ancestor of the process running this check is excluded the same way: ptrace's
     restricted mode denies reading an ancestor's environ regardless of uid, and our own lineage
     predates any attempt we are now checking, so it can never be that attempt's escaper.
+
+    None of this is enough on a real, busy, non-root host: Yama's restricted
+    ptrace mode (``ptrace_scope=1``, Ubuntu's default, including on a GitHub
+    Actions runner) only lets a process read the environ of its own
+    descendants — never an unrelated process, even one at the very same uid.
+    On a shared runner there are always other same-uid processes that are
+    neither our ancestor nor any part of this attempt's lineage: other
+    pytest-xdist workers' own child processes during a parallel test run, or
+    the runner's other same-uid helpers. § B1's "unknown stays quarantined"
+    rule, applied indiscriminately to every same-uid pid on the box, made
+    every one of those permanently unreadable-and-unexcluded, so recovery
+    could never prove an attempt dead outside a quiet, single-process host.
+    (c) is therefore scoped to processes that could structurally BE this
+    attempt's escaper: live descendants of the process performing this check
+    (a setsid()'d child of ours we spawned and are still tracing) or of
+    ``launch_pid`` (a setsid()'d descendant of the recorded launch, traced by
+    ``ppid`` rather than session, which survives the setsid() call even
+    though the session check (b) does not). A pid outside both subtrees
+    cannot be a fork/exec descendant of either, so it cannot be our escaper
+    regardless of whether its environ happens to be readable — this is what
+    lets recovery prove "dead" on a shared, non-root CI runner.
+
+    This does leave one case genuinely unprovable without root: a launch that
+    crashed before its identity was ever recorded (``launch_pid`` is
+    ``None``) AND whose escaper is not a descendant of the process doing the
+    check either (for example, after a supervisor restart, checked from a
+    brand-new process that never spawned it). There is no structural link to
+    it at all, and no non-root way to read an arbitrary unrelated process's
+    environ to look for the marker directly. That attempt stays quarantined
+    forever rather than being guessed dead — a documented refusal, not a
+    silent wrong answer; only a root check (which bypasses ptrace_scope
+    entirely) can settle it, since ``ops reconcile`` runs this identical
+    proof and has no force flag.
     """
     table = process_table(boot_id, proc) if table is None else table
     self_uid = os.getuid()
     ancestors = _ancestor_pids(os.getpid(), table)
+    candidates = _descendant_pids(
+        {os.getpid()} | ({launch_pid} if launch_pid is not None else set()), table)
     blockers = []
     for pid, (identity, _, state, _, session) in table.items():
         if state == "Z":
@@ -152,6 +200,8 @@ def find_owners(boot_id: str, *, launch_pid: int | None, launch_start_ticks: int
                         and identity.start_ticks >= launch_start_ticks)
         if session_owns:
             blockers.append((pid, identity.start_ticks))
+            continue
+        if pid not in candidates:
             continue
         owner_uid = _owner_uid(pid, proc)
         if owner_uid is not None and owner_uid != self_uid:

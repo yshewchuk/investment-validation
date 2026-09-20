@@ -359,31 +359,69 @@ def test_find_owners_never_treats_its_own_process_as_a_blocker(monkeypatch):
     assert self_pid not in blockers, "the checking process's own pid must never block itself"
 
 
-def test_find_owners_ignores_self_but_still_blocks_an_unrelated_same_uid_process(monkeypatch):
+def test_find_owners_ignores_self_but_still_blocks_a_same_uid_descendant(monkeypatch):
     """The ancestor exclusion in ``_ancestor_pids`` must not overreach: a live,
-    same-uid process that is NOT on the checking process's own ancestor chain
-    is a completely ordinary (b)/(c) candidate and must still block exactly
-    as before when its environ is unreadable. Only the checker's own lineage
-    is exempt -- not every same-uid process on the box -- or this fix would
-    quietly widen the same-uid escaper hole it was meant to close.
+    same-uid process that is a genuine descendant of the launch is a normal
+    (b)/(c) candidate and must still block when its environ is unreadable.
+    Only the checker's own lineage is exempt -- not the whole launch subtree
+    -- or this fix would quietly widen the same-uid escaper hole it closed.
     """
     boot = "boot-non-ancestor-test"
     self_uid = os.getuid()
     self_pid = os.getpid()
     fabricated_ppid = self_pid + 1_000_000  # the checker's own (fabricated) ancestor chain
-    unrelated_pid = self_pid + 2_000_000  # same uid, but neither our ancestor nor our descendant
+    launch_pid = 1
+    descendant_pid = self_pid + 2_000_000  # same uid, a ppid-descendant of launch_pid
     session = 222  # deliberately not launch_pid, isolating proof (c)
     table = {
         self_pid: (ProcessIdentity(boot_id=boot, pid=self_pid, start_ticks=1,
                                    process_group=self_pid), fabricated_ppid, "S", 0, 999),
-        unrelated_pid: (ProcessIdentity(boot_id=boot, pid=unrelated_pid, start_ticks=1,
-                                        process_group=unrelated_pid), 1, "S", 0, session),
+        descendant_pid: (ProcessIdentity(boot_id=boot, pid=descendant_pid, start_ticks=1,
+                                         process_group=descendant_pid), launch_pid, "S", 0, session),
     }
     monkeypatch.setattr(ew, "_owner_uid", lambda pid, proc: self_uid)
     monkeypatch.setattr(ew, "_environ_contains", lambda pid, marker, proc: None)  # unreadable, both
 
     blockers = {pid for pid, _ in find_owners(
-        boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
+        boot, launch_pid=launch_pid, launch_start_ticks=0, marker="attempt-marker-xyz",
         table=table, proc=Path("/proc"))}
     assert self_pid not in blockers, "the checker's own pid must still be excluded"
-    assert unrelated_pid in blockers, "a same-uid, non-ancestor process must still block"
+    assert descendant_pid in blockers, "a same-uid descendant of the launch must still block"
+
+
+def test_find_owners_ignores_an_unrelated_same_uid_process_outside_both_subtrees(monkeypatch):
+    """On a real, non-root host, Yama's restricted ptrace mode makes every
+    OTHER same-uid process's environ unreadable too, not just the checker's
+    ancestors: another pytest-xdist worker's own child process during a
+    parallel run, say. Such a pid is neither a descendant of the checking
+    process nor of the recorded launch, so it cannot structurally be this
+    attempt's escaper -- unlike the ancestor case, it is a live process this
+    proof must actively look past, not one it happens to walk over. Treating
+    every unreadable same-uid pid on the box as an eternal blocker (the
+    pre-fix behaviour) is exactly what made recovery hang forever on a real
+    CI runner: this is the family of defect ``ci-quarantine-same-uid`` closed
+    only half of.
+    """
+    boot = "boot-unrelated-uid-test"
+    self_uid = os.getuid()
+    self_pid = os.getpid()
+    fabricated_ppid = self_pid + 1_000_000
+    launch_pid = 1
+    unrelated_pid = self_pid + 3_000_000  # same uid, ppid-descendant of neither self nor launch
+    session = 222  # deliberately not launch_pid, isolating proof (c)
+    table = {
+        self_pid: (ProcessIdentity(boot_id=boot, pid=self_pid, start_ticks=1,
+                                   process_group=self_pid), fabricated_ppid, "S", 0, 999),
+        unrelated_pid: (ProcessIdentity(boot_id=boot, pid=unrelated_pid, start_ticks=1,
+                                        process_group=unrelated_pid), fabricated_ppid + 1, "S", 0,
+                        session),
+    }
+    monkeypatch.setattr(ew, "_owner_uid", lambda pid, proc: self_uid)
+    monkeypatch.setattr(ew, "_environ_contains", lambda pid, marker, proc: None)  # unreadable, both
+
+    blockers = {pid for pid, _ in find_owners(
+        boot, launch_pid=launch_pid, launch_start_ticks=0, marker="attempt-marker-xyz",
+        table=table, proc=Path("/proc"))}
+    assert unrelated_pid not in blockers, (
+        "a same-uid pid outside both the checker's and the launch's subtree "
+        "cannot be this attempt's escaper and must not block forever")
