@@ -19,5 +19,22 @@
     "list": "deny",
     "lsp": "deny",
     "todowrite": "deny"
+  },
+  "models": {
+    "openrouter/deepseek/deepseek-v4.1-flash": {
+      "options": {
+        "skip-title": true
+      }
+    },
+    "openrouter/qwen/qwen3.8-flash": {
+      "options": {
+        "skip-title": true
+      }
+    },
+    "openrouter/z-ai/glm-5.3": {
+      "options": {
+        "skip-title": true
+      }
+    }
   }
 }
