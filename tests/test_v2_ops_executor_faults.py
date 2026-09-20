@@ -258,7 +258,7 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
     assert details == {"exception_type": "RuntimeError",
                        "location": details["location"]}
-    assert details["location"].endswith("test_v2_ops_executor_faults.py:235")
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:236")
     assert "S3CRET-VALUE" not in json.dumps(details)
 
 
@@ -357,3 +357,33 @@ def test_find_owners_never_treats_its_own_process_as_a_blocker(monkeypatch):
         boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
         table=table, proc=Path("/proc"))}
     assert self_pid not in blockers, "the checking process's own pid must never block itself"
+
+
+def test_find_owners_ignores_self_but_still_blocks_an_unrelated_same_uid_process(monkeypatch):
+    """The ancestor exclusion in ``_ancestor_pids`` must not overreach: a live,
+    same-uid process that is NOT on the checking process's own ancestor chain
+    is a completely ordinary (b)/(c) candidate and must still block exactly
+    as before when its environ is unreadable. Only the checker's own lineage
+    is exempt -- not every same-uid process on the box -- or this fix would
+    quietly widen the same-uid escaper hole it was meant to close.
+    """
+    boot = "boot-non-ancestor-test"
+    self_uid = os.getuid()
+    self_pid = os.getpid()
+    fabricated_ppid = self_pid + 1_000_000  # the checker's own (fabricated) ancestor chain
+    unrelated_pid = self_pid + 2_000_000  # same uid, but neither our ancestor nor our descendant
+    session = 222  # deliberately not launch_pid, isolating proof (c)
+    table = {
+        self_pid: (ProcessIdentity(boot_id=boot, pid=self_pid, start_ticks=1,
+                                   process_group=self_pid), fabricated_ppid, "S", 0, 999),
+        unrelated_pid: (ProcessIdentity(boot_id=boot, pid=unrelated_pid, start_ticks=1,
+                                        process_group=unrelated_pid), 1, "S", 0, session),
+    }
+    monkeypatch.setattr(ew, "_owner_uid", lambda pid, proc: self_uid)
+    monkeypatch.setattr(ew, "_environ_contains", lambda pid, marker, proc: None)  # unreadable, both
+
+    blockers = {pid for pid, _ in find_owners(
+        boot, launch_pid=1, launch_start_ticks=0, marker="attempt-marker-xyz",
+        table=table, proc=Path("/proc"))}
+    assert self_pid not in blockers, "the checker's own pid must still be excluded"
+    assert unrelated_pid in blockers, "a same-uid, non-ancestor process must still block"
