@@ -691,6 +691,7 @@ reason = "Resource-bounded process runner used by every heavy job; infrastructur
 "phase-4 extraction" = "P4"
 "phase-4 data extraction" = "P4"
 "phase-4 evaluation extraction" = "P6-2"
+"phase-4/6 native features extraction" = "P6-2"
 "phase-5 model extraction" = "P5"
 "phase-5 scoring extraction" = "P5"
 "phase-5 native training/serving extraction" = "P5"
