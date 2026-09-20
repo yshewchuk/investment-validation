@@ -192,10 +192,31 @@ def _resolve_shared(node: Any, shared_dir: Path, cache: dict[str, Any],
             return resolved
         if ROWS_REF_KEY in node:
             return _resolve_rows_reference(node, shared_dir, table_cache)
-        return {k: _resolve_shared(v, shared_dir, cache, resolving, table_cache)
-                for k, v in node.items()}
+        changed = False
+        out = {}
+        for k, v in node.items():
+            resolved_v = _resolve_shared(v, shared_dir, cache, resolving, table_cache)
+            if resolved_v is not v:
+                changed = True
+            out[k] = resolved_v
+        # No reference anywhere below this node: return the SAME dict object
+        # rather than a freshly rebuilt (but content-identical) copy. An
+        # old-format corpus, or any subtree with no `$shared`/`$rows` node,
+        # previously paid a full recursive dict/list rebuild for nothing --
+        # this is the literal "loads unchanged" the docstring above already
+        # claims. Safe because nothing downstream mutates a loaded pair or
+        # record in place (every in-place edit in this file goes through
+        # `copy.deepcopy` first -- see `round_params`/`_seeded_record`).
+        return out if changed else node
     if isinstance(node, list):
-        return [_resolve_shared(v, shared_dir, cache, resolving, table_cache) for v in node]
+        changed = False
+        out = []
+        for v in node:
+            resolved_v = _resolve_shared(v, shared_dir, cache, resolving, table_cache)
+            if resolved_v is not v:
+                changed = True
+            out.append(resolved_v)
+        return out if changed else node
     return node
 
 
@@ -339,7 +360,19 @@ def _resolve_rows_reference(node: dict, shared_dir: Path,
         raise CorpusFormatError(f"malformed shared translation table digest: {digest!r}")
     table_rows = _load_translation_table(shared_dir, digest, table_cache)
     if order == ROWS_ORDER_IDENTITY:
-        rows = list(table_rows)
+        # "identity" means this member's rows ARE the table's rows in that
+        # exact order -- content-identical to `table_rows` for every
+        # occurrence of this digest, by definition of the order, so it is
+        # safe to alias the SAME cached list object here rather than copy
+        # it per occurrence: no code in this module or its consumers
+        # mutates a translation row list in place (every in-place edit goes
+        # through `copy.deepcopy` first; verified against
+        # checks/phase4_real.py, tools/replay_tier1.py and the other
+        # `load()` consumers, which only ever read `row["shared_path"]` /
+        # `row["native_path"]` / `row["value_hash"]`). "positions" rows can
+        # legitimately differ per occurrence (see below) and still get
+        # their own list.
+        rows = table_rows
     else:
         sequence = node["sequence"]
         literals = node["literals"]
@@ -426,15 +459,19 @@ def load(root: Path) -> Corpus:
     small ``{ROWS_REF_KEY: "sha256:...", ...}`` reference (``identity`` or
     ``positions``) against a ``root/shared/translations/<hex>.json`` row
     table; each such table is likewise read and verified once per digest
-    across every pair one call loads (``table_cache``), and every occurrence
-    gets its own reconstructed row list back (never a shared object, unlike a
-    whole document: each member's row order and content against the table
-    can differ). A missing or
+    across every pair one call loads (``table_cache``). An ``identity``
+    reference is, by definition, content-identical to the table in table
+    order for every occurrence, so it gets the SAME cached row-list object
+    back every time (like a whole shared document). A ``positions``
+    reference can legitimately differ per occurrence (its own order and its
+    own ``literals``), so it still gets its own reconstructed row list --
+    never a shared object. A missing or
     digest-mismatched shared file or table, or an unrecognized reference
     shape, is a hard refusal (``CorpusFormatError``), never a silent skip.
     An OLD-format corpus with no ``shared/`` directory and no reference
     nodes loads unchanged: nothing in it is reference-shaped, so nothing
-    here does anything but pass values through.
+    here does anything but pass values through (literally: unresolved
+    subtrees come back as the SAME object, not a rebuilt copy).
     """
     index = json.loads((root / "INDEX.json").read_text())
     shared_dir = root / "shared"
@@ -1019,6 +1056,18 @@ def run(corpus_root: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonRecei
 def _run(corpus_root: Path,
          scratch: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
     corpus = load(corpus_root)
+    return _run_loaded(corpus, corpus_root, scratch)
+
+
+def _run_loaded(corpus: Corpus, corpus_root: Path,
+                scratch: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
+    """The case battery over an ALREADY LOADED corpus.
+
+    Split out of ``_run`` so one CLI invocation loads the corpus exactly
+    once and the same ``Corpus`` is reused for ``_json_report`` -- a second
+    ``load()`` call just to build the JSON report was one of three loads a
+    single ``--json`` run paid for on the real corpus.
+    """
     if not corpus.pairs:
         empty = merge_receipts([], comparison_kind="tier0_corpus_replay",
                                tier=0, expected=1)
@@ -1039,9 +1088,8 @@ def _run(corpus_root: Path,
     return merged, cases
 
 
-def _json_report(root: Path, merged: ComparisonReceipt,
+def _json_report(corpus: Corpus, merged: ComparisonReceipt,
                  cases: dict[str, ComparisonReceipt]) -> dict[str, Any]:
-    corpus = load(root)
     return {
         "verdict": merged.verdict,
         "cases": {name: r.verdict for name, r in cases.items()},
@@ -1082,10 +1130,12 @@ def main(argv: list[str] | None = None) -> int:
             print(corpus_verdict(load(root), Path(tmp)).verdict)
         return 0
 
-    merged, cases = run(root)
-    if args.json:
-        print(json.dumps(_json_report(root, merged, cases), indent=2, sort_keys=True))
-        return 0 if merged.verdict == AGREE else 1
+    with tempfile.TemporaryDirectory(prefix="tier0-") as tmp:
+        corpus = load(root)
+        merged, cases = _run_loaded(corpus, root, Path(tmp))
+        if args.json:
+            print(json.dumps(_json_report(corpus, merged, cases), indent=2, sort_keys=True))
+            return 0 if merged.verdict == AGREE else 1
 
     if not args.quiet:
         for name, receipt in cases.items():
