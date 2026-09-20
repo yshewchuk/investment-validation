@@ -296,7 +296,50 @@ or `LOW-VALUE`), a `note`, and an optional `diff_contains` that pins the
 mutated text. mutmut numbers mutants per function, so editing the function can
 point an old name at a different mutation. When `diff_contains` stops
 matching, the row's triage is marked `stale` and the survivor counts as
-untriaged again. The file is empty for now; the header documents the format.
+untriaged again. Populated 2026-09-19 with 19 entries across five reviewed
+findings: a same-expiry leg-index read in `native_chooser`, a
+canonical-number fast/slow path pair (two entries), two `pnl_sim`
+`black_scholes_put` dtype casts, and `PayoffArtifactLoader.load`'s 14
+message-text-only mutants. See each entry's own note for the reasoning.
+
+### Ratchet: `checks/mutation_ratchet.py`
+
+Per-module mutation-score ratchet, mirroring
+`checks/rearchitecture_phase1_coverage.py`: a fixed comparison
+(`compare(measured, baseline)`), a committed baseline
+(`checks/mutation_ratchet_baseline.json`), and a measurement that never
+rewrites the baseline (`--output` only ever writes a fresh measurement to
+review and commit as the new baseline by hand). It never runs mutmut --
+`--dir` points it at an already-produced report directory (the merged
+`mutation-report` CI artifact, or `mutation_results.py merge` output).
+
+- **Full runs only.** It refuses to compare unless BOTH the measurement and
+  the baseline have `mode: "full"` (`MUTATION_MEASUREMENT_NOT_FULL` /
+  `MUTATION_BASELINE_NOT_FULL`) and skips the per-module checks entirely when
+  either fires. Per-push incremental runs re-test a different, cache-dependent
+  slice of each module's mutants every time (see `mutation.yml`'s own
+  behavior: a cache miss can re-test 100% of one module while its neighbors
+  re-test nothing), so a push-to-push score delta is noise; incremental runs
+  stay advisory (`tools/mutation_report.py`'s normal per-run reporting),
+  never gating.
+- **Triage is re-applied live.** `checked_effective`/`killed_effective` per
+  module are recomputed from `results.jsonl` against the CURRENT
+  `tools/mutation_triage.toml` (`--triage` to point elsewhere), not from
+  whatever a row's own `triage` field says (that reflects the triage file
+  when some earlier CI run exported it). A mutant with a live triage entry is
+  excluded from both sides of the ratio; a stale one counts as an untriaged
+  survivor again.
+- **New modules never pass silently.** A module in the measurement with no
+  baseline entry is `MUTATION_NEW_MODULE_BASELINE_REQUIRED`. A baseline entry
+  for a module no longer measured (e.g. `data_legacy`, excluded 2026-09-19) is
+  not an error -- mutation modules are a CI-scope choice, unlike coverage's
+  fixed `PACKAGES`.
+- The committed baseline starts with `"modules": {}` -- no weekly full run has
+  completed yet (mutation CI landed 2026-09-19). The first one's output must
+  be reviewed and promoted to the baseline by hand, same as coverage.
+- Not wired into `mutation.yml` as a hard CI gate: that workflow is
+  deliberately report-only ("Scores never fail a job"), and adding an
+  automatic failing step there is a decision for the user, not this change.
 
 ### Querying: `tools/mutation_report.py`
 

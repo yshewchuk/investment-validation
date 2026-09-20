@@ -197,6 +197,7 @@ venv/
 !/requirements-dev.txt
 !/checks/rearchitecture_phase1_coverage_baseline.json
 !/checks/rearchitecture_phase2_coverage_baseline.json
+!/checks/mutation_ratchet_baseline.json
 
 # The Phase 2 acceptance registry (phase-2 guide §12.1): which tests and,
 # for tier-2 rows, which Phase2Evidence fields prove each D01-D20 row.

@@ -16,3 +16,176 @@
 # EQUIVALENT: the mutant behaves identically to the original on every input.
 # LOW-VALUE: it differs, but only in a way no test should pin (logging text,
 # a defensive branch that is unreachable by construction, ...).
+#
+# Entries below verified 2026-09-19 by reading the surviving mutant's diff
+# against the current source (not re-derived from any prior finding).
+
+[[triage]]
+mutant = "engine.v2.scoring.native_chooser.x__n_admissible__mutmut_22"
+verdict = "EQUIVALENT"
+note = '''
+Swaps legs[0] for legs[1] when reading the expiry to look up chain depth.
+Every leg engine/v2/domain/generation/structures.py:generate() builds for a
+geometry is stamped with the SAME single `expiry` local (see the NativeLeg(...)
+calls after `expiry = str(selected[1]) if selected is not None else _expiry(inputs)`,
+:211-267): straddle_through, twin_peak and the put-ladder patterns all pass one
+`expiry` value to every leg. legacy engine/structures.py's put_calendar (two
+expiries) is not part of the v2 registry that reaches native_chooser. So for
+every legs tuple this function can ever be called with, legs[0].expiry ==
+legs[1].expiry, and the swap cannot change n_admissible. (Registered
+structures also all carry >=2 legs, so legs[1] does not IndexError either.)
+'''
+diff_contains = "legs[1].get(\"expiry\")"
+
+[[triage]]
+mutant = "engine.v2.foundation.canonical.x__number__mutmut_12"
+verdict = "EQUIVALENT"
+note = '''
+Inverts `type(value) is float` to `is not float`, swapping which values take
+_number's fast string-parsing path vs. the general Decimal path -- for a
+value where `type(value) is not float` (e.g. a float subclass), the mutant
+takes the FAST path instead of the general one, and vice versa. The
+function's own docstring states the invariant that makes this a no-op: the
+fast path re-derives "the same m and n the Decimal path below derives" from
+the identical `repr(abs(value))` string (:78-118) -- both branches parse the
+same digit/exponent decomposition of the same string, just with different
+code, so whichever branch a given value takes, the returned string is the
+same.
+'''
+diff_contains = "is not float"
+
+[[triage]]
+mutant = "engine.v2.foundation.canonical.x__number__mutmut_22"
+verdict = "EQUIVALENT"
+note = '''
+Loosens the general (float-subclass) path's trailing-zero-stripping loop
+from `len(digits) > 1` to `>= 1`. `digits` comes from
+`Decimal(repr(abs(value))).as_tuple().digits`; the caller already returned
+early for `value == 0.0`, so `digits` is the digit tuple of a genuinely
+nonzero Decimal, which Python's decimal module never represents with a
+leading (or, once other digits are gone, sole) zero digit -- the tuple always
+contains at least one nonzero digit. Stripping trailing zeros one at a time
+therefore always halts at a nonzero digit and can never reach `digits == "0"`
+at length 1, so the `> 1` vs `>= 1` boundary is never actually exercised
+differently for any reachable nonzero value.
+'''
+diff_contains = "len(digits) >= 1"
+
+[[triage]]
+mutant = "engine.pnl_sim.x_black_scholes_put__mutmut_3"
+verdict = "EQUIVALENT"
+note = '''
+`np.asarray(spot, dtype=float)` -> `dtype=None`. With dtype=None, np.asarray
+keeps whatever dtype `spot` already has instead of forcing float64. Every use
+of `spot` downstream is in a mixed operation with an already-float value
+(`spot / strike` is Python true division; `strike - spot` and
+`np.maximum(..., 0.0)` mix with a float 0.0/float strike; `spot *
+norm.cdf(...)` multiplies by a float returned from scipy) so the result
+promotes to float64 regardless of whether `spot` started as an int or float
+array. No arithmetic here is int-only (no `//` or bitwise ops), so the cast
+cannot change the returned values.
+'''
+diff_contains = "np.asarray(spot, dtype=None)"
+
+[[triage]]
+mutant = "engine.pnl_sim.x_black_scholes_put__mutmut_12"
+verdict = "EQUIVALENT"
+note = '''
+Same reasoning as the `spot` dtype cast above, for `vol`:
+`np.maximum(np.asarray(vol, dtype=float), MIN_VOL)` -> `dtype=None`. MIN_VOL
+is a float constant, so `np.maximum(int_or_float_array, MIN_VOL)` always
+promotes to float64 regardless of the array's own dtype before the call.
+'''
+diff_contains = "np.asarray(vol, dtype=None)"
+
+# -- payoff_artifact.py Loader.load: message-text-only mutants --------------
+# Each of these replaces only the literal string passed to PayoffArtifactError
+# (case, mutmut's XX-marker, or the whole f-string collapsed to None) while the
+# exception TYPE and the branch that raises it are untouched. No test pins the
+# exact wording of a refusal message (nor should one -- that couples tests to
+# prose, not behavior), so these can never be killed without a text-pinning
+# test that would itself be low-value.
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_7"
+verdict = "LOW-VALUE"
+note = "message text only, on the path-escape refusal; see the module header above this block."
+diff_contains = "escapes artifact root"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_8"
+verdict = "LOW-VALUE"
+note = "message text only, on the path-escape refusal; see the module header above this block."
+diff_contains = "XXartifact path escapes artifact rootXX"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_9"
+verdict = "LOW-VALUE"
+note = "message text only, on the path-escape refusal; see the module header above this block."
+diff_contains = "ARTIFACT PATH ESCAPES ARTIFACT ROOT"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_11"
+verdict = "LOW-VALUE"
+note = "message text only, on the missing-file refusal; see the module header above this block."
+diff_contains = "missing payoff artifact"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_16"
+verdict = "LOW-VALUE"
+note = "message text only, on the hash-mismatch refusal; see the module header above this block."
+diff_contains = "payoff artifact hash mismatch"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_19"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-valid-JSON refusal; see the module header above this block."
+diff_contains = "PayoffArtifactError(None) from exc"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_20"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-valid-JSON refusal; see the module header above this block."
+diff_contains = "XXpayoff artifact is not valid JSONXX"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_21"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-valid-JSON refusal; see the module header above this block."
+diff_contains = "payoff artifact is not valid json"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_22"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-valid-JSON refusal; see the module header above this block."
+diff_contains = "PAYOFF ARTIFACT IS NOT VALID JSON"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_24"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-an-object refusal; see the module header above this block."
+diff_contains = "must be a JSON object"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_25"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-an-object refusal; see the module header above this block."
+diff_contains = "XXpayoff artifact document must be a JSON objectXX"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_26"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-an-object refusal; see the module header above this block."
+diff_contains = "must be a json object"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_27"
+verdict = "LOW-VALUE"
+note = "message text only, on the not-an-object refusal; see the module header above this block."
+diff_contains = "MUST BE A JSON OBJECT"
+
+[[triage]]
+mutant = "engine.v2.models.payoff_artifact.xǁPayoffArtifactLoaderǁload__mutmut_31"
+verdict = "LOW-VALUE"
+note = "message text only, on the self-hash-disagreement refusal; see the module header above this block."
+diff_contains = "content disagrees with its own hash"
