@@ -680,6 +680,10 @@ reason = "Phase 4/5/6 migration preparation and inventory tooling."
 ids = ["cli:tools/bounded_run.py"]
 reason = "Resource-bounded process runner used by every heavy job; infrastructure, not a capability."
 
+[[excluded]]
+ids = ["cli:tools/mem_sampler.py"]
+reason = "In-process RSS/stack sampler for profiling a run (py-spy cannot attach on this host); diagnostic tooling, not a consumer."
+
 # --------------------------------------------------------- adapter edges
 
 # Ledger removal_phase label -> owning phase. Open phases keep their label;
