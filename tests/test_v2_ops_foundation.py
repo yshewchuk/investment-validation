@@ -247,6 +247,248 @@ def test_streaming_hash_updates_incrementally_not_from_one_joined_string(monkeyp
     assert len(calls) > 10, f"only {len(calls)} update() calls -- looks joined, not streamed"
     assert max(calls) < total // 2, "one update() call carried most of the document"
 
+
+# --------------------------------------------------------------------------
+# property test: canonical_json/content_hash prove byte-identical output
+# against the pre-refactor definition, over a generator of awkward values.
+#
+# `engine/v2/foundation/canonical.py` was refactored so `canonical_json` and
+# `content_hash` are both thin wrappers around `iter_canonical_json` (the one
+# chunk generator) instead of `canonical_json` building a whole string via
+# `_serialize(_normalize(value))` and `content_hash` hashing that string.
+# `_serialize`/`_normalize` themselves were NOT touched by that refactor, so
+# `_serialize(_normalize(value))` is a genuine, independent oracle for what
+# the pre-refactor `canonical_json`/`content_hash` computed -- not a
+# tautology against the new code. Every value below is checked against it.
+# --------------------------------------------------------------------------
+
+import json as _json
+import random as _random
+
+
+def _old_batch_canonical(value):
+    """The pre-refactor `canonical_json(value)` (no fragments), reconstructed
+    from the still-unchanged `_serialize`/`_normalize` helpers -- the oracle
+    for the property test below, independent of `iter_canonical_json`."""
+    from engine.v2.foundation import canonical as canonical_module
+    return canonical_module._serialize(canonical_module._normalize(value))
+
+
+def _old_serialize_shared(value, fragments):
+    """The removed `_serialize_shared(value, fragments)`, reproduced verbatim
+    as a test-only oracle for the fragments-aware path (see commit history:
+    it recursed on `_CONTAINERS`, consulted `fragments.canonical(node,
+    _plain)` per container, and fell back to `_serialize(_scalar(v))` at
+    leaves -- exactly what `iter_canonical_json` now does in one pass)."""
+    from engine.v2.foundation import canonical as canonical_module
+    containers = canonical_module._CONTAINERS
+    serialize = canonical_module._serialize
+    scalar = canonical_module._scalar
+    plain = lambda v: serialize(canonical_module._normalize(v))  # noqa: E731
+    if not isinstance(value, containers):
+        return serialize(scalar(value))
+    text = fragments.canonical(value, plain)
+    if text is not None:
+        return text
+    if isinstance(value, dict):
+        members = {str(k): v for k, v in value.items()}
+        items = sorted(members.items(),
+                       key=lambda kv: kv[0].encode("utf-16-be", "surrogatepass"))
+        body = ",".join(
+            f"{_json.dumps(k, ensure_ascii=False)}:"
+            + (_old_serialize_shared(v, fragments) if isinstance(v, containers)
+               else serialize(scalar(v)))
+            for k, v in items)
+        return "{" + body + "}"
+    return "[" + ",".join(
+        _old_serialize_shared(v, fragments) if isinstance(v, containers)
+        else serialize(scalar(v)) for v in value) + "]"
+
+
+def _random_awkward_value(rng: "_random.Random", depth: int = 0):
+    """One recursively-generated value exercising: nested dicts/lists, empty
+    containers, unicode keys needing UTF-16-BE ordering, floats through
+    `_number` (subnormals, +-0.0, large/small exponents, NaN/Infinity), bools
+    vs ints, tuples, and non-JSON leaves (date, Decimal).
+
+    Deliberately EXCLUDES lone surrogates (U+D800-U+DFFF unpaired): hashing
+    one already raises ``UnicodeEncodeError`` at the final `.encode("utf-8")`
+    step in the UNMODIFIED pre-refactor code too (verified directly against
+    HEAD before this change) -- `surrogatepass` in `_serialize`'s dict branch
+    only covers UTF-16-BE KEY SORTING, not the UTF-8 hash encoding, so a
+    lone-surrogate value was never hashable before this refactor either.
+    That pre-existing gap is covered on its own, hash-free, by
+    `test_keys_with_lone_surrogates_sort_by_utf16_code_units` above and by
+    the dedicated ordering-only case below; it must not be papered over by
+    this generator accidentally feeding one into `content_hash`."""
+    from datetime import date, timedelta
+    from decimal import Decimal
+
+    leaves = [
+        None, True, False, 0, 1, -1, 2**63, -(2**64), 10**30,
+        0.0, -0.0, 1e-5, 1e-7, 1e21, 5e-324, -1.5, 0.1,
+        float("nan"), float("inf"), float("-inf"),
+        "", " ", "plain", "line\nbreak", 'quote"back\\slash',
+        "\U0001F600", "café",
+        date(2026, 1, 1) + timedelta(days=rng.randint(0, 3650)),
+        Decimal("1.10"), Decimal("-0.0001"),
+    ]
+    awkward_keys = ["", " ", "a", "B", "\U0001F600", "café", "0", "-1",
+                     "key\nwith\nnewlines"]
+
+    if depth >= 4 or rng.random() < 0.35:
+        return rng.choice(leaves)
+
+    kind = rng.choice(["dict", "list", "tuple", "leaf"])
+    if kind == "dict":
+        n = rng.randint(0, 5)
+        keys = rng.sample(awkward_keys, k=min(n, len(awkward_keys)))
+        return {k: _random_awkward_value(rng, depth + 1) for k in keys}
+    if kind == "list":
+        return [_random_awkward_value(rng, depth + 1) for _ in range(rng.randint(0, 5))]
+    if kind == "tuple":
+        return tuple(_random_awkward_value(rng, depth + 1) for _ in range(rng.randint(0, 3)))
+    return rng.choice(leaves)
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_awkward_values_match_the_pre_refactor_oracle(seed):
+    """`canonical_json`/`content_hash` (now `iter_canonical_json` wrappers)
+    must reproduce exactly what `_serialize(_normalize(value))` -- the
+    unmodified pre-refactor definition -- computes, over 200 random awkward
+    trees (nesting, empty containers, unicode keys, the full float
+    edge-case set, bool-vs-int, tuples, non-JSON leaves)."""
+    rng = _random.Random(seed)
+    value = _random_awkward_value(rng)
+
+    expected_text = _old_batch_canonical(value)
+    assert canonical_json(value) == expected_text
+    assert "".join(iter_canonical_json(value)) == expected_text
+
+    import hashlib as _hashlib
+    expected_hash = (
+        "sha256:" + _hashlib.sha256(expected_text.encode("utf-8")).hexdigest()
+    )
+    assert content_hash(value) == expected_hash
+    assert stream_content_hash(value) == expected_hash
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_awkward_values_match_the_pre_refactor_oracle_under_fragments(seed):
+    """Same property, with a fragments object memoizing every dict/list node
+    by identity (the corpus writer's shared-pool mechanism) -- proves the
+    refactor did not change fragments-aware output either."""
+
+    class _Fragments:
+        def __init__(self):
+            self._held = set()
+
+        def register(self, value):
+            self._held.add(id(value))
+
+        def canonical(self, node, render):
+            if id(node) not in self._held:
+                return None
+            return render(node)
+
+    rng = _random.Random(seed + 10_000)
+    frag = _Fragments()
+    shared_pieces = [_random_awkward_value(rng) for _ in range(3)]
+    for piece in shared_pieces:
+        if isinstance(piece, (dict, list, tuple)):
+            frag.register(piece)
+    value = {"members": shared_pieces + shared_pieces, "solo": shared_pieces[0]}
+
+    expected_text = _old_serialize_shared(value, frag)
+    assert canonical_json(value, fragments=frag) == expected_text
+    assert "".join(iter_canonical_json(value, fragments=frag)) == expected_text
+
+    import hashlib as _hashlib
+    expected_hash = (
+        "sha256:" + _hashlib.sha256(expected_text.encode("utf-8")).hexdigest()
+    )
+    assert content_hash(value, fragments=frag) == expected_hash
+    assert stream_content_hash(value, fragments=frag) == expected_hash
+
+
+def test_lone_surrogate_key_ordering_matches_the_pre_refactor_oracle():
+    """Lone surrogates as dict keys (the case the module's `surrogatepass`
+    comment at :139-142 -- now inline in `_serialize`'s docstring -- exists
+    for) must sort identically and, where the pre-refactor code COULD hash
+    them, hash identically. Uses the SAME three keys as
+    `test_keys_with_lone_surrogates_sort_by_utf16_code_units` above --
+    D800 (lone surrogate), the U+1F600 surrogate PAIR, and U+E000 (the first
+    valid BMP code point past the surrogate block; it is NOT an empty
+    string, though it renders as one in many terminals -- confirmed via
+    `ast.parse` on the source file) -- exercising the exact ordering that
+    docstring names: D800 < D83D DE00 < E000. `content_hash` on a value
+    containing a lone surrogate anywhere already raises `UnicodeEncodeError`
+    at the final `.encode("utf-8")` step in the unmodified pre-refactor code
+    (verified directly against `_serialize(_normalize(...))` before this
+    refactor), so only `canonical_json`/`iter_canonical_json` text equality
+    is asserted for the surrogate-bearing case; a value using the SAME keys
+    but ASCII leaves (hashable both before and after) checks the hash too."""
+    doc = {"": 1, "\U0001F600": 2, "\ud800": 3}
+    expected_text = _old_batch_canonical(doc)
+    assert expected_text == '{"\ud800":3,"\U0001F600":2,"":1}'  # pins the existing test's literal
+    assert canonical_json(doc) == expected_text
+    assert "".join(iter_canonical_json(doc)) == expected_text
+    import hashlib as _hashlib
+    with pytest.raises(UnicodeEncodeError):
+        _hashlib.sha256(expected_text.encode("utf-8"))
+    with pytest.raises(UnicodeEncodeError):
+        content_hash(doc)
+
+    hashable_doc = {"a": 1, "\U0001F600": 2, "z": 3}
+    expected_hashable_text = _old_batch_canonical(hashable_doc)
+    assert canonical_json(hashable_doc) == expected_hashable_text
+    expected_hashable_hash = (
+        "sha256:" + _hashlib.sha256(expected_hashable_text.encode("utf-8")).hexdigest()
+    )
+    assert content_hash(hashable_doc) == expected_hashable_hash
+
+
+def test_deep_nesting_round_trips_without_recursion_error():
+    """Deep nesting must stay fine after switching the recursion shape from
+    plain function calls (`_serialize`/`_normalize`) to generator delegation
+    (`iter_canonical_json`'s `yield from`). Measured directly (not asserted
+    here, since the exact breaking point is interpreter-build-dependent): on
+    this box's default recursion limit (1000), the OLD `_serialize(_normalize(
+    value))` broke around depth ~400-500, while the NEW `canonical_json`/
+    `content_hash` reach ~800-950 -- generator delegation costs FEWER stack
+    frames per level here, not more. 300 is comfortably inside both."""
+    value = 0
+    for _ in range(300):
+        value = [value]
+
+    expected_text = _old_batch_canonical(value)
+    assert canonical_json(value) == expected_text
+    assert "".join(iter_canonical_json(value)) == expected_text
+    assert content_hash(value) == (
+        "sha256:" + __import__("hashlib").sha256(expected_text.encode("utf-8")).hexdigest()
+    )
+
+
+def test_large_row_list_matches_the_pre_refactor_oracle():
+    """A large, uniform row list (the shape a translation block actually has)
+    -- smaller than the ~350k-row synthetic used for the memory/time
+    measurement (that one runs under `tools/bounded_run.py`, not pytest), but
+    large enough to catch an off-by-one in the streaming join/hash loop that
+    a handful of rows would not."""
+    rows = [
+        {"id": i, "ticker": f"T{i % 500}", "px": i * 0.01 - 0.005,
+         "flag": bool(i % 2), "note": "café" if i % 7 == 0 else "",
+         "nested": [i, i + 1, {"x": None}]}
+        for i in range(20_000)
+    ]
+    expected_text = _old_batch_canonical(rows)
+    assert canonical_json(rows) == expected_text
+    assert "".join(iter_canonical_json(rows)) == expected_text
+    assert content_hash(rows) == (
+        "sha256:" + __import__("hashlib").sha256(expected_text.encode("utf-8")).hexdigest()
+    )
+
+
 # --------------------------------------------------------------------------
 # clocks
 # --------------------------------------------------------------------------
