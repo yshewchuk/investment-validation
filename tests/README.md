@@ -305,7 +305,7 @@ message-text-only mutants. See each entry's own note for the reasoning.
 ### Ratchet: `checks/mutation_ratchet.py`
 
 Per-module mutation-score ratchet, mirroring
-`checks/rearchitecture_phase1_coverage.py`: a fixed comparison
+`checks/v2_coverage_ratchet.py`: a fixed comparison
 (`compare(measured, baseline)`), a committed baseline
 (`checks/mutation_ratchet_baseline.json`), and a measurement that never
 rewrites the baseline (`--output` only ever writes a fresh measurement to

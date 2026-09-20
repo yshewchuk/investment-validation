@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Per-module mutation-score ratchet, mirroring
-``checks/rearchitecture_phase1_coverage.py``'s pattern: a fixed comparison, a
+``checks/v2_coverage_ratchet.py``'s pattern: a fixed comparison, a
 committed baseline JSON, a regression code that fails the gate, and a
 measurement that NEVER rewrites the baseline (``--output`` only ever writes a
 fresh measurement for a human to review and commit).
