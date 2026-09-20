@@ -52,7 +52,9 @@ from engine.v2.features import (  # noqa: E402
     FeatureContextPlanner,
     default_feature_registry,
 )
-from engine.v2.foundation import content_hash, from_document, to_document  # noqa: E402
+from engine.v2.foundation import (  # noqa: E402
+    NONFINITE_KEY, content_hash, from_document, to_document,
+)
 from engine.v2.models import (  # noqa: E402
     FrozenInference,
     InferenceRequest,
@@ -1415,6 +1417,27 @@ def _verify_content(value: Any, expected: Any, label: str) -> str:
 
 def _leaf_values(value: Any, path: tuple[Any, ...] = ()) -> dict[tuple, Any]:
     if isinstance(value, Mapping):
+        # A `{"__nonfinite__": "<repr>"}` object is `tag_nonfinite`'s (and
+        # `canonical_json`'s own internal `_scalar`'s) JSON-safe encoding of
+        # ONE nonfinite float leaf, not a genuine two-level document node --
+        # `engine.v2.foundation.canonical.untag_nonfinite` decodes exactly
+        # this shape back to a float, recursively, everywhere else in the
+        # repo. A mapping's `shared_path`/`native_path` is recorded against
+        # the pre-tag document (`tools/phase4_release_assembler.py::_leaves`
+        # runs before `tools/capture_tier0_corpus.py`'s
+        # `_prepare_normalized_shared` tags the value for the stored JSON),
+        # so on-disk the recorded path addresses this wrapper, one segment
+        # short of where a generic leaf-walk would otherwise stop. Treating
+        # it as the leaf here restores that address without touching stored
+        # bytes: `content_hash` already normalizes a raw nonfinite float and
+        # its tagged form identically (contracts §2.1's `_scalar`), so the
+        # recorded `value_hash` matches either way. The check is exact --
+        # sole key, string value -- so a genuine (mismatched) one-key dict
+        # that merely happens to use another key is never mistaken for this
+        # encoding and still fails coverage/leaf checks as a real defect
+        # would.
+        if set(value) == {NONFINITE_KEY} and isinstance(value[NONFINITE_KEY], str):
+            return {path: value}
         if not value:
             return {path: {}}
         leaves = {}
