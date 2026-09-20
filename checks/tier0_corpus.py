@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -130,16 +131,20 @@ class Corpus:
 SHARED_REF_KEY = "$shared"
 SHARED_DOCUMENT_SCHEMA_VERSION = "tier0_shared_document.v1.0"
 
-#: `tools/capture_tier0_corpus.py`'s row-table delta reference for an
+#: `tools/capture_tier0_corpus.py`'s row-table reference for an
 #: `input_translation.mappings` list -- see that module's `ROWS_REF_KEY`
-#: docstring for the full shape and reconstruction rule. This module carries
-#: the SAME literals independently, for the reason `SHARED_REF_KEY`'s
-#: docstring above gives.
+#: docstring for the full shape and reconstruction rule (position-exact,
+#: never re-sorted: real captured order is not derivable by sorting). This
+#: module carries the SAME literals independently, for the reason
+#: `SHARED_REF_KEY`'s docstring above gives.
 ROWS_REF_KEY = "$rows"
-ROWS_ORDER_SHARED_PATH = "shared_path"
+ROWS_ORDER_IDENTITY = "identity"
+ROWS_ORDER_POSITIONS = "positions"
 SHARED_TRANSLATION_TABLE_SCHEMA_VERSION = "tier0_shared_translation_table.v1.0"
 _TRANSLATION_ROW_KEYS = frozenset({"native_path", "shared_path", "value_hash"})
-_ROWS_REFERENCE_KEYS = frozenset({ROWS_REF_KEY, "order", "omit", "extra"})
+_ROWS_KEYS_IDENTITY = frozenset({ROWS_REF_KEY, "order"})
+_ROWS_KEYS_POSITIONS = frozenset({ROWS_REF_KEY, "order", "sequence", "literals"})
+_SEQUENCE_TOKEN_RE = re.compile(r"^(?:[0-9]+|L[0-9]+)$")
 
 
 class CorpusFormatError(ValueError):
@@ -149,14 +154,15 @@ class CorpusFormatError(ValueError):
 
 
 def _resolve_shared(node: Any, shared_dir: Path, cache: dict[str, Any],
-                     resolving: set[str], table_cache: dict[str, dict[str, Any]]) -> Any:
+                     resolving: set[str], table_cache: dict[str, list]) -> Any:
     """Walk ``node``, replacing every ``{SHARED_REF_KEY: digest}`` reference
     with the ONE Python object ``_load_shared_document`` reads for that
     digest -- the same object at every occurrence, restoring the capture's
     own in-memory sharing (``cache`` is keyed by digest and shared across
     every pair one :func:`load` call reads) -- and every
-    ``{ROWS_REF_KEY: digest, ...}`` translation-row delta reference with its
-    reconstructed row list (:func:`_resolve_rows_reference`; ``table_cache``
+    ``{ROWS_REF_KEY: digest, ...}`` translation-row reference (an ``identity``
+    or ``positions`` shape) with its reconstructed row list
+    (:func:`_resolve_rows_reference`; ``table_cache``
     likewise spans every pair one :func:`load` call reads). A dict carrying
     either reference key alongside an unexpected key set is an unknown
     reference shape: refused loudly, never silently treated as ordinary
@@ -195,7 +201,7 @@ def _resolve_shared(node: Any, shared_dir: Path, cache: dict[str, Any],
 
 def _load_shared_document(shared_dir: Path, digest: str, cache: dict[str, Any],
                            resolving: set[str],
-                           table_cache: dict[str, dict[str, Any]]) -> Any:
+                           table_cache: dict[str, list]) -> Any:
     """Read, verify and resolve one ``shared/<hex>.json`` document.
 
     A missing file, a malformed body, an unsupported schema version, a
@@ -247,22 +253,18 @@ def _validate_translation_row(row: Any, label: str) -> None:
         raise CorpusFormatError(f"{label}.value_hash: malformed digest")
 
 
-def _translation_row_key(row: dict) -> str:
-    return content_hash(row)
-
-
-def _translation_row_sort_key(row: dict) -> tuple[str, str]:
-    return (repr(row["shared_path"]), repr(row["native_path"]))
-
-
 def _load_translation_table(shared_dir: Path, digest: str,
-                             cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Read, verify and index one ``shared/translations/<hex>.json`` table,
-    once per digest per :func:`load` call -- the same hard-refusal contract
-    as :func:`_load_shared_document`: a missing file, a malformed body, an
-    unsupported schema, a declared digest that disagrees with the requested
-    one, a duplicate row, or content that does not hash back to the digest
-    are all raised, never silently skipped.
+                             cache: dict[str, list]) -> list:
+    """Read and verify one ``shared/translations/<hex>.json`` table's row
+    list, once per digest per :func:`load` call -- the same hard-refusal
+    contract as :func:`_load_shared_document`: a missing file, a malformed
+    body, an unsupported schema, a declared digest that disagrees with the
+    requested one, or content that does not hash back to the digest are all
+    raised, never silently skipped. Returned in the EXACT order stored: a
+    table's row order is never re-sorted (see ``ROWS_REF_KEY``'s docstring
+    in ``tools/capture_tier0_corpus.py``), so ``rows[i]`` is what a
+    ``{"order": ROWS_ORDER_POSITIONS}`` reference's ``sequence`` addresses
+    by that same index ``i``.
     """
     cached = cache.get(digest)
     if cached is not None:
@@ -288,70 +290,101 @@ def _load_translation_table(shared_dir: Path, digest: str,
     rows = doc["rows"]
     if not isinstance(rows, list):
         raise CorpusFormatError(f"shared translation table {digest}: rows is not a list")
-    by_key: dict[str, Any] = {}
+    seen_keys: set[str] = set()
     for index, row in enumerate(rows):
         _validate_translation_row(row, f"{digest}.rows[{index}]")
-        key = _translation_row_key(row)
-        if key in by_key:
+        # A duplicate row would mean two distinct leaf paths hashing to the
+        # same (native_path, shared_path, value_hash) triple -- impossible
+        # from a real capture (`_translation` rejects a duplicate path
+        # upstream) -- refused loudly rather than silently tolerated.
+        key = content_hash(row)
+        if key in seen_keys:
             raise CorpusFormatError(f"shared translation table {digest}: duplicate row {key}")
-        by_key[key] = row
+        seen_keys.add(key)
     actual = content_hash(rows)
     if actual != digest:
         raise CorpusFormatError(
             f"shared translation table {path} content does not match its "
             f"digest: {actual} != {digest}")
-    cache[digest] = by_key
-    return by_key
+    cache[digest] = rows
+    return rows
 
 
 def _resolve_rows_reference(node: dict, shared_dir: Path,
-                             table_cache: dict[str, dict[str, Any]]) -> list:
+                             table_cache: dict[str, list]) -> list:
     """Reconstruct a ``mappings`` row list from a ``{ROWS_REF_KEY: ...}``
-    delta reference: the referenced table's rows, minus ``omit``, plus
-    ``extra``, sorted back into the exact original order. See
-    ``tools/capture_tier0_corpus.py``'s ``ROWS_REF_KEY`` docstring for why
-    this sort order reproduces the original list exactly.
+    reference, EXACT POSITION for exact position -- never re-sorted or
+    otherwise re-derived (a real capture's row order is not predictable from
+    its content; see ``tools/capture_tier0_corpus.py``'s ``ROWS_REF_KEY``
+    docstring). ``order: "identity"`` means this member's rows ARE the
+    table's rows in that exact order; ``order: "positions"`` means
+    ``sequence`` (a comma-joined string, one token per row IN THIS MEMBER'S
+    ORIGINAL ORDER) names, per position, either a table row (a bare integer
+    index) or this member's own row not in the table (``L<k>``, the ``k``-th
+    entry of ``literals``).
     """
-    if set(node) != _ROWS_REFERENCE_KEYS:
+    order = node.get("order")
+    if order == ROWS_ORDER_IDENTITY:
+        expected_keys = _ROWS_KEYS_IDENTITY
+    elif order == ROWS_ORDER_POSITIONS:
+        expected_keys = _ROWS_KEYS_POSITIONS
+    else:
+        raise CorpusFormatError(f"unsupported translation-row order: {order!r}")
+    if set(node) != expected_keys:
         raise CorpusFormatError(
-            "unknown translation-row reference shape (expected "
-            f"{sorted(_ROWS_REFERENCE_KEYS)}): {sorted(node)}")
+            f"unknown translation-row reference shape for order {order!r} "
+            f"(expected {sorted(expected_keys)}): {sorted(node)}")
     digest = node[ROWS_REF_KEY]
     if not isinstance(digest, str) or not digest.startswith("sha256:"):
         raise CorpusFormatError(f"malformed shared translation table digest: {digest!r}")
-    order = node["order"]
-    if order != ROWS_ORDER_SHARED_PATH:
-        raise CorpusFormatError(f"unsupported translation-row order: {order!r}")
-    omit = node["omit"]
-    extra = node["extra"]
-    if not isinstance(omit, list) or not all(isinstance(x, str) for x in omit):
-        raise CorpusFormatError("malformed translation-row omit list")
-    if not isinstance(extra, list):
-        raise CorpusFormatError("malformed translation-row extra list")
-    table = _load_translation_table(shared_dir, digest, table_cache)
-    selected = dict(table)
-    seen_omit: set[str] = set()
-    for key in omit:
-        if key not in selected:
+    table_rows = _load_translation_table(shared_dir, digest, table_cache)
+    if order == ROWS_ORDER_IDENTITY:
+        rows = list(table_rows)
+    else:
+        sequence = node["sequence"]
+        literals = node["literals"]
+        if not isinstance(sequence, str):
+            raise CorpusFormatError("malformed translation-row sequence: expected a string")
+        if not isinstance(literals, list):
+            raise CorpusFormatError("malformed translation-row literals: expected a list")
+        rows = []
+        used_literals: set[int] = set()
+        used_positions: set[int] = set()
+        tokens = sequence.split(",") if sequence else []
+        for token in tokens:
+            if not _SEQUENCE_TOKEN_RE.match(token):
+                raise CorpusFormatError(f"malformed translation-row sequence token: {token!r}")
+            if token[0] == "L":
+                lit_index = int(token[1:])
+                if lit_index < 0 or lit_index >= len(literals):
+                    raise CorpusFormatError(
+                        f"translation-row sequence literal index out of range: {token!r}")
+                if lit_index in used_literals:
+                    raise CorpusFormatError(f"duplicate translation-row literal use: {token!r}")
+                used_literals.add(lit_index)
+                row = literals[lit_index]
+                _validate_translation_row(row, f"literals[{lit_index}]")
+                rows.append(row)
+            else:
+                position = int(token)
+                if position < 0 or position >= len(table_rows):
+                    raise CorpusFormatError(
+                        f"translation-row sequence table index out of range: {token!r}")
+                if position in used_positions:
+                    raise CorpusFormatError(
+                        f"duplicate translation-row table reference: {token!r}")
+                used_positions.add(position)
+                rows.append(table_rows[position])
+        if len(used_literals) != len(literals):
             raise CorpusFormatError(
-                f"translation-row omit references a row not in table {digest}: {key}")
-        if key in seen_omit:
-            raise CorpusFormatError(f"duplicate translation-row omit entry: {key}")
-        seen_omit.add(key)
-        del selected[key]
-    for index, row in enumerate(extra):
-        _validate_translation_row(row, f"extra[{index}]")
-        key = _translation_row_key(row)
-        if key in selected:
-            raise CorpusFormatError(f"extra row duplicates an existing row: {key}")
-        selected[key] = row
-    rows = sorted(selected.values(), key=_translation_row_sort_key)
+                f"translation-row literals: {len(literals) - len(used_literals)} "
+                "entries never referenced by the sequence")
     seen_shared_paths: set[tuple] = set()
     for row in rows:
         path = tuple(row["shared_path"])
         if path in seen_shared_paths:
             raise CorpusFormatError(
-                f"translation table {digest}: duplicate shared_path after "
+                f"translation reference {digest}: duplicate shared_path after "
                 f"reconstruction: {path}")
         seen_shared_paths.add(path)
     return rows
@@ -390,12 +423,13 @@ def load(root: Path) -> Corpus:
     same fold) share that object by identity again -- restoring the
     capture's own in-memory sharing instead of duplicating it per pair.
     Similarly, an ``input_translation.mappings`` row list may be stored as a
-    small ``{ROWS_REF_KEY: "sha256:...", ...}`` delta against a
-    ``root/shared/translations/<hex>.json`` row table; each such table is
-    likewise read and verified once per digest across every pair one call
-    loads (``table_cache``), and every occurrence gets its own reconstructed
-    row list back (never a shared object, unlike a whole document: each
-    member's delta against the table differs). A missing or
+    small ``{ROWS_REF_KEY: "sha256:...", ...}`` reference (``identity`` or
+    ``positions``) against a ``root/shared/translations/<hex>.json`` row
+    table; each such table is likewise read and verified once per digest
+    across every pair one call loads (``table_cache``), and every occurrence
+    gets its own reconstructed row list back (never a shared object, unlike a
+    whole document: each member's row order and content against the table
+    can differ). A missing or
     digest-mismatched shared file or table, or an unrecognized reference
     shape, is a hard refusal (``CorpusFormatError``), never a silent skip.
     An OLD-format corpus with no ``shared/`` directory and no reference
@@ -405,7 +439,7 @@ def load(root: Path) -> Corpus:
     index = json.loads((root / "INDEX.json").read_text())
     shared_dir = root / "shared"
     shared_cache: dict[str, Any] = {}
-    table_cache: dict[str, dict[str, Any]] = {}
+    table_cache: dict[str, list] = {}
     pairs = {}
     for path in sorted((root / "pairs").glob("*.json")):
         pair = json.loads(path.read_text())

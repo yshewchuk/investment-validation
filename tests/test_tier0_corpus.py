@@ -629,43 +629,68 @@ def write_translation_table(root: Path, rows: list) -> str:
     return digest
 
 
-def test_a_rows_reference_reconstructs_the_exact_original_list_in_order(tmp_path):
-    """A member's mappings list, delta-encoded against a larger table (the
-    ~14-row difference measured on a real DYN-SV chooser), reconstructs
-    byte-identically to the ORIGINAL list -- including the ORDER, recovered
-    by re-sorting on ``(repr(shared_path), repr(native_path))``, the exact
-    order ``tools/phase4_release_assembler.py``'s ``_translation`` already
-    produces for an auto-derived ``mappings`` list. ``repr`` of an int list
-    index sorts as TEXT, not numerically (``['p', 10]`` before ``['p', 2]``),
-    so this also proves the loader uses the real sort key, not row-building
-    order.
-    """
-    original = [translation_row(["p", i], ["p", i], i) for i in range(200)]
-    table_rows = list(original)
-    differing = [3, 47, 101, 150]
-    for i in differing:
-        table_rows[i] = translation_row(
-            original[i]["shared_path"], original[i]["native_path"], "table-only-value")
+def test_an_identity_reference_returns_the_table_rows_exactly(tmp_path):
+    """The table itself may hold rows in ANY order (here deliberately
+    REVERSED path order): an "identity" reference must return exactly that,
+    unchanged -- never re-sorted."""
+    table_rows = [translation_row(["p", i], ["p", i], i) for i in range(50, 0, -1)]
     digest = write_translation_table(tmp_path / "tier0", table_rows)
-    ref = {
-        t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
-        "omit": [content_hash(table_rows[i]) for i in differing],
-        "extra": [original[i] for i in differing],
-    }
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY}
+    p = pair("199_identity", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    corpus = t0.load(root)
+    resolved = corpus.pairs["199_identity"]["payload"]["record"]["extra_field"]
+    assert resolved == table_rows
+    assert content_hash(resolved) == content_hash(table_rows)
+
+
+def test_a_positions_reference_reconstructs_realistically_unsorted_order(tmp_path):
+    """2026-09-20: the real capture's mappings order turned out to be
+    NEITHER sorted-by-path NOR consistent across members -- the probe on
+    real data refused an earlier, sort-based design. This fixture is
+    deliberately adversarial to that assumption: the table holds rows in
+    REVERSED path order, and the member's OWN order interleaves an ascending
+    even-path pass, one of its own rows not in the table at all, a
+    descending odd-path pass, and a second own-only row -- proving
+    reconstruction depends on nothing but the explicit ``sequence``, never
+    on re-deriving order from content.
+    """
+    table_rows = [translation_row(["p", i], ["p", i], i) for i in range(199, -1, -1)]
+    digest = write_translation_table(tmp_path / "tier0", table_rows)
+    table_index = {content_hash(row): pos for pos, row in enumerate(table_rows)}
+
+    own_row_a = translation_row(["p", 500], ["p", 500], "own-a")
+    own_row_b = translation_row(["p", 501], ["p", 501], "own-b")
+    member_rows = (
+        [translation_row(["p", i], ["p", i], i) for i in range(0, 200, 2)]
+        + [own_row_a]
+        + [translation_row(["p", i], ["p", i], i) for i in range(199, 0, -2)]
+        + [own_row_b]
+    )
+    tokens = []
+    literals = []
+    for row in member_rows:
+        key = content_hash(row)
+        position = table_index.get(key)
+        if position is not None:
+            tokens.append(str(position))
+        else:
+            tokens.append(f"L{len(literals)}")
+            literals.append(row)
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": ",".join(tokens), "literals": literals}
     p = pair("200_rows", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
     root = build(tmp_path / "tier0", [p])
     corpus = t0.load(root)
     resolved = corpus.pairs["200_rows"]["payload"]["record"]["extra_field"]
-    expected = sorted(original, key=lambda r: (repr(r["shared_path"]), repr(r["native_path"])))
-    assert resolved == expected
-    assert content_hash(resolved) == content_hash(expected)  # hash-oracle equivalence
+    assert resolved == member_rows  # exact order, including the two literals
+    assert content_hash(resolved) == content_hash(member_rows)  # hash-oracle equivalence
 
 
 def test_an_unknown_rows_reference_shape_refuses_loudly(tmp_path):
     digest = write_translation_table(
         tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
-    bad_ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
-               "omit": [], "extra": [], "surprise": 1}
+    bad_ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY, "surprise": 1}
     p = pair("201_bad_shape", request("STR-THRU"), priced("STR-THRU", extra_field=bad_ref))
     root = build(tmp_path / "tier0", [p])
     with pytest.raises(t0.CorpusFormatError):
@@ -673,8 +698,7 @@ def test_an_unknown_rows_reference_shape_refuses_loudly(tmp_path):
 
 
 def test_a_missing_translation_table_refuses_loudly(tmp_path):
-    ref = {t0.ROWS_REF_KEY: "sha256:" + "b" * 64, "order": t0.ROWS_ORDER_SHARED_PATH,
-           "omit": [], "extra": []}
+    ref = {t0.ROWS_REF_KEY: "sha256:" + "b" * 64, "order": t0.ROWS_ORDER_IDENTITY}
     p = pair("202_missing_table", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
     root = build(tmp_path / "tier0", [p])
     with pytest.raises(t0.CorpusFormatError):
@@ -689,8 +713,7 @@ def test_a_tampered_translation_table_refuses_loudly(tmp_path):
     doc = json.loads(table_path.read_text())
     doc["rows"][0]["value_hash"] = "sha256:" + "c" * 64
     table_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
-    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
-           "omit": [], "extra": []}
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY}
     p = pair("203_tampered_table", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
     root = build(tmp_path / "tier0", [p])
     with pytest.raises(t0.CorpusFormatError):
@@ -700,19 +723,148 @@ def test_a_tampered_translation_table_refuses_loudly(tmp_path):
 def test_an_unsupported_row_order_refuses_loudly(tmp_path):
     digest = write_translation_table(
         tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
-    ref = {t0.ROWS_REF_KEY: digest, "order": "native_path", "omit": [], "extra": []}
+    ref = {t0.ROWS_REF_KEY: digest, "order": "shared_path"}  # the retired v1 scheme
     p = pair("204_bad_order", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
     root = build(tmp_path / "tier0", [p])
     with pytest.raises(t0.CorpusFormatError):
         t0.load(root)
 
 
-def test_an_omit_of_an_unknown_row_refuses_loudly(tmp_path):
+def test_a_malformed_sequence_token_refuses_loudly(tmp_path):
     digest = write_translation_table(
         tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
-    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_SHARED_PATH,
-           "omit": ["sha256:" + "d" * 64], "extra": []}
-    p = pair("205_bad_omit", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": "0,not-a-token", "literals": []}
+    p = pair("205_bad_token", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_sequence_table_index_out_of_range_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": "1", "literals": []}
+    p = pair("206_index_oob", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_sequence_literal_index_out_of_range_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": "L0", "literals": []}
+    p = pair("207_literal_oob", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_an_unused_literal_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    unused = translation_row(["p", 1], ["p", 1], 1)
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": "0", "literals": [unused]}
+    p = pair("208_unused_literal", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_duplicate_table_position_in_a_sequence_refuses_loudly(tmp_path):
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": "0,0", "literals": []}
+    p = pair("209_dup_position", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_duplicate_literal_use_in_a_sequence_refuses_loudly(tmp_path):
+    """Distinct from a duplicate TABLE position: here the same literal index
+    is referenced twice by the sequence, which is just as ambiguous as
+    replaying one table row twice.
+    """
+    digest = write_translation_table(
+        tmp_path / "tier0", [translation_row(["p", 0], ["p", 0], 0)])
+    literal = translation_row(["p", 1], ["p", 1], 1)
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_POSITIONS,
+           "sequence": "L0,L0", "literals": [literal]}
+    p = pair("210_dup_literal", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_duplicate_row_within_a_shared_table_refuses_loudly(tmp_path):
+    """A stored table with a repeated row is ambiguous for both overlap
+    matching and position reconstruction -- the writer never produces this,
+    but a hand-edited or corrupted table must still be refused, not silently
+    accepted.
+    """
+    row = translation_row(["p", 0], ["p", 0], 0)
+    table_rows = [row, dict(row)]
+    tables_dir = tmp_path / "tier0" / "shared" / "translations"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    # Write directly (bypassing `write_translation_table`'s digest-over-rows
+    # convention isn't needed here) so the digest matches this exact,
+    # duplicate-carrying row list.
+    digest = content_hash(table_rows)
+    body = {"schema_version": t0.SHARED_TRANSLATION_TABLE_SCHEMA_VERSION,
+            "digest": digest, "rows": table_rows}
+    (tables_dir / f"{digest.split(':', 1)[-1]}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n")
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY}
+    p = pair("211_dup_table_row", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_an_unparseable_translation_table_file_refuses_loudly(tmp_path):
+    digest = "sha256:" + "d" * 64
+    tables_dir = tmp_path / "tier0" / "shared" / "translations"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    (tables_dir / f"{digest.split(':', 1)[-1]}.json").write_text("{not json")
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY}
+    p = pair("212_bad_json", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_translation_table_with_the_wrong_schema_version_refuses_loudly(tmp_path):
+    table_rows = [translation_row(["p", 0], ["p", 0], 0)]
+    digest = content_hash(table_rows)
+    tables_dir = tmp_path / "tier0" / "shared" / "translations"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    body = {"schema_version": "tier0_shared_translation_table.v9.9",
+            "digest": digest, "rows": table_rows}
+    (tables_dir / f"{digest.split(':', 1)[-1]}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n")
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY}
+    p = pair("213_bad_schema", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
+    root = build(tmp_path / "tier0", [p])
+    with pytest.raises(t0.CorpusFormatError):
+        t0.load(root)
+
+
+def test_a_translation_table_whose_rows_is_not_a_list_refuses_loudly(tmp_path):
+    digest = content_hash({"not": "a list"})
+    tables_dir = tmp_path / "tier0" / "shared" / "translations"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    body = {"schema_version": t0.SHARED_TRANSLATION_TABLE_SCHEMA_VERSION,
+            "digest": digest, "rows": {"not": "a list"}}
+    (tables_dir / f"{digest.split(':', 1)[-1]}.json").write_text(
+        json.dumps(body, indent=2, sort_keys=True) + "\n")
+    ref = {t0.ROWS_REF_KEY: digest, "order": t0.ROWS_ORDER_IDENTITY}
+    p = pair("214_rows_not_list", request("STR-THRU"), priced("STR-THRU", extra_field=ref))
     root = build(tmp_path / "tier0", [p])
     with pytest.raises(t0.CorpusFormatError):
         t0.load(root)
@@ -721,9 +873,10 @@ def test_an_omit_of_an_unknown_row_refuses_loudly(tmp_path):
 def test_an_old_format_plain_mappings_list_loads_unchanged(tmp_path):
     """A pair captured before this fix carries `mappings` as a plain list,
     with no `shared/translations/` directory anywhere -- CURRENT is still an
-    old-format corpus. It must load byte-for-byte unchanged.
+    old-format corpus. It must load byte-for-byte unchanged, order included
+    (deliberately reversed here, not ascending-by-path).
     """
-    mappings = [translation_row(["p", i], ["p", i], i) for i in range(5)]
+    mappings = [translation_row(["p", i], ["p", i], i) for i in range(4, -1, -1)]
     p = pair("206_plain_mappings", request("STR-THRU"),
              priced("STR-THRU", extra_field={"mappings": mappings}))
     root = build(tmp_path / "tier0", [p])
