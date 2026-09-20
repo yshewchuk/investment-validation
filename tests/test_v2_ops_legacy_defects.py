@@ -18,6 +18,7 @@ from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity
+from engine.v2.ops import legacy_adapter
 from engine.v2.ops.legacy_adapter import _action_score, _load_finality
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.plans import nightly_plan
@@ -66,12 +67,26 @@ def _write_finality(root, date="2026-09-12"):
         "daily_share": 1.0, "chain_share": 1.0, "covered": 1, "detail": "final"}))
 
 
+def _stub_features_current(monkeypatch, root, *, panel_sha256="panel-sha", tier4_sha256="tier4-sha"):
+    """P6-2: neutralize ``_check_features_current`` for tests that exercise
+    something else about ``_action_score`` — writes a receipt and stubs the
+    "current on disk" hashes to match it, never touching real
+    ``engine.paths``/panel/tier4 files. The check's own behaviour (all three
+    states) is covered directly in ``tests/test_v2_ops_legacy_features.py``."""
+    (root / "features.json").write_text(json.dumps({
+        "schema_version": "features.v1.0",
+        "panel_sha256": panel_sha256, "tier4_sha256": tier4_sha256}))
+    monkeypatch.setattr(legacy_adapter, "_current_features_hashes",
+                        lambda: {"panel_sha256": panel_sha256, "tier4_sha256": tier4_sha256})
+
+
 def test_action_score_accepts_a_population_planned_before_strikes_exist(monkeypatch, tmp_path):
     rows = [{"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-12",
             "strike": 100.0, "expiry": "2026-10-16"},
            {"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-12",
             "strike": 105.0, "expiry": "2026-10-16"}]
     _stub_scoring(monkeypatch, rows)
+    _stub_features_current(monkeypatch, tmp_path)
     _write_finality(tmp_path)
     result = _action_score(_score_parameters(
         expected_population=("FAKE|TWIN-P|2026-09-12",)), tmp_path)
@@ -84,6 +99,7 @@ def test_action_score_accepts_a_population_planned_before_strikes_exist(monkeypa
 def test_action_score_rejects_missing_duplicate_and_unplanned_keys(monkeypatch, tmp_path):
     rows = [{"ticker": "FAKE", "strategy": "TWIN-P", "event_date": "2026-09-12"}]
     _stub_scoring(monkeypatch, rows)
+    _stub_features_current(monkeypatch, tmp_path)
     _write_finality(tmp_path)
     with pytest.raises(OpsError, match="must be planned"):
         _action_score(_score_parameters(expected_population=()), tmp_path)
@@ -167,7 +183,7 @@ def test_every_emitted_request_environment_ref_matches_launch_formula():
     requests = build_legacy_job_requests(plan, tickers=("FAKE",),
                                          year_start=2025, year_end=2026,
                                          include_prerequisites=False)
-    assert len(requests) == 13
+    assert len(requests) == 14  # P6-2 added the "features" stage
     for request in requests:
         profile = profile_named(DEFAULT_POLICY, _legacy_resource(request.job.kind))
         thread_count = profile.thread_count or profile.cpu_count

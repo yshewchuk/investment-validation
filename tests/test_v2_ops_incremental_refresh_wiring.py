@@ -34,9 +34,10 @@ from tests.ops_support import FakeClock
 #: pins for a default nightly plan. Repeated here as the regression control:
 #: native refresh mode must never change this list.
 _LEGACY_KINDS = [
-    "legacy_finality", "legacy_score", "legacy_decision_replay", "decision_evidence",
-    "legacy_decisions", "legacy_settlement", "legacy_model_evidence", "ledger_export",
-    "engineering_gate", "legacy_render", "legacy_selfcheck", "publication", "backup"]
+    "legacy_finality", "legacy_features", "legacy_score", "legacy_decision_replay",
+    "decision_evidence", "legacy_decisions", "legacy_settlement", "legacy_model_evidence",
+    "ledger_export", "engineering_gate", "legacy_render", "legacy_selfcheck", "publication",
+    "backup"]
 
 
 def _snapshot(snapshot_id="snap-parent"):

@@ -1,5 +1,5 @@
 {
-  "count": 72,
+  "count": 75,
   "adapters": [
     {
       "package": "engine.v2.ops",
@@ -1084,9 +1084,54 @@
       "retry": "pure function of its rows/frame argument; no retry needed",
       "output": "calibration report + health.json (calibrate), book DataFrame + summary (book), status dict",
       "removal_phase": "phase-6 native ledger/portfolio extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.paths",
+      "reason": "P6-2: reads paths.PANEL/paths.TIER4 to compute the features receipt (panel_sha256/tier4_sha256) this worker just built or is about to score against -- no numerical copy, path constants only.",
+      "declared_on": "2026-09-19",
+      "runtime": "_action_features / _check_features_current (legacy_score guard)",
+      "read_set": "declared legacy input manifest (rooted via _rooted_import)",
+      "write_set": "features.json artifact only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "features.json receipt (panel_sha256/tier4_sha256)",
+      "removal_phase": "phase-4/6 native features extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.store",
+      "reason": "P6-2: file_sha256 only, to hash the current panel/tier4 files for the features receipt and its guard -- no table read, no numerical copy.",
+      "declared_on": "2026-09-19",
+      "runtime": "_action_features / _check_features_current (legacy_score guard)",
+      "read_set": "declared legacy input manifest (rooted via _rooted_import)",
+      "write_set": "features.json artifact only",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "features.json receipt (panel_sha256/tier4_sha256)",
+      "removal_phase": "phase-4/6 native features extraction"
+    },
+    {
+      "package": "engine.v2.ops",
+      "module": "engine.v2.ops.legacy_adapter",
+      "legacy_symbol": "engine.data.rebuild",
+      "reason": "P6-2: pinned Tier-3 panel / Tier-4 forecast rebuild bridge (build_panel_table/build_tier4_table) -- no numerical copy, the legacy builders run unmodified.",
+      "declared_on": "2026-09-19",
+      "runtime": "_action_features",
+      "read_set": "declared legacy input manifest (rooted via _rooted_import)",
+      "write_set": "panel.parquet/tier4_forecasts.parquet under the rooted staging tree, then features.json",
+      "credentials": "none",
+      "hidden_subprocesses": "none",
+      "retry": "bounded worker retry after fence validation",
+      "output": "features.json receipt (panel_sha256/tier4_sha256)",
+      "removal_phase": "phase-4/6 native features extraction"
     }
   ],
   "bootstrap_decision": "guides/rearchitecture_phase1_decisions.md#d1--adapter-budget-bootstrap-operator-approved",
   "note": "D1 one-time exact-symbol and runtime-command inventory for engine.v2.ops (20). Phase-2 guide \u00a74 adds engine.v2.data's own reviewed inventory of 4 legacy symbols for its versioned table-contract mapping (engine/v2/data/legacy_adapter.py). P2-5 (render parity, D19) adds 5 more engine.v2.ops symbols (build_meta, build_health, freshness_summary, quota_state, size_model_mae_from_ledger) so the supervised legacy_render action carries the legacy nightly's full render argument set. P2-5/B1c review adds one more engine.v2.ops symbol, engine.data.finality.covered_tickers, for real per-ticker finality evidence. P2-6 (snapshot-to-legacy materialization, D13/D14 adapter half) adds 2 more engine.v2.data symbols (engine.data.store._read_part, engine.data.schemas.coerce) so materialize() proves a written legacy file is readable by the unchanged legacy loaders before it is locked read-only; each exact legacy symbol keeps its own ledger entry per review (PANEL_COLUMNS, tier4.COLUMNS, tier4.KEY_COLUMNS stay three separate entries) even though this puts engine.v2.data.legacy_adapter's own import fan-out one over its 8-edge budget -- reported in the task report as a stop-and-decide finding, not gamed by collapsing entries. P2-7 (supervised snapshot import, D16 synthetic) adds one more engine.v2.data symbol, engine.data.schemas.SOURCE_PRIORITY, for a deterministic source_priority_version fingerprint. The ceiling rose only by these reviewed counts and now resumes ratcheting downward. Production activation remains disabled. capture-inputs (2026-09-14, this task) adds two more engine.v2.ops symbols, engine.data.fetch.iter_cached and engine.calendar.projected_trading_days, for the nightly barrier read-set capture tool's raw-fetch enumeration and stale-calendar-safe session walk -- see engine/v2/ops/capture_inputs.py and engine/v2/data/legacy_nightly_read_plan.py. ops price-refresh (2026-09-14, this task) adds six more engine.v2.ops symbols -- the five engine.data.pulls.price_refresh entry points (load_events, load_price_universe, load_fetch_history, plan_refresh, run_refresh) plus engine.data.fetch.Fetcher -- so the scheduled full-history yfinance price re-downloader crosses the v2/legacy boundary through legacy_adapter.invoke_price_refresh instead of engine.v2.ops.cli importing engine.data.* directly. See engine/data/pulls/price_refresh.py and engine/v2/ops/legacy_adapter.py. Selfcheck failure-detail observability (2026-09-15, real attempt-19 diagnosis: job_1b16bb8b349dab81cb28f20726d78359) adds one more engine.v2.ops symbol, engine.dashboard.selfcheck.scrub_mismatches, so a failed legacy_selfcheck job persists a row/field/reason mismatch list to diagnostics/failure_details.json instead of only a bare traceback. Last read-set gap fix (2026-09-15) adds one more engine.v2.ops symbol, engine.data.finality.session_finality, for legacy_finality's own content-level cross-check against this run's committed materialization (task decision (b) -- legacy_model_evidence needed no new symbol at all, since its full read surface turned out to already be LEGACY_SCORE_READ_PLAN_V1, and moved into stages.SNAPSHOT_BACKED_KINDS instead). R3B-7 (2026-09-18) adds two more engine.v2.ops symbols, engine.data.finality._market_wide_complete and engine.data.finality._coverage_frame, both held only as identity-comparison originals for finality_compatibility's existing monkeypatch-detection seam (the same pattern already used for session_finality/resolve_final_session/covered_tickers) -- fixes a coverage regression where a test that faked only these two private helpers had no effect on the native v2 path, which silently fell through to a real data read instead of the fake. P5-3 (2026-09-18) adds one engine.v2.models.training symbol, engine.models.no_fit.forbid_fitting, so the native training job trips the same process-wide no-fit switch P5-2 rigged on every legacy scoring path (legacy cannot import a v2 guard). P6-3 (2026-09-19) adds five engine.v2.ledger symbols through a new single adapter module, engine/v2/ledger/legacy_adapter.py -- engine.ledger.scored_pairs, engine.ledger.settlement_summary, engine.ledger._strategy_calibration, engine.portfolio.build_book and engine.portfolio.summarize -- for the three MISSING capabilities decisions-status, decisions-calibration and books-funding (tools/phase6_capabilities.toml). Each reused function is pure over the rows/frame it is handed; engine.ledger.scored_pairs and engine.portfolio.build_book gained optional predictions=/outcomes= row-override parameters (default None, every pre-existing caller unchanged) so v2's engine/v2/ledger/catalog_reader.py rows feed the SAME code legacy uses, rather than a duplicated reimplementation that could drift. See engine/v2/ledger/{status,calibration,portfolio,legacy_adapter,catalog_reader}.py and the ops ledger status|calibrate|book CLI subcommands (engine/v2/ops/cli.py).",
-  "committed_ceiling": 72
+  "committed_ceiling": 75
 }

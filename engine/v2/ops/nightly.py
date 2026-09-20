@@ -178,6 +178,14 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
         # P2-C03: score/settlement need the finality-RESOLVED session, never
         # the requested one, so both bind the finality job's own output.
         params["input_bindings"] = {"finality.json": _job_output("finality", keys)}
+    if action == "legacy_score":
+        # P6-2: the features stage's own receipt, materialized into this
+        # worker's staging root the same way finality.json is -- score
+        # refuses (FEATURES_MISSING/FEATURES_STALE,
+        # ``legacy_adapter._check_features_current``) without it. Binding it
+        # here is what makes the executor actually stage the file; omitting
+        # this binding is exactly the no-op the check exists to prevent.
+        params["input_bindings"]["features.json"] = _job_output("features", keys)
     if action == "legacy_decisions":
         params["input_bindings"] = {
             "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
@@ -259,7 +267,7 @@ def _legacy_resource(kind):
         return "legacy_score"
     if kind == "legacy_model_evidence":
         return "model_evidence"
-    if kind == "legacy_settlement":
+    if kind in ("legacy_settlement", "legacy_features"):
         return "legacy_rebuild"
     # 2026-09-14 right-sizing: legacy_materialize no longer borrows
     # legacy_rebuild (5.5 GiB, sized for tier rebuilds) — it gets its own
@@ -280,17 +288,18 @@ def _thread_count(kind):
 
 
 #: The legacy worker DAG's stages when prerequisites are not included.
-_DAG_STAGES = ("finality", "score", "decision_replay", "decision_evidence", "decision_commit",
-               "settlement", "model_evidence", "ledger_export", "engineering_gate",
-               "projection", "selfcheck", "publication", "backup")
+_DAG_STAGES = ("finality", "features", "score", "decision_replay", "decision_evidence",
+               "decision_commit", "settlement", "model_evidence", "ledger_export",
+               "engineering_gate", "projection", "selfcheck", "publication", "backup")
 # P2-5/Task5: ``ledger_export`` and ``backup`` name ``decision_commit`` as
 # their only hard scheduler dependency, never ``settlement`` — a failed
 # settlement job would otherwise cascade through ``block_descendants``
 # and permanently block both (guide: "settlement failure must not block
 # export"). Each coordinator instead reads the settlement *watermark*
 # (present or absent) directly, independent of scheduling.
-_DAG_PARENTS = {"finality": (), "score": ("finality",),
-                "decision_replay": ("score", "finality"),
+_DAG_PARENTS = {"finality": (), "features": ("finality",),
+                "score": ("features", "finality"),
+                "decision_replay": ("score", "features", "finality"),
                 "decision_evidence": ("score", "finality", "decision_replay"),
                 "decision_commit": ("decision_evidence", "score", "finality"),
                 "settlement": ("finality",),

@@ -100,6 +100,14 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # cover the planned population of a snapshot-backed scoring/replay
     # launch -- refused before the job starts, never fit on a miss.
     "TIER4_CACHE_MISSING": ("validation", False),
+    # P6-2: the Tier-3 panel / Tier-4 forecast rebuild's identity
+    # (``legacy_adapter._check_features_current``) -- distinct codes so "no
+    # receipt at all" (a resumed run, a fresh catalog, a skipped stage) can
+    # never be mistaken for "receipt present but stale", the way a single
+    # shared code would let it silently pass as a false positive on the
+    # wrong branch.
+    "FEATURES_MISSING": ("validation", False),
+    "FEATURES_STALE": ("validation", False),
     "CANCELLED": ("internal", False),
     "LAUNCH_FAILED": ("internal", True),
     "WORKER_FAILED": ("internal", True),

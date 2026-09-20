@@ -27,6 +27,7 @@ from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.effects_graph import ledger_export_effect
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, file_hash, worker_source_manifest
+from engine.v2.ops import legacy_adapter
 from engine.v2.ops.legacy_adapter import (
     _action_decision_replay,
     _action_render,
@@ -183,6 +184,16 @@ def test_pin_snapshot_inputs_widens_evidence_scope_not_direct_scope(case):
 # --------------------------------------------------------------------------
 
 
+def _stub_features_current(monkeypatch, root, *, panel_sha256="panel-sha", tier4_sha256="tier4-sha"):
+    """P6-2: ``_action_score`` now refuses without a matching features
+    receipt (FEATURES_MISSING/FEATURES_STALE) -- neutralize it for tests
+    exercising context_tickers/scope, unrelated to features identity."""
+    (root / "features.json").write_text(json.dumps(
+        {"panel_sha256": panel_sha256, "tier4_sha256": tier4_sha256}))
+    monkeypatch.setattr(legacy_adapter, "_current_features_hashes",
+                        lambda: {"panel_sha256": panel_sha256, "tier4_sha256": tier4_sha256})
+
+
 def _stub_scoring(monkeypatch, rows):
     import engine.dashboard.nightly as nightly_module
     import engine.features as features_module
@@ -213,6 +224,7 @@ def test_action_score_loads_context_tickers_and_scores_only_the_watchlist(monkey
     rows = [{"ticker": "AAA", "strategy": "TWIN-P", "event_date": SESSION,
             "strike": 100.0, "expiry": "2026-10-16"}]
     calls = _stub_scoring(monkeypatch, rows)
+    _stub_features_current(monkeypatch, tmp_path)
     (tmp_path / "finality.json").write_text(json.dumps({"date": SESSION, "is_final": True}))
 
     parameters = {"tickers": ["AAA"], "context_tickers": ["AAA", "BBB", "CCC", "DDD", "EEE"],
@@ -237,6 +249,7 @@ def test_action_score_context_tickers_defaults_to_the_watchlist(monkeypatch, tmp
     rows = [{"ticker": "AAA", "strategy": "TWIN-P", "event_date": SESSION,
             "strike": 100.0, "expiry": "2026-10-16"}]
     calls = _stub_scoring(monkeypatch, rows)
+    _stub_features_current(monkeypatch, tmp_path)
     (tmp_path / "finality.json").write_text(json.dumps({"date": SESSION, "is_final": True}))
 
     parameters = {"tickers": ["AAA"], "year_start": 2024, "year_end": 2026, "session": SESSION,
@@ -471,6 +484,7 @@ def test_all_four_scoring_actions_load_identical_context_for_a_subset_request(
     score_root = tmp_path / "score"
     score_root.mkdir()
     (score_root / "finality.json").write_text(json.dumps({"date": SESSION, "is_final": True}))
+    _stub_features_current(monkeypatch, score_root)
     score_calls = _stub_scoring(monkeypatch, [row])
     _action_score(dict(common, session=SESSION, horizon_days=35, alt_strikes=1,
                        expected_population=("AAA|TWIN-P|" + SESSION,)), score_root)

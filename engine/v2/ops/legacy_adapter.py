@@ -291,6 +291,7 @@ def legacy_action(action, parameters, staging, legacy_root=None, cross_check=Non
     _rooted_import(Path(legacy_root) if legacy_root else root / "legacy")
     actions = {
         "legacy_finality": _action_finality,
+        "legacy_features": _action_features,
         "legacy_score": _action_score,
         "legacy_decisions": _action_decisions,
         "legacy_settlement": _action_settlement,
@@ -421,6 +422,94 @@ def _action_finality(parameters, root, cross_check=None):
     return primary
 
 
+def _load_features(root):
+    path = root / "features.json"
+    if not path.is_file():
+        raise fail("FEATURES_MISSING",
+                   "no features receipt for this session — the features stage must "
+                   "run (and record the panel/tier4 hashes it built) before score")
+    return json.loads(path.read_text())
+
+
+def _current_features_hashes():
+    """The Tier-3 panel's and Tier-4 forecast table's CURRENT content
+    hashes, read off whatever root this worker process is presently rooted
+    at (``_rooted_import`` -- the barrier staging copy, or a verified
+    materialization). ``None`` for a file that does not exist, mirroring
+    ``engine.data.manifest``'s own optional digests."""
+    from engine import paths
+    from engine.data import store
+
+    return {
+        "panel_sha256": store.file_sha256(paths.PANEL) if paths.PANEL.exists() else None,
+        "tier4_sha256": store.file_sha256(paths.TIER4) if paths.TIER4.exists() else None,
+    }
+
+
+def _check_features_current(root):
+    """P6-2: refuse a score launch whose features receipt does not match
+    what the panel and Tier-4 forecast table actually are right now.
+
+    Two distinct refusals, on purpose (identity must not be able to no-op,
+    the way ``_phase4_tier4_digest`` and the pre-registration guard's
+    ``spec_hash_checked`` did -- a hash written and never read):
+
+    * ``FEATURES_MISSING`` -- no ``features.json`` in this session's root at
+      all (``_load_features``). This is the common, dangerous case (a
+      resumed run, a fresh catalog, a skipped stage) and must never
+      silently pass.
+    * ``FEATURES_STALE`` -- a receipt exists but the panel and/or tier4 file
+      it recorded no longer matches what is on disk (the features stage
+      ran, but something rebuilt or replaced Tier 3/4 afterward).
+
+    Called unconditionally at the top of :func:`_action_score` -- never
+    gated behind ``input_mode``, unlike
+    ``snapshot_stages._check_tier4_coverage`` -- because the real, default
+    nightly plan is ``input_mode="legacy"`` (``plans.nightly_plan``'s own
+    default), which never reaches ``snapshot_stages.prepare_launch`` at all
+    (``prepare_launch`` returns ``None`` for ``launch_mode(spec) ==
+    "legacy"``). A check that lived only in ``snapshot_stages.py`` would be
+    exactly the kind of no-op this task exists to close. See
+    ``tools/phase6_capabilities.toml`` row ``nightly-features``.
+    """
+    receipt = _load_features(root)
+    current = _current_features_hashes()
+    mismatches = {key: {"receipt": receipt.get(key), "current": current[key]}
+                 for key in ("panel_sha256", "tier4_sha256") if receipt.get(key) != current[key]}
+    if mismatches:
+        raise fail("FEATURES_STALE",
+                   "the panel and/or tier4 forecast table on disk no longer matches "
+                   "this session's features receipt",
+                   details={"mismatches": mismatches})
+
+
+def _action_features(parameters, root):
+    """The Tier-3 panel and Tier-4 forecast rebuild (P6-2), wrapped as a
+    supervised legacy action: ``engine.data.rebuild``'s own panel/tier4
+    builders, run inside this worker's rooted staging tree
+    (``legacy_action``'s ``_rooted_import``), then a ``features.json``
+    receipt binding the exact files a downstream ``legacy_score`` must see
+    unchanged (``_check_features_current``) -- the identity
+    ``nightly-features`` never had before this task.
+    """
+    from engine.data import rebuild
+
+    worker_progress.step_start("panel_rebuild")
+    panel_report = rebuild.build_panel_table()
+    worker_progress.step_end("panel_rebuild")
+    worker_progress.step_start("tier4_rebuild")
+    tier4_report = rebuild.build_tier4_table(parameters.get("tier4_since"))
+    worker_progress.step_end("tier4_rebuild")
+    hashes = _current_features_hashes()
+    return _write_action(root, "features.json", {
+        "schema_version": "features.v1.0",
+        "panel_sha256": hashes["panel_sha256"],
+        "tier4_sha256": hashes["tier4_sha256"],
+        "panel_rows": panel_report.get("rows"),
+        "tier4_rows": tier4_report.get("rows"),
+    })
+
+
 def _scoring_context(parameters, *, action):
     """P2-C04's single implementation of the scorer's evidence universe
     (``context_tickers``) plus its ``years`` window, used by every action
@@ -464,6 +553,7 @@ def _action_score(parameters, root):
     from engine.score import Scorer, score_calendar
     from engine.v2.ops.session_resolution import resolve_effective_session
 
+    _check_features_current(root)
     worker_progress.step_start("inputs_load")
     session = resolve_effective_session(_load_finality(root), parameters["session"])
     tickers = sorted(set(parameters["tickers"]))
