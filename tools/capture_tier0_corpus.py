@@ -826,6 +826,69 @@ def entry_rule_gate_block(candidate: Mapping[str, Any], strategy: str,
                             cutoff=cutoff)
 
 
+#: Legacy ``Scorer._crush_forecast``'s stored-lookup branch declares this
+#: forecast output with ``source: "stored_tier4"`` and no model binding (a
+#: past event's crush comes from the Tier-4 forecasts table, not a served
+#: fold) -- see engine/score.py:3465 and _STORED_FORECAST_OUTPUTS in
+#: engine/v2/scoring/source_inputs.py, which this mirrors.
+_STORED_FORECAST_DECLARATION_KEY = "forecast:pred_iv_crush_30"
+_STORED_FORECAST_OUTPUT = "pred_iv_crush_30"
+_STORED_FORECAST_ROLE = "iv_crush"
+
+
+def _with_stored_crush(forecast_recipe: dict[str, Any],
+                       source: Mapping[str, Any]) -> dict[str, Any]:
+    """Fold a legacy ``stored_tier4`` iv_crush declaration into ``forecast``.
+
+    Capture-side gap (established on fixture 011, CTR5): a stored crush
+    value never earns a ``model_bindings`` entry (there is no served
+    artifact behind a table lookup), so ``capture_source_bundle`` never adds
+    "iv_crush" to ``native_recipes.forecast.required_roles`` and the strict
+    trace's ``binding_ids`` never requests it -- even though legacy recorded
+    the value, its provenance row, and its hash in
+    ``source_inputs.frozen.declarations``. Every planned-exit DYN-SV
+    strategy (TWIN-P/TWIN-P5/CND-PS/BFLY-P/BFLY-P5/RAMP7/CTR5) needs this
+    role (``engine/v2/scoring/stages.py::_required_forecast_roles``'s
+    ``_is_planned`` branch), so this is not fixture-011-specific.
+
+    Mirrors ``engine/v2/scoring/source_inputs.py``'s ``_stored_forecasts``
+    shape (``block["stored"][output] = {"value", "row", "row_hash"}``, read
+    by ``engine/v2/scoring/stages.py::_execute_local_forecast``), so a
+    stored crush value replays as a verified local value -- never as a
+    frozen-binding execution, which would misrepresent a table lookup as a
+    served model. The row hash is recomputed here, not trusted from the
+    capture, so a corrupted capture refuses loudly instead of replaying a
+    silently wrong value.
+    """
+    frozen = source.get("frozen") or {}
+    if frozen.get("conflicts"):
+        raise StrictTraceCaptureError(
+            f"legacy recorded different values for {sorted(frozen['conflicts'])}")
+    declared = frozen.get("declarations") or {}
+    entry = declared.get(_STORED_FORECAST_DECLARATION_KEY)
+    if not isinstance(entry, Mapping) or entry.get("source") != "stored_tier4":
+        return forecast_recipe
+    from engine.v2.scoring.source_inputs import stored_forecast_row_hash
+
+    row = dict(entry.get("row") or {})
+    value = float(entry["value"])
+    row_hash = stored_forecast_row_hash(row, value)
+    if entry.get("row_hash") not in (None, row_hash):
+        raise StrictTraceCaptureError(
+            f"{_STORED_FORECAST_DECLARATION_KEY} row_hash does not match its row and value"
+        )
+    stored_block = dict(forecast_recipe.get("stored") or {})
+    stored_block[_STORED_FORECAST_OUTPUT] = {
+        "value": value, "row": row, "row_hash": row_hash,
+    }
+    forecast_recipe["stored"] = stored_block
+    required_roles = list(forecast_recipe.get("required_roles") or ())
+    if _STORED_FORECAST_ROLE not in required_roles:
+        required_roles.append(_STORED_FORECAST_ROLE)
+    forecast_recipe["required_roles"] = required_roles
+    return forecast_recipe
+
+
 def _captured_blocks(candidate: Mapping[str, Any],
                      request: V2ScoreRequest,
                      frozen_chooser: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -874,6 +937,7 @@ def _captured_blocks(candidate: Mapping[str, Any],
     recipes.setdefault("analogs", {"mode": "not_applicable"})
     recipes.setdefault("simulation", {"mode": "not_applicable"})
     recipes.setdefault("gate", {"mode": "not_applicable"})
+    recipes["forecast"] = _with_stored_crush(dict(recipes["forecast"]), source)
     model_inputs = _merged_model_inputs(candidate)
     if frozen_chooser is not None:
         _merge_chooser_rows(model_inputs, _chooser_consumed_rows(candidate))
