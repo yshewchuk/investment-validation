@@ -998,6 +998,27 @@ class Phase4TraceCollector:
                 self._first_gap = (stage, str(reason))
             self.record(stage, {}, {"reason": reason}, status="not_reached")
 
+    def has_checkpoint(self, name: str) -> bool:
+        """True iff ``name``'s REQUIRED_CHECKPOINT_GROUPS-vocabulary group
+        (``features``/``selection_pricing``/``simulation``/``gate_inputs``,
+        or the optional ``dyn_sv``/``source_inputs``) has already been
+        captured.
+
+        Exists because the pipeline-``stage`` vocabulary ``not_reached``
+        tracks (``resolve_context``/``features``/.../``chooser``, traced
+        unconditionally by ``_trace_phase4`` once ``score`` reaches that
+        point in its body) is NOT the same vocabulary as the four
+        checkpoint GROUPS ``checks/phase4_checkpoints.py`` requires: a row
+        can run every named stage to completion (so ``not_reached`` never
+        fires and ``_first_gap`` stays ``None``) while a specific
+        ``capture_*`` call was still skipped by its own narrower guard
+        (no legs resolved, missing/non-finite gate features, simulation
+        evidence not ``"completed"``). Callers use this to detect that gap
+        at the point it is real and record an honest ``not_reached`` for
+        the group itself, instead of the pipeline stage that ran anyway.
+        """
+        return name in self._checkpoint_groups
+
     def finish(self, result: "ScoreResult") -> None:
         if result.flags:
             self.status = "refused"
@@ -1807,8 +1828,20 @@ class Scorer:
 
         # -- the live chain: entry cost, strike, and the moneyness label ----
         self._price_entry(request, structure, result, chain_index)
-        if trace is not None and result.legs and result.entry_cost is not None:
-            trace.capture_selection_pricing(result.legs, result.entry_cost)
+        if trace is not None:
+            if result.legs and result.entry_cost is not None:
+                trace.capture_selection_pricing(result.legs, result.entry_cost)
+            else:
+                # Real gap, real reason: pricing ran and left no legs/entry
+                # cost (see `has_checkpoint`'s docstring — the "pricing"
+                # stage below traces unconditionally either way, so this is
+                # the only place that ever learns this group was skipped).
+                trace.not_reached(
+                    "selection_pricing",
+                    result.detail
+                    or (", ".join(result.flags) if result.flags
+                        else "no legs or entry cost resolved"),
+                )
         self._trace_phase4(
             trace,
             "geometry",
@@ -1922,6 +1955,25 @@ class Scorer:
             },
         )
         self._score_gate(request, result, features)
+        if trace is not None:
+            # `_score_gate` dispatches to a model gate or an arithmetic
+            # entry rule, either of which may return without capturing
+            # `gate_inputs`/`simulation` (missing/non-finite gate features,
+            # simulation evidence short of `"completed"`). The "gate" and
+            # "simulation" pipeline STAGES trace unconditionally below
+            # regardless, so this is the only point that observes the real
+            # gap. Named `simulation_checkpoint`, not `simulation`, so this
+            # `not_reached` cannot collide with the unconditional stage
+            # trace two lines down (`record` raises on a stage recorded
+            # twice).
+            reason = (
+                result.detail
+                or (", ".join(result.flags) if result.flags else None)
+            )
+            if not trace.has_checkpoint("gate_inputs"):
+                trace.not_reached("gate_inputs", reason or "gate inputs not captured")
+            if not trace.has_checkpoint("simulation"):
+                trace.not_reached("simulation_checkpoint", reason or "simulation not captured")
         self._trace_phase4(
             trace,
             "simulation",
