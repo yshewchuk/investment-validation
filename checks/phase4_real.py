@@ -2592,8 +2592,18 @@ def _report_is_complete(text: str, evidence: dict) -> bool:
 def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     started = time.perf_counter()
     resolved = resolve_corpus(corpus_root)
-    corpus = load(resolved)
+    # `run_corpus` runs (and, per 958388f, fully releases its OWN internal
+    # `Corpus`) BEFORE this frame's persistent `corpus = load(...)` local is
+    # created. Reversed, the two full corpora were resident at once for the
+    # whole `run_corpus` call: `corpus` was already bound to a local here,
+    # on top of the independent `load(corpus_root)` `checks.tier0_corpus.run`
+    # -> `_run` -> `_run_loaded` performs internally to verify the round
+    # trip. Measured on the real 3.2 GB corpus: climbs past an 8.5 GB cap
+    # and, raised to 9.5 GB, past that too with active swapping -- still
+    # rising when killed. Neither call needs the other's result, so this
+    # ordering changes nothing about what either one verifies.
     corpus_verdict, _ = run_corpus(resolved)
+    corpus = load(resolved)
     registry = default_registry()
     feature_registry = default_feature_registry()
     application_controls = _application_controls()
