@@ -590,6 +590,80 @@ def test_analogs_that_genuinely_did_not_match_stay_absent_from_the_frozen_checkp
     assert "analogs" not in recipes
 
 
+def test_analog_recipe_seed_matches_legacy_matchers_own_seed_call() -> None:
+    """``capture_analog_inputs`` must derive ``bootstrap_seed`` from exactly
+    the buckets dict ``AnalogMatcher._summarize`` actually hashed in
+    ``_seed`` -- the CAUSALLY re-bucketed ``effective_bucket_query`` (which
+    also still carries the raw ``implied_ratio`` key ``_seed`` hashes,
+    alongside the four bucket labels), not the pre-causal ``bucket_query``
+    snapshot restricted to the four bucket-dimension names.
+
+    Before the fix this read ``bucket_query`` and dropped ``implied_ratio``
+    from the hashed payload, so the captured seed differed from legacy's own
+    -- same matched population (bucket labels only ever come from the four
+    dimension names, unaffected), same mean/win/n, but an unrelated bootstrap
+    draw and therefore a different ci_low/ci_high than the legacy record
+    this capture exists to let native reproduce.
+    """
+    from engine.v2.scoring.native_analog import legacy_bucket_bootstrap_seed
+
+    bucket_query = {
+        "mcap_bucket": "large", "moneyness_band": "atm", "dte_band": "short",
+        "implied_tercile": "mid", "implied_ratio": 1.05,
+    }
+    # The CAUSAL re-bucketing: same raw ratio, a DIFFERENT tercile label
+    # than the population-edge one above -- exactly what `match()` produces
+    # when `as_of` causal edges disagree with the population edges.
+    effective_bucket_query = {
+        **bucket_query, "implied_tercile": "high",
+    }
+    evidence = {
+        "strategy": "STR-THRU", "alpha": 0.5, "snapshot": "snap-test",
+        "cutoff": "2024-01-01T00:00:00", "request_key": "req-1",
+        "bucket_query": bucket_query,
+        "effective_bucket_query": effective_bucket_query,
+        "causal": {"rows": [{
+            "row_id": "r1", "source_index": "r1",
+            "values": {"mcap_bucket": "large", "moneyness_band": "atm",
+                      "dte_band": "short", "implied_tercile": "high",
+                      "ret": 0.1},
+        }]},
+    }
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_source_bundle(context={"ticker": "ABC"})
+    collector.capture_analog_inputs(evidence)
+
+    analogs_block = _checkpoint_value(collector, "source_inputs")["native_recipes"]["analogs"]
+    recipe = analogs_block["recipe"]
+
+    # What `AnalogMatcher._summarize`'s own `_seed()` call actually hashes:
+    # every key of the buckets object `match()` passed it, which is
+    # `effective_bucket_query` here (causal tercile + implied_ratio both
+    # present).
+    expected_seed = legacy_bucket_bootstrap_seed(
+        snapshot="snap-test", strategy="STR-THRU", alpha=0.5,
+        buckets=effective_bucket_query, request_key="req-1",
+    )
+    assert recipe["bootstrap_seed"] == expected_seed
+
+    # The old, buggy derivation: `bucket_query` (pre-causal), restricted to
+    # only the four bucket-dimension names (no `implied_ratio`). Pins that
+    # the fix actually changed the derivation, not just its inputs.
+    stale_and_restricted = {
+        k: bucket_query[k]
+        for k in ("mcap_bucket", "moneyness_band", "dte_band", "implied_tercile")
+    }
+    old_buggy_seed = legacy_bucket_bootstrap_seed(
+        snapshot="snap-test", strategy="STR-THRU", alpha=0.5,
+        buckets=stale_and_restricted, request_key="req-1",
+    )
+    assert recipe["bootstrap_seed"] != old_buggy_seed
+
+    # The causal tercile also reaches `query_features` (used for MATCHING in
+    # native replay), not the stale population-edge one.
+    assert analogs_block["query_features"]["implied_tercile"] == "high"
+
+
 def _residual_pool() -> ResidualPool:
     index = np.arange(600)
     return ResidualPool(pd.DataFrame({
