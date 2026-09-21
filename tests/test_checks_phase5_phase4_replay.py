@@ -195,6 +195,97 @@ def test_fit_during_replay_fails_the_phase4_subject(tmp_path, monkeypatch):
     assert evidence["phase4"]["status"] == "FAIL"
 
 
+def test_checkpoint_resumes_without_replaying_again(tmp_path, monkeypatch):
+    """A second ``replay_corpus`` call against the same corpus and checkpoint
+    reuses the first call's row instead of re-verifying/re-scoring the pair."""
+    from checks.phase5_release import deployment_root, read_manifest
+    from checks.tier0_corpus import load, resolve_corpus
+    from engine.v2.models.deployment import resolve_release
+
+    corpus = _corpus(tmp_path)
+    root = _release(tmp_path)
+    manifest = read_manifest(root)
+    model_release = resolve_release(deployment_root(root), manifest["release_id"])
+    checkpoint = tmp_path / "checkpoint.jsonl"
+
+    summary1, findings1 = replay.replay_corpus(corpus, root, model_release, manifest,
+                                               checkpoint_path=checkpoint)
+    assert summary1["dispositions"]["replayed"] == 1
+    assert checkpoint.is_file()
+    lines = checkpoint.read_text().strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["fixture_id"] == "pair-1" and row["disposition"] == "replayed"
+    assert row["corpus_hash"] == load(resolve_corpus(corpus)).index.get("corpus_hash")
+
+    real_replay_pair = replay._replay_pair
+
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError("checkpointed pair was re-replayed")
+
+    monkeypatch.setattr(replay, "_replay_pair", must_not_be_called)
+    summary2, findings2 = replay.replay_corpus(corpus, root, model_release, manifest,
+                                               checkpoint_path=checkpoint)
+    monkeypatch.setattr(replay, "_replay_pair", real_replay_pair)
+
+    assert summary2["dispositions"] == summary1["dispositions"]
+    assert findings2 == findings1
+    # no duplicate line was appended for the pair served from the checkpoint
+    assert len(checkpoint.read_text().strip().splitlines()) == 1
+
+
+def test_checkpoint_from_a_different_corpus_is_discarded(tmp_path, monkeypatch):
+    """A checkpoint recorded against one corpus must not silently serve a
+    DIFFERENT corpus's pair of the same fixture_id -- resuming against the
+    wrong corpus would be a correctness defect, not a convenience. The
+    ``_corpus`` fixture writes a fixed ``INDEX.json`` corpus_hash regardless
+    of pair content (fine for every other test here, which never reads it),
+    so this test overwrites it directly to give corpus_b a genuinely
+    different declared identity -- the same field a real capture's INDEX.json
+    computes from its own content."""
+    from checks.phase5_release import deployment_root, read_manifest
+    from engine.v2.models.deployment import resolve_release
+
+    root = _release(tmp_path)
+    manifest = read_manifest(root)
+    model_release = resolve_release(deployment_root(root), manifest["release_id"])
+    checkpoint = tmp_path / "checkpoint.jsonl"
+
+    corpus_a = _corpus(tmp_path)
+    replay.replay_corpus(corpus_a, root, model_release, manifest, checkpoint_path=checkpoint)
+    assert len(checkpoint.read_text().strip().splitlines()) == 1
+    row_a = json.loads(checkpoint.read_text().strip().splitlines()[0])
+
+    other = tmp_path / "other"
+    other.mkdir()
+    corpus_b = _corpus(other)
+    index_b = json.loads((corpus_b / "INDEX.json").read_text())
+    index_b["corpus_hash"] = "sha256:" + "b" * 64  # deliberately distinct from corpus_a's
+    (corpus_b / "INDEX.json").write_text(json.dumps(index_b))
+    assert index_b["corpus_hash"] != row_a["corpus_hash"]
+
+    calls = []
+    real_replay_pair = replay._replay_pair
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real_replay_pair(*args, **kwargs)
+
+    monkeypatch.setattr(replay, "_replay_pair", counting)
+    summary_b, _ = replay.replay_corpus(corpus_b, root, model_release, manifest,
+                                        checkpoint_path=checkpoint)
+
+    # corpus_b's pair WAS freshly replayed (not silently served from corpus_a's
+    # checkpoint row for the same fixture_id "pair-1"), and the checkpoint file
+    # now carries both corpora's rows, correctly identity-tagged
+    assert len(calls) == 1
+    assert summary_b["dispositions"]["replayed"] == 1
+    lines = checkpoint.read_text().strip().splitlines()
+    assert len(lines) == 2
+    hashes = {json.loads(line)["corpus_hash"] for line in lines}
+    assert hashes == {row_a["corpus_hash"], index_b["corpus_hash"]}
+
+
 def test_corpus_with_no_traced_pair_is_empty(tmp_path):
     root = tmp_path / "corpus"
     (root / "pairs").mkdir(parents=True)

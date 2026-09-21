@@ -34,7 +34,8 @@ Given a release root written by ``tools/phase5_prepare_release.py`` (layout:
 Usage::
 
     python3 checks/phase5_acceptance.py --release-root /root/p5-6/release-A \\
-        --artifact-root /root/p5-6/acceptance-A [--phase4-corpus <corpus>]
+        --artifact-root /root/p5-6/acceptance-A [--phase4-corpus <corpus>] \\
+        [--phase4-checkpoint <resumable jsonl path>]
 """
 from __future__ import annotations
 
@@ -107,6 +108,33 @@ FINDING_CODES = (
     ROLLBACK_NO_INCUMBENT, ROLLBACK_CANDIDATE_LIVE, ROLLBACK_NOT_EXACT,
     PROMOTE_REFUSED, *REPLAY_CODES, REPORT_INCOMPLETE,
 )
+
+
+def _rss_gb() -> float:
+    """Resident set of this process, in GB -- same helper and unit as
+    ``tools/capture_tier0_corpus.py::_rss_gb`` and ``tools/mem_sampler.py``."""
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        pass
+    return 0.0
+
+
+def _progress(tag: str, message: str, started: float) -> None:
+    """One phase-boundary progress line: wall-clock time, elapsed since
+    ``started``, RSS. The gate has no other output for the 10s of minutes a
+    real release/corpus can take per phase (measured: a 133-minute run that
+    never printed anything past its own startup banner and never created an
+    artifact directory), so every ``build_evidence``/``replay_corpus`` phase
+    boundary calls this -- the same ``[tag] message`` idiom
+    ``tools/capture_tier0_corpus.py``'s ``[corpus] ...`` lines use, extended
+    with a wall-clock timestamp so a supervisor tailing the log with `date`
+    can tell how far along a run is, not just that it is still alive."""
+    print(f"[{tag} {time.strftime('%H:%M:%S')}] {message} "
+          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)", flush=True)
 
 
 class ReportPathError(ValueError):
@@ -557,14 +585,15 @@ def _round_trip(root: Path, candidate: str, first_deployment: bool, findings) ->
 
 def _phase4_subject(corpus: Path | None, release_root: Path, model_release,
                     manifest: Mapping[str, Any], watch_dirs: list[Path],
-                    findings: _Findings) -> dict:
+                    findings: _Findings, checkpoint_path: Path | None = None) -> dict:
     """Replay the corpus's traced pairs from the staged release, no fitting."""
     if corpus is None:
         return {"status": "NOT_RUN"}
     if model_release is None:  # already a P5_MODEL_RELEASE_INVALID finding
         return {"status": "BLOCKED"}
     with guarded_scoring(watch_dirs) as watch:
-        summary, rows = replay_corpus(corpus, release_root, model_release, manifest)
+        summary, rows = replay_corpus(corpus, release_root, model_release, manifest,
+                                      checkpoint_path=checkpoint_path)
     for code, subject, detail in rows:
         findings.add(code, subject, detail)
     for path in sorted(set(watch.fit_paths)):
@@ -669,6 +698,7 @@ def _default_watch_dirs(release_root: Path) -> list[Path]:
 
 def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                    phase4_corpus: Path | None = None,
+                   phase4_checkpoint: Path | None = None,
                    watch_dirs: Iterable[Path] | None = None,
                    consumers: Mapping[str, Any] | None = None,
                    state_specs: tuple[StateSpec, ...] = STATE_SPECS,
@@ -684,6 +714,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                                 "consumers": [], "scoring_pass": {}, "rollback": {},
                                 "lineage": {"status": "NOT_RUN"},
                                 "phase4": {"status": "NOT_RUN"}}
+    _progress("p5-accept", f"start release_root={release_root}", started)
     try:
         manifest = read_manifest(release_root)
     except (ReleaseLayoutError, OSError, ValueError) as exc:
@@ -691,22 +722,49 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
         return _finish(evidence, findings, report_dir, started)
     release_id = manifest["release_id"]
     evidence.update({"release_id": release_id, "manifest_hash": manifest["manifest_hash"]})
+    _progress("p5-accept", f"manifest read, release_id={release_id}", started)
+
+    _progress("p5-accept", "members: loading model release + state members", started)
     model_release = _load_model_release(release_root, release_id, findings)
     evidence["members"] = _model_member_rows(release_root, model_release, findings)
     state_rows, loaded = _state_member_rows(release_root, manifest, findings, state_specs)
     evidence["members"] += state_rows
+    _progress("p5-accept", f"members: {len(evidence['members'])} rows verified", started)
+
+    _progress("p5-accept", "lineage: checking release lineage", started)
     evidence["lineage"] = _lineage_subject(loaded, findings)
+    _progress("p5-accept", f"lineage: status={evidence['lineage'].get('status')}", started)
+
     dirs = list(watch_dirs) if watch_dirs is not None else _default_watch_dirs(release_root)
     if model_release is not None:
         ctx = ReleaseContext(release_root=release_root, model_release=model_release,
                              states=loaded)
+        active_consumers = CONSUMERS if consumers is None else consumers
+        _progress("p5-accept",
+                  f"consumers: scoring pass over {len(active_consumers)} consumers", started)
         evidence["consumers"], evidence["scoring_pass"] = _scoring_pass(
-            ctx, CONSUMERS if consumers is None else consumers, dirs, findings)
+            ctx, active_consumers, dirs, findings)
+        _progress("p5-accept", f"consumers: {len(evidence['consumers'])} scored", started)
+
+        _progress("p5-accept", "rollback: running promote/rollback round trip", started)
         evidence["rollback"] = _rollback_round_trip(
             release_root, release_id, first_deployment, findings)
+        _progress("p5-accept",
+                  f"rollback: status={evidence['rollback'].get('status')}", started)
+
+    if phase4_corpus is None:
+        _progress("p5-accept", "phase4: no --phase4-corpus given, NOT_RUN", started)
+    else:
+        _progress("p5-accept", f"phase4: replaying corpus={phase4_corpus}", started)
     evidence["phase4"] = _phase4_subject(phase4_corpus, release_root, model_release,
-                                         manifest, dirs, findings)
-    return _finish(evidence, findings, report_dir, started)
+                                         manifest, dirs, findings,
+                                         checkpoint_path=phase4_checkpoint)
+    _progress("p5-accept", f"phase4: status={evidence['phase4'].get('status')}", started)
+
+    _progress("p5-accept", "writing evidence + report", started)
+    result = _finish(evidence, findings, report_dir, started)
+    _progress("p5-accept", f"done status={result['status']}", started)
+    return result
 
 
 def _finish(evidence, findings, report_dir, started) -> dict:
@@ -737,6 +795,9 @@ def main(argv=None) -> int:
                         default=Path(tempfile.gettempdir()) / "phase5-acceptance",
                         help="private report + evidence dir; refused inside the repo")
     parser.add_argument("--phase4-corpus", type=Path)
+    parser.add_argument("--phase4-checkpoint", type=Path,
+                        help="resumable JSONL of already-replayed phase4 pairs "
+                             "(same corpus only; a mismatched corpus_hash is discarded)")
     parser.add_argument("--watch-dir", type=Path, action="append",
                         help="extra model-cache dir to watch (default data/models + release)")
     parser.add_argument("--first-deployment", action="store_true",
@@ -747,7 +808,8 @@ def main(argv=None) -> int:
         watch = _default_watch_dirs(args.release_root) + list(args.watch_dir)
     try:
         evidence = build_evidence(args.release_root, report_dir=args.artifact_root,
-                                  phase4_corpus=args.phase4_corpus, watch_dirs=watch,
+                                  phase4_corpus=args.phase4_corpus,
+                                  phase4_checkpoint=args.phase4_checkpoint, watch_dirs=watch,
                                   first_deployment=args.first_deployment)
     except ReportPathError as exc:
         print(f"refusing to write report: {exc}", file=sys.stderr)
