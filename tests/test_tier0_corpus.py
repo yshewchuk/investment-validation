@@ -211,6 +211,67 @@ def test_the_network_guard_actually_refuses():
     assert "_NetworkUsed" in proc.stdout
 
 
+def test_the_corpus_is_released_before_the_fresh_process_forks(tmp_path, monkeypatch):
+    """Regression for the v20/v21 OOM kills: on the real corpus, the parent
+    held its fully-loaded ``Corpus`` (~5.87 GB) while ``case_fresh_process``
+    forked a subprocess that loaded a full second copy -- ~11.7 GB peak on a
+    10.7 GB box. ``_run_loaded`` must drop its own last reference to
+    ``corpus`` before that subprocess call, so the object is actually
+    collectable (not merely ``del``-ed while something else still holds it).
+
+    ``t0.subprocess.run`` is stubbed so this never spawns a real process, and
+    the synthetic ``corpus`` fixture (a handful of tiny fixtures) stands in
+    for the real 3.2 GB corpus -- this test proves the LIFETIME property, not
+    a real memory measurement (the caller runs that against the real corpus
+    separately).
+
+    Deliberately does NOT bind the loaded ``Corpus`` to a name in this test's
+    own frame: a named local here would keep its own reference alive across
+    the ``_run_loaded`` call regardless of anything ``_run_loaded`` does
+    internally (verified empirically: an inline call argument has exactly
+    one owner -- the callee's parameter -- while a caller-side named local
+    is a second, independent owner that survives the callee's ``del``). This
+    mirrors exactly how ``_run`` and ``main()`` call ``_run_loaded`` in
+    ``checks/tier0_corpus.py``. A test that merely asserted ``del`` was
+    called, without this, would pass even if the fix did nothing.
+    """
+    import gc
+    import tempfile
+    import weakref
+
+    root = build(tmp_path / "tier0", standard_pairs())
+    observed: dict[str, bool] = {}
+
+    def fake_subprocess_run(*_args, **_kwargs):
+        gc.collect()
+        observed["corpus_alive_at_fork"] = ref_box[0]() is not None
+        return subprocess.CompletedProcess(_args, 0, stdout=f"{AGREE}\n", stderr="")
+
+    monkeypatch.setattr(t0.subprocess, "run", fake_subprocess_run)
+
+    ref_box: list = []
+
+    def _load_and_track():
+        # Returned straight into `_run_loaded(...)` below with no
+        # intervening `corpus = ...` in THIS frame.
+        loaded = t0.load(root)
+        ref_box.append(weakref.ref(loaded))
+        return loaded
+
+    with tempfile.TemporaryDirectory(prefix="tier0-corpus-lifetime-") as tmp:
+        merged, cases, report_extra = t0._run_loaded(
+            _load_and_track(), root, Path(tmp))
+
+    assert "corpus_alive_at_fork" in observed, "the stubbed subprocess call never fired"
+    assert observed["corpus_alive_at_fork"] is False, (
+        "the corpus was still resident when case_fresh_process forked")
+    gc.collect()
+    assert ref_box[0]() is None, "the corpus is still referenced somewhere after the run"
+    assert cases["fresh_process"].verdict == AGREE
+    assert report_extra is not None and report_extra["pairs"] == len(standard_pairs())
+    assert merged.verdict == AGREE, merged.summary()
+
+
 # --------------------------------------------------------------------------
 # integrity: addressing, digest, manifest
 # --------------------------------------------------------------------------
