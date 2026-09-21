@@ -172,8 +172,10 @@ def test_write_streams_a_multi_member_chooser_byte_identical(tmp_path) -> None:
 # dyn_sv/source_inputs), and `checks/phase4_checkpoints.py` requires the
 # first four of those, present and unpartial, on every case. A candidate
 # whose only checkpoint group is "chooser" is exactly the "real trace
-# present but incomplete" case `_phase4_case_document` now skips (never
-# writes) rather than shaping into an invalid case -- see
+# present but incomplete" case `_phase4_case_document` now WRITES (2026-09-21:
+# a silently thinner corpus was worse than one that records early refusals
+# honestly) with only the groups it actually reached -- never shaping a
+# fictional group into an invalid one -- see
 # `tools/capture_tier0_corpus.py::_phase4_case_document` and
 # `tests/test_phase4_capture_writer.py`, which wires the real producer to
 # the real `checks/phase4_checkpoints.py` validator on a REAL four-group

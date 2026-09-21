@@ -34,9 +34,12 @@ def _hashed(value):
 def _full_legacy_trace(*, residual_population=None):
     """A REAL-shaped ``Phase4TraceCollector.diagnostic_checkpoint()`` --
     all four required groups, each hashed the way ``capture_*`` records
-    them, not a partial trace. ``checks/phase4_checkpoints.py`` requires
-    all four on every case, so a partial trace (the old fixture here) can
-    never become a valid case -- see ``_phase4_case_document``."""
+    them, not a partial trace. ``_phase4_case_document`` now WRITES a
+    partial trace too (as an honest ``incomparable``/``refused_as_expected``
+    case with only the groups actually reached -- see its docstring), but
+    ``checks/phase4_checkpoints.py`` still requires all four unconditionally
+    today, so only a FULL trace like this one can pass its validator; that
+    contract gap is flagged, not fixed, in this producer."""
     simulation_value = {
         "horizon": {"exit_date": "2026-01-10", "expiry": "2026-01-16", "dte_exit": 6.0},
         "capital_denominator": 2.5,
@@ -128,6 +131,53 @@ def test_writer_persists_a_case_the_real_phase4_validator_accepts(tmp_path) -> N
     assert case_id == "case-1"
     assert strategy == "STR-THRU"
     assert "debit_credit" in branches
+
+
+def test_an_early_refusal_is_written_honestly_not_skipped(tmp_path) -> None:
+    """2026-09-21 (coordinator): a candidate whose real trace refused
+    BEFORE capturing any checkpoint group must still be WRITTEN, with an
+    honest ``disposition``/``executable_inputs`` -- never silently
+    skipped (that would quietly shrink the corpus a completeness gate
+    reads) and never fabricated (no empty ``features``/``selection_pricing``/
+    ``simulation``/``gate_inputs`` groups invented to satisfy the schema).
+    The legacy_trace here is exactly what a real SUPERSEDED refusal
+    produces (``Phase4TraceCollector.finish`` + the new ``first_gap``,
+    see test_phase4_trace_collector.py's own wired test of that path).
+    """
+    candidate = {
+        "fixture_id": "case-superseded",
+        "covers": ["strategy:TWIN-P"],
+        "request": {"strategy": "TWIN-P", "ticker": "ABC"},
+        "record": {"strategy": "TWIN-P", "ticker": "ABC"},
+        "kind": "score_result",
+        "duration": 0.05,
+        "legacy_trace": {
+            "schema_version": "phase4_legacy_diagnostic_checkpoint.v1.0",
+            "disposition": {
+                "status": "refused", "flags": ["SUPERSEDED"],
+                "detail": "TWIN-P is superseded by TWIN-P5",
+                "first_gap": {"stage": "resolve_context",
+                              "reason": "superseded strategy"},
+            },
+            "checkpoints": {},
+        },
+    }
+    release = tmp_path / "release"
+    write(release, [candidate], {"strategy:TWIN-P": ["case-superseded"]},
+          pd.Timestamp("2026-01-01"), "snapshot-1")
+
+    case = json.loads(
+        (release / "checkpoints" / "cases" / "case-superseded.json").read_text())
+    assert case["checkpoints"] == {}
+    assert case["executable_inputs"] == "missing"
+    assert case["disposition"] == "incomparable"
+    assert "missing_inputs" in case["branches"]
+    # Not a schema violation of anything THIS producer owns: `case_hash`/
+    # `request_hash` are still real and self-consistent even for a
+    # partial case -- only checks/phase4_checkpoints.py's unconditional
+    # four-groups rule (a separate, flagged design question) rejects it.
+    assert case["case_hash"] == content_hash(
+        {k: v for k, v in case.items() if k != "case_hash"})
 
 
 def test_the_old_pre_fix_case_shape_is_rejected_by_the_real_validator(tmp_path) -> None:

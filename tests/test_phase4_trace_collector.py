@@ -34,6 +34,31 @@ def test_collector_is_opt_in_and_default_finish_does_not_mutate_result() -> None
     assert not hasattr(result, "_phase4_trace")
 
 
+def test_early_refusal_records_the_first_gap_stage_and_reason() -> None:
+    """The REAL early-return path (`Scorer._finish_phase4_trace`, used
+    verbatim by the ``SUPERSEDED``/disabled-strategy returns in
+    ``Scorer.score``) marks every stage ``not_reached``; the FIRST one and
+    its reason must survive into ``diagnostic_checkpoint()['disposition']``
+    even with ``retain_full_trace=False`` (the capture tool's own setting),
+    so a capture producer can write an honest early-refusal disposition
+    instead of treating "no checkpoint groups" as unexplained."""
+    scorer = Scorer.__new__(Scorer)
+    collector = Phase4TraceCollector(retain_full_trace=False, content_hasher=content_hash)
+    result = ScoreResult(ticker="ABC", strategy="STR-THRU", as_of=pd.Timestamp("2026-01-02"))
+    result.flag("SUPERSEDED")
+
+    finished = scorer._finish_phase4_trace(collector, result, "superseded strategy")
+
+    assert finished is result
+    checkpoint = collector.diagnostic_checkpoint()
+    assert checkpoint["disposition"]["status"] == "refused"
+    assert checkpoint["disposition"]["flags"] == ["SUPERSEDED"]
+    assert checkpoint["disposition"]["first_gap"] == {
+        "stage": "resolve_context", "reason": "superseded strategy",
+    }
+    assert checkpoint["checkpoints"] == {}
+
+
 def test_collector_records_json_safe_stage_documents_and_refusal_identity() -> None:
     collector = Phase4TraceCollector(content_hasher=content_hash)
     collector.begin(ScoreRequest(
