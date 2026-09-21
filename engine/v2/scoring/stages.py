@@ -647,13 +647,25 @@ def _execute_local_forecast(
     if not isinstance(executors, Mapping):
         _add_flag(flags, "INVALID_FORECAST_EXECUTORS")
         executors = {}
+    # ``stored``: a stored Tier-4 cell THIS PROCESS resolved from the table
+    # the capture pointed it at (``checks/phase4_stored_forecasts.py``).
+    # ``stored_refs``: the capture's address for that cell, carrying no
+    # value. A reference that nobody resolved must refuse, never fall
+    # through to a fold or a model -- that fallback would compare a
+    # DIFFERENT forecast path against legacy's table read and call it parity.
     stored = block.get("stored") or {}
+    stored_refs = block.get("stored_refs") or {}
     for field in _FORECAST_OUTPUTS:
         if field in stored:
             # Legacy ``Scorer._crush_forecast``: a stored Tier-4 value for the
             # event wins, and no fold is served.
             declared = True
             output[field] = float(stored[field]["value"])
+            continue
+        if field in stored_refs:
+            declared = True
+            invalid_fields.add(field)
+            _add_flag(flags, f"UNRESOLVED_STORED_FORECAST:{field}")
             continue
         executor = executors.get(field)
         if executor is not None:

@@ -51,7 +51,6 @@ from engine.calendar import trading_calendar
 from engine.data import manifest, store
 from engine.data.features import tier4
 from engine.entry_rules import rule_for
-from engine.structure_registry import live_strategies, superseded_by
 from engine.features import (
     DAILY_STATE_COLUMNS,
     DAILY_STATE_FIELDS,
@@ -67,8 +66,10 @@ from engine.features import (
 from engine.fills import BAD_QUOTE_COST_PCT, MID, FillModel
 from engine.forecast_sizing import (
     FORECAST_SIZED,
-    describe as describe_sizing,
     forecast_params,
+)
+from engine.forecast_sizing import (
+    describe as describe_sizing,
 )
 from engine.models.registry import Registry, RegistryError, load_registry
 from engine.payoff import (
@@ -88,13 +89,14 @@ from engine.replay import (
     load_chain_index,
     plan_events,
 )
+from engine.structure_registry import live_strategies, superseded_by
 from engine.structures import (
     STRUCTURES,
     ExpirySelector,
+    LadderTooCoarse,
     LegSpec,
     StrikeSelector,
     Structure,
-    LadderTooCoarse,
     StructureError,
     execution_variant_label,
     with_decision_offset,
@@ -386,6 +388,24 @@ def _phase4_input(frame: pd.DataFrame, name: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if np.isfinite(number) else None
+
+
+def _stored_cell_text(value: Any) -> str | None:
+    """A stored Tier-4 provenance cell as canonical text, or ``None``.
+
+    Only ever applied to the ``*_model_id`` column, whose pandas dtype is the
+    nullable ``string`` one: ``pd.NA`` for a row Tier 4 wrote without naming a
+    producer. JSON has no NA, and a capture must record "not named" as
+    ``None`` rather than the string ``"<NA>"``.
+    """
+    return None if value is None or pd.isna(value) else str(value)
+
+
+def _stored_cell_date(value: Any) -> str | None:
+    """A stored Tier-4 ``*_fold_start`` cell as an ISO date, or ``None``."""
+    if value is None or pd.isna(value):
+        return None
+    return str(pd.Timestamp(value).date())
 
 
 def _size_feature_capture_value(features: pd.DataFrame, name: str) -> Any:
@@ -3556,7 +3576,6 @@ class Scorer:
         try:
             from engine.data.features import tier4
             from engine.features import load_panel
-            from engine.models.training import iv_crush
 
             panel = load_panel()[["ticker", "date", "abs_move"]].rename(
                 columns={"date": "event_date"})
@@ -3642,26 +3661,50 @@ class Scorer:
 
         if self._crush is _UNSET:
             try:
-                frame = tier4.load_forecasts()[["ticker", "event_date", "pred_iv_crush_30"]]
-                self._crush = {(t, pd.Timestamp(d)): v for t, d, v
-                               in zip(frame.ticker, frame.event_date, frame.pred_iv_crush_30)}
+                # The two provenance columns are read so a Phase 4 capture can
+                # declare WHICH model wrote the row it is pointing native at
+                # (see the ``row`` below); the board itself only reads the
+                # point forecast.
+                frame = tier4.load_forecasts()[[
+                    "ticker", "event_date", "pred_iv_crush_30",
+                    "pred_iv_crush_30_model_id", "pred_iv_crush_30_fold_start",
+                ]]
+                self._crush = {
+                    (t, pd.Timestamp(d)): (v, m, f)
+                    for t, d, v, m, f in zip(
+                        frame.ticker, frame.event_date, frame.pred_iv_crush_30,
+                        frame.pred_iv_crush_30_model_id,
+                        frame.pred_iv_crush_30_fold_start,
+                    )
+                }
             except MemoryError:
                 raise
             except Exception:
                 self._crush = {}
-        stored = self._crush.get((request.ticker, pd.Timestamp(result.event_date)))
+        found = self._crush.get((request.ticker, pd.Timestamp(result.event_date)))
+        stored = None if found is None else found[0]
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if stored is not None and stored == stored:
             if collector is not None:
                 # R4-20 (c): legacy used the STORED Tier-4 row, not a fold.
+                # ``row`` is the ROW IDENTITY, and it is what the Phase 4
+                # capture hands native instead of this value: table, table
+                # vintage, the producer model that wrote the cell, and the
+                # key. ``value`` stays in the legacy-side checkpoint (the
+                # expected side of the comparison) and never reaches
+                # ``native_inputs`` -- see
+                # tools/capture_tier0_corpus.py::_with_stored_crush.
                 collector.capture_frozen(declarations={"forecast:pred_iv_crush_30": {
                     "source": "stored_tier4",
                     "value": float(stored),
                     "row": {
                         "table": "tier4_forecasts",
                         "table_sha256": self._phase4_tier4_digest(),
+                        "column": "pred_iv_crush_30",
                         "ticker": str(request.ticker),
                         "event_date": str(pd.Timestamp(result.event_date).date()),
+                        "model_id": _stored_cell_text(found[1]),
+                        "fold_start": _stored_cell_date(found[2]),
                     },
                 }})
             return float(stored)

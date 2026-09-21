@@ -21,9 +21,12 @@ Two independent capture-side gaps produced this, one per branch of legacy
   folded that into the strict trace's ``forecast`` recipe. Fixed in
   ``tools/capture_tier0_corpus.py::_with_stored_crush`` (called from
   ``_captured_blocks``), which mirrors
-  ``engine/v2/scoring/source_inputs.py``'s ``_stored_forecasts`` shape so
-  ``engine/v2/scoring/stages.py::_execute_local_forecast`` replays the
-  stored value locally rather than through a fabricated binding.
+  ``engine/v2/scoring/source_inputs.py``'s ``_stored_forecast_refs`` shape:
+  it writes ``forecast.stored_refs``, the cell's address plus a one-way hash
+  of its row and value, and ``checks/phase4_stored_forecasts.py`` resolves
+  that reference into the stored value
+  ``engine/v2/scoring/stages.py::_execute_local_forecast`` reads, never
+  through a fabricated binding.
 
 Neither strategy is CTR5-specific: ``_required_forecast_roles``'s
 ``_is_planned`` branch adds "iv_crush" for ANY strategy whose simulation is
@@ -63,7 +66,7 @@ def _source_inputs(collector: Phase4TraceCollector) -> dict:
 # ---------------------------------------------------------------------------
 # STORED branch (fixture 011's own shape): the row-hash-verified value in
 # ``source_inputs.frozen.declarations`` must reach ``forecast.required_roles``
-# and ``forecast.stored`` without going through a fabricated model binding.
+# and ``forecast.stored_refs`` without going through a fabricated model binding.
 # ---------------------------------------------------------------------------
 
 def test_stored_crush_declaration_earns_no_binding_before_the_fix():
@@ -73,7 +76,8 @@ def test_stored_crush_declaration_earns_no_binding_before_the_fix():
     unless something else folds the stored declaration in."""
     collector = _collector()
     scorer = object.__new__(Scorer)
-    scorer._crush = {("AAA", pd.Timestamp(EVENT)): -17.25}
+    scorer._crush = {("AAA", pd.Timestamp(EVENT)): (
+        -17.25, "iv-crush-hgbr-v1", pd.Timestamp("2026-08-01"))}
     scorer._phase4_tier4_sha = "sha256:" + "c" * 64
     request = SimpleNamespace(ticker="AAA", strategy="CTR5", decision_offset=None)
     result = SimpleNamespace(
@@ -89,12 +93,13 @@ def test_stored_crush_declaration_earns_no_binding_before_the_fix():
     )
 
 
-def test_with_stored_crush_adds_iv_crush_to_required_roles_and_stored_block():
+def test_with_stored_crush_adds_iv_crush_to_required_roles_and_stored_ref_block():
     """The fix: ``_with_stored_crush`` folds the stored declaration into the
-    forecast recipe the same shape ``_execute_local_forecast`` reads."""
+    forecast recipe as the reference shape ``_execute_local_forecast`` reads."""
     collector = _collector()
     scorer = object.__new__(Scorer)
-    scorer._crush = {("AAA", pd.Timestamp(EVENT)): -17.25}
+    scorer._crush = {("AAA", pd.Timestamp(EVENT)): (
+        -17.25, "iv-crush-hgbr-v1", pd.Timestamp("2026-08-01"))}
     scorer._phase4_tier4_sha = "sha256:" + "c" * 64
     request = SimpleNamespace(ticker="AAA", strategy="CTR5", decision_offset=None)
     result = SimpleNamespace(
@@ -110,12 +115,16 @@ def test_with_stored_crush_adds_iv_crush_to_required_roles_and_stored_block():
     fixed = _with_stored_crush(dict(forecast_recipe), source)
 
     assert fixed["required_roles"] == ["size", "iv_crush"]
-    stored = fixed["stored"]["pred_iv_crush_30"]
-    assert stored["value"] == -17.25
-    assert stored["row"] == {
+    ref = fixed["stored_refs"]["pred_iv_crush_30"]
+    assert set(ref) == {"row", "row_hash"}
+    assert ref["row"] == {
         "table": "tier4_forecasts", "table_sha256": "sha256:" + "c" * 64,
-        "ticker": "AAA", "event_date": EVENT,
+        "column": "pred_iv_crush_30", "ticker": "AAA", "event_date": EVENT,
+        "model_id": "iv-crush-hgbr-v1", "fold_start": "2026-08-01",
     }
+    assert "value" not in ref
+    assert "value" not in ref["row"]
+    assert "stored" not in fixed
     # Original recipe is untouched -- callers pass their own copy.
     assert forecast_recipe == {"required_roles": ["size"]}
 
@@ -130,7 +139,8 @@ def test_with_stored_crush_is_a_noop_without_a_stored_declaration():
 def test_with_stored_crush_refuses_a_tampered_row_hash():
     collector = _collector()
     scorer = object.__new__(Scorer)
-    scorer._crush = {("AAA", pd.Timestamp(EVENT)): -17.25}
+    scorer._crush = {("AAA", pd.Timestamp(EVENT)): (
+        -17.25, "iv-crush-hgbr-v1", pd.Timestamp("2026-08-01"))}
     scorer._phase4_tier4_sha = "sha256:" + "c" * 64
     request = SimpleNamespace(ticker="AAA", strategy="CTR5", decision_offset=None)
     result = SimpleNamespace(

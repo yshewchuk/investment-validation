@@ -7,7 +7,11 @@ from typing import Any, Mapping, Sequence
 from engine.v2.contracts import ScoreRequest
 from engine.v2.foundation import NONFINITE_KEY, content_hash, from_document
 from engine.v2.scoring.identity import request_hash
-from engine.v2.scoring.source_inputs import _ANSWER_FIELDS
+from engine.v2.scoring.source_inputs import (
+    _ANSWER_FIELDS,
+    STORED_REF_FIELDS,
+    STORED_ROW_FIELDS,
+)
 
 TRACE_SCHEMA = "phase4_input_trace.v1.0"
 TRANSLATION_SCHEMA = "phase4_input_translation.v1.0"
@@ -28,7 +32,46 @@ NATIVE_INPUT_KEYS = frozenset({
     "context", "features", "forecast", "geometry", "pricing", "analogs",
     "simulation", "gate", "chooser", "diagnostics", "source_ref",
 })
-_FORECAST_ROLE_CONTAINERS = frozenset({"models", "model_artifact_refs"})
+#: Containers under ``native_inputs.forecast`` whose KEYS are output names,
+#: exempt from :func:`_reject_answers` for that reason and no other.
+#:
+#: The rule this exempts from: an output of the system under test may not be
+#: supplied back to it as an input, or the comparison is circular -- native
+#: would "agree" with legacy even if the path that produces the value were
+#: entirely broken. ``_ANSWER_FIELDS`` names those outputs, and the walk
+#: refuses any dict key that matches one.
+#:
+#: A container keyed BY output name trips that walk on its keys while
+#: carrying none of the values. What each one is allowed to carry, and why
+#: none of it is an answer:
+#:
+#: * ``models``      -- per output, the recipe (intercept + coefficients) that
+#:                      native must EXECUTE to produce the output. Inputs to
+#:                      a calculation, not its result.
+#: * ``model_artifact_refs``
+#:                   -- per output, the identifier of the frozen artifact
+#:                      native must load and run. An address, not a result.
+#: * ``stored_refs`` -- per output, the ADDRESS of a cell in a stored table
+#:                      (which table, which vintage of it, which column, which
+#:                      key, which producer model wrote it) plus a one-way
+#:                      content hash of the row and value together. Native has
+#:                      to read the table to obtain the value; the hash only
+#:                      lets it check what it read. Added for the stored
+#:                      ``pred_iv_crush_30`` crush forecast, which legacy reads
+#:                      from the Tier-4 table for any event that has already
+#:                      printed -- every HISTORICAL row of the seven planned-exit
+#:                      DYN-SV strategies. Carrying that cell's value here is
+#:                      what made those rows incomparable; carrying its address
+#:                      makes native exercise its own retrieval path.
+#:
+#: The exemption is one level deep by construction (it tests ``path[-2] ==
+#: "forecast"``), so an answer nested any further inside is still refused, and
+#: :func:`_reject_stored_refs` separately pins ``stored_refs`` to exactly its
+#: address fields so a raw value cannot ride in beside the address under a
+#: name ``_ANSWER_FIELDS`` does not happen to list.
+_FORECAST_ROLE_CONTAINERS = frozenset({
+    "models", "model_artifact_refs", "stored_refs",
+})
 
 
 class ReleaseAssemblyError(ValueError):
@@ -92,6 +135,13 @@ def _reject_answers(
                 and path[-2] == "forecast"
                 and path[-1] in _FORECAST_ROLE_CONTAINERS
             )
+            # ``features.role_model_inputs`` is keyed role -> feature name ->
+            # value: the input ROW each frozen binding is fed. A feature that
+            # shares a name with an output (a downstream model consuming an
+            # upstream forecast, e.g. ``forecast_abs_move`` as a gate feature)
+            # is that binding's input, not this row's answer -- native still
+            # has to run the binding to get an answer out of it. The depth
+            # test keeps the exemption to the feature-name level.
             role_feature_vector = (
                 len(path) >= 3
                 and path[-3] == "features"
@@ -104,6 +154,66 @@ def _reject_answers(
     elif isinstance(value, (list, tuple)):
         for index, child in enumerate(value):
             _reject_answers(child, (*path, str(index)))
+
+
+def _reject_stored_refs(native_inputs: Any) -> None:
+    """Pin ``forecast.stored_refs`` to an address, and refuse a stored VALUE.
+
+    :data:`_FORECAST_ROLE_CONTAINERS` exempts ``stored_refs`` from the
+    answer walk because its keys are output names. That exemption must not
+    turn into a hole: :func:`_reject_answers` only knows the names in
+    ``_ANSWER_FIELDS``, and a captured cell smuggled in as ``"value"`` --
+    or as ``"v"``, or as an extra row column -- is not one of them. So the
+    shape is pinned here instead of enumerated: exactly
+    ``{"row", "row_hash"}``, and the row exactly its address fields. Any
+    other member refuses, whatever it is called.
+
+    A ``forecast.stored`` block is refused outright: that is the RESOLVED
+    block, which only ``checks/phase4_stored_forecasts.py`` may produce, at
+    replay, from a table it read itself. Captured material never holds one.
+    """
+    if not isinstance(native_inputs, Mapping):
+        return
+    forecast = native_inputs.get("forecast")
+    if not isinstance(forecast, Mapping):
+        return
+    if "stored" in forecast:
+        raise ReleaseAssemblyError(
+            "native_inputs.forecast.stored: resolved stored forecasts are "
+            "produced natively at replay, never captured"
+        )
+    refs = forecast.get("stored_refs")
+    if refs is None:
+        return
+    if not isinstance(refs, Mapping):
+        raise ReleaseAssemblyError("native_inputs.forecast.stored_refs: expected object")
+    for output, entry in refs.items():
+        location = f"native_inputs.forecast.stored_refs.{output}"
+        if not isinstance(entry, Mapping):
+            raise ReleaseAssemblyError(f"{location}: expected object")
+        extra = sorted(set(map(str, entry)) - STORED_REF_FIELDS)
+        if extra:
+            raise ReleaseAssemblyError(
+                f"{location}: stored forecast reference carries {extra}; it may "
+                f"carry only {sorted(STORED_REF_FIELDS)}"
+            )
+        if set(map(str, entry)) != STORED_REF_FIELDS:
+            raise ReleaseAssemblyError(
+                f"{location}: must name {sorted(STORED_REF_FIELDS)}"
+            )
+        row = entry["row"]
+        if not isinstance(row, Mapping):
+            raise ReleaseAssemblyError(f"{location}.row: expected object")
+        row_extra = sorted(set(map(str, row)) - STORED_ROW_FIELDS)
+        if row_extra:
+            raise ReleaseAssemblyError(
+                f"{location}.row: stored forecast address carries {row_extra}; it "
+                f"may carry only {sorted(STORED_ROW_FIELDS)}"
+            )
+        if set(map(str, row)) != STORED_ROW_FIELDS:
+            raise ReleaseAssemblyError(
+                f"{location}.row: must name {sorted(STORED_ROW_FIELDS)}"
+            )
 
 
 def _path(value: Any, label: str) -> tuple[Any, ...]:
@@ -214,6 +324,7 @@ def assemble_input_trace(*, request: Mapping[str, Any], shared_inputs: Mapping[s
             f"unknown={sorted(unknown_inputs)}, missing={sorted(missing_inputs)}"
         )
     _reject_answers(native_inputs)
+    _reject_stored_refs(native_inputs)
     shared_hash = content_hash(shared_inputs)
     if native_inputs.get("source_ref") != shared_hash:
         raise ReleaseAssemblyError(

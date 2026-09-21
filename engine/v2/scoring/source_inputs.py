@@ -316,11 +316,15 @@ class SourceBundle:
     # R4-20 (c): a forecast legacy read from the STORED Tier-4 table instead
     # of serving a fold (``Scorer._crush_forecast`` prefers the stored
     # ``pred_iv_crush_30`` whenever the table holds a non-NaN value for the
-    # event). ``{"pred_iv_crush_30": {"value", "row": {"table",
-    # "table_sha256", "ticker", "event_date"}, "row_hash"}}``: ``row_hash``
-    # is the content hash of ``{"row", "value"}`` and is checked at build.
-    # A stored value wins over any recipe for the same output, as in legacy.
-    stored_forecasts: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # event). This carries a REFERENCE to that cell, never the cell:
+    # ``{"pred_iv_crush_30": {"row": {"table", "table_sha256", "column",
+    # "ticker", "event_date", "model_id", "fold_start"}, "row_hash"}}``.
+    # ``row_hash`` is the content hash of ``{"row", "value"}`` -- a one-way
+    # check that the value a resolver reads back is the one legacy read, and
+    # not a way to recover it. Native must look the cell up for itself; see
+    # ``checks/phase4_stored_forecasts.py``. A resolved stored value wins
+    # over any recipe for the same output, as in legacy.
+    stored_forecast_refs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def _answer_paths(value: Any, path: str) -> list[str]:
@@ -372,35 +376,88 @@ def _linear_recipe(name: str, value: Mapping[str, Any]) -> dict[str, Any]:
 
 #: Outputs legacy may read from the stored Tier-4 table (``_crush_forecast``).
 _STORED_FORECAST_OUTPUTS = frozenset({"pred_iv_crush_30"})
-_STORED_FORECAST_FIELDS = frozenset({"value", "row", "row_hash"})
-_STORED_ROW_FIELDS = frozenset({"table", "table_sha256", "ticker", "event_date"})
+#: A stored-forecast REFERENCE, and the whole of one. There is deliberately
+#: no ``value`` member: a captured value would be an output of the system
+#: under test supplied back to it as an input, which is the circularity
+#: ``tools/phase4_release_assembler.py::_reject_answers`` exists to stop.
+#: ``_bounded_recipe`` refuses any other member, so ``value`` cannot be
+#: smuggled in beside the reference either (tests/test_phase4_stored_forecast_refs.py).
+STORED_REF_FIELDS = frozenset({"row", "row_hash"})
+#: The row identity: which table, which vintage of it, which column, which
+#: key, and which producer model wrote the cell. Every one of these is an
+#: ADDRESS or a provenance label -- none of them is, or bounds, the number
+#: stored at that address.
+STORED_ROW_FIELDS = frozenset({
+    "table", "table_sha256", "column", "ticker", "event_date",
+    "model_id", "fold_start",
+})
+_STORED_ROW_REQUIRED_TEXT = ("table", "table_sha256", "column", "ticker", "event_date")
 
 
 def stored_forecast_row_hash(row: Mapping[str, Any], value: float) -> str:
     """The identity a stored forecast declaration carries: its source row
-    and value, content-hashed together."""
+    and value, content-hashed together.
+
+    This is a VERIFICATION aid and cannot stand in for the lookup: it is a
+    one-way content hash, so a resolver has to produce the value by reading
+    the table before it can check anything against this.
+    """
     from engine.v2.foundation import content_hash
 
     return content_hash({"row": dict(row), "value": float(value)})
 
 
-def _stored_forecasts(bundle: SourceBundle) -> dict[str, dict[str, Any]]:
-    unknown = sorted(set(bundle.stored_forecasts) - _STORED_FORECAST_OUTPUTS)
+def _stored_forecast_row(name: str, output: str, raw: Any) -> dict[str, Any]:
+    """The address half of one reference: exactly its identity fields."""
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{name}.row must be a mapping")
+    row = _bounded_recipe(f"{name}.row", raw, STORED_ROW_FIELDS)
+    if set(row) != STORED_ROW_FIELDS:
+        raise ValueError(f"{name}.row must name {sorted(STORED_ROW_FIELDS)}")
+    for key in _STORED_ROW_REQUIRED_TEXT:
+        if not isinstance(row[key], str) or not row[key].strip():
+            raise ValueError(f"{name}.row.{key} must be a non-empty string")
+    if row["column"] != output:
+        raise ValueError(f"{name}.row.column must name {output!r}")
+    for key in ("model_id", "fold_start"):
+        if row[key] is not None and not isinstance(row[key], str):
+            raise ValueError(f"{name}.row.{key} must be a string or null")
+    return {key: row[key] for key in sorted(row)}
+
+
+def _stored_forecast_ref(name: str, output: str, declared: Any) -> dict[str, Any]:
+    """One reference: an address plus its one-way row hash, and nothing else.
+
+    The "nothing else" is the point -- see :data:`STORED_REF_FIELDS`.
+    """
+    if not isinstance(declared, Mapping):
+        raise ValueError(f"{name} must be a mapping")
+    config = _bounded_recipe(name, declared, STORED_REF_FIELDS)
+    if set(config) != STORED_REF_FIELDS:
+        raise ValueError(f"{name} must name {sorted(STORED_REF_FIELDS)}")
+    row_hash = config["row_hash"]
+    if not isinstance(row_hash, str) or not row_hash.strip():
+        raise ValueError(f"{name}.row_hash must be a non-empty string")
+    return {
+        "row": _stored_forecast_row(name, output, config.get("row")),
+        "row_hash": row_hash,
+    }
+
+
+def _stored_forecast_refs(bundle: SourceBundle) -> dict[str, dict[str, Any]]:
+    """Validate every declared stored-forecast reference.
+
+    Refuses anything that is not exactly an address plus its one-way row
+    hash, so this path cannot become the hole in the answer rule.
+    """
+    unknown = sorted(set(bundle.stored_forecast_refs) - _STORED_FORECAST_OUTPUTS)
     if unknown:
         raise ValueError(f"unsupported stored forecast outputs: {unknown}")
-    stored: dict[str, dict[str, Any]] = {}
-    for output, declared in bundle.stored_forecasts.items():
-        name = f"stored_forecasts.{output}"
-        config = _bounded_recipe(name, declared, _STORED_FORECAST_FIELDS)
-        row = _bounded_recipe(f"{name}.row", config.get("row") or {}, _STORED_ROW_FIELDS)
-        if set(row) != _STORED_ROW_FIELDS:
-            raise ValueError(f"{name}.row must name {sorted(_STORED_ROW_FIELDS)}")
-        value = _finite_number(config.get("value"), f"{name}.value")
-        if config.get("row_hash") != stored_forecast_row_hash(row, value):
-            raise ValueError(f"{name}.row_hash does not match its row and value")
-        stored[str(output)] = {"value": value, "row": row,
-                               "row_hash": str(config["row_hash"])}
-    return stored
+    return {
+        str(output): _stored_forecast_ref(
+            f"stored_forecast_refs.{output}", str(output), declared)
+        for output, declared in bundle.stored_forecast_refs.items()
+    }
 
 
 def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
@@ -441,9 +498,9 @@ def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     }
     if executors:
         block["executors"] = executors
-    stored = _stored_forecasts(bundle)
-    if stored:
-        block["stored"] = stored
+    refs = _stored_forecast_refs(bundle)
+    if refs:
+        block["stored_refs"] = refs
     return block
 
 

@@ -82,13 +82,13 @@ def _artifact_source_root() -> Path:
 
     return Path(paths.ROOT)
 
+from checks.phase4_checkpoints import REQUIRED_CHECKPOINT_GROUPS  # noqa: E402
 from checks.phase4_frozen_bridge import (  # noqa: E402
     FROZEN_CHOOSER_FIELD,
     FROZEN_CHOOSER_SCHEMA,
     prepare_frozen_chooser,
     with_frozen_chooser,
 )
-from checks.phase4_checkpoints import REQUIRED_CHECKPOINT_GROUPS  # noqa: E402
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
 from engine import score as score_mod  # noqa: E402
@@ -839,7 +839,8 @@ _STORED_FORECAST_ROLE = "iv_crush"
 
 def _with_stored_crush(forecast_recipe: dict[str, Any],
                        source: Mapping[str, Any]) -> dict[str, Any]:
-    """Fold a legacy ``stored_tier4`` iv_crush declaration into ``forecast``.
+    """Fold a legacy ``stored_tier4`` iv_crush declaration into ``forecast``
+    as a REFERENCE -- an address native resolves, never the value itself.
 
     Capture-side gap (established on fixture 011, CTR5): a stored crush
     value never earns a ``model_bindings`` entry (there is no served
@@ -852,14 +853,33 @@ def _with_stored_crush(forecast_recipe: dict[str, Any],
     role (``engine/v2/scoring/stages.py::_required_forecast_roles``'s
     ``_is_planned`` branch), so this is not fixture-011-specific.
 
-    Mirrors ``engine/v2/scoring/source_inputs.py``'s ``_stored_forecasts``
-    shape (``block["stored"][output] = {"value", "row", "row_hash"}``, read
-    by ``engine/v2/scoring/stages.py::_execute_local_forecast``), so a
-    stored crush value replays as a verified local value -- never as a
-    frozen-binding execution, which would misrepresent a table lookup as a
-    served model. The row hash is recomputed here, not trusted from the
-    capture, so a corrupted capture refuses loudly instead of replaying a
-    silently wrong value.
+    What travels, and why none of it is an answer: ``block["stored_refs"]
+    [output] = {"row", "row_hash"}``, where ``row`` is the cell's ADDRESS
+    (``table``, ``table_sha256`` -- the table vintage, which pins the model
+    version the whole table was written by -- ``column``, ``ticker``,
+    ``event_date``, plus the ``model_id``/``fold_start`` of the producer that
+    wrote that cell) and ``row_hash`` is the one-way content hash of that
+    address together with the value. The value itself stays on the legacy
+    side of the comparison.
+
+    That distinction is the whole point. ``pred_iv_crush_30`` is an
+    ``_ANSWER_FIELDS`` member, and handing native the number would let the
+    parity check pass with native's entire stored-forecast retrieval path
+    broken: it would be comparing legacy's answer with itself. Handing it
+    the address makes native read the table, and ``row_hash`` then proves
+    the cell it read is the cell legacy read -- a check that cannot stand in
+    for the read, because a content hash does not invert.
+
+    ``engine/v2/scoring/source_inputs.py``'s ``_stored_forecast_refs``
+    validates the same shape on the build side, and
+    ``checks/phase4_stored_forecasts.py`` resolves it into the
+    ``block["stored"]`` that ``engine/v2/scoring/stages.py::
+    _execute_local_forecast`` reads. Resolving it as a local stored value --
+    rather than as a frozen-binding execution -- is what keeps a table
+    lookup from being misrepresented as a served model. The row hash is
+    recomputed here, not trusted from the capture, so a corrupted capture
+    refuses loudly instead of shipping an address whose hash can never be
+    satisfied.
     """
     frozen = source.get("frozen") or {}
     if frozen.get("conflicts"):
@@ -869,20 +889,35 @@ def _with_stored_crush(forecast_recipe: dict[str, Any],
     entry = declared.get(_STORED_FORECAST_DECLARATION_KEY)
     if not isinstance(entry, Mapping) or entry.get("source") != "stored_tier4":
         return forecast_recipe
-    from engine.v2.scoring.source_inputs import stored_forecast_row_hash
+    from engine.v2.scoring.source_inputs import (
+        STORED_ROW_FIELDS,
+        stored_forecast_row_hash,
+    )
 
-    row = dict(entry.get("row") or {})
+    row = {str(key): value for key, value in (entry.get("row") or {}).items()}
+    missing = sorted(STORED_ROW_FIELDS - set(row))
+    if missing:
+        raise StrictTraceCaptureError(
+            f"{_STORED_FORECAST_DECLARATION_KEY} row is missing {missing}; "
+            "recapture with the current engine/score.py::_crush_forecast"
+        )
+    extra = sorted(set(row) - STORED_ROW_FIELDS)
+    if extra:
+        raise StrictTraceCaptureError(
+            f"{_STORED_FORECAST_DECLARATION_KEY} row carries {extra}"
+        )
+    row = {key: row[key] for key in sorted(row)}
     value = float(entry["value"])
     row_hash = stored_forecast_row_hash(row, value)
     if entry.get("row_hash") not in (None, row_hash):
         raise StrictTraceCaptureError(
             f"{_STORED_FORECAST_DECLARATION_KEY} row_hash does not match its row and value"
         )
-    stored_block = dict(forecast_recipe.get("stored") or {})
-    stored_block[_STORED_FORECAST_OUTPUT] = {
-        "value": value, "row": row, "row_hash": row_hash,
-    }
-    forecast_recipe["stored"] = stored_block
+    # ``value`` is deliberately NOT written into the block: it was read only
+    # to bind the hash, and it goes no further than this frame.
+    stored_block = dict(forecast_recipe.get("stored_refs") or {})
+    stored_block[_STORED_FORECAST_OUTPUT] = {"row": row, "row_hash": row_hash}
+    forecast_recipe["stored_refs"] = stored_block
     required_roles = list(forecast_recipe.get("required_roles") or ())
     if _STORED_FORECAST_ROLE not in required_roles:
         required_roles.append(_STORED_FORECAST_ROLE)
@@ -1144,7 +1179,8 @@ def frozen_source_declarations(
     collector noted (``frozen.conflicts``).
 
     Returned keys: ``frozen_inference``, ``model_release``,
-    ``forecast_recipes`` (binding-named recipes only), ``stored_forecasts``,
+    ``forecast_recipes`` (binding-named recipes only),
+    ``stored_forecast_refs``,
     ``gate_recipe``/``gate_forecast_pool``, ``chooser_recipe``/
     ``chooser_fold_pools``/``chooser_admissible_table``/
     ``chooser_analog_pool``, ``payoff_artifact_recipe``/``payoff_artifact``,
@@ -1251,15 +1287,18 @@ def frozen_source_declarations(
             continue
         target = key.split(":", 1)[1]
         if entry.get("source") == "stored_tier4":
-            row = dict(entry["row"])
-            stored[target] = {"value": float(entry["value"]), "row": row,
-                              "row_hash": stored_forecast_row_hash(row, entry["value"])}
+            # A reference, never the cell: see ``_with_stored_crush``.
+            row = {str(key): value for key, value in dict(entry["row"]).items()}
+            stored[target] = {
+                "row": {key: row[key] for key in sorted(row)},
+                "row_hash": stored_forecast_row_hash(row, entry["value"]),
+            }
             continue
         forecasts[target] = ref(entry)
     if forecasts:
         out["forecast_recipes"] = forecasts
     if stored:
-        out["stored_forecasts"] = stored
+        out["stored_forecast_refs"] = stored
 
     # -- gate -------------------------------------------------------------------
     gate = declared.get("gate")
