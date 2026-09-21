@@ -1515,6 +1515,20 @@ def required_axes() -> list[str]:
     axes += [f"priced:{name}" for name in STRUCTURES
              if name not in score_mod.DISABLED_STRATEGIES]
     axes.append(f"priced:{score_mod.DYNAMIC_STRATEGY}")
+    # Every SERVED strategy must also appear PRICED_CLEAN — priced AND not
+    # cut short by an early-exit refusal flag (BAD_QUOTE and friends;
+    # legacy prices the entry before checking BAD_QUOTE, so a BAD_QUOTE row
+    # is `priced` without ever reaching simulation/gate). Without this axis
+    # `select()`'s greedy cover can settle for a single early-refusal row
+    # that happens to satisfy both `priced:<strategy>` and `refusal:<code>`
+    # at once, leaving no candidate that ever reached every stage even when
+    # one was scored and simply not selected (established on STR-THRU:
+    # its only corpus row is the BAD_QUOTE ISPR one, chosen for exactly
+    # this reason, while `priced_clean:STR-THRU` was never required so
+    # select() never looked for a cleaner candidate).
+    axes += [f"priced_clean:{name}" for name in STRUCTURES
+             if name not in score_mod.DISABLED_STRATEGIES]
+    axes.append(f"priced_clean:{score_mod.DYNAMIC_STRATEGY}")
     axes += [f"model_role:{r}" for r in MODEL_ROLES]
     axes += [f"refusal:{c}" for c in REFUSAL_CODES]
     axes += ["session:BMO", "session:AMC", "boundary:year", "boundary:month"]
