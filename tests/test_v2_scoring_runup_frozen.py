@@ -285,3 +285,56 @@ def test_default_native_runup_numbers_and_record_shape_are_unchanged():
     assert set(record.uncertainty) == {
         "model_p10", "model_p90", "forecast_p10", "forecast_p90",
     }
+
+
+def test_captured_runup_binding_names_are_raw_not_final():
+    """Regression for the 2026-09-21 defect: both places that declare the
+    ``runup_move`` frozen binding's output name -- the Phase 4 capture side
+    (``engine.score._RUNUP_MODEL_OUTPUTS``) and the real Phase 5 release
+    stager (``tools.phase5_prepare_release.OUTPUT_NAMES``) -- must name the
+    RAW artifact output (one of ``application._RUNUP_RAW_NAMES``), never a
+    FINAL one (``application._RUNUP_FINAL_NAMES``). The artifact
+    (``LogTargetRegressor``) only ever returns the raw T-14 magnitude;
+    ``application._runup_frozen_output`` is the one place the day scale
+    (``days_before_print / 14``) is applied, and it applies it exactly once.
+    A binding mislabeled with the final name makes native refuse the row
+    (PRETRANSFORMED_FROZEN_OUTPUT:runup_move) instead of scoring it -- the
+    bug this test catches -- while a binding that already carried the final
+    name and was ALSO scaled again would silently double the move.
+    """
+    import engine.score as score
+    import tools.phase5_prepare_release as phase5_prepare_release
+
+    captured_name = score._RUNUP_MODEL_OUTPUTS["runup_move"][0]
+    staged_name = phase5_prepare_release.OUTPUT_NAMES["runup_move"][0]
+
+    for name, label in ((captured_name, "phase4 capture"),
+                        (staged_name, "phase5 release")):
+        assert name in application._RUNUP_RAW_NAMES, (
+            f"{label}: runup_move output name {name!r} must be raw"
+        )
+        assert name not in application._RUNUP_FINAL_NAMES, (
+            f"{label}: runup_move output name {name!r} must not be final"
+        )
+
+    # End-to-end: the name the capture side actually writes must let native
+    # score the row (no refusal) and must scale the raw artifact prediction
+    # by exactly one factor of days_before_print / 14 -- not zero times
+    # (refused, staying None) and not twice (a further /14 or *0.5).
+    inputs = replace(_inputs(), analogs=_analog_block())
+    frozen = _Frozen()
+    frozen.runup_output = captured_name
+    record = application.score_frozen(
+        _request(),
+        frozen,
+        _release(captured_name),
+        _inference_requests(),
+        {"_native_inputs": inputs},
+    )
+
+    assert record.validation_status == "scored"
+    assert "PRETRANSFORMED_FROZEN_OUTPUT:runup_move" not in record.reason_codes
+    # raw prediction is 8.0 (see _Frozen.infer), days=7.0 -> scale 0.5.
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    assert record.forecasts["runup_move_scale"] == pytest.approx(0.5)
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
