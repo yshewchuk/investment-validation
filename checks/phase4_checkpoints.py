@@ -61,6 +61,16 @@ REQUIRED_CHECKPOINT_GROUPS = frozenset((
     "features", "selection_pricing", "simulation", "gate_inputs",
 ))
 OPTIONAL_CHECKPOINT_GROUPS = frozenset(("dyn_sv",))
+#: The full set of branch labels ``bundle.coverage.branches`` may legally
+#: carry: every ``REQUIRED_BRANCHES`` label (mandatory), plus ``ties``
+#: (``ASSERTED_UNEXERCISED_BRANCHES`` -- normally absent, legitimate if a
+#: real tie is ever captured), plus ``dyn_sv`` (``OPTIONAL_CHECKPOINT_GROUPS``
+#: -- a checkpoint-group name that doubles as a branch label; see ``_case``'s
+#: own dyn_sv consistency check below and
+#: ``tools/capture_tier0_corpus.py::_phase4_case_branches``). A label outside
+#: this union is unrecognised -- a typo or an invented branch -- and must
+#: still fail loudly, not silently pass because it happens to be "extra".
+KNOWN_BRANCHES = REQUIRED_BRANCHES | ASSERTED_UNEXERCISED_BRANCHES | OPTIONAL_CHECKPOINT_GROUPS
 _DISPOSITIONS = frozenset(("compared", "refused_as_expected", "incomparable"))
 
 
@@ -376,8 +386,17 @@ def validate_bundle(bundle: Any, release_root: Path) -> dict[str, Any]:
     strategies, branches = coverage["strategies"], coverage["branches"]
     if not isinstance(strategies, Mapping) or not strategies:
         _fail("bundle.coverage.strategies", "expected nonempty object")
-    if not isinstance(branches, Mapping) or set(branches) != REQUIRED_BRANCHES:
-        _fail("bundle.coverage.branches", "incomplete critical branches")
+    if not isinstance(branches, Mapping):
+        _fail("bundle.coverage.branches", "expected object")
+    observed_branches = set(branches)
+    missing_branches = REQUIRED_BRANCHES - observed_branches
+    unexpected_branches = observed_branches - KNOWN_BRANCHES
+    if missing_branches or unexpected_branches:
+        _fail(
+            "bundle.coverage.branches",
+            "missing required: " + (", ".join(sorted(missing_branches)) or "none")
+            + "; unexpected: " + (", ".join(sorted(unexpected_branches)) or "none"),
+        )
     _tie_audit(bundle.get("metadata"), branch_cases)
     for strategy, ids in strategies.items():
         _string(strategy, "bundle.coverage.strategies key")
