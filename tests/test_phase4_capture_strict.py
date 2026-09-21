@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
 import hashlib
 import json
+from dataclasses import replace
 
 import joblib
 import pandas as pd
@@ -18,11 +18,11 @@ from engine.v2.scoring.stages import NativeScoreInputs, receipt
 from tools.capture_tier0_corpus import (
     STRICT_TRACE_SUPPORTED_STRATEGIES,
     StrictTraceCaptureError,
-    _SpilledTrace,
     _frozen_runtime,
     _hydrate_trace,
     _merged_model_inputs,
     _role_feature_vectors,
+    _SpilledTrace,
     attach_strict_probe,
     canonical_v2_request,
     main,
@@ -870,9 +870,15 @@ from types import SimpleNamespace  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+import checks.phase4_stored_forecasts as phase4_stored_forecasts  # noqa: E402
 import engine.score as score_mod  # noqa: E402
 import tests.test_v2_scoring_native_chooser_features as cf  # noqa: E402
 import tests.test_v2_scoring_r4_20_frozen_parity as r4  # noqa: E402
+from checks.phase4_stored_forecasts import (  # noqa: E402
+    StoredForecastError,
+    resolve_stored_forecasts,
+    with_stored_forecasts,
+)
 from engine.data.features import tier4  # noqa: E402
 from engine.models import registry  # noqa: E402
 from engine.score import Phase4TraceCollector, Scorer  # noqa: E402
@@ -882,6 +888,7 @@ from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.source_inputs import (  # noqa: E402
     SourceBundle,
     build_native_score_inputs,
+    stored_forecast_row_hash,
 )
 from tools.capture_tier0_corpus import (  # noqa: E402
     CHOOSER_PRIMITIVE_COLUMNS,
@@ -1415,7 +1422,8 @@ def test_a_conflicting_second_record_never_raises_and_the_converter_refuses_it(
 def _captured_crush(stored_value):
     collector = _collector()
     scorer = object.__new__(Scorer)
-    scorer._crush = {("AAA", pd.Timestamp(r4.EVENT)): stored_value}
+    scorer._crush = {("AAA", pd.Timestamp(r4.EVENT)): (
+        stored_value, "iv-crush-hgbr-v1", pd.Timestamp("2026-08-01"))}
     scorer._phase4_tier4_sha = "sha256:" + "c" * 64
     request = SimpleNamespace(ticker="AAA", strategy="STR-THRU", decision_offset=None)
     result = r4._Result(_phase4_checkpoint_collector=collector)
@@ -1423,8 +1431,8 @@ def _captured_crush(stored_value):
     return value, _candidate(collector)
 
 
-def _crush_native(declared, **extra):
-    bundle = SourceBundle(
+def _crush_bundle(declared, **extra):
+    return SourceBundle(
         source_ref="capture-crush", strategy="STR-THRU", context=dict(r4.STR_THRU_CONTEXT),
         raw_quotes=r4.STR_THRU_QUOTES, feature_vector={}, feature_missing_mask={},
         model_identity={"driver": {"model_id": "synthetic"}},
@@ -1434,28 +1442,68 @@ def _crush_native(declared, **extra):
                              **{name: "sha256:crush" for name in extra}},
         residual_recipe={}, analog_recipe={},
         gate_recipe={"model": {"intercept": 1.0, "coefficients": {}}, "threshold": 0.0},
-        stored_forecasts=declared.get("stored_forecasts", {}))
-    return r4._score(bundle, "STR-THRU")
+        stored_forecast_refs=declared.get("stored_forecast_refs", {}))
 
 
-def test_stored_crush_from_the_captured_bundle_equals_legacy(tmp_path):
+def _crush_native(declared, **extra):
+    return r4._score(_crush_bundle(declared, **extra), "STR-THRU")
+
+
+def _crush_native_resolved(declared, reader, **extra):
+    inputs = build_native_score_inputs(_crush_bundle(declared, **extra))
+    resolved = resolve_stored_forecasts(inputs, reader=reader)
+    seen: dict = {}
+    record = application.score_one(
+        r4._request("STR-THRU"), with_stored_forecasts(inputs, resolved),
+        observer=lambda item: seen.setdefault(item.receipt.stage, item.output_document))
+    return record, seen
+
+
+def test_stored_crush_reference_from_the_captured_bundle_resolves_to_legacy(
+        tmp_path, monkeypatch):
     legacy, candidate = _captured_crush(-17.25)
     assert legacy == -17.25
     declared = _declared(candidate, tmp_path)
-    stored = declared["stored_forecasts"]["pred_iv_crush_30"]
-    assert stored["value"] == legacy
-    assert stored["row"] == {"table": "tier4_forecasts", "table_sha256": "sha256:" + "c" * 64,
-                             "ticker": "AAA", "event_date": r4.EVENT}
-    _record, seen = _crush_native(declared)
+    ref = declared["stored_forecast_refs"]["pred_iv_crush_30"]
+    assert set(ref) == {"row", "row_hash"}
+    assert ref["row"] == {
+        "table": "tier4_forecasts", "table_sha256": "sha256:" + "c" * 64,
+        "column": "pred_iv_crush_30", "ticker": "AAA", "event_date": r4.EVENT,
+        "model_id": "iv-crush-hgbr-v1", "fold_start": "2026-08-01",
+    }
+    assert "value" not in json.dumps(ref)
+
+    # The reference is an address, so native must read the table itself. The
+    # injected reader stands in for that read; the file stands in for the
+    # table vintage the capture named.
+    table = tmp_path / "tier4_forecasts.parquet"
+    table.write_bytes(b"captured-tier4-vintage")
+    monkeypatch.setattr(phase4_stored_forecasts, "STORED_TABLES",
+                        {"tier4_forecasts": lambda: table})
+    ref["row"]["table_sha256"] = hashlib.sha256(table.read_bytes()).hexdigest()
+    ref["row_hash"] = stored_forecast_row_hash(ref["row"], legacy)
+
+    def reader(path, ticker, event_date, column):
+        return {"value": legacy, "model_id": ref["row"]["model_id"],
+                "fold_start": ref["row"]["fold_start"]}
+
+    _record, seen = _crush_native_resolved(declared, reader)
     assert seen["forecast"]["pred_iv_crush_30"] == legacy
     # Legacy prefers the stored row over the served fold: so does native.
-    _record, seen = _crush_native(
-        declared, pred_iv_crush_30={"intercept": -3.0, "coefficients": {}})
+    _record, seen = _crush_native_resolved(
+        declared, reader, pred_iv_crush_30={"intercept": -3.0, "coefficients": {}})
     assert seen["forecast"]["pred_iv_crush_30"] == legacy
-    # Planted defect: a value that does not match its row identity is refused.
-    tampered = {"stored_forecasts": {"pred_iv_crush_30": {**stored, "value": -1.0}}}
-    with pytest.raises(ValueError, match="row_hash"):
-        _crush_native(tampered)
+    # Planted defect: a row_hash that disagrees with the resolved cell refuses.
+    tampered = {"stored_forecast_refs": {
+        "pred_iv_crush_30": {**ref, "row_hash": "sha256:" + "0" * 64}}}
+    with pytest.raises(StoredForecastError) as err:
+        _crush_native_resolved(tampered, reader)
+    assert err.value.reason == "STORED_FORECAST_ROW_HASH_MISMATCH"
+    # Planted defect: a value smuggled in beside the reference is refused.
+    loophole = {"stored_forecast_refs": {
+        "pred_iv_crush_30": {**ref, "value": legacy}}}
+    with pytest.raises(ValueError, match="unsupported recipe fields"):
+        _crush_native(loophole)
 
 
 def _buckets():

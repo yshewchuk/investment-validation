@@ -11,9 +11,9 @@ import engine.score as score_module
 from engine.pnl_sim import DRAWS, ResidualPool
 from engine.score import (
     Phase4TraceCollector,
+    Scorer,
     ScoreRequest,
     ScoreResult,
-    Scorer,
     _Predocumented,
     _size_feature_capture_value,
 )
@@ -910,12 +910,18 @@ def test_crush_capture_names_the_source_legacy_used(tmp_path) -> None:
         value = scorer._crush_forecast(request, result, features)
         return value, _checkpoint_value(collector, "source_inputs")["frozen"]
 
-    value, frozen = run({("ABC", pd.Timestamp("2026-09-10")): -12.5})
+    value, frozen = run({("ABC", pd.Timestamp("2026-09-10")): (
+        -12.5, "iv-crush-hgbr-v1", pd.Timestamp("2026-08-01"))})
     assert value == -12.5
     stored = frozen["declarations"]["forecast:pred_iv_crush_30"]
+    # ``row`` is the cell's ADDRESS, and it is all that reaches native
+    # (tools/capture_tier0_corpus.py::_with_stored_crush drops ``value``
+    # after using it to bind the row hash).
     assert stored == {"source": "stored_tier4", "value": -12.5, "row": {
-        "table": "tier4_forecasts", "table_sha256": "digest-1", "ticker": "ABC",
-        "event_date": "2026-09-10"}}
+        "table": "tier4_forecasts", "table_sha256": "digest-1",
+        "column": "pred_iv_crush_30", "ticker": "ABC",
+        "event_date": "2026-09-10", "model_id": "iv-crush-hgbr-v1",
+        "fold_start": "2026-08-01"}}
     assert frozen["bindings"] == {}
 
     value, frozen = run({})

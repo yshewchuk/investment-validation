@@ -26,6 +26,10 @@ from checks.phase4_frozen_bridge import (  # noqa: E402
     prepare_frozen_replay,
     with_frozen_chooser,
 )
+from checks.phase4_stored_forecasts import (  # noqa: E402
+    resolve_stored_forecasts,
+    with_stored_forecasts,
+)
 from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
 from engine.analogs import AnalogMatcher  # noqa: E402
@@ -34,26 +38,29 @@ from engine.models.registry import artifact_sha256, load_registry  # noqa: E402
 from engine.pnl_sim import ResidualPool, expected_pnl  # noqa: E402
 from engine.report import Report, build_provenance  # noqa: E402
 from engine.structures import (  # noqa: E402
-    ChainSnapshot,
     STRUCTURES,
+    ChainSnapshot,
     StructureError,
     price_structure,
 )
 from engine.v2.contracts import ScoreRecord, ScoreRequest  # noqa: E402
+from engine.v2.diagnosis import AGREE, SCORE_RECORD_V1, compare_records  # noqa: E402
 from engine.v2.domain.generation import Geometry, Pricing, generate, price  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
     multi_expiry_refusal,
     planned_exit_label,
     terminal_payoff,
 )
-from engine.v2.diagnosis import AGREE, SCORE_RECORD_V1, compare_records  # noqa: E402
 from engine.v2.features import (  # noqa: E402
     FeatureContextError,
     FeatureContextPlanner,
     default_feature_registry,
 )
 from engine.v2.foundation import (  # noqa: E402
-    NONFINITE_KEY, content_hash, from_document, to_document,
+    NONFINITE_KEY,
+    content_hash,
+    from_document,
+    to_document,
 )
 from engine.v2.models import (  # noqa: E402
     FrozenInference,
@@ -66,14 +73,14 @@ from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # n
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash, score_id, with_score_id  # noqa: E402
 from engine.v2.scoring.native_analog import legacy_bucket_bootstrap_seed  # noqa: E402
+from engine.v2.scoring.source_inputs import (  # noqa: E402
+    SourceBundle,
+    build_native_score_inputs,
+)
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
     StageReceipt,
     receipt,
-)
-from engine.v2.scoring.source_inputs import (  # noqa: E402
-    SourceBundle,
-    build_native_score_inputs,
 )
 from engine.v2.serving.score_projection import legacy_score_projection  # noqa: E402
 from tools.phase4_request_translation import legacy_binding_mismatches  # noqa: E402
@@ -1908,6 +1915,13 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     # A declared frozen chooser runs as its executable block (the champion
     # and producer folds of its own verified release, the recorded pools).
     inputs = with_frozen_chooser(inputs, frozen_chooser)
+    # A declared stored-forecast REFERENCE is looked up here, natively, from
+    # the table it addresses. The trace carries the address, never the cell,
+    # so this is the only place the value can enter -- and it enters by
+    # being read, which is the path parity is meant to exercise. Any refusal
+    # propagates: a reference that cannot be resolved must fail the record,
+    # not score without it.
+    inputs = with_stored_forecasts(inputs, resolve_stored_forecasts(inputs))
     return {
         "request": request,
         "inputs": inputs,
