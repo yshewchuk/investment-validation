@@ -34,6 +34,7 @@ Dispositions per pair (value-free: ids, codes, counts, field paths):
 """
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -272,28 +273,117 @@ def _replay_chooser_pair(pair, corpus_root: Path, release_root: Path,
             "stages": stages, "runtime_stages": runtime}
 
 
+def _log(tag: str, message: str, started: float) -> None:
+    """Same ``[tag HH:MM:SS] message (+elapsed)`` idiom as
+    ``checks.phase5_acceptance._progress`` -- this module's own corpus load
+    and per-pair loop are the phase that actually dominates a real run (a
+    single ~120MB pair measured at ~111s, a ~7MB pair at ~4s; the corpus can
+    hold pairs up to 750MB), so each pair gets its own line rather than one
+    line for the whole phase."""
+    print(f"[{tag} {time.strftime('%H:%M:%S')}] {message} (+{time.perf_counter()-started:.1f}s)",
+          flush=True)
+
+
+def _load_checkpoint(checkpoint_path: Path, corpus_hash: str | None) -> dict[str, dict]:
+    """Rows already replayed by an earlier, killed run of the SAME corpus.
+
+    Keyed by ``fixture_id``. A checkpoint file from a different corpus (its
+    first line's ``corpus_hash`` disagrees, or the file is unreadable/corrupt)
+    is discarded, never silently reused -- resuming against the wrong corpus
+    would be a correctness defect, not a convenience."""
+    if not checkpoint_path.is_file():
+        return {}
+    import json
+
+    done: dict[str, dict] = {}
+    try:
+        with checkpoint_path.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if row.get("corpus_hash") != corpus_hash:
+                    return {}
+                done[row["fixture_id"]] = row
+    except (OSError, ValueError):
+        return {}
+    return done
+
+
 def replay_corpus(corpus: Path, release_root: Path, model_release,
-                  manifest: Mapping[str, Any]) -> tuple[dict, list[tuple[str, str, str]]]:
-    """Replay every pair; return ``(summary, findings as (code, subject, detail))``."""
+                  manifest: Mapping[str, Any],
+                  checkpoint_path: Path | None = None,
+                  ) -> tuple[dict, list[tuple[str, str, str]]]:
+    """Replay every pair; return ``(summary, findings as (code, subject, detail))``.
+
+    ``checkpoint_path``, if given, makes the pair loop resumable: each pair's
+    row is appended (one JSON line, flushed immediately -- survives SIGKILL)
+    as soon as it is computed, and a prior file for the SAME corpus is read
+    back at the top so a killed or capped run picks up where it left off
+    instead of re-paying every already-replayed pair. Added because a single
+    pair has been measured at ~111s and the corpus can hold pairs up to
+    ~750MB -- losing all 20 pairs' work to one OOM kill near the end was the
+    concrete risk this closes. Not wired for the pre-phase4 build_evidence
+    phases: those are comparatively cheap (~10s of seconds total, measured)
+    and none of them is naturally per-item."""
     from checks.tier0_corpus import load, resolve_corpus
 
+    started = time.perf_counter()
+    _log("p5-phase4", f"loading corpus {corpus}", started)
     loaded = load(resolve_corpus(Path(corpus)))
+    total = len(loaded.ordered_ids)
+    corpus_hash = loaded.index.get("corpus_hash")
+    _log("p5-phase4", f"corpus loaded: {total} pairs", started)
     staged = staged_model_objects(model_release, manifest)
+
+    done: dict[str, dict] = {}
+    checkpoint_fh = None
+    if checkpoint_path is not None:
+        done = _load_checkpoint(checkpoint_path, corpus_hash)
+        if done:
+            _log("p5-phase4",
+                 f"checkpoint: resuming, {len(done)}/{total} pairs already replayed", started)
+        checkpoint_fh = checkpoint_path.open("a", buffering=1)  # line-buffered: survives SIGKILL
+
+    import json as _json
+
     rows, findings = [], []
     counts = {name: 0 for name in DISPOSITIONS}
-    for fixture_id in loaded.ordered_ids:
-        row = _replay_pair(loaded.pairs[fixture_id], loaded.root, release_root, staged)
-        counts[row["disposition"]] += 1
-        rows.append({"fixture_id": fixture_id, **row})
-        if "code" in row:
-            findings.append((row["code"], f"phase4:{fixture_id}", row["detail"]))
+    try:
+        for index, fixture_id in enumerate(loaded.ordered_ids):
+            cached = done.get(fixture_id)
+            if cached is not None:
+                row = {k: v for k, v in cached.items() if k != "corpus_hash"}
+                _log("p5-phase4",
+                     f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
+                     "(from checkpoint)", started)
+            else:
+                pair_started = time.perf_counter()
+                replay_row = _replay_pair(loaded.pairs[fixture_id], loaded.root, release_root,
+                                          staged)
+                pair_elapsed = time.perf_counter() - pair_started
+                row = {"fixture_id": fixture_id, **replay_row}
+                _log("p5-phase4",
+                     f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
+                     f"(pair +{pair_elapsed:.1f}s)", started)
+                if checkpoint_fh is not None:
+                    checkpoint_fh.write(_json.dumps({**row, "corpus_hash": corpus_hash}) + "\n")
+            counts[row["disposition"]] += 1
+            rows.append(row)
+            if "code" in row:
+                findings.append((row["code"], f"phase4:{fixture_id}", row["detail"]))
+    finally:
+        if checkpoint_fh is not None:
+            checkpoint_fh.close()
     if not counts["replayed"] and not findings:
         findings.append((PHASE4_EMPTY, "phase4",
                          f"0/{len(rows)} pairs replayed against the staged release"))
     used = sorted({m for row in rows for m in row.get("members", ())})
     summary = {"status": "FAIL" if findings else "PASS", "pairs": len(rows),
                "dispositions": counts, "members_exercised": used,
-               "corpus_hash": loaded.index.get("corpus_hash"), "rows": rows}
+               "corpus_hash": corpus_hash, "rows": rows}
+    _log("p5-phase4", f"done: {counts}", started)
     return summary, findings
 
 
