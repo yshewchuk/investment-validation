@@ -3097,7 +3097,8 @@ class Scorer:
                             site: str,
                             produces: str = "pred_abs_move",
                             declarations: Mapping[str, Any] | None = None,
-                            pool: bool = True) -> bool:
+                            pool: bool = True,
+                            register_binding: bool = False) -> bool:
         """Record one served Tier-4 fold for a Phase 4 capture (R4-19).
 
         The binding is the fold's cache file (path, sha256, features) under
@@ -3107,6 +3108,17 @@ class Scorer:
         and the documented pool are cached per served fold, so each
         candidate shares one copy. A no-op without a collector, and nothing
         is recorded (returns False) when the fold has no cache file to name.
+
+        ``register_binding``: ALSO record this fold's role into
+        ``capture_source_bundle``'s ``model_bindings`` (the accumulator
+        ``native_recipes.forecast.required_roles`` and the strict trace's
+        ``binding_ids`` are built from) and its own ``features`` role,
+        exactly as ``_size_from_forecast`` already does inline for
+        "forecast_sizing". Reuses the SAME cached ``(path, digest)`` this
+        method resolves for ``frozen.bindings`` -- never calls
+        ``served.artifact_ref()`` a second time, which would re-hash the
+        fold's cache file once per candidate instead of once per served
+        fold (the caching this docstring's second sentence describes).
         """
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is None:
@@ -3142,6 +3154,9 @@ class Scorer:
             return False
         binding, pool_document = cached
         slot = f"fold:{binding['role']}"
+        row = {
+            name: _phase4_input(features, name) for name in served.features
+        }
         collector.capture_frozen(
             bindings={slot: {
                 **binding,
@@ -3151,12 +3166,37 @@ class Scorer:
             # Per call site: the sizing, gate and chooser paths each read the
             # frame they were handed, and a fold fed two different rows must
             # be visible as two rows, not refused.
-            inputs={f"{slot}@{site}": {
-                name: _phase4_input(features, name) for name in served.features
-            }},
+            inputs={f"{slot}@{site}": row},
             fold_pools={produces: pool_document} if pool else None,
             declarations=declarations,
         )
+        if register_binding:
+            input_as_of = (
+                str(pd.Timestamp(result.as_of).date())
+                if result.as_of is not None else None
+            )
+            collector.capture_features(
+                dict(row),
+                {
+                    "model_id": binding["model_id"], "role": binding["role"],
+                    "fold_start": binding["fold_start"],
+                },
+                role=binding["role"],
+            )
+            collector.capture_source_bundle(
+                model_bindings=({
+                    "model_id": binding["model_id"],
+                    "role": binding["role"],
+                    "feature_order": binding["feature_order"],
+                    "artifact": binding["artifact"],
+                    "artifact_sha256": binding["artifact_sha256"],
+                    "adapter": binding["adapter"],
+                    "output_names": binding["output_names"],
+                    "strategy": request.strategy,
+                    "decision_offset": request.decision_offset,
+                    "input_as_of": input_as_of,
+                },),
+            )
         return True
 
     def _size_from_forecast(self, request, result, structure, *, size: bool = True):
@@ -3513,9 +3553,17 @@ class Scorer:
             return None
         # Outside the try: a capture error must never become legacy's silent
         # None.
+        #
+        # `register_binding=True`: same gap the "R4-6" note on
+        # `_size_from_forecast` fixed for `forecast_sizing`. Without a
+        # `model_bindings` entry, `capture_source_bundle` never sees an
+        # "iv_crush" role, so `native_recipes["forecast"]["required_roles"]`
+        # stays short of it and the strict trace's `binding_ids` never
+        # requests an iv_crush binding -- the MISSING_FORECAST_OUTPUT:
+        # iv_crush cascade this fixes (established on fixture 011, CTR5).
         self._phase4_record_fold(
             request, result, served, features, produces="pred_iv_crush_30",
-            pool=False, site="crush",
+            pool=False, site="crush", register_binding=True,
             declarations={"forecast:pred_iv_crush_30": {
                 "source": "served_fold", "binding": "fold:iv_crush",
                 "output": "pred_iv_crush_30", "site": "crush",

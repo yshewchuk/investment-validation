@@ -122,3 +122,61 @@ def test_per_role_rows_refuse_a_binding_whose_role_was_not_captured():
     inputs = _inputs({"model_inputs": {"x": 2.0}, "role_model_inputs": {"driver": {"x": 2.0}}})
     with pytest.raises(FrozenBridgeError, match="no captured row for role gate"):
         _feature_rows(inputs, (_binding("gate", ("x",)),), "release")
+
+
+# ---------------------------------------------------------------------------
+# A genuinely non-finite captured feature (contracts §2.1's
+# ``{"__nonfinite__": repr(value)}`` tag -- a real sourced NaN, e.g. no
+# ORATS quote for that ticker/date, not a dropped column) used to reach
+# ``float(vector[name])`` untouched and raise "nonnumeric feature" (a
+# TypeError on ``float(dict)``), which killed the WHOLE bridge construction
+# and excluded the record from the Phase 4 population before any comparison
+# was even attempted. Fixed: the tag decodes to a real NaN, and a binding
+# whose row comes back non-finite is silently OMITTED (no request, no
+# raise) rather than raised -- mirroring legacy's own behavior (neither
+# ``Scorer._score_model`` nor ``ServingModel.predict`` ever calls a model
+# on an incomplete row) and ``FrozenStageExecutor._row``'s identical
+# "a non-finite value is a missing feature, not an invalid one".
+# ---------------------------------------------------------------------------
+
+def test_a_tagged_nonfinite_feature_omits_its_binding_not_raises():
+    inputs = _inputs({"model_inputs": {"x": {"__nonfinite__": "nan"}, "n_prior": 5.0}})
+    requests = _feature_rows(inputs, (_binding("driver", ("x",)),), "release")
+    assert requests == ()  # omitted, not raised
+
+
+def test_a_tagged_nonfinite_feature_omits_only_its_own_binding():
+    inputs = _inputs({"model_inputs": {"x": {"__nonfinite__": "nan"}, "n_prior": 5.0}})
+    bindings = (_binding("driver", ("x",)), _binding("implied_t1", ("n_prior",)))
+    requests = _feature_rows(inputs, bindings, "release")
+    assert [item.binding_id for item in requests] == ["b-implied_t1"]
+    assert requests[0].rows == ((5.0,),)
+
+
+def test_a_tagged_nonfinite_feature_decodes_to_nan_not_zero():
+    """The regression this test guards against: a decode that produced 0.0
+    instead of NaN would NOT be omitted (0.0 is finite) and would silently
+    feed the model a fabricated value. Confirmed via the previous two tests'
+    omission; this one pins the exact decoded value so a future change
+    cannot swap NaN for 0.0 and still pass "is omitted"."""
+    from engine.v2.foundation import untag_nonfinite
+
+    decoded = untag_nonfinite({"__nonfinite__": "nan"})
+    assert decoded != decoded  # NaN, not 0.0 (0.0 == 0.0)
+
+
+def test_a_genuinely_malformed_feature_still_raises_nonnumeric():
+    """Not every non-numeric value is a nonfinite tag: a real data-shape
+    defect (a string, a list) must still raise loudly."""
+    inputs = _inputs({"model_inputs": {"x": "not-a-number", "n_prior": 5.0}})
+    with pytest.raises(FrozenBridgeError, match="nonnumeric feature x"):
+        _feature_rows(inputs, (_binding("driver", ("x",)),), "release")
+
+
+def test_a_missing_feature_name_still_raises_not_omitted():
+    """A structurally absent column (the key itself never captured) is a
+    different, more severe defect than a present-but-non-finite value, and
+    stays a hard refusal."""
+    inputs = _inputs({"model_inputs": {"n_prior": 5.0}})
+    with pytest.raises(FrozenBridgeError, match="missing feature x"):
+        _feature_rows(inputs, (_binding("driver", ("x",)),), "release")
