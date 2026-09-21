@@ -145,6 +145,18 @@ def seeded_render_job(tmp_path, monkeypatch):
     # (e.g. panel-coverage-unmeasurable), which is an artifact of the test
     # picking two different roots, not a real D19 disagreement.
     yield ops_root, job_id, staging / "legacy"
+    # _point_legacy_root's importlib.reload(paths) rebinds paths.ROOT (and
+    # every constant derived from it) to this test's tmp_path. monkeypatch
+    # reverts the INVESTING_PLAN_ROOT env var automatically, but it never
+    # re-runs that reload, so paths.ROOT stayed pointed at a staging
+    # directory pytest later deletes -- any later test in the same process
+    # that reads engine.paths.ROOT (e.g. test_features.py,
+    # test_v2_data_reference_inputs.py) got FileNotFoundError/AssertionError
+    # from state this fixture left behind. Mirror
+    # tests/test_v2_ops_render_parity.py's _pointed_paths teardown: delenv
+    # then reload so paths.ROOT is back on the real repo root.
+    monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+    importlib.reload(paths)
 
 
 @pytest.fixture
