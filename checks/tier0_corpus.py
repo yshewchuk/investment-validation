@@ -668,6 +668,35 @@ def priced(record: dict) -> bool:
     return bool(record.get("legs")) and record.get("entry_cost") is not None
 
 
+#: Refusal-flag names that make ``priced`` true but the row still an early
+#: exit: legacy prices the entry (legs + cost resolve) before checking
+#: BAD_QUOTE, so a BAD_QUOTE row is ``priced`` without ever reaching
+#: simulation/gate. Kept as a literal set (not imported from
+#: ``tools.capture_tier0_corpus.REFUSAL_CODES``, mirroring the pattern
+#: ``engine/v2/scoring/stages.py``'s literal constants already use to avoid
+#: a v2-into-legacy-tool dependency): any code in this list means legacy
+#: withheld the later stages for this row.
+_EARLY_EXIT_FLAGS = frozenset({
+    "UNVALIDATED_STRUCTURE", "OUT_OF_DOMAIN", "NO_CHAIN", "BAD_QUOTE",
+    "COARSE_LADDER", "NO_FORECAST",
+})
+
+
+def priced_clean(record: dict) -> bool:
+    """A priced row legacy did NOT cut short with an early-exit refusal flag.
+
+    Necessary, not sufficient, for ``disposition: "compared"``: the strict
+    native trace attach step (``attach_strict_probe``, after ``select()``)
+    can still refuse a clean-quote row for other reasons (for example the
+    stored-``iv_crush`` capture-side gap tracked separately). This predicate
+    only rules out the case ``select()`` cannot otherwise see: a candidate
+    whose only demonstrated value is an early refusal, chosen because it is
+    cheap to satisfy ``priced:<strategy>`` and ``refusal:<code>`` in one row,
+    while a candidate that reached every stage went unselected.
+    """
+    return priced(record) and not (_EARLY_EXIT_FLAGS & set(_flags(record)))
+
+
 def _missing(value: Any) -> bool:
     return value is None or (isinstance(value, dict) and NONFINITE in value)
 
@@ -785,6 +814,8 @@ def derive_covers(record: dict, request: dict, record_kind: str | None,
     out = {f"strategy:{strategy}"}
     if priced(record):
         out.add(f"priced:{strategy}")
+    if priced_clean(record):
+        out.add(f"priced_clean:{strategy}")
     if record.get("session"):
         out.add(f"session:{record['session']}")
     mapping = axis_inputs.get("refusal_code_mapping") or {}

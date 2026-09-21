@@ -395,6 +395,34 @@ def test_deleting_the_only_priced_fixture_loses_its_axis(corpus):
     assert any(p.startswith("axes.priced:BFLY-P") for p in paths)
 
 
+def test_a_bad_quote_priced_row_covers_priced_but_not_priced_clean():
+    """Legacy prices the entry (legs + cost resolve) before checking
+    BAD_QUOTE, so a BAD_QUOTE row is `priced` without ever reaching
+    simulation/gate -- exactly the STR-THRU/ISPR corpus case this axis
+    exists to make `select()` stop treating as sufficient."""
+    got = covers(priced("STR-THRU", flags=["BAD_QUOTE"]))
+    assert "priced:STR-THRU" in got
+    assert "priced_clean:STR-THRU" not in got
+
+
+def test_a_priced_row_with_no_early_exit_flag_covers_priced_clean():
+    got = covers(priced("STR-THRU"))
+    assert {"priced:STR-THRU", "priced_clean:STR-THRU"} <= got
+
+
+def test_an_unpriced_refusal_covers_neither_priced_axis():
+    got = covers(refusal("STR-THRU", "BAD_QUOTE"))
+    assert "priced:STR-THRU" not in got
+    assert "priced_clean:STR-THRU" not in got
+
+
+def test_deleting_the_only_priced_clean_fixture_loses_its_axis(corpus):
+    _pair_path(corpus, "004_BFLY-P").unlink()
+    _, cases = t0.run(corpus)
+    paths = {f.field_path for f in cases["coverage"].findings}
+    assert any(p.startswith("axes.priced_clean:BFLY-P") for p in paths)
+
+
 def test_an_inflated_covers_list_is_a_finding(corpus):
     _rewrite(corpus, "002_STR-THRU", lambda d: d["covers"].append("geometry:round_listed_strike"))
     _, cases = t0.run(corpus)
