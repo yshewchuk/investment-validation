@@ -1049,6 +1049,33 @@ class Phase4TraceCollector:
             status=self.status,
         )
 
+    def finish_without_result(self, status: str, *, detail: str | None = None) -> None:
+        """Close a trace taken at an entry point that builds no ``ScoreResult``.
+
+        :meth:`finish` reads its status, flags and detail off a
+        ``ScoreResult``, so it can only close a trace taken through
+        ``Scorer.score``. ``engine.replay.replay_one`` is a second real
+        legacy entry point -- it plans, resolves and PRICES a structure and
+        returns priced rows -- and it never builds a ``ScoreResult`` at all.
+        Its trace still needs the same closing step, because
+        ``disposition["first_gap"]`` (the first stage a row never reached)
+        is published there and nowhere else, and a capture reads it to
+        explain an honestly partial case instead of asserting less than it
+        has.
+
+        Nothing here records or infers a checkpoint: it publishes only the
+        caller-supplied status and the ``not_reached`` the caller already
+        recorded. ``flags`` is empty by construction -- ``result.flags`` is
+        a ``ScoreResult`` concept and this entry point has none, so claiming
+        one would be an invention.
+        """
+        self.status = status
+        self.disposition = {"status": status, "flags": [], "detail": detail}
+        if self._first_gap is not None:
+            self.disposition["first_gap"] = {
+                "stage": self._first_gap[0], "reason": self._first_gap[1],
+            }
+
     def document(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,

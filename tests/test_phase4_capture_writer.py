@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 
 import pandas as pd
@@ -10,6 +11,7 @@ from checks.phase4_checkpoints import (
     validate_bundle,
 )
 from engine.v2.foundation import content_hash
+import tools.capture_tier0_corpus as capture
 from tools.capture_tier0_corpus import write
 
 
@@ -460,3 +462,171 @@ def test_shared_texts_do_not_thrash_when_a_candidate_outgrows_the_budget() -> No
         registry({"frozen": {"pools": pools[:1]}})
     assert registry.renders == len(pools)
     assert registry._text_size <= len(registry._texts[id(pools[0])][0])
+
+
+# --------------------------------------------------------------------------
+# branch labelling: fallback, multi_expiry, and the research-replay trace
+# --------------------------------------------------------------------------
+
+
+def _written_branches(tmp_path, trace, *, record=None, kind="score_result",
+                      case_id="case-1"):
+    """Run the REAL producer and read the branches off the case the REAL
+    per-case validator accepted -- not off ``_phase4_case_branches``
+    directly, so a label that the writer drops on the way to disk cannot
+    pass (the `_clean_row`-versus-artifact trap, AGENTS.md)."""
+    candidate = {
+        "fixture_id": case_id,
+        "covers": ["strategy:STR-THRU"],
+        "request": {"strategy": "STR-THRU", "ticker": "ABC"},
+        "record": record if record is not None else {"strategy": "STR-THRU",
+                                                     "ticker": "ABC"},
+        "kind": kind,
+        "duration": 0.1,
+        "legacy_trace": trace,
+    }
+    release = tmp_path / "release"
+    write(release, [candidate], {"strategy:STR-THRU": [case_id]},
+          pd.Timestamp("2026-01-01"), "snapshot-1")
+    return release, _verify_case(release, case_id)
+
+
+def test_a_gate_that_fell_back_to_the_arithmetic_entry_rule_is_labelled_fallback(
+        tmp_path) -> None:
+    """``gate_inputs.kind == "entry_rule"`` is legacy's own record that the
+    registry had NO gate model for this strategy and the arithmetic rule
+    stood in (``Scorer._score_gate`` calls ``_apply_entry_rule`` only on
+    ``loaded is None``). Without this rule the ``fallback`` branch is
+    unreachable corpus-wide: the only other fallback the checkpoints carry
+    is ``residual_population_identity.fallback_used``, which needs a causal
+    residual pool under ~2,500 rows and therefore cannot fire on any event
+    the capture can reach."""
+    _release, (_case_id, _strategy, branches) = _written_branches(
+        tmp_path, _full_legacy_trace())
+    assert "fallback" in branches
+
+
+def test_a_gate_scored_by_a_registered_model_is_not_labelled_fallback(
+        tmp_path) -> None:
+    """The negative control. Both arms occur in the real corpus, so
+    ``fallback`` must discriminate; a rule that fired on every gated row
+    would be a constant wearing a branch label."""
+    trace = copy.deepcopy(_full_legacy_trace())
+    trace["checkpoints"]["gate_inputs"] = _hashed({
+        "kind": "model", "model_identity": "gate-v1",
+        "feature_vector": {"spot": 100.0}, "threshold": 0.5,
+    })
+    _release, (_case_id, _strategy, branches) = _written_branches(tmp_path, trace)
+    assert "fallback" not in branches
+    assert branches  # still a real case, still labelled
+
+
+def test_legs_spanning_two_expiries_are_labelled_multi_expiry(tmp_path) -> None:
+    """``multi_expiry`` reads the per-leg ``expiry`` legacy priced, and
+    only a calendar can differ across legs. Without the two-expiry arm the
+    branch never fires; without the single-expiry arm below the rule could
+    be labelling every priced row."""
+    trace = copy.deepcopy(_full_legacy_trace())
+    trace["checkpoints"]["selection_pricing"] = _hashed({
+        "selected_legs": [
+            {"right": "put", "side": "short", "quantity": 1, "expiry": "2026-01-16"},
+            {"right": "put", "side": "long", "quantity": 1, "expiry": "2026-02-20"},
+        ],
+        "entry_cost": 1.25,
+    })
+    _release, (_case_id, _strategy, branches) = _written_branches(tmp_path, trace)
+    assert "multi_expiry" in branches
+
+    _release2, (_id2, _s2, single) = _written_branches(
+        tmp_path / "single", _full_legacy_trace(), case_id="case-2")
+    assert "multi_expiry" not in single
+
+
+def _replay_rows():
+    """Two fill-alpha rows shaped like ``engine/replay.py``'s own
+    ``include_legs=True`` output. The legs are IDENTICAL across alphas
+    because ``replay_one`` pins the contracts from the first alpha; only
+    the cost moves."""
+    legs = [
+        {"name": "front", "right": "put", "side": "short", "qty": 1,
+         "strike": 100.0, "expiry": "2026-01-16", "bid": 1.0, "ask": 1.2,
+         "price": 1.1},
+        {"name": "back", "right": "put", "side": "long", "qty": 1,
+         "strike": 100.0, "expiry": "2026-02-20", "bid": 3.0, "ask": 3.4,
+         "price": 3.2},
+    ]
+    return [
+        {"ticker": "ABC", "fill_alpha": 0.5, "entry_cost": 2.1,
+         "entry_legs": copy.deepcopy(legs)},
+        {"ticker": "ABC", "fill_alpha": 1.0, "entry_cost": 2.4,
+         "entry_legs": copy.deepcopy(legs)},
+    ]
+
+
+def test_a_research_replay_result_becomes_a_case_the_real_validator_accepts(
+        tmp_path) -> None:
+    """CAL-P is the only structure whose legs span two expiries and
+    ``Scorer.score`` refuses it at ``resolve_context``, so
+    ``engine.replay.replay_one`` is the ONLY legacy path that ever prices
+    a multi-expiry structure. Before this, ``research_replay_pass`` built
+    its candidate with no ``legacy_trace``, so ``write()``'s
+    ``raw_checkpoint is not None`` guard dropped every one of them and the
+    bundle carried no priced CAL-P leg at all."""
+    rows = _replay_rows()
+    trace = capture._research_replay_trace(rows)
+    assert set(trace) == {"schema_version", "disposition", "checkpoints"}
+    # Only what legacy actually produced -- no fabricated empty groups.
+    assert set(trace["checkpoints"]) == {"selection_pricing"}
+    priced = trace["checkpoints"]["selection_pricing"]["value"]
+    assert priced["selected_legs"] == rows[0]["entry_legs"]
+    assert priced["entry_cost"] == rows[0]["entry_cost"]
+    assert trace["disposition"]["first_gap"] == {
+        "stage": "features", "reason": capture._RESEARCH_REPLAY_GAP_REASON,
+    }
+
+    release, (case_id, strategy, branches) = _written_branches(
+        tmp_path, trace, kind="research_replay",
+        record={"strategy": "CAL-P", "ticker": "ABC"}, case_id="calp-1")
+    assert case_id == "calp-1" and strategy == "CAL-P"
+    assert "multi_expiry" in branches and "debit_credit" in branches
+    case = json.loads(
+        (release / "checkpoints" / "cases" / "calp-1.json").read_text())
+    assert case["disposition"] == "incomparable"
+    assert case["first_gap"] == {
+        "stage": "features", "reason": capture._RESEARCH_REPLAY_GAP_REASON,
+    }
+
+
+def test_research_replay_trace_refuses_to_invent_a_checkpoint() -> None:
+    """No priced row, no legs or no cost means legacy computed nothing to
+    record; an empty ``selection_pricing`` group would be a fabrication."""
+    assert capture._research_replay_trace([]) is None
+    assert capture._research_replay_trace(
+        [{"ticker": "ABC", "entry_cost": 2.1}]) is None
+    assert capture._research_replay_trace(
+        [{"ticker": "ABC", "entry_legs": [{"expiry": "2026-01-16"}],
+          "entry_cost": None}]) is None
+
+
+def test_the_tie_audit_reads_the_choosers_own_published_margin() -> None:
+    """The choice-level evidence needed to settle "did a tie occur" is
+    already in the corpus: ``dynamic_short_vol`` publishes
+    ``chosen_margin`` on the row it returns and ``dyn_sv_pass`` keeps that
+    row verbatim. ``None`` means no runner-up existed, so the tie path was
+    never reachable for that choice and it must not be counted as an
+    examination."""
+    candidates = [
+        {"kind": "dyn_sv_choice", "record": {"chosen_margin": 0.42}},
+        {"kind": "dyn_sv_choice", "record": {"chosen_margin": -0.017}},
+        {"kind": "dyn_sv_choice", "record": {"chosen_margin": None}},
+        {"kind": "score_result", "record": {"chosen_margin": 0.0}},
+    ]
+    assert capture.tie_audit(candidates) == {
+        "examined": 2, "exercised": 0, "closest": 0.017,
+    }
+    tied = capture.tie_audit(
+        [{"kind": "dyn_sv_choice", "record": {"chosen_margin": 0.0}}])
+    assert tied == {"examined": 1, "exercised": 1, "closest": 0.0}
+    assert capture.tie_audit([]) == {
+        "examined": 0, "exercised": 0, "closest": None,
+    }

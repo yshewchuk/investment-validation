@@ -2677,6 +2677,70 @@ def _research_replay_chain_keys(
     return keys
 
 
+#: Pipeline stages `engine.replay.replay_one` never runs, in the order
+#: `Scorer.score` would have run them. It is a PRICING entry point: it
+#: plans the event, resolves the entry/exit chains and prices the planned
+#: structure, and then returns rows. No feature vector is ever built, no
+#: P&L is simulated and no gate is evaluated, for any input -- so the
+#: FIRST of these, `features`, is this entry point's real and permanent
+#: `first_gap`, not a data accident.
+_RESEARCH_REPLAY_UNREACHED_STAGES = ("features", "simulation", "gate_inputs")
+
+_RESEARCH_REPLAY_GAP_REASON = (
+    "engine.replay.replay_one is a pricing entry point: it plans, resolves "
+    "chains and prices the structure, and never runs the model pipeline"
+)
+
+
+def _research_replay_trace(rows: Sequence[Mapping[str, Any]]) -> dict | None:
+    """A real ``diagnostic_checkpoint()`` for one ``replay_one`` result.
+
+    §7.1 requires the two ``DISABLED_STRATEGIES`` to appear as production
+    REFUSALS and to REPLAY under research. Only the refusal half reached
+    the Phase 4 checkpoint bundle: ``_candidate`` was called with no
+    ``legacy_trace``, so ``write()``'s ``if raw_checkpoint is not None``
+    guard dropped every research_replay candidate and the bundle never
+    carried a single priced CAL-P leg. That is what made the
+    ``multi_expiry`` branch unreachable corpus-wide -- CAL-P
+    (``engine/structures.py`` ``put_calendar``) is the only structure whose
+    legs span two expiries, and ``Scorer.score`` refuses it at
+    ``resolve_context``, so the research entry point is the ONLY place
+    legacy ever prices a multi-expiry structure.
+
+    Nothing is computed here. ``selected_legs`` and ``entry_cost`` are the
+    values ``replay_one`` itself returned (``engine/replay.py``'s
+    ``entry_legs``/``entry_cost``, built from ``price_structure``'s own
+    ``entry.legs`` and ``structure_return``'s ``cost``) -- the same two
+    values ``Scorer._price_entry`` hands
+    ``Phase4TraceCollector.capture_selection_pricing``, from the same
+    pricing function, at the same boundary. The alpha grid re-prices the
+    SAME pinned contracts (``replay_one`` pins from the first alpha so the
+    contracts cannot depend on the fill assumption), so the legs are alpha
+    invariant and the first row is the resolution the rest inherit; its
+    own ``entry_cost`` is recorded with it rather than a cost from some
+    other alpha.
+
+    Returns ``None`` when the replay produced no priced row or no legs --
+    there is then nothing legacy computed to record, and an empty group
+    would be a fabrication.
+    """
+    if not rows:
+        return None
+    first = rows[0]
+    legs = first.get("entry_legs")
+    entry_cost = first.get("entry_cost")
+    if not legs or entry_cost is None:
+        return None
+    trace = score_mod.Phase4TraceCollector(
+        retain_full_trace=False, content_hasher=_SHARED_TRACE_DOCUMENTS,
+    )
+    trace.capture_selection_pricing(legs, entry_cost)
+    for stage in _RESEARCH_REPLAY_UNREACHED_STAGES:
+        trace.not_reached(stage, _RESEARCH_REPLAY_GAP_REASON)
+    trace.finish_without_result("completed", detail=_RESEARCH_REPLAY_GAP_REASON)
+    return trace.diagnostic_checkpoint()
+
+
 def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
                          strategies: tuple[str, ...] | None = None,
                          index: "replay_mod.ChainIndex | None" = None) -> list[dict]:
@@ -2722,7 +2786,8 @@ def research_replay_pass(scorer, events: pd.DataFrame, limit: int = 2,
             }
             record = {"rows": jsonable(rows), "skip_reason": skip, "strategy": strategy}
             out.append(_candidate(request, None, record, time.monotonic() - started,
-                                  kind="research_replay"))
+                                  kind="research_replay",
+                                  legacy_trace=_research_replay_trace(rows)))
             taken += 1
             if taken >= limit:
                 break
@@ -3211,7 +3276,8 @@ def _any_captured_evidence(checkpoints_in: Mapping[str, Any]) -> bool:
 def _phase4_case_branches(
     cand: Mapping[str, Any], request: Mapping[str, Any],
     features_value: Mapping[str, Any], selection_value: Mapping[str, Any],
-    simulation_value: Mapping[str, Any], raw_checkpoint: Mapping[str, Any], *,
+    simulation_value: Mapping[str, Any], gate_inputs_value: Mapping[str, Any],
+    raw_checkpoint: Mapping[str, Any], *,
     missing_inputs_signal: bool = False,
 ) -> list[str]:
     """Real ``REQUIRED_BRANCHES``-vocabulary labels this case's OWN content shows.
@@ -3225,11 +3291,33 @@ def _phase4_case_branches(
     passes and ``select()`` choose, not of this function.
 
     ``ties`` is included for documentation and completeness but is
-    currently UNREACHABLE: a ``dyn_sv_choice`` candidate (the only kind
-    ``dynamic_short_vol``'s own tie applies to) carries no ``legacy_trace``
-    of its own (see ``dyn_sv_pass`` -- only its ranked ``members`` do), so
-    ``write()`` never calls this function for one. Recorded here rather
-    than silently dropped so the gap is visible instead of hidden.
+    UNREACHABLE, for TWO independent reasons, and only the second one
+    matters (2026-09-21):
+
+    1. Structural: a ``dyn_sv_choice`` candidate (the only kind
+       ``dynamic_short_vol``'s own tie applies to) carries no
+       ``legacy_trace`` of its own (see ``dyn_sv_pass`` -- only its ranked
+       ``members`` do), so ``write()`` never calls this function for one.
+    2. The real one: ``dynamic_short_vol``'s ranking key is CONTINUOUS
+       (``chooser_score``, else ``exp_pnl_sim``), and decision 2026-09-12
+       (see ``required_axes`` above) recorded that no genuine tie between
+       two different structures exists in the store or in the prediction
+       ledger, and that the corpus MAY NOT INVENT ONE. Removing (1) would
+       therefore still not produce a ``ties`` label; it would only add
+       empty ``dyn_sv_choice`` cases.
+
+    The tie RULE -- input-row order breaks a tie, on both ranking paths --
+    is guarded instead by the exported frozen definition
+    (``resolved_dyn_sv()["payload"]["tie_behaviour"]``) and by
+    ``tests/test_baseline_export.py::
+    test_the_exported_tie_rule_is_the_measured_behaviour``, which runs the
+    REAL ``dynamic_short_vol`` over deliberately tied rows in both orders.
+    Kept here rather than dropped so that a genuine tie, if one is ever
+    captured, is still labelled.
+
+    ``multi_expiry`` and ``fallback`` each read a signal legacy really
+    produces; see their own comments below for WHICH legacy path reaches
+    them, because in both cases the obvious path does not.
     """
     branches: set[str] = set()
 
@@ -3256,6 +3344,18 @@ def _phase4_case_branches(
             if isinstance(leg, Mapping) and leg.get("expiry") is not None
         }
         if len(expiries) > 1:
+            # Legs spanning more than one expiry. NOT reachable through
+            # `Scorer.score`: `put_calendar` (CAL-P) is the only factory in
+            # `STRUCTURES` whose legs carry two different `ExpirySelector`s
+            # (engine/structures.py:881 `first_post_event` front vs :888
+            # `first_dte_at_least` back) -- every other factory resolves ONE
+            # expiry and shares it across legs -- and CAL-P is in
+            # `score_mod.DISABLED_STRATEGIES`, so `Scorer.score` returns at
+            # `resolve_context` with UNVALIDATED_STRUCTURE and never prices
+            # anything. The path that DOES reach it is
+            # `research_replay_pass` -> `engine.replay.replay_one`, the
+            # second real legacy entry point, which §7.1 requires CAL-P to
+            # replay through and which has no scorer short-circuit.
             branches.add("multi_expiry")
 
     if selection_value.get("entry_cost") is not None:
@@ -3285,7 +3385,30 @@ def _phase4_case_branches(
 
     residual_identity = simulation_value.get("residual_population_identity")
     if isinstance(residual_identity, Mapping) and bool(residual_identity.get("fallback_used")):
-        # The residual draw's own recorded fallback flag.
+        # The residual draw's own recorded fallback flag: `ResidualPool.draw`
+        # (engine/pnl_sim.py:297) sets it when the prediction's DECILE bucket
+        # holds fewer than `MIN_POOL` (250) rows and the flat causal pool
+        # stands in. Kept, but it cannot fire on a capturable case: the
+        # buckets are equal-count by construction, so it needs a causal pool
+        # under ~2,500 rows, while the pool this capture draws against runs
+        # 59,543 rows at a 2023 cutoff and 85,277 at a 2026 one, and the
+        # oldest event the capture can even reach is `as_of - 2500 days`
+        # (`_boundary_candidates`), bounded further by chain availability.
+        # That arm is covered by `tests/test_pnl_sim_evidence.py` against the
+        # real `ResidualPool`, not by the corpus.
+        branches.add("fallback")
+
+    if gate_inputs_value.get("kind") == "entry_rule":
+        # The gate's own fallback, recorded per row in this case's OWN
+        # `gate_inputs` group. `Scorer._score_gate` (engine/score.py) asks
+        # the registry for a gate model first and only calls
+        # `_apply_entry_rule` when there is none: "Reached only when the
+        # registry has no gate for the strategy, so a promoted model always
+        # wins: the rule is the floor, never an override." So `kind` is the
+        # literal record of WHICH mechanism gated this row -- `"model"` when
+        # the registered champion did, `"entry_rule"` when the arithmetic
+        # rule stood in for an absent one. Both arms occur in the captured
+        # corpus, so this is a real discriminating signal and not a constant.
         branches.add("fallback")
 
     record = cand.get("record") or {}
@@ -3477,7 +3600,8 @@ def _phase4_case_document(
         cand, request,
         checkpoints_out.get("features", {}).get("value", {}),
         checkpoints_out.get("selection_pricing", {}).get("value", {}),
-        checkpoints_out.get("simulation", {}).get("value", {}), raw_checkpoint,
+        checkpoints_out.get("simulation", {}).get("value", {}),
+        checkpoints_out.get("gate_inputs", {}).get("value", {}), raw_checkpoint,
         missing_inputs_signal=(executable_inputs == "missing" or not have_all_required),
     ))
     if dyn_sv_present and strategy != score_mod.DYNAMIC_STRATEGY:
@@ -3506,9 +3630,55 @@ def _phase4_case_document(
     return body, have_all_required
 
 
+def tie_audit(candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Did ``dynamic_short_vol``'s tie path execute? Checked, not assumed.
+
+    The chooser's tie applies at the CHOICE level -- winner versus
+    runner-up across an event's menu -- and `dynamic_short_vol` already
+    publishes exactly that comparison on the chosen row it returns:
+    ``chosen_margin = float(best[key]) - float(runner[key])`` (see
+    ``engine/score.py``), ``None`` when there was no runner-up at all.
+    ``dyn_sv_pass`` keeps that row verbatim as the choice candidate's
+    ``record``, so the evidence needed to settle "did a tie occur" is
+    already in the corpus today; no extra trace has to be attached to the
+    summary candidate to read it.
+
+    Returned: ``examined`` (choices that had a runner-up, so the tie path
+    was reachable for them), ``exercised`` (choices whose margin was
+    exactly 0.0 -- the tie path really ran) and ``closest`` (the smallest
+    absolute margin seen, the margin of safety behind the claim).
+
+    Why this exists instead of a required ``ties`` branch: the ranking key
+    is continuous, and if NEITHER implementation ever ties then the
+    tie-breaking code never executes on either side and cannot produce a
+    divergence. Requiring a captured tie asks for proof that a path nobody
+    took was taken identically. The condition is checkable, though, so it
+    is asserted rather than assumed -- and an explicit audit separates
+    "verified absent" from "never looked", which a missing branch label
+    cannot.
+    """
+    margins: list[float] = []
+    exercised = 0
+    for cand in candidates:
+        if cand.get("kind") != "dyn_sv_choice":
+            continue
+        margin = (cand.get("record") or {}).get("chosen_margin")
+        if not isinstance(margin, (int, float)) or isinstance(margin, bool):
+            continue  # None: no runner-up, so no tie was possible to break
+        margins.append(abs(float(margin)))
+        if float(margin) == 0.0:
+            exercised += 1
+    return {
+        "examined": len(margins),
+        "exercised": exercised,
+        "closest": min(margins) if margins else None,
+    }
+
+
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
           as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False,
-          strict_trace: bool = False) -> dict:
+          strict_trace: bool = False,
+          tie_audit_result: Mapping[str, Any] | None = None) -> dict:
     """Publish one immutable version directory, atomically.
 
     The version is built under a temporary sibling and published with one
@@ -3712,6 +3882,14 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         "source_snapshot": snapshot,
         "coverage": doc["coverage"],
         "status": "diagnostic_only",
+        # The negative assertion the `ties` branch used to demand as a
+        # positive (see `tie_audit`). Computed over the FULL candidate
+        # population when `main()` supplies it, and over the retained
+        # subset otherwise -- either way `examined` states how many
+        # choices stand behind the claim, so it can never read as an
+        # assertion from zero.
+        "tie_audit": dict(tie_audit_result) if tie_audit_result is not None
+        else tie_audit(chosen),
     })
     doc["diagnostic_checkpoint_manifest"] = "checkpoints/manifest.json"
     (tmp / "INDEX.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
@@ -3724,7 +3902,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
 def _gather_candidates(
     scorer, as_of: pd.Timestamp, args: argparse.Namespace,
     strategies: tuple[str, ...] | None,
-) -> tuple[list[dict], dict[str, list[str]], str]:
+) -> tuple[list[dict], dict[str, list[str]], str, dict[str, Any]]:
     """Score every pass and return the covering subset ``select()`` keeps.
 
     Everything built here -- ``forward``/``boundaries`` (the candidate
@@ -3784,6 +3962,10 @@ def _gather_candidates(
     print(f"[corpus] candidates: {len(candidates)}", flush=True)
 
     chosen, index = select(candidates)
+    # Audited over the WHOLE candidate population, before `select()` drops
+    # any of it: the claim is about every choice legacy made in this
+    # capture, not only the few choices the covering subset retained.
+    audit = tie_audit(candidates)
     # Only `chosen` -- `select()`'s small covering subset, never
     # `candidates` itself -- needs its real `legacy_trace` content back;
     # everything from here on (`attach_strict_probe`, `write`) reads it
@@ -3795,7 +3977,7 @@ def _gather_candidates(
             trace = _hydrate_trace(holder.get("legacy_trace"))
             _reconcile_shared_trace_content(trace, _shared_hydration_cache)
             holder["legacy_trace"] = trace
-    return chosen, index, scorer.snapshot
+    return chosen, index, scorer.snapshot, audit
 
 
 def _dump_selected(path: Path, chosen: list[dict], index: dict[str, list[str]],
@@ -3860,7 +4042,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     # holding it in `candidates` for the rest of this function; the `finally`
     # below removes that spill directory whether the run finishes or raises.
     try:
-        chosen, index, snapshot = _gather_candidates(scorer, as_of, args, strategies)
+        chosen, index, snapshot, audit = _gather_candidates(
+            scorer, as_of, args, strategies)
         dump_path = os.environ.get("CAPTURE_DUMP_SELECTED")
         if dump_path:
             _dump_selected(Path(dump_path), chosen, index, as_of, snapshot)
@@ -3886,6 +4069,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             out_dir, chosen, index, as_of, snapshot,
             replace_existing=args.replace,
             strict_trace=args.strict_phase4_trace,
+            tie_audit_result=audit,
         )
     finally:
         _cleanup_trace_spill()

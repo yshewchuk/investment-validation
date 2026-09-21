@@ -7,6 +7,7 @@ import json
 import pytest
 
 from checks.phase4_checkpoints import (
+    ASSERTED_UNEXERCISED_BRANCHES,
     REQUIRED_BRANCHES,
     SCHEMA_VERSION,
     CheckpointError,
@@ -90,7 +91,13 @@ def _bundle(tmp_path, document=None):
     bundle = {
         "schema_version": SCHEMA_VERSION,
         "release_id": "phase4-test-release",
-        "metadata": {"status": "diagnostic_only"},
+        "metadata": {
+            "status": "diagnostic_only",
+            # `ties` is asserted ABSENT with evidence rather than required
+            # as a captured instance (see ASSERTED_UNEXERCISED_BRANCHES):
+            # 12 choices had a runner-up, none tied, closest margin 0.017.
+            "tie_audit": {"examined": 12, "exercised": 0, "closest": 0.017},
+        },
         "resources": [{
             "resource_id": "models",
             "path": "models.json",
@@ -258,7 +265,7 @@ def test_compared_case_still_requires_all_four_groups_even_with_first_gap(tmp_pa
 
 def test_incomplete_declared_coverage_is_rejected(tmp_path):
     bundle = _bundle(tmp_path)
-    bundle["coverage"]["branches"].pop("ties")
+    bundle["coverage"]["branches"].pop("multi_expiry")
     _resign_bundle(bundle)
     with pytest.raises(CheckpointError, match="incomplete critical branches"):
         validate_bundle(bundle, tmp_path)
@@ -292,3 +299,70 @@ def test_load_bundle_rejects_malformed_json(tmp_path):
     path.write_text("{not-json", encoding="utf-8")
     with pytest.raises(CheckpointError, match="invalid JSON"):
         load_bundle(path)
+
+
+# --------------------------------------------------------------------------
+# ties: asserted absent, with evidence (user decision, 2026-09-21)
+# --------------------------------------------------------------------------
+
+
+def test_ties_is_asserted_absent_and_is_not_a_required_branch():
+    """The contract moved from "show me a tie" to "prove none happened".
+
+    Without this the two constants could drift back together and `ties`
+    would silently become a coverage requirement again -- the incoherent
+    demand this decision removed (a path neither implementation takes
+    cannot diverge).
+    """
+    assert "ties" not in REQUIRED_BRANCHES
+    assert "ties" in ASSERTED_UNEXERCISED_BRANCHES
+    assert not (REQUIRED_BRANCHES & ASSERTED_UNEXERCISED_BRANCHES)
+
+
+def test_a_bundle_without_a_tie_audit_is_rejected(tmp_path):
+    """An unmentioned tie is ambiguous between "none happened", "one
+    happened and was not recorded" and "nobody looked". Dropping `ties`
+    from the required set without this check would accept all three."""
+    bundle = _bundle(tmp_path)
+    del bundle["metadata"]["tie_audit"]
+    _resign_bundle(bundle)
+    with pytest.raises(CheckpointError, match="tie_audit"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_a_tie_audit_that_examined_nothing_is_rejected(tmp_path):
+    """`examined == 0` is an assertion from zero observations -- exactly
+    the absence-of-evidence move the audit exists to stop."""
+    bundle = _bundle(tmp_path)
+    bundle["metadata"]["tie_audit"] = {
+        "examined": 0, "exercised": 0, "closest": None,
+    }
+    _resign_bundle(bundle)
+    with pytest.raises(CheckpointError, match="absence of evidence"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_a_tie_that_really_happened_must_be_covered_by_a_case(tmp_path):
+    """If the tie path DOES start executing (a score discretised or
+    rounded upstream), the audit must fail loudly rather than pass with a
+    nonzero count nobody captured."""
+    bundle = _bundle(tmp_path)
+    bundle["metadata"]["tie_audit"] = {
+        "examined": 12, "exercised": 1, "closest": 0.0,
+    }
+    _resign_bundle(bundle)
+    with pytest.raises(CheckpointError, match="no case covers it"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_a_zero_margin_the_audit_did_not_count_is_rejected(tmp_path):
+    """`closest == 0.0` with `exercised == 0` is self-contradictory: a
+    zero margin IS a tie. Without this the producer could report the
+    margin honestly and the count wrongly and still pass."""
+    bundle = _bundle(tmp_path)
+    bundle["metadata"]["tie_audit"] = {
+        "examined": 12, "exercised": 0, "closest": 0.0,
+    }
+    _resign_bundle(bundle)
+    with pytest.raises(CheckpointError, match="did not count"):
+        validate_bundle(bundle, tmp_path)

@@ -74,11 +74,15 @@ def test_gather_candidates_drops_the_scorer_before_returning(monkeypatch):
                  "request": {}, "record": {}, "duration": 0.1}]
     _install_empty_pipeline(monkeypatch, chosen_in)
 
-    chosen, index, snapshot = capture._gather_candidates(
+    chosen, index, snapshot, audit = capture._gather_candidates(
         scorer, pd.Timestamp("2026-01-01"), _args(), None,
     )
 
     assert snapshot == "snapshot-1"
+    # The tie audit rides back with the selection: it is computed over the
+    # FULL candidate population, before `select()` drops any of it, so it
+    # cannot be recovered from `chosen` afterwards.
+    assert audit == {"examined": 0, "exercised": 0, "closest": None}
     assert chosen == chosen_in
     del scorer
     gc.collect()

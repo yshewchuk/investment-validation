@@ -22,9 +22,41 @@ SCHEMA_VERSION = "phase4_diagnostic_checkpoints.v1.0"
 _SAFE_CASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 REQUIRED_BRANCHES = frozenset((
     "pre_expiry", "multi_expiry", "debit_credit", "missing_inputs",
-    "overrides", "ties", "fallback",
+    "overrides", "fallback",
     "frozen_inference_canonical_application",
 ))
+
+#: ``ties`` is NOT in ``REQUIRED_BRANCHES`` and was not dropped: it moved
+#: from "show me an instance" to "assert, with evidence, that no instance
+#: occurred" (user, 2026-09-21).
+#:
+#: The argument: if neither legacy nor native ever ties, the tie-breaking
+#: code never executes on either side, so it cannot produce a divergence
+#: and parity is unaffected. Requiring a captured tie asks for proof that
+#: a path neither implementation took was taken identically. The chooser's
+#: ranking key is continuous (``chooser_score``, else ``exp_pnl_sim``), and
+#: decision 2026-09-12 already recorded that no genuine tie exists in the
+#: store or the prediction ledger and that the corpus may not invent one.
+#:
+#: But absence of a branch label is ambiguous between "no tie occurred",
+#: "a tie occurred and was not recorded" and "the choice level was never
+#: examined", and only the first supports the argument. So the bundle must
+#: carry ``metadata.tie_audit`` -- how many choices had a runner-up, how
+#: many tied, and the smallest margin seen -- and this check fails if that
+#: audit is missing, examined nothing, or reports a tie that no case
+#: covers. A future run in which scores become discretised or rounded
+#: upstream fails loudly here instead of quietly passing.
+#:
+#: The tie RULE itself (input-row order breaks a tie, on both ranking
+#: paths) is guarded by the exported frozen definition and by
+#: ``tests/test_baseline_export.py::
+#: test_the_exported_tie_rule_is_the_measured_behaviour``, which runs the
+#: real ``dynamic_short_vol`` over deliberately tied rows in both orders.
+ASSERTED_UNEXERCISED_BRANCHES = frozenset(("ties",))
+
+#: What ``metadata.tie_audit`` must carry. ``examined`` is the guard
+#: against asserting a negative from zero observations.
+_TIE_AUDIT_FIELDS = frozenset(("examined", "exercised", "closest"))
 REQUIRED_CHECKPOINT_GROUPS = frozenset((
     "features", "selection_pricing", "simulation", "gate_inputs",
 ))
@@ -270,6 +302,44 @@ def _case(row: Any, index: int, resource_ids: set[str]) -> tuple[str, str, set[s
     return case_id, strategy, set(branches)
 
 
+def _tie_audit(metadata: Any, branch_cases: Mapping[str, set[str]]) -> None:
+    """``ties`` asserted absent WITH evidence, never merely unmentioned.
+
+    Three different situations produce no ``ties`` label -- no tie
+    occurred, a tie occurred and went unrecorded, or the choice level was
+    never examined -- and only the first supports leaving the branch
+    uncovered (see ``ASSERTED_UNEXERCISED_BRANCHES``). This refuses the
+    other two.
+    """
+    label = "bundle.metadata.tie_audit"
+    if not isinstance(metadata, Mapping):
+        _fail("bundle.metadata", "expected object carrying the tie audit")
+    audit = metadata.get("tie_audit")
+    if not isinstance(audit, Mapping) or set(audit) != _TIE_AUDIT_FIELDS:
+        _fail(label, "expected examined, exercised and closest")
+    examined = audit["examined"]
+    exercised = audit["exercised"]
+    for name, value in (("examined", examined), ("exercised", exercised)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            _fail(label + "." + name, "expected a non-negative count")
+    if examined < 1:
+        _fail(label + ".examined", "no choice was examined: absence of evidence")
+    if exercised > examined:
+        _fail(label + ".exercised", "more ties than choices examined")
+    closest = audit["closest"]
+    if closest is not None and (
+        not isinstance(closest, (int, float)) or isinstance(closest, bool) or closest < 0
+    ):
+        _fail(label + ".closest", "expected a non-negative margin or null")
+    covered = {branch for branch in ASSERTED_UNEXERCISED_BRANCHES if branch in branch_cases}
+    if exercised and not covered:
+        _fail(label + ".exercised", "a tie was exercised but no case covers it")
+    if covered and not exercised:
+        _fail(label + ".exercised", "a case covers a tie the audit says never happened")
+    if exercised == 0 and closest == 0:
+        _fail(label + ".closest", "a zero margin is a tie the audit did not count")
+
+
 def validate_bundle(bundle: Any, release_root: Path) -> dict[str, Any]:
     """Validate release resources, cases, coverage, and content hashes."""
     expected = {
@@ -308,6 +378,7 @@ def validate_bundle(bundle: Any, release_root: Path) -> dict[str, Any]:
         _fail("bundle.coverage.strategies", "expected nonempty object")
     if not isinstance(branches, Mapping) or set(branches) != REQUIRED_BRANCHES:
         _fail("bundle.coverage.branches", "incomplete critical branches")
+    _tie_audit(bundle.get("metadata"), branch_cases)
     for strategy, ids in strategies.items():
         _string(strategy, "bundle.coverage.strategies key")
         if not isinstance(ids, list) or not ids or set(ids) != strategy_cases.get(strategy, set()):
