@@ -110,6 +110,29 @@ def test_frozen_inference_path_does_not_call_legacy_backend():
     assert record.readiness == "refused"
 
 
+def test_frozen_inference_with_zero_requests_does_not_crash():
+    """Regression (phase4 fixtures 002/016, 2026-09-21): when EVERY binding's
+    feature row is non-finite, `_feature_rows` omits all of them -- an empty
+    `inference_request` -- and `results` inside `score_frozen` is then an
+    empty tuple. That must still score (no frozen output, not a hard
+    refusal), not raise IndexError from indexing `results[0]`."""
+    class Frozen:
+        def infer(self, release, inference_request):
+            raise AssertionError("infer must not be called with zero requests")
+
+    raw = {"ticker": "AAA", "event_date": "2026-09-16", "spot": 100.0,
+           "entry_cost": 5.0, "implied_move": 6.0, "driver_name": "abs_move",
+           "legs": [], "flags": [], "model_inputs": {}, "payoff": {}, "fill": 0.5}
+    record = application.score_frozen(
+        request(), Frozen(), object(), (),
+        {"_native_inputs": NativeScoreInputs.from_legacy_fields(raw)},
+    )
+    assert record.readiness in ("refused", "ready")
+    assert record.resolved_request["native_source_ref"].startswith(
+        f"frozen:{request().deployment_id}:"
+    )
+
+
 def test_frozen_path_refuses_legacy_answer_fields_without_native_inputs():
     """The acceptance/frozen path must not fall back to reconstructing
     NativeScoreInputs from caller-supplied legacy answer fields; it must

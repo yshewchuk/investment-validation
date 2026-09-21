@@ -505,9 +505,13 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
     forecast.update({
         "frozen_outputs": outputs,
         "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
-        "binding_id": bindings[0].binding_id,
+        # `bindings`/`results` are empty together whenever every binding's
+        # feature row was non-finite and omitted (see the matching note on
+        # `release_id` in `_frozen_native_inputs`) -- indexing `[0]`
+        # unconditionally raised IndexError before this fix.
+        "binding_id": bindings[0].binding_id if bindings else None,
         "binding_ids": tuple(binding.binding_id for binding in bindings),
-        "model_id": getattr(results[0], "model_id", None),
+        "model_id": getattr(results[0], "model_id", None) if results else None,
         "required_roles": tuple(dict.fromkeys(required_roles)),
     })
     if inference is not None:
@@ -567,6 +571,18 @@ def _frozen_gate_inputs(base, bindings, gate_result,
     return _without_runup_derived(gate)
 
 
+def _frozen_release_id(results, release, request) -> str:
+    """`release_id` for `source_ref`. `results` is empty whenever every
+    binding's feature row came back non-finite and was omitted by
+    `_feature_rows` (documented, deliberate: the row still scores with no
+    frozen output, not excluded) -- `results[0]` on that empty tuple raised
+    IndexError before this fix. Falls back to `release` the same way the
+    per-result `release_ids` fallback below already does."""
+    if results:
+        return getattr(results[0], "release_id", request.deployment_id)
+    return getattr(release, "release_id", request.deployment_id)
+
+
 def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
                           inference_requests, request, release,
                           inference=None) -> NativeScoreInputs:
@@ -618,7 +634,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
         _collect_frozen_results(results, bindings, inference_requests, days)
     )
     context.update(result_state)
-    release_id = getattr(results[0], "release_id", request.deployment_id)
+    release_id = _frozen_release_id(results, release, request)
     binding_ids = tuple(binding.binding_id for binding in bindings)
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
     forecast = _frozen_forecast_inputs(
