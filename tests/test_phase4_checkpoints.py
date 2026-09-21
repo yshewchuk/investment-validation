@@ -267,7 +267,36 @@ def test_incomplete_declared_coverage_is_rejected(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["coverage"]["branches"].pop("multi_expiry")
     _resign_bundle(bundle)
-    with pytest.raises(CheckpointError, match="incomplete critical branches"):
+    with pytest.raises(CheckpointError, match="missing required"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_bundle_coverage_may_carry_a_known_extra_branch_dyn_sv(tmp_path):
+    branches = sorted(REQUIRED_BRANCHES) + ["dyn_sv"]
+    document = _case("case-1", branches)
+    document["checkpoints"]["dyn_sv"] = _hashed({"eligibility": {}, "ranking": {}})
+    _resign_case(document)
+    bundle = _bundle(tmp_path, document=document)
+    bundle["coverage"]["branches"]["dyn_sv"] = ["case-1"]
+    _resign_bundle(bundle)
+    verified = validate_bundle(bundle, tmp_path)
+    assert "dyn_sv" in verified["branches"]
+    assert set(verified["branches"]) >= REQUIRED_BRANCHES
+
+
+def test_bundle_coverage_with_an_unrecognised_branch_label_is_rejected(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["coverage"]["branches"]["totally_made_up"] = ["case-1"]
+    _resign_bundle(bundle)
+    with pytest.raises(CheckpointError, match="unexpected"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_bundle_coverage_still_requires_every_required_branch(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["coverage"]["branches"].pop("overrides")
+    _resign_bundle(bundle)
+    with pytest.raises(CheckpointError, match="missing required"):
         validate_bundle(bundle, tmp_path)
 
 
