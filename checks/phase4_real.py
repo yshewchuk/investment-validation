@@ -2603,205 +2603,240 @@ def _report_is_complete(text: str, evidence: dict) -> bool:
     return True
 
 
+class _Stage:
+    """Print start/end markers with elapsed seconds for a coarse phase4_real.py stage."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __enter__(self):
+        self._started = time.perf_counter()
+        print(f"[phase4_real] START {self.name}")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = time.perf_counter() - self._started
+        status = "FAILED" if exc_type else "END"
+        print(f"[phase4_real] {status} {self.name} ({elapsed:.1f}s)")
+        return False
+
+
 def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     started = time.perf_counter()
-    resolved = resolve_corpus(corpus_root)
-    # `run_corpus` runs (and, per 958388f, fully releases its OWN internal
-    # `Corpus`) BEFORE this frame's persistent `corpus = load(...)` local is
-    # created. Reversed, the two full corpora were resident at once for the
-    # whole `run_corpus` call: `corpus` was already bound to a local here,
-    # on top of the independent `load(corpus_root)` `checks.tier0_corpus.run`
-    # -> `_run` -> `_run_loaded` performs internally to verify the round
-    # trip. Measured on the real 3.2 GB corpus: climbs past an 8.5 GB cap
-    # and, raised to 9.5 GB, past that too with active swapping -- still
-    # rising when killed. Neither call needs the other's result, so this
-    # ordering changes nothing about what either one verifies.
-    corpus_verdict, _ = run_corpus(resolved)
-    corpus = load(resolved)
-    registry = default_registry()
-    feature_registry = default_feature_registry()
-    application_controls = _application_controls()
-    frozen_model_stage = _frozen_model_control(_request())
-    completion_controls = _completion_controls(application_controls)
-    completion_controls.update(_chooser_controls())
-    numerical_independence = _numerical_independence_control()
-    factory_structure_controls = _factory_structure_controls()
-    simulation_acceptance = _simulation_acceptance_controls()
-    saved_release_comparison, native_parity = _native_parity(corpus)
-    factory_parity = _factory_parity(corpus)
-    completion_controls.update({
-        "str_thru_stage_parity": application_controls["direct_batch_equal"],
-        "all_factory_geometry_expiry_fill_parity": factory_parity["complete"],
-        **factory_structure_controls,
-        "native_outputs_independently_recomputed":
-            numerical_independence["independent_recomputation"],
-        "native_analogs_independently_recomputed":
-            numerical_independence["analog_independent_recomputation"],
-        "analog_corruption_rejected":
-            numerical_independence["analog_planted_defects_rejected"],
-        "simulation_expiry_parity": simulation_acceptance["expiry_parity"],
-        "simulation_pre_expiry_parity": simulation_acceptance["pre_expiry_parity"],
-        "simulation_material_time_value": simulation_acceptance["material_time_value"],
-        "simulation_fill_propagation": simulation_acceptance["fill_propagation"],
-        "executable_recipe_binding": simulation_acceptance["executable_recipe_binding"],
-        "strict_gate_semantics": simulation_acceptance["strict_gate_semantics"],
-        "preservation_only_detected":
-            numerical_independence["preservation_only_detected"],
-        "preservation_only_rejected":
-            numerical_independence["preservation_only_rejected"],
-        "native_stage_comparator_planted_defect": native_parity["planted_defect"]["detected"],
-        "numeric_forecast_corruption_rejected": native_parity["planted_defect"]["controls"]["forecasts"],
-        "simulation_corruption_rejected": native_parity["planted_defect"]["controls"]["simulation"],
-        "financial_diagnostic_corruption_rejected": native_parity["planted_defect"]["controls"]["financial_diagnostics"],
-        "factory_geometry_corruption_rejected": factory_parity["negative_controls"]["geometry"],
-        "factory_expiry_corruption_rejected": factory_parity["negative_controls"]["expiry"],
-        "factory_fill_corruption_rejected": factory_parity["negative_controls"]["fill"],
-        # Honest definition: True only if EVERY declared-population record was
-        # actually run through a record-by-record saved-release comparison
-        # (expected == supported == compared, all agreed, every comparison
-        # dimension agreeing, same-input hashes verified, all required stages
-        # covered) -- exactly what `saved_release_comparison["complete"]`
-        # (_native_parity's `release` return value) measures. It is NOT the
-        # champion-artifact hash check; that lives under its own honest name
-        # below.
-        "full_saved_release_compared": saved_release_comparison["complete"],
-        "champion_artifacts_verified": _champion_artifacts_verified(),
-        # Not in `final_controls`: a real bundle's absence must not become a
-        # new gating requirement. Only surfaces a DECLARED bundle's own
-        # verification failure.
-        "diagnostic_checkpoint_bundle_valid": _diagnostic_checkpoint_control(corpus),
-        "batch_resources_measured": application_controls["batch_resource_profile"],
-    })
-    completion_controls.update({
-        "saved_release_comparison_complete": saved_release_comparison["complete"],
-        "native_parity_complete": native_parity["complete"],
-    })
-    kinds = sorted({pair["payload"].get("record_kind") for pair in corpus.pairs.values()})
-    covered_strategies = sorted({
-        pair["payload"]["record"].get("strategy")
-        for pair in corpus.pairs.values()
-        if pair["payload"].get("record_kind") != "dyn_sv_resolution"
-    })
-    stage_ids = (
-        "resolve_context", "features", "forecast", "geometry", "pricing",
-        "analogs", "simulation", "gate", "chooser", "serialization",
-    )
-    subjects = {
-        "P4-01": {"status": "PASS", "controls": {
-            "corpus_round_trip": corpus_verdict.verdict == "agree",
-            "identity_controls": all(application_controls.values()),
-            "stage_plan_registered": bool(stage_ids),
-        }},
-        "P4-02": {"status": "PASS", "controls": {
-            "eleven_factories": len(STRATEGY_IDS) == 11,
-            "dynamic_menu_order": registry.strategy("DYN-SV").structure_parameters["menu"] == DYNAMIC_MENU,
-            "deployment_pins_roles": len(registry.deployment("legacy-phase4-deployment.v1").model_role_bindings) == 7,
-        }},
-        "P4-03": {"status": "PASS", "controls": {
-            "separate_context_scopes": {r.source_scope for r in feature_registry.recipes} == {"event", "analog", "calibration"},
-            "named_analog_recipe": feature_registry.get("legacy.bucket_analogs.v1").history_scope == "complete historical replay population",
-            "zero_null_distinction": application_controls["zero_is_not_missing"],
-        }},
-        "P4-04": {"status": "FOUNDATION_PASS", "controls": {
-            "str_thru_corpus_present": "STR-THRU" in covered_strategies,
-            "shared_kernel": application_controls["direct_batch_equal"],
-            "numeric_forecast_parity": native_parity["dimension_agreement"]["forecasts"],
+    with _Stage("corpus_resolve"):
+        resolved = resolve_corpus(corpus_root)
+    with _Stage("corpus_load"):
+        # `run_corpus` runs (and, per 958388f, fully releases its OWN internal
+        # `Corpus`) BEFORE this frame's persistent `corpus = load(...)` local is
+        # created. Reversed, the two full corpora were resident at once for the
+        # whole `run_corpus` call: `corpus` was already bound to a local here,
+        # on top of the independent `load(corpus_root)` `checks.tier0_corpus.run`
+        # -> `_run` -> `_run_loaded` performs internally to verify the round
+        # trip. Measured on the real 3.2 GB corpus: climbs past an 8.5 GB cap
+        # and, raised to 9.5 GB, past that too with active swapping -- still
+        # rising when killed. Neither call needs the other's result, so this
+        # ordering changes nothing about what either one verifies.
+        corpus_verdict, _ = run_corpus(resolved)
+        corpus = load(resolved)
+    with _Stage("registry_load"):
+        registry = default_registry()
+        feature_registry = default_feature_registry()
+    with _Stage("application_controls"):
+        application_controls = _application_controls()
+    with _Stage("frozen_model_control"):
+        frozen_model_stage = _frozen_model_control(_request())
+    with _Stage("completion_controls_init"):
+        completion_controls = _completion_controls(application_controls)
+        completion_controls.update(_chooser_controls())
+    with _Stage("numerical_independence"):
+        numerical_independence = _numerical_independence_control()
+    with _Stage("factory_structure_controls"):
+        factory_structure_controls = _factory_structure_controls()
+    with _Stage("simulation_acceptance"):
+        simulation_acceptance = _simulation_acceptance_controls()
+    with _Stage("native_parity"):
+        saved_release_comparison, native_parity = _native_parity(corpus)
+    with _Stage("factory_parity"):
+        factory_parity = _factory_parity(corpus)
+    with _Stage("completion_controls_update"):
+        completion_controls.update({
+            "str_thru_stage_parity": application_controls["direct_batch_equal"],
+            "all_factory_geometry_expiry_fill_parity": factory_parity["complete"],
+            **factory_structure_controls,
             "native_outputs_independently_recomputed":
                 numerical_independence["independent_recomputation"],
             "native_analogs_independently_recomputed":
                 numerical_independence["analog_independent_recomputation"],
-            "expiry_simulation_parity": simulation_acceptance["expiry_parity"],
-            "pre_expiry_simulation_parity": simulation_acceptance["pre_expiry_parity"],
-            "material_time_value": simulation_acceptance["material_time_value"],
-            "fill_propagation": simulation_acceptance["fill_propagation"],
+            "analog_corruption_rejected":
+                numerical_independence["analog_planted_defects_rejected"],
+            "simulation_expiry_parity": simulation_acceptance["expiry_parity"],
+            "simulation_pre_expiry_parity": simulation_acceptance["pre_expiry_parity"],
+            "simulation_material_time_value": simulation_acceptance["material_time_value"],
+            "simulation_fill_propagation": simulation_acceptance["fill_propagation"],
+            "executable_recipe_binding": simulation_acceptance["executable_recipe_binding"],
             "strict_gate_semantics": simulation_acceptance["strict_gate_semantics"],
-        }},
-        "P4-05": {"status": "PASS", "controls": {
-            "all_factory_rows_in_corpus": set(covered_strategies) >= set(STRATEGY_IDS),
-            "refusal_rows_present": {"CAL-P", "CND-P"}.issubset(set(covered_strategies)),
-            "geometry_expiry_fill_parity": factory_parity["complete"],
-        }},
-        "P4-06": {"status": "FOUNDATION_PASS", "controls": {
-            "chooser_corpus_present": "dyn_sv_choice" in kinds,
-            "complete_menu_registered": len(DYNAMIC_MENU) == 7,
-        }},
-        "P4-07": {"status": "FOUNDATION_PASS", "controls": {
-            "financial_values_owned": application_controls["financial_values_owned"],
-            "simulation_parity": native_parity["dimension_agreement"]["simulation"],
-            "independent_simulation_parity": (
-                simulation_acceptance["expiry_parity"]
-                and simulation_acceptance["pre_expiry_parity"]
-            ),
-            "financial_diagnostic_parity": native_parity["dimension_agreement"]["financial_diagnostics"],
-            "terminal_and_planned_exit_labels": completion_controls["planned_exit_valuation_parity"],
-        }},
-        "P4-08": {"status": "FOUNDATION_PASS", "controls": {
-            "single_batch_equal": application_controls["direct_batch_equal"],
-            "replay_identity_pinned": application_controls["operational_time_excluded"],
-            "executable_recipe_binding":
-                simulation_acceptance["executable_recipe_binding"],
-        }},
-        "P4-09": {"status": "PASS", "controls": {
-            "no_training_import": all("engine.v2.models.training" not in path.read_text()
-                                      for path in Path("engine/v2/scoring").glob("*.py")),
-            "no_experiment_import": all("experiments" not in path.read_text()
-                                        for path in Path("engine/v2/scoring").glob("*.py")),
-        }},
-    }
-    final_controls = (
-        "full_saved_release_compared", "batch_resources_measured",
-        "saved_release_comparison_complete", "native_parity_complete",
-        "numeric_forecast_corruption_rejected", "simulation_corruption_rejected",
-        "financial_diagnostic_corruption_rejected",
-        "factory_geometry_corruption_rejected", "factory_expiry_corruption_rejected",
-        "factory_fill_corruption_rejected",
-        "native_outputs_independently_recomputed", "preservation_only_rejected",
-        "native_analogs_independently_recomputed", "analog_corruption_rejected",
-        "simulation_expiry_parity", "simulation_pre_expiry_parity",
-        "simulation_material_time_value", "simulation_fill_propagation",
-        "executable_recipe_binding", "strict_gate_semantics",
-    )
-    evidence = {
-        "schema_version": "phase4_acceptance.v1.0",
-        "status": "FOUNDATION_PASS",
-        "evidence_scope": "frozen_real_data_foundation",
-        "corpus_root": str(resolved),
-        "corpus_hash": corpus.index.get("corpus_hash"),
-        "population": saved_release_comparison["population"],
-        "strategy_inventory": {"factories": list(STRATEGY_IDS), "dynamic_menu": list(DYNAMIC_MENU)},
-        "model_roles": sorted(registry.deployment("legacy-phase4-deployment.v1").model_role_bindings),
-        "feature_recipes": [recipe.recipe_id for recipe in feature_registry.recipes],
-        "stage_plan": list(stage_ids),
-        "subjects": subjects,
-        "application_controls": application_controls,
-        "frozen_model_stage": frozen_model_stage,
-        "completion_controls": completion_controls,
-        "saved_release_comparison": saved_release_comparison,
-        "native_parity": native_parity,
-        "factory_parity": factory_parity,
-        "numerical_independence": numerical_independence,
-        "factory_structure_controls": factory_structure_controls,
-        "simulation_acceptance": simulation_acceptance,
-        "phase5_inference_integrated": False,
-        "phase5_handoff_required": True,
-        "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
-        "implementation_hash": content_hash({"strategies": list(STRATEGY_IDS), "recipes": [r.recipe_id for r in feature_registry.recipes], "stages": stage_ids}),
-    }
-    report = _write_phase4_report(evidence, artifact_root)
-    evidence["completion_controls"]["complete_report_written"] = _report_is_complete(
-        report.read_text(), evidence,
-    )
-    if all(evidence["completion_controls"].get(name) is True for name in final_controls + ("complete_report_written",)):
-        evidence["status"] = "PASS"
-        evidence["evidence_scope"] = "native_full_release"
-        evidence["phase5_inference_integrated"] = frozen_model_stage
-        for row in evidence["subjects"].values():
-            if row["status"] == "FOUNDATION_PASS":
-                row["status"] = "PASS"
+            "preservation_only_detected":
+                numerical_independence["preservation_only_detected"],
+            "preservation_only_rejected":
+                numerical_independence["preservation_only_rejected"],
+            "native_stage_comparator_planted_defect": native_parity["planted_defect"]["detected"],
+            "numeric_forecast_corruption_rejected": native_parity["planted_defect"]["controls"]["forecasts"],
+            "simulation_corruption_rejected": native_parity["planted_defect"]["controls"]["simulation"],
+            "financial_diagnostic_corruption_rejected": native_parity["planted_defect"]["controls"]["financial_diagnostics"],
+            "factory_geometry_corruption_rejected": factory_parity["negative_controls"]["geometry"],
+            "factory_expiry_corruption_rejected": factory_parity["negative_controls"]["expiry"],
+            "factory_fill_corruption_rejected": factory_parity["negative_controls"]["fill"],
+            # Honest definition: True only if EVERY declared-population record was
+            # actually run through a record-by-record saved-release comparison
+            # (expected == supported == compared, all agreed, every comparison
+            # dimension agreeing, same-input hashes verified, all required stages
+            # covered) -- exactly what `saved_release_comparison["complete"]`
+            # (_native_parity's `release` return value) measures. It is NOT the
+            # champion-artifact hash check; that lives under its own honest name
+            # below.
+            "full_saved_release_compared": saved_release_comparison["complete"],
+            "champion_artifacts_verified": _champion_artifacts_verified(),
+            # Not in `final_controls`: a real bundle's absence must not become a
+            # new gating requirement. Only surfaces a DECLARED bundle's own
+            # verification failure.
+            "diagnostic_checkpoint_bundle_valid": _diagnostic_checkpoint_control(corpus),
+            "batch_resources_measured": application_controls["batch_resource_profile"],
+        })
+        completion_controls.update({
+            "saved_release_comparison_complete": saved_release_comparison["complete"],
+            "native_parity_complete": native_parity["complete"],
+        })
+    with _Stage("inventory_building"):
+        kinds = sorted({pair["payload"].get("record_kind") for pair in corpus.pairs.values()})
+        covered_strategies = sorted({
+            pair["payload"]["record"].get("strategy")
+            for pair in corpus.pairs.values()
+            if pair["payload"].get("record_kind") != "dyn_sv_resolution"
+        })
+        stage_ids = (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "analogs", "simulation", "gate", "chooser", "serialization",
+        )
+    with _Stage("subjects_building"):
+        subjects = {
+            "P4-01": {"status": "PASS", "controls": {
+                "corpus_round_trip": corpus_verdict.verdict == "agree",
+                "identity_controls": all(application_controls.values()),
+                "stage_plan_registered": bool(stage_ids),
+            }},
+            "P4-02": {"status": "PASS", "controls": {
+                "eleven_factories": len(STRATEGY_IDS) == 11,
+                "dynamic_menu_order": registry.strategy("DYN-SV").structure_parameters["menu"] == DYNAMIC_MENU,
+                "deployment_pins_roles": len(registry.deployment("legacy-phase4-deployment.v1").model_role_bindings) == 7,
+            }},
+            "P4-03": {"status": "PASS", "controls": {
+                "separate_context_scopes": {r.source_scope for r in feature_registry.recipes} == {"event", "analog", "calibration"},
+                "named_analog_recipe": feature_registry.get("legacy.bucket_analogs.v1").history_scope == "complete historical replay population",
+                "zero_null_distinction": application_controls["zero_is_not_missing"],
+            }},
+            "P4-04": {"status": "FOUNDATION_PASS", "controls": {
+                "str_thru_corpus_present": "STR-THRU" in covered_strategies,
+                "shared_kernel": application_controls["direct_batch_equal"],
+                "numeric_forecast_parity": native_parity["dimension_agreement"]["forecasts"],
+                "native_outputs_independently_recomputed":
+                    numerical_independence["independent_recomputation"],
+                "native_analogs_independently_recomputed":
+                    numerical_independence["analog_independent_recomputation"],
+                "expiry_simulation_parity": simulation_acceptance["expiry_parity"],
+                "pre_expiry_simulation_parity": simulation_acceptance["pre_expiry_parity"],
+                "material_time_value": simulation_acceptance["material_time_value"],
+                "fill_propagation": simulation_acceptance["fill_propagation"],
+                "strict_gate_semantics": simulation_acceptance["strict_gate_semantics"],
+            }},
+            "P4-05": {"status": "PASS", "controls": {
+                "all_factory_rows_in_corpus": set(covered_strategies) >= set(STRATEGY_IDS),
+                "refusal_rows_present": {"CAL-P", "CND-P"}.issubset(set(covered_strategies)),
+                "geometry_expiry_fill_parity": factory_parity["complete"],
+            }},
+            "P4-06": {"status": "FOUNDATION_PASS", "controls": {
+                "chooser_corpus_present": "dyn_sv_choice" in kinds,
+                "complete_menu_registered": len(DYNAMIC_MENU) == 7,
+            }},
+            "P4-07": {"status": "FOUNDATION_PASS", "controls": {
+                "financial_values_owned": application_controls["financial_values_owned"],
+                "simulation_parity": native_parity["dimension_agreement"]["simulation"],
+                "independent_simulation_parity": (
+                    simulation_acceptance["expiry_parity"]
+                    and simulation_acceptance["pre_expiry_parity"]
+                ),
+                "financial_diagnostic_parity": native_parity["dimension_agreement"]["financial_diagnostics"],
+                "terminal_and_planned_exit_labels": completion_controls["planned_exit_valuation_parity"],
+            }},
+            "P4-08": {"status": "FOUNDATION_PASS", "controls": {
+                "single_batch_equal": application_controls["direct_batch_equal"],
+                "replay_identity_pinned": application_controls["operational_time_excluded"],
+                "executable_recipe_binding":
+                    simulation_acceptance["executable_recipe_binding"],
+            }},
+            "P4-09": {"status": "PASS", "controls": {
+                "no_training_import": all("engine.v2.models.training" not in path.read_text()
+                                          for path in Path("engine/v2/scoring").glob("*.py")),
+                "no_experiment_import": all("experiments" not in path.read_text()
+                                            for path in Path("engine/v2/scoring").glob("*.py")),
+            }},
+        }
+    with _Stage("evidence_assembly"):
+        final_controls = (
+            "full_saved_release_compared", "batch_resources_measured",
+            "saved_release_comparison_complete", "native_parity_complete",
+            "numeric_forecast_corruption_rejected", "simulation_corruption_rejected",
+            "financial_diagnostic_corruption_rejected",
+            "factory_geometry_corruption_rejected", "factory_expiry_corruption_rejected",
+            "factory_fill_corruption_rejected",
+            "native_outputs_independently_recomputed", "preservation_only_rejected",
+            "native_analogs_independently_recomputed", "analog_corruption_rejected",
+            "simulation_expiry_parity", "simulation_pre_expiry_parity",
+            "simulation_material_time_value", "simulation_fill_propagation",
+            "executable_recipe_binding", "strict_gate_semantics",
+        )
+        evidence = {
+            "schema_version": "phase4_acceptance.v1.0",
+            "status": "FOUNDATION_PASS",
+            "evidence_scope": "frozen_real_data_foundation",
+            "corpus_root": str(resolved),
+            "corpus_hash": corpus.index.get("corpus_hash"),
+            "population": saved_release_comparison["population"],
+            "strategy_inventory": {"factories": list(STRATEGY_IDS), "dynamic_menu": list(DYNAMIC_MENU)},
+            "model_roles": sorted(registry.deployment("legacy-phase4-deployment.v1").model_role_bindings),
+            "feature_recipes": [recipe.recipe_id for recipe in feature_registry.recipes],
+            "stage_plan": list(stage_ids),
+            "subjects": subjects,
+            "application_controls": application_controls,
+            "frozen_model_stage": frozen_model_stage,
+            "completion_controls": completion_controls,
+            "saved_release_comparison": saved_release_comparison,
+            "native_parity": native_parity,
+            "factory_parity": factory_parity,
+            "numerical_independence": numerical_independence,
+            "factory_structure_controls": factory_structure_controls,
+            "simulation_acceptance": simulation_acceptance,
+            "phase5_inference_integrated": False,
+            "phase5_handoff_required": True,
+            "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
+            "implementation_hash": content_hash({"strategies": list(STRATEGY_IDS), "recipes": [r.recipe_id for r in feature_registry.recipes], "stages": stage_ids}),
+        }
+    with _Stage("report_write"):
         report = _write_phase4_report(evidence, artifact_root)
         evidence["completion_controls"]["complete_report_written"] = _report_is_complete(
             report.read_text(), evidence,
         )
+    with _Stage("completion_check_and_write"):
+        if all(evidence["completion_controls"].get(name) is True for name in final_controls + ("complete_report_written",)):
+            evidence["status"] = "PASS"
+            evidence["evidence_scope"] = "native_full_release"
+            evidence["phase5_inference_integrated"] = frozen_model_stage
+            for row in evidence["subjects"].values():
+                if row["status"] == "FOUNDATION_PASS":
+                    row["status"] = "PASS"
+            report = _write_phase4_report(evidence, artifact_root)
+            evidence["completion_controls"]["complete_report_written"] = _report_is_complete(
+                report.read_text(), evidence,
+            )
     return evidence
 
 
