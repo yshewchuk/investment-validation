@@ -3543,8 +3543,18 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     #: now requires all four groups only for `compared` (2026-09-21,
     #: coordinator-authorised); a `refused_as_expected`/`incomparable` case
     #: may be partial PROVIDED it carries `first_gap`, tracked separately
-    #: below so a case this stale (pre-`first_gap`-instrumentation) corpus
-    #: cannot honestly fill is visible, not silently swallowed.
+    #: below so a case whose trace genuinely has no `first_gap` to report is
+    #: visible, not silently swallowed. This is NOT a "predates the
+    #: instrumentation" question -- `Phase4TraceCollector._first_gap` is set
+    #: by `not_reached`, called only for the fixed pipeline-STAGE vocabulary
+    #: (`resolve_context`/.../`chooser`), which is a different list from the
+    #: four checkpoint GROUPS this module requires. A row can run every
+    #: stage to completion (so `not_reached` never fires) while a specific
+    #: `capture_*` call was still skipped by its own narrower guard -- see
+    #: `Phase4TraceCollector.has_checkpoint`'s docstring and its call sites
+    #: in `Scorer.score` (2026-09-21 fix). "Legacy trace predates that
+    #: instrumentation" was this line's own prior guess and was WRONG: every
+    #: trace this module writes was produced by the current code.
     #: `phase4_cases_skipped` is real corruption or an unidentifiable
     #: candidate -- never a fabricated field.
     phase4_cases_compared = 0
@@ -3660,8 +3670,10 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
           "never faked)", flush=True)
     if phase4_cases_partial_without_first_gap:
         print(f"    {len(phase4_cases_partial_without_first_gap)} partial case(s) have no "
-              "first_gap (legacy trace predates that instrumentation) and will FAIL "
-              "checks/phase4_checkpoints.py bundle validation until recaptured:",
+              "first_gap (Scorer.score reached every pipeline stage but skipped a "
+              "required checkpoint group's own capture_* call along the way -- a real "
+              "gap in this fresh trace, not a legacy/pre-instrumentation one) and will "
+              "FAIL checks/phase4_checkpoints.py bundle validation until recaptured:",
               flush=True)
         for fixture_id in phase4_cases_partial_without_first_gap[:5]:
             print(f"    no first_gap: {fixture_id}", flush=True)

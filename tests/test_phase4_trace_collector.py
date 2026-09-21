@@ -1014,6 +1014,38 @@ def test_no_chain_row_records_its_context_and_an_explicitly_empty_lookup(
     assert traced.as_dict() == default.as_dict()
 
 
+def test_no_chain_row_that_runs_every_stage_still_gets_a_first_gap(monkeypatch) -> None:
+    """A capture-side regression for the 2026-09-21 Tier-0 corpus gap: a row
+    can run every named pipeline STAGE to completion -- `_finish_phase4_trace`
+    calls `not_reached` for each of the 9 stage names only if that stage is
+    not already in `collector.stages`, and every one of them IS, because
+    `Scorer.score` traces each stage unconditionally once it reaches that
+    point in its body -- while never calling `capture_selection_pricing`/
+    `capture_gate_inputs`/`capture_simulation` (this scenario's `_score_gate`
+    stub, like the NO_CHAIN row above, never calls any of them). Before the
+    `has_checkpoint` guards this fixes, `_first_gap` stayed `None` and
+    `diagnostic_checkpoint()['disposition']` carried no `first_gap` key at
+    all -- exactly the corpus's own HAIN/LUXE/ACI symptom (checkpoints=
+    ['features','source_inputs'] or similar, first_gap=None), which
+    `checks/phase4_checkpoints.py::_case` then rejects outright."""
+    scorer = _early_scorer(monkeypatch)
+    scorer._score_model = lambda request, result, features: None
+    empty_index = SimpleNamespace(get=lambda ticker, date: None)
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+
+    result = scorer.score(_request(), chain_index=empty_index, trace=collector)
+
+    assert "NO_CHAIN" in result.flags
+    checkpoint = collector.diagnostic_checkpoint()
+    assert set(checkpoint["checkpoints"]) == {"source_inputs"}
+    first_gap = checkpoint["disposition"]["first_gap"]
+    assert first_gap is not None, (
+        "a row with a missing required checkpoint group must explain itself"
+    )
+    assert first_gap["stage"] == "selection_pricing"
+    assert "NO_CHAIN" in first_gap["reason"]
+
+
 def test_row_that_never_reaches_pricing_records_context_and_not_reached(
         monkeypatch) -> None:
     """Gap 012: a NO_FORECAST sizing refusal returns before _price_entry."""
