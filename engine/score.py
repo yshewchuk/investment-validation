@@ -616,7 +616,20 @@ class Phase4TraceCollector:
         exactly, byte for byte.
         """
         causal = evidence.get("causal")
-        query = evidence.get("bucket_query")
+        # ``effective_bucket_query`` is the buckets dict `AnalogMatcher.match`
+        # actually passed to `_summarize`/`_seed` -- causally re-bucketed
+        # (as_of-dependent `implied_tercile`) and still carrying the raw
+        # `implied_ratio` key `_seed` also hashes. `bucket_query` is the
+        # PRE-causal snapshot taken before that re-bucketing; it is the only
+        # one set when there is no `as_of` (non-causal match), which is why
+        # it stays the fallback rather than being dropped. Reading the wrong
+        # one here reproduces legacy's OWN seed formula over the WRONG
+        # buckets object -- same population, same mean, a different
+        # bootstrap draw and therefore a different ci_low/ci_high than the
+        # legacy record this capture is supposed to let native reproduce.
+        query = evidence.get("effective_bucket_query")
+        if not isinstance(query, Mapping):
+            query = evidence.get("bucket_query")
         if not isinstance(causal, Mapping) or not isinstance(query, Mapping):
             return
         raw_rows = causal.get("rows")
@@ -700,11 +713,22 @@ class Phase4TraceCollector:
         buckets = {
             name: query.get(name) for name in legacy_bucket_dimensions
         }
+        # `AnalogMatcher._seed` hashes `sorted(buckets)` over the FULL
+        # buckets object `match()` built via `buckets_for` -- which also
+        # carries the raw `implied_ratio` key alongside the four bucket
+        # labels above. Hashing only `legacy_bucket_dimensions` here (as
+        # `buckets` above does, correctly, for the recipe's
+        # `query_features`, which must contain exactly the bucket
+        # dimensions) drops `implied_ratio` from the payload and produces a
+        # DIFFERENT seed than legacy's own `_seed()` call used -- same
+        # matched population, unrelated bootstrap draw. `query` (now
+        # `effective_bucket_query` when available) is exactly that full
+        # object, so hash it directly rather than `buckets`.
         seed_payload = "|".join(
             [
                 snapshot, strategy, f"{alpha:.4f}", request_key,
             ]
-            + [f"{key}={buckets.get(key)}" for key in sorted(buckets)]
+            + [f"{key}={query.get(key)}" for key in sorted(query)]
         )
         bootstrap_seed = int.from_bytes(
             hashlib.sha256(seed_payload.encode()).digest()[:8], "big",
