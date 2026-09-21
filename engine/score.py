@@ -443,6 +443,16 @@ class Phase4TraceCollector:
         self.stages: dict[str, dict[str, Any]] = {}
         self.status = "pending"
         self.disposition: dict[str, Any] = {"status": "pending", "flags": []}
+        #: The stage and reason `not_reached` recorded FIRST, kept
+        #: regardless of `retain_full_trace` (unlike `self.stages`, whose
+        #: per-stage reason text is only retained when the caller pays for
+        #: full trace retention). A bounded single (str, str) pair, not
+        #: proportional to data size, so it costs nothing to keep always: a
+        #: capture tool needs to know WHY a row stopped early -- disabled
+        #: strategy, superseded structure, no chain -- to write an honest
+        #: disposition instead of treating "stopped before all checkpoints"
+        #: as unexplained.
+        self._first_gap: tuple[str, str] | None = None
         self._checkpoint_groups: dict[str, Any] = {}
         self._source_bundle: dict[str, Any] = {
             "context": {}, "quote_domain": [], "features": {},
@@ -960,6 +970,8 @@ class Phase4TraceCollector:
 
     def not_reached(self, stage: str, reason: str) -> None:
         if stage not in self.stages:
+            if self._first_gap is None:
+                self._first_gap = (stage, str(reason))
             self.record(stage, {}, {"reason": reason}, status="not_reached")
 
     def finish(self, result: "ScoreResult") -> None:
@@ -974,6 +986,17 @@ class Phase4TraceCollector:
             "flags": self._document(result.flags),
             "detail": result.detail,
         }
+        if self._first_gap is not None:
+            # Real, bounded and always retained (see `_first_gap`'s own
+            # comment): the FIRST stage this row never reached, and the
+            # reason recorded there -- "disabled strategy", "superseded
+            # strategy", or whatever `_finish_phase4_trace`/an early return
+            # passed. A capture tool reads this to write an honest
+            # disposition for a row whose checkpoint groups are genuinely
+            # incomplete, instead of treating incompleteness as unexplained.
+            self.disposition["first_gap"] = {
+                "stage": self._first_gap[0], "reason": self._first_gap[1],
+            }
         self.record(
             "serialization",
             {"request": self.request, "stage_names": tuple(self.stages)},

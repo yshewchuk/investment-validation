@@ -27,7 +27,6 @@ import pytest
 import checks.tier0_corpus as t0
 import tools.capture_tier0_corpus as capture
 from engine.v2.foundation.canonical import content_hash
-from tools.phase4_checkpoint_sink import _json_bytes
 
 
 def _shared_pool(rows: int = 40) -> dict:
@@ -164,41 +163,31 @@ def test_write_streams_a_multi_member_chooser_byte_identical(tmp_path) -> None:
         capture._cleanup_trace_spill()
 
 
-def test_write_streams_case_file_byte_identical_for_the_same_chooser(tmp_path) -> None:
-    trace = _chooser_legacy_trace(members=11)
-    request = {"strategy": "dynamic_short_vol", "ticker": "ABC"}
-    record = {"strategy": "dynamic_short_vol", "ticker": "ABC"}
-    candidate = {
-        "fixture_id": "dyn_sv_choice_002",
-        "covers": ["strategy:dynamic_short_vol"],
-        "request": request, "record": record, "kind": "dyn_sv_choice",
-        "duration": 0.2,
-        "legacy_trace": trace,
-    }
-    try:
-        out_dir = tmp_path / "corpus"
-        capture.write(
-            out_dir, [candidate],
-            {"strategy:dynamic_short_vol": ["dyn_sv_choice_002"]},
-            pd.Timestamp("2026-01-01"), "snap-1",
-        )
-
-        _, checkpoint = _rebuild_pair(candidate)
-        oracle_case = {
-            "case_id": "dyn_sv_choice_002",
-            "request": request,
-            "strategy": record.get("strategy"),
-            "covers": ["strategy:dynamic_short_vol"],
-            "record_kind": "dyn_sv_choice",
-            "checkpoint": checkpoint,
-        }
-        oracle_bytes = _json_bytes(oracle_case)
-        written_bytes = (
-            out_dir / "checkpoints" / "cases" / "dyn_sv_choice_002.json"
-        ).read_bytes()
-        assert written_bytes == oracle_bytes
-    finally:
-        capture._cleanup_trace_spill()
+# `test_write_streams_case_file_byte_identical_for_the_same_chooser` and
+# `test_the_case_document_also_references_the_shared_pool` used to live here.
+# Both built their oracle from a fictional "chooser" checkpoint group and the
+# pre-fix `{case_id, request, strategy, covers, record_kind, checkpoint}`
+# shape -- `Phase4TraceCollector` never records a group named "chooser"
+# (`_checkpoint_names` is features/selection_pricing/simulation/gate_inputs/
+# dyn_sv/source_inputs), and `checks/phase4_checkpoints.py` requires the
+# first four of those, present and unpartial, on every case. A candidate
+# whose only checkpoint group is "chooser" is exactly the "real trace
+# present but incomplete" case `_phase4_case_document` now WRITES (2026-09-21:
+# a silently thinner corpus was worse than one that records early refusals
+# honestly) with only the groups it actually reached -- never shaping a
+# fictional group into an invalid one -- see
+# `tools/capture_tier0_corpus.py::_phase4_case_document` and
+# `tests/test_phase4_capture_writer.py`, which wires the real producer to
+# the real `checks/phase4_checkpoints.py` validator on a REAL four-group
+# trace. The streamed-vs-whole-document byte identity these two tests were
+# also checking is covered independently, at the sink level, by
+# `tests/test_phase4_checkpoint_sink.py::test_write_case_streamed_digest_and_bytes_match_the_oracle`.
+# Shared-pool hoisting into `checkpoints/shared` for a CASE's own checkpoint
+# groups is intentionally not something `_phase4_case_document` does: none
+# of the four required groups embeds a large shared object today (the one
+# that did, `simulation.residual_population`, is dropped from the case
+# entirely, not referenced -- see `_SIMULATION_DROPPED_FIELDS`); pair files
+# still hoist shared documents exactly as before, unaffected by this.
 
 
 def test_shared_pool_is_one_object_not_duplicated_after_preparing(tmp_path) -> None:
@@ -298,24 +287,6 @@ def test_a_registered_shared_pool_is_hoisted_and_referenced(tmp_path) -> None:
         # Its expanded recompute matches the source pool -- tag_nonfinite'd,
         # since that is the JSON-safe form a real file round-trips through.
         assert first == capture.tag_nonfinite(pool)
-    finally:
-        capture._cleanup_trace_spill()
-
-
-def test_the_case_document_also_references_the_shared_pool(tmp_path) -> None:
-    candidate, pool = _registered_chooser_candidate("dyn_sv_shared_002")
-    try:
-        out_dir = tmp_path / "corpus"
-        capture.write(
-            out_dir, [candidate],
-            {"strategy:dynamic_short_vol": ["dyn_sv_shared_002"]},
-            pd.Timestamp("2026-01-01"), "snap-1",
-        )
-        case_text = (
-            out_dir / "checkpoints" / "cases" / "dyn_sv_shared_002.json"
-        ).read_text()
-        assert case_text.count('"tag":"pool"') == 0  # compact separators, no spaces
-        assert case_text.count(capture.SHARED_REF_KEY) == 12
     finally:
         capture._cleanup_trace_spill()
 

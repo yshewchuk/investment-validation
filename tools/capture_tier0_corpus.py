@@ -88,6 +88,7 @@ from checks.phase4_frozen_bridge import (  # noqa: E402
     prepare_frozen_chooser,
     with_frozen_chooser,
 )
+from checks.phase4_checkpoints import REQUIRED_CHECKPOINT_GROUPS  # noqa: E402
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
 from engine import score as score_mod  # noqa: E402
@@ -3154,6 +3155,357 @@ def _publish_current(root: Path, version: str) -> None:
     os.replace(tmp, root / "CURRENT")
 
 
+# --------------------------------------------------------------------------
+# phase 4 diagnostic checkpoint cases -- checks/phase4_checkpoints.py IS the
+# spec; this builds exactly the shape ``_case`` there requires, from the
+# REAL values ``Phase4TraceCollector.diagnostic_checkpoint()`` already
+# recorded for this candidate. Nothing here is a placeholder: a field this
+# candidate's own trace does not show is grounds to skip the case (return
+# ``None``), never to fabricate one.
+# --------------------------------------------------------------------------
+
+#: The four groups ``checks/phase4_checkpoints.py`` requires on every case --
+#: imported, not copied, so there is exactly one definition of the contract.
+_PHASE4_REQUIRED_GROUPS = tuple(sorted(REQUIRED_CHECKPOINT_GROUPS))
+
+#: ``Phase4TraceCollector.capture_simulation``'s stored "simulation" value
+#: carries one field the diagnostic-checkpoint contract does not:
+#: ``residual_population`` (the evidence rows behind
+#: ``residual_population_identity``'s own hashes -- can be tens of
+#: thousands of rows; see that method's docstring on the OOM this caused
+#: elsewhere in this file). The contract's ``simulation`` checkpoint is
+#: exactly ``{horizon, capital_denominator, residual_population_identity,
+#: draw_count, seed}`` (``checks/phase4_checkpoints.py::_checkpoint``).
+#: Dropping this key is a shape correction, never a value change: the
+#: population's own content-addressable hashes already stand in for it.
+_SIMULATION_DROPPED_FIELDS = ("residual_population",)
+
+
+#: Legacy flags `Scorer.score` raises BEFORE resolving anything (see
+#: `_finish_phase4_trace`'s call sites: `superseded_by`/`DISABLED_STRATEGIES`
+#: both `return` immediately, no chain, no features, nothing else). A case
+#: refused for one of these is refused BY DESIGN, not by a data gap -- the
+#: real basis for `disposition == "refused_as_expected"`.
+_EXPECTED_EARLY_REFUSAL_FLAGS = frozenset({"SUPERSEDED", "UNVALIDATED_STRUCTURE"})
+
+
+def _any_captured_evidence(checkpoints_in: Mapping[str, Any]) -> bool:
+    """True iff the legacy trace recorded at least one hash-verified group,
+    of ANY kind -- including ``source_inputs``, captured before scoring
+    even starts, so present for a genuinely early refusal that never
+    reaches any of the four ``REQUIRED_CHECKPOINT_GROUPS``.
+
+    Distinct from ``have_all_required`` / ``checkpoints_out``: this answers
+    "did this row's inputs resolve to something real," not "did scoring
+    run to completion." It exists only to set ``executable_inputs``
+    honestly -- never to populate ``checkpoints_out``, which stays confined
+    to the schema's own vocabulary regardless of what this returns.
+    """
+    for row in checkpoints_in.values():
+        if (isinstance(row, Mapping) and isinstance(row.get("value"), Mapping)
+                and row.get("content_hash") == content_hash(row["value"])):
+            return True
+    return False
+
+
+def _phase4_case_branches(
+    cand: Mapping[str, Any], request: Mapping[str, Any],
+    features_value: Mapping[str, Any], selection_value: Mapping[str, Any],
+    simulation_value: Mapping[str, Any], raw_checkpoint: Mapping[str, Any], *,
+    missing_inputs_signal: bool = False,
+) -> list[str]:
+    """Real ``REQUIRED_BRANCHES``-vocabulary labels this case's OWN content shows.
+
+    The capture-side counterpart to ``checks.tier0_corpus.derive_covers``:
+    every label below reads a signal ``Phase4TraceCollector``/
+    ``dynamic_short_vol``/the request itself already recorded for THIS
+    case -- never a guess, never a fixed default. One case naturally
+    exercises a subset of the vocabulary; corpus-WIDE coverage of every
+    required branch is a property of which candidates the forward/boundary
+    passes and ``select()`` choose, not of this function.
+
+    ``ties`` is included for documentation and completeness but is
+    currently UNREACHABLE: a ``dyn_sv_choice`` candidate (the only kind
+    ``dynamic_short_vol``'s own tie applies to) carries no ``legacy_trace``
+    of its own (see ``dyn_sv_pass`` -- only its ranked ``members`` do), so
+    ``write()`` never calls this function for one. Recorded here rather
+    than silently dropped so the gap is visible instead of hidden.
+    """
+    branches: set[str] = set()
+
+    if missing_inputs_signal:
+        # Caller-supplied, real: either `executable_inputs == "missing"`
+        # (nothing was ever captured) or this candidate's trace never
+        # reached all four required checkpoint groups (an early refusal --
+        # the checkpoint record itself IS the evidence of the missing
+        # input/stage, not a guess).
+        branches.add("missing_inputs")
+
+    horizon = simulation_value.get("horizon")
+    dte_exit = horizon.get("dte_exit") if isinstance(horizon, Mapping) else None
+    if (isinstance(dte_exit, (int, float)) and not isinstance(dte_exit, bool)
+            and dte_exit > 0):
+        # `_simulate_pnl` (engine/score.py) records `dte_exit = (expiry -
+        # exit_date).days`: a planned exit strictly before expiry.
+        branches.add("pre_expiry")
+
+    legs = selection_value.get("selected_legs")
+    if isinstance(legs, list):
+        expiries = {
+            leg.get("expiry") for leg in legs
+            if isinstance(leg, Mapping) and leg.get("expiry") is not None
+        }
+        if len(expiries) > 1:
+            branches.add("multi_expiry")
+
+    if selection_value.get("entry_cost") is not None:
+        # `capture_selection_pricing`'s own entry_cost: legacy's real
+        # debit(+)/credit(-) sign on the legs this case actually priced.
+        branches.add("debit_credit")
+
+    missing_mask = features_value.get("missing_mask")
+    if isinstance(missing_mask, Mapping) and any(
+        bool(flag)
+        for role_mask in missing_mask.values() if isinstance(role_mask, Mapping)
+        for flag in role_mask.values()
+    ):
+        # `capture_features` sets this True exactly where the model's own
+        # feature vector was missing/non-finite for this case.
+        branches.add("missing_inputs")
+
+    override_fields = (
+        "strike", "expiry", "structure_params", "decision_offset",
+        "quote_max_age_sessions", "chain_as_of",
+    )
+    if any(request.get(field) is not None for field in override_fields):
+        # These ``ScoreRequest`` fields exist only to override a strategy's
+        # default selection/timing (see their docstrings in engine/score.py);
+        # this request set at least one of them.
+        branches.add("overrides")
+
+    residual_identity = simulation_value.get("residual_population_identity")
+    if isinstance(residual_identity, Mapping) and bool(residual_identity.get("fallback_used")):
+        # The residual draw's own recorded fallback flag.
+        branches.add("fallback")
+
+    record = cand.get("record") or {}
+    if cand.get("kind") == "dyn_sv_choice" and record.get("chosen_margin") == 0.0:
+        # `dynamic_short_vol`'s own tie: winner and runner-up shared the
+        # exact ranking-key value (`chosen_margin` is None with no
+        # runner-up, nonzero on any real margin). See the docstring above:
+        # not reachable today, kept for when it is.
+        branches.add("ties")
+
+    source_inputs = (raw_checkpoint.get("checkpoints") or {}).get("source_inputs")
+    source_value = source_inputs.get("value") if isinstance(source_inputs, Mapping) else None
+    frozen = source_value.get("frozen") if isinstance(source_value, Mapping) else None
+    if isinstance(frozen, Mapping) and any(
+        frozen.get(section) for section in
+        ("bindings", "fold_pools", "declarations", "inputs", "states")
+    ):
+        # `capture_frozen` (R4-19): a served Tier-4/frozen binding was
+        # actually recorded reaching THIS case, not merely referenced
+        # elsewhere -- frozen inference applied through to this record.
+        branches.add("frozen_inference_canonical_application")
+
+    return sorted(branches)
+
+
+def _phase4_case_document(
+    cand: Mapping[str, Any], pair: Mapping[str, Any], raw_checkpoint: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    """Build one ``checks/phase4_checkpoints.py``-shaped case, or ``None``.
+
+    Returns ``(case_document_or_None, complete)``: ``complete`` is True
+    when the candidate's trace reached all four required checkpoint groups
+    (and any real ``dyn_sv`` group hashes clean), False for a genuine early
+    refusal written with only the groups it actually reached. ``write()``
+    uses this to report compared/incomparable-complete/incomparable-partial
+    counts, not to decide whether to write -- a real trace is ALWAYS
+    written now, never silently dropped, with an honest disposition
+    (2026-09-21: population completeness gates Phase 4 completion
+    controls, so a quieter corpus from silently skipping partial cases
+    would move those controls the wrong way while looking like an
+    improvement).
+
+    The document is ``None`` only when nothing case-identifying exists at
+    all (no ``strategy``) or a PRESENT group's own content does not hash to
+    its own recorded digest (real corruption, not absence) -- never for an
+    early refusal by itself. Every checkpoint group in the body is one this
+    candidate's own trace actually produced; a group it never reached is
+    left OUT of ``checkpoints``, never fabricated as an empty placeholder.
+
+    2026-09-21 (coordinator, second authorised contract change):
+    ``checks/phase4_checkpoints.py::_case`` now requires all four
+    ``REQUIRED_CHECKPOINT_GROUPS`` only when ``disposition == "compared"``;
+    a non-``compared`` case may carry a strict subset -- exactly what this
+    function already built -- PROVIDED it also carries ``first_gap`` (the
+    stage and reason its trace stopped), so the record explains itself
+    instead of quietly asserting less than it has. See ``first_gap``
+    below for how that is filled honestly, never synthesized.
+    """
+    checkpoints_in = raw_checkpoint.get("checkpoints")
+    if not isinstance(checkpoints_in, Mapping):
+        checkpoints_in = {}
+
+    request = pair["payload"]["request"]
+    strategy = pair["payload"]["record"].get("strategy")
+    if not isinstance(strategy, str) or not strategy.strip():
+        return None, False
+
+    def _hashed_group(group: str, *, drop: tuple[str, ...] = ()) -> dict[str, Any] | None:
+        row = checkpoints_in.get(group)
+        if not isinstance(row, Mapping) or not isinstance(row.get("value"), Mapping):
+            return None
+        value = dict(row["value"])
+        if drop:
+            # Strip THEN hash -- never reuse a hash taken over the
+            # superset. Hashing before this mutation is exactly the
+            # hash-then-mutate trap this fix must not repeat (see the
+            # selfcheck `structure_params` and legacy ticker-json defects).
+            for field in drop:
+                value.pop(field, None)
+            digest = content_hash(value)
+        else:
+            # Unmutated: `Phase4TraceCollector`'s own hash
+            # (`_SHARED_TRACE_DOCUMENTS`, digest-identical to a bare
+            # `content_hash` call -- see that class's docstring) already
+            # covers exactly this value. Re-verified, not blindly trusted.
+            digest = row.get("content_hash")
+            if digest != content_hash(value):
+                return None
+        return {"value": value, "content_hash": digest}
+
+    checkpoints_out: dict[str, Any] = {}
+    corrupt = False
+    for group in _PHASE4_REQUIRED_GROUPS:
+        if group not in checkpoints_in:
+            continue  # never reached -- left out, never fabricated
+        built = _hashed_group(
+            group, drop=_SIMULATION_DROPPED_FIELDS if group == "simulation" else ())
+        if built is None:
+            corrupt = True  # present but its content does not hash clean
+            break
+        checkpoints_out[group] = built
+    have_all_required = not corrupt and not (
+        set(_PHASE4_REQUIRED_GROUPS) - set(checkpoints_out))
+
+    # ``dyn_sv`` is optional but, once present, its presence and the
+    # literal "dyn_sv" branch label must agree in both directions with
+    # ``checks/phase4_checkpoints.py::_case``'s own rule
+    # (``dyn_sv == strategy == "DYN-SV" or "dyn_sv" in branches``). Include
+    # it whenever this candidate's OWN trace really recorded one (a
+    # DYN-SV-menu member's chooser eligibility, captured on its own
+    # non-DYN-SV strategy row) -- never only because the strategy matches.
+    dyn_sv_present = not corrupt and isinstance(checkpoints_in.get("dyn_sv"), Mapping)
+    if dyn_sv_present:
+        built = _hashed_group("dyn_sv")
+        if built is None:
+            corrupt = True
+        else:
+            checkpoints_out["dyn_sv"] = built
+
+    if corrupt:
+        # A group that IS present but does not hash to its own recorded
+        # digest is data corruption, not a real early refusal -- never
+        # written, same as before this change.
+        return None, False
+
+    # Real disposition, from what THIS candidate's own capture actually
+    # produced -- never a fixed "compared":
+    # * `executable_inputs` used to read ONLY `checkpoints_out` (the four
+    #   REQUIRED groups) -- which meant a row that resolved its inputs
+    #   (`source_inputs` captured: ticker, strategy, request all real and
+    #   known) but was correctly refused before reaching `features` looked
+    #   IDENTICAL to a row that resolved nothing at all. That accounting
+    #   artifact is what made `refused_as_expected` unreachable: `missing`
+    #   forces `incomparable` by the validator's own rule, and every
+    #   `SUPERSEDED`/`UNVALIDATED_STRUCTURE` refusal left `checkpoints_out`
+    #   empty by construction. Fixed (2026-09-21, coordinator): look at
+    #   EVERY hash-verified group the legacy trace recorded, including
+    #   `source_inputs` -- never added to `checkpoints_out` itself, which
+    #   stays confined to the schema's own vocabulary, but real evidence
+    #   that this row's inputs were available.
+    # * A row refused for a KNOWN, EXPECTED reason before the pipeline ran
+    #   (`_EXPECTED_EARLY_REFUSAL_FLAGS`, from `Phase4TraceCollector.finish`'s
+    #   own `result.flags` -- real, not inferred) is `refused_as_expected`:
+    #   evidence the system correctly declined an invalid row, not a gap.
+    #   Any other early stop is `incomparable` -- a genuine inability to
+    #   evaluate, not a deliberate, recognized refusal.
+    # * `input_trace` is the native probe's own successful trace
+    #   (`attach_strict_probe`); its absence with a full legacy trace means
+    #   a typed `strict_trace_gap` was recorded instead -- a real, named
+    #   reason this case cannot be compared to a native record.
+    legacy_disposition = raw_checkpoint.get("disposition") or {}
+    legacy_status = legacy_disposition.get("status")
+    legacy_flags = set(legacy_disposition.get("flags") or ())
+    executable_inputs = (
+        "missing" if (legacy_status == "missing_output"
+                      or not _any_captured_evidence(checkpoints_in))
+        else "available"
+    )
+    if executable_inputs == "missing":
+        disposition = "incomparable"
+    elif not have_all_required:
+        disposition = (
+            "refused_as_expected" if legacy_flags & _EXPECTED_EARLY_REFUSAL_FLAGS
+            else "incomparable"
+        )
+    elif pair["payload"].get("input_trace") is not None:
+        disposition = "compared"
+    else:
+        disposition = "incomparable"
+
+    # `first_gap`: the stage and reason `Phase4TraceCollector.finish`
+    # recorded FIRST for a row that never reached some stage (see that
+    # class's own `_first_gap` docstring). Read verbatim, never derived or
+    # guessed from `legacy_disposition["detail"]`/flags -- a corpus
+    # captured before that instrumentation existed (as the current one is)
+    # genuinely has no `first_gap` to report, and a case built from it
+    # correctly fails the "explain a gap" rule below rather than inventing
+    # an explanation the trace never gave.
+    raw_first_gap = legacy_disposition.get("first_gap")
+    first_gap = (
+        {"stage": raw_first_gap["stage"], "reason": raw_first_gap["reason"]}
+        if (isinstance(raw_first_gap, Mapping)
+            and isinstance(raw_first_gap.get("stage"), str)
+            and isinstance(raw_first_gap.get("reason"), str))
+        else None
+    ) if not have_all_required else None
+
+    branches = set(_phase4_case_branches(
+        cand, request,
+        checkpoints_out.get("features", {}).get("value", {}),
+        checkpoints_out.get("selection_pricing", {}).get("value", {}),
+        checkpoints_out.get("simulation", {}).get("value", {}), raw_checkpoint,
+        missing_inputs_signal=(executable_inputs == "missing" or not have_all_required),
+    ))
+    if dyn_sv_present and strategy != score_mod.DYNAMIC_STRATEGY:
+        branches.add("dyn_sv")
+    if not branches:
+        # No real signal at all (full trace, available inputs, but e.g. no
+        # entry_cost and nothing else fired) -- never fabricate a label.
+        return None, False
+
+    body = {
+        "case_id": cand["fixture_id"],
+        "request": request,
+        "request_hash": content_hash(request),
+        "strategy": strategy,
+        "branches": sorted(branches),
+        # No resource this fix hoists out of a case body -- the one field
+        # large enough to need it (`residual_population`) is dropped, not
+        # referenced (see `_SIMULATION_DROPPED_FIELDS`).
+        "resource_refs": [],
+        "executable_inputs": executable_inputs,
+        "disposition": disposition,
+        "checkpoints": checkpoints_out,
+        "first_gap": first_gap,
+    }
+    body["case_hash"] = content_hash(body)
+    return body, have_all_required
+
+
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
           as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False,
           strict_trace: bool = False) -> dict:
@@ -3184,6 +3536,22 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             for fixture_id, reason in strict_gaps.items():
                 print(f"    {fixture_id}: {reason}", flush=True)
     checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
+    #: Every real trace is now WRITTEN, complete or partial (2026-09-21: a
+    #: silently thinner corpus from skipping partial cases is worse than
+    #: one that records them honestly -- see `_phase4_case_document`).
+    #: Counted by the case's own `disposition` -- `checks/phase4_checkpoints.py`
+    #: now requires all four groups only for `compared` (2026-09-21,
+    #: coordinator-authorised); a `refused_as_expected`/`incomparable` case
+    #: may be partial PROVIDED it carries `first_gap`, tracked separately
+    #: below so a case this stale (pre-`first_gap`-instrumentation) corpus
+    #: cannot honestly fill is visible, not silently swallowed.
+    #: `phase4_cases_skipped` is real corruption or an unidentifiable
+    #: candidate -- never a fabricated field.
+    phase4_cases_compared = 0
+    phase4_cases_refused_as_expected = 0
+    phase4_cases_incomparable = 0
+    phase4_cases_partial_without_first_gap: list[str] = []
+    phase4_cases_skipped: list[str] = []
 
     manifest_pairs = {}
     # One writer for the WHOLE corpus version: a fold pool served by two
@@ -3253,27 +3621,53 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "trace_disposition": pair["payload"].get("trace_disposition", "absent"),
         }
         if raw_checkpoint is not None:
-            case_cache: dict[int, tuple[Any, Any]] = {}
-            case_checkpoint = _prepare_normalized_referenced(
-                raw_checkpoint, case_cache, shared_writer)
-            checkpoint_sink.write_case(
-                cand["fixture_id"],
-                {
-                    "case_id": cand["fixture_id"],
-                    "request": pair["payload"]["request"],
-                    "strategy": pair["payload"]["record"].get("strategy"),
-                    "covers": pair["covers"],
-                    "record_kind": cand["kind"],
-                    "checkpoint": case_checkpoint,
-                },
-            )
-            del case_cache, case_checkpoint
+            # `pair` (not `storage_pair`) carries the checkpoint-relevant
+            # fields (`request`, `record`, `input_trace`) in their real,
+            # already-hydrated form; `_phase4_case_document` is THE
+            # producer of the `checks/phase4_checkpoints.py`-contract case
+            # shape -- see that function's docstring for what it verifies
+            # and why it returns `None` instead of fabricating a field.
+            case_document, complete = _phase4_case_document(cand, pair, raw_checkpoint)
+            if case_document is None:
+                phase4_cases_skipped.append(str(cand["fixture_id"]))
+            else:
+                checkpoint_sink.write_case(cand["fixture_id"], case_document)
+                disposition = case_document["disposition"]
+                if disposition == "compared":
+                    phase4_cases_compared += 1
+                elif disposition == "refused_as_expected":
+                    phase4_cases_refused_as_expected += 1
+                else:
+                    phase4_cases_incomparable += 1
+                if not complete and case_document["first_gap"] is None:
+                    phase4_cases_partial_without_first_gap.append(str(cand["fixture_id"]))
+            del case_document
         # Hydrate/prepare one pair at a time and drop it before the next --
         # `pair`/`checkpoint`/`input_trace`/`storage_pair` are the only
         # things this iteration grew (the spilled trace was hydrated above),
         # so nothing else needs releasing.
         del pair, checkpoint, input_trace, prep_cache, storage_pair, storage_payload
         gc.collect()
+
+    phase4_total_written = (
+        phase4_cases_compared + phase4_cases_refused_as_expected
+        + phase4_cases_incomparable
+    )
+    print(f"[corpus] phase4 diagnostic checkpoint cases: {phase4_total_written} written "
+          f"({phase4_cases_compared} compared, {phase4_cases_refused_as_expected} "
+          f"refused_as_expected, {phase4_cases_incomparable} incomparable), "
+          f"{len(phase4_cases_skipped)} skipped (real corruption or unidentifiable, "
+          "never faked)", flush=True)
+    if phase4_cases_partial_without_first_gap:
+        print(f"    {len(phase4_cases_partial_without_first_gap)} partial case(s) have no "
+              "first_gap (legacy trace predates that instrumentation) and will FAIL "
+              "checks/phase4_checkpoints.py bundle validation until recaptured:",
+              flush=True)
+        for fixture_id in phase4_cases_partial_without_first_gap[:5]:
+            print(f"    no first_gap: {fixture_id}", flush=True)
+    if phase4_cases_skipped:
+        for fixture_id in phase4_cases_skipped[:5]:
+            print(f"    skipped: {fixture_id}", flush=True)
 
     missing = sorted(set(required_axes()) - set(index))
     doc = {
