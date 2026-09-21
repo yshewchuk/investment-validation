@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import re
 import socket
@@ -1055,23 +1056,54 @@ def run(corpus_root: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonRecei
 
 def _run(corpus_root: Path,
          scratch: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
-    corpus = load(corpus_root)
-    return _run_loaded(corpus, corpus_root, scratch)
+    # `load(corpus_root)` is passed straight into the call rather than bound
+    # to a local first: a named `corpus = load(...)` here would keep this
+    # frame's OWN reference alive for the whole `_run_loaded` call, on top of
+    # the one `_run_loaded` drops before `case_fresh_process` forks -- see
+    # that function's docstring. An unnamed call argument has no such
+    # second owner (verified: a named local survives the callee's `del`; an
+    # inline argument does not).
+    merged, cases, _report_extra = _run_loaded(load(corpus_root), corpus_root, scratch)
+    return merged, cases
 
 
-def _run_loaded(corpus: Corpus, corpus_root: Path,
-                scratch: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
+def _run_loaded(corpus: Corpus, corpus_root: Path, scratch: Path,
+                ) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt], dict[str, Any] | None]:
     """The case battery over an ALREADY LOADED corpus.
 
-    Split out of ``_run`` so one CLI invocation loads the corpus exactly
-    once and the same ``Corpus`` is reused for ``_json_report`` -- a second
-    ``load()`` call just to build the JSON report was one of three loads a
-    single ``--json`` run paid for on the real corpus.
+    Returns ``(merged, cases, report_extra)``. ``report_extra`` carries the
+    small, corpus-derived facts ``_json_report`` needs (pair counts, the
+    corpus hash, uncovered axes, the seeded-controls summary) -- computed
+    HERE, while ``corpus`` is still resident, so the caller never needs its
+    own live ``Corpus`` reference to build the report.
+
+    That matters because ``case_fresh_process`` forks a subprocess that
+    loads the WHOLE corpus again to prove the verdict is process-independent
+    (module docstring, point 8). Measured on the real corpus: ~5.87 GB
+    loaded here, and the child climbs toward the same figure while this
+    process is still holding it -- ~11.7 GB peak on a 10.7 GB box, which
+    killed two real runs (v20/v21) before this fix. ``case_fresh_process``
+    itself only needs ``corpus_root`` (a path) and the verdict string
+    (:func:`case_fresh_process`'s signature takes no ``Corpus``), so this
+    function builds every OTHER case first, deletes its own reference to
+    ``corpus`` (the only reference: see ``_run``'s comment and
+    ``main()``'s call site below, neither of which binds a separate named
+    local across this call), and only then runs the fresh-process case.
+    ``gc.collect()`` is belt-and-suspenders -- nothing here creates a
+    reference cycle, so refcounting alone should free it -- but it makes the
+    release synchronous and durably testable.
     """
     if not corpus.pairs:
         empty = merge_receipts([], comparison_kind="tier0_corpus_replay",
                                tier=0, expected=1)
-        return empty, {}
+        report_extra = {
+            "pairs": 0,
+            "declared_pairs": len(corpus.index.get("pairs") or {}),
+            "corpus_hash": corpus.index.get("corpus_hash"),
+            "uncovered_axes": derived_uncovered(corpus),
+            "seeded_controls": {},
+        }
+        return empty, {}, report_extra
     verdict = corpus_verdict(corpus, scratch)
     cases = {
         "manifest": case_manifest(corpus),
@@ -1080,27 +1112,42 @@ def _run_loaded(corpus: Corpus, corpus_root: Path,
         "pinned_counterparts": case_pinned_counterparts(corpus),
         "seeded_controls": case_seeded_controls(corpus),
         "batch_vs_single": case_batch_and_single(corpus, scratch),
-        "fresh_process": case_fresh_process(corpus_root, verdict.verdict),
     }
+    report_extra = {
+        "pairs": len(corpus.pairs),
+        "declared_pairs": len(corpus.index.get("pairs") or {}),
+        "corpus_hash": corpus.index.get("corpus_hash"),
+        "uncovered_axes": derived_uncovered(corpus),
+        "seeded_controls": seeded_controls(corpus),
+    }
+    verdict_str = verdict.verdict
+    # Every case above is built and every small fact `report_extra` needs is
+    # already copied out. Nothing else in this frame (or any caller frame --
+    # see the comments at both call sites) still names `corpus`, so this is
+    # the last reference and the corpus is collectable from here on.
+    del corpus
+    gc.collect()
+    cases["fresh_process"] = case_fresh_process(corpus_root, verdict_str)
     merged = merge_receipts(list(cases.values()),
                             comparison_kind="tier0_corpus", tier=0,
                             expected=len(cases))
-    return merged, cases
+    return merged, cases, report_extra
 
 
-def _json_report(corpus: Corpus, merged: ComparisonReceipt,
+def _json_report(report_extra: dict[str, Any] | None, merged: ComparisonReceipt,
                  cases: dict[str, ComparisonReceipt]) -> dict[str, Any]:
+    extra = report_extra or {}
     return {
         "verdict": merged.verdict,
         "cases": {name: r.verdict for name, r in cases.items()},
         "findings": [f.describe() for f in merged.findings],
         "population": {"expected": merged.population.expected,
                        "compared": merged.population.compared},
-        "pairs": len(corpus.pairs),
-        "declared_pairs": len(corpus.index.get("pairs") or {}),
-        "corpus_hash": corpus.index.get("corpus_hash"),
-        "uncovered_axes": derived_uncovered(corpus),
-        "seeded_controls": seeded_controls(corpus) if corpus.pairs else {},
+        "pairs": extra.get("pairs", 0),
+        "declared_pairs": extra.get("declared_pairs", 0),
+        "corpus_hash": extra.get("corpus_hash"),
+        "uncovered_axes": extra.get("uncovered_axes", []),
+        "seeded_controls": extra.get("seeded_controls", {}),
     }
 
 
@@ -1131,10 +1178,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     with tempfile.TemporaryDirectory(prefix="tier0-") as tmp:
-        corpus = load(root)
-        merged, cases = _run_loaded(corpus, root, Path(tmp))
+        # Same reasoning as `_run`: `load(root)` is passed inline, never
+        # bound to a `corpus =` local, so this frame holds no reference past
+        # the call and `_run_loaded` can actually free the corpus before its
+        # fresh-process subprocess forks. `report_extra` carries what the
+        # JSON report needs instead.
+        merged, cases, report_extra = _run_loaded(load(root), root, Path(tmp))
         if args.json:
-            print(json.dumps(_json_report(corpus, merged, cases), indent=2, sort_keys=True))
+            print(json.dumps(_json_report(report_extra, merged, cases), indent=2, sort_keys=True))
             return 0 if merged.verdict == AGREE else 1
 
     if not args.quiet:
