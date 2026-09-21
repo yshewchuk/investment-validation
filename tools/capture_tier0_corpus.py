@@ -88,6 +88,7 @@ from checks.phase4_frozen_bridge import (  # noqa: E402
     prepare_frozen_chooser,
     with_frozen_chooser,
 )
+from checks.phase4_checkpoints import REQUIRED_CHECKPOINT_GROUPS  # noqa: E402
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
 from engine import score as score_mod  # noqa: E402
@@ -3154,6 +3155,245 @@ def _publish_current(root: Path, version: str) -> None:
     os.replace(tmp, root / "CURRENT")
 
 
+# --------------------------------------------------------------------------
+# phase 4 diagnostic checkpoint cases -- checks/phase4_checkpoints.py IS the
+# spec; this builds exactly the shape ``_case`` there requires, from the
+# REAL values ``Phase4TraceCollector.diagnostic_checkpoint()`` already
+# recorded for this candidate. Nothing here is a placeholder: a field this
+# candidate's own trace does not show is grounds to skip the case (return
+# ``None``), never to fabricate one.
+# --------------------------------------------------------------------------
+
+#: The four groups ``checks/phase4_checkpoints.py`` requires on every case --
+#: imported, not copied, so there is exactly one definition of the contract.
+_PHASE4_REQUIRED_GROUPS = tuple(sorted(REQUIRED_CHECKPOINT_GROUPS))
+
+#: ``Phase4TraceCollector.capture_simulation``'s stored "simulation" value
+#: carries one field the diagnostic-checkpoint contract does not:
+#: ``residual_population`` (the evidence rows behind
+#: ``residual_population_identity``'s own hashes -- can be tens of
+#: thousands of rows; see that method's docstring on the OOM this caused
+#: elsewhere in this file). The contract's ``simulation`` checkpoint is
+#: exactly ``{horizon, capital_denominator, residual_population_identity,
+#: draw_count, seed}`` (``checks/phase4_checkpoints.py::_checkpoint``).
+#: Dropping this key is a shape correction, never a value change: the
+#: population's own content-addressable hashes already stand in for it.
+_SIMULATION_DROPPED_FIELDS = ("residual_population",)
+
+
+def _phase4_case_branches(
+    cand: Mapping[str, Any], request: Mapping[str, Any],
+    features_value: Mapping[str, Any], selection_value: Mapping[str, Any],
+    simulation_value: Mapping[str, Any], raw_checkpoint: Mapping[str, Any],
+) -> list[str]:
+    """Real ``REQUIRED_BRANCHES``-vocabulary labels this case's OWN content shows.
+
+    The capture-side counterpart to ``checks.tier0_corpus.derive_covers``:
+    every label below reads a signal ``Phase4TraceCollector``/
+    ``dynamic_short_vol``/the request itself already recorded for THIS
+    case -- never a guess, never a fixed default. One case naturally
+    exercises a subset of the vocabulary; corpus-WIDE coverage of every
+    required branch is a property of which candidates the forward/boundary
+    passes and ``select()`` choose, not of this function.
+
+    ``ties`` is included for documentation and completeness but is
+    currently UNREACHABLE: a ``dyn_sv_choice`` candidate (the only kind
+    ``dynamic_short_vol``'s own tie applies to) carries no ``legacy_trace``
+    of its own (see ``dyn_sv_pass`` -- only its ranked ``members`` do), so
+    ``write()`` never calls this function for one. Recorded here rather
+    than silently dropped so the gap is visible instead of hidden.
+    """
+    branches: set[str] = set()
+
+    horizon = simulation_value.get("horizon")
+    dte_exit = horizon.get("dte_exit") if isinstance(horizon, Mapping) else None
+    if (isinstance(dte_exit, (int, float)) and not isinstance(dte_exit, bool)
+            and dte_exit > 0):
+        # `_simulate_pnl` (engine/score.py) records `dte_exit = (expiry -
+        # exit_date).days`: a planned exit strictly before expiry.
+        branches.add("pre_expiry")
+
+    legs = selection_value.get("selected_legs")
+    if isinstance(legs, list):
+        expiries = {
+            leg.get("expiry") for leg in legs
+            if isinstance(leg, Mapping) and leg.get("expiry") is not None
+        }
+        if len(expiries) > 1:
+            branches.add("multi_expiry")
+
+    if selection_value.get("entry_cost") is not None:
+        # `capture_selection_pricing`'s own entry_cost: legacy's real
+        # debit(+)/credit(-) sign on the legs this case actually priced.
+        branches.add("debit_credit")
+
+    missing_mask = features_value.get("missing_mask")
+    if isinstance(missing_mask, Mapping) and any(
+        bool(flag)
+        for role_mask in missing_mask.values() if isinstance(role_mask, Mapping)
+        for flag in role_mask.values()
+    ):
+        # `capture_features` sets this True exactly where the model's own
+        # feature vector was missing/non-finite for this case.
+        branches.add("missing_inputs")
+
+    override_fields = (
+        "strike", "expiry", "structure_params", "decision_offset",
+        "quote_max_age_sessions", "chain_as_of",
+    )
+    if any(request.get(field) is not None for field in override_fields):
+        # These ``ScoreRequest`` fields exist only to override a strategy's
+        # default selection/timing (see their docstrings in engine/score.py);
+        # this request set at least one of them.
+        branches.add("overrides")
+
+    residual_identity = simulation_value.get("residual_population_identity")
+    if isinstance(residual_identity, Mapping) and bool(residual_identity.get("fallback_used")):
+        # The residual draw's own recorded fallback flag.
+        branches.add("fallback")
+
+    record = cand.get("record") or {}
+    if cand.get("kind") == "dyn_sv_choice" and record.get("chosen_margin") == 0.0:
+        # `dynamic_short_vol`'s own tie: winner and runner-up shared the
+        # exact ranking-key value (`chosen_margin` is None with no
+        # runner-up, nonzero on any real margin). See the docstring above:
+        # not reachable today, kept for when it is.
+        branches.add("ties")
+
+    source_inputs = (raw_checkpoint.get("checkpoints") or {}).get("source_inputs")
+    source_value = source_inputs.get("value") if isinstance(source_inputs, Mapping) else None
+    frozen = source_value.get("frozen") if isinstance(source_value, Mapping) else None
+    if isinstance(frozen, Mapping) and any(
+        frozen.get(section) for section in
+        ("bindings", "fold_pools", "declarations", "inputs", "states")
+    ):
+        # `capture_frozen` (R4-19): a served Tier-4/frozen binding was
+        # actually recorded reaching THIS case, not merely referenced
+        # elsewhere -- frozen inference applied through to this record.
+        branches.add("frozen_inference_canonical_application")
+
+    return sorted(branches)
+
+
+def _phase4_case_document(
+    cand: Mapping[str, Any], pair: Mapping[str, Any], raw_checkpoint: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Build one ``checks/phase4_checkpoints.py``-shaped case, or ``None``.
+
+    ``None`` when this candidate's real trace never reached all four
+    required checkpoint groups (an early refusal that stopped before
+    ``selection_pricing``/``simulation``/``gate_inputs`` ran), when a
+    stored group's own content does not hash to its own recorded digest, or
+    when no real branch label applies -- every one of those is grounds to
+    skip the case, never to fabricate a group, a hash, or a label. The
+    caller (``write()``) counts and reports how many candidates this drops.
+    """
+    checkpoints_in = raw_checkpoint.get("checkpoints")
+    if not isinstance(checkpoints_in, Mapping):
+        return None
+    if set(_PHASE4_REQUIRED_GROUPS) - set(checkpoints_in):
+        return None
+
+    request = pair["payload"]["request"]
+    strategy = pair["payload"]["record"].get("strategy")
+    if not isinstance(strategy, str) or not strategy.strip():
+        return None
+
+    def _hashed_group(group: str, *, drop: tuple[str, ...] = ()) -> dict[str, Any] | None:
+        row = checkpoints_in.get(group)
+        if not isinstance(row, Mapping) or not isinstance(row.get("value"), Mapping):
+            return None
+        value = dict(row["value"])
+        if drop:
+            # Strip THEN hash -- never reuse a hash taken over the
+            # superset. Hashing before this mutation is exactly the
+            # hash-then-mutate trap this fix must not repeat (see the
+            # selfcheck `structure_params` and legacy ticker-json defects).
+            for field in drop:
+                value.pop(field, None)
+            digest = content_hash(value)
+        else:
+            # Unmutated: `Phase4TraceCollector`'s own hash
+            # (`_SHARED_TRACE_DOCUMENTS`, digest-identical to a bare
+            # `content_hash` call -- see that class's docstring) already
+            # covers exactly this value. Re-verified, not blindly trusted.
+            digest = row.get("content_hash")
+            if digest != content_hash(value):
+                return None
+        return {"value": value, "content_hash": digest}
+
+    checkpoints_out: dict[str, Any] = {}
+    for group in _PHASE4_REQUIRED_GROUPS:
+        built = _hashed_group(
+            group, drop=_SIMULATION_DROPPED_FIELDS if group == "simulation" else ())
+        if built is None:
+            return None
+        checkpoints_out[group] = built
+
+    # ``dyn_sv`` is optional but, once present, its presence and the
+    # literal "dyn_sv" branch label must agree in both directions with
+    # ``checks/phase4_checkpoints.py::_case``'s own rule
+    # (``dyn_sv == strategy == "DYN-SV" or "dyn_sv" in branches``). Include
+    # it whenever this candidate's OWN trace really recorded one (a
+    # DYN-SV-menu member's chooser eligibility, captured on its own
+    # non-DYN-SV strategy row) -- never only because the strategy matches.
+    dyn_sv_present = isinstance(checkpoints_in.get("dyn_sv"), Mapping)
+    if dyn_sv_present:
+        built = _hashed_group("dyn_sv")
+        if built is None:
+            return None
+        checkpoints_out["dyn_sv"] = built
+    elif strategy == score_mod.DYNAMIC_STRATEGY:
+        # A DYN-SV-strategy case with no recorded dyn_sv checkpoint would
+        # violate the required-exactly-for-DYN-SV rule; never fabricate one.
+        return None
+
+    branches = set(_phase4_case_branches(
+        cand, request, checkpoints_out["features"]["value"],
+        checkpoints_out["selection_pricing"]["value"],
+        checkpoints_out["simulation"]["value"], raw_checkpoint,
+    ))
+    if dyn_sv_present and strategy != score_mod.DYNAMIC_STRATEGY:
+        branches.add("dyn_sv")
+    if not branches:
+        return None
+
+    # Real disposition, from what THIS candidate's own capture actually
+    # produced -- never a fixed "compared":
+    # * `executable_inputs` reads the legacy trace's own terminal status
+    #   (`Phase4TraceCollector.finish`): "missing_output" is the one status
+    #   that means no executable inputs were ever available.
+    # * `input_trace` is the native probe's own successful trace
+    #   (`attach_strict_probe`); its absence means a typed
+    #   `strict_trace_gap` was recorded instead -- a real, named reason
+    #   this case cannot be compared to a native record.
+    legacy_status = (raw_checkpoint.get("disposition") or {}).get("status")
+    executable_inputs = "missing" if legacy_status == "missing_output" else "available"
+    if executable_inputs == "missing":
+        disposition = "incomparable"
+    elif pair["payload"].get("input_trace") is not None:
+        disposition = "compared"
+    else:
+        disposition = "incomparable"
+
+    body = {
+        "case_id": cand["fixture_id"],
+        "request": request,
+        "request_hash": content_hash(request),
+        "strategy": strategy,
+        "branches": sorted(branches),
+        # No resource this fix hoists out of a case body -- the one field
+        # large enough to need it (`residual_population`) is dropped, not
+        # referenced (see `_SIMULATION_DROPPED_FIELDS`).
+        "resource_refs": [],
+        "executable_inputs": executable_inputs,
+        "disposition": disposition,
+        "checkpoints": checkpoints_out,
+    }
+    body["case_hash"] = content_hash(body)
+    return body
+
+
 def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
           as_of: pd.Timestamp, snapshot: str, *, replace_existing: bool = False,
           strict_trace: bool = False) -> dict:
@@ -3184,6 +3424,12 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             for fixture_id, reason in strict_gaps.items():
                 print(f"    {fixture_id}: {reason}", flush=True)
     checkpoint_sink = DiskCheckpointSink(tmp / "checkpoints")
+    #: Candidates whose real trace has a `legacy_trace` but cannot become a
+    #: valid `checks/phase4_checkpoints.py` case (early refusal before all
+    #: four required groups, or no real branch label applies) -- reported,
+    #: never silently absorbed. See `_phase4_case_document`.
+    phase4_cases_written = 0
+    phase4_cases_skipped: list[str] = []
 
     manifest_pairs = {}
     # One writer for the WHOLE corpus version: a fold pool served by two
@@ -3253,27 +3499,33 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
             "trace_disposition": pair["payload"].get("trace_disposition", "absent"),
         }
         if raw_checkpoint is not None:
-            case_cache: dict[int, tuple[Any, Any]] = {}
-            case_checkpoint = _prepare_normalized_referenced(
-                raw_checkpoint, case_cache, shared_writer)
-            checkpoint_sink.write_case(
-                cand["fixture_id"],
-                {
-                    "case_id": cand["fixture_id"],
-                    "request": pair["payload"]["request"],
-                    "strategy": pair["payload"]["record"].get("strategy"),
-                    "covers": pair["covers"],
-                    "record_kind": cand["kind"],
-                    "checkpoint": case_checkpoint,
-                },
-            )
-            del case_cache, case_checkpoint
+            # `pair` (not `storage_pair`) carries the checkpoint-relevant
+            # fields (`request`, `record`, `input_trace`) in their real,
+            # already-hydrated form; `_phase4_case_document` is THE
+            # producer of the `checks/phase4_checkpoints.py`-contract case
+            # shape -- see that function's docstring for what it verifies
+            # and why it returns `None` instead of fabricating a field.
+            case_document = _phase4_case_document(cand, pair, raw_checkpoint)
+            if case_document is None:
+                phase4_cases_skipped.append(str(cand["fixture_id"]))
+            else:
+                checkpoint_sink.write_case(cand["fixture_id"], case_document)
+                phase4_cases_written += 1
+            del case_document
         # Hydrate/prepare one pair at a time and drop it before the next --
         # `pair`/`checkpoint`/`input_trace`/`storage_pair` are the only
         # things this iteration grew (the spilled trace was hydrated above),
         # so nothing else needs releasing.
         del pair, checkpoint, input_trace, prep_cache, storage_pair, storage_payload
         gc.collect()
+
+    print(f"[corpus] phase4 diagnostic checkpoint cases: "
+          f"{phase4_cases_written} written, {len(phase4_cases_skipped)} skipped "
+          "(real trace present but incomplete or unlabelable, never faked)",
+          flush=True)
+    if phase4_cases_skipped:
+        for fixture_id in phase4_cases_skipped[:5]:
+            print(f"    skipped: {fixture_id}", flush=True)
 
     missing = sorted(set(required_axes()) - set(index))
     doc = {
