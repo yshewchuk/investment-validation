@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
 """Run a long job with bounded CPU and memory on a shared box.
 
-This environment has no writable cgroups and no systemd (probed 2026-09-09),
-so a hard kernel memory cap is not available. What IS available, applied here:
+cgroup v2 limits ARE readable here (``/sys/fs/cgroup/memory.max`` and
+``memory.swap.max``), and the container is hard-capped by the kernel at
+those values (confirmed 2026-09-20; corrects an earlier claim here, probed
+2026-09-09, that no writable cgroups or hard kernel memory cap existed).
+This tool still supervises from OUTSIDE that cap: it bounds one named
+process TREE and reports exactly what it saw, which a bare cgroup limit
+does not do on its own — a cgroup OOM kill leaves no per-process breakdown.
+Building cgroup-based enforcement is future work, not done here.
+
+Caution, worth carrying into any future work here: ``/proc`` readings on
+this box (``MemAvailable``, ``MemTotal``) are the HOST/VM's numbers, not
+necessarily the container's cgroup limit, and the two are not guaranteed to
+agree. A tier-0 capture was killed twice at the box floor while its own
+cgroup had room, because the VM was 7.97 GiB while the container's cgroup
+allowed 10.5 GiB; the VM has since been resized to 10.7 GiB so the two now
+roughly match, but a future mismatch (either direction) is a live hazard,
+not a one-time fluke already closed off.
 
 CPU
   ``taskset`` pins the job to the first ``--cores`` cores (default: half the
@@ -12,24 +27,45 @@ CPU
 
 MEMORY
   An external watchdog checks the job's whole process tree every ``--poll-s``
-  seconds (default 0.25) and logs a heartbeat line once a minute. Two limits,
-  both on real (resident) memory, never on address space:
+  seconds (default 0.25) and logs a heartbeat line once a minute carrying
+  RSS, swap and box-free memory together, so a paging job is visible in the
+  log without extra tooling. Three limits act on the tree, all measured from
+  ``/proc``, never on address space:
 
-  * the job's own cap, ``--max-rss-gb``: a cheap VmRSS sum each tick, confirmed
-    with proportional RSS (Pss) before acting, so shared pages never trigger a
-    false kill. Breach: SIGTERM, then SIGKILL after ``--kill-grace-s`` or at
-    once if the box floor is crossed meanwhile.
+  * the job's own RSS cap, ``--max-rss-gb``: a cheap VmRSS sum each tick,
+    confirmed with proportional RSS (Pss) before acting, so shared pages
+    never trigger a false kill. Breach: SIGTERM, then SIGKILL after
+    ``--kill-grace-s`` or at once if the box floor is crossed meanwhile.
+  * the job's own SWAP cap, ``--max-swap-gb`` (default 0.5, ON by default —
+    most bounded runs should have a kill switch for thrashing): summed the
+    same way over ``VmSwap`` (confirmed with SwapPss). This exists because
+    the other two limits both RELAX exactly when a job starts paging: RSS
+    counts only resident pages, so a process being swapped out appears to
+    SHRINK, and MemAvailable RECOVERS as pages move to swap. Without a swap
+    cap, a thrashing job is invisible to this watchdog — comfortable numbers
+    on both other limits while the job takes hours instead of minutes.
+    ``--max-swap-gb 0`` kills on ANY swap; a NEGATIVE value (for example
+    ``-1``) is the only way to disable the swap check entirely. Breach
+    behaviour matches the RSS cap (SIGTERM, then SIGKILL after
+    ``--kill-grace-s``) and prints the same style of per-process breakdown,
+    with each process's swap shown.
   * the box floor, ``--min-free-gb`` (default 0.5): MemAvailable for the whole
     machine. Other sessions share this box, so a job under its own cap can
     still starve docker when a neighbour grows. Breach: SIGKILL at once; this
     is an emergency, not a courtesy stop.
+
+  A ``--max-rss-gb`` set ABOVE this box's MemTotal can only be reached by
+  swapping, which is precisely what ``--max-swap-gb`` exists to discourage.
+  At startup, such a cap prints a loud warning naming both numbers. It is
+  NOT refused — a legitimate caller may want that on a machine whose limits
+  differ from this one — just impossible to set by accident and not notice.
 
   Why the interval matters: the watchdog acts only when it looks, so the worst
   overshoot is growth rate x interval. The 30 s default this replaced let a
   capture climb gigabytes between looks and took docker down (2026-09-18); at
   0.25 s the overshoot is tens of MB. A tick reads a few /proc files.
 
-  Either breach prints the memory breakdown and exits 137. That turns this
+  Any breach prints the memory breakdown and exits 137. That turns this
   box's failure mode — a silent OOM that kills a neighbor's job with no
   traceback anywhere — into a clean, explained abort of exactly one job.
 
@@ -50,7 +86,7 @@ once a minute.
 
 Usage:
     python3 tools/bounded_run.py [--cores N] [--max-rss-gb G] \\
-        [--min-free-gb F] [--poll-s S] -- <command...>
+        [--max-swap-gb G] [--min-free-gb F] [--poll-s S] -- <command...>
 
     python3 tools/bounded_run.py --max-rss-gb 5.5 -- \\
         python3 -m engine.dashboard.nightly --as-of 2026-09-09
@@ -68,6 +104,7 @@ from pathlib import Path
 
 POLL_DEFAULT_S = 0.25
 MIN_FREE_DEFAULT_GB = 0.5
+MAX_SWAP_DEFAULT_GB = 0.5
 KILL_GRACE_DEFAULT_S = 45
 HEARTBEAT_S = 60.0
 
@@ -113,11 +150,51 @@ def _vmrss_mb(pid: int) -> float:
     return float(raw[:-2]) / 1024.0 if raw.endswith("kB") else 0.0
 
 
+def _swap_mb(pid: int) -> tuple[float, float]:
+    """``(vm_swap_mb, swap_pss_mb)`` for one process; SwapPss from
+    smaps_rollup when readable, mirroring ``_rss_mb``.
+
+    VmSwap can double-count swapped-out shared pages across processes, so the
+    tree total uses SwapPss where the kernel provides it and falls back to
+    VmSwap otherwise.
+    """
+    status = _read_status(pid)
+    raw = status.get("VmSwap", "")
+    vm = float(raw[:-2]) / 1024.0 if raw.endswith("kB") else 0.0
+    pss = vm
+    try:
+        for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+            if line.startswith("SwapPss:"):
+                pss = float(line.split()[1]) / 1024.0
+                break
+    except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
+        pass
+    return vm, pss
+
+
+def _vmswap_mb(pid: int) -> float:
+    """VmSwap alone: the cheap per-tick reading (no smaps walk)."""
+    raw = _read_status(pid).get("VmSwap", "")
+    return float(raw[:-2]) / 1024.0 if raw.endswith("kB") else 0.0
+
+
 def _available_mb() -> float:
     """The box's MemAvailable, in MB (inf if unreadable, so it never kills)."""
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemAvailable:"):
+                return float(line.split()[1]) / 1024.0
+    except (OSError, IndexError, ValueError):
+        pass
+    return float("inf")
+
+
+def _mem_total_mb() -> float:
+    """The box's MemTotal, in MB (inf if unreadable, so the startup warning
+    about an over-large ``--max-rss-gb`` never false-fires)."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
                 return float(line.split()[1]) / 1024.0
     except (OSError, IndexError, ValueError):
         pass
@@ -164,6 +241,25 @@ def _cmdline(pid: int) -> str:
         return "<gone>"
 
 
+def _terminate_with_grace(proc: subprocess.Popen, kill_grace_s: int,
+                          poll_s: float, floor_mb: float) -> None:
+    """SIGTERM the tree, wait up to ``kill_grace_s`` honouring the box floor,
+    then SIGKILL if it is still alive. Shared by the RSS-cap and swap-cap
+    breach paths so their grace-period behaviour cannot drift apart.
+    """
+    _kill(proc, signal.SIGTERM)
+    deadline = time.monotonic() + kill_grace_s
+    while time.monotonic() < deadline and proc.poll() is None:
+        if _available_mb() < floor_mb:
+            print("[bounded] box floor crossed during grace; SIGKILL",
+                  flush=True)
+            break
+        time.sleep(poll_s)
+    if proc.poll() is None:
+        print("[bounded] SIGTERM not honoured; SIGKILL", flush=True)
+        _kill(proc, signal.SIGKILL)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -180,6 +276,11 @@ def main() -> int:
     parser.add_argument("--min-free-gb", type=float, default=MIN_FREE_DEFAULT_GB,
                         help="SIGKILL the job when the whole box's MemAvailable "
                              "drops below this (default: 0.5)")
+    parser.add_argument("--max-swap-gb", type=float, default=MAX_SWAP_DEFAULT_GB,
+                        help="kill the tree when its swap crosses this cap "
+                             "(default: 0.5, on by default). 0 kills on ANY "
+                             "swap; a NEGATIVE value disables the swap check "
+                             "entirely")
     parser.add_argument("--poll-s", type=float, default=POLL_DEFAULT_S,
                         help="watchdog interval in seconds (default: 0.25)")
     parser.add_argument("--kill-grace-s", type=int, default=KILL_GRACE_DEFAULT_S,
@@ -198,6 +299,21 @@ def main() -> int:
     floor_mb = args.min_free_gb * 1024.0
 
     cap_mb = args.max_rss_gb * 1024.0
+    swap_enabled = args.max_swap_gb >= 0
+    # A NEGATIVE --max-swap-gb disables the check; 0 or above enables it, with
+    # 0 meaning "kill on ANY swap". The breach test below uses a strict ">",
+    # not ">=": with a 0 cap, ">=" would be true even at zero swap (0 >= 0)
+    # and kill every job unconditionally, which is not "any swap", it is
+    # "always". ">" only fires once swap actually becomes positive.
+    swap_cap_mb = args.max_swap_gb * 1024.0 if swap_enabled else float("inf")
+
+    mem_total_mb = _mem_total_mb()
+    if cap_mb > mem_total_mb:
+        print(f"[bounded] WARNING: --max-rss-gb {args.max_rss_gb:g}G exceeds "
+              f"this box's MemTotal {mem_total_mb / 1024.0:.2f}G — that cap "
+              f"can only be reached by swapping, which --max-swap-gb is here "
+              f"to discourage; continuing anyway", flush=True)
+
     cores = args.cpu_set or (f"0-{args.cores - 1}" if args.cores > 1 else "0")
     if not re.fullmatch(r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*", cores):
         parser.error("--cpu-set must contain comma-separated CPU numbers or ranges")
@@ -217,6 +333,7 @@ def main() -> int:
         env[name] = str(worker_cores)
 
     print(f"[bounded] cap={args.max_rss_gb:g}G warn at {args.warn_pct:g}% "
+          f"swap-cap={'disabled' if not swap_enabled else f'{args.max_swap_gb:g}G'} "
           f"box floor={args.min_free_gb:g}G "
           f"cores={cores} of {os.cpu_count()} poll={args.poll_s:g}s "
           f"nice=19 threads={worker_cores}", flush=True)
@@ -255,22 +372,42 @@ def main() -> int:
             return 137
         tree = _descendants(proc.pid)
         rss_total = sum(_vmrss_mb(pid) for pid in tree)
+        swap_total = sum(_vmswap_mb(pid) for pid in tree)
         heartbeat = elapsed - last_beat >= HEARTBEAT_S
-        if rss_total >= cap_mb * args.warn_pct / 100.0 or heartbeat:
-            # VmRSS double-counts pages shared across the tree; confirm with
-            # Pss before warning or killing, and for the heartbeat line.
+        near_swap_cap = swap_enabled and swap_total > swap_cap_mb * args.warn_pct / 100.0
+        if rss_total >= cap_mb * args.warn_pct / 100.0 or heartbeat or near_swap_cap:
+            # VmRSS/VmSwap double-count pages shared across the tree; confirm
+            # with Pss/SwapPss before warning or killing, and for the
+            # heartbeat line.
             vm_total = pss_total = 0.0
+            swap_pss_total = 0.0
             for pid in tree:
                 vm, pss = _rss_mb(pid)
                 vm_total += vm
                 pss_total += pss
+                _, spss = _swap_mb(pid)
+                swap_pss_total += spss
         else:
             vm_total = pss_total = rss_total
+            swap_pss_total = swap_total
         pct = 100.0 * pss_total / cap_mb
         line = (f"[watchdog] {elapsed / 60.0:6.1f}m rss "
                 f"{pss_total / 1024.0:5.2f}G pss ({vm_total / 1024.0:.2f}G vm, "
-                f"{len(tree)} procs) = {pct:.0f}% of cap; box free "
+                f"{len(tree)} procs) = {pct:.0f}% of cap; swap "
+                f"{swap_pss_total / 1024.0:5.2f}G; box free "
                 f"{available / 1024.0:.2f}G")
+        if swap_enabled and swap_pss_total > swap_cap_mb:
+            print(f"{line} — SWAP BREACH, killing tree", flush=True)
+            print("[bounded] per-process memory at breach:", flush=True)
+            rows = sorted(((_swap_mb(p)[1], p) for p in tree), reverse=True)
+            for swap, pid in rows[:8]:
+                print(f"  {swap / 1024.0:5.2f}G swap  pid {pid}  {_cmdline(pid)}",
+                      flush=True)
+            _terminate_with_grace(proc, args.kill_grace_s, args.poll_s, floor_mb)
+            print("[bounded] killed at the swap cap — the job is resumable; "
+                  "raise --max-swap-gb or stop the paging before re-running",
+                  flush=True)
+            return 137
         if pss_total >= cap_mb:
             print(f"{line} — CAP BREACH, killing tree", flush=True)
             print("[bounded] per-process memory at breach:", flush=True)
@@ -278,17 +415,7 @@ def main() -> int:
             for pss, pid in rows[:8]:
                 print(f"  {pss / 1024.0:5.2f}G  pid {pid}  {_cmdline(pid)}",
                       flush=True)
-            _kill(proc, signal.SIGTERM)
-            deadline = time.monotonic() + args.kill_grace_s
-            while time.monotonic() < deadline and proc.poll() is None:
-                if _available_mb() < floor_mb:
-                    print("[bounded] box floor crossed during grace; SIGKILL",
-                          flush=True)
-                    break
-                time.sleep(args.poll_s)
-            if proc.poll() is None:
-                print("[bounded] SIGTERM not honoured; SIGKILL", flush=True)
-                _kill(proc, signal.SIGKILL)
+            _terminate_with_grace(proc, args.kill_grace_s, args.poll_s, floor_mb)
             print("[bounded] killed at the memory cap — the job is resumable; "
                   "raise --max-rss-gb or free memory before re-running",
                   flush=True)
