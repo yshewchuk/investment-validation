@@ -115,13 +115,15 @@ def test_writer_persists_a_case_the_real_phase4_validator_accepts(tmp_path) -> N
     assert set(case) == {
         "case_id", "request", "request_hash", "strategy", "branches",
         "resource_refs", "executable_inputs", "disposition", "checkpoints",
-        "case_hash",
+        "first_gap", "case_hash",
     }
     assert case["strategy"] == "STR-THRU"
     assert case["branches"]  # nonempty, real: entry_cost=2.5 -> debit_credit
     assert set(case["checkpoints"]) == {
         "features", "selection_pricing", "simulation", "gate_inputs",
     }
+    # All four required groups present -> nothing to explain.
+    assert case["first_gap"] is None
     assert json.loads((release / "INDEX.json").read_text())[
         "diagnostic_checkpoint_manifest"
     ] == "checkpoints/manifest.json"
@@ -172,12 +174,82 @@ def test_an_early_refusal_is_written_honestly_not_skipped(tmp_path) -> None:
     assert case["executable_inputs"] == "missing"
     assert case["disposition"] == "incomparable"
     assert "missing_inputs" in case["branches"]
-    # Not a schema violation of anything THIS producer owns: `case_hash`/
-    # `request_hash` are still real and self-consistent even for a
-    # partial case -- only checks/phase4_checkpoints.py's unconditional
-    # four-groups rule (a separate, flagged design question) rejects it.
+    # No checkpoint group at all (not even `source_inputs`) means this row
+    # truly could not be evaluated -- `executable_inputs: missing` forces
+    # `incomparable` (never `refused_as_expected`, which is reserved for a
+    # row that DID resolve real inputs before its deliberate early exit).
+    assert case["first_gap"] == {
+        "stage": "resolve_context", "reason": "superseded strategy",
+    }
     assert case["case_hash"] == content_hash(
         {k: v for k, v in case.items() if k != "case_hash"})
+
+    # 2026-09-21 contract change: a non-`compared` case with a strict
+    # subset of the four required groups now validates against the REAL
+    # spec, PROVIDED it carries `first_gap` -- which this one does.
+    case_id, strategy, branches = _verify_case(release, "case-superseded")
+    assert case_id == "case-superseded"
+    assert strategy == "TWIN-P"
+    assert "missing_inputs" in branches
+
+
+def test_a_row_that_resolved_its_inputs_before_refusing_is_refused_as_expected(tmp_path) -> None:
+    """2026-09-21 (coordinator, second fix): the real corpus proves
+    ``refused_as_expected`` was unreachable -- every ``SUPERSEDED``/
+    ``UNVALIDATED_STRUCTURE`` refusal ``capture_request_only_bundle``
+    records leaves ``source_inputs`` populated (the request's own facts:
+    ticker, strategy, structure) even though NONE of the four required
+    groups are ever reached. The old rule read ONLY those four groups to
+    decide ``executable_inputs``, so a row that plainly had real,
+    resolved inputs still came out ``missing`` -> forced ``incomparable``
+    by the validator's own rule -- collapsing "the system correctly
+    refused this row" into the same bucket as "this row could not be
+    evaluated at all". Fixed: ``executable_inputs`` now reads ANY
+    hash-verified group, including ``source_inputs``.
+    """
+    candidate = {
+        "fixture_id": "case-unvalidated",
+        "covers": ["strategy:CAL-P"],
+        "request": {"strategy": "CAL-P", "ticker": "CODA"},
+        "record": {"strategy": "CAL-P", "ticker": "CODA"},
+        "kind": "score_result",
+        "duration": 0.05,
+        "legacy_trace": {
+            "schema_version": "phase4_legacy_diagnostic_checkpoint.v1.0",
+            "disposition": {
+                "status": "refused", "flags": ["UNVALIDATED_STRUCTURE"],
+                "detail": "CAL-P is not scored",
+                "first_gap": {"stage": "resolve_context",
+                              "reason": "disabled strategy"},
+            },
+            "checkpoints": {
+                "source_inputs": _hashed({
+                    "context": {"ticker": "CODA", "strategy": "CAL-P"},
+                    "quote_status": "not_reached", "scope": "request_only",
+                }),
+            },
+        },
+    }
+    release = tmp_path / "release"
+    write(release, [candidate], {"strategy:CAL-P": ["case-unvalidated"]},
+          pd.Timestamp("2026-01-01"), "snapshot-1")
+
+    case = json.loads(
+        (release / "checkpoints" / "cases" / "case-unvalidated.json").read_text())
+    # `source_inputs` itself is never part of `checkpoints` (not in the
+    # schema's REQUIRED/OPTIONAL vocabulary) -- only its EVIDENCE that
+    # real inputs resolved changes `executable_inputs`.
+    assert case["checkpoints"] == {}
+    assert case["executable_inputs"] == "available"
+    assert case["disposition"] == "refused_as_expected"
+    assert case["first_gap"] == {
+        "stage": "resolve_context", "reason": "disabled strategy",
+    }
+
+    case_id, strategy, branches = _verify_case(release, "case-unvalidated")
+    assert case_id == "case-unvalidated"
+    assert strategy == "CAL-P"
+    assert "missing_inputs" in branches
 
 
 def test_the_old_pre_fix_case_shape_is_rejected_by_the_real_validator(tmp_path) -> None:

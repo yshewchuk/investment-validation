@@ -3189,6 +3189,25 @@ _SIMULATION_DROPPED_FIELDS = ("residual_population",)
 _EXPECTED_EARLY_REFUSAL_FLAGS = frozenset({"SUPERSEDED", "UNVALIDATED_STRUCTURE"})
 
 
+def _any_captured_evidence(checkpoints_in: Mapping[str, Any]) -> bool:
+    """True iff the legacy trace recorded at least one hash-verified group,
+    of ANY kind -- including ``source_inputs``, captured before scoring
+    even starts, so present for a genuinely early refusal that never
+    reaches any of the four ``REQUIRED_CHECKPOINT_GROUPS``.
+
+    Distinct from ``have_all_required`` / ``checkpoints_out``: this answers
+    "did this row's inputs resolve to something real," not "did scoring
+    run to completion." It exists only to set ``executable_inputs``
+    honestly -- never to populate ``checkpoints_out``, which stays confined
+    to the schema's own vocabulary regardless of what this returns.
+    """
+    for row in checkpoints_in.values():
+        if (isinstance(row, Mapping) and isinstance(row.get("value"), Mapping)
+                and row.get("content_hash") == content_hash(row["value"])):
+            return True
+    return False
+
+
 def _phase4_case_branches(
     cand: Mapping[str, Any], request: Mapping[str, Any],
     features_value: Mapping[str, Any], selection_value: Mapping[str, Any],
@@ -3316,17 +3335,14 @@ def _phase4_case_document(
     candidate's own trace actually produced; a group it never reached is
     left OUT of ``checkpoints``, never fabricated as an empty placeholder.
 
-    NOTE (design gap, flagged for the coordinator, not fixed here):
-    ``checks/phase4_checkpoints.py::_case`` requires all four
-    ``REQUIRED_CHECKPOINT_GROUPS`` on EVERY case regardless of
-    ``disposition``/``executable_inputs`` -- it has no accommodation for an
-    honest early refusal, whose checkpoints are necessarily a subset (down
-    to empty, for a row refused before ``features`` is ever captured). A
-    partial-groups case built here therefore still fails
-    ``checks/phase4_checkpoints.py``'s bundle-level validation today; only
-    the schema owner can decide whether to gate the four-groups requirement
-    on ``disposition == "compared"``. This function does not weaken that
-    validator and does not fabricate groups to satisfy it.
+    2026-09-21 (coordinator, second authorised contract change):
+    ``checks/phase4_checkpoints.py::_case`` now requires all four
+    ``REQUIRED_CHECKPOINT_GROUPS`` only when ``disposition == "compared"``;
+    a non-``compared`` case may carry a strict subset -- exactly what this
+    function already built -- PROVIDED it also carries ``first_gap`` (the
+    stage and reason its trace stopped), so the record explains itself
+    instead of quietly asserting less than it has. See ``first_gap``
+    below for how that is filled honestly, never synthesized.
     """
     checkpoints_in = raw_checkpoint.get("checkpoints")
     if not isinstance(checkpoints_in, Mapping):
@@ -3397,15 +3413,25 @@ def _phase4_case_document(
 
     # Real disposition, from what THIS candidate's own capture actually
     # produced -- never a fixed "compared":
-    # * `executable_inputs` reads the legacy trace's own terminal status
-    #   (`Phase4TraceCollector.finish`): "missing_output" is the one status
-    #   that means no executable inputs were ever available, and so is a
-    #   trace that captured NO checkpoint group at all.
+    # * `executable_inputs` used to read ONLY `checkpoints_out` (the four
+    #   REQUIRED groups) -- which meant a row that resolved its inputs
+    #   (`source_inputs` captured: ticker, strategy, request all real and
+    #   known) but was correctly refused before reaching `features` looked
+    #   IDENTICAL to a row that resolved nothing at all. That accounting
+    #   artifact is what made `refused_as_expected` unreachable: `missing`
+    #   forces `incomparable` by the validator's own rule, and every
+    #   `SUPERSEDED`/`UNVALIDATED_STRUCTURE` refusal left `checkpoints_out`
+    #   empty by construction. Fixed (2026-09-21, coordinator): look at
+    #   EVERY hash-verified group the legacy trace recorded, including
+    #   `source_inputs` -- never added to `checkpoints_out` itself, which
+    #   stays confined to the schema's own vocabulary, but real evidence
+    #   that this row's inputs were available.
     # * A row refused for a KNOWN, EXPECTED reason before the pipeline ran
     #   (`_EXPECTED_EARLY_REFUSAL_FLAGS`, from `Phase4TraceCollector.finish`'s
-    #   own `result.flags` -- real, not inferred) is `refused_as_expected`;
-    #   any other early stop is `incomparable` -- a real gap, not a planned
-    #   refusal.
+    #   own `result.flags` -- real, not inferred) is `refused_as_expected`:
+    #   evidence the system correctly declined an invalid row, not a gap.
+    #   Any other early stop is `incomparable` -- a genuine inability to
+    #   evaluate, not a deliberate, recognized refusal.
     # * `input_trace` is the native probe's own successful trace
     #   (`attach_strict_probe`); its absence with a full legacy trace means
     #   a typed `strict_trace_gap` was recorded instead -- a real, named
@@ -3414,7 +3440,8 @@ def _phase4_case_document(
     legacy_status = legacy_disposition.get("status")
     legacy_flags = set(legacy_disposition.get("flags") or ())
     executable_inputs = (
-        "missing" if (legacy_status == "missing_output" or not checkpoints_out)
+        "missing" if (legacy_status == "missing_output"
+                      or not _any_captured_evidence(checkpoints_in))
         else "available"
     )
     if executable_inputs == "missing":
@@ -3428,6 +3455,23 @@ def _phase4_case_document(
         disposition = "compared"
     else:
         disposition = "incomparable"
+
+    # `first_gap`: the stage and reason `Phase4TraceCollector.finish`
+    # recorded FIRST for a row that never reached some stage (see that
+    # class's own `_first_gap` docstring). Read verbatim, never derived or
+    # guessed from `legacy_disposition["detail"]`/flags -- a corpus
+    # captured before that instrumentation existed (as the current one is)
+    # genuinely has no `first_gap` to report, and a case built from it
+    # correctly fails the "explain a gap" rule below rather than inventing
+    # an explanation the trace never gave.
+    raw_first_gap = legacy_disposition.get("first_gap")
+    first_gap = (
+        {"stage": raw_first_gap["stage"], "reason": raw_first_gap["reason"]}
+        if (isinstance(raw_first_gap, Mapping)
+            and isinstance(raw_first_gap.get("stage"), str)
+            and isinstance(raw_first_gap.get("reason"), str))
+        else None
+    ) if not have_all_required else None
 
     branches = set(_phase4_case_branches(
         cand, request,
@@ -3456,6 +3500,7 @@ def _phase4_case_document(
         "executable_inputs": executable_inputs,
         "disposition": disposition,
         "checkpoints": checkpoints_out,
+        "first_gap": first_gap,
     }
     body["case_hash"] = content_hash(body)
     return body, have_all_required
@@ -3494,17 +3539,18 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     #: Every real trace is now WRITTEN, complete or partial (2026-09-21: a
     #: silently thinner corpus from skipping partial cases is worse than
     #: one that records them honestly -- see `_phase4_case_document`).
-    #: `phase4_cases_complete` had all four required groups (further split
-    #: by disposition below); `phase4_cases_partial` is an honest early
-    #: refusal written with only the groups it actually reached --
-    #: `checks/phase4_checkpoints.py` still requires all four on every
-    #: case today, so these are EXPECTED to fail bundle-level validation
-    #: until that contract gap is resolved (flagged, not fixed, here).
+    #: Counted by the case's own `disposition` -- `checks/phase4_checkpoints.py`
+    #: now requires all four groups only for `compared` (2026-09-21,
+    #: coordinator-authorised); a `refused_as_expected`/`incomparable` case
+    #: may be partial PROVIDED it carries `first_gap`, tracked separately
+    #: below so a case this stale (pre-`first_gap`-instrumentation) corpus
+    #: cannot honestly fill is visible, not silently swallowed.
     #: `phase4_cases_skipped` is real corruption or an unidentifiable
     #: candidate -- never a fabricated field.
     phase4_cases_compared = 0
-    phase4_cases_incomparable_complete = 0
-    phase4_cases_partial: list[str] = []
+    phase4_cases_refused_as_expected = 0
+    phase4_cases_incomparable = 0
+    phase4_cases_partial_without_first_gap: list[str] = []
     phase4_cases_skipped: list[str] = []
 
     manifest_pairs = {}
@@ -3586,12 +3632,15 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
                 phase4_cases_skipped.append(str(cand["fixture_id"]))
             else:
                 checkpoint_sink.write_case(cand["fixture_id"], case_document)
-                if not complete:
-                    phase4_cases_partial.append(str(cand["fixture_id"]))
-                elif case_document["disposition"] == "compared":
+                disposition = case_document["disposition"]
+                if disposition == "compared":
                     phase4_cases_compared += 1
+                elif disposition == "refused_as_expected":
+                    phase4_cases_refused_as_expected += 1
                 else:
-                    phase4_cases_incomparable_complete += 1
+                    phase4_cases_incomparable += 1
+                if not complete and case_document["first_gap"] is None:
+                    phase4_cases_partial_without_first_gap.append(str(cand["fixture_id"]))
             del case_document
         # Hydrate/prepare one pair at a time and drop it before the next --
         # `pair`/`checkpoint`/`input_trace`/`storage_pair` are the only
@@ -3601,20 +3650,21 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         gc.collect()
 
     phase4_total_written = (
-        phase4_cases_compared + phase4_cases_incomparable_complete
-        + len(phase4_cases_partial)
+        phase4_cases_compared + phase4_cases_refused_as_expected
+        + phase4_cases_incomparable
     )
     print(f"[corpus] phase4 diagnostic checkpoint cases: {phase4_total_written} written "
-          f"({phase4_cases_compared} compared, {phase4_cases_incomparable_complete} "
-          f"incomparable-complete, {len(phase4_cases_partial)} partial/early-refusal), "
+          f"({phase4_cases_compared} compared, {phase4_cases_refused_as_expected} "
+          f"refused_as_expected, {phase4_cases_incomparable} incomparable), "
           f"{len(phase4_cases_skipped)} skipped (real corruption or unidentifiable, "
           "never faked)", flush=True)
-    if phase4_cases_partial:
-        print("    partial (all 4 required groups not reached -- written, but "
-              "checks/phase4_checkpoints.py requires all four unconditionally today; "
-              "see _phase4_case_document's docstring):", flush=True)
-        for fixture_id in phase4_cases_partial[:5]:
-            print(f"    partial: {fixture_id}", flush=True)
+    if phase4_cases_partial_without_first_gap:
+        print(f"    {len(phase4_cases_partial_without_first_gap)} partial case(s) have no "
+              "first_gap (legacy trace predates that instrumentation) and will FAIL "
+              "checks/phase4_checkpoints.py bundle validation until recaptured:",
+              flush=True)
+        for fixture_id in phase4_cases_partial_without_first_gap[:5]:
+            print(f"    no first_gap: {fixture_id}", flush=True)
     if phase4_cases_skipped:
         for fixture_id in phase4_cases_skipped[:5]:
             print(f"    skipped: {fixture_id}", flush=True)

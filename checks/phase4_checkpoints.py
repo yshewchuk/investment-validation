@@ -191,11 +191,27 @@ def _case_from_pointer(
 
 
 def _case(row: Any, index: int, resource_ids: set[str]) -> tuple[str, str, set[str]]:
+    """Validate one case.
+
+    ``disposition == "compared"`` keeps FULL strictness: all four
+    ``REQUIRED_CHECKPOINT_GROUPS`` present, each one's own shape and hash
+    verified exactly as before. A non-``compared`` case (2026-09-21,
+    coordinator-authorised contract change) may be missing some of those
+    four -- a row that refused before reaching a stage has no stage-3
+    checkpoint and never will, and demanding one anyway forces either a
+    skip (loses evidence) or a fabrication (worse). What is NOT relaxed:
+    every group the row DID reach still passes the same per-group key/hash
+    checks as a ``compared`` case, and a case with any required group
+    missing must carry ``first_gap`` -- the stage and reason it stopped --
+    so the record explains itself instead of just going quiet. A case
+    with all four groups present must NOT also carry a ``first_gap``
+    (nothing to explain).
+    """
     label = "cases[" + str(index) + "]"
     expected = {
         "case_id", "request", "request_hash", "strategy", "branches",
         "resource_refs", "executable_inputs", "disposition", "checkpoints",
-        "case_hash",
+        "first_gap", "case_hash",
     }
     if not isinstance(row, Mapping) or set(row) != expected:
         _fail(label, "unexpected or missing fields")
@@ -230,9 +246,18 @@ def _case(row: Any, index: int, resource_ids: set[str]) -> tuple[str, str, set[s
         _fail(label + ".checkpoints", "expected object")
     if set(checkpoints) - (REQUIRED_CHECKPOINT_GROUPS | OPTIONAL_CHECKPOINT_GROUPS):
         _fail(label + ".checkpoints", "unsupported group")
-    missing = REQUIRED_CHECKPOINT_GROUPS - set(checkpoints)
-    if missing:
+    have_all_required = not (REQUIRED_CHECKPOINT_GROUPS - set(checkpoints))
+    if row["disposition"] == "compared" and not have_all_required:
         _fail(label + ".checkpoints", "missing required group")
+    first_gap = row["first_gap"]
+    if have_all_required:
+        if first_gap is not None:
+            _fail(label + ".first_gap", "must be null when all required groups are present")
+    else:
+        if not isinstance(first_gap, Mapping) or set(first_gap) != {"stage", "reason"}:
+            _fail(label + ".first_gap", "expected stage and reason when a required group is missing")
+        _string(first_gap["stage"], label + ".first_gap.stage")
+        _string(first_gap["reason"], label + ".first_gap.reason")
     dyn_sv = strategy == "DYN-SV" or "dyn_sv" in branches
     if dyn_sv != ("dyn_sv" in checkpoints):
         _fail(label + ".checkpoints.dyn_sv", "required exactly for DYN-SV")

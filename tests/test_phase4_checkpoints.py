@@ -20,31 +20,33 @@ def _hashed(value):
     return {"value": value, "content_hash": content_hash(value)}
 
 
-def _case(case_id, branches):
+def _case(case_id, branches, *, disposition="compared", checkpoints=None,
+          executable_inputs="available", first_gap=None):
     request = {
         "event_id": case_id,
         "strategy_version": "STR-THRU",
         "mode": "replay",
     }
-    checkpoints = {
-        "features": _hashed({
-            "feature_vector": {"spot": 100.0},
-            "missing_mask": {"spot": False},
-            "model_identity": {"artifact": "model-a"},
-        }),
-        "selection_pricing": _hashed({
-            "selected_legs": [{"right": "call", "side": "long", "quantity": 1}],
-            "entry_cost": 2.5,
-        }),
-        "simulation": _hashed({
-            "horizon": "planned_exit",
-            "capital_denominator": 2.5,
-            "residual_population_identity": {"ref": "residual-a"},
-            "draw_count": 1000,
-            "seed": 7,
-        }),
-        "gate_inputs": _hashed({"entry_cost": 2.5}),
-    }
+    if checkpoints is None:
+        checkpoints = {
+            "features": _hashed({
+                "feature_vector": {"spot": 100.0},
+                "missing_mask": {"spot": False},
+                "model_identity": {"artifact": "model-a"},
+            }),
+            "selection_pricing": _hashed({
+                "selected_legs": [{"right": "call", "side": "long", "quantity": 1}],
+                "entry_cost": 2.5,
+            }),
+            "simulation": _hashed({
+                "horizon": "planned_exit",
+                "capital_denominator": 2.5,
+                "residual_population_identity": {"ref": "residual-a"},
+                "draw_count": 1000,
+                "seed": 7,
+            }),
+            "gate_inputs": _hashed({"entry_cost": 2.5}),
+        }
     row = {
         "case_id": case_id,
         "request": request,
@@ -52,9 +54,10 @@ def _case(case_id, branches):
         "strategy": "STR-THRU",
         "branches": branches,
         "resource_refs": ["models"],
-        "executable_inputs": "available",
-        "disposition": "compared",
+        "executable_inputs": executable_inputs,
+        "disposition": disposition,
         "checkpoints": checkpoints,
+        "first_gap": first_gap,
     }
     return {**row, "case_hash": content_hash(row)}
 
@@ -188,6 +191,65 @@ def test_missing_checkpoint_group_is_rejected(tmp_path):
     branches = sorted(REQUIRED_BRANCHES)
     document = _case("case-1", branches)
     document["checkpoints"].pop("gate_inputs")
+    _resign_case(document)
+    bundle = _bundle(tmp_path, document=document)
+    with pytest.raises(CheckpointError, match="missing required group"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_incomparable_case_missing_required_groups_needs_first_gap(tmp_path):
+    """2026-09-21 (coordinator): a non-``compared`` case may be missing
+    required groups, but only when it explains itself -- no ``first_gap``
+    with missing groups is still rejected, the same as a fabricated group
+    would be."""
+    branches = sorted(REQUIRED_BRANCHES)
+    checkpoints = {"gate_inputs": _hashed({"entry_cost": 2.5})}
+    document = _case(
+        "case-1", branches, disposition="incomparable", checkpoints=checkpoints,
+        first_gap=None,
+    )
+    bundle = _bundle(tmp_path, document=document)
+    with pytest.raises(CheckpointError, match="expected stage and reason"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_incomparable_case_with_first_gap_and_partial_groups_is_accepted(tmp_path):
+    """The relaxed side of the same contract change: a genuinely partial,
+    non-``compared`` case that DOES explain where it stopped validates,
+    carrying only the groups it actually reached."""
+    branches = sorted(REQUIRED_BRANCHES)
+    checkpoints = {"gate_inputs": _hashed({"entry_cost": 2.5})}
+    document = _case(
+        "case-1", branches, disposition="refused_as_expected", checkpoints=checkpoints,
+        first_gap={"stage": "resolve_context", "reason": "superseded strategy"},
+    )
+    bundle = _bundle(tmp_path, document=document)
+    verified = validate_bundle(bundle, tmp_path)
+    assert verified["case_ids"] == ("case-1",)
+
+
+def test_complete_case_must_not_carry_a_first_gap(tmp_path):
+    """A case with all four required groups has nothing to explain; a
+    stray ``first_gap`` there would be a lie about where it stopped."""
+    branches = sorted(REQUIRED_BRANCHES)
+    document = _case(
+        "case-1", branches, disposition="incomparable",
+        first_gap={"stage": "resolve_context", "reason": "superseded strategy"},
+    )
+    bundle = _bundle(tmp_path, document=document)
+    with pytest.raises(CheckpointError, match="must be null"):
+        validate_bundle(bundle, tmp_path)
+
+
+def test_compared_case_still_requires_all_four_groups_even_with_first_gap(tmp_path):
+    """Coordinator: keep FULL strictness for ``compared``. Supplying a
+    ``first_gap`` does not buy a ``compared`` case an exemption from the
+    four-group requirement -- that relaxation is for non-``compared``
+    dispositions only."""
+    branches = sorted(REQUIRED_BRANCHES)
+    document = _case("case-1", branches)
+    document["checkpoints"].pop("gate_inputs")
+    document["first_gap"] = {"stage": "resolve_context", "reason": "superseded strategy"}
     _resign_case(document)
     bundle = _bundle(tmp_path, document=document)
     with pytest.raises(CheckpointError, match="missing required group"):
