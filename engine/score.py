@@ -207,9 +207,21 @@ ATM_TOLERANCE_PCT = 2.0
 MODEL_DRAWS = 4000
 
 #: The Phase 4 binding output names of STR-RUNUP's two forecast models.
+#:
+#: ``runup_move``'s artifact (``move_artifact.predict`` below, a
+#: ``LogTargetRegressor``) returns the raw T-14 magnitude
+#: (``runup_abs_move_d14`` target units) -- ``scale_runup_move``/``days/14``
+#: is applied afterward, once, at scoring time. The binding name has to say
+#: RAW here, matching ``engine.v2.scoring.application._RUNUP_RAW_NAMES``,
+#: or the native consumer correctly refuses the row
+#: (``PRETRANSFORMED_FROZEN_OUTPUT:runup_move``) rather than silently
+#: skipping or double-applying the day scale. 2026-09-21: this label was
+#: "runup_move_prediction" (a FINAL name) while the captured value was
+#: always the raw one -- see tools/phase5_prepare_release.py's
+#: ``OUTPUT_NAMES`` for the same fix on the real release path.
 _RUNUP_MODEL_OUTPUTS = {
     "implied_t1": ("implied_t1",),
-    "runup_move": ("runup_move_prediction",),
+    "runup_move": ("pred_runup_abs_move_d14",),
 }
 
 #: Below this, a quoted implied move is treated as ABSENT rather than displayed.

@@ -65,12 +65,20 @@ from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelReleas
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
-#: Output name per role for the frozen binding. Resolution-only today: no
-#: consumer reads these names yet, so they follow the Phase 4 native field
-#: names where one exists.
+#: Output name per role for the frozen binding, following the Phase 4 native
+#: field names where one exists. ``runup_move`` is the one role whose native
+#: field (``runup_move_prediction``) names a FINAL, day-scaled value while
+#: the joblib artifact itself (``LogTargetRegressor``) only ever returns the
+#: raw T-14 magnitude -- ``engine.v2.scoring.application`` scales it by
+#: ``days_before_print / 14`` exactly once, at scoring time, and refuses
+#: (``PRETRANSFORMED_FROZEN_OUTPUT:runup_move``) any binding that instead
+#: claims to already be final. This must stay a raw name from
+#: ``engine.v2.scoring.application._RUNUP_RAW_NAMES``; see
+#: ``engine.score._RUNUP_MODEL_OUTPUTS`` for the matching Phase 4 capture
+#: fix (2026-09-21).
 OUTPUT_NAMES = {
     "size": ("forecast_abs_move",), "implied_t1": ("driver_prediction",),
-    "runup_move": ("runup_move_prediction",), "iv_crush": ("pred_iv_crush",),
+    "runup_move": ("pred_runup_abs_move_d14",), "iv_crush": ("pred_iv_crush",),
     "gate": ("gate_score",), "chooser": ("chooser_score",),
 }
 _FOLD = re.compile(r"^(?P<model>.+)_(?P<month>\d{6})_(?P<snap>[0-9a-f]{12})\.joblib$")
