@@ -170,16 +170,27 @@ def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
              "--max-rss-gb", "2", "--cpu-set", args.cpu_set, "--",
              sys.executable, "-m", "pytest", "-v", "-m", oc.MARKERS, *targets],
             cwd=str(root), capture_output=True, text=True)
-        if pytest_run.returncode != 0:
+        # pytest's own exit code 5 means "no tests were collected" -- here,
+        # every test in the selected file(s) was deselected by -m (the
+        # whole-file needs_corpus case this defect was measured on). That
+        # is an honest, expected outcome of the CI-marker filter, not a
+        # failure: 0 vs 5 vs any other code distinguishes "ran clean",
+        # "selected nothing to run", and "actually failed" without
+        # collapsing the middle case into either of the outer two.
+        if pytest_run.returncode not in (0, 5):
             tail = "\n".join(
                 (pytest_run.stdout + pytest_run.stderr).splitlines()[-TEST_TAIL_LINES:])
             restore_head(root, saved)
             eprint(f"land: refusing: tests failed (exit {pytest_run.returncode})")
             eprint(tail)
             return 8
-        tests_summary = (
-            f"{len(targets)} test file(s) passed "
-            f"(needs_data/needs_corpus/heavy_host/browser deselected)")
+        marker_note = "CI-marker filter: not needs_data/needs_corpus/heavy_host/browser"
+        if pytest_run.returncode == 5:
+            tests_summary = (
+                f"{len(targets)} test file(s) selected, 0 test(s) ran "
+                f"under the {marker_note}")
+        else:
+            tests_summary = f"{len(targets)} test file(s) passed ({marker_note})"
 
     if args.dry_run:
         push_summary = "skipped (--dry-run)"
