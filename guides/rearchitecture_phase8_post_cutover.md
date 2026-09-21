@@ -36,6 +36,17 @@ in place:
   introduced BY the migration, not present in the legacy function beforehand.
   Stability argues for moving rather than rewriting; it never argues for
   leaving the function where it is.
+  **Amendment (user decision, 2026-09-20):** non-determinism of any kind --
+  clock, randomness, or mutable state read from anywhere -- makes a function
+  impure, and therefore a REWRITE candidate, regardless of whether it touches
+  the store, filesystem, network or global config. This closes a gap in the
+  definition above: a function using `time.time()`, `datetime.now()`,
+  `random`, or reading mutable class or instance state touches none of the
+  listed things and would otherwise classify as PURE. Operational time
+  leaking into results is a defect class this repo already guards against
+  elsewhere -- replay identity and parity work exists precisely because a
+  result that depends on when it ran cannot be replayed. A function moved
+  verbatim despite being nondeterministic would reintroduce that quietly.
 - **REACHES OUTSIDE ITSELF** = touches the mutable legacy store, the
   filesystem, the network, global config, or executes a legacy pipeline.
   These are REWRITTEN natively in `engine/v2/`, because a move cannot
