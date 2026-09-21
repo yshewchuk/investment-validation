@@ -84,6 +84,46 @@ native job graph/deployment refs, backup/restore and authority-switch runbook,
 measured resource policy, qualified session records and remaining Phase 8 work.
 No production switch is performed merely by completing this phase.
 
+## Completion bar: runtime reachability (user decision, 2026-09-20)
+
+Phase 6 is done when every capability row's v2 entrypoint is both RESOLVED
+and actually REACHED at runtime -- called, registered, or passed into the
+object that serves it -- not merely present in source. "No legacy code
+executes" is explicitly NOT the Phase 6 bar; legacy is removed at cutover:
+Phase 7 switches the official writer, and 8A deletes the legacy tree only
+after the agreed rollback window elapses. That gap is deliberate -- you
+cannot roll back to code you have deleted -- so legacy code continues to
+execute, on purpose, through Phase 6, through Phase 7, and until 8A actually
+deletes the tree.
+
+`tools/phase6_capabilities.toml` is a STATIC analysis (source/`ast`/regex
+discovery, per **How it is produced** below) and has already been wrong in
+the direction that matters -- reporting a capability as done when nothing
+calls it:
+
+- It recorded `board-refresh-action` as `native` because `refresh_action`
+  (`engine/v2/ops/cli.py:572`) existed, while
+  `engine/v2/dashboard/preview.py:82`'s call to `create_server` never passed
+  a `submit_refresh` callable. Whenever `config.submit_refresh is None`,
+  `engine/v2/serving/operations.py::_refresh_route` returns 503
+  (`refresh not configured`). Correct, auth-gated code wired to nothing.
+- `engine/v2/scoring/application.py:739 score_batch` is a complete native
+  batch scorer with 5 call sites, all in tests, zero in production.
+
+(Both verified directly against source on 2026-09-20; state them as verified
+facts, not as open questions.)
+
+So: a green `checks/phase6_inventory.py` run does not imply anything works
+at runtime. It proves a row exists, its owner/disposition are valid and its
+named entrypoint is present in source -- it does not prove anything calls
+that entrypoint in the running system. Closing a capability row to `native`
+requires showing the call/registration site, not just the function's
+existence -- concretely, the same kind of evidence the two examples above
+are missing: what the object that actually serves the request constructs
+with, dispatches to, or is handed at startup (for example, what
+`create_server` is passed, or what a dispatch table contains), not the
+`def` line the static scan found.
+
 ## P6-1 inventory results
 
 Status: 2026-09-19, from source at `4352b77`. No data, ledger or model value

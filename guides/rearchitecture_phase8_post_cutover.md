@@ -7,8 +7,10 @@ EOD cutover gate. The target design remains the architectural destination.
 
 ## 8A — Retire compatibility dependencies and clean up the tree
 
-Entry: cutover verified, agreed rollback window elapsed, restore/replay evidence
-retained and current consumers inventoried.
+Entry: cutover verified, agreed rollback window elapsed (Phase 7 switches the
+official writer; 8A deletes the legacy tree only after that window -- the gap
+is deliberate, since you cannot roll back to code you have already deleted),
+restore/replay evidence retained and current consumers inventoried.
 
 1. Remove remaining compatibility/import-only adapters one at a time, preserving
    historical artifact and CLI readability through supported formats.
@@ -18,6 +20,38 @@ retained and current consumers inventoried.
    legacy tree and mechanically rename `engine/v2/` to `engine/` in a separate
    change from numerical or storage behavior.
 4. Update entrypoints, import map, READMEs, backup/restore and operator docs.
+
+### How a retained legacy function leaves the legacy tree (user decision, 2026-09-20)
+
+Every function retained from `engine/` leaves the legacy tree one of two ways,
+decided by whether it is PURE or REACHES OUTSIDE ITSELF -- never by leaving it
+in place:
+
+- **PURE** = its result depends only on its arguments: no file, network or
+  store access; no read of global or module-level mutable config; no mutation
+  of shared state; deterministic. Pure functions are MOVED VERBATIM into
+  `engine/v2/`, not reimplemented, and the move must be proven byte-identical
+  on real inputs. Rewriting a working, tested calculation earns nothing and
+  can only introduce defects: every writer defect found on 2026-09-20 was
+  introduced BY the migration, not present in the legacy function beforehand.
+  Stability argues for moving rather than rewriting; it never argues for
+  leaving the function where it is.
+- **REACHES OUTSIDE ITSELF** = touches the mutable legacy store, the
+  filesystem, the network, global config, or executes a legacy pipeline.
+  These are REWRITTEN natively in `engine/v2/`, because a move cannot
+  preserve behaviour when what the function reads has to move (or be
+  retired) with it.
+- **Classify from the call graph, not the import block.** A function-level
+  (indented) `import` hides a legacy dependency from a top-of-file scan.
+  `tools/phase5_training_job.py` pulls roughly ten legacy modules this way,
+  at lines 96, 120, 121, 128, 136, 143, 150, 154, 159; a `^from engine\.`
+  grep (anchored to line start) misses every one of them. Trace what a
+  function actually calls, transitively, before classifying it as either
+  pure or reaching.
+
+Item 2's drive-to-zero above is this rule applied exhaustively: every
+retained function is either moved (pure) or rewritten (reaching) so that
+nothing legitimately needs the legacy runtime by the time 8A removes it.
 
 Acceptance: tier-0 corpus and real replay unchanged by rename, zero legacy
 adapter edges, import/budget/hygiene/coverage checks, current consumer smoke
