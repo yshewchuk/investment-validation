@@ -181,6 +181,12 @@ def _content_exists_in_tree(root: Path, sha: str, content: str) -> bool:
     """Check if content (whitespace-normalized) appears anywhere in the tree at sha.
     Returns True if the content is found anywhere in the tree (relocated lines pass).
     Uses git grep -F (fixed-string, case-insensitive) to search the tree.
+
+    Known limitation: short generic lines (if x:, ), bare comments) get exempted
+    as "moved" because such text appears elsewhere in any typical tree. This does
+    not defeat detection of a real revert, since a genuine revert also removes
+    distinctive lines. The guard relies on the presence of those distinctive lines
+    to raise tier 1; short common fragments are noise and correctly exempted.
     """
     proc = git(root, "grep", "-F", "-i", content, sha)
     return proc.returncode == 0
