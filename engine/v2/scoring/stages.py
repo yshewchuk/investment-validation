@@ -1648,6 +1648,8 @@ def _execute_frozen_analogs(
     if flag is not None:
         _add_flag(flags, flag)
         return {}
+    if result.thin:
+        _add_flag(flags, "THIN_ANALOGS")
     output = {
         "exp_pnl_analog": result.exp_pnl_analog,
         "win_analog": result.win_analog,
@@ -1720,6 +1722,8 @@ def _execute_analogs(
     except (TypeError, ValueError) as exc:
         _add_flag(flags, str(exc))
         return {}
+    if result.thin:
+        _add_flag(flags, "THIN_ANALOGS")
     output = {
         "exp_pnl_analog": result.exp_pnl_analog,
         "win_analog": result.win_analog,
