@@ -225,7 +225,7 @@ def test_a_comparator_that_ignores_differences_is_itself_caught(
     def _blind_record_checks(_record, _native):
         dims = ("keys", "contracts", "verdicts", "flags", "null_masks",
                 "forecasts", "simulation", "financial_diagnostics", "analogs")
-        return ({name: True for name in dims}, {})
+        return ({name: True for name in dims}, {}, {})
 
     monkeypatch.setattr(phase4_real, "compare_records", _blind_compare_records)
     monkeypatch.setattr(phase4_real, "_record_checks", _blind_record_checks)

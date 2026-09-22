@@ -56,7 +56,7 @@ def stub_replay(monkeypatch):
     monkeypatch.setattr(phase4_real, "_verified_trace_bundle", verified)
     monkeypatch.setattr(phase4_real, "_replayed_member", replayed)
     monkeypatch.setattr(phase4_real, "_record_checks",
-                        lambda _r, _n: ({d: True for d in DIMENSIONS}, {}))
+                        lambda _r, _n: ({d: True for d in DIMENSIONS}, {}, {}))
     empty_views = {d: {} for d in ("forecasts", "simulation", "financial_diagnostics",
                                    "verdicts", "analogs")}
     monkeypatch.setattr(phase4_real, "_numeric_views",
