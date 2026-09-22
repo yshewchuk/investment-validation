@@ -91,6 +91,25 @@ def _point_legacy_root(monkeypatch, legacy_root):
     importlib.reload(paths)
 
 
+def _unpoint_legacy_root(monkeypatch, original_root_env):
+    """Undo ``_point_legacy_root``, restoring whatever ``INVESTING_PLAN_ROOT``
+    this process actually started with (``original_root_env``, captured
+    before ``_point_legacy_root`` ran) -- not unconditionally unset. An
+    unconditional delenv assumes the process began with no override, which
+    is false whenever the harness exports the real checkout's root before
+    running pytest from a worktree; getting this wrong leaves ``paths.ROOT``
+    re-derived from the file-default after teardown while any module that
+    read ``paths.ROOT`` at its own import time (under the original env)
+    keeps the stale value -- the divergence a later test in the same
+    process (e.g. ``test_v2_data_reference_inputs.py``) can observe.
+    """
+    if original_root_env is None:
+        monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("INVESTING_PLAN_ROOT", original_root_env)
+    importlib.reload(paths)
+
+
 @pytest.fixture
 def seeded_render_job(tmp_path, monkeypatch):
     """A real ``legacy_render`` job/attempt with a committed ``bundle.tar``.
@@ -100,6 +119,7 @@ def seeded_render_job(tmp_path, monkeypatch):
     ``_pointed_paths`` fixture.
     """
     patch_scorer(monkeypatch, features_module, score_module)
+    original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
     ops_root = tmp_path / "ops_root"
     ops_root.mkdir()
     clock = FakeClock()
@@ -153,10 +173,10 @@ def seeded_render_job(tmp_path, monkeypatch):
     # that reads engine.paths.ROOT (e.g. test_features.py,
     # test_v2_data_reference_inputs.py) got FileNotFoundError/AssertionError
     # from state this fixture left behind. Mirror
-    # tests/test_v2_ops_render_parity.py's _pointed_paths teardown: delenv
-    # then reload so paths.ROOT is back on the real repo root.
-    monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
-    importlib.reload(paths)
+    # tests/test_v2_ops_render_parity.py's _pointed_paths teardown:
+    # _unpoint_legacy_root puts INVESTING_PLAN_ROOT back exactly as this
+    # process had it (not unconditionally unset) and reloads paths.
+    _unpoint_legacy_root(monkeypatch, original_root_env)
 
 
 @pytest.fixture
