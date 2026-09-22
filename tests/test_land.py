@@ -524,33 +524,32 @@ def test_tier1_passes_cleanly_when_line_moves_to_different_file(
     assert _status(work) == ""
 
 
-def test_tier1_with_real_history_cac6c00_to_d40a505(sandbox, tmp_path, monkeypatch):
-    """Regression test: the real laundering incident (cac6c00 → d40a505).
-    Verifies that the absent set is non-empty and includes the with_stored_forecasts call.
-    Skips cleanly if those commits are unreachable (shallow clone).
+def test_tier1_with_real_history_cac6c00_to_d40a505():
+    """Regression test: real laundering incident (cac6c00 → d40a505).
+    Direct unit test of _content_exists_in_tree predicate.
+    Verifies: (1) decisive laundered line is ABSENT at d40a505 (tier 1 must fire),
+    (2) one of the 12 moved lines EXISTS at d40a505 (relocation exemption works).
     """
     import pytest
-    work, origin = sandbox
-    env_path = _write_env(tmp_path, "real.env", REAL_ENV_BODY)
-    monkeypatch.setattr(land, "RECENT_ADDITION_WINDOW", 50)
+    import subprocess
+    root = REPO_ROOT
 
-    # Try to detect if we're in the real repo with the real commits
-    proc = _git(work, "rev-parse", "--verify", "cac6c00^{commit}", check=False)
+    # Skip only in genuine shallow clone (commits unreachable in worktree's own repo)
+    proc = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-t", "d40a505"],
+        capture_output=True, text=True)
     if proc.returncode != 0:
-        pytest.skip("cac6c00 commit not in repo (shallow clone or wrong repo)")
+        pytest.skip("d40a505 not in worktree (shallow clone)")
 
-    # Simulate the real merge: cac6c00 → d40a505
-    # (In the real repo, this merge removed 20 lines, 12 moved, 8 absent including
-    # the with_stored_forecasts call. This test pins that the absent set is non-empty.)
-    proc = _git(work, "merge-base", "cac6c00", "d40a505", check=False)
-    if proc.returncode == 0:
-        # Real history exists; verify the absent set is non-empty
-        # by checking that some lines from cac6c00 don't appear in d40a505
-        removed_in_merge = _git(work, "diff", "-w", "cac6c00", "d40a505").stdout
-        assert "with_stored_forecasts" in removed_in_merge or len(removed_in_merge) > 0, \
-            "Real merge cac6c00→d40a505 should have removed lines"
-    else:
-        pytest.skip("cac6c00 and d40a505 merge history not available")
+    # The decisive laundered line: removed in merge, must NOT exist at d40a505
+    absent_line = "inputs = with_stored_forecasts(inputs, resolve_stored_forecasts(inputs))"
+    assert not land._content_exists_in_tree(root, "d40a505", absent_line), \
+        "Laundered line must be ABSENT at d40a505 for tier 1 to fire"
+
+    # One of the 12 moved lines: must EXIST at d40a505 (relocation exemption)
+    moved_line = "raw = vector[name]"
+    assert land._content_exists_in_tree(root, "d40a505", moved_line), \
+        "Moved line must EXIST at d40a505 for relocation exemption to work"
 
 
 def test_tier1_passes_with_correct_reviewed_deletions_from_wrong_without(
