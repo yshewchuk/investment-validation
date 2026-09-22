@@ -846,33 +846,84 @@ def _completion_controls(application_controls: dict[str, bool]) -> dict[str, boo
     }
 
 
-def _frozen_model_control(request: ScoreRequest) -> bool:
-    payload = json.dumps({
+#: STR-THRU's own required-role set (``stages._STRATEGY_FORECAST_ROLES``,
+#: set by aa97f53 2026-09-17): the strategy will not score without a
+#: ``driver`` role binding producing ``driver_prediction``, on top of the
+#: ``forecast``-role binding this control always carried. A synthetic
+#: release that only binds ``forecast`` refuses every request with
+#: ``MISSING_FORECAST_OUTPUT:driver`` before it ever reaches the model or
+#: gate layers -- this control returned False on every run between
+#: 2026-09-17 and the fix that added the second binding below.
+def _frozen_release(request: ScoreRequest, directory: Path) -> tuple[ModelRelease, ArtifactMember, ArtifactMember]:
+    """The two bindings a real STR-THRU release carries today: ``forecast``
+    (sizing + crush) and ``driver`` (the payoff-model driver STR-THRU now
+    requires). Both are verified, hash-checked JSON-linear artifacts under
+    ``directory`` -- nothing here is fit at runtime."""
+    forecast_payload = json.dumps({
         "schema_version": "linear_estimator.v1.0", "feature_order": ["x"],
         "outputs": [
             {"name": "forecast_abs_move", "intercept": 0.0, "coefficients": [1.0]},
             {"name": "pred_iv_crush", "intercept": -20.0, "coefficients": [0.0]},
         ],
     }, sort_keys=True).encode()
+    driver_payload = json.dumps({
+        "schema_version": "linear_estimator.v1.0", "feature_order": ["x"],
+        "outputs": [
+            {"name": "pred_driver_thru", "intercept": 0.0, "coefficients": [1.0]},
+        ],
+    }, sort_keys=True).encode()
+    (directory / "forecast_estimator.json").write_bytes(forecast_payload)
+    (directory / "driver_estimator.json").write_bytes(driver_payload)
+    forecast_member = ArtifactMember(
+        name="estimator", path="forecast_estimator.json",
+        content_hash="sha256:" + hashlib.sha256(forecast_payload).hexdigest(),
+    )
+    driver_member = ArtifactMember(
+        name="estimator", path="driver_estimator.json",
+        content_hash="sha256:" + hashlib.sha256(driver_payload).hexdigest(),
+    )
+    forecast_binding = ModelBinding(
+        binding_id="forecast", model_id="forecast-v1", role="forecast", strategy_id="*",
+        decision_clock_id=request.decision_clock_id, adapter="json-linear.v1",
+        feature_order=("x",),
+        output_names=("forecast_abs_move", "pred_iv_crush"),
+        members=(forecast_member,),
+    )
+    driver_binding = ModelBinding(
+        binding_id="driver", model_id="driver-v1", role="driver", strategy_id="STR-THRU",
+        decision_clock_id=request.decision_clock_id, adapter="json-linear.v1",
+        feature_order=("x",),
+        output_names=("pred_driver_thru",),
+        members=(driver_member,),
+    )
+    release = ModelRelease(release_id="release-v1", deployment_id=request.deployment_id,
+                           bindings=(forecast_binding, driver_binding))
+    return release, forecast_member, driver_member
+
+
+def _frozen_model_control(request: ScoreRequest, *, bind_driver: bool = True) -> bool:
+    """True only if a synthetic STR-THRU request, run through the real
+    ``application.score_frozen`` with a hash-verified frozen release, comes
+    back scored -- not refused, and carrying a genuine model number.
+
+    ``bind_driver=False`` is the regression-test negative: with the driver
+    binding removed the release matches what broke on 2026-09-17
+    (``MISSING_FORECAST_OUTPUT:driver``), and this must return False.
+    """
     with tempfile.TemporaryDirectory(prefix="phase4-frozen-") as root:
         directory = Path(root)
-        (directory / "estimator.json").write_bytes(payload)
-        member = ArtifactMember(
-            name="estimator", path="estimator.json",
-            content_hash="sha256:" + hashlib.sha256(payload).hexdigest(),
-        )
-        binding = ModelBinding(
-            binding_id="forecast", model_id="forecast-v1", role="forecast", strategy_id="*",
-            decision_clock_id=request.decision_clock_id, adapter="json-linear.v1",
-            feature_order=("x",),
-            output_names=("forecast_abs_move", "pred_iv_crush"),
-            members=(member,),
-        )
-        release = ModelRelease(release_id="release-v1", deployment_id=request.deployment_id,
-                               bindings=(binding,))
-        inference_request = InferenceRequest(
-            release_id="release-v1", binding_id="forecast",
-            feature_order=("x",), rows=((0.42,),))
+        release, forecast_member, driver_member = _frozen_release(request, directory)
+        inference_requests = [
+            InferenceRequest(release_id="release-v1", binding_id="forecast",
+                             feature_order=("x",), rows=((0.42,),)),
+        ]
+        if bind_driver:
+            inference_requests.append(InferenceRequest(
+                release_id="release-v1", binding_id="driver",
+                feature_order=("x",), rows=((0.42,),)))
+        else:
+            release = ModelRelease(release_id="release-v1", deployment_id=request.deployment_id,
+                                   bindings=tuple(b for b in release.bindings if b.role != "driver"))
         context = {
             "ticker": "PHASE4", "strategy": "STR-THRU",
             "event_date": "2026-09-16", "entry_date": "2026-09-16",
@@ -895,6 +946,28 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
                 "serialization",
             )
         )
+        # STR-THRU is a PAYOFF_DRIVER strategy (stages._PAYOFF_DRIVER_STRATEGIES):
+        # the model layer needs a payoff line through driver_prediction before
+        # exp_pnl_model exists, or application._record_payload's NO_SCORE guard
+        # (b8b1d92, 2026-09-18: "neither layer produced a number") refuses the
+        # row even once the driver binding above resolves. A handful of
+        # synthetic closed trades, with min_trades overridden down from the
+        # production default of 200, is enough to fit a real line -- nothing
+        # here is a frozen artifact, this is the same inline-fit compatibility
+        # path native_payoff.fit_payoff_line always supported.
+        model_block = {
+            "payoff_recipe": {"min_trades": 3},
+            "payoff_source_rows": [
+                {"driver": 0.1, "spot_entry": 100.0, "exit_value": 101.0},
+                {"driver": 0.3, "spot_entry": 100.0, "exit_value": 103.0},
+                {"driver": 0.5, "spot_entry": 100.0, "exit_value": 106.0},
+            ],
+            "model_residual_rows": [
+                {"prediction": 0.1, "residual": 0.01},
+                {"prediction": 0.3, "residual": -0.02},
+                {"prediction": 0.5, "residual": 0.03},
+            ],
+        }
         native_inputs = NativeScoreInputs(
             context=context,
             features={"model_inputs": {"x": 0.42}},
@@ -909,18 +982,22 @@ def _frozen_model_control(request: ScoreRequest) -> bool:
             },
             chooser={},
             diagnostics={},
+            model=model_block,
             source_ref="frozen-control",
             stage_receipts=receipts,
         )
         record = application.score_frozen(
-            request, FrozenInference(directory), release, inference_request,
+            request, FrozenInference(directory), release, tuple(inference_requests),
             {"_native_inputs": native_inputs},
         )
+        expected_artifact_ids = ((forecast_member.content_hash, driver_member.content_hash)
+                                 if bind_driver else (forecast_member.content_hash,))
         return (record.forecasts["forecast_abs_move"] == 0.42
+                and record.forecasts.get("driver_prediction") == (0.42 if bind_driver else None)
                 and record.resolved_request["pred_iv_crush"] == -20.0
                 and record.validation_status == "scored"
                 and record.gate_terms["gate_pass"] is True
-                and record.model_artifact_ids == (member.content_hash,))
+                and record.model_artifact_ids == expected_artifact_ids)
 
 
 def _chooser_controls() -> dict[str, bool]:
