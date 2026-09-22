@@ -2713,6 +2713,11 @@ def _load_battery_cache_entry(corpus_hash: str | None,
     or stale record into a skipped verification is unacceptable; the
     fallback on any doubt is always "run the battery".
     """
+    # A None or empty corpus hash is maximal doubt: always cache miss.
+    # Protects against two corpora that both fail the peek colliding on
+    # a key like "None::<impl>".
+    if not isinstance(corpus_hash, str) or not corpus_hash:
+        return None
     path = _battery_cache_path()
     try:
         raw = json.loads(path.read_text())
@@ -2750,6 +2755,10 @@ def _write_battery_cache_entry(corpus_hash: str | None, implementation_hash: str
     replaced) is swallowed -- it must never fail a run that just proved
     AGREE the hard way.
     """
+    # A None or empty corpus hash must never be cached. Protects against
+    # writing collision keys like "None::<impl>" when corpus_hash peek fails.
+    if not isinstance(corpus_hash, str) or not corpus_hash:
+        return
     assert merged.verdict == AGREE, "battery cache must only be written after a genuine AGREE"
     path = _battery_cache_path()
     try:

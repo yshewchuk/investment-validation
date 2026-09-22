@@ -183,3 +183,44 @@ def test_peek_corpus_hash_fails_open_on_corrupt_json(tmp_path):
     root.mkdir()
     (root / "INDEX.json").write_text("{not json")
     assert p4._peek_corpus_hash(root) is None
+
+
+# --------------------------------------------------------------------------
+# the regression: None corpus hash must never be a cache hit
+# --------------------------------------------------------------------------
+
+
+def test_none_corpus_hash_is_a_miss_even_when_entry_exists(cache_path):
+    """Regression test: a None corpus hash is always a MISS, never a HIT.
+
+    This test first hand-writes an entry under the 'None::<impl>' key to
+    simulate the collision that would happen if _write_battery_cache_entry
+    did not guard against None. Then it verifies that even with that entry
+    present, _load_battery_cache_entry still returns None (MISS).
+    """
+    merged = _agree_receipt()
+    # Hand-write an entry to simulate the collision key that would have been
+    # created by the pre-fix _write_battery_cache_entry
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(json.dumps({
+        "schema_version": p4._BATTERY_CACHE_SCHEMA,
+        "entries": {"None::sha256:bb": {
+            "corpus_hash": None, "implementation_hash": "sha256:bb",
+            "verdict": AGREE, "population": {"expected": 1, "compared": 1},
+            "cases": {}, "problem_codes": [],
+        }},
+    }))
+    # Now verify that _load_battery_cache_entry returns None (MISS), not the entry (HIT)
+    assert p4._load_battery_cache_entry(None, "sha256:bb") is None
+
+
+def test_none_corpus_hash_does_not_write_an_entry(cache_path):
+    """A None corpus hash must never write a cache entry."""
+    merged = _agree_receipt()
+    p4._write_battery_cache_entry(None, "sha256:bb", merged, {})
+    # Cache file should not exist, or if it exists, should have no entries
+    if cache_path.exists():
+        raw = json.loads(cache_path.read_text())
+        assert raw.get("entries", {}) == {}
+    else:
+        assert not cache_path.exists()
