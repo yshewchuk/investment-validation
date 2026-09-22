@@ -1044,6 +1044,59 @@ _GATE_FIELDS = ("gate_score", "gate_threshold", "gate_pass")
 #: with no incomparability marker needed.
 _ANALOG_FIELDS = ("ci_low", "ci_high", "n_analogs")
 
+#: The correspondence set the "keys" check compares. DERIVED, not hand-listed:
+#: exactly the union of the four field-name tuples above -- the fields the
+#: forecasts/simulation/verdicts/analogs numeric dimensions already compare
+#: BY NAME through ``_compare_dimension``/``compare_records`` under the exact
+#: ``SCORE_RECORD_V1`` tolerance policy. Every one of these names is read
+#: with ``record.get(name)`` on the legacy side (see ``_numeric_views``) and,
+#: on the native side, ultimately falls back to ``resolved.get(name)`` where
+#: ``resolved = dict(native.resolved_request)`` -- the one native document
+#: that is NOT a fixed-shape projection. ``application._record_payload``
+#: builds ``forecasts=``/``uncertainty=``/``gate_terms=`` via
+#: ``_value_fields(values, (<fixed name tuple>))``, an UNCONDITIONAL dict
+#: comprehension over a fixed tuple of names -- those dicts always contain
+#: every one of their names as a key (value ``None`` if ``values`` lacked
+#: it), so a key-presence check against them could never fail and would be
+#: worthless. ``resolved_request = {k: v for k, v in legacy_fields.items()
+#: if k != "scorer"}`` is different: it is a comprehension over WHATEVER
+#: ``values`` (native's own assembled stage output) actually holds, so a
+#: name that never got written into ``values`` is genuinely absent as a key,
+#: not merely ``None``. ``resolved_request`` is therefore the only native
+#: document where "this key vanished" is even a fact that can be observed --
+#: which is exactly the property a "keys" check needs.
+#:
+#: financial_diagnostics is the one comparison-dimension group EXCLUDED from
+#: this set, deliberately: entry_cost_pct/model_vs_market/fair_premium_pct/
+#: premium_vs_fair/cost_over_width are COMPUTED, not carried, on both sides
+#: (``_expected_financial_diagnostics(record)`` on the legacy side,
+#: ``financial.financial_diagnostics(values)`` on the native side, each from
+#: OTHER fields -- spot, entry_cost, driver_name, implied_move,
+#: structure_width). Neither ``record`` nor ``native.resolved_request`` ever
+#: holds them as a literal key by construction, correct or not, so a
+#: key-presence check on them would read "missing" unconditionally on every
+#: row regardless of whether native computed them right -- the same
+#: always-red-for-an-unrelated-reason failure mode this fix removes
+#: elsewhere. Their VALUES are still checked exactly, by the
+#: "financial_diagnostics" numeric dimension a few lines below.
+#:
+#: Also out of scope (each already has its own dedicated structural check in
+#: ``_record_checks``, not "keys"): contract/leg fields (the "contracts"
+#: check), flags (the "flags" check), model_inputs/null masks (the
+#: "null_masks" check). And out of scope: the ~59 field names in the old
+#: evidence's ``row_key_differences`` that never named a field in any of
+#: these groups -- legacy-only bookkeeping (``analog_buckets``,
+#: ``chain_age_days``, ``driver_name``, ``detail``, ``snapshot_hash``,
+#: ``structure_spec``, ...) and native-only working state (``quotes``,
+#: ``source_features``, ``pred_iv_crush``, ``days_before_print``, ...). None
+#: of those was ever supposed to correspond 1:1 by name across the legacy
+#: flat record and native's raw stage-value dump -- two documents built for
+#: different purposes -- so their presence on only one side is not a finding
+#: and must not fail this check.
+_DECISION_KEY_FIELDS = frozenset(
+    _FORECAST_FIELDS + _SIMULATION_FIELDS + _GATE_FIELDS + _ANALOG_FIELDS
+)
+
 #: Tri-state outcome of a numeric negative control (R4-15 fix, 2026-09-20).
 #: A dimension whose every field is ``None`` for every compared row has
 #: nothing for the control to corrupt -- that is a distinct fact from a
@@ -1994,18 +2047,14 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     - key_differences: native_only/legacy_only key sets
     - flag_differences: native_only/legacy_only flag names (symmetric diff)
     """
-    expected_keys = set(record)
-    native_keys = set(native.resolved_request) - {
-        "native_stage_receipts", "native_source_ref",
-    }
-    # Compute key differences using the same exclusion sets as the check
-    excluded_from_check = {
-        "_model_artifact_ids", "native_source_ref",
-        "native_stage_receipts", "selected_contracts",
-    }
-    optional_in_legacy = ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
-                          expected_keys)
-    native_keys_for_comparison = native_keys - excluded_from_check - optional_in_legacy
+    # "keys" compares only the fields SUPPOSED to correspond by name --
+    # _DECISION_KEY_FIELDS -- not the full shape of either document (see its
+    # definition for the derivation and what it excludes, and why). A field
+    # in that set present on only one side is a real finding: it either
+    # never reached ``record`` or silently dropped out of
+    # ``native.resolved_request``.
+    expected_keys = set(record) & _DECISION_KEY_FIELDS
+    native_keys_for_comparison = set(native.resolved_request) & _DECISION_KEY_FIELDS
 
     keys_agree = expected_keys == native_keys_for_comparison
     native_only = sorted(native_keys_for_comparison - expected_keys)
@@ -2194,9 +2243,19 @@ def _plant_structural_defect(record: Mapping[str, Any], native, dimension: str):
             **native.null_masks, key: not native.null_masks[key],
         })
     if dimension == "keys":
-        return replace(native, resolved_request={
-            **native.resolved_request, "phase4_planted_defect_key": True,
-        })
+        # An unrelated extra key is no longer a defect the narrowed "keys"
+        # check can see (out-of-scope structural fields are supposed to
+        # differ -- that is the whole point of the fix). The defect this
+        # check now exists to catch is a DECISION-CARRYING field silently
+        # vanishing from native's own resolved_request, so plant exactly
+        # that: drop one field this row actually has from
+        # _DECISION_KEY_FIELDS.
+        present = _DECISION_KEY_FIELDS & set(native.resolved_request)
+        if not present:
+            return None
+        dropped = dict(native.resolved_request)
+        del dropped[next(iter(sorted(present)))]
+        return replace(native, resolved_request=dropped)
     raise ValueError(f"unknown structural defect dimension {dimension!r}")
 
 

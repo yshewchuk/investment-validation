@@ -293,14 +293,44 @@ def test_numeric_finding_names_the_diverging_field_and_carries_no_value(tmp_path
     assert "0.2" not in dumped
 
 
-def test_key_differences_recorded_when_keys_check_fails(tmp_path, monkeypatch):
-    """A row with a key mismatch records native_only and legacy_only."""
+def test_key_differences_recorded_when_a_decision_field_vanishes_from_native(
+        tmp_path, monkeypatch):
+    """The one case that matters: a decision-carrying field present on the
+    legacy side but silently absent from native's resolved_request fails
+    "keys" and is named in row_key_differences.legacy_only."""
+    from dataclasses import replace
+
+    record = _clean_record()
+    native_missing_gate_score = replace(
+        _native_record(record),
+        resolved_request={k: v for k, v in record.items() if k != "gate_score"},
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+        natives_by_fixture={"a": native_missing_gate_score},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["keys"] is False
+    assert "a" in release["row_key_differences"]
+    diff = release["row_key_differences"]["a"]
+    assert diff["legacy_only"] == ["gate_score"]
+    assert diff["native_only"] == []
+
+
+def test_out_of_scope_key_difference_does_not_fail_keys_check(tmp_path, monkeypatch):
+    """A structural field present on only one side, but outside
+    _DECISION_KEY_FIELDS, must NOT fail "keys" -- the two documents are
+    different shapes by design, and only the named correspondence set is
+    supposed to match."""
     from dataclasses import replace
 
     record = _clean_record()
     # Add an extra key to the legacy record
     record_with_extra = {**record, "extra_legacy_key": "value"}
-    # Create a native with a different set of keys
+    # Create a native with a different, out-of-scope extra key
     native_with_diff = replace(
         _native_record(record),
         resolved_request={**record, "extra_native_key": "value"}
@@ -313,13 +343,8 @@ def test_key_differences_recorded_when_keys_check_fails(tmp_path, monkeypatch):
     )
 
     checks = release["row_dimension_checks"]["a"]
-    assert checks["keys"] is False
-    assert "a" in release["row_key_differences"]
-    diff = release["row_key_differences"]["a"]
-    assert "native_only" in diff
-    assert "legacy_only" in diff
-    assert "extra_native_key" in diff["native_only"]
-    assert "extra_legacy_key" in diff["legacy_only"]
+    assert checks["keys"] is True
+    assert "a" not in release.get("row_key_differences", {})
 
 
 def test_flag_differences_recorded_when_flags_check_fails(tmp_path, monkeypatch):
@@ -373,7 +398,7 @@ def test_key_flag_differences_contain_only_strings(tmp_path, monkeypatch):
     native_with_diffs = replace(
         _native_record(record),
         reason_codes=("FLAG_B",),
-        resolved_request={**record, "extra_key": "value"},
+        resolved_request={k: v for k, v in record.items() if k != "gate_score"},
     )
 
     release, _parity = _run(
@@ -401,7 +426,7 @@ def test_verdicts_unchanged_by_difference_recording(tmp_path, monkeypatch):
     record_disagree = _clean_record()
     native_disagree = replace(
         _native_record(record_disagree),
-        resolved_request={**record_disagree, "new_key": "value"}
+        resolved_request={k: v for k, v in record_disagree.items() if k != "gate_score"},
     )
 
     release, _parity = _run(
