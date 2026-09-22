@@ -314,3 +314,40 @@ def test_answer_field_directly_under_features_is_still_rejected():
             observations=_observations(),
             resources=[],
         )
+
+
+#: R4-checkpoint gap: ``driver_p10``/``driver_p90`` (the driver/implied_t1
+#: quantile band, legacy ``engine/score.py:2874-2875``/``3053-3054``) and
+#: ``win_model_raw`` (the payoff-model layer's raw win rate,
+#: ``engine/score.py:2914``/``3087``) are three fields legacy publishes that
+#: no stage in ``engine/v2/scoring/stages.py`` has ever owned or computed --
+#: unlike their siblings (``forecast_p10``/``forecast_p90``/``forecast_sd``,
+#: ``exp_pnl_model``/``win_model``), which were already in
+#: ``source_inputs._ANSWER_FIELDS`` and so already refused if smuggled in as
+#: a captured legacy value. These three were not: a capture could carry
+#: legacy's own number for them straight into ``native_inputs.context`` (or
+#: ``.features``) and it would pass through unfiltered
+#: (``stages._merge_stage`` only strips names in ``_OWNED_OUTPUTS``, and
+#: none of these three is), making a Phase 4 row "agree" on a field native
+#: never actually computed. Each parametrized field below used to pass
+#: silently through this exact path before being added to
+#: ``_ANSWER_FIELDS``; this test plants it as a captured answer under
+#: ``context`` (mirroring ``test_answer_field_directly_under_features_is_
+#: still_rejected``'s pattern for ``features``) and asserts the assembler
+#: now refuses it as a calculated answer.
+@pytest.mark.parametrize("field", ["driver_p10", "driver_p90", "win_model_raw"])
+def test_previously_unprotected_answer_fields_are_now_rejected(field):
+    request = _request()
+    inputs, shared = _native_inputs(request)
+    inputs["context"][field] = 1.23
+    shared["native_inputs"]["context"] = copy.deepcopy(inputs["context"])
+    inputs["source_ref"] = content_hash(shared)
+
+    with pytest.raises(ReleaseAssemblyError, match="calculated answer"):
+        assemble_input_trace(
+            request=request,
+            shared_inputs=shared,
+            native_inputs=inputs,
+            observations=_observations(),
+            resources=[],
+        )
