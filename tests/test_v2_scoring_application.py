@@ -56,6 +56,37 @@ def test_single_and_batch_share_score_id(monkeypatch):
     assert single.null_masks == {"x": False}
 
 
+def test_feature_fields_decodes_tagged_nonfinite_into_null_mask():
+    """A captured feature that was non-finite at capture time is carried
+    tagged (``{"__nonfinite__": "nan"}``, contracts §2.1), never as a real
+    ``None``. Before the fix, ``_feature_fields`` checked only
+    ``value is None``, so a tagged feature read as PRESENT (mask False)
+    instead of missing -- the same representation gap fixed for
+    ``checks/phase4_frozen_bridge.py::_feature_rows`` in 841150e. It must
+    decode via ``engine.v2.foundation.untag_nonfinite`` and mark it missing,
+    matching a genuinely ``None`` feature, while leaving an ordinary finite
+    feature and the raw stored ``feature_values`` untouched."""
+    features, null_masks = application._feature_fields({
+        "model_inputs": {
+            "x": 1.0,
+            "y": None,
+            "z": {"__nonfinite__": "nan"},
+        },
+    })
+    assert null_masks == {"x": False, "y": True, "z": True}
+    # The raw (still-tagged) value is preserved in feature_values -- only
+    # the missingness decision changes.
+    assert features["z"] == {"__nonfinite__": "nan"}
+
+
+def test_score_one_null_masks_treats_tagged_nonfinite_feature_as_missing():
+    fields = result().as_dict()
+    fields["model_inputs"] = {"x": 0.0, "or_implied": {"__nonfinite__": "nan"}}
+    native = NativeScoreInputs.from_legacy_fields(fields)
+    record = application.score_one(request(), native)
+    assert record.null_masks == {"x": False, "or_implied": True}
+
+
 def test_native_inputs_require_stage_receipts():
     fields = result().as_dict()
     native = NativeScoreInputs.from_legacy_fields(fields)
