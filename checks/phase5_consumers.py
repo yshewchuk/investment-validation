@@ -140,6 +140,21 @@ def _row(consumer: str, member_id: str, flags, missing_flags) -> dict:
             "detail": "" if resolved else ",".join(flags)}
 
 
+def _chooser_row(consumer: str, member_id: str, flags, missing_flags) -> dict:
+    """Like ``_row``, but for TWIN-P chooser probes only: NO_PAYOFF_MAP is
+    excluded from the unresolved set. TWIN-P is not in PAYOFF_DRIVER
+    (engine/payoff.py), so legacy's model stage flags NO_PAYOFF_MAP on
+    EVERY TWIN-P row unconditionally (engine/score.py:2799) -- a permanent,
+    benign fact about the strategy, unrelated to whether the chooser stage
+    this probe exercises resolved its declared state. Only MODEL_NOT_READY
+    (a declared-but-absent chooser state) is evidence of an unresolved
+    consumer here."""
+    resolved = "MODEL_NOT_READY" not in set(flags)
+    return {"consumer": consumer, "member_id": member_id, "resolved": resolved,
+            "refused_when_missing": "MODEL_NOT_READY" in missing_flags,
+            "detail": "" if resolved else ",".join(flags)}
+
+
 def _payoff_probe(member_id: str, strategy: str, consumer: str):
     def probe(ctx: ReleaseContext) -> list[dict]:
         state = ctx.states.get(member_id)
@@ -413,7 +428,7 @@ def _chooser_probe(member_id: str, consumer: str, field: str, key_of):
                 ctx, chooser[0].binding_id, recipe, **{field: artifact})).reason_codes
             missing = _score("TWIN-P", 0.5, _chooser_bundle(
                 ctx, chooser[0].binding_id, recipe)).reason_codes
-            rows.append(_row(consumer, member_id, flags, missing))
+            rows.append(_chooser_row(consumer, member_id, flags, missing))
         return rows
     return probe
 

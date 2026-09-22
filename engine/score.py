@@ -1855,6 +1855,17 @@ class Scorer:
                     "as_of": result.as_of,
                     "quote_date": (window.decision_date if structure.decided_early
                                    else result.entry_date),
+                    # The calendar's own horizon fact (engine/calendar.py's
+                    # TradingCalendar.observed_through, set once from the max
+                    # date of the real S&P 500 daily series): the last date
+                    # backed by real observed price history, past which the
+                    # calendar is rule-projected. Source-owned and constant
+                    # for every row scored against this calendar instance --
+                    # never legacy's own PROJECTED_CALENDAR verdict, which is
+                    # a per-row calculated answer and would be circular here.
+                    # Native's `_check_projected_calendar` (stages.py) reads
+                    # this to reproduce `calendar.is_projected(exit_date)`.
+                    "calendar_observed_through": self.calendar.observed_through,
                 },
                 quote_status="not_reached",
             )

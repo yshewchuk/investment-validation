@@ -86,13 +86,25 @@ def _pointed_paths(tmp_path, monkeypatch):
     pinned to the exact path ``_stage`` below uses.
     """
     import importlib
+    import os
 
     from engine import paths
 
+    # Restore whatever INVESTING_PLAN_ROOT this process actually started
+    # with, not unconditionally unset -- an unconditional delenv assumes the
+    # process began with no override, which is false whenever the harness
+    # exports the real checkout's root before running pytest from a
+    # worktree. Getting this wrong leaves paths.ROOT re-derived from the
+    # file-default after teardown while any module that read paths.ROOT at
+    # its own import time (under the original env) keeps the stale value.
+    original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
     monkeypatch.setenv("INVESTING_PLAN_ROOT", str(tmp_path / "job" / "legacy"))
     importlib.reload(paths)
     yield
-    monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+    if original_root_env is None:
+        monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("INVESTING_PLAN_ROOT", original_root_env)
     importlib.reload(paths)
 
 

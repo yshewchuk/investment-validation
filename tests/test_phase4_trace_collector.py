@@ -374,6 +374,7 @@ def test_score_captures_boundary_legs_and_cost_before_later_mutation(
     scorer.calendar = SimpleNamespace(
         resolve_offsets=lambda *args, **kwargs: window,
         is_projected=lambda value: False,
+        observed_through=pd.Timestamp("2026-01-09"),
     )
     scorer._resolve_event = lambda request: (
         pd.Timestamp("2026-01-08"), "AMC",
@@ -463,6 +464,7 @@ def test_forecast_sized_entry_rule_run_ends_with_analogs_and_simulation_frozen(
     scorer.calendar = SimpleNamespace(
         resolve_offsets=lambda *args, **kwargs: window,
         is_projected=lambda value: False,
+        observed_through=pd.Timestamp("2026-01-09"),
     )
     scorer._resolve_event = lambda request: (pd.Timestamp("2026-01-08"), "AMC")
     scorer._structure = lambda request: SimpleNamespace(
@@ -977,6 +979,7 @@ def _early_scorer(monkeypatch, strategy: str = "STR-THRU"):
     scorer.calendar = SimpleNamespace(
         resolve_offsets=lambda *args, **kwargs: _WINDOW,
         is_projected=lambda value: False,
+        observed_through=pd.Timestamp("2026-01-09"),
     )
     scorer._resolve_event = lambda request: (pd.Timestamp("2026-01-08"), "AMC")
     scorer._structure = lambda request: STRUCTURES[strategy]()

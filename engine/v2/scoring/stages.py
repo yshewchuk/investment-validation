@@ -1549,7 +1549,17 @@ def _execute_model(
     block = inputs.model
     recipe = block.get("payoff_recipe")
     if recipe is None:
-        if any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
+        if name not in _PAYOFF_DRIVER_STRATEGIES:
+            # Legacy's site-1 NO_PAYOFF_MAP (engine/score.py:2799,
+            # ``PAYOFF_DRIVER.get(strategy) is None``): a strategy with no
+            # registered payoff driver never reaches the rest of the model
+            # stage, so capture never records a ``payoff_recipe`` for it
+            # either. This must fire from the strategy's identity alone,
+            # before any output-anomaly check, exactly as legacy does --
+            # never reachable via ``_model_driver_and_cost`` below, since
+            # that path requires a recipe to have been declared at all.
+            _add_flag(flags, "NO_PAYOFF_MAP")
+        elif any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
             _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
         return {}
     if not isinstance(recipe, Mapping):
@@ -1648,6 +1658,8 @@ def _execute_frozen_analogs(
     if flag is not None:
         _add_flag(flags, flag)
         return {}
+    if result.thin:
+        _add_flag(flags, "THIN_ANALOGS")
     output = {
         "exp_pnl_analog": result.exp_pnl_analog,
         "win_analog": result.win_analog,
@@ -1720,6 +1732,8 @@ def _execute_analogs(
     except (TypeError, ValueError) as exc:
         _add_flag(flags, str(exc))
         return {}
+    if result.thin:
+        _add_flag(flags, "THIN_ANALOGS")
     output = {
         "exp_pnl_analog": result.exp_pnl_analog,
         "win_analog": result.win_analog,

@@ -359,12 +359,24 @@ def browser(playwright_instance):
 @pytest.fixture
 def tmp_root(tmp_path, monkeypatch):
     """Point ``engine.paths`` at a throwaway tree for the duration of a test."""
+    # Capture the INVESTING_PLAN_ROOT this process actually started with (may
+    # be set, e.g. when the harness runs pytest from a worktree with the real
+    # checkout's root exported). Restoring by unconditional delenv assumes
+    # "unset" is the original state; when it was set, that assumption leaves
+    # paths.ROOT re-derived from the file-default after teardown while every
+    # module that read paths.ROOT at its own import time (before this
+    # fixture ran) keeps the originally-exported value -- a divergence a
+    # later test (e.g. test_v2_data_reference_inputs.py) can observe.
+    original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
     monkeypatch.setenv("INVESTING_PLAN_ROOT", str(tmp_path))
     from engine import paths
 
     importlib.reload(paths)
     yield tmp_path
-    monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+    if original_root_env is None:
+        monkeypatch.delenv("INVESTING_PLAN_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("INVESTING_PLAN_ROOT", original_root_env)
     importlib.reload(paths)
 
 
