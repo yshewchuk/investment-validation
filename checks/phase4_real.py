@@ -2046,6 +2046,8 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     Returns: (checks, numeric, differences) where differences contains:
     - key_differences: native_only/legacy_only key sets
     - flag_differences: native_only/legacy_only flag names (symmetric diff)
+    - null_mask_differences: native_only/legacy_only/value_mismatch feature
+      key NAMES (never values) for the ``null_masks`` check
     """
     # "keys" compares only the fields SUPPOSED to correspond by name --
     # _DECISION_KEY_FIELDS -- not the full shape of either document (see its
@@ -2070,6 +2072,20 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     flags_in_native_only = sorted(set(native_flags) - set(legacy_flags))
     flags_in_legacy_only = sorted(set(legacy_flags) - set(native_flags))
 
+    # Compute null-mask differences. NOTE: this compares only whether a
+    # feature key is None on each side -- key NAMES and booleans, never the
+    # underlying feature VALUES.
+    legacy_mask = {
+        key: value is None for key, value in (record.get("model_inputs") or {}).items()
+    }
+    null_masks_agree = native.null_masks == legacy_mask
+    null_mask_native_only = sorted(set(native.null_masks) - set(legacy_mask))
+    null_mask_legacy_only = sorted(set(legacy_mask) - set(native.null_masks))
+    null_mask_value_mismatch = sorted(
+        key for key in set(native.null_masks) & set(legacy_mask)
+        if native.null_masks[key] != legacy_mask[key]
+    )
+
     checks = {
         "keys": keys_agree,
         "contracts": _contract_projection(
@@ -2088,9 +2104,7 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
         # (checks.update), which is the same compare_records machinery
         # used for forecasts/simulation/financial_diagnostics.
         "flags": flags_agree,
-        "null_masks": native.null_masks == {
-            key: value is None for key, value in (record.get("model_inputs") or {}).items()
-        },
+        "null_masks": null_masks_agree,
     }
     numeric = _compare_numeric_outputs(record, native)
     checks.update({name: result["agree"] for name, result in numeric.items()})
@@ -2104,6 +2118,11 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
             "native_only": flags_in_native_only,
             "legacy_only": flags_in_legacy_only,
         } if not flags_agree else {},
+        "null_mask_differences": {
+            "native_only": null_mask_native_only,
+            "legacy_only": null_mask_legacy_only,
+            "value_mismatch": null_mask_value_mismatch,
+        } if not null_masks_agree else {},
     }
 
     return checks, numeric, differences
@@ -2434,6 +2453,10 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                 member_differences[0].get("flag_differences") if not chooser_pair
                 else [d.get("flag_differences") for d in member_differences]
             ),
+            "null_mask_differences": (
+                member_differences[0].get("null_mask_differences") if not chooser_pair
+                else [d.get("null_mask_differences") for d in member_differences]
+            ),
             "advisory_flags": {
                 "legacy": sorted(set(record.get("flags") or ()) & _ADVISORY_FLAGS),
                 "native": sorted(set(native.reason_codes) & _ADVISORY_FLAGS),
@@ -2520,17 +2543,20 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     row_numeric_findings = {
         row["fixture_id"]: row["numeric_findings"] for row in compared_rows
     }
-    #: ``row_key_differences`` and ``row_flag_differences`` record the set
-    #: differences that made their respective checks fail. For multi-member
-    #: (chooser) rows, each entry is a list of per-member dicts; for regular
-    #: rows, it's a single dict. When a check passes, the entry is omitted.
-    #: Field and flag NAMES only -- never values.
+    #: ``row_key_differences``, ``row_flag_differences`` and
+    #: ``row_null_mask_differences`` record the set differences that made
+    #: their respective checks fail. For multi-member (chooser) rows, each
+    #: entry is a list of per-member dicts; for regular rows, it's a single
+    #: dict. When a check passes, the entry is omitted. Field and flag
+    #: NAMES only -- never values.
     row_key_differences = {}
     row_flag_differences = {}
+    row_null_mask_differences = {}
     for row in compared_rows:
         fixture_id = row["fixture_id"]
         key_diff = row.get("key_differences")
         flag_diff = row.get("flag_differences")
+        null_mask_diff = row.get("null_mask_differences")
         # Handle both single and multi-member (chooser) cases
         if isinstance(key_diff, list):
             # Multi-member: collect non-empty differences
@@ -2551,6 +2577,16 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             # Single member: only store if non-empty
             if flag_diff:
                 row_flag_differences[fixture_id] = flag_diff
+
+        if isinstance(null_mask_diff, list):
+            # Multi-member: collect non-empty differences
+            non_empty_null_mask_diffs = [d for d in null_mask_diff if d]
+            if non_empty_null_mask_diffs:
+                row_null_mask_differences[fixture_id] = non_empty_null_mask_diffs
+        else:
+            # Single member: only store if non-empty
+            if null_mask_diff:
+                row_null_mask_differences[fixture_id] = null_mask_diff
     #: Roll-up: per dimension, how many compared rows passed vs failed it.
     #: A row missing a dimension (e.g. "chooser" on a non-chooser row)
     #: counts toward neither bucket, so the two only sum to ``compared`` for
@@ -2605,6 +2641,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "row_numeric_findings": row_numeric_findings,
         "row_key_differences": row_key_differences,
         "row_flag_differences": row_flag_differences,
+        "row_null_mask_differences": row_null_mask_differences,
         "dimension_rollup": dimension_rollup,
         "dispositions": tuple({
             "fixture_id": row["fixture_id"],

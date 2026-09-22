@@ -418,6 +418,85 @@ def test_key_flag_differences_contain_only_strings(tmp_path, monkeypatch):
     )
 
 
+def test_null_mask_differences_recorded_when_check_fails(tmp_path, monkeypatch):
+    """A row with a null-mask mismatch records native_only/legacy_only/
+    value_mismatch feature key NAMES -- one of each in the same row, so the
+    three buckets can't be confused with one another."""
+    from dataclasses import replace
+
+    record = _clean_record(model_inputs={"x": 1.0, "y": None, "w": 2.0})
+    # legacy_mask (derived from model_inputs) = {"x": False, "y": True, "w": False}
+    native_with_diff = replace(
+        _native_record(record),
+        # "x": value_mismatch (False on legacy, True here); "w": legacy_only
+        # (absent here); "z": native_only (absent on legacy); "y": agrees.
+        null_masks={"x": True, "y": True, "z": True},
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+        natives_by_fixture={"a": native_with_diff},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["null_masks"] is False
+    assert "a" in release["row_null_mask_differences"]
+    diff = release["row_null_mask_differences"]["a"]
+    assert diff["native_only"] == ["z"]
+    assert diff["legacy_only"] == ["w"]
+    assert diff["value_mismatch"] == ["x"]
+
+
+def test_passing_row_omits_null_mask_differences(tmp_path, monkeypatch):
+    """A row where the null-mask check passes does not record a difference
+    entry (mirrors the existing key/flag omission test)."""
+    record = _clean_record()
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["null_masks"] is True
+    assert "a" not in release.get("row_null_mask_differences", {})
+
+
+def test_null_mask_differences_contain_only_strings_never_feature_values(
+        tmp_path, monkeypatch):
+    """The null-mask difference evidence names feature keys only. Two
+    unmistakable magic floats stand in for the underlying feature VALUES on
+    each side; neither may leak into the emitted evidence, whether raw or
+    serialized."""
+    from dataclasses import replace
+
+    legacy_magic = 0.123456789
+    native_magic = 0.987654321
+    record = _clean_record(model_inputs={"x": legacy_magic, "y": None})
+    native_with_diff = replace(
+        _native_record(record),
+        null_masks={"x": True, "y": True},  # "x" flips legacy False -> True
+        feature_values={"x": native_magic},
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+        natives_by_fixture={"a": native_with_diff},
+    )
+
+    diff = release["row_null_mask_differences"]["a"]
+    assert diff["value_mismatch"] == ["x"]
+
+    _assert_only_safe_leaves(
+        release.get("row_null_mask_differences", {}),
+        allow_bool=False, allow_int=False,
+    )
+    dumped = json.dumps(release["row_null_mask_differences"])
+    assert str(legacy_magic) not in dumped
+    assert str(native_magic) not in dumped
+
+
 def test_verdicts_unchanged_by_difference_recording(tmp_path, monkeypatch):
     """The checks verdicts are identical whether differences are recorded or not."""
     from dataclasses import replace
