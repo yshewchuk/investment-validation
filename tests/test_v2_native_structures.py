@@ -210,6 +210,169 @@ def test_missing_quote_is_a_truthful_refusal():
         price(geometry, {}, 0.5)
 
 
+# --------------------------------------------------------------------------
+# Listed-strike generation for the symmetric put-ladder families.
+#
+# The defect: generate() built the ATM (and every other) leg from the raw
+# continuous spot float for CND-PS/TWIN-P/TWIN-P5/BFLY-P/BFLY-P5/RAMP7/CTR5,
+# so price()'s exact-key quote lookup could never match a real chain. The
+# fix must reproduce legacy's own StrikeSelector rule (engine/structures.py)
+# rather than invent a new one: `bracket(side="below")` for the anchor,
+# `offset_from` to size the spacing off the grid, `mirror` (exact-listed-or-
+# refuse) for every strike placed relative to another. Below: fixture-driven
+# regressions for two different assembly shapes, a coarse-grid case that
+# proves TWIN-P's chained-mirror construction is not interchangeable with
+# the other families' independent-offset construction, and the two distinct
+# refusal codes legacy has (NO_CHAIN-analogue vs COARSE_LADDER-analogue).
+
+
+def test_cnd_ps_snaps_atm_to_the_listed_strike_from_fixture_000():
+    """Fixture 000_CND-PS-LEN-2026-09-16 (corpus 20260922T031338Z.tmp):
+    legacy priced this event's ATM reference leg at the listed strike 77.0
+    for the 2026-09-18 expiry. spot/width are the values legacy's own
+    record.spot / record.structure_width captured for this row; quote
+    bid/ask below are synthetic, not the fixture's real market data.
+
+    FAILS on origin/main: unpatched generate() builds the atm leg at raw
+    spot (77.91), which is not a quotes key, so price() raises
+    MISSING_QUOTE:atm (verified separately against origin/main's copy of
+    this module -- see the PR/handback notes)."""
+    grid = (73.0, 75.0, 77.0, 79.0, 81.0)
+    expiry = "2026-09-18"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    inputs = {"spot": 77.91, "width": 2.0, "expiry": expiry, "quotes": quotes}
+
+    geometry = generate("CND-PS", inputs)
+
+    assert geometry.legs[0].name == "atm"
+    assert geometry.legs[0].strike == 77.0
+    assert ("P", 77.0, expiry) in quotes
+
+    priced = price(geometry, quotes, 0.5)
+    assert priced.refusal is None
+    assert [leg.strike for leg in priced.legs] == [77.0, 79.0, 75.0, 81.0, 73.0]
+
+
+def test_bfly_p_snaps_to_the_listed_strikes_from_fixture_003():
+    """Fixture 003_BFLY-P-RLGT-2026-09-14: legacy's atm/up1/dn1 were the
+    listed strikes 7.5/10.0/5.0 on a sparse ($2.50-spaced) grid -- the same
+    independent-offset-then-mirror shape as CND-PS's family, exercised on a
+    different structure so the fix isn't a single-family patch."""
+    grid = (5.0, 7.5, 10.0)
+    expiry = "2026-09-18"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    inputs = {"spot": 8.21, "width": 2.5, "expiry": expiry, "quotes": quotes}
+
+    geometry = generate("BFLY-P", inputs)
+
+    assert [(leg.name, leg.strike) for leg in geometry.legs] == [
+        ("atm", 7.5), ("up1", 10.0), ("dn1", 5.0),
+    ]
+    priced = price(geometry, quotes, 0.5)
+    assert priced.refusal is None
+
+
+def test_twin_p_chained_mirror_matches_legacy_on_a_coarse_grid_that_would_diverge():
+    """Proves TWIN-P's construction is NOT the independently-offset ladder
+    the other five families use. On this grid, offsetting each wing
+    independently by width*multiple (the wrong, easier-to-write rule) would
+    put up2 at 109 (nearest listed to spot+2*width=110); legacy's actual
+    rule -- offset_from finds up1 ONLY, everything else is an exact chained
+    mirror off already-resolved strikes -- puts up2 at 112
+    (mirror(atm=100, about=up1=106) = 2*106-100). A dense grid cannot tell
+    these apart because both land on the same nearby strike; this one can
+    and does."""
+    grid = (76.0, 88.0, 94.0, 100.0, 106.0, 109.0, 112.0, 124.0)
+    expiry = "2026-10-01"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    inputs = {"spot": 101.0, "width": 5.0, "expiry": expiry, "quotes": quotes}
+
+    geometry = generate("TWIN-P", inputs)
+    by_name = {leg.name: leg.strike for leg in geometry.legs}
+
+    # The independent-offset value this grid was built to distinguish from:
+    naive_up2 = min((s for s in grid if s > 100.0), key=lambda s: abs(s - 110.0))
+    assert naive_up2 == 109.0
+    assert by_name["up2"] == 112.0
+    assert by_name["up2"] != naive_up2
+
+    assert by_name == {
+        "atm": 100.0, "up1": 106.0, "dn1": 94.0,
+        "up2": 112.0, "dn2": 88.0, "up3": 124.0, "dn3": 76.0,
+    }
+    priced = price(geometry, quotes, 0.5)
+    assert priced.refusal is None
+
+
+def test_condor_wings_are_exactly_evenly_spaced_in_dollars():
+    """The defined-risk claim depends on (K4-K3) == (K2-K1) exactly -- an
+    uneven condor pays a negative amount below the bottom strike. Every
+    mirrored leg must therefore land at EXACTLY the anchor-symmetric dollar
+    distance, not merely close to it."""
+    grid = (73.0, 75.0, 77.0, 79.0, 81.0)
+    expiry = "2026-09-18"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    geometry = generate(
+        "CND-PS", {"spot": 77.91, "width": 2.0, "expiry": expiry, "quotes": quotes},
+    )
+    by_name = {leg.name: leg.strike for leg in geometry.legs}
+    assert by_name["up1"] - by_name["atm"] == by_name["atm"] - by_name["dn1"]
+    assert by_name["up2"] - by_name["atm"] == by_name["atm"] - by_name["dn2"]
+
+
+def test_ladder_refuses_rather_than_approximating_when_no_listed_strike_completes_the_mirror():
+    """A mirror target that is not listed means the grid cannot carry the
+    even-spacing shape at all -- legacy refuses (StructureError -> NO_CHAIN)
+    rather than substituting the nearest strike, and so must native. This is
+    a per-leg failure, distinct from the collision case below, and must
+    raise a distinguishable code (not the collision code)."""
+    grid = (100.0, 105.0)  # 95.0 (2*100-105) is deliberately absent
+    expiry = "2026-01-01"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+
+    with pytest.raises(GeometryRefusal, match=r"^NO_LISTED_STRIKE:dn1$"):
+        generate("BFLY-P", {"spot": 100.5, "width": 5.0, "expiry": expiry, "quotes": quotes})
+
+
+def test_ladder_refuses_with_coarse_ladder_code_when_two_legs_collide_on_one_contract():
+    """A ladder too coarse for the shape can independently snap two DIFFERENT
+    legs onto the SAME listed contract (CND-PS's up1/up2 both nearest to the
+    one strike a sparse grid lists above the anchor) -- legacy's
+    LadderTooCoarse / COARSE_LADDER, a different failure from a single leg
+    simply having no listed strike. The two codes must not collapse into
+    one: that is the diagnosability gap the coordinator flagged."""
+    grid = (95.0, 100.0, 105.0)  # only one strike listed above/below the anchor
+    expiry = "2026-01-01"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+
+    with pytest.raises(GeometryRefusal, match=r"^COARSE_LADDER:"):
+        generate("CND-PS", {"spot": 100.5, "width": 1.0, "expiry": expiry, "quotes": quotes})
+
+
+def test_str_thru_and_str_runup_are_unaffected_by_the_ladder_grid_fix():
+    """STR-THRU/STR-RUNUP already snapped correctly via _select_listed_
+    straddle before this fix and must be byte-for-byte unchanged by it --
+    the fix only touches the CND-PS/TWIN-P/TWIN-P5/BFLY-P/BFLY-P5/RAMP7/CTR5
+    branches. Reuses the same deliberately coarse grid the TWIN-P test above
+    proves is discriminating, to show straddle selection (nearest listed
+    strike either direction, shared call/put strike) is untouched by the
+    ladder-specific bracket/offset_from/mirror machinery."""
+    grid = (76.0, 88.0, 94.0, 100.0, 106.0, 109.0, 112.0, 124.0)
+    expiry = "2026-10-01"
+    quotes = {}
+    for strike in grid:
+        quotes[("C", strike, expiry)] = {"bid": 1.0, "ask": 2.0}
+        quotes[("P", strike, expiry)] = {"bid": 1.0, "ask": 2.0}
+
+    geometry = generate("STR-THRU", {"spot": 101.0, "expiry": expiry, "quotes": quotes})
+
+    # Nearest listed strike to spot=101.0 in EITHER direction is 100.0 (not
+    # the ladder anchor's bracket-below rule, and not 106.0/109.0).
+    assert {leg.strike for leg in geometry.legs} == {100.0}
+    priced = price(geometry, quotes, 0.5)
+    assert priced.refusal is None
+
+
 def test_resolved_contracts_replace_theoretical_width_with_traded_spacing():
     inputs = {
         **_inputs(),

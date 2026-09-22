@@ -178,6 +178,215 @@ def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[flo
     return strike, expiry
 
 
+def _grid_for_right(inputs: Mapping[str, Any], right: str, expiry: str) -> tuple[float, ...]:
+    """Sorted distinct listed strikes for ``right`` at ``expiry``.
+
+    Empty when the caller supplied no chain domain at all (``quotes`` absent,
+    or nothing listed at this right/expiry) -- the degenerate case unit tests
+    exercise without a chain, where generation falls back to the pre-existing
+    continuous-spot arithmetic instead of refusing. Once a real chain is
+    present, callers must use it: see :func:`_resolve_ladder_on_grid` and
+    friends below.
+    """
+    contracts = _quote_contracts(inputs)
+    return tuple(sorted({strike for r, strike, e in contracts
+                          if r == right and e == expiry}))
+
+
+def _bracket_below(grid: tuple[float, ...], spot: float) -> float | None:
+    """Greatest listed strike at or below ``spot``.
+
+    Mirrors legacy's ``StrikeSelector("bracket", side="below")``
+    (``engine/structures.py`` ~308) -- the anchor every symmetric put ladder
+    is built from. ``grid`` is sorted ascending, so the last surviving entry
+    is the one nearest spot from below.
+    """
+    candidates = [strike for strike in grid if strike <= spot]
+    return candidates[-1] if candidates else None
+
+
+def _ladder_offset_from(grid: tuple[float, ...], anchor: float,
+                        delta: float) -> float | None:
+    """Nearest listed strike to ``anchor + delta``, strictly on ``delta``'s side.
+
+    Mirrors legacy's ``StrikeSelector("offset_from", ...)`` (~348): candidates
+    are restricted to strikes strictly above the anchor (``delta > 0``) or
+    strictly below it (``delta < 0``), which excludes the anchor's own strike
+    and keeps a lopsided grid from returning a nearer strike on the wrong
+    side of it.
+    """
+    if delta == 0:
+        return None
+    candidates = [strike for strike in grid
+                  if (strike > anchor if delta > 0 else strike < anchor)]
+    if not candidates:
+        return None
+    target = anchor + delta
+    return min(candidates, key=lambda strike: (abs(strike - target), strike))
+
+
+def _ladder_mirror(grid: tuple[float, ...], ref: float, about: float,
+                   tol: float = 1e-6) -> float | None:
+    """``2*about - ref`` if and only if that strike is LISTED.
+
+    Mirrors legacy's ``StrikeSelector("mirror", ...)`` (~371). Unlike
+    ``offset_from`` this never snaps to the nearest strike: an unlisted
+    mirror target means the ladder cannot carry the shape at exactly even
+    spacing, so the caller must refuse rather than approximate -- an unevenly
+    spaced condor pays ``(K4-K3) - (K2-K1) < 0`` below the bottom strike, and
+    its loss is no longer capped at the debit.
+    """
+    target = 2.0 * about - ref
+    for strike in grid:
+        if abs(strike - target) <= tol:
+            return strike
+    return None
+
+
+def _check_ladder_collisions(legs: tuple[NativeLeg, ...]) -> None:
+    """Refuse when two DISTINCT legs resolved onto the same contract.
+
+    Mirrors legacy's post-resolution collision check (``engine/structures.py``
+    ~769-784, ``LadderTooCoarse``, flagged ``COARSE_LADDER`` by
+    ``engine/score.py``): independently-snapped legs -- CND-PS's up1/up2 in
+    particular -- can both land on the first listed strike above a coarse
+    anchor even though each one resolved fine on its own. That is a distinct
+    failure mode from any single leg lacking a listed strike (``NO_CHAIN`` in
+    legacy, ``NO_LISTED_STRIKE`` here), so it gets its own code rather than
+    reusing that one -- collapsing the two costs a diagnosability cycle.
+    """
+    seen: dict[tuple[str, float, str], list[str]] = {}
+    for leg in legs:
+        seen.setdefault((leg.right, leg.strike, leg.expiry), []).append(leg.name)
+    collided = sorted(
+        (key, names) for key, names in seen.items() if len(names) > 1
+    )
+    if collided:
+        detail = "+".join(name for _, names in collided for name in names)
+        raise GeometryRefusal(f"COARSE_LADDER:{detail}")
+
+
+#: family -> (anchor_qty, tail) for the shared independent-offset ladder
+#: shape. Mirrors legacy's ``_symmetric_put_ladder`` factory
+#: (``engine/structures.py`` ~1238): each tail multiple is snapped to the
+#: grid INDEPENDENTLY via ``offset_from``, then exact-mirrored for its dn
+#: twin. This is the shape CND-PS, BFLY-P, BFLY-P5, RAMP7 and CTR5 share --
+#: TWIN-P/TWIN-P5 do NOT use it, see :func:`_resolve_twin_peak_on_grid`.
+_LADDER_SPECS: dict[str, tuple[float, tuple[tuple[int, float], ...]]] = {
+    "CND-PS": (0.0, ((1, -1.0), (2, 1.0))),
+    "BFLY-P": (-2.0, ((1, 1.0),)),
+    "BFLY-P5": (-4.0, ((1, 1.0), (3, 1.0))),
+    "RAMP7": (-2.0, ((1, -1.0), (2, 1.0), (3, 1.0))),
+    "CTR5": (-2.0, ((1, -1.0), (2, 2.0))),
+}
+
+
+def _resolve_ladder_on_grid(strategy: str, spot: float, width: float, expiry: str,
+                            grid: tuple[float, ...]) -> tuple[NativeLeg, ...]:
+    """CND-PS/BFLY-P/BFLY-P5/RAMP7/CTR5's shape, resolved on the listed grid."""
+    anchor_qty, tail = _LADDER_SPECS[strategy]
+    atm_strike = _bracket_below(grid, spot)
+    if atm_strike is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:atm")
+    legs: list[NativeLeg] = [NativeLeg(
+        "atm", "P", "buy" if anchor_qty >= 0 else "sell",
+        abs(anchor_qty), atm_strike, expiry,
+    )]
+    for i, (mult, qty) in enumerate(tail, start=1):
+        up = _ladder_offset_from(grid, atm_strike, width * mult)
+        if up is None:
+            raise GeometryRefusal(f"NO_LISTED_STRIKE:up{i}")
+        dn = _ladder_mirror(grid, up, atm_strike)
+        if dn is None:
+            raise GeometryRefusal(f"NO_LISTED_STRIKE:dn{i}")
+        side = "buy" if qty > 0 else "sell"
+        legs.append(NativeLeg(f"up{i}", "P", side, abs(qty), up, expiry))
+        legs.append(NativeLeg(f"dn{i}", "P", side, abs(qty), dn, expiry))
+    resolved = tuple(legs)
+    _check_ladder_collisions(resolved)
+    return resolved
+
+
+def _resolve_twin_peak_on_grid(spot: float, width: float, expiry: str,
+                               grid: tuple[float, ...]) -> tuple[NativeLeg, ...]:
+    """TWIN-P's seven-strike chained-mirror shape, on the listed grid.
+
+    Mirrors legacy's ``twin_peak`` (``engine/structures.py`` ~1024) exactly:
+    ``offset_from`` picks ONLY up1; every other strike is a chained exact
+    ``mirror`` off already-resolved strikes (``up2 = mirror(atm, up1)``,
+    ``up3 = mirror(atm, up2)``, ``dn{i} = mirror(up{i}, atm)``). This is NOT
+    the independent-offset ladder shape above -- multiplying width by the
+    multiple independently would not reproduce this chain on a coarse grid,
+    only on a dense one where the two happen to agree.
+    """
+    atm = _bracket_below(grid, spot)
+    if atm is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:atm")
+    up1 = _ladder_offset_from(grid, atm, width)
+    if up1 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:up1")
+    dn1 = _ladder_mirror(grid, up1, atm)
+    if dn1 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn1")
+    up2 = _ladder_mirror(grid, atm, up1)
+    if up2 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:up2")
+    dn2 = _ladder_mirror(grid, up2, atm)
+    if dn2 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn2")
+    up3 = _ladder_mirror(grid, atm, up2)
+    if up3 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:up3")
+    dn3 = _ladder_mirror(grid, up3, atm)
+    if dn3 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn3")
+    legs = (
+        NativeLeg("atm", "P", "buy", 2.0, atm, expiry),
+        NativeLeg("up1", "P", "sell", 1.0, up1, expiry),
+        NativeLeg("dn1", "P", "sell", 1.0, dn1, expiry),
+        NativeLeg("up2", "P", "sell", 1.0, up2, expiry),
+        NativeLeg("dn2", "P", "sell", 1.0, dn2, expiry),
+        NativeLeg("up3", "P", "buy", 1.0, up3, expiry),
+        NativeLeg("dn3", "P", "buy", 1.0, dn3, expiry),
+    )
+    _check_ladder_collisions(legs)
+    return legs
+
+
+def _resolve_twin_peak_5_on_grid(spot: float, width: float, expiry: str,
+                                 grid: tuple[float, ...]) -> tuple[NativeLeg, ...]:
+    """TWIN-P5's five-strike chained-mirror shape (``wing_multiple=3``), on
+    the listed grid. Mirrors legacy's ``twin_peak_5`` (~1133) default case:
+    ``up1`` is the only ``offset_from`` selection, ``dn1`` mirrors it about
+    ``atm``, and the wings are chained mirrors of ``up1``/``dn1`` about each
+    other -- again not reproducible by independently offsetting each leg.
+    """
+    atm = _bracket_below(grid, spot)
+    if atm is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:atm")
+    up1 = _ladder_offset_from(grid, atm, width)
+    if up1 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:up1")
+    dn1 = _ladder_mirror(grid, up1, atm)
+    if dn1 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn1")
+    up_wing = _ladder_mirror(grid, dn1, up1)
+    if up_wing is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:up2")
+    dn_wing = _ladder_mirror(grid, up1, dn1)
+    if dn_wing is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn2")
+    legs = (
+        NativeLeg("atm", "P", "buy", 2.0, atm, expiry),
+        NativeLeg("up1", "P", "sell", 2.0, up1, expiry),
+        NativeLeg("dn1", "P", "sell", 2.0, dn1, expiry),
+        NativeLeg("up2", "P", "buy", 1.0, up_wing, expiry),
+        NativeLeg("dn2", "P", "buy", 1.0, dn_wing, expiry),
+    )
+    _check_ladder_collisions(legs)
+    return legs
+
+
 def _resolved_width(legs: tuple[NativeLeg, ...]) -> float:
     """Derive the traded spacing from resolved contracts."""
     by_name = {leg.name: leg.strike for leg in legs}
@@ -247,25 +456,52 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
         )
         legs = (NativeLeg("call", "C", "buy", 1.0, strike, expiry),
                 NativeLeg("put", "P", "buy", 1.0, strike, expiry))
-    elif strategy == "CND-PS":
-        legs = (
+    else:
+        legs = _resolve_put_ladder_legs(strategy, inputs, spot, width, expiry)
+    return Geometry(strategy, spot, width, legs)
+
+
+def _resolve_put_ladder_legs(strategy: str, inputs: Mapping[str, Any], spot: float,
+                             width: float, expiry: str) -> tuple[NativeLeg, ...]:
+    """Dispatch CND-PS/TWIN-P/TWIN-P5/BFLY-P/BFLY-P5/RAMP7/CTR5 to the
+    grid-based resolvers when a real chain is present for this right+expiry,
+    else preserve the pre-existing continuous-spot arithmetic (the
+    unit-test degenerate case with no ``quotes`` at all). Extracted out of
+    :func:`generate` to keep its own branch count under the complexity
+    budget; this is pure dispatch, no behaviour lives here that isn't also
+    named by one of the ``_resolve_*_on_grid`` functions or ``_put_ladder``.
+    """
+    grid = _grid_for_right(inputs, "P", expiry)
+    if strategy == "CND-PS":
+        if grid:
+            # Real chain domain present: legs MUST land on listed strikes,
+            # or refuse -- see _resolve_ladder_on_grid's docstring. Never
+            # snap to a nearby-but-different strike here.
+            return _resolve_ladder_on_grid(strategy, spot, width, expiry, grid)
+        # No chain domain supplied at all: unchanged pre-existing
+        # continuous-spot arithmetic.
+        return (
             NativeLeg("atm", "P", "buy", 0.0, spot, expiry),
             NativeLeg("up1", "P", "sell", 1.0, spot + width, expiry),
             NativeLeg("dn1", "P", "sell", 1.0, spot - width, expiry),
             NativeLeg("up2", "P", "buy", 1.0, spot + 2.0 * width, expiry),
             NativeLeg("dn2", "P", "buy", 1.0, spot - 2.0 * width, expiry),
         )
-    else:
-        patterns = {
-            "TWIN-P": ((0, 2.0), (1, -1.0), (2, -1.0), (4, 1.0)),
-            "TWIN-P5": ((0, 2.0), (1, -2.0), (3, 1.0)),
-            "BFLY-P": ((0, -2.0), (1, 1.0)),
-            "BFLY-P5": ((0, -4.0), (1, 1.0), (3, 1.0)),
-            "RAMP7": ((0, -2.0), (1, -1.0), (2, 1.0), (3, 1.0)),
-            "CTR5": ((0, -2.0), (1, -1.0), (2, 2.0)),
-        }
-        legs = _put_ladder(strategy, spot, width, expiry, patterns[strategy])
-    return Geometry(strategy, spot, width, legs)
+    if grid and strategy == "TWIN-P":
+        return _resolve_twin_peak_on_grid(spot, width, expiry, grid)
+    if grid and strategy == "TWIN-P5":
+        return _resolve_twin_peak_5_on_grid(spot, width, expiry, grid)
+    if grid and strategy in _LADDER_SPECS:
+        return _resolve_ladder_on_grid(strategy, spot, width, expiry, grid)
+    patterns = {
+        "TWIN-P": ((0, 2.0), (1, -1.0), (2, -1.0), (4, 1.0)),
+        "TWIN-P5": ((0, 2.0), (1, -2.0), (3, 1.0)),
+        "BFLY-P": ((0, -2.0), (1, 1.0)),
+        "BFLY-P5": ((0, -4.0), (1, 1.0), (3, 1.0)),
+        "RAMP7": ((0, -2.0), (1, -1.0), (2, 1.0), (3, 1.0)),
+        "CTR5": ((0, -2.0), (1, -1.0), (2, 2.0)),
+    }
+    return _put_ladder(strategy, spot, width, expiry, patterns[strategy])
 
 
 def price(geometry: Geometry, quotes: Mapping[Any, Mapping[str, Any]],
