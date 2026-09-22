@@ -49,7 +49,8 @@ _ANSWER_FIELDS = frozenset({
     "chooser_selection", "chosen_strategy", "chosen_margin", "menu_size",
     "financial_diagnostics", "entry_cost_pct", "model_vs_market",
     "fair_premium_pct", "premium_vs_fair", "cost_over_width",
-    "terminal_payoff", "exp_pnl_model", "win_model", "resolved_request",
+    "terminal_payoff", "exp_pnl_model", "win_model", "win_model_raw",
+    "driver_p10", "driver_p90", "resolved_request",
     "validation_status", "readiness", "reason_codes", "warnings",
 })
 _FORECAST_OUTPUTS = frozenset({
