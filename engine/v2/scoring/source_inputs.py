@@ -193,6 +193,19 @@ class SourceBundle:
     """
 
     source_ref: str
+    # Raw, source-owned facts about this row: ticker, strategy, the resolved
+    # entry/exit/quote dates, spot, strike, ... Never a calculated scoring
+    # answer (checked below via ``_ANSWER_FIELDS``). One entry worth calling
+    # out explicitly, on the same non-circular footing as ``gate_forecast_pool``
+    # below: ``calendar_observed_through`` -- the calendar's own horizon fact
+    # (``engine.calendar.TradingCalendar.observed_through``, the last date
+    # backed by real observed price history), constant for every row scored
+    # against one calendar instance and carried here from
+    # ``engine/score.py``'s own ``self.calendar.observed_through`` at capture
+    # time. It is never legacy's PROJECTED_CALENDAR verdict -- that is a
+    # per-row calculated answer and would be circular -- only the calendar
+    # fact ``_check_projected_calendar`` (engine/v2/scoring/stages.py) needs
+    # to reproduce ``calendar.is_projected(exit_date)`` independently.
     context: Mapping[str, Any]
     raw_quotes: Mapping[Any, Mapping[str, Any]]
     feature_vector: Mapping[str, Any]
