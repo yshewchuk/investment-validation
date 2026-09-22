@@ -373,6 +373,47 @@ def test_str_thru_and_str_runup_are_unaffected_by_the_ladder_grid_fix():
     assert priced.refusal is None
 
 
+def test_fresh_put_ladder_width_is_realised_not_requested_on_a_coarse_grid():
+    """Regression for the cost_over_width parity gap: generate() used to
+    publish the CONTINUOUS requested ``width`` on ``Geometry.width`` for a
+    freshly-generated put ladder, even though the legs it built were snapped
+    to the listed grid. cost_over_width = entry_cost / structure_width then
+    divided by a number nobody traded, diverging from legacy's
+    ``_structure_width`` (engine/score.py), which reads the realised
+    atm-to-up1 spacing off the PRICED legs.
+
+    Reuses the TWIN-P coarse-grid fixture from
+    ``test_twin_p_chained_mirror_matches_legacy_on_a_coarse_grid_that_would_diverge``:
+    requested width is 5.0, but atm=100.0 snaps to up1=106.0, a realised
+    spacing of 6.0 -- exactly the gap that made cost_over_width fail in the
+    Phase 4 parity gate (corpus 20260922T131516Z, rows 004/020 TWIN-P,
+    005/021 TWIN-P5, 000 CND-PS, 003 BFLY-P)."""
+    grid = (76.0, 88.0, 94.0, 100.0, 106.0, 109.0, 112.0, 124.0)
+    expiry = "2026-10-01"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    inputs = {"spot": 101.0, "width": 5.0, "expiry": expiry, "quotes": quotes}
+
+    geometry = generate("TWIN-P", inputs)
+
+    assert geometry.width == 6.0
+    assert geometry.width != 5.0
+
+
+def test_fresh_put_ladder_width_matches_requested_on_a_grid_fine_enough_to_snap_exactly():
+    """Sanity check the fix in the OTHER direction: when the listed grid is
+    fine enough that the snap lands exactly on the requested offset, the
+    realised width still equals the requested one -- the fix changes the
+    SOURCE of the value, not its result, whenever the two coincide."""
+    grid = (73.0, 75.0, 77.0, 79.0, 81.0)
+    expiry = "2026-09-18"
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    inputs = {"spot": 77.91, "width": 2.0, "expiry": expiry, "quotes": quotes}
+
+    geometry = generate("CND-PS", inputs)
+
+    assert geometry.width == 2.0
+
+
 def test_resolved_contracts_replace_theoretical_width_with_traded_spacing():
     inputs = {
         **_inputs(),
