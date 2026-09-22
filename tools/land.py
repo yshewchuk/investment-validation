@@ -7,11 +7,12 @@ Replaces the manual sequence a supervisor used to run by hand:
   2. fetch ``origin/main`` and detach at it;
   3. ``git merge --no-ff <branch>``;
   4. deletion guard: whitespace-insensitive lines the merge removes, in two
-     tiers -- tier 1 (hard, never overridable) refuses if any removed line
-     was itself added to ``origin/main`` within the last
-     ``RECENT_ADDITION_WINDOW`` commits (a stale-checkout revert of
-     just-landed work); tier 2 (soft) refuses any other removed lines unless
-     ``--allow-deletions N`` names the exact count;
+     tiers -- tier 1 (hard, overridable only via ``--reviewed-deletions-from``)
+     refuses if any removed line was itself added to ``origin/main`` within
+     the last ``RECENT_ADDITION_WINDOW`` commits AND the content no longer
+     exists anywhere in the merged tree (a stale-checkout revert of just-landed
+     work); lines that moved are ignored; tier 2 (soft) refuses any other
+     removed lines unless ``--allow-deletions N`` names the exact count;
   5. run repo hygiene with the real ``.env`` -- fail CLOSED when zero secret
      patterns were loaded (a hygiene check with an inactive value-grep must
      never wave a push through);
@@ -23,13 +24,15 @@ Usage::
 
     python3 tools/land.py <branch> -m "<merge message>" [--dry-run] [--no-push]
     python3 tools/land.py <branch> -m "<merge message>" --allow-deletions 3
+    python3 tools/land.py <branch> -m "<merge message>" --reviewed-deletions-from abc123,def456
 
 Exit codes: 0 success; 1 working tree not clean; 2 branch does not exist;
 3 merge conflict (aborted, HEAD restored); 4 ``.env`` missing/unreadable;
 5 refusing to PUSH (0 secret patterns loaded); 6 unparsable hygiene output;
 7 hygiene violations; 8 tests failed (HEAD restored); 9 push failed
-(HEAD restored); 10 deletion guard tier 1 -- merge reverts lines
-origin/main gained recently (HEAD restored, never overridable); 11 deletion
+(HEAD restored); 10 deletion guard tier 1 -- merge removes lines that
+origin/main gained recently and no longer exist in merged result (HEAD restored,
+overridable only via ``--reviewed-deletions-from`` after review); 11 deletion
 guard tier 2 -- merge removes other lines that exist on main and either no
 ``--allow-deletions`` was given or it did not match the exact count (HEAD
 restored).
@@ -174,6 +177,15 @@ def _attribute_recent_commit(root: Path, recent_base: str, origin_main_sha: str,
     return "<unknown commit>"
 
 
+def _content_exists_in_tree(root: Path, sha: str, content: str) -> bool:
+    """Check if content (whitespace-normalized) appears anywhere in the tree at sha.
+    Returns True if the content is found anywhere in the tree (relocated lines pass).
+    Uses git grep -F (fixed-string, case-insensitive) to search the tree.
+    """
+    proc = git(root, "grep", "-F", "-i", content, sha)
+    return proc.returncode == 0
+
+
 def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
          env_path: Path) -> int:
     branch = args.branch
@@ -193,11 +205,13 @@ def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
     merged_sha = git(root, "rev-parse", "HEAD", check=True).stdout.strip()
 
     # --- Deletion guard (two tiers) -----------------------------------
-    # Tier 1 (hard, never overridable): the merge removes a line that
-    # origin/main itself gained within its last RECENT_ADDITION_WINDOW
-    # commits -- the signature of a stale-checkout revert of work that just
-    # landed (the incident this guard exists for: a branch deleted a call
+    # Tier 1 (hard, never overridable unless --reviewed-deletions-from is passed):
+    # the merge removes a line that origin/main itself gained within its last
+    # RECENT_ADDITION_WINDOW commits AND that content no longer exists anywhere
+    # in the merged tree -- the signature of a stale-checkout revert of work that
+    # just landed (the incident this guard exists for: a branch deleted a call
     # and its imports that a merge shortly before had added to main).
+    # Lines that moved to another location in the merge are NOT counted (relocation-aware).
     # Tier 2 (soft): any other whitespace-insensitive removed lines, only
     # passable with --allow-deletions N matching the exact count.
     recent_base = _recent_base_sha(root, origin_main_sha, RECENT_ADDITION_WINDOW)
@@ -208,64 +222,118 @@ def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
     }
     removed = _diff_marked_lines(root, origin_main_sha, merged_sha, "-")
 
-    tier1_hits = [
+    # Identify tier 1 candidates: recently-added lines that were removed.
+    # Separate them into "moved" (still exist in merged tree) and "genuinely absent".
+    tier1_candidates = [
         (file, line) for file, line in removed
         if len(_normalized(line)) >= MIN_DELETION_GUARD_LINE_LEN
         and _normalized(line) in added_recent_norm
     ]
-    if tier1_hits:
-        for file, line in tier1_hits[:MAX_DELETION_LINES_SHOWN]:
+
+    tier1_moved = []
+    tier1_absent = []
+    for file, line in tier1_candidates:
+        norm_content = _normalized(line)
+        if _content_exists_in_tree(root, merged_sha, norm_content):
+            tier1_moved.append((file, line))
+        else:
+            tier1_absent.append((file, line))
+
+    # Tier 1 fires only on genuinely absent lines. Handle with --reviewed-deletions-from override.
+    tier1_acknowledged = False
+    if tier1_absent:
+        # Collect commits that added these absent lines
+        absent_commits_set = set()
+        for file, line in tier1_absent:
             commit = _attribute_recent_commit(
                 root, recent_base, origin_main_sha, file, _normalized(line))
-            eprint(f"land: deletion guard [tier 1]: {file}: {line}  <- added by {commit}")
-        if len(tier1_hits) > MAX_DELETION_LINES_SHOWN:
-            eprint(f"land: deletion guard [tier 1]: ... and "
-                   f"{len(tier1_hits) - MAX_DELETION_LINES_SHOWN} more")
-        restore_head(root, saved)
-        eprint(
-            f"land: refusing: this merge reverts recently-landed work -- it removes "
-            f"{len(tier1_hits)} line(s) that origin/main gained within its last "
-            f"{RECENT_ADDITION_WINDOW} commits (since {recent_base[:12]}). This is "
-            "NOT overridable by --allow-deletions; land the revert as its own "
-            "commit with its own message if that is truly intended.")
-        return 10
+            # Extract the short SHA (before the tab)
+            sha = commit.split("\t")[0] if "\t" in commit else commit
+            absent_commits_set.add(sha)
 
-    removed_by_file: dict[str, int] = {}
-    for file, _line in removed:
-        removed_by_file[file] = removed_by_file.get(file, 0) + 1
-    removed_count = len(removed)
+        # Report moved vs absent lines clearly
+        if tier1_moved:
+            eprint(f"land: deletion guard [tier 1]: {len(tier1_moved)} line(s) MOVED "
+                   "(found elsewhere in merge result):")
+            for file, line in tier1_moved[:min(10, MAX_DELETION_LINES_SHOWN)]:
+                eprint(f"land: deletion guard [tier 1]:   MOVED {file}: {line}")
+            if len(tier1_moved) > 10:
+                eprint(f"land: deletion guard [tier 1]:   ... and {len(tier1_moved) - 10} more")
 
-    if args.allow_deletions is not None and args.allow_deletions != removed_count:
-        for file, count in sorted(removed_by_file.items()):
-            eprint(f"land: deletion guard [tier 2]:   {file}: {count} line(s) removed")
-        for file, line in removed[:MAX_DELETION_LINES_SHOWN]:
-            eprint(f"land: deletion guard [tier 2]:   {file}: {line}")
-        restore_head(root, saved)
-        eprint(
-            f"land: refusing: --allow-deletions {args.allow_deletions} does not "
-            f"match the actual removed-line count {removed_count}")
-        return 11
+        eprint(f"land: deletion guard [tier 1]: {len(tier1_absent)} line(s) ABSENT "
+               "(genuinely removed):")
+        for file, line in tier1_absent[:MAX_DELETION_LINES_SHOWN]:
+            commit = _attribute_recent_commit(
+                root, recent_base, origin_main_sha, file, _normalized(line))
+            eprint(f"land: deletion guard [tier 1]:   ABSENT {file}: {line}  <- added by {commit}")
+        if len(tier1_absent) > MAX_DELETION_LINES_SHOWN:
+            eprint(f"land: deletion guard [tier 1]:   ... and "
+                   f"{len(tier1_absent) - MAX_DELETION_LINES_SHOWN} more")
 
-    if removed_count == 0:
-        print("land: deletion guard: 0 line(s) removed by this merge "
-              "(whitespace-insensitive) - OK")
-    elif args.allow_deletions == removed_count:
-        print(f"land: deletion guard [tier 2]: {removed_count} line(s) removed, "
-              f"matches --allow-deletions {removed_count} - OK")
+        # Check if --reviewed-deletions-from was provided and matches
+        if args.reviewed_deletions_from is not None:
+            provided_shas = set(args.reviewed_deletions_from.split(","))
+            if provided_shas == absent_commits_set:
+                print(f"land: deletion guard [tier 1]: {len(tier1_absent)} line(s) absent, "
+                      f"but --reviewed-deletions-from commits match: {', '.join(sorted(absent_commits_set))}")
+                tier1_acknowledged = True
+            else:
+                restore_head(root, saved)
+                eprint(
+                    f"land: refusing: --reviewed-deletions-from commits do not match the "
+                    f"commits that added the removed lines. Expected: {', '.join(sorted(absent_commits_set))}, "
+                    f"got: {', '.join(sorted(provided_shas))}")
+                return 10
+        else:
+            restore_head(root, saved)
+            eprint(
+                f"land: refusing: this merge reverts recently-landed work -- it removes "
+                f"{len(tier1_absent)} line(s) that origin/main gained within its last "
+                f"{RECENT_ADDITION_WINDOW} commits (since {recent_base[:12]}) and no longer exist "
+                f"in the merged result. To acknowledge this intentional deletion, pass "
+                f"--reviewed-deletions-from {','.join(sorted(absent_commits_set))}")
+            return 10
+
+    # Skip tier 2 if tier 1 was already acknowledged with --reviewed-deletions-from
+    if tier1_acknowledged:
+        print("land: deletion guard [tier 1]: tier 1 acknowledged, skipping tier 2")
     else:
-        eprint(f"land: deletion guard [tier 2]: {removed_count} line(s) removed by "
-               "this merge (whitespace-insensitive), and this merge removes lines "
-               "that exist on main:")
-        for file, count in sorted(removed_by_file.items()):
-            eprint(f"land: deletion guard [tier 2]:   {file}: {count} line(s) removed")
-        for file, line in removed[:MAX_DELETION_LINES_SHOWN]:
-            eprint(f"land: deletion guard [tier 2]:   {file}: {line}")
-        restore_head(root, saved)
-        eprint(
-            "land: refusing: this merge removes lines that exist on main; pass "
-            f"--allow-deletions N (N = the exact expected removed-line count, "
-            f"{removed_count} here) to allow it")
-        return 11
+        removed_by_file: dict[str, int] = {}
+        for file, _line in removed:
+            removed_by_file[file] = removed_by_file.get(file, 0) + 1
+        removed_count = len(removed)
+
+        if args.allow_deletions is not None and args.allow_deletions != removed_count:
+            for file, count in sorted(removed_by_file.items()):
+                eprint(f"land: deletion guard [tier 2]:   {file}: {count} line(s) removed")
+            for file, line in removed[:MAX_DELETION_LINES_SHOWN]:
+                eprint(f"land: deletion guard [tier 2]:   {file}: {line}")
+            restore_head(root, saved)
+            eprint(
+                f"land: refusing: --allow-deletions {args.allow_deletions} does not "
+                f"match the actual removed-line count {removed_count}")
+            return 11
+
+        if removed_count == 0:
+            print("land: deletion guard: 0 line(s) removed by this merge "
+                  "(whitespace-insensitive) - OK")
+        elif args.allow_deletions == removed_count:
+            print(f"land: deletion guard [tier 2]: {removed_count} line(s) removed, "
+                  f"matches --allow-deletions {removed_count} - OK")
+        else:
+            eprint(f"land: deletion guard [tier 2]: {removed_count} line(s) removed by "
+                   "this merge (whitespace-insensitive), and this merge removes lines "
+                   "that exist on main:")
+            for file, count in sorted(removed_by_file.items()):
+                eprint(f"land: deletion guard [tier 2]:   {file}: {count} line(s) removed")
+            for file, line in removed[:MAX_DELETION_LINES_SHOWN]:
+                eprint(f"land: deletion guard [tier 2]:   {file}: {line}")
+            restore_head(root, saved)
+            eprint(
+                "land: refusing: this merge removes lines that exist on main; pass "
+                f"--allow-deletions N (N = the exact expected removed-line count, "
+                f"{removed_count} here) to allow it")
+            return 11
 
     # Computed once, up front, so hygiene scans exactly what THIS merge
     # changed (not the whole tree, and never a silent 0-file scan): a
@@ -388,6 +456,13 @@ def main(argv: list[str] | None = None, *, env_path: Path = DEFAULT_ENV_PATH,
                              "for this merge, or land refuses (exit 11). Never "
                              "overrides tier 1 (exit 10), which reverts lines "
                              "origin/main gained recently.")
+    parser.add_argument("--reviewed-deletions-from", default=None, metavar="SHA[,SHA,...]",
+                        help="acknowledge tier-1 deletions: a comma-separated list of "
+                             "short SHAs of commits that added the lines genuinely "
+                             "removed by this merge. The set of SHAs must exactly match "
+                             "the commits that originally added the removed lines. "
+                             "Use this only after reviewing that the deletions are "
+                             "intentional (e.g., part of a refactor where code moved).")
     parser.add_argument("--cpu-set", default=DEFAULT_TEST_CPU_SET,
                         help="taskset CPU list passed to bounded_run.py --cpu-set "
                              f"for the gated test run (default: {DEFAULT_TEST_CPU_SET}, "

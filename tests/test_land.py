@@ -300,8 +300,8 @@ def test_tier1_reverting_a_recently_landed_line_refuses_and_head_restored(
     assert proc.returncode == 10, (proc.returncode, proc.stdout, proc.stderr)
     assert "tier 1" in proc.stderr
     assert "RECENT_IMPORTANT_VALUE" in proc.stderr
-    assert "reverts recently-landed work" in proc.stderr
-    assert "NOT overridable" in proc.stderr
+    assert "reverts recently-landed work" in proc.stderr or "no longer exist" in proc.stderr
+    assert "--reviewed-deletions-from" in proc.stderr
     assert _origin_main(origin) == before_origin
     assert _head(work) == before_head
     assert _branch(work) == before_branch
@@ -331,7 +331,8 @@ def test_tier1_is_not_rescuable_by_allow_deletions(sandbox, tmp_path, monkeypatc
         work, env_path, "feature", "-m", "merge feature", "--allow-deletions", "1")
 
     assert proc.returncode == 10, (proc.returncode, proc.stdout, proc.stderr)
-    assert "NOT overridable" in proc.stderr
+    assert "tier 1" in proc.stderr
+    assert "--reviewed-deletions-from" in proc.stderr
     assert _origin_main(origin) == before_origin
     assert _head(work) == before_head
     assert _status(work) == ""
@@ -386,5 +387,103 @@ def test_tier2_unrelated_deletion_refuses_and_is_rescuable_by_exact_count(
         "--dry-run")
     assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
     assert "matches --allow-deletions 1" in proc.stdout
+    assert _head(work) == before_head
+    assert _status(work) == ""
+
+
+
+
+def test_tier1_genuinely_absent_lines_require_reviewed_deletions_from(
+        sandbox, tmp_path, monkeypatch):
+    """Test that genuinely deleted lines fire tier 1 but can be overridden with
+    --reviewed-deletions-from flag listing the exact commits that added them.
+    """
+    work, origin = sandbox
+    env_path = _write_env(tmp_path, "real.env", REAL_ENV_BODY)
+    monkeypatch.setattr(land, "RECENT_ADDITION_WINDOW", 1)
+
+    # Add some lines we'll later genuinely delete
+    _write_and_commit(work, "old.txt", "padding\n", "padding")
+    _write_and_commit(
+        work, "config.py",
+        "SETTING_1 = True\nSETTING_2 = False\n",
+        "land config")
+    _git(work, "push", "origin", "main")
+
+    # Get the SHA of the commit that added the config
+    config_commit_sha = _git(work, "rev-parse", "HEAD").stdout.strip()[:7]
+
+    # On feature branch, genuinely delete both lines
+    _git(work, "checkout", "-b", "feature")
+    (work / "config.py").write_text("")
+    _commit(work, "remove config settings")
+    _git(work, "checkout", "main")
+
+    before_head = _head(work)
+    before_origin = _origin_main(origin)
+
+    # First, verify it fires tier 1
+    proc = _run_land(work, env_path, "feature", "-m", "merge feature")
+    assert proc.returncode == 10, (proc.returncode, proc.stdout, proc.stderr)
+    assert "tier 1" in proc.stderr
+    assert "ABSENT" in proc.stderr or "reverts" in proc.stderr
+    assert _head(work) == before_head
+    assert _status(work) == ""
+
+    # Wrong commit SHA: still refuses
+    proc = _run_land(
+        work, env_path, "feature", "-m", "merge feature",
+        "--reviewed-deletions-from", "wrongsha")
+    assert proc.returncode == 10, (proc.returncode, proc.stdout, proc.stderr)
+    assert "do not match" in proc.stderr
+    assert _head(work) == before_head
+    assert _status(work) == ""
+
+    # Correct commit SHA: passes
+    proc = _run_land(
+        work, env_path, "feature", "-m", "merge feature",
+        "--reviewed-deletions-from", config_commit_sha, "--dry-run")
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert config_commit_sha in proc.stdout
+    assert _head(work) == before_head
+    assert _status(work) == ""
+
+
+def test_tier1_still_fires_on_absolute_genuine_deletion(sandbox, tmp_path, monkeypatch):
+    """Test that the real incident (cac6c00 → d40a505) still fires tier 1.
+
+    This tests the original incident: a branch deletes a call and its imports
+    that were recently added to main. This should always fire and not be
+    weakened by the relocation-aware fix.
+    """
+    work, origin = sandbox
+    env_path = _write_env(tmp_path, "real.env", REAL_ENV_BODY)
+    monkeypatch.setattr(land, "RECENT_ADDITION_WINDOW", 1)
+
+    # Add a function call and its imports
+    _write_and_commit(work, "old.txt", "padding\n", "padding")
+    _write_and_commit(
+        work, "main_code.py",
+        "from helpers import get_value\n\ndef process():\n    val = get_value()\n    return val\n",
+        "land function call")
+    _git(work, "push", "origin", "main")
+
+    # On feature branch, delete both the call AND the import
+    # The key is that they're both deleted entirely (not moved)
+    _git(work, "checkout", "-b", "feature")
+    (work / "main_code.py").write_text("def process():\n    return None\n")
+    _commit(work, "remove call and import")
+    _git(work, "checkout", "main")
+
+    before_head = _head(work)
+    before_origin = _origin_main(origin)
+
+    # Must fire tier 1 - this is the real incident that must never slip through
+    proc = _run_land(work, env_path, "feature", "-m", "merge feature")
+    assert proc.returncode == 10, (proc.returncode, proc.stdout, proc.stderr)
+    assert "tier 1" in proc.stderr
+    # The ABSENT lines should be reported
+    assert "ABSENT" in proc.stderr or "reverts" in proc.stderr
+    assert _origin_main(origin) == before_origin
     assert _head(work) == before_head
     assert _status(work) == ""
