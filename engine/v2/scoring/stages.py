@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterable, Mapping
 import numpy as np
 from scipy.stats import norm
 
-from engine.v2.domain.generation import Geometry, Pricing, generate, price
+from engine.v2.domain.generation import DISABLED, Geometry, Pricing, generate, price
 from engine.v2.domain.valuation import terminal_payoff
 from engine.v2.foundation import content_hash, to_document
 
@@ -1549,7 +1549,7 @@ def _execute_model(
     block = inputs.model
     recipe = block.get("payoff_recipe")
     if recipe is None:
-        if name not in _PAYOFF_DRIVER_STRATEGIES:
+        if name not in _PAYOFF_DRIVER_STRATEGIES and name not in DISABLED:
             # Legacy's site-1 NO_PAYOFF_MAP (engine/score.py:2799,
             # ``PAYOFF_DRIVER.get(strategy) is None``): a strategy with no
             # registered payoff driver never reaches the rest of the model
@@ -1558,6 +1558,18 @@ def _execute_model(
             # before any output-anomaly check, exactly as legacy does --
             # never reachable via ``_model_driver_and_cost`` below, since
             # that path requires a recipe to have been declared at all.
+            #
+            # ``name not in DISABLED``: a SEPARATE, narrower legacy gate.
+            # DISABLED_STRATEGIES (engine/score.py:117-127) returns from
+            # Scorer.score before site-1 (or _price_entry/_score_model) ever
+            # runs, flagging only UNVALIDATED_STRUCTURE. ``DISABLED`` is the
+            # same registry domain.generation.structures already uses to
+            # refuse geometry for these strategies -- reused by reference,
+            # not a new list. Deliberately NOT "geometry refused for any
+            # reason": a FORECAST_SIZED strategy whose geometry refuses for
+            # an unrelated capture gap still reaches _score_model in legacy
+            # and DOES get NO_PAYOFF_MAP there (see the commit that added
+            # this line for the measurement).
             _add_flag(flags, "NO_PAYOFF_MAP")
         elif any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
             _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
