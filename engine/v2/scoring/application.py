@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping
 
 from engine.v2.contracts import ReplayReceipt, ScoreBatch, ScoreRecord, ScoreRequest
 from engine.v2.features import default_feature_registry
-from engine.v2.foundation import from_document, to_document
+from engine.v2.foundation import from_document, to_document, untag_nonfinite
 from engine.v2.registry import DYNAMIC_MENU, default_registry
 
 from .financial import financial_diagnostics
@@ -104,8 +104,26 @@ def _value_fields(values: Mapping[str, Any], names: tuple[str, ...]) -> dict[str
 
 
 def _feature_fields(values: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, bool]]:
+    """``(feature_values, null_masks)`` for ``ScoreRecord``.
+
+    A captured feature that was non-finite at capture time is carried
+    tagged (``{"__nonfinite__": repr(value)}``; contracts §2.1) rather than
+    as a real NaN, so it is never ``None`` and would otherwise read as
+    present. Decode it (mirrors ``checks/phase4_frozen_bridge.py::
+    _feature_rows``, fixed in 841150e for the identical representation
+    gap) before deciding missingness, so a tagged nonfinite feature counts
+    as missing in ``null_masks`` exactly as a ``None`` one does. The raw,
+    still-tagged value is kept in the returned ``features``/
+    ``feature_values`` -- only the missingness decision changes.
+    """
     features = dict(values.get("model_inputs") or {})
-    return features, {name: value is None for name, value in features.items()}
+    null_masks = {}
+    for name, value in features.items():
+        decoded = untag_nonfinite(value) if isinstance(value, Mapping) else value
+        null_masks[name] = decoded is None or (
+            isinstance(decoded, float) and not isfinite(decoded)
+        )
+    return features, null_masks
 
 
 def _chooser_selection(values: Mapping[str, Any]) -> dict[str, Any] | None:
