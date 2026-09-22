@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from checks import phase4_real
+from checks.phase4_frozen_bridge import _feature_rows
 from engine.fills import MID
 from engine.score import ScoreRequest
 from engine.v2.contracts import ScoreRequest as V2ScoreRequest
@@ -498,6 +499,79 @@ def test_frozen_runtime_refuses_a_binding_missing_a_feature_by_name(tmp_path):
     with pytest.raises(StrictTraceCaptureError, match=r"gate.*missing_feat") as excinfo:
         _frozen_runtime(package, tmp_path / "release", request, inputs, candidate)
     assert not isinstance(excinfo.value, KeyError)
+
+
+def test_frozen_runtime_omits_a_nonfinite_binding_exactly_as_feature_rows_does(tmp_path):
+    """Regression for the RAMP7-HAIN (016) / DYN-SV-LUXE (002) defect: the
+    captured trace's own `role_model_inputs` tags `or_implied` non-finite for
+    the driver binding, `_feature_rows` (checks/phase4_frozen_bridge.py,
+    replay) correctly OMITS that binding from its requests, but
+    `_frozen_runtime` (here, capture) used to build an InferenceRequest for
+    EVERY declared binding regardless of finiteness -- so the resolve_context
+    receipt this module writes at capture time asserted the driver binding
+    ran, while replay re-derives from the identical recorded feature vector
+    that it did not, and `execution.resolve_context.input_hash` mismatches
+    on a row nothing actually changed about.
+
+    This pins that `_frozen_runtime`'s inference-request binding set and
+    `_feature_rows`'s derivation from the SAME per-role vectors always
+    agree: the non-finite driver binding is omitted on both sides, and the
+    unaffected, fully-finite gate binding is kept on both sides.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    path, digest = _artifact(source)
+    driver_binding = _model_binding(
+        path, digest, role="abs_move", feature_order=["x"],
+        output_names=["driver_prediction"], model_id="driver-1",
+    )
+    gate_binding = _model_binding(
+        path, digest, role="gate", feature_order=["x", "n_prior"],
+        output_names=["gate_score"], model_id="gate-1",
+    )
+    # The driver role's own captured `x` is a genuine sourced non-finite
+    # value (contracts §2.1 tag), same shape as the real fixture's
+    # `or_implied` gap; the gate role's captured vector is fully finite.
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="abs_move",
+        driver_vector={"x": {"__nonfinite__": "nan"}},
+        gate_vector={"x": 9.0, "n_prior": 5.0},
+    )}
+    package = package_frozen_resources(
+        model_bindings=[driver_binding, gate_binding],
+        deployment_id="deployment-1",
+        release_root=tmp_path / "release",
+        source_root=source,
+    )
+    request = _request()
+    inputs, _ = _native(request)
+
+    _, release, inference_requests = _frozen_runtime(
+        package, tmp_path / "release", request, inputs, candidate,
+    )
+    captured_binding_ids = {item.binding_id for item in inference_requests}
+    bindings_by_role = {binding.role: binding for binding in release.bindings}
+
+    # What replay derives from the SAME recorded per-role vectors, in the
+    # shape a round-tripped JSON trace carries them (a non-finite value
+    # serializes as the `{"__nonfinite__": ...}` tag; a finite one round-
+    # trips as itself) -- exactly what `checks/phase4_real.py` hands
+    # `_feature_rows` from `features.role_model_inputs` at replay.
+    replay_inputs = replace(inputs, features={
+        **inputs.features,
+        "role_model_inputs": {
+            "driver": {"x": {"__nonfinite__": "nan"}},
+            "gate": {"x": 9.0, "n_prior": 5.0},
+        },
+    })
+    replayed_requests = _feature_rows(
+        replay_inputs, release.bindings, release.release_id,
+    )
+    replayed_binding_ids = {item.binding_id for item in replayed_requests}
+
+    assert captured_binding_ids == replayed_binding_ids
+    assert bindings_by_role["driver"].binding_id not in captured_binding_ids
+    assert bindings_by_role["gate"].binding_id in captured_binding_ids
 
 
 def _full_strict_candidate(*, fixture_id, ticker, driver_vector, gate_vector,

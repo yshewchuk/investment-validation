@@ -160,6 +160,80 @@ def _answer_free(inputs: NativeScoreInputs) -> None:
             )
 
 
+def binding_feature_row(
+    binding: ModelBinding, vector: Mapping[str, Any],
+) -> tuple[float, ...] | None:
+    """One inference row for ``binding`` from its captured feature ``vector``,
+    or ``None`` when a required feature came back non-finite.
+
+    This is the ONE predicate that decides whether a binding is included,
+    shared by ``_feature_rows`` below (replay, via
+    ``checks/phase4_real.py``) and ``_frozen_runtime`` in
+    ``tools/capture_tier0_corpus.py`` (capture, building the
+    ``resolve_context`` receipt from the same recorded feature vector). The
+    two sides used to duplicate this rule -- capture's copy checked only for
+    a structurally missing feature, never for a non-finite one -- so a trace
+    could assert a binding both included (capture's receipt, which fed the
+    model unconditionally) and omitted (replay's re-derivation from the
+    identical ``role_model_inputs`` the trace itself recorded), a real
+    self-contradiction the runtime-vs-captured-receipt check exists to
+    catch. Reading both sides from this one function is what keeps them
+    from drifting apart again.
+
+    A captured feature that was genuinely non-finite at capture time is
+    tagged ``{"__nonfinite__": repr(value)}`` (contracts §2.1; see
+    ``engine.v2.foundation.canonical.tag_nonfinite``/``untag_nonfinite``) --
+    a real sourced NaN (e.g. no ORATS quote that day), not a dropped column.
+    Decoding it here (rather than letting ``float()`` raise on the dict
+    itself) is what tells a genuinely non-finite captured value apart from
+    an actually-malformed one.
+
+    A binding whose row comes back non-finite yields ``None`` here -- the
+    caller must omit it, never raise. This mirrors
+    ``engine/v2/scoring/frozen_executor.py``'s ``FrozenStageExecutor._row``
+    ("a non-finite value is a missing feature, not an invalid one") and
+    legacy itself: ``engine.score.Scorer._score_model`` flags
+    MISSING_FEATURES and never calls ``.predict`` on a non-finite row, and
+    ``engine.data.features.tier4.ServingModel.predict`` masks an incomplete
+    row to NaN without calling its estimator either way -- neither legacy
+    path ever asks a model to score an incomplete feature vector. On the
+    replay side, omitting the request means ``prepare_frozen_replay`` hands
+    the omission's binding fewer requests than bindings, which
+    ``engine.v2.scoring.application.score_frozen`` already handles (its
+    ``bindings``/``results`` are built FROM ``requests``, not from
+    ``release.bindings``), so the role simply produces no frozen output --
+    read as the native record's own MISSING_FORECAST_OUTPUT for that role,
+    comparable against legacy's own decline, instead of a hard refusal that
+    excludes the whole record from the population before any comparison is
+    even attempted.
+
+    A structurally missing feature name (the key never captured at all) or
+    a genuinely non-numeric value (a string, not a nonfinite tag) both still
+    raise ``FrozenBridgeError`` -- those are not an omission either side
+    should make silently.
+    """
+    from engine.v2.foundation import untag_nonfinite
+
+    row: list[float] = []
+    for name in binding.feature_order:
+        if name not in vector:
+            raise FrozenBridgeError(
+                f"binding {binding.binding_id}: missing feature {name}"
+            )
+        raw = vector[name]
+        decoded = untag_nonfinite(raw) if isinstance(raw, Mapping) else raw
+        try:
+            value = float(decoded)
+        except (TypeError, ValueError) as exc:
+            raise FrozenBridgeError(
+                f"binding {binding.binding_id}: nonnumeric feature {name}"
+            ) from exc
+        if not isfinite(value):
+            return None
+        row.append(value)
+    return tuple(row)
+
+
 def _feature_rows(
     inputs: NativeScoreInputs,
     bindings: Sequence[ModelBinding],
@@ -176,35 +250,9 @@ def _feature_rows(
     roles from ``model_inputs`` (the merge refuses a cross-role conflict), but
     never a gate or chooser binding.
 
-    A captured feature that was genuinely non-finite at capture time is
-    tagged ``{"__nonfinite__": repr(value)}`` (contracts §2.1; see
-    ``engine.v2.foundation.canonical.tag_nonfinite``/``untag_nonfinite``) --
-    a real sourced NaN (e.g. no ORATS quote that day), not a dropped column.
-    Decoding it here (rather than letting ``float()`` raise on the dict
-    itself) is what tells a genuinely non-finite captured value apart from
-    an actually-malformed one.
-
-    A binding whose row comes back non-finite gets NO request here -- it is
-    silently omitted from the returned tuple, never raised. This mirrors
-    ``engine/v2/scoring/frozen_executor.py``'s ``FrozenStageExecutor._row``
-    ("a non-finite value is a missing feature, not an invalid one") and
-    legacy itself: ``engine.score.Scorer._score_model`` flags
-    MISSING_FEATURES and never calls ``.predict`` on a non-finite row, and
-    ``engine.data.features.tier4.ServingModel.predict`` masks an incomplete
-    row to NaN without calling its estimator either way -- neither legacy
-    path ever asks a model to score an incomplete feature vector. Omitting
-    the request here reproduces that: the caller (``prepare_frozen_replay``)
-    hands the omission's binding fewer requests than bindings, which
-    ``engine.v2.scoring.application.score_frozen`` already handles (its
-    ``bindings``/``results`` are built FROM ``requests``, not from
-    ``release.bindings``), so the role simply produces no frozen output --
-    read as the native record's own MISSING_FORECAST_OUTPUT for that role,
-    comparable against legacy's own decline, instead of a hard refusal that
-    excludes the whole record from the population before any comparison is
-    even attempted.
+    Per-binding row construction (nonfinite decoding, omission on a
+    non-finite feature) is ``binding_feature_row`` -- see its docstring.
     """
-    from engine.v2.foundation import untag_nonfinite
-
     merged = inputs.features.get("model_inputs")
     if not isinstance(merged, Mapping):
         raise FrozenBridgeError("native inputs require features.model_inputs")
@@ -228,32 +276,14 @@ def _feature_rows(
             )
         else:
             vector = merged
-        row = []
-        incomplete = False
-        for name in binding.feature_order:
-            if name not in vector:
-                raise FrozenBridgeError(
-                    f"binding {binding.binding_id}: missing feature {name}"
-                )
-            raw = vector[name]
-            decoded = untag_nonfinite(raw) if isinstance(raw, Mapping) else raw
-            try:
-                value = float(decoded)
-            except (TypeError, ValueError) as exc:
-                raise FrozenBridgeError(
-                    f"binding {binding.binding_id}: nonnumeric feature {name}"
-                ) from exc
-            if not isfinite(value):
-                incomplete = True
-                break
-            row.append(value)
-        if incomplete:
+        row = binding_feature_row(binding, vector)
+        if row is None:
             continue
         requests.append(InferenceRequest(
             release_id=release_id,
             binding_id=binding.binding_id,
             feature_order=binding.feature_order,
-            rows=(tuple(row),),
+            rows=(row,),
         ))
     return tuple(requests)
 

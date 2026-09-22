@@ -86,6 +86,8 @@ from checks.phase4_checkpoints import REQUIRED_CHECKPOINT_GROUPS  # noqa: E402
 from checks.phase4_frozen_bridge import (  # noqa: E402
     FROZEN_CHOOSER_FIELD,
     FROZEN_CHOOSER_SCHEMA,
+    FrozenBridgeError,
+    binding_feature_row,
     prepare_frozen_chooser,
     with_frozen_chooser,
 )
@@ -1100,17 +1102,30 @@ def _frozen_runtime(
                 f"frozen runtime binding {binding.binding_id} (role={binding.role}): "
                 "no captured per-role feature vector"
             )
-        missing = [name for name in binding.feature_order if name not in vector]
-        if missing:
+        # Same predicate replay's `_feature_rows` applies to this same
+        # captured `role_model_inputs` vector (checks/phase4_frozen_bridge.py
+        # ::binding_feature_row): a binding whose row comes back non-finite
+        # (contracts §2.1's `{"__nonfinite__": ...}` tag) is OMITTED here
+        # too, never fed to inference. Before this fix this loop built the
+        # row from the raw vector unconditionally, so the resolve_context
+        # receipt captured here asserted the binding ran even when the very
+        # feature vector this function reads recorded it as non-finite --
+        # replay then re-derives the omission from that same data and the
+        # two receipts disagree. Reading both sides from one function is
+        # what keeps that from recurring.
+        try:
+            row = binding_feature_row(binding, vector)
+        except FrozenBridgeError as exc:
             raise StrictTraceCaptureError(
-                f"frozen runtime binding {binding.binding_id} (role={binding.role}): "
-                f"missing feature(s) {missing}"
-            )
+                f"frozen runtime binding {binding.binding_id} (role={binding.role}): {exc}"
+            ) from exc
+        if row is None:
+            continue
         inference_requests.append(InferenceRequest(
             release_id=release.release_id,
             binding_id=binding.binding_id,
             feature_order=binding.feature_order,
-            rows=(tuple(vector[name] for name in binding.feature_order),),
+            rows=(row,),
         ))
     return FrozenInference(release_root), release, tuple(inference_requests)
 
