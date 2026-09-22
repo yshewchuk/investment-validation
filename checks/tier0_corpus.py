@@ -107,6 +107,15 @@ class Corpus:
     root: Path
     index: dict[str, Any]
     pairs: dict[str, dict] = field(default_factory=dict)
+    #: Change B (§ "pass fragments into case_digest and case_addressing"):
+    #: `load()`'s own identity-keyed shared cache, wrapped so
+    #: `content_hash(..., fragments=corpus.fragments)` renders a shared
+    #: subtree once per DIGEST instead of once per referencing pair. `None`
+    #: when this corpus loaded no shared references at all (the common case
+    #: for a synthetic/old-format corpus) -- callers pass it straight to
+    #: `content_hash`'s `fragments=` kwarg either way; `fragments=None` is
+    #: that function's own no-op path.
+    fragments: Any = None
 
     @property
     def ordered_ids(self) -> list[str]:
@@ -424,6 +433,43 @@ def _resolve_rows_reference(node: dict, shared_dir: Path,
     return rows
 
 
+class _IdentityFragments:
+    """``content_hash``'s ``fragments`` protocol (``engine/v2/foundation/
+    canonical.py``), backed by ``load()``'s own ``shared_cache``/
+    ``table_cache``: every ``$shared``/``$rows`` (``identity`` order)
+    reference in one :func:`load` call already resolves to a SINGLE Python
+    object per digest (``_resolve_shared``'s and
+    ``_load_translation_table``'s docstrings), reused by identity
+    everywhere it is referenced. Handing that same set of objects to
+    ``content_hash`` as ``fragments`` renders each one ONCE per digest
+    instead of once per referencing pair -- canonicalize-and-hash are
+    already fused (``canonical.py`` module docstring), so this changes
+    nothing about the hash produced, only how many times a shared subtree's
+    text is built (pinned byte-identical in
+    ``tests/test_tier0_corpus.py::test_fragments_do_not_change_the_hash``).
+
+    Deliberately simpler than ``tools/capture_tier0_corpus.py``'s
+    ``_SharedTraceDocuments``: no LRU eviction, because the shared set here
+    is already bounded by the corpus's own ``shared/`` directory (one entry
+    per DISTINCT digest, not per occurrence) rather than per-candidate
+    working sets during a live scoring run.
+    """
+
+    def __init__(self, shared_values: tuple[Any, ...]) -> None:
+        self._held: dict[int, Any] = {id(v): v for v in shared_values}
+        self._texts: dict[int, str] = {}
+
+    def canonical(self, node: Any, render) -> str | None:
+        key = id(node)
+        if self._held.get(key) is not node:
+            return None
+        text = self._texts.get(key)
+        if text is None:
+            text = render(node)
+            self._texts[key] = text
+        return text
+
+
 def resolve_corpus(root: Path) -> Path:
     """The version directory a corpus root points at.
 
@@ -473,6 +519,13 @@ def load(root: Path) -> Corpus:
     nodes loads unchanged: nothing in it is reference-shaped, so nothing
     here does anything but pass values through (literally: unresolved
     subtrees come back as the SAME object, not a rebuilt copy).
+
+    The returned :class:`Corpus`'s ``fragments`` (Change B) wraps exactly
+    these same ``shared_cache``/``table_cache`` objects -- see
+    :class:`_IdentityFragments` -- so ``case_digest`` and ``case_addressing``
+    can hash a payload without re-canonicalising a shared subtree once per
+    pair that references it. ``None`` when this call resolved no shared
+    references at all.
     """
     index = json.loads((root / "INDEX.json").read_text())
     shared_dir = root / "shared"
@@ -483,7 +536,9 @@ def load(root: Path) -> Corpus:
         pair = json.loads(path.read_text())
         pair = _resolve_shared(pair, shared_dir, shared_cache, set(), table_cache)
         pairs[pair["fixture_id"]] = pair
-    return Corpus(root=root, index=index, pairs=pairs)
+    shared_values = tuple(shared_cache.values()) + tuple(table_cache.values())
+    fragments = _IdentityFragments(shared_values) if shared_values else None
+    return Corpus(root=root, index=index, pairs=pairs, fragments=fragments)
 
 
 # --------------------------------------------------------------------------
@@ -541,15 +596,19 @@ def case_manifest(corpus: Corpus) -> ComparisonReceipt:
 
 def case_addressing(corpus: Corpus) -> list[ComparisonReceipt]:
     """Resolve every record from the hash of its own frozen request."""
+    # Change B: `fragments=corpus.fragments` (`None` on a corpus with no
+    # shared references, the no-op path) -- byte-identical hash, see
+    # `_IdentityFragments` and `load`'s docstring.
     by_request: dict[str, list[str]] = {}
     for fixture_id in corpus.ordered_ids:
-        by_request.setdefault(content_hash(corpus.request_of(fixture_id)),
-                              []).append(fixture_id)
+        by_request.setdefault(
+            content_hash(corpus.request_of(fixture_id), fragments=corpus.fragments),
+            []).append(fixture_id)
 
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
         pair = corpus.pairs[fixture_id]
-        digest = content_hash(pair["payload"]["request"])
+        digest = content_hash(pair["payload"]["request"], fragments=corpus.fragments)
         resolved = by_request.get(pair["request_hash"], [])
         left = {"request_hash": pair["request_hash"], "resolves_to": [fixture_id]}
         right = {"request_hash": digest, "resolves_to": resolved}
@@ -561,12 +620,13 @@ def case_addressing(corpus: Corpus) -> list[ComparisonReceipt]:
 
 
 def case_digest(corpus: Corpus) -> list[ComparisonReceipt]:
+    # Change B: `fragments=corpus.fragments` -- see `case_addressing` above.
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
         pair = corpus.pairs[fixture_id]
         out.append(compare_records(
             {"payload_hash": pair["payload_hash"]},
-            {"payload_hash": content_hash(pair["payload"])},
+            {"payload_hash": content_hash(pair["payload"], fragments=corpus.fragments)},
             comparison_kind="tier0_payload_digest",
             left_ref=f"{fixture_id}#stored", right_ref=f"{fixture_id}#recomputed",
         ))

@@ -693,6 +693,107 @@ def test_an_old_format_corpus_has_no_shared_directory_and_loads_unchanged(corpus
 
 
 # --------------------------------------------------------------------------
+# Change B — fragments into case_digest / case_addressing
+# --------------------------------------------------------------------------
+
+
+def _pair_with_shared_ref(fid: str, req: dict, record_with_ref: dict,
+                          record_expanded: dict) -> dict:
+    """A pair whose STORED payload carries ``{$shared: ...}`` markers
+    (``record_with_ref``) but whose ``payload_hash`` is taken over the fully
+    EXPANDED value (``record_expanded``) -- the real writer's contract
+    (``tools/capture_tier0_corpus.py``'s ``make_pair``/``_SharedDocumentWriter``:
+    the digest is computed before shared subtrees are substituted for disk
+    references), and what ``load()`` must reproduce after resolving those
+    references back. The plain ``pair()`` helper above hashes whatever it is
+    given as-is, which is correct for every OTHER test here (none of them
+    embed a ``$shared`` reference) but would be the wrong value for one that
+    does -- this helper exists so the fragments tests below assert a
+    genuinely correct ``payload_hash``, not an artifact of the shortcut.
+    """
+    kind = "score_result"
+    return {
+        "schema_version": "tier0_pair.v1.1",
+        "fixture_id": fid,
+        "covers": t0.derive_covers(record_expanded, req, kind, AXIS_INPUTS, None),
+        "notes": "",
+        "payload": {"request": req, "record": record_with_ref, "record_kind": kind},
+        "payload_hash": content_hash({"request": req, "record": record_expanded,
+                                      "record_kind": kind}),
+        "request_hash": content_hash(req),
+        "envelope": {"captured_at": "2026-09-12T00:00:00.000000+00:00",
+                     "worker_ref": "test:1", "duration_seconds": 0.01},
+    }
+
+
+def _shared_fragment_corpus(tmp_path: Path):
+    """Two pairs, three occurrences of one shared pool between them (two in
+    one pair's own record, one in the other's), with correct payload_hashes
+    (see :func:`_pair_with_shared_ref`) so the full case battery can
+    legitimately AGREE on them."""
+    pool = {"predictions": [0.11, 0.22, 0.33], "tag": "shared-pool"}
+    digest = write_shared(tmp_path / "tier0", pool)
+    ref = {t0.SHARED_REF_KEY: digest}
+    req_a = request("STR-THRU")
+    req_b = request("BFLY-P")
+    rec_a_ref = priced("STR-THRU", extra_field={"a": ref, "b": ref})
+    rec_a_expanded = priced("STR-THRU", extra_field={"a": pool, "b": pool})
+    rec_b_ref = priced("BFLY-P", extra_field=ref)
+    rec_b_expanded = priced("BFLY-P", extra_field=pool)
+    p1 = _pair_with_shared_ref("200_shared_a", req_a, rec_a_ref, rec_a_expanded)
+    p2 = _pair_with_shared_ref("201_shared_b", req_b, rec_b_ref, rec_b_expanded)
+    root = build(tmp_path / "tier0", [p1, p2])
+    return t0.load(root), pool
+
+
+def test_fragments_do_not_change_the_hash(tmp_path):
+    """Required proof for Change B: `content_hash(value, fragments=...)` is
+    byte-identical to `content_hash(value)` over the same (real, shared)
+    subtree -- `engine/v2/foundation/canonical.py`'s own contract, pinned
+    here rather than just trusted."""
+    corpus, pool = _shared_fragment_corpus(tmp_path)
+    assert corpus.fragments is not None
+
+    record_a = corpus.pairs["200_shared_a"]["payload"]["record"]["extra_field"]
+    record_b = corpus.pairs["201_shared_b"]["payload"]["record"]["extra_field"]
+    assert record_a["a"] is record_a["b"] is record_b  # one shared object, by identity
+    assert record_a["a"] == pool
+
+    for fixture_id in corpus.ordered_ids:
+        payload = corpus.pairs[fixture_id]["payload"]
+        assert (content_hash(payload, fragments=corpus.fragments)
+                == content_hash(payload))
+        req = corpus.request_of(fixture_id)
+        assert (content_hash(req, fragments=corpus.fragments) == content_hash(req))
+
+
+def test_case_digest_and_addressing_pass_the_corpus_fragments(tmp_path, monkeypatch):
+    """`case_digest`/`case_addressing` must actually pass `fragments=
+    corpus.fragments` through to `content_hash` -- not just be capable of
+    it if called that way. Spies on the module's `content_hash` name (both
+    functions call it as a bare name, so patching the module attribute
+    intercepts every call) and asserts the corpus's own fragments object
+    was used, and that both cases still AGREE."""
+    corpus, _pool = _shared_fragment_corpus(tmp_path)
+    assert corpus.fragments is not None
+
+    seen_fragments = []
+    real_content_hash = t0.content_hash
+
+    def spy(value, *, fragments=None):
+        seen_fragments.append(fragments)
+        return real_content_hash(value, fragments=fragments)
+
+    monkeypatch.setattr(t0, "content_hash", spy)
+    digest_receipts = t0.case_digest(corpus)
+    addressing_receipts = t0.case_addressing(corpus)
+
+    assert corpus.fragments in seen_fragments
+    assert all(r.verdict == AGREE for r in digest_receipts)
+    assert all(r.verdict == AGREE for r in addressing_receipts)
+
+
+# --------------------------------------------------------------------------
 # shared translation row tables (input_translation.mappings by reference)
 # --------------------------------------------------------------------------
 
