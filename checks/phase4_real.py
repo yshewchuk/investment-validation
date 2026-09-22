@@ -2401,6 +2401,37 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         )
         for dimension in dimensions
     }
+    #: Per-row, per-dimension diagnosis -- additive evidence only, computed
+    #: from data ``rows`` already carries (``checks``/``numeric_findings``
+    #: from ``_record_checks`` via the per-member loop above). Nothing here
+    #: changes what is compared or decided; it only writes down what the
+    #: comparator already found. VALUE-FREE by construction: ``checks``
+    #: holds only dimension name -> bool (see ``_record_checks``), and
+    #: ``numeric_findings`` holds only dimension name -> list of
+    #: ``Finding.field_path`` strings (see ``_compare_dimension``, which
+    #: reads ``finding.field_path`` and never ``finding.left_value``/
+    #: ``right_value``/``delta``) -- structural leaf paths such as
+    #: ``"forecasts.pred_iv_crush_30"``, never a number derived from either
+    #: side's record.
+    row_dimension_checks = {
+        row["fixture_id"]: row["checks"] for row in compared_rows
+    }
+    row_numeric_findings = {
+        row["fixture_id"]: row["numeric_findings"] for row in compared_rows
+    }
+    #: Roll-up: per dimension, how many compared rows passed vs failed it.
+    #: A row missing a dimension (e.g. "chooser" on a non-chooser row)
+    #: counts toward neither bucket, so the two only sum to ``compared`` for
+    #: a dimension every compared row actually carries.
+    dimension_rollup = {
+        dimension: {
+            "passed": sum(1 for row in compared_rows
+                          if row["checks"].get(dimension) is True),
+            "failed": sum(1 for row in compared_rows
+                          if row["checks"].get(dimension) is False),
+        }
+        for dimension in dimensions
+    }
     native_receipt = content_hash(native_ids)
     legacy_receipt = content_hash(legacy_ids)
     comparison_receipt = content_hash(rows)
@@ -2438,6 +2469,9 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "dimension_agreement": dimension_agreement,
         "numeric_coverage": numeric_coverage,
         "numeric_negative_controls": numeric_negative_controls,
+        "row_dimension_checks": row_dimension_checks,
+        "row_numeric_findings": row_numeric_findings,
+        "dimension_rollup": dimension_rollup,
         "dispositions": tuple({
             "fixture_id": row["fixture_id"],
             "disposition": row["disposition"],
