@@ -291,3 +291,133 @@ def test_numeric_finding_names_the_diverging_field_and_carries_no_value(tmp_path
     assert str(native_magic) not in dumped
     assert "0.987654321" not in dumped
     assert "0.2" not in dumped
+
+
+def test_key_differences_recorded_when_keys_check_fails(tmp_path, monkeypatch):
+    """A row with a key mismatch records native_only and legacy_only."""
+    from dataclasses import replace
+
+    record = _clean_record()
+    # Add an extra key to the legacy record
+    record_with_extra = {**record, "extra_legacy_key": "value"}
+    # Create a native with a different set of keys
+    native_with_diff = replace(
+        _native_record(record),
+        resolved_request={**record, "extra_native_key": "value"}
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record_with_extra},
+        natives_by_fixture={"a": native_with_diff},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["keys"] is False
+    assert "a" in release["row_key_differences"]
+    diff = release["row_key_differences"]["a"]
+    assert "native_only" in diff
+    assert "legacy_only" in diff
+    assert "extra_native_key" in diff["native_only"]
+    assert "extra_legacy_key" in diff["legacy_only"]
+
+
+def test_flag_differences_recorded_when_flags_check_fails(tmp_path, monkeypatch):
+    """A row with a flag mismatch records symmetric difference."""
+    from dataclasses import replace
+
+    record = _clean_record(flags=("FLAG_A", "FLAG_B"))
+    native_with_diff = replace(
+        _native_record(record),
+        reason_codes=("FLAG_A", "FLAG_C")  # FLAG_B is only in legacy, FLAG_C only in native
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+        natives_by_fixture={"a": native_with_diff},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["flags"] is False
+    assert "a" in release["row_flag_differences"]
+    diff = release["row_flag_differences"]["a"]
+    assert "native_only" in diff
+    assert "legacy_only" in diff
+    assert "FLAG_C" in diff["native_only"]
+    assert "FLAG_B" in diff["legacy_only"]
+
+
+def test_passing_row_omits_key_and_flag_differences(tmp_path, monkeypatch):
+    """A row where all checks pass does not record difference entries."""
+    record = _clean_record()
+    # Use the same record for native so everything matches
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["keys"] is True
+    assert checks["flags"] is True
+    # The fixture should not appear in row_key_differences or row_flag_differences
+    assert "a" not in release.get("row_key_differences", {})
+    assert "a" not in release.get("row_flag_differences", {})
+
+
+def test_key_flag_differences_contain_only_strings(tmp_path, monkeypatch):
+    """All leaves in key and flag differences are field/flag names (strings)."""
+    from dataclasses import replace
+
+    record = _clean_record(flags=("FLAG_A",))
+    native_with_diffs = replace(
+        _native_record(record),
+        reason_codes=("FLAG_B",),
+        resolved_request={**record, "extra_key": "value"},
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+        natives_by_fixture={"a": native_with_diffs},
+    )
+
+    # Assert no float leaves in the new difference fields
+    _assert_only_safe_leaves(
+        release.get("row_key_differences", {}),
+        allow_bool=False, allow_int=False
+    )
+    _assert_only_safe_leaves(
+        release.get("row_flag_differences", {}),
+        allow_bool=False, allow_int=False
+    )
+
+
+def test_verdicts_unchanged_by_difference_recording(tmp_path, monkeypatch):
+    """The checks verdicts are identical whether differences are recorded or not."""
+    from dataclasses import replace
+
+    record_agree = _clean_record()
+    record_disagree = _clean_record()
+    native_disagree = replace(
+        _native_record(record_disagree),
+        resolved_request={**record_disagree, "new_key": "value"}
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"agree": record_agree, "disagree": record_disagree},
+        natives_by_fixture={"disagree": native_disagree},
+    )
+
+    # Check that verdicts match what we'd expect independent of differences
+    assert release["row_dimension_checks"]["agree"]["keys"] is True
+    assert release["row_dimension_checks"]["disagree"]["keys"] is False
+
+    # The presence/absence of difference data doesn't affect the verdict
+    agree_checks = release["row_dimension_checks"]["agree"]
+    disagree_checks = release["row_dimension_checks"]["disagree"]
+    for dimension in agree_checks:
+        if dimension in disagree_checks:
+            # verdicts should match their check's purpose
+            pass

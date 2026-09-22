@@ -1986,18 +1986,42 @@ def _frozen_receipt(verified: Mapping[str, Any]) -> str | None:
     return frozen_replay.receipt if frozen_replay is not None else None
 
 
-def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict]:
-    """The per-record comparison of one legacy record with its native one."""
+def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]:
+    """The per-record comparison of one legacy record with its native one.
+
+    Returns: (checks, numeric, differences) where differences contains:
+    - key_differences: native_only/legacy_only key sets
+    - flag_differences: native_only/legacy_only flag names (symmetric diff)
+    """
     expected_keys = set(record)
     native_keys = set(native.resolved_request) - {
         "native_stage_receipts", "native_source_ref",
     }
+    # Compute key differences using the same exclusion sets as the check
+    excluded_from_check = {
+        "_model_artifact_ids", "native_source_ref",
+        "native_stage_receipts", "selected_contracts",
+    }
+    optional_in_legacy = ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
+                          expected_keys)
+    native_keys_for_comparison = native_keys - excluded_from_check - optional_in_legacy
+
+    keys_agree = expected_keys == native_keys_for_comparison
+    native_only = sorted(native_keys_for_comparison - expected_keys)
+    legacy_only = sorted(expected_keys - native_keys_for_comparison)
+
+    # Compute flag differences
+    native_flags = _semantic_flags({"flags": native.reason_codes})
+    legacy_flags = _semantic_flags(record)
+    if record.get("strategy") in {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in legacy_flags:
+        legacy_flags = legacy_flags + ("UNVALIDATED_STRUCTURE",)
+
+    flags_agree = native_flags == legacy_flags
+    flags_in_native_only = sorted(set(native_flags) - set(legacy_flags))
+    flags_in_legacy_only = sorted(set(legacy_flags) - set(native_flags))
+
     checks = {
-        "keys": expected_keys == (native_keys - {
-            "_model_artifact_ids", "native_source_ref",
-            "native_stage_receipts", "selected_contracts",
-        } - ({"entry_cost", "fill", "legs", "spot", "structure_width", "flags"} -
-             expected_keys)),
+        "keys": keys_agree,
         "contracts": _contract_projection(
             native.legs,
             entry_date=native.entry_exit_plan.get("entry_date"),
@@ -2013,19 +2037,26 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict]:
         # come from the "verdicts"/"analogs" numeric dimensions below
         # (checks.update), which is the same compare_records machinery
         # used for forecasts/simulation/financial_diagnostics.
-        "flags": _semantic_flags({"flags": native.reason_codes}) == (
-            _semantic_flags(record)
-            + ("UNVALIDATED_STRUCTURE",) if record.get("strategy") in
-               {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in
-               (record.get("flags") or ()) else ()
-        ),
+        "flags": flags_agree,
         "null_masks": native.null_masks == {
             key: value is None for key, value in (record.get("model_inputs") or {}).items()
         },
     }
     numeric = _compare_numeric_outputs(record, native)
     checks.update({name: result["agree"] for name, result in numeric.items()})
-    return checks, numeric
+
+    differences = {
+        "key_differences": {
+            "native_only": native_only,
+            "legacy_only": legacy_only,
+        } if not keys_agree else {},
+        "flag_differences": {
+            "native_only": flags_in_native_only,
+            "legacy_only": flags_in_legacy_only,
+        } if not flags_agree else {},
+    }
+
+    return checks, numeric, differences
 
 
 _CHOOSER_TRACE_SCHEMA = "phase4_chooser_trace.v1.0"
@@ -2263,12 +2294,14 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             runtime_stage_counts[stage] += 1
         member_checks = []
         numeric_findings = []
+        member_differences = []
         for member_record, _verified, member_native, _receipts, _identities in members:
-            checks, numeric = _record_checks(member_record, member_native)
+            checks, numeric, differences = _record_checks(member_record, member_native)
             member_checks.append(checks)
             numeric_findings.append({
                 name: result["finding_fields"] for name, result in numeric.items()
             })
+            member_differences.append(differences)
             _, actual_numeric = _numeric_views(member_record, member_native)
             for dimension in numeric_negative_controls:
                 if _numeric_corruption_candidate(actual_numeric[dimension]) is not None:
@@ -2303,7 +2336,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                 )
                 if mutated is None:
                     continue
-                mutated_checks, _ = _record_checks(member_record, mutated)
+                mutated_checks, _, _ = _record_checks(member_record, mutated)
                 structural_negative_controls[dimension] = not mutated_checks[dimension]
         checks = {
             name: all(item[name] for item in member_checks) for name in member_checks[0]
@@ -2332,6 +2365,14 @@ def _native_parity(corpus) -> tuple[dict, dict]:
             "checks": checks,
             "numeric_findings": (
                 numeric_findings[0] if not chooser_pair else numeric_findings
+            ),
+            "key_differences": (
+                member_differences[0].get("key_differences") if not chooser_pair
+                else [d.get("key_differences") for d in member_differences]
+            ),
+            "flag_differences": (
+                member_differences[0].get("flag_differences") if not chooser_pair
+                else [d.get("flag_differences") for d in member_differences]
             ),
             "advisory_flags": {
                 "legacy": sorted(set(record.get("flags") or ()) & _ADVISORY_FLAGS),
@@ -2419,6 +2460,37 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     row_numeric_findings = {
         row["fixture_id"]: row["numeric_findings"] for row in compared_rows
     }
+    #: ``row_key_differences`` and ``row_flag_differences`` record the set
+    #: differences that made their respective checks fail. For multi-member
+    #: (chooser) rows, each entry is a list of per-member dicts; for regular
+    #: rows, it's a single dict. When a check passes, the entry is omitted.
+    #: Field and flag NAMES only -- never values.
+    row_key_differences = {}
+    row_flag_differences = {}
+    for row in compared_rows:
+        fixture_id = row["fixture_id"]
+        key_diff = row.get("key_differences")
+        flag_diff = row.get("flag_differences")
+        # Handle both single and multi-member (chooser) cases
+        if isinstance(key_diff, list):
+            # Multi-member: collect non-empty differences
+            non_empty_key_diffs = [d for d in key_diff if d]
+            if non_empty_key_diffs:
+                row_key_differences[fixture_id] = non_empty_key_diffs
+        else:
+            # Single member: only store if non-empty
+            if key_diff:
+                row_key_differences[fixture_id] = key_diff
+
+        if isinstance(flag_diff, list):
+            # Multi-member: collect non-empty differences
+            non_empty_flag_diffs = [d for d in flag_diff if d]
+            if non_empty_flag_diffs:
+                row_flag_differences[fixture_id] = non_empty_flag_diffs
+        else:
+            # Single member: only store if non-empty
+            if flag_diff:
+                row_flag_differences[fixture_id] = flag_diff
     #: Roll-up: per dimension, how many compared rows passed vs failed it.
     #: A row missing a dimension (e.g. "chooser" on a non-chooser row)
     #: counts toward neither bucket, so the two only sum to ``compared`` for
@@ -2471,6 +2543,8 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "numeric_negative_controls": numeric_negative_controls,
         "row_dimension_checks": row_dimension_checks,
         "row_numeric_findings": row_numeric_findings,
+        "row_key_differences": row_key_differences,
+        "row_flag_differences": row_flag_differences,
         "dimension_rollup": dimension_rollup,
         "dispositions": tuple({
             "fixture_id": row["fixture_id"],
