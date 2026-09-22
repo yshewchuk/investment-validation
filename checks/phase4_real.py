@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import sys
 import tempfile
 import time
@@ -2637,6 +2638,146 @@ def _report_is_complete(text: str, evidence: dict) -> bool:
     return True
 
 
+#: The declared stage plan `build_evidence` runs -- a single module-level
+#: constant, not two copies of the same literal (`_implementation_hash`
+#: needs it before the corpus loads; `evidence_assembly`'s `stage_ids` local
+#: needs it for the report). One definition means the two can never drift
+#: apart and silently stop meaning the same thing.
+_STAGE_IDS = (
+    "resolve_context", "features", "forecast", "geometry", "pricing",
+    "analogs", "simulation", "gate", "chooser", "serialization",
+)
+
+
+def _implementation_hash() -> str:
+    """The evidence artifact's `implementation_hash`: a fingerprint of the
+    strategies, feature recipes and stage plan this build runs -- entirely
+    corpus-independent. Change C's battery cache (below) keys a cached
+    verdict on this value alongside the corpus's own declared hash, and
+    needs it BEFORE deciding whether to run the battery, so this is called
+    once from the `corpus_load` stage for that lookup and again, unchanged,
+    at `evidence_assembly` for the evidence field itself -- one function, so
+    the two can never compute a different answer for the same build.
+    `default_feature_registry()` and `STRATEGY_IDS` are pure and read no
+    corpus state, so calling this before the corpus loads is safe.
+    """
+    return content_hash({
+        "strategies": list(STRATEGY_IDS),
+        "recipes": [r.recipe_id for r in default_feature_registry().recipes],
+        "stages": _STAGE_IDS,
+    })
+
+
+#: Change C — cache the battery verdict across runs, keyed by BOTH
+#: corpus_hash and implementation_hash (see `build_evidence`'s
+#: `corpus_load` stage). NEVER under `fixtures/` or any other tracked tree:
+#: `fixtures/` is not git-ignored in this repo, so a write there would land
+#: in the working tree. Overridable so a test, or a box laid out
+#: differently, can point elsewhere without touching this default.
+_BATTERY_CACHE_SCHEMA = "phase4_battery_cache.v1.0"
+_DEFAULT_BATTERY_CACHE_PATH = Path("/root/.cache/investing-plan/phase4_battery_cache.json")
+
+
+def _battery_cache_path() -> Path:
+    override = os.environ.get("PHASE4_BATTERY_CACHE_PATH")
+    return Path(override) if override else _DEFAULT_BATTERY_CACHE_PATH
+
+
+def _battery_cache_entry_key(corpus_hash: str | None, implementation_hash: str) -> str:
+    return f"{corpus_hash}::{implementation_hash}"
+
+
+def _peek_corpus_hash(resolved: Path) -> str | None:
+    """The corpus's own declared hash straight off `INDEX.json`'s
+    `corpus_hash` field -- the same field `checks.tier0_corpus.case_manifest`
+    reads as `left["corpus_hash"]` -- WITHOUT calling `load()` or running the
+    battery. One small JSON file, not the corpus: cheap enough to read before
+    deciding whether the battery needs to run at all.
+    """
+    try:
+        return json.loads((resolved / "INDEX.json").read_text()).get("corpus_hash")
+    except (OSError, ValueError):
+        return None
+
+
+def _load_battery_cache_entry(corpus_hash: str | None,
+                              implementation_hash: str) -> dict | None:
+    """A cached AGREE verdict for this exact (corpus_hash, implementation_hash)
+    pair, or ``None``.
+
+    FAILS OPEN, always: a missing cache file, an unreadable one, corrupt
+    JSON, an unrecognized schema version, a malformed entries table, or an
+    entry that does not itself carry a genuine recorded AGREE for BOTH
+    hashes -- every one of these is a cache MISS (``None``), never an
+    exception and never treated as a pass. A cache that could turn a broken
+    or stale record into a skipped verification is unacceptable; the
+    fallback on any doubt is always "run the battery".
+    """
+    path = _battery_cache_path()
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("schema_version") != _BATTERY_CACHE_SCHEMA:
+        return None
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        return None
+    entry = entries.get(_battery_cache_entry_key(corpus_hash, implementation_hash))
+    if not isinstance(entry, dict):
+        return None
+    if (entry.get("verdict") != AGREE
+            or entry.get("corpus_hash") != corpus_hash
+            or entry.get("implementation_hash") != implementation_hash):
+        return None
+    return entry
+
+
+def _write_battery_cache_entry(corpus_hash: str | None, implementation_hash: str,
+                               merged, cases: dict) -> None:
+    """Persist a genuine full-battery AGREE verdict, keyed by BOTH hashes.
+
+    Value-free, the same standard the evidence artifact itself holds to:
+    statuses, codes, counts, hashes and field names only -- never a model
+    value or numeric result. The caller only invokes this after confirming
+    ``merged.verdict == AGREE`` itself; this function does not re-check it,
+    so a caller bug fails loudly (an assertion elsewhere) rather than
+    quietly writing a false pass under a mislabeled key.
+
+    Best-effort: writing the cache is an optimization for the NEXT run, not
+    load-bearing for this one. Any failure to write (missing parent, a
+    read-only mount, a corrupt existing file that cannot be parsed and
+    replaced) is swallowed -- it must never fail a run that just proved
+    AGREE the hard way.
+    """
+    assert merged.verdict == AGREE, "battery cache must only be written after a genuine AGREE"
+    path = _battery_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            raw = json.loads(path.read_text())
+            if not isinstance(raw, dict) or raw.get("schema_version") != _BATTERY_CACHE_SCHEMA:
+                raw = {"schema_version": _BATTERY_CACHE_SCHEMA, "entries": {}}
+        except (OSError, ValueError):
+            raw = {"schema_version": _BATTERY_CACHE_SCHEMA, "entries": {}}
+        if not isinstance(raw.get("entries"), dict):
+            raw["entries"] = {}
+        raw["entries"][_battery_cache_entry_key(corpus_hash, implementation_hash)] = {
+            "corpus_hash": corpus_hash,
+            "implementation_hash": implementation_hash,
+            "verdict": merged.verdict,
+            "population": {"expected": merged.population.expected,
+                          "compared": merged.population.compared},
+            "cases": {name: r.verdict for name, r in cases.items()},
+            "problem_codes": sorted({p["code"] for r in cases.values() for p in r.problems}),
+        }
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 class _Stage:
     """Print start/end markers with elapsed seconds for a coarse phase4_real.py stage."""
 
@@ -2670,7 +2811,34 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         # and, raised to 9.5 GB, past that too with active swapping -- still
         # rising when killed. Neither call needs the other's result, so this
         # ordering changes nothing about what either one verifies.
-        corpus_verdict, _ = run_corpus(resolved)
+        #
+        # Change C: `run_corpus` (the battery) is itself the expensive part
+        # of this stage -- measured 3136.7s of a 67.1-minute run, reloading
+        # and re-verifying the corpus repeatedly inside itself (module-level
+        # comment history). A cached AGREE verdict keyed by BOTH the
+        # corpus's own declared hash and this build's implementation hash
+        # skips it; any mismatch (a different corpus, a different
+        # implementation) runs it in full, exactly as before. `load(resolved)`
+        # below is unaffected either way -- it is `run_corpus`'s OWN internal
+        # load that a cache hit skips, not this one.
+        declared_corpus_hash = _peek_corpus_hash(resolved)
+        implementation_hash = _implementation_hash()
+        cached_entry = _load_battery_cache_entry(declared_corpus_hash, implementation_hash)
+        if cached_entry is not None:
+            print(f"[phase4_real] battery cache HIT corpus_hash={declared_corpus_hash} "
+                  f"implementation_hash={implementation_hash}; skipping full battery "
+                  f"(recorded {cached_entry.get('population')})")
+            corpus_verdict = compare_records(
+                {"corpus_hash": declared_corpus_hash, "implementation_hash": implementation_hash},
+                {"corpus_hash": declared_corpus_hash, "implementation_hash": implementation_hash},
+                comparison_kind="tier0_corpus_cache_hit",
+                left_ref="cache", right_ref="cache",
+            )
+        else:
+            corpus_verdict, cases = run_corpus(resolved)
+            if corpus_verdict.verdict == AGREE:
+                _write_battery_cache_entry(declared_corpus_hash, implementation_hash,
+                                           corpus_verdict, cases)
         corpus = load(resolved)
     with _Stage("registry_load"):
         registry = default_registry()
@@ -2747,10 +2915,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
             for pair in corpus.pairs.values()
             if pair["payload"].get("record_kind") != "dyn_sv_resolution"
         })
-        stage_ids = (
-            "resolve_context", "features", "forecast", "geometry", "pricing",
-            "analogs", "simulation", "gate", "chooser", "serialization",
-        )
+        stage_ids = _STAGE_IDS
     with _Stage("subjects_building"):
         subjects = {
             "P4-01": {"status": "PASS", "controls": {
@@ -2852,7 +3017,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
             "phase5_inference_integrated": False,
             "phase5_handoff_required": True,
             "runtime_ms": round((time.perf_counter() - started) * 1000.0, 2),
-            "implementation_hash": content_hash({"strategies": list(STRATEGY_IDS), "recipes": [r.recipe_id for r in feature_registry.recipes], "stages": stage_ids}),
+            "implementation_hash": _implementation_hash(),
         }
     with _Stage("report_write"):
         report = _write_phase4_report(evidence, artifact_root)
