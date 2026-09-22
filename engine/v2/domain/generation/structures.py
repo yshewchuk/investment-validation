@@ -456,9 +456,19 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
         )
         legs = (NativeLeg("call", "C", "buy", 1.0, strike, expiry),
                 NativeLeg("put", "P", "buy", 1.0, strike, expiry))
-    else:
-        legs = _resolve_put_ladder_legs(strategy, inputs, spot, width, expiry)
-    return Geometry(strategy, spot, width, legs)
+        return Geometry(strategy, spot, width, legs)
+    legs = _resolve_put_ladder_legs(strategy, inputs, spot, width, expiry)
+    # `width` here is the CONTINUOUS target the ladder was asked for, not
+    # what the listed grid actually gave -- `_resolve_put_ladder_legs` snaps
+    # every offset to the nearest listed strike (`_ladder_offset_from`), so
+    # the realised atm-to-up1 spacing can differ from `width` on a grid
+    # coarse enough for the snap to matter. `cost_over_width`'s denominator
+    # must be the spacing the market actually offered (mirrors legacy's
+    # `_structure_width`, engine/score.py, and the `resolved_legs` branch
+    # above, which already does this via the same `_resolved_width` call) --
+    # otherwise the ratio compares a real premium against a width nobody
+    # ever traded.
+    return Geometry(strategy, spot, _resolved_width(legs), legs)
 
 
 def _resolve_put_ladder_legs(strategy: str, inputs: Mapping[str, Any], spot: float,
