@@ -261,6 +261,7 @@ def test_model_number_computed_from_answer_free_inputs():
 
     assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
     assert record.resolved_request["win_model"] == pytest.approx(1.0)
+    assert record.resolved_request["win_model_raw"] == pytest.approx(1.0)
     assert "NO_PAYOFF_MAP" not in record.reason_codes
     assert record.validation_status == "scored"
 
@@ -604,6 +605,7 @@ def test_runup_model_number_computed_from_answer_free_inputs():
 
     assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
     assert record.resolved_request["win_model"] == pytest.approx(1.0)
+    assert record.resolved_request["win_model_raw"] == pytest.approx(1.0)
     assert "NO_PAYOFF_MAP" not in record.reason_codes
     assert record.validation_status == "scored"
 
