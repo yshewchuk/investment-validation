@@ -32,6 +32,7 @@ from tools.capture_tier0_corpus import (
     package_strict_trace,
     parse_strategies,
     request_to_dict,
+    strict_trace_one,
     write,
 )
 from tools.phase4_frozen_resources import package_frozen_resources
@@ -1578,6 +1579,124 @@ def test_stored_crush_reference_from_the_captured_bundle_resolves_to_legacy(
         "pred_iv_crush_30": {**ref, "value": legacy}}}
     with pytest.raises(ValueError, match="unsupported recipe fields"):
         _crush_native(loophole)
+
+
+def test_stored_crush_reference_resolves_identically_at_capture_and_replay(
+        tmp_path, monkeypatch):
+    """Regression for 006/007/012 (BFLY-P5/CTR5/RAMP7): both gates failed at
+    ``execution.forecast.{input_hash,output_hash}: captured runtime
+    mismatch`` because capture scored the forecast stage with the stored
+    crush reference UNRESOLVED while replay resolved it first
+    (``checks/phase4_stored_forecasts.py``). Capture must resolve it too, on
+    its own execution pass only -- the stored pair still carries only the
+    reference, never the value.
+    """
+    # No frozen driver/gate bindings here on purpose: this test is scoped to
+    # the stored-crush forecast path this fix touches, not the separate
+    # frozen-release machinery `_full_strict_candidate` exercises elsewhere.
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    ticker, event_date, expiry = "AAA", "2026-09-17", "2026-09-18"
+    legacy_request = ScoreRequest(
+        ticker=ticker, strategy="STR-THRU",
+        as_of=pd.Timestamp("2026-09-16"), event_date=pd.Timestamp(event_date),
+        session="AMC", fill=MID,
+    )
+    source_inputs_value = {
+        "context": {
+            "ticker": ticker, "event_date": event_date,
+            "entry_date": "2026-09-16", "exit_date": expiry,
+            "expiry": expiry, "spot": 100.0,
+        },
+        "quote_domain": [
+            {"right": "C", "strike": 100.0, "expiry": expiry, "bid": 1.0, "ask": 2.0},
+            {"right": "P", "strike": 100.0, "expiry": expiry, "bid": 1.0, "ask": 2.0},
+        ],
+        "features": {},
+        "model_bindings": [],
+        "native_recipes": {"forecast": {"models": {}}},
+    }
+    legacy_trace = _legacy_trace(driver_role="abs_move", driver_vector={}, gate_vector=None)
+    legacy_trace["checkpoints"]["source_inputs"] = {
+        "value": source_inputs_value,
+        "content_hash": content_hash(source_inputs_value),
+    }
+    candidate = {
+        "fixture_id": "case-crush",
+        "covers": [],
+        "kind": "score_result",
+        "record": {"strategy": "STR-THRU", "ticker": ticker},
+        "request": request_to_dict(legacy_request),
+        "duration": 0.1,
+        "relations": {},
+        "legacy_trace": legacy_trace,
+        "event_id": f"{ticker}_{event_date}",
+    }
+
+    table_path = tmp_path / "tier4_forecasts.parquet"
+    value = -12.5
+    pd.DataFrame({
+        "ticker": ["AAA"],
+        "event_date": pd.to_datetime(["2026-09-17"]).astype("datetime64[us]"),
+        "pred_iv_crush_30": [value],
+        "pred_iv_crush_30_model_id": pd.array(["iv-crush-hgbr-v1"], dtype="string"),
+        "pred_iv_crush_30_fold_start": pd.to_datetime(
+            ["2026-08-01"]).astype("datetime64[us]"),
+    }).to_parquet(table_path)
+    monkeypatch.setattr(phase4_stored_forecasts, "STORED_TABLES",
+                        {"tier4_forecasts": lambda: table_path})
+
+    ref_row = {
+        "table": "tier4_forecasts",
+        "table_sha256": hashlib.sha256(table_path.read_bytes()).hexdigest(),
+        "column": "pred_iv_crush_30", "ticker": "AAA", "event_date": "2026-09-17",
+        "model_id": "iv-crush-hgbr-v1", "fold_start": "2026-08-01",
+    }
+    row_hash = stored_forecast_row_hash(ref_row, value)
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    checkpoint["value"]["frozen"] = {"declarations": {
+        "forecast:pred_iv_crush_30": {
+            "source": "stored_tier4", "row": ref_row, "value": value,
+            "row_hash": row_hash,
+        },
+    }}
+    checkpoint["content_hash"] = content_hash(checkpoint["value"])
+
+    trace, native = strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
+
+    # The pair still carries only the reference: no resolved value anywhere
+    # in what gets stored, and the reference itself is unchanged.
+    forecast_native_inputs = trace["native_inputs"]["forecast"]
+    assert "stored" not in forecast_native_inputs
+    assert forecast_native_inputs["stored_refs"] == {
+        "pred_iv_crush_30": {"row": ref_row, "row_hash": row_hash},
+    }
+    assert str(value) not in json.dumps(trace["native_inputs"])
+
+    # Capture's own scoring pass resolved the reference: no unresolved flag.
+    assert not any(
+        code.startswith("UNRESOLVED_STORED_FORECAST")
+        for code in (native.reason_codes or ())
+    )
+    forecast_stage = trace["stages"]["forecast"]
+
+    # Replay resolves the same reference from the same table and must land
+    # on the SAME forecast-stage input_hash/output_hash the capture
+    # recorded -- the defect this closes.
+    pair = {
+        "payload": {
+            "request": candidate["request"],
+            "record": {},
+            "legacy_input_hash": trace["shared_input_hash"],
+            "input_trace": trace,
+            "input_trace_hash": trace["trace_hash"],
+        },
+    }
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path / "release")
+    _replay_native, runtime_receipts, _identities = phase4_real._replayed_member(verified)
+    replay_forecast = next(row for row in runtime_receipts if row["stage"] == "forecast")
+
+    assert replay_forecast["input_hash"] == forecast_stage["input_hash"]
+    assert replay_forecast["output_hash"] == forecast_stage["output_hash"]
 
 
 def _buckets():

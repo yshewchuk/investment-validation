@@ -733,7 +733,20 @@ def _initial_values(
         output = {key: value for key, value in block.items()
                   if key not in _OWNED_OUTPUTS and key != "flags"}
         _emit_stage(executed, stage, prior, output, observer)
-        prior = {"prior": executed[-1].output_hash, "values": values}
+        # A SNAPSHOT, not a live reference: ``values`` is a single mutable
+        # dict threaded through resolve_context -> features -> forecast, and
+        # the forecast stage mutates it (``_execute_forecast``'s
+        # ``values.update(output)``) before this "prior" is ever consumed by
+        # ``_emit_stage``. An aliased dict here means the NEXT stage's
+        # declared "input" quietly includes whatever the stage before it
+        # goes on to compute -- for forecast, its own freshly-produced
+        # OWNED output. That is invisible when a stage's own block is
+        # byte-identical across two runs (the leaked content is identical
+        # too), but a stored-forecast reference that resolves at replay and
+        # not at capture (``checks/phase4_stored_forecasts.py``) makes the
+        # leaked content differ, and the divergence is misreported as the
+        # forecast stage's INPUT rather than its OUTPUT.
+        prior = {"prior": executed[-1].output_hash, "values": dict(values)}
     if compatibility:
         values.update(inputs.forecast)
         forecast_output = dict(inputs.forecast)

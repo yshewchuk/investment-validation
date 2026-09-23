@@ -84,3 +84,31 @@ def test_observer_is_opt_in_and_cannot_mutate_scoring_state():
 
     assert actual == expected
     assert "observer_only" not in actual
+
+
+def test_forecast_stage_input_is_a_pre_execution_snapshot():
+    """The forecast stage's declared INPUT must not include its own OUTPUT.
+
+    Regression for the Phase 4/5 ``execution.forecast.input_hash: captured
+    runtime mismatch`` finding on 006_BFLY-P5-ABBV-2024-02-02,
+    007_CTR5-ABBV-2024-02-02 and 012_RAMP7-AAPL-2023-11-02: ``_initial_values``
+    built the forecast stage's declared "prior" as ``{"values": values}``
+    with ``values`` a live reference to the SAME mutable dict
+    ``_execute_forecast`` updates via ``values.update(output)`` -- and that
+    update runs before the observer's ``_emit_stage`` call ever hashes
+    "prior". The forecast stage's own freshly-computed field
+    (``driver_prediction`` here; ``pred_iv_crush_30`` for the three corpus
+    rows, resolved from a stored-forecast reference that only replay -- not
+    capture -- resolves) therefore leaked into what was hashed as the
+    stage's INPUT rather than its OUTPUT.
+    """
+    observations: list[StageObservation] = []
+    assemble_native_values(
+        _inputs(), strategy="STR-THRU", observer=observations.append,
+    )
+
+    forecast_obs = next(
+        item for item in observations if item.receipt.stage == "forecast"
+    )
+    assert "driver_prediction" not in forecast_obs.input_document["values"]
+    assert forecast_obs.output_document.get("driver_prediction") == 7.0
