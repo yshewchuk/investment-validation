@@ -1964,6 +1964,21 @@ class Scorer:
         today = self._quote_today(request.ticker, result.as_of)
         if today is not None:
             result.implied_move = today
+        if trace is not None:
+            # Raw market-quote facts, not scoring answers -- neither name is
+            # in `_source_answer_fields` above, `source_inputs._ANSWER_FIELDS`,
+            # or `phase4_frozen_bridge._ANSWER_FIELDS`. Captured here, right
+            # after both are computed, because the earlier unconditional
+            # `capture_source_bundle` call (~line 1847, before pricing/
+            # features run) is too early: neither field exists yet there.
+            im_context = {
+                key: value for key, value in (
+                    ("implied_move_at_entry", result.implied_move_at_entry),
+                    ("implied_move", result.implied_move),
+                ) if value is not None
+            }
+            if im_context:
+                trace.capture_source_bundle(context=im_context)
 
         # -- layers --------------------------------------------------------
         # EXP-117: a quote that fails the cost-of-spot sanity ceiling gets no
