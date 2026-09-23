@@ -327,6 +327,70 @@ def test_native_observer_packages_a_strict_verifiable_trace(tmp_path):
     ] == "serialization"
 
 
+def test_native_observer_packages_a_trace_with_a_nonempty_model_block(tmp_path):
+    """Regression for the payoff-driver ``model`` block translation gap.
+
+    Capture's ``_model_block_from_frozen`` (STR-THRU/STR-RUNUP and the
+    DYN-SV rows built on them) fills ``blocks["model"]`` with real artifact
+    dataclasses (``PayoffLineArtifact``, ...) -- required for
+    ``NativeScoreInputs`` to execute the model stage. Before this fix,
+    ``native_inputs_from_capture`` put that SAME raw block into
+    ``shared_inputs`` unchanged, while ``package_strict_trace`` serializes
+    the native trace's "model" through ``_model_document`` (tagged kinds).
+    The two sides' leaf sets then differed and
+    ``tools/phase4_release_assembler.py::_translation``'s identity path
+    refused with "translation leaf coverage differs". Every unit test used
+    an empty ``model: {}`` (where both sides trivially agree), so none of
+    them caught it.
+    """
+    from engine.v2.models.payoff_artifact import make_payoff_line_artifact
+    from tools.capture_tier0_corpus import _model_document
+
+    legacy = request_to_dict(ScoreRequest(
+        ticker="ABC", strategy="STR-THRU", as_of=pd.Timestamp("2026-09-16"),
+        event_date=pd.Timestamp("2026-09-17"), session="AMC", fill=MID,
+    ))
+    request = canonical_v2_request({"event_id": "event-1", "request": legacy}, "snapshot-1")
+    inputs, shared = _native(request)
+
+    payoff_artifact = make_payoff_line_artifact(
+        {"n": 40, "resid_sd": 1.5, "r": 0.6, "residuals": [0.1, -0.2, 0.3],
+         "intercept": 0.05, "slope": 0.9},
+        strategy="STR-THRU", driver="abs_move", alpha=0.5, cutoff="2026-09-01",
+        window=("2020-01-01", "2026-09-16"))
+    model_block = {
+        "payoff_recipe": {"before": "2026-09-16", "seed": 7, "draw_count": 2000},
+        "payoff_artifact": payoff_artifact,
+        "model_residual_artifact_recipe": {},
+        "model_residual_artifacts": {},
+    }
+    # Mirrors the fix in `native_inputs_from_capture`: `shared_inputs` carries
+    # the DOCUMENTED form of the model block, the native trace carries the
+    # raw one that `NativeScoreInputs` executes against.
+    inputs = replace(inputs, model=model_block)
+    shared["native_inputs"]["model"] = _model_document(model_block)
+
+    trace, native = package_strict_trace(request, inputs, shared)
+    assert trace["input_translation"]["mappings"]
+
+    pair = {
+        "payload": {
+            "request": legacy,
+            "record": {},
+            "legacy_input_hash": trace["shared_input_hash"],
+            "input_trace": trace,
+            "input_trace_hash": trace["trace_hash"],
+        },
+    }
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+
+    assert verified["captured_stages"][-1] == "serialization"
+    values = verified["inputs"].model
+    assert "payoff_artifact" in values
+    assert values["payoff_artifact"].intercept == payoff_artifact.intercept
+    assert to_document(native.canonical_request) == to_document(request)
+
+
 def test_strict_cli_accepts_every_dyn_sv_menu_strategy_alongside_str_thru():
     # R4-1 originally restricted --strict-phase4-trace to exactly one of
     # STR-THRU/STR-RUNUP. That restriction was lifted: native scoring

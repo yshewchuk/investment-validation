@@ -772,7 +772,25 @@ def native_inputs_from_capture(
     else:
         blocks = _captured_blocks(candidate, request, frozen_chooser)
     request_doc = to_document(request)
-    shared_inputs = {"request": request_doc, "native_inputs": blocks}
+    # `shared_blocks`: a shallow copy of ``blocks`` with "model" replaced by
+    # its JSON-documented form (:func:`_model_document`, the exact function
+    # ``package_strict_trace`` uses to serialize ``native_document["model"]``
+    # below). ``blocks["model"]`` (from :func:`_model_block_from_frozen`) can
+    # hold real artifact dataclasses (``PayoffLineArtifact``,
+    # ``DriverResidualPoolArtifact``, ...) as leaf VALUES -- required for
+    # ``NativeScoreInputs`` to execute the model stage -- but
+    # ``tools/phase4_release_assembler.py::_translation``'s identity path
+    # compares ``shared_inputs`` leaves against the native trace document
+    # leaf-for-leaf, and a raw dataclass object is one opaque leaf where the
+    # documented form (``{"kind": ..., "value": {...}}`` for the payoff
+    # artifact, plain dicts for the rest) is several. Every other block here
+    # is already document-shaped from capture, so only "model" needs this.
+    # Doing it on a copy, not ``blocks`` itself, keeps the dataclass
+    # instances in the object ``NativeScoreInputs(**blocks, ...)`` below
+    # actually executes against.
+    shared_blocks = dict(blocks)
+    shared_blocks["model"] = _model_document(blocks.get("model") or {})
+    shared_inputs = {"request": request_doc, "native_inputs": shared_blocks}
     # `fragments=`: a chooser member's ``blocks["chooser"]`` nests the frozen
     # chooser's fold pools (:func:`_frozen_block`/`_untag_nonfinite_shared`),
     # shared by identity across every menu member the fold served. The
