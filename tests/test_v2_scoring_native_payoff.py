@@ -29,7 +29,7 @@ from engine.payoff import (
 )
 from engine.payoff import runup_payoff_design as legacy_runup_payoff_design
 from engine.v2.contracts import ScoreRequest
-from engine.v2.scoring import application, native_payoff
+from engine.v2.scoring import application, native_payoff, stages
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
 
 # ---------------------------------------------------------------------------
@@ -1459,3 +1459,26 @@ def test_runup_draws_floor_implied_and_move_at_zero_like_legacy():
         point_implied, point_move, implied_pool, move_pool, _COEFFICIENTS, payoff_residuals,
         spot, strike, cost, days, draws, np.random.default_rng(21))
     np.testing.assert_array_equal(native, legacy)
+
+
+def test_line_payoff_document_rounds_intercept_and_slope_to_8dp():
+    fit = {"intercept": 0.123456789012, "slope": -0.0000000156253}
+    doc = stages._line_payoff_document(fit)
+    assert doc == {
+        "intercept": round(0.123456789012, 8),
+        "slope": round(-0.0000000156253, 8),
+    }
+
+
+def test_surface_payoff_document_rounds_coefficients_to_8dp():
+    raw = [
+        0.1234567891, -0.0000000123456, 1.999999995,
+        0.3333333335, -1.23456789012, 0.00000001005,
+    ]
+    fit = {"coefficients": raw}
+    doc = stages._surface_payoff_document(fit)
+    assert doc["kind"] == "runup_payoff_surface"
+    assert doc["coefficients"] == {
+        name: round(value, 8)
+        for name, value in zip(native_payoff.RUNUP_TERMS, raw)
+    }
