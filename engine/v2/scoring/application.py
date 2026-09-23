@@ -103,6 +103,20 @@ def _value_fields(values: Mapping[str, Any], names: tuple[str, ...]) -> dict[str
     return {name: values.get(name) for name in names}
 
 
+def _entry_exit_plan(values: Mapping[str, Any]) -> dict[str, Any]:
+    plan = _value_fields(values, ("entry_date", "exit_date", "quote_date", "expiry"))
+    if values.get("entry_cost") is None:
+        plan.pop("quote_date", None)
+    return plan
+
+
+def _quote_provenance(values: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = _value_fields(values, ("quote_date", "quote_age_sessions", "fill"))
+    if values.get("entry_cost") is None:
+        provenance.pop("quote_date", None)
+    return provenance
+
+
 def _feature_fields(values: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, bool]]:
     """``(feature_values, null_masks)`` for ``ScoreRecord``.
 
@@ -199,8 +213,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         model_artifact_ids=tuple(values.get("_model_artifact_ids") or request.model_artifact_refs),
         selected_contracts=tuple(values.get("selected_contracts") or values.get("legs") or ()),
         legs=tuple(values.get("legs") or ()),
-        entry_exit_plan=_value_fields(values, ("entry_date", "exit_date", "quote_date", "expiry")),
-        quote_provenance=_value_fields(values, ("quote_date", "quote_age_sessions", "fill")),
+        entry_exit_plan=_entry_exit_plan(values),
+        quote_provenance=_quote_provenance(values),
         forecasts=forecasts,
         uncertainty=uncertainty,
         residual_state_ref=request.residual_state_ref,

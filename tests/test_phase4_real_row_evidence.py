@@ -418,6 +418,90 @@ def test_key_flag_differences_contain_only_strings(tmp_path, monkeypatch):
     )
 
 
+def test_never_ran_dimensions_agree_when_both_sides_show_no_stage_ran(
+        tmp_path, monkeypatch):
+    """USER DECISION 2026-09-23: when legacy carries only the typed
+    placeholder defaults for a dimension's fields AND native carries none of
+    that dimension's keys, both sides agree the stage never ran -- this is
+    not a decision-field vanishing, and must not fail "keys" or the numeric
+    dimension. Covers both "verdicts" (all-None defaults) and "analogs"
+    (n_analogs's non-None typed default, 0, plus None siblings)."""
+    from dataclasses import replace
+
+    record = _clean_record(
+        gate_score=None, gate_threshold=None, gate_pass=None,
+        ci_low=None, ci_high=None, n_analogs=0,
+    )
+    native = replace(
+        _native_record(record),
+        resolved_request={
+            k: v for k, v in record.items()
+            if k not in ("gate_score", "gate_threshold", "gate_pass",
+                         "ci_low", "ci_high", "n_analogs")
+        },
+        gate_terms={},
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["verdicts"] is True
+    assert checks["analogs"] is True
+    assert checks["keys"] is True
+    never_ran = release["row_never_ran_dimensions"]["a"]
+    assert "verdicts" in never_ran
+    assert "analogs" in never_ran
+    assert "a" not in release.get("row_key_differences", {})
+
+
+def test_never_ran_rule_does_not_suppress_a_real_analog_regression(
+        tmp_path, monkeypatch):
+    """Legacy carries REAL (non-placeholder) analog values; native drops all
+    three analog keys. That is a native regression, not a never-ran
+    agreement -- the rule must not fire and the normal comparator must catch
+    it."""
+    from dataclasses import replace
+
+    record = _clean_record()  # ci_low=-0.01, ci_high=0.05, n_analogs=10 -- real
+    native = replace(
+        _native_record(record),
+        resolved_request={
+            k: v for k, v in record.items()
+            if k not in ("ci_low", "ci_high", "n_analogs")
+        },
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["analogs"] is False
+    assert release["row_never_ran_dimensions"].get("a", []) == []
+
+
+def test_native_carrying_none_gate_keys_is_a_normal_agreeing_comparison(
+        tmp_path, monkeypatch):
+    """Legacy holds gate placeholder Nones; native's resolved_request holds
+    the same three gate keys with real (None) VALUES -- a genuine key
+    presence, not an absence. The never-ran rule's condition ("native holds
+    NONE of the dimension's field names as keys") is false, so it must not
+    fire even though every value on both sides happens to be None; this is
+    an ordinary agreeing comparison."""
+    record = _clean_record(gate_score=None, gate_threshold=None, gate_pass=None)
+    native = _native_record(record)  # unchanged: resolved_request = dict(record)
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["verdicts"] is True
+    assert release["row_never_ran_dimensions"].get("a", []) == []
+
+
 def test_null_mask_differences_recorded_when_check_fails(tmp_path, monkeypatch):
     """A row with a null-mask mismatch records native_only/legacy_only/
     value_mismatch feature key NAMES -- one of each in the same row, so the
