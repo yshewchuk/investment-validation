@@ -74,9 +74,17 @@ from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.models.payoff_artifact import (  # noqa: E402
     PayoffLineArtifact,
     PayoffSurfaceArtifact,
+    _artifact_from_document as _payoff_artifact_from_document,
 )
-from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact  # noqa: E402
-from engine.v2.models.residual_artifact import DriverResidualPoolArtifact  # noqa: E402
+from engine.v2.models.recalibration_artifact import (  # noqa: E402
+    RecalibrationMapArtifact,
+    _artifact_from_document as _recalibration_artifact_from_document,
+)
+from engine.v2.models.residual_artifact import (  # noqa: E402
+    DriverResidualPoolArtifact,
+    ResidualArtifactError,
+    residual_artifact_from_document,
+)
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash, score_id, with_score_id  # noqa: E402
