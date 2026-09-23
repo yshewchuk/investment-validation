@@ -525,3 +525,93 @@ def test_verdicts_unchanged_by_difference_recording(tmp_path, monkeypatch):
         if dimension in disagree_checks:
             # verdicts should match their check's purpose
             pass
+
+
+def test_never_ran_dimensions_agree_when_both_sides_show_no_stage_ran(
+        tmp_path, monkeypatch):
+    """The rule's positive case: legacy holds only the typed placeholder
+    defaults for verdicts/analogs AND native's resolved_request holds NONE
+    of those names as keys -- both sides say the stages never ran, so the
+    dimensions agree, are named in row_never_ran_dimensions, and produce no
+    "keys" finding."""
+    from dataclasses import replace
+
+    record = _clean_record(
+        gate_score=None, gate_threshold=None, gate_pass=None,
+        ci_low=None, ci_high=None, n_analogs=0,
+    )
+    native_base = _native_record(record)
+    native = replace(
+        native_base,
+        resolved_request={
+            key: value for key, value in native_base.resolved_request.items()
+            if key not in ("gate_score", "gate_threshold", "gate_pass",
+                           "ci_low", "ci_high", "n_analogs")
+        },
+        # The "verdicts" numeric dimension reads native.gate_terms (see
+        # _numeric_views), not resolved_request, so empty it too -- every
+        # verdict field then resolves to None via .get, matching legacy.
+        gate_terms={},
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["verdicts"] is True
+    assert checks["analogs"] is True
+    never_ran = release["row_never_ran_dimensions"]["a"]
+    assert "verdicts" in never_ran
+    assert "analogs" in never_ran
+    # The suppressed fields must not read as a "keys" finding either, so the
+    # row passes keys and is omitted from row_key_differences entirely.
+    assert checks["keys"] is True
+    assert "a" not in release["row_key_differences"]
+
+
+def test_never_ran_rule_does_not_suppress_a_real_analog_regression(
+        tmp_path, monkeypatch):
+    """The rule's guard rail: native missing every analog key while LEGACY
+    carries real (non-placeholder) analog values is a native regression,
+    not a never-ran agreement -- the rule must not fire and the normal
+    comparator must fail the dimension."""
+    from dataclasses import replace
+
+    record = _clean_record()  # ci_low=-0.01, ci_high=0.05, n_analogs=10: real values
+    native = replace(
+        _native_record(record),
+        resolved_request={
+            key: value for key, value in record.items()
+            if key not in ("ci_low", "ci_high", "n_analogs")
+        },
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["analogs"] is False
+    assert "a" not in release["row_never_ran_dimensions"]
+
+
+def test_native_carrying_none_gate_keys_is_a_normal_agreeing_comparison(
+        tmp_path, monkeypatch):
+    """Key PRESENCE is the rule's condition, not value: legacy holds the
+    gate placeholders and native's resolved_request carries the gate keys
+    with None values (real keys, written by a stage that ran) -- the rule
+    must not fire, and the plain comparator still agrees None against
+    None."""
+    record = _clean_record(gate_score=None, gate_threshold=None, gate_pass=None)
+    # Native UNCHANGED: _native_record builds resolved_request from
+    # dict(record), so the gate keys are present there with None values.
+    native = _native_record(record)
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["verdicts"] is True
+    assert "a" not in release["row_never_ran_dimensions"]

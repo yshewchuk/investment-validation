@@ -112,3 +112,28 @@ def test_a_refusing_flag_with_numbers_still_refuses():
     assert record.readiness == "refused"
     assert record.reason_codes == ("NO_CHAIN",)
     assert "NO_SCORE" not in record.reason_codes
+
+
+def test_quote_date_present_iff_pricing_ran():
+    # ``stages._publish_pricing`` leaves ``entry_cost`` None exactly when
+    # pricing did not run (or refused), and ``quote_date`` is a fact about
+    # the quote a price came from: with no price there is no quote date, so
+    # the key must be ABSENT from entry_exit_plan/quote_provenance, not
+    # present-with-None (the entry_cost convention _record_payload follows).
+    fields = {**_fields(), "quote_date": "2026-09-16"}
+    # Compatibility input with no quotes: _resolve_pricing returns the
+    # fields' own entry_cost (5.0) with refusal=None, so pricing ran.
+    priced = _score(fields)
+
+    assert priced.resolved_request["entry_cost"] == 5.0
+    assert priced.entry_exit_plan.get("quote_date") == "2026-09-16"
+    assert priced.quote_provenance.get("quote_date") == "2026-09-16"
+
+    # spot=None is the missing essential _resolve_geometry refuses on
+    # (MISSING_SPOT) before pricing: entry_cost ends up None and the
+    # quote_date key must not appear in either dict at all.
+    refused = _score({**fields, "spot": None})
+
+    assert refused.resolved_request["entry_cost"] is None
+    assert "quote_date" not in refused.entry_exit_plan
+    assert "quote_date" not in refused.quote_provenance
