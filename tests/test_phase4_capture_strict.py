@@ -1247,6 +1247,36 @@ def test_gate_capture_declares_the_decline_too(gate_root, tmp_path):
     assert "MISSING_FEATURES" in record.reason_codes
 
 
+# -- the size fold: its binding, forecast declaration and pool --------------------
+
+
+def _captured_sizing(root, pool, row):
+    collector = _collector()
+    scorer = object.__new__(Scorer)
+    scorer._serving = lambda fold, produces="pred_abs_move": r4._served(root, pool)
+    scorer._features = lambda request, result: pd.DataFrame([row])
+    result = r4._Result(_phase4_checkpoint_collector=collector)
+    request = SimpleNamespace(strategy="TWIN-P", decision_offset=None)
+    Scorer._size_from_forecast(scorer, request, result, None, size=False)
+    return result, _candidate(collector)
+
+
+def test_sizing_capture_records_the_fold_and_packages_its_own_pool(gate_root, tmp_path):
+    root, pool = gate_root
+    result, candidate = _captured_sizing(root, pool, r4.ROW)
+    assert result.forecast_model == "size_synthetic"
+    frozen = _frozen(candidate)
+    assert frozen["declarations"]["forecast:forecast_abs_move"] == {
+        "binding": "fold:size", "output": "pred_abs_move", "pool": "pred_abs_move",
+        "site": "sizing"}
+    declared = _declared(candidate, tmp_path)
+    assert declared["forecast_recipes"]["forecast_abs_move"]["output"] == "pred_abs_move"
+    packaged = declared["forecast_pool"]
+    assert packaged["predictions"] == pool[0].tolist()
+    assert packaged["residuals"] == pool[1].tolist()
+    assert packaged["interval_floor"] == 0.0
+
+
 # -- the chooser: champion, producers, fold pools, keys and primitives -------------
 
 

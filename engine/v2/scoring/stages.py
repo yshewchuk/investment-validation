@@ -706,6 +706,33 @@ def _execute_local_forecast(
     return declared
 
 
+def _execute_forecast_band(block: Mapping[str, Any], output: dict[str, Any]) -> None:
+    """engine/score.py ``Scorer._size_from_forecast``: the served size
+    fold's band (``forecast_p10``/``_p90``/``_sd``) from its own held-out
+    pool (R4-20 gap 3, sizing side). Absent when the forecast is
+    missing/non-finite or the fold declared no pool -- never a fabricated
+    band, mirroring ``gate_forecast_columns``."""
+    from engine.v2.scoring import native_gate_features as derived
+
+    forecast = output.get("forecast_abs_move")
+    if forecast is None or forecast != forecast:
+        return
+    pool = block.get("forecast_pool")
+    if pool is None:
+        return
+    try:
+        p10, p90, sd, _ = derived.forecast_interval(
+            [forecast], pool["predictions"], pool["residuals"],
+            floor=pool.get("interval_floor", 0.0),
+        )
+    except (KeyError, TypeError, ValueError):
+        return
+    if np.isfinite(sd[0]):
+        output["forecast_p10"] = float(p10[0])
+        output["forecast_p90"] = float(p90[0])
+        output["forecast_sd"] = float(sd[0])
+
+
 def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
                       flags: list[str], strategy: str | None) -> dict[str, Any]:
     block = inputs.forecast
@@ -720,6 +747,7 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     local_declared = _execute_local_forecast(
         inputs, block, values, output, invalid_fields, flags, undetermined,
     )
+    _execute_forecast_band(block, output)
     _validate_forecast_roles(
         inputs, output, flags, strategy, invalid_fields,
     )

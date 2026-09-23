@@ -495,6 +495,36 @@ def test_fold_crush_non_finite_feature_leaves_the_simulation_undetermined(frozen
     assert finite.resolved_request.get("exp_pnl_sim") is not None
 
 
+# == gap 3, sizing side: the served fold's own band ============================
+
+
+def test_size_fold_band_equals_forecast_interval_on_the_declared_pool(frozen):
+    """The forecast stage derives ``forecast_p10``/``_p90``/``_sd`` from the
+    size fold's own declared pool -- the same helper and arguments legacy
+    ``_size_from_forecast``'s ``served.interval`` runs."""
+    pool = _pool(3000)
+    declared = {"predictions": tuple(pool[0]), "residuals": tuple(pool[1]),
+                "interval_floor": 0.0}
+    _record, seen = _score(
+        _twin_bundle(frozen, ROW, chooser=False, forecast_pool=declared), "TWIN-P")
+    forecast = seen["forecast"]["forecast_abs_move"]
+    p10, p90, sd, _ = forecast_interval(
+        [forecast], declared["predictions"], declared["residuals"],
+        floor=declared["interval_floor"])
+    assert seen["forecast"]["forecast_p10"] == float(p10[0])
+    assert seen["forecast"]["forecast_p90"] == float(p90[0])
+    assert seen["forecast"]["forecast_sd"] == float(sd[0])
+
+
+def test_undeclared_size_pool_leaves_the_band_absent(frozen):
+    """No declared pool: the band is simply absent (legacy never fabricates
+    one) -- not NaN-filled, and the forecast itself is still produced."""
+    _record, seen = _score(_twin_bundle(frozen, ROW, chooser=False), "TWIN-P")
+    assert "forecast_abs_move" in seen["forecast"]
+    for name in ("forecast_p10", "forecast_p90", "forecast_sd"):
+        assert name not in seen["forecast"]
+
+
 # == gap 5: the DYN-SV chooser through a frozen recipe ============================
 
 

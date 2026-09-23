@@ -3544,7 +3544,8 @@ class Scorer:
             self._phase4_record_fold(
                 request, result, served, features, site="sizing",
                 declarations={"forecast:forecast_abs_move": {
-                    "binding": "fold:size", "output": "pred_abs_move", "site": "sizing",
+                    "binding": "fold:size", "output": "pred_abs_move",
+                    "pool": "pred_abs_move", "site": "sizing",
                 }},
             )
         missing = [f for f in served.features if f not in features.columns]
