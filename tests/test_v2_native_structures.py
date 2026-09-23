@@ -1,6 +1,8 @@
 import pytest
 
-from engine.v2.domain.generation import GeometryRefusal, generate, price
+from engine.v2.domain.generation import (
+    GeometryRefusal, generate, has_resolvable_expiry, price,
+)
 from engine.structures import twin_peak, twin_peak_5
 
 
@@ -475,3 +477,133 @@ def test_resolved_contracts_replace_theoretical_width_with_traded_spacing():
     }
     geometry = generate("BFLY-P", inputs)
     assert geometry.width == 5.0
+
+
+def test_native_put_ladder_expiry_selection_matches_legacy_expiry_selector():
+    """RAMP7/TWIN-P/TWIN-P5/CND-PS/BFLY-P/BFLY-P5/CTR5 all use legacy's
+    ``first_post_event`` ``ExpirySelector`` kind (``engine/structures.py``
+    ``_symmetric_put_ladder``/``twin_peak``/``twin_peak_5``). Prove native's
+    selection -- made purely off ``quotes`` when neither ``expiry`` nor
+    ``post_event_expiry`` was captured, the state every row legacy failed to
+    price arrives in -- agrees with the REAL legacy selector on the same
+    synthetic chain, not just an assumed-equivalent reimplementation."""
+    import pandas as pd
+
+    from engine.structures import ExpirySelector
+
+    expiries = ["2026-09-16", "2026-09-17", "2026-09-19", "2026-09-25"]
+    chain = pd.DataFrame({"expiry": pd.to_datetime(expiries), "dte": [0, 1, 3, 9]})
+    legacy_choice = ExpirySelector(kind="first_post_event").select(
+        chain, pd.Timestamp("2026-09-17"), "AMC",
+    )
+
+    grid = (92.0, 94.0, 96.0, 98.0, 100.0, 102.0, 104.0, 106.0, 108.0)
+    quotes = {("P", strike, "2026-09-19"): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    # Decoys at expiries a real ExpirySelector would reject (09-16/09-17: on
+    # or before an AMC print) or that are listed but later than the true
+    # earliest survivor (09-25) -- present so the assertion below proves
+    # native picked the earliest survivor, not merely "the only one listed".
+    quotes.update({("P", 100.0, expiry): {"bid": 1.0, "ask": 2.0}
+                   for expiry in ("2026-09-16", "2026-09-17", "2026-09-25")})
+    inputs = {"spot": 100.0, "width": 2.0, "event_date": "2026-09-16",
+              "exit_date": "2026-09-17", "session": "AMC", "quotes": quotes}
+
+    assert has_resolvable_expiry("CND-PS", inputs, 100.0) is True
+    geometry = generate("CND-PS", inputs)
+
+    assert {leg.expiry for leg in geometry.legs} == {str(legacy_choice.date())}
+    assert str(legacy_choice.date()) == "2026-09-19"
+
+
+def test_native_put_ladder_refuses_when_no_listed_expiry_survives_matching_legacy():
+    """A chain that IS present but has nothing on/after the print is a
+    genuine refusal in both implementations: legacy's ``ExpirySelector``
+    raises ``StructureError`` (which the board reports as ``NO_CHAIN``, the
+    same generic mapping every ``price_structure`` failure other than
+    ``LadderTooCoarse`` gets); native raises ``GeometryRefusal`` with its
+    own ``NO_EXPIRY_ON_OR_AFTER`` code rather than forcing the exact legacy
+    string, per the brief's "report it, don't force it" instruction."""
+    import pandas as pd
+
+    from engine.structures import ExpirySelector, StructureError
+
+    expiries = ["2026-09-10", "2026-09-15"]
+    chain = pd.DataFrame({"expiry": pd.to_datetime(expiries), "dte": [0, 5]})
+    with pytest.raises(StructureError):
+        ExpirySelector(kind="first_post_event").select(
+            chain, pd.Timestamp("2026-09-16"), "BMO",
+        )
+
+    quotes = {("P", 100.0, expiry): {"bid": 1.0, "ask": 2.0} for expiry in expiries}
+    inputs = {"spot": 100.0, "width": 2.0, "event_date": "2026-09-16",
+              "exit_date": "2026-09-16", "session": "BMO", "quotes": quotes}
+
+    # A domain exists (puts are listed) -- the gate lets native attempt its
+    # own selection rather than pre-empting with a blanket MISSING_EXPIRY;
+    # `generate` is the one that reports the more specific refusal below.
+    assert has_resolvable_expiry("CND-PS", inputs, 100.0) is True
+    with pytest.raises(GeometryRefusal, match=r"^NO_EXPIRY_ON_OR_AFTER:2026-09-16$"):
+        generate("CND-PS", inputs)
+
+
+def test_put_ladder_with_no_chain_domain_still_refuses_missing_expiry():
+    """The pre-existing degenerate case (no ``quotes`` at all, so there is
+    nothing for native to select from either) must still refuse
+    ``MISSING_EXPIRY`` -- this is the one case the fix does not change."""
+    assert has_resolvable_expiry("CND-PS", {"spot": 100.0}, 100.0) is False
+    with pytest.raises(GeometryRefusal, match=r"^MISSING_EXPIRY$"):
+        generate("CND-PS", {"spot": 100.0, "width": 2.0})
+
+
+def test_ladder_row_with_no_captured_expiry_reaches_pricing_through_the_gate():
+    """Regression for the Phase 4 diagnosis: a ladder row legacy failed to
+    price (NO_CHAIN/COARSE_LADDER/NO_FORECAST at sizing) never gets
+    ``context["expiry"]`` written, so it used to refuse ``MISSING_EXPIRY`` at
+    ``stages.py::_resolve_geometry`` before ``generate`` ever ran -- even
+    though the row still carries ``quotes``/``event_date``/``exit_date``/
+    ``session``. This drives the real ``assemble_native_values`` pipeline
+    (not just ``generate`` directly) to prove the GATE, not only the
+    selector, now lets the row through to pricing."""
+    from engine.v2.scoring.native_analog import source_population_hash
+    from engine.v2.scoring.stages import (
+        STAGE_NAMES, NativeScoreInputs, StageReceipt, assemble_native_values,
+    )
+
+    grid = (92.0, 94.0, 96.0, 98.0, 100.0, 102.0, 104.0, 106.0, 108.0)
+    quotes = {("P", strike, "2026-09-19"): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    context = {
+        "ticker": "AAA", "strategy": "CND-PS",
+        "event_date": "2026-09-16", "entry_date": "2026-09-16",
+        "exit_date": "2026-09-17", "session": "AMC",
+        "spot": 100.0, "width": 2.0, "quotes": quotes,
+        # Deliberately no "expiry" / "post_event_expiry": the state legacy
+        # leaves a row in when it never priced it.
+    }
+    rows = [{"row_id": "a", "features": {"move": 1.0}, "realized_pnl": 3.0},
+            {"row_id": "b", "features": {"move": -1.0}, "realized_pnl": -1.0}]
+    receipts = tuple(StageReceipt(stage, "declared-input", "declared-output")
+                     for stage in STAGE_NAMES if stage != "diagnostics")
+    inputs = NativeScoreInputs(
+        context=context,
+        features={"model_inputs": {}},
+        forecast={"driver_name": "abs_move",
+                  "models": {"driver_prediction": {"intercept": 0.0, "coefficients": {}}}},
+        geometry=None,
+        pricing=None,
+        analogs={"recipe": {"feature_names": ("move",), "neighbors": 2,
+                            "population_hash": source_population_hash(rows)},
+                 "source_rows": rows, "query_features": {"move": 1.0}},
+        simulation={"mode": "not_applicable"},
+        gate={"mode": "not_applicable"},
+        chooser={},
+        diagnostics={},
+        source_ref="ladder-no-captured-expiry-fixture",
+        stage_receipts=receipts,
+    )
+
+    values = assemble_native_values(inputs, strategy="CND-PS")
+
+    assert "MISSING_EXPIRY" not in values["flags"]
+    assert values.get("entry_cost") is not None
+    assert values.get("legs")
+    assert {leg["expiry"] for leg in values["legs"]} == {"2026-09-19"}
