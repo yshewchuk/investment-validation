@@ -21,6 +21,7 @@ from engine.v2.domain.generation import (
 )
 from engine.v2.domain.valuation import terminal_payoff
 from engine.v2.foundation import content_hash, to_document
+from engine.v2.scoring import financial
 
 STAGE_NAMES = (
     "resolve_context", "features", "forecast", "geometry", "pricing",
@@ -467,7 +468,22 @@ def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> boo
 
 
 def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, Any]:
-    facts = dict(inputs.context)
+    """Lowest precedence first: ``source_features`` (the captured base
+    feature columns -- im/im_d1/im_d5/im_d10/iv10/iv30/... --
+    ``tools/capture_tier0_corpus.py``'s ``features = {"model_inputs": ...,
+    "source_features": ...}``) is the raw legacy-features-DataFrame
+    equivalent (R4-20 gap: it was never merged, so the frozen gate champion
+    ``gate_midfill_str_thru_forecast_analog`` could never see its own
+    ``im_d*`` inputs). It is merged FIRST so context, the rest of
+    ``inputs.features``, the flattened driver ``model_inputs``, and finally
+    execution-owned ``values`` can each still override it -- a source
+    snapshot must never shadow an owned output or a context fact.
+    """
+    facts: dict[str, Any] = {}
+    source_features = inputs.features.get("source_features")
+    if isinstance(source_features, Mapping):
+        facts.update(source_features)
+    facts.update(inputs.context)
     facts.update(inputs.features)
     model_inputs = inputs.features.get("model_inputs")
     if isinstance(model_inputs, Mapping):
@@ -2186,6 +2202,19 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
         pricing, observer,
     )
     _publish_pricing(values, geometry, pricing, alpha)
+    # R4-20 gap 2: the STR-THRU/STR-RUNUP gate champions name
+    # ``entry_cost_pct`` in their frozen ``feature_order``, but legacy
+    # computes it in ``Scorer._features`` (engine/score.py:1934,
+    # ~2562-2564) BEFORE ``Scorer._score_gate`` (engine/score.py:2030).
+    # Native used to only produce it post-hoc in
+    # ``financial.financial_diagnostics`` (application.py:174), long after
+    # the gate stage in ``_append_late_stages`` has already run -- so the
+    # gate's frozen executor always raised MISSING_FEATURES. Publish it here,
+    # from the same shared formula ``financial.entry_cost_pct`` uses, so it
+    # is in ``values`` (and therefore ``_facts``) before the gate executes.
+    values["entry_cost_pct"] = financial.entry_cost_pct(
+        values.get("entry_cost"), values.get("spot"),
+    )
     _check_wide_market(pricing, flags)
     _check_bad_quote(pricing, flags)
     _check_extrapolated(geometry, pricing, flags)
