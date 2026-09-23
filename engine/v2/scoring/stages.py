@@ -1655,8 +1655,6 @@ def _execute_model(
             _add_flag(flags, "NO_PAYOFF_MAP")
         elif any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
             _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
-        elif name in _PAYOFF_DRIVER_STRATEGIES:
-            _add_flag(flags, "MODEL_NOT_READY")  # block never arrived
         return {}
     if not isinstance(recipe, Mapping):
         _add_flag(flags, "INVALID_PAYOFF_RECIPE")
