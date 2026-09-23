@@ -475,6 +475,7 @@ def _request_only_inputs(
         "forecast": {},
         "geometry": None,
         "pricing": None,
+        "model": {},
         "analogs": {"mode": "not_applicable"},
         "simulation": {"mode": "not_applicable"},
         "gate": {"mode": "not_applicable"},
