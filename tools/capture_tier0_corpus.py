@@ -1120,9 +1120,23 @@ def _captured_blocks(candidate: Mapping[str, Any],
         if not isinstance(sizing_pool, Mapping):
             raise StrictTraceCaptureError("malformed sizing fold pool")
         try:
-            predictions = [float(value) for value in sizing_pool["predictions"]]
-            residuals = [float(value) for value in sizing_pool["residuals"]]
+            raw_predictions = sizing_pool["predictions"]
+            raw_residuals = sizing_pool["residuals"]
             floor = float(sizing_pool.get("interval_floor", 0.0))
+            if (not isinstance(raw_predictions, (list, tuple, np.ndarray))
+                    or not isinstance(raw_residuals, (list, tuple, np.ndarray))
+                    or isinstance(raw_predictions, Mapping)
+                    or isinstance(raw_residuals, Mapping)):
+                raise TypeError("pool columns must be numeric sequences")
+            raw_predictions = list(raw_predictions)
+            raw_residuals = list(raw_residuals)
+            if len(raw_predictions) != len(raw_residuals):
+                raise ValueError("pool columns have unequal lengths")
+            if any(isinstance(value, (str, bytes, bool)) or not isinstance(value, (int, float, np.number))
+                   for value in raw_predictions + raw_residuals):
+                raise TypeError("pool columns must contain numeric values")
+            predictions = [float(value) for value in raw_predictions]
+            residuals = [float(value) for value in raw_residuals]
         except (KeyError, TypeError, ValueError) as exc:
             raise StrictTraceCaptureError("malformed sizing fold pool") from exc
         if (not predictions or not residuals

@@ -19,12 +19,12 @@ from engine.v2.scoring.stages import NativeScoreInputs, receipt
 from tools.capture_tier0_corpus import (
     STRICT_TRACE_SUPPORTED_STRATEGIES,
     StrictTraceCaptureError,
+    _captured_blocks,
     _frozen_runtime,
     _hydrate_trace,
     _merged_model_inputs,
     _role_feature_vectors,
     _SpilledTrace,
-    _captured_blocks,
     attach_strict_probe,
     canonical_v2_request,
     main,
@@ -1310,6 +1310,7 @@ def test_sizing_capture_records_the_fold_and_packages_its_own_pool(gate_root, tm
     thin_source = thin_pool["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     thin_source["context"] = source["context"]
     thin_source["quote_status"] = "empty"
+    thin_source["frozen"]["fold_pools"]["pred_abs_move"]["predictions"] = [1.0, 2.0]
     thin_source["frozen"]["fold_pools"]["pred_abs_move"]["residuals"] = [0.1, 0.2]
     thin_checkpoint = thin_pool["legacy_trace"]["checkpoints"]["source_inputs"]
     thin_checkpoint["content_hash"] = content_hash(thin_source)
@@ -1320,6 +1321,94 @@ def test_sizing_capture_records_the_fold_and_packages_its_own_pool(gate_root, tm
             [1.0], thin_block["forecast_pool"]["predictions"],
             thin_block["forecast_pool"]["residuals"])
     assert pd.isna(p10[0]) and pd.isna(p90[0]) and pd.isna(sd[0])
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda entry: entry.update(binding="fold:other"), "malformed sizing forecast declaration"),
+    (lambda entry: entry.update(output="wrong"), "malformed sizing forecast declaration"),
+    (lambda entry: entry.update(site="gate"), "malformed sizing forecast declaration"),
+    (lambda entry: entry.update(pool="absent"), "declared sizing fold pool absent was not recorded"),
+])
+def test_sizing_capture_rejects_bad_pool_declarations(gate_root, change, message):
+    root, pool = gate_root
+    _result, candidate = _captured_sizing(root, pool, r4.ROW)
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    source["context"] = {"ticker": "AAA", "event_date": "2026-09-17",
+                         "entry_date": "2026-09-16", "exit_date": "2026-09-18"}
+    source["quote_status"] = "empty"
+    entry = source["frozen"]["declarations"]["forecast:forecast_abs_move"]
+    change(entry)
+    checkpoint["content_hash"] = content_hash(source)
+    with pytest.raises(StrictTraceCaptureError, match=message):
+        _captured_blocks(candidate, _request())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda pool: pool.update(predictions="123"),
+    lambda pool: pool.update(residuals={"0": 0.1}),
+    lambda pool: pool.update(predictions=[1.0] * 251, residuals=[0.1] * 250),
+    lambda pool: pool.update(predictions=[float("inf")] * 3000),
+    lambda pool: pool.update(residuals=["0.1"] * 3000),
+])
+def test_sizing_capture_rejects_malformed_or_unequal_pool_columns(gate_root, mutate):
+    root, pool = gate_root
+    _result, candidate = _captured_sizing(root, pool, r4.ROW)
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    source["context"] = {"ticker": "AAA", "event_date": "2026-09-17",
+                         "entry_date": "2026-09-16", "exit_date": "2026-09-18"}
+    source["quote_status"] = "empty"
+    mutate(source["frozen"]["fold_pools"]["pred_abs_move"])
+    checkpoint["content_hash"] = content_hash(source)
+    with pytest.raises(StrictTraceCaptureError, match="malformed sizing fold pool"):
+        _captured_blocks(candidate, _request())
+
+
+def test_sizing_band_survives_strict_capture_verified_replay_and_record(gate_root, tmp_path):
+    root, pool = gate_root
+    _legacy_result, candidate = _captured_sizing(root, pool, r4.ROW)
+    legacy_request = ScoreRequest(
+        ticker="AAA", strategy="STR-THRU", as_of=pd.Timestamp("2026-09-16"),
+        event_date=pd.Timestamp("2026-09-17"), session="AMC", fill=MID,
+    )
+    candidate.update({"event_id": "AAA_2026-09-17",
+                      "request": request_to_dict(legacy_request),
+                      "record": {"strategy": "STR-THRU", "ticker": "AAA"}})
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    source["context"] = {"ticker": "AAA", "event_date": "2026-09-17",
+                         "entry_date": "2026-09-16", "exit_date": "2026-09-18",
+                         "spot": 100.0}
+    source["quote_status"] = "empty"
+    source["native_recipes"]["forecast"] = {"models": {
+        "forecast_abs_move": {"intercept": 4.0, "coefficients": {}}}}
+    source["model_bindings"] = []
+    source["frozen"]["bindings"] = {}
+    checkpoint["content_hash"] = content_hash(source)
+
+    trace, captured_record = strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
+    pool_doc = trace["native_inputs"]["forecast"]["forecast_pool"]
+    legacy_band = tier4.interval_for(
+        np.array([4.0]), np.asarray(pool_doc["predictions"]),
+        np.asarray(pool_doc["residuals"]), floor=pool_doc["interval_floor"])
+    expected = tuple(float(values[0]) for values in legacy_band[:3])
+    assert tuple(captured_record.uncertainty[key] for key in
+                 ("forecast_p10", "forecast_p90", "forecast_sd")) == expected
+
+    pair = {"payload": {"request": candidate["request"], "record": {},
+                        "legacy_input_hash": trace["shared_input_hash"],
+                        "input_trace": trace, "input_trace_hash": trace["trace_hash"]}}
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path / "release")
+    replayed_record, _receipts, _identities = phase4_real._replayed_member(verified)
+    assert tuple(replayed_record.uncertainty[key] for key in
+                 ("forecast_p10", "forecast_p90", "forecast_sd")) == expected
+
+    changed = copy.deepcopy(pair)
+    changed["payload"]["input_trace"]["shared_inputs"]["native_inputs"]["forecast"]\
+        ["forecast_pool"]["residuals"][0] += 1.0
+    with pytest.raises(phase4_real._TraceError, match="trace_hash"):
+        phase4_real._verified_trace_bundle(changed, tmp_path / "release")
 
 
 # -- the chooser: champion, producers, fold pools, keys and primitives -------------
