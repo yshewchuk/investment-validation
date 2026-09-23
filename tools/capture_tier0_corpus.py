@@ -1438,6 +1438,11 @@ def frozen_source_declarations(
     if stored:
         out["stored_forecast_refs"] = stored
 
+    # -- size fold's own band pool (R4-20 gap 3, sizing side) ---------------------
+    size_forecast = declared.get("forecast:forecast_abs_move")
+    if size_forecast is not None and "pool" in size_forecast:
+        out["forecast_pool"] = pool(size_forecast["pool"])
+
     # -- gate -------------------------------------------------------------------
     gate = declared.get("gate")
     if gate is not None:

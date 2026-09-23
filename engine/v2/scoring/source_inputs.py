@@ -313,6 +313,13 @@ class SourceBundle:
     # ``pool_res`` in stored order (a model-owned population, like
     # ``model_residual_rows``; never this row's answer). Empty: undeclared.
     gate_forecast_pool: Mapping[str, Any] = field(default_factory=dict)
+    # R4-20 gap 3 (sizing side): the SIZE fold's OWN held-out pool behind
+    # ``forecast_p10``/``_p90``/``_sd`` -- legacy
+    # ``Scorer._size_from_forecast``'s ``served.interval``, the fold's own
+    # ``pool_pred``/``pool_res`` in stored order (a model-owned population,
+    # like ``model_residual_rows``; never this row's answer). Not the gate's
+    # copy of it (``gate_forecast_pool`` above). Empty: undeclared.
+    forecast_pool: Mapping[str, Any] = field(default_factory=dict)
     # R4-20 gap 5: the DYN-SV chooser champion as a frozen release binding,
     # ``{"binding_id"[, "output"]}``, for a DYNAMIC_MENU candidate. Empty:
     # no chooser ranking is requested (legacy with no chooser champion).
@@ -515,6 +522,9 @@ def _forecast_block(bundle: SourceBundle, strategy: str) -> dict[str, Any]:
     refs = _stored_forecast_refs(bundle)
     if refs:
         block["stored_refs"] = refs
+    pool = fold_pool("forecast_pool", bundle.forecast_pool)
+    if pool:
+        block["forecast_pool"] = pool
     return block
 
 
