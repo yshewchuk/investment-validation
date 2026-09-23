@@ -35,6 +35,7 @@ def _inputs(request) -> tuple[NativeScoreInputs, dict]:
         "features": {"model_inputs": {"x": 3.0}},
         "forecast": {}, "geometry": None, "pricing": None, "analogs": {},
         "simulation": {}, "gate": {}, "chooser": {}, "diagnostics": {},
+        "model": {},
     }
     shared = {"request": to_document(request), "native_inputs": blocks}
     source_ref = content_hash(shared)

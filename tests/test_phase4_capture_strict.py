@@ -80,6 +80,7 @@ def _native(request: V2ScoreRequest):
         },
         "geometry": None,
         "pricing": None,
+        "model": {},
         "analogs": {},
         "simulation": {
             "terminal_spots": [95.0, 105.0],
