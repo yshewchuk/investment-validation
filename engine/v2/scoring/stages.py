@@ -830,6 +830,16 @@ def _publish_pricing(values: dict[str, Any], geometry: Geometry,
         "fill": alpha,
         "legs": tuple(vars(leg) for leg in legs),
         "selected_contracts": tuple(vars(leg) for leg in geometry.legs),
+        # engine/score.py:2342 -- ``result.strike = float(priced.legs[0].strike)``,
+        # set only once pricing has actually resolved (legacy never reaches
+        # that assignment on a refusal, and a caller-pinned strike in
+        # ``context`` is not enough on its own: an unpinned request resolves
+        # its strike here, in geometry/pricing, not before). Same leg
+        # ``_check_extrapolated`` above already reads off ``geometry`` --
+        # this is the one place that fact becomes a published stage output,
+        # which ``financial.py``'s payoff-surface reader needs.
+        "strike": (float(legs[0].strike)
+                   if pricing.refusal is None and legs else None),
     })
 
 
@@ -1519,9 +1529,30 @@ def _execute_runup_model(
     output = {
         "exp_pnl_model": float(np.mean(returns)),
         "win_model": float(np.mean(returns > 0.0)),
+        "payoff": _surface_payoff_document(fit),
     }
     values.update(output)
     return output
+
+
+def _line_payoff_document(fit: Mapping[str, Any]) -> dict[str, Any]:
+    """engine/payoff.py:157-167 (``PayoffLine.as_dict``) -- the shape
+    ``financial.py::_fair_premium`` reads for the single-driver line case.
+    Publishes the fit the model stage already produced instead of a
+    separately captured legacy number."""
+    return {"intercept": fit["intercept"], "slope": fit["slope"]}
+
+
+def _surface_payoff_document(fit: Mapping[str, Any]) -> dict[str, Any]:
+    """engine/payoff.py:260-278 (``RunupPayoffSurface.as_dict``) -- the
+    shape ``financial.py::_runup_fair_premium`` reads: ``kind`` picks the
+    surface branch, ``coefficients`` keyed by RUNUP_TERMS."""
+    from engine.v2.scoring import native_payoff
+
+    return {
+        "kind": "runup_payoff_surface",
+        "coefficients": dict(zip(native_payoff.RUNUP_TERMS, fit["coefficients"])),
+    }
 
 
 def _execute_model(
@@ -1597,6 +1628,7 @@ def _execute_model(
     output = {
         "exp_pnl_model": float(np.mean(returns)),
         "win_model": float(np.mean(returns > 0.0)),
+        "payoff": _line_payoff_document(fit),
     }
     output = _recalibrated_output(block, recipe, name, values, output, flags)
     values.update(output)
