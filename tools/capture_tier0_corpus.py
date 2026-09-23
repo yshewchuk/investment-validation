@@ -1097,6 +1097,48 @@ def _captured_blocks(candidate: Mapping[str, Any],
     recipes.setdefault("simulation", {"mode": "not_applicable"})
     recipes.setdefault("gate", {"mode": "not_applicable"})
     recipes["forecast"] = _with_stored_crush(dict(recipes["forecast"]), source)
+    frozen = source.get("frozen") or {}
+    if not isinstance(frozen, Mapping):
+        raise StrictTraceCaptureError("malformed frozen source declarations")
+    declarations = frozen.get("declarations") or {}
+    if not isinstance(declarations, Mapping):
+        raise StrictTraceCaptureError("malformed frozen source declarations")
+    size_forecast = declarations.get("forecast:forecast_abs_move")
+    if size_forecast is not None:
+        if (not isinstance(size_forecast, Mapping)
+                or size_forecast.get("binding") != "fold:size"
+                or size_forecast.get("output") != "pred_abs_move"
+                or size_forecast.get("site") != "sizing"
+                or not isinstance(size_forecast.get("pool"), str)):
+            raise StrictTraceCaptureError("malformed sizing forecast declaration")
+        fold_pools = frozen.get("fold_pools") or {}
+        pool_name = size_forecast["pool"]
+        if not isinstance(fold_pools, Mapping) or pool_name not in fold_pools:
+            raise StrictTraceCaptureError(
+                f"declared sizing fold pool {pool_name} was not recorded")
+        sizing_pool = fold_pools[pool_name]
+        if not isinstance(sizing_pool, Mapping):
+            raise StrictTraceCaptureError("malformed sizing fold pool")
+        try:
+            predictions = [float(value) for value in sizing_pool["predictions"]]
+            residuals = [float(value) for value in sizing_pool["residuals"]]
+            floor = float(sizing_pool.get("interval_floor", 0.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StrictTraceCaptureError("malformed sizing fold pool") from exc
+        if (not predictions or not residuals
+                or not all(math.isfinite(value) for value in predictions + residuals)
+                or not math.isfinite(floor)):
+            raise StrictTraceCaptureError("malformed sizing fold pool")
+        pool_document = {"predictions": predictions, "residuals": residuals,
+                         "interval_floor": floor}
+        recipes["forecast"] = {
+            **recipes["forecast"], "forecast_pool": pool_document,
+            "forecast_pool_provenance": {
+                "declaration": dict(size_forecast),
+                "pool_name": pool_name,
+                "pool_hash": content_hash(pool_document),
+            },
+        }
     model_inputs = _merged_model_inputs(candidate)
     if frozen_chooser is not None:
         _merge_chooser_rows(model_inputs, _chooser_consumed_rows(candidate))

@@ -24,6 +24,7 @@ from tools.capture_tier0_corpus import (
     _merged_model_inputs,
     _role_feature_vectors,
     _SpilledTrace,
+    _captured_blocks,
     attach_strict_probe,
     canonical_v2_request,
     main,
@@ -1275,6 +1276,50 @@ def test_sizing_capture_records_the_fold_and_packages_its_own_pool(gate_root, tm
     assert packaged["predictions"] == pool[0].tolist()
     assert packaged["residuals"] == pool[1].tolist()
     assert packaged["interval_floor"] == 0.0
+
+    # The actual strict trace path uses _captured_blocks (not the helper above
+    # that produces the frozen release declarations). Verify that this is the
+    # source of the executable sizing band and that its serialization is bound
+    # to both the declaration and captured pool contents.
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    source["context"] = {"ticker": "AAA", "event_date": "2026-09-17",
+                         "entry_date": "2026-09-16", "exit_date": "2026-09-18",
+                         "spot": 100.0}
+    source["quote_status"] = "empty"
+    checkpoint["content_hash"] = content_hash(source)
+    blocks = _captured_blocks(candidate, _request())
+    forecast = blocks["forecast"]
+    assert forecast["forecast_pool"] == packaged
+    provenance = forecast["forecast_pool_provenance"]
+    assert provenance["declaration"] == frozen["declarations"]["forecast:forecast_abs_move"]
+    assert provenance["pool_hash"] == content_hash(packaged)
+
+    # No declaration means no band. A recorded but thin pool is retained as
+    # the source truth; the native interval implementation itself suppresses it.
+    without_declaration = copy.deepcopy(candidate)
+    thin_source = without_declaration["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    thin_source["frozen"]["declarations"].pop("forecast:forecast_abs_move")
+    thin_source["context"] = source["context"]
+    thin_source["quote_status"] = "empty"
+    thin_checkpoint = without_declaration["legacy_trace"]["checkpoints"]["source_inputs"]
+    thin_checkpoint["content_hash"] = content_hash(thin_source)
+    assert "forecast_pool" not in _captured_blocks(without_declaration, _request())["forecast"]
+
+    thin_pool = copy.deepcopy(candidate)
+    thin_source = thin_pool["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    thin_source["context"] = source["context"]
+    thin_source["quote_status"] = "empty"
+    thin_source["frozen"]["fold_pools"]["pred_abs_move"]["residuals"] = [0.1, 0.2]
+    thin_checkpoint = thin_pool["legacy_trace"]["checkpoints"]["source_inputs"]
+    thin_checkpoint["content_hash"] = content_hash(thin_source)
+    thin_block = _captured_blocks(thin_pool, _request())["forecast"]
+    assert len(thin_block["forecast_pool"]["residuals"]) == 2
+    p10, p90, sd, _ = importlib.import_module(
+        "engine.v2.scoring.native_gate_features").forecast_interval(
+            [1.0], thin_block["forecast_pool"]["predictions"],
+            thin_block["forecast_pool"]["residuals"])
+    assert pd.isna(p10[0]) and pd.isna(p90[0]) and pd.isna(sd[0])
 
 
 # -- the chooser: champion, producers, fold pools, keys and primitives -------------
