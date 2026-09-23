@@ -505,15 +505,23 @@ def test_size_fold_band_equals_forecast_interval_on_the_declared_pool(frozen):
     pool = _pool(3000)
     declared = {"predictions": tuple(pool[0]), "residuals": tuple(pool[1]),
                 "interval_floor": 0.0}
-    _record, seen = _score(
+    record, seen = _score(
         _twin_bundle(frozen, ROW, chooser=False, forecast_pool=declared), "TWIN-P")
     forecast = seen["forecast"]["forecast_abs_move"]
     p10, p90, sd, _ = forecast_interval(
         [forecast], declared["predictions"], declared["residuals"],
         floor=declared["interval_floor"])
+    served = _served(frozen[0], pool)
+    legacy_p10, legacy_p90, legacy_sd, _ = served.interval([forecast])
+    assert p10[0] == legacy_p10[0]
+    assert p90[0] == legacy_p90[0]
+    assert sd[0] == legacy_sd[0]
     assert seen["forecast"]["forecast_p10"] == float(p10[0])
     assert seen["forecast"]["forecast_p90"] == float(p90[0])
     assert seen["forecast"]["forecast_sd"] == float(sd[0])
+    assert record.uncertainty["forecast_p10"] == float(p10[0])
+    assert record.uncertainty["forecast_p90"] == float(p90[0])
+    assert record.uncertainty["forecast_sd"] == float(sd[0])
 
 
 def test_undeclared_size_pool_leaves_the_band_absent(frozen):

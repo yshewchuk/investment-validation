@@ -194,7 +194,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         "runup_move_provenance",
     ) if key in values})
     uncertainty = _value_fields(
-        values, ("model_p10", "model_p90", "forecast_p10", "forecast_p90"),
+        values, ("model_p10", "model_p90", "forecast_p10", "forecast_p90",
+                 "forecast_sd"),
     )
     uncertainty.update({key: values[key] for key in (
         "runup_move_raw_d14_p10", "runup_move_raw_d14_p90",
