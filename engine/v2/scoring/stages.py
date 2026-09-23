@@ -1228,18 +1228,26 @@ def _execute_simulation(
 
 
 def _model_seed(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> int:
-    """Deterministic RNG seed from answer-free identity, when none is given.
+    """Deterministic RNG seed, byte-identical to legacy's bootstrap seed.
 
-    Mirrors the SHAPE of engine/score.py:2164-2168's
-    ``sha256(f"{snapshot}|{key}")`` -- one stable string hashed to an int --
-    without depending on legacy's ``Scorer.snapshot``/``ScoreRequest.key()``,
-    neither of which a bounded source builder carries. Built from
-    ``source_ref`` (this request's own content-addressed identity) plus the
-    driver prediction actually used, so two distinct requests draw
-    independent Monte Carlo paths.
+    Mirrors engine/score.py's ``sha256(f"{self.snapshot}|{request.key()}")``
+    (Scorer._score_model / _score_runup_model, ~line 2891/3057) exactly,
+    from the REQUEST-level identity facts captured into ``inputs.context``
+    (see engine/score.py's unconditional capture_source_bundle call, ~line
+    1847, and the ``requested_structure_params`` merge right after forecast
+    sizing). No fallback to ``source_ref``: a bundle missing a required
+    identity fact is a capture defect, and seeding on ``source_ref`` instead
+    would silently draw a DIFFERENT Monte Carlo path than legacy drew for
+    the same trade -- worse than refusing.
     """
-    key = f"{inputs.source_ref}|model|{values.get('driver_prediction')}"
-    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big")
+    from engine.v2.scoring.identity import bootstrap_seed, score_request_key
+
+    context = inputs.context
+    if "snapshot" not in context:
+        raise KeyError("_model_seed: missing identity field 'snapshot'")
+    snapshot = context["snapshot"]
+    key = score_request_key(context)
+    return bootstrap_seed(snapshot, key)
 
 
 def _model_driver_and_cost(
