@@ -1875,6 +1875,34 @@ class Scorer:
                     # Native's `_check_projected_calendar` (stages.py) reads
                     # this to reproduce `calendar.is_projected(exit_date)`.
                     "calendar_observed_through": self.calendar.observed_through,
+                    # The bootstrap-seed identity (2026-09-23 user decision):
+                    # native must seed its Monte Carlo exactly like legacy's
+                    # `sha256(f"{self.snapshot}|{request.key()}")`
+                    # (engine/score.py ~2891). `ScoreRequest.key()` renders
+                    # the REQUEST'S OWN fields -- `self.as_of`/`self.event_date`/
+                    # `self.strike`/`self.expiry`, not the resolved
+                    # `event_date`/`result.as_of`/priced strike/expiry above,
+                    # which can differ (e.g. `request.as_of` is None whenever
+                    # the caller left it open, even though `result.as_of` is
+                    # already filled from `window.decision_date` by then).
+                    # Named with the same `requested_` prefix the codebase
+                    # already uses for this exact request-vs-resolved
+                    # distinction (`result.requested_strike`,
+                    # `structure.params["requested_strike"]`/
+                    # `["requested_expiry"]` in `_structure` above). Identity
+                    # facts, not answers -- confirmed absent from
+                    # `source_inputs._ANSWER_FIELDS` and
+                    # `phase4_frozen_bridge._ANSWER_FIELDS`.
+                    "snapshot": self.snapshot,
+                    "requested_as_of": request.as_of,
+                    "requested_event_date": request.event_date,
+                    "requested_strike": request.strike,
+                    "requested_expiry": request.expiry,
+                    "fill_alpha": request.fill.alpha,
+                    "variant": request.variant,
+                    "decision_offset": request.decision_offset,
+                    "quote_max_age_sessions": request.quote_max_age_sessions,
+                    "chain_as_of": request.chain_as_of,
                 },
                 quote_status="not_reached",
             )
@@ -1892,6 +1920,25 @@ class Scorer:
                 request, result, structure, size=not request.structure_params)
             if structure is None:
                 return self._finish_phase4_trace(trace, result, "forecast sizing refused")
+
+        if trace is not None:
+            # `request.structure_params` -- inert at the unconditional bundle
+            # above (~line 1847, before forecast sizing runs) -- may be SIZED
+            # by now for a FORECAST_SIZED strategy (the `if` block above), and
+            # it is this final value `ScoreRequest.key()` renders when the
+            # bootstrap seed is taken below in `_score_model`/
+            # `_score_runup_model`. A merge here, not a value captured
+            # earlier, keeps the two in step for every strategy, sized or
+            # not -- a caller can pin `structure_params` on any request, not
+            # only a FORECAST_SIZED one (mirrors the `im_context` merge
+            # pattern below, added for the same reason: too early to know
+            # yet at the unconditional capture).
+            trace.capture_source_bundle(context={
+                "requested_structure_params": (
+                    dict(request.structure_params)
+                    if request.structure_params else None
+                ),
+            })
 
         # -- the live chain: entry cost, strike, and the moneyness label ----
         self._price_entry(request, structure, result, chain_index)

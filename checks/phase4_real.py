@@ -929,6 +929,22 @@ def _frozen_model_control(request: ScoreRequest, *, bind_driver: bool = True) ->
             "event_date": "2026-09-16", "entry_date": "2026-09-16",
             "exit_date": "2026-09-17", "expiry": "2026-09-18",
             "spot": 100.0,
+            # Bootstrap-seed identity (engine/v2/scoring/identity.py's
+            # score_request_key/_model_seed, 2026-09-23): this synthetic
+            # control has no legacy ScoreRequest of its own to mirror -- it
+            # only needs the model stage to draw A seed and score, not one
+            # matching a specific legacy replay -- so these are plausible
+            # constants, not derived from any real request.
+            "snapshot": "phase4-frozen-control-snapshot",
+            "requested_as_of": None,
+            "requested_event_date": "2026-09-16",
+            "requested_strike": None,
+            "requested_expiry": None,
+            "fill_alpha": 0.5,
+            "variant": None,
+            "decision_offset": None,
+            "quote_max_age_sessions": None,
+            "chain_as_of": None,
         }
         geometry = generate(
             "STR-THRU", {**context, "forecast_abs_move": 0.42},
