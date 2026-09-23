@@ -6,6 +6,7 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Mapping
 
+from engine.v2.foundation import untag_nonfinite
 from engine.v2.models.contracts import (
     MODEL_READY,
     InferenceRequest,
@@ -106,7 +107,7 @@ class FrozenStageExecutor:
         # at all (legacy's float conversion would raise) is INVALID_FEATURE.
         row: list[float] = []
         for name in binding.feature_order:
-            raw = features[name]
+            raw = untag_nonfinite(features[name])
             try:
                 value = float("nan") if raw is None else float(raw)
             except (TypeError, ValueError) as exc:
@@ -181,6 +182,14 @@ class FrozenStageExecutor:
 
     def execute(self, features: Mapping[str, float]) -> FrozenStageResult:
         binding = self._binding()
+        role_rows = features.get("role_model_inputs")
+        if isinstance(role_rows, Mapping):
+            role = str(binding.role)
+            vector = role_rows.get(role, role_rows.get(role.split(":", 1)[0]))
+            stage_facts = features.get("_native_stage_facts", {})
+            stage_facts = stage_facts if isinstance(stage_facts, Mapping) else {}
+            role_facts = vector if isinstance(vector, Mapping) else {}
+            features = {**role_facts, **stage_facts}
         row = self._row(binding, features)
         request = InferenceRequest(
             release_id=self.release.release_id,
@@ -258,6 +267,11 @@ class FrozenRecipeExecutor:
     def feature_order(self) -> tuple[str, ...]:
         """The resolved binding's feature order, ``()`` when unresolved."""
         return () if self._binding is None else tuple(self._binding.feature_order)
+
+    @property
+    def role(self) -> str | None:
+        """The resolved served role, ``None`` when the binding is unresolved."""
+        return None if self._binding is None else str(self._binding.role)
 
     def __str__(self) -> str:
         if self._executor is None or self._binding is None:

@@ -789,7 +789,9 @@ def _application_control_source() -> SourceBundle:
         feature_vector={"zero": 0.0},
         feature_missing_mask={},
         model_identity={"driver": {"model_id": "phase4-app-driver-v1"}},
-        forecast_recipes={"driver_prediction": {"intercept": 7.0, "coefficients": {}}},
+        forecast_recipes={"driver_prediction": {
+            "intercept": 7.0, "coefficients": {"zero": 0.0},
+        }},
         model_artifact_refs={"driver_prediction": "sha256:phase4-app-driver"},
         residual_recipe={
             "terminal_spots": (95.0, 105.0), "weights": (0.5, 0.5),

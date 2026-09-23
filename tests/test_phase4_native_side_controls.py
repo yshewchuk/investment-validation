@@ -39,8 +39,12 @@ def test_application_control_source_is_native_built_not_legacy_fields():
     assert inputs.source_ref != "compatibility-input"
     assert inputs.geometry is None and inputs.pricing is None
     assert inputs.forecast.get("models", {}).get("driver_prediction") == {
-        "intercept": 7.0, "coefficients": {},
+        "intercept": 7.0, "coefficients": {"zero": 0.0},
     }
+    record = application.score_one(_request(), inputs)
+    assert record.feature_values == {"zero": 0.0}
+    assert record.null_masks == {"zero": False}
+    assert record.forecasts["driver_prediction"] == 7.0
 
 
 def test_application_controls_all_true_from_native_inputs():

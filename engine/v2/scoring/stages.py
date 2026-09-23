@@ -184,7 +184,8 @@ _INTERNAL_STAGE_FIELDS = frozenset({"executors", "forecast_executor"})
 # hashes and receipts), never merged into the record's values. The strict
 # capture's per-role model rows (``role_model_inputs``) are what frozen
 # inference was fed for each binding; they are inputs, not record fields.
-_SOURCE_ONLY_FEATURE_FIELDS = frozenset({"role_model_inputs"})
+_SOURCE_ONLY_FEATURE_FIELDS = frozenset({"model_inputs", "role_model_inputs"})
+_REPORTING_MODEL_ROLES = frozenset({"driver", "implied_t1", "runup_move"})
 _STRATEGY_FORECAST_ROLES = {
     "STR-THRU": ("driver",),
     "STR-RUNUP": ("implied_t1", "runup_move"),
@@ -425,7 +426,7 @@ def _check_bad_quote(pricing: Pricing, flags: list[str]) -> None:
 _BAD_QUOTE_WITHHELD = {"withheld": "BAD_QUOTE"}
 #: Forecast outputs a BAD_QUOTE row does not carry: legacy serves every
 #: forecast role but ``size`` from the layers after its BAD_QUOTE exit.
-_BAD_QUOTE_WITHHELD_FIELDS = ("driver_name",) + tuple(sorted({
+_BAD_QUOTE_WITHHELD_FIELDS = ("driver_name", "model_inputs") + tuple(sorted({
     output for role, outputs in _ROLE_OUTPUTS.items() if role != "size"
     for output in outputs
 }))
@@ -492,7 +493,19 @@ def _facts(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> dict[str, An
     if isinstance(model_inputs, Mapping):
         facts.update(model_inputs)
     facts.update(values)
+    facts["_native_stage_facts"] = {
+        key: values[key] for key in _OWNED_OUTPUTS if key in values
+    }
     return facts
+
+
+def _add_stage_facts(facts: dict[str, Any], derived: Mapping[str, Any]) -> None:
+    """Make freshly derived stage columns outrank captured role primitives."""
+    facts.update(derived)
+    owned = facts.get("_native_stage_facts", {})
+    owned = dict(owned) if isinstance(owned, Mapping) else {}
+    owned.update(derived)
+    facts["_native_stage_facts"] = owned
 
 
 def _linear(spec: Mapping[str, Any], facts: Mapping[str, Any],
@@ -612,12 +625,17 @@ def _missing_feature_refusal(exc: Exception) -> bool:
 def _execute_forecast_executor(
     executor, field, facts, output, invalid_fields, flags, undetermined,
 ) -> None:
+    role = str(getattr(executor, "role", ""))
+    report = (role.split(":", 1)[0] in _REPORTING_MODEL_ROLES)
+    names = getattr(executor, "feature_order", ())
     predict = getattr(executor, "predict", None)
     if not callable(predict):
         _add_flag(flags, "INVALID_FORECAST_EXECUTOR")
         return
     try:
         result = predict(facts)
+        if report:
+            _record_model_inputs(output, facts, names, role)
         raw = result.get(field) if isinstance(result, Mapping) else result
         if isinstance(result, Mapping) and raw is None and len(result) == 1:
             raw = next(iter(result.values()))
@@ -629,6 +647,8 @@ def _execute_forecast_executor(
         output[field] = value
     except (TypeError, ValueError, KeyError) as exc:
         if _missing_feature_refusal(exc):
+            if report:
+                _record_model_inputs(output, facts, names, role)
             # R4-20 gap 4: a missing/non-finite model feature is legacy's
             # MISSING_FEATURES for a champion model (``_score_model``), and a
             # silent NaN for a Tier-4 fold (see TIER4_FOLD_ADAPTER). Either
@@ -643,11 +663,40 @@ def _execute_forecast_executor(
         _add_executor_refusal(flags, exc, f"INVALID_FORECAST_EXECUTOR:{field}")
 
 
+def _record_model_inputs(output, facts, names, role):
+    """Publish reporting inputs when a legacy model role is reached.
+
+    Inputs stay source-owned in ``NativeScoreInputs.features``. This separate
+    result view mirrors legacy ``ScoreResult.model_inputs`` and can include
+    missing names when the attempted model refuses its row.
+    """
+    inputs = output.setdefault("model_inputs", {})
+    role_rows = facts.get("role_model_inputs")
+    stage_facts = facts.get("_native_stage_facts", {})
+    stage_facts = stage_facts if isinstance(stage_facts, Mapping) else {}
+    selected_role = False
+    row = {}
+    if isinstance(role_rows, Mapping):
+        base_role = str(role).split(":", 1)[0]
+        candidate = role_rows.get(role, role_rows.get(base_role))
+        selected_role = True
+        row = candidate if isinstance(candidate, Mapping) else {}
+    for name in names:
+        if name in stage_facts:
+            inputs[name] = stage_facts[name]
+        else:
+            inputs[name] = row.get(name) if selected_role else facts.get(name)
+
+
 def _execute_forecast_model(spec, field, facts, output, invalid_fields, flags):
     if not isinstance(spec, Mapping):
         _add_flag(flags, f"UNOWNED_FORECAST_OUTPUT:{field}")
         return
     try:
+        role = ("driver" if field == "driver_prediction" else
+                "runup_move" if field == "runup_move_prediction" else "")
+        if role in _REPORTING_MODEL_ROLES:
+            _record_model_inputs(output, facts, tuple(spec.get("coefficients", {})), role)
         output[field] = _linear(spec, facts, "forecast")
     except ValueError as exc:
         invalid_fields.add(field)
@@ -1942,7 +1991,7 @@ def _gate_facts(inputs: NativeScoreInputs, values: Mapping[str, Any],
                 and (requested is None or name in requested)]
 
     if wanted(derived.GATE_ANALOG_COLUMNS):
-        facts.update(derived.gate_analog_columns(values))
+        _add_stage_facts(facts, derived.gate_analog_columns(values))
     forecast = wanted(derived.GATE_FORECAST_COLUMNS)
     executor = block.get("forecast_executor")
     if not forecast or (requested is None and executor is None):
@@ -1964,7 +2013,9 @@ def _gate_facts(inputs: NativeScoreInputs, values: Mapping[str, Any],
         # A fold row with a missing/non-finite feature serves NaN (legacy
         # ``ServingModel.predict``): every forecast column stays NaN.
         served = None
-    facts.update(derived.gate_forecast_columns(served, pool, facts.get("im")))
+    _add_stage_facts(
+        facts, derived.gate_forecast_columns(served, pool, facts.get("im")),
+    )
     return facts
 
 
@@ -2103,7 +2154,8 @@ def _execute_chooser(inputs: NativeScoreInputs, name: str,
                                      _quote_map(inputs, name), flags)
     if derived is None:
         return {}
-    facts.update({key: value for key, value in derived.items() if key not in base})
+    applied = {key: value for key, value in derived.items() if key not in base}
+    _add_stage_facts(facts, applied)
     try:
         score = _finite(executor.predict(facts).get("chooser_score"))
     except (TypeError, ValueError, KeyError) as exc:

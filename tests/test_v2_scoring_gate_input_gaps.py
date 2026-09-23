@@ -19,6 +19,7 @@ import json
 from engine.v2.models import FrozenInference, ModelBinding, ModelRelease
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring.frozen_executor import FrozenStageExecutor
+from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
@@ -36,8 +37,8 @@ _QUOTES = {
 }
 
 
-def _inputs(*, source_features=None, model_inputs=None, gate=None,
-           context_overrides=None) -> NativeScoreInputs:
+def _inputs(*, source_features=None, model_inputs=None, gate=None, chooser=None,
+           analogs=None, role_model_inputs=None, context_overrides=None) -> NativeScoreInputs:
     context = {
         "ticker": "AAA",
         "strategy": "STR-THRU",
@@ -57,16 +58,18 @@ def _inputs(*, source_features=None, model_inputs=None, gate=None,
     features = {"model_inputs": dict(model_inputs or {})}
     if source_features is not None:
         features["source_features"] = dict(source_features)
+    if role_model_inputs is not None:
+        features["role_model_inputs"] = dict(role_model_inputs)
     return NativeScoreInputs(
         context=context,
         features=features,
         forecast=forecast,
         geometry=None,
         pricing=None,
-        analogs={"recipe": None},
+        analogs=analogs if analogs is not None else {"recipe": None},
         simulation={"mode": "not_applicable"},
         gate=gate if gate is not None else {"mode": "not_applicable"},
-        chooser={},
+        chooser=chooser or {},
         diagnostics={},
         source_ref="gate-input-gaps-fixture",
         stage_receipts=_RECEIPTS,
@@ -89,16 +92,18 @@ class _FrozenGate:
         return self._executor.predict(features)
 
 
-def _frozen_gate(tmp_path, feature_order: tuple[str, ...]) -> dict:
+def _frozen_gate(tmp_path, feature_order: tuple[str, ...], *, role="gate",
+                 output_name="gate_score", coefficients=None) -> dict:
     """One linear gate artifact naming exactly ``feature_order``."""
     payload = {
         "schema_version": "linear_estimator.v1.0",
         "feature_order": list(feature_order),
         "outputs": [
             {
-                "name": "gate_score",
+                "name": output_name,
                 "intercept": 0.1,
-                "coefficients": [0.0 for _ in feature_order],
+                "coefficients": [float((coefficients or {}).get(name, 0.0))
+                                 for name in feature_order],
             },
         ],
     }
@@ -108,12 +113,12 @@ def _frozen_gate(tmp_path, feature_order: tuple[str, ...]) -> dict:
     binding = ModelBinding(
         binding_id="gate-binding",
         model_id="gate-v1",
-        role="gate",
+        role=role,
         strategy_id="STR-THRU",
         decision_clock_id="entry-close",
         adapter="json-linear.v1",
         feature_order=feature_order,
-        output_names=("gate_score",),
+        output_names=(output_name,),
         members=(
             ArtifactMember(
                 name="estimator", path="estimator.json",
@@ -131,7 +136,7 @@ def _frozen_gate(tmp_path, feature_order: tuple[str, ...]) -> dict:
         inference=inference, release=release, binding_id=binding.binding_id,
     )
     gate_executor = _FrozenGate(executor, binding)
-    return {"executors": {"gate_score": gate_executor}, "threshold": 0.0}
+    return {"executors": {output_name: gate_executor}, "threshold": 0.0}
 
 
 # --- Gap 1: source_features must reach the gate ---------------------------
@@ -143,6 +148,43 @@ def test_nonfinite_source_feature_gives_missing_features(tmp_path):
     ))
     assert "MISSING_FEATURES" in values["flags"]
     assert values.get("gate_score") is None
+
+
+def test_derived_gate_analog_overrides_conflicting_captured_role_value(tmp_path):
+    rows = [{"row_id": "analog-1", "features": {"move": 1.0},
+             "realized_pnl": 0.3}]
+    recipe = {"feature_names": ("move",), "neighbors": 1,
+              "population_hash": source_population_hash(rows)}
+    gate = _frozen_gate(tmp_path, ("analog_n",),
+                        coefficients={"analog_n": 1.0})
+    values = assemble_native_values(_inputs(
+        gate=gate,
+        analogs={"source_rows": rows, "query_features": {"move": 1.0},
+                 "recipe": recipe},
+        role_model_inputs={"gate": {"analog_n": 999.0}},
+    ))
+    assert values["n_analogs"] == 1
+    assert values["gate_score"] == 1.1
+
+
+def test_derived_chooser_value_overrides_conflicting_captured_role_value(
+    tmp_path, monkeypatch,
+):
+    import engine.v2.scoring.native_chooser as native_chooser
+
+    monkeypatch.setattr(
+        native_chooser, "derive_chooser_columns",
+        lambda *args, **kwargs: {"analog_n": 5.0},
+    )
+    chooser = _frozen_gate(
+        tmp_path, ("analog_n",), role="chooser", output_name="chooser_score",
+        coefficients={"analog_n": 1.0},
+    )
+    values = assemble_native_values(_inputs(
+        chooser=chooser,
+        role_model_inputs={"chooser": {"analog_n": 999.0}},
+    ))
+    assert values["chooser_score"] == 5.1
 
 
 def test_finite_source_feature_lets_the_gate_execute(tmp_path):
