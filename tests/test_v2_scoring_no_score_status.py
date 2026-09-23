@@ -114,47 +114,26 @@ def test_a_refusing_flag_with_numbers_still_refuses():
     assert "NO_SCORE" not in record.reason_codes
 
 
-def _payload_values(*, entry_cost):
-    # Direct-call fixture for ``application._record_payload`` -- bypasses the
-    # geometry/pricing stage pipeline entirely (this test only exercises
-    # the "quote_date must not appear as a key when pricing did not run"
-    # fix, not stage plumbing). ``entry_cost is None`` is the same signal
-    # ``stages.py``'s ``_publish_pricing`` (~871) uses to mean "pricing did
-    # not run/refused": ``entry_cost = pricing.entry_cost if
-    # pricing.refusal is None else None``.
-    return {
-        "flags": [], "model_inputs": {},
-        "driver_prediction": None, "forecast_abs_move": None,
-        "runup_move_prediction": None, "exp_pnl_sim": None,
-        "chooser_score": None,
-        "model_p10": None, "model_p90": None,
-        "forecast_p10": None, "forecast_p90": None,
-        "gate_score": None, "gate_threshold": None, "gate_pass": None,
-        "chosen_strategy": None,
-        "legs": (), "selected_contracts": (),
-        "entry_date": "2026-09-16", "exit_date": "2026-09-17",
-        "quote_date": "2026-09-16", "expiry": "2026-09-18",
-        "quote_age_sessions": 0, "fill": 0.5,
-        "entry_cost": entry_cost,
-        "detail": "",
-        "spot": 100.0, "structure_width": 10.0, "driver_name": "abs_move",
-        "implied_move": 6.0,
-    }
-
-
 def test_quote_date_present_iff_pricing_ran():
-    # Fixed 2026-09-23: quote_date used to be written as a key with value
-    # ``None`` in ``entry_exit_plan``/``quote_provenance`` even when pricing
-    # never ran; it must now be ABSENT as a key (mirrors ``entry_cost``'s
-    # own None-means-did-not-run convention), not merely None-valued.
-    request = _request()
+    # ``stages._publish_pricing`` leaves ``entry_cost`` None exactly when
+    # pricing did not run (or refused), and ``quote_date`` is a fact about
+    # the quote a price came from: with no price there is no quote date, so
+    # the key must be ABSENT from entry_exit_plan/quote_provenance, not
+    # present-with-None (the entry_cost convention _record_payload follows).
+    fields = {**_fields(), "quote_date": "2026-09-16"}
+    # Compatibility input with no quotes: _resolve_pricing returns the
+    # fields' own entry_cost (5.0) with refusal=None, so pricing ran.
+    priced = _score(fields)
 
-    priced = application._record_payload(request, _payload_values(entry_cost=5.0),
-                                          _payload_values(entry_cost=5.0))
-    assert priced["entry_exit_plan"].get("quote_date") == "2026-09-16"
-    assert priced["quote_provenance"].get("quote_date") == "2026-09-16"
+    assert priced.resolved_request["entry_cost"] == 5.0
+    assert priced.entry_exit_plan.get("quote_date") == "2026-09-16"
+    assert priced.quote_provenance.get("quote_date") == "2026-09-16"
 
-    unpriced = application._record_payload(request, _payload_values(entry_cost=None),
-                                            _payload_values(entry_cost=None))
-    assert "quote_date" not in unpriced["entry_exit_plan"]
-    assert "quote_date" not in unpriced["quote_provenance"]
+    # spot=None is the missing essential _resolve_geometry refuses on
+    # (MISSING_SPOT) before pricing: entry_cost ends up None and the
+    # quote_date key must not appear in either dict at all.
+    refused = _score({**fields, "spot": None})
+
+    assert refused.resolved_request["entry_cost"] is None
+    assert "quote_date" not in refused.entry_exit_plan
+    assert "quote_date" not in refused.quote_provenance

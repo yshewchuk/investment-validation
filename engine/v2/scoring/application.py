@@ -103,18 +103,18 @@ def _value_fields(values: Mapping[str, Any], names: tuple[str, ...]) -> dict[str
     return {name: values.get(name) for name in names}
 
 
-def _entry_exit_plan(values: Mapping[str, Any]) -> dict[str, Any]:
-    plan = _value_fields(values, ("entry_date", "exit_date", "quote_date", "expiry"))
+def _pricing_dependent_fields(values: Mapping[str, Any],
+                              names: tuple[str, ...]) -> dict[str, Any]:
+    """``_value_fields`` under the entry_cost convention: when pricing did
+    not run (or refused), ``stages._publish_pricing`` leaves ``entry_cost``
+    ``None``, and ``quote_date`` -- a fact about the quote a price came
+    from -- must then be ABSENT from the plan/provenance dicts, not
+    present-as-None. Lives out here because ``_record_payload`` already
+    sits at the complexity budget (checks/code_budgets.py)."""
+    fields = _value_fields(values, names)
     if values.get("entry_cost") is None:
-        plan.pop("quote_date", None)
-    return plan
-
-
-def _quote_provenance(values: Mapping[str, Any]) -> dict[str, Any]:
-    provenance = _value_fields(values, ("quote_date", "quote_age_sessions", "fill"))
-    if values.get("entry_cost") is None:
-        provenance.pop("quote_date", None)
-    return provenance
+        fields.pop("quote_date", None)
+    return fields
 
 
 def _feature_fields(values: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, bool]]:
@@ -201,6 +201,12 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         "runup_move_raw_d14_sd", "runup_move_p10", "runup_move_p90",
         "runup_move_sd",
     ) if key in values})
+    entry_exit_plan = _pricing_dependent_fields(
+        values, ("entry_date", "exit_date", "quote_date", "expiry"),
+    )
+    quote_provenance = _pricing_dependent_fields(
+        values, ("quote_date", "quote_age_sessions", "fill"),
+    )
     return dict(
         score_id="pending",
         canonical_request=to_document(request),
@@ -213,8 +219,8 @@ def _record_payload(request: ScoreRequest, values: Mapping[str, Any],
         model_artifact_ids=tuple(values.get("_model_artifact_ids") or request.model_artifact_refs),
         selected_contracts=tuple(values.get("selected_contracts") or values.get("legs") or ()),
         legs=tuple(values.get("legs") or ()),
-        entry_exit_plan=_entry_exit_plan(values),
-        quote_provenance=_quote_provenance(values),
+        entry_exit_plan=entry_exit_plan,
+        quote_provenance=quote_provenance,
         forecasts=forecasts,
         uncertainty=uncertainty,
         residual_state_ref=request.residual_state_ref,
