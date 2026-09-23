@@ -402,6 +402,50 @@ def test_native_observer_packages_a_trace_with_a_nonempty_model_block(tmp_path):
     assert to_document(native.canonical_request) == to_document(request)
 
 
+def test_decoded_driver_residual_pool_bucket_edges_survive_the_json_round_trip():
+    """Regression for the production artifact-loader import gap.
+
+    ``checks.phase4_real._decode_model_block`` rebuilds a captured driver
+    residual pool via ``_residual_pool_from_document`` ->
+    ``engine.v2.models.residual_artifact.residual_artifact_from_document``,
+    the SAME production path a release read uses -- which is why that
+    reader (and its ``DriverResidualPoolArtifact``/``ResidualArtifactError``
+    companions) must be imported directly from
+    ``engine.v2.models.residual_artifact`` rather than reconstructed by
+    hand. The pool's outermost decile buckets are unbounded
+    (``+/-inf`` edges); a strict-JSON round trip has to carry those through
+    ``tag_nonfinite`` on write and ``untag_nonfinite`` (inside
+    ``residual_artifact_from_document``) on read without a refusal or a
+    silent collapse to a finite sentinel.
+    """
+    import math
+
+    from engine.v2.foundation import tag_nonfinite
+    from engine.v2.models.lineage import Lineage
+    from engine.v2.models.residual_artifact import make_driver_residual_pool_artifact
+    from tools.capture_tier0_corpus import _model_document
+
+    artifact = make_driver_residual_pool_artifact(
+        role="size", model_id="size_v1_4", fold="2026-09-01",
+        flat_residuals=[0.1, -0.2, 0.3, 1.5, -1.5],
+        buckets={"edges": [-math.inf, -1.0, 0.0, 1.0, math.inf],
+                 "pools": [[-2.0, -1.5], [-0.5, -0.1], [0.2, 0.4], [1.2, 2.0]]},
+        deciles=4, min_pool=2, lineage=Lineage(),
+    )
+    model_block = {"model_residual_artifacts": {"driver": artifact}}
+
+    doc = _model_document(model_block)
+    tagged = tag_nonfinite(doc)
+    encoded = json.dumps(tagged, allow_nan=False)
+    decoded_doc = json.loads(encoded)
+    decoded_block = phase4_real._decode_model_block(decoded_doc)
+
+    decoded_artifact = decoded_block["model_residual_artifacts"]["driver"]
+    assert decoded_artifact.bucket_edges == artifact.bucket_edges
+    assert decoded_artifact.bucket_edges[0] == -math.inf
+    assert decoded_artifact.bucket_edges[-1] == math.inf
+
+
 def test_strict_cli_accepts_every_dyn_sv_menu_strategy_alongside_str_thru():
     # R4-1 originally restricted --strict-phase4-trace to exactly one of
     # STR-THRU/STR-RUNUP. That restriction was lifted: native scoring
