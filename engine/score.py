@@ -2054,6 +2054,22 @@ class Scorer:
         self._score_model(request, result, features)
         self._trace_phase4(
             trace,
+            "model",
+            {"model_inputs": result.model_inputs, "model_versions": result.model_versions},
+            {
+                "driver_name": result.driver_name,
+                "driver_prediction": result.driver_prediction,
+                "driver_p10": result.driver_p10,
+                "driver_p90": result.driver_p90,
+                "exp_pnl_model": result.exp_pnl_model,
+                "win_model": result.win_model,
+                "model_p10": result.model_p10,
+                "model_p90": result.model_p90,
+                "flags": result.flags,
+            },
+        )
+        self._trace_phase4(
+            trace,
             "forecast",
             {"model_inputs": result.model_inputs, "model_versions": result.model_versions},
             {
@@ -4052,17 +4068,17 @@ class Scorer:
             return
         entry, artifact = loaded
         result.model_versions["gate"] = entry.id
-        if not self._gate_in_domain(request, features):
-            result.flag("OUT_OF_DOMAIN")
-            return
-        base_features = features
-        features = self._gate_feature_frame(request, result, features, artifact.features)
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is not None and hasattr(entry, "path") and hasattr(entry, "artifact_sha256"):
-            # R4-19: the gate's binding and output, declared before any
-            # decline so native declines the same way. ``inputs`` holds only
-            # the base-frame columns: the forecast/analog columns
-            # `_gate_feature_frame` derived are derived natively.
+            # R4-19: the gate's binding and output, declared before ANY
+            # decline -- including OUT_OF_DOMAIN, checked right below -- so
+            # native declines the same way. Roughly 70% of STR rows decline
+            # here on the market-cap floor; capturing after the domain check
+            # (as this used to) meant those rows never got a gate champion
+            # bound at all. ``inputs`` holds only the base-frame columns: the
+            # forecast/analog columns `_gate_feature_frame` derives are
+            # derived natively, and `_gate_feature_frame` has not run yet at
+            # this point, so ``features`` here IS the base frame.
             collector.capture_frozen(
                 bindings={"gate": {
                     "model_id": entry.id,
@@ -4076,14 +4092,19 @@ class Scorer:
                     "decision_offset": entry.decision_offset,
                 }},
                 inputs={"gate@gate": {
-                    name: _phase4_input(base_features, name)
-                    for name in artifact.features if name in base_features.columns
+                    name: _phase4_input(features, name)
+                    for name in artifact.features if name in features.columns
                 }},
                 declarations={"gate": {
                     "binding": "gate", "output": "gate_score",
                     "threshold": entry.threshold, "site": "gate",
                 }},
             )
+        if not self._gate_in_domain(request, features):
+            result.flag("OUT_OF_DOMAIN")
+            return
+        base_features = features
+        features = self._gate_feature_frame(request, result, features, artifact.features)
         # A gate that declines says WHY. Both branches used to `return` in
         # silence, which put an unexplained `n/a` on the board — indistinguishable
         # from a name the gate had never been asked about. It matters more since
