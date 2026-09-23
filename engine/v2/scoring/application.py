@@ -660,7 +660,7 @@ def _frozen_release_id(results, release, request) -> str:
 
 def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
                           inference_requests, request, release,
-                          inference=None) -> NativeScoreInputs:
+                          inference=None) -> tuple[NativeScoreInputs, dict[str, float]]:
     supplied = fields.get("_native_inputs")
     if not isinstance(supplied, NativeScoreInputs):
         # score_frozen is the acceptance/frozen path: its native inputs must
@@ -709,6 +709,11 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
         _collect_frozen_results(results, bindings, inference_requests, days)
     )
     context.update(result_state)
+    frozen_interval = {
+        key: result_state[key]
+        for key in ("runup_move_p10", "runup_move_p90")
+        if key in result_state
+    }
     release_id = _frozen_release_id(results, release, request)
     binding_ids = tuple(binding.binding_id for binding in bindings)
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
@@ -730,7 +735,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
         chooser=_without_runup_derived(base.chooser),
         diagnostics=_without_runup_derived(base.diagnostics),
         source_ref=source,
-    )
+    ), frozen_interval
 
 
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
@@ -743,10 +748,16 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
         _frozen_binding(release, result, item)
         for result, item in zip(results, requests, strict=True)
     )
-    inputs = _frozen_native_inputs(
+    inputs, frozen_runup_interval = _frozen_native_inputs(
         fields, results, bindings, requests, request, release, inference,
     )
     record = score_one(request, inputs, observer=observer)
+    missing_runup = {
+        key: value for key, value in frozen_runup_interval.items()
+        if key not in record.uncertainty
+    }
+    if missing_runup:
+        record = replace(record, uncertainty={**record.uncertainty, **missing_runup})
     artifact_hashes = tuple(dict.fromkeys(
         hash_value
         for result in results

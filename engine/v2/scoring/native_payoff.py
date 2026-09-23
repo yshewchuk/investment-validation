@@ -308,13 +308,17 @@ def simulate_model_returns(
     cost: float,
     draws: int,
     rng: np.random.Generator,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """engine/score.py:2164-2208 + engine/payoff.py:445-466, in one call.
 
     Draw order is fixed and matches legacy exactly: the driver's own
     residual pool is drawn from ``rng`` FIRST, then the payoff line's
     residuals SECOND -- both from the same generator, so reordering would
     silently change every draw downstream.
+
+    Returns ``(returns, model_draws)`` -- ``model_draws`` is the driver's own
+    Monte Carlo draws (point + residual pool), engine/score.py's
+    ``driver_p10``/``driver_p90`` band, taken before the payoff transform.
     """
     model_draws = float(driver) + rng.choice(
         np.asarray(driver_pool, dtype=float), size=int(draws), replace=True,
@@ -325,8 +329,8 @@ def simulate_model_returns(
     pnl = payoff_exit_value(model_draws, spot, intercept, slope) - float(cost)
     pnl = pnl + noise * float(spot)
     if cost <= 0:
-        return np.full(np.shape(pnl), np.nan)
-    return pnl / float(cost)
+        return np.full(np.shape(pnl), np.nan), model_draws
+    return pnl / float(cost), model_draws
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +488,7 @@ def simulate_runup_model_returns(
     days_before_print: float,
     draws: int,
     rng: np.random.Generator,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """engine/score.py:2377-2430 + engine/payoff.py:469-491, in one call.
 
     Draw order is fixed and matches legacy exactly, all from the SAME rng:
@@ -492,6 +496,11 @@ def simulate_runup_model_returns(
     model's own residual pool (at its native D14 scale) SECOND, the +/-1
     sign draw THIRD, the payoff surface's own residuals FOURTH. Reordering
     any of the four would silently change every draw downstream.
+
+    Returns ``(returns, implied_draws, move_draws)`` -- engine/score.py's
+    ``driver_p10``/``driver_p90`` (from ``implied_draws``) and
+    ``runup_move_p10``/``runup_move_p90`` (from ``move_draws``, already at its
+    scaled horizon).
     """
     implied_draws = float(point_implied) + rng.choice(
         np.asarray(implied_pool, dtype=float), size=int(draws), replace=True,
@@ -513,5 +522,5 @@ def simulate_runup_model_returns(
     value_per_spot = value_per_spot + noise
     value = np.maximum(value_per_spot, 0.0) * float(spot)
     if cost <= 0:
-        return np.full(np.shape(value), np.nan)
-    return (value - float(cost)) / float(cost)
+        return np.full(np.shape(value), np.nan), implied_draws, move_draws
+    return (value - float(cost)) / float(cost), implied_draws, move_draws
