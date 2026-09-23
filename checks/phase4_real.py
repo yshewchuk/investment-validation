@@ -2337,18 +2337,21 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     # never reached ``record`` or silently dropped out of
     # ``native.resolved_request``.
     #
-    # EXCEPTION (USER DECISION, 2026-09-23): when a whole dimension never
-    # ran (see ``_never_ran_dimensions``), the legacy side's placeholder
-    # values for that dimension's fields don't count as a "keys" finding --
-    # native's real key absence and legacy's typed default agree that the
-    # stage never ran, so this is not a decision-field vanishing, and must
-    # not read as one.
+    # Legacy flat records carry None placeholders for stages that never ran,
+    # while native resolved requests may omit those fields. Treat nulls as
+    # absent on both sides; non-null keys remain decision-key evidence.
     never_ran = _never_ran_dimensions(record, native)
     never_ran_fields = frozenset(
         name for dimension in never_ran for name in _NEVER_RAN_DIMENSIONS[dimension]
     )
-    expected_keys = (set(record) & _DECISION_KEY_FIELDS) - never_ran_fields
-    native_keys_for_comparison = set(native.resolved_request) & _DECISION_KEY_FIELDS
+    expected_keys = {
+        name for name in _DECISION_KEY_FIELDS
+        if record.get(name) is not None
+    } - never_ran_fields
+    native_keys_for_comparison = {
+        name for name in _DECISION_KEY_FIELDS
+        if native.resolved_request.get(name) is not None
+    }
 
     keys_agree = expected_keys == native_keys_for_comparison
     native_only = sorted(native_keys_for_comparison - expected_keys)

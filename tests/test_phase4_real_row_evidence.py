@@ -320,6 +320,30 @@ def test_key_differences_recorded_when_a_decision_field_vanishes_from_native(
     assert diff["native_only"] == []
 
 
+def test_null_decision_key_placeholders_count_as_absent_on_both_sides(
+        tmp_path, monkeypatch):
+    """None placeholders match native omissions, while populated keys remain."""
+    from dataclasses import replace
+
+    record = _clean_record(runup_move_1d=None, driver_prediction=None)
+    native = replace(
+        _native_record(record),
+        resolved_request={
+            **_native_record(record).resolved_request,
+            "chooser_score": None,
+        },
+    )
+
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"a": record},
+        natives_by_fixture={"a": native},
+    )
+
+    assert release["row_dimension_checks"]["a"]["keys"] is True
+    assert "a" not in release["row_key_differences"]
+
+
 def test_out_of_scope_key_difference_does_not_fail_keys_check(tmp_path, monkeypatch):
     """A structural field present on only one side, but outside
     _DECISION_KEY_FIELDS, must NOT fail "keys" -- the two documents are
