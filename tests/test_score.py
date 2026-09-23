@@ -999,6 +999,55 @@ class TestMarketBlock:
         assert "or_implied" not in features.columns
         assert features["days_before_print"].iloc[0] == 14.0
 
+    def test_captured_source_features_match_the_final_enriched_frame(
+        self, scorer, monkeypatch
+    ):
+        """Regression for the capture-point defect: for a forward row with no
+        panel row (as_of >= last_pre_print, so the market block AND the
+        event-history live fallback both fire), the Phase4TraceCollector's
+        captured ``source_features`` must equal what legacy actually scored
+        — the frame AFTER ``add_absolute_features``/``add_quote_indicators``
+        — not an earlier snapshot missing those enrichments.
+        """
+        from engine.audit import FeatureVector
+        from engine.score import Phase4TraceCollector
+
+        upcoming = pd.Timestamp("2024-08-01")
+
+        def fake_live(ticker, event_date, **kwargs):
+            return FeatureVector(
+                ticker=ticker,
+                as_of=kwargs.get("as_of") or event_date,
+                values={"or_implied": 7.5, "mcap_usd": 6e9, "dist_ema": -3.5,
+                        "n_prior": 9.0},
+                feature_as_of={},
+                event_date=event_date,
+            )
+
+        monkeypatch.setattr(score_mod, "live_features", fake_live)
+        trace = Phase4TraceCollector(retain_full_trace=False)
+        result = ScoreResult(
+            ticker=TICKER, strategy="STR-THRU", as_of=upcoming,
+            event_date=upcoming, session="AMC", entry_date=upcoming,
+        )
+        result._phase4_checkpoint_collector = trace
+
+        features = scorer._features(request(event_date=upcoming), result)
+
+        # `abs_dist_ema` is derived by `add_absolute_features` from
+        # `dist_ema`, which the market block landed AFTER the pre-fix
+        # capture point ran.
+        assert features["abs_dist_ema"].iloc[0] == pytest.approx(3.5)
+        # `n_prior` is an EVENT_HISTORY_FEATURES column filled by the live
+        # fallback, which also ran AFTER the pre-fix capture point.
+        assert features["n_prior"].iloc[0] == 9.0
+
+        captured = trace._checkpoint_groups["source_inputs"]["features"]
+        assert captured["abs_dist_ema"] == pytest.approx(
+            features["abs_dist_ema"].iloc[0]
+        )
+        assert captured["n_prior"] == features["n_prior"].iloc[0]
+
 
 class TestTrainingServingAgreement:
     """Features must mean at serving time what they meant at training time."""

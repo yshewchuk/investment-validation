@@ -2646,14 +2646,6 @@ class Scorer:
         built["days_before_print"] = _trading_days_before(
             self.calendar, result.entry_date, result.event_date, result.session
         )
-        collector = getattr(result, "_phase4_checkpoint_collector", None)
-        if collector is not None:
-            source_features = {
-                str(key): built[key].iloc[0]
-                for key in built.columns
-                if key not in {"entry_cost", "entry_cost_pct", "spot_entry"}
-            }
-            collector.capture_source_bundle(features=source_features)
 
         # The panel's market-state block — `or_implied`, `dist_high`,
         # `spy_vol20`, the market cap — is read at the last pre-print close. The
@@ -2700,6 +2692,23 @@ class Scorer:
         # promoting size_v1_4 without this made every row MISSING_FEATURES.
         built = add_absolute_features(built)
         built = add_quote_indicators(built)
+
+        # Capture the source bundle from THIS fully enriched frame, not an
+        # earlier snapshot. Legacy scores `built` only after the market
+        # block, the event-history live fallback and these two derivations
+        # have all landed, so a capture taken before any of them recorded a
+        # frame legacy itself never scored: native's forward/PROJECTED_CALENDAR
+        # rows (no panel row, or as_of >= last_pre_print) declined
+        # MISSING_FEATURES on columns that were sitting right here, one
+        # step later in this same function.
+        collector = getattr(result, "_phase4_checkpoint_collector", None)
+        if collector is not None:
+            source_features = {
+                str(key): built[key].iloc[0]
+                for key in built.columns
+                if key not in {"entry_cost", "entry_cost_pct", "spot_entry"}
+            }
+            collector.capture_source_bundle(features=source_features)
 
         n_prior = built.get("n_prior")
         if n_prior is not None and pd.notna(n_prior.iloc[0]) and n_prior.iloc[0] < THIN_HISTORY_EVENTS:
