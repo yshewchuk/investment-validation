@@ -54,12 +54,15 @@ _RUNUP_DERIVED_FIELDS = frozenset({
 class _CanonicalFrozenExecutor:
     """Map one verified artifact output into its canonical stage field."""
 
-    def __init__(self, executor, source, target, *, scale=1.0, floor_zero=False):
+    def __init__(self, executor, source, target, *, scale=1.0, floor_zero=False,
+                 role=None, feature_order=()):
         self._executor = executor
         self._source = source
         self._target = target
         self._scale = scale
         self._floor_zero = floor_zero
+        self.role = role
+        self.feature_order = tuple(feature_order)
 
     def predict(self, features):
         outputs = self._executor.predict(features)
@@ -533,6 +536,8 @@ def _frozen_stage_executors(bindings, inference, release, days):
                     target,
                     scale=scale,
                     floor_zero=floor_zero,
+                    role=binding.role,
+                    feature_order=binding.feature_order,
                 )
     return executors, owned
 
@@ -574,7 +579,7 @@ def _frozen_driver_name(base, strategy):
 
 def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
                             required_roles, results, inference, release, days,
-                            strategy):
+                            strategy, executor_bindings=None):
     forecast = _without_frozen_recipes(base.forecast, bindings)
     forecast.update({
         "frozen_outputs": outputs,
@@ -591,7 +596,8 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
     })
     if inference is not None:
         executors, executor_owned = _frozen_stage_executors(
-            bindings, inference, release, days,
+            bindings if executor_bindings is None else executor_bindings,
+            inference, release, days,
         )
         frozen_outputs = {
             name: value for name, value in outputs.items()
@@ -607,7 +613,8 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
 
 
 def _frozen_gate_inputs(base, bindings, gate_result,
-                        artifact_hashes, inference, release):
+                        artifact_hashes, inference, release,
+                        executor_bindings=None):
     # gate_threshold is answer-bearing (engine/v2/scoring/source_inputs.py
     # _ANSWER_FIELDS). The frozen/acceptance path takes it only from the
     # source-built NativeScoreInputs (base.gate) already folded into `gate`
@@ -623,7 +630,9 @@ def _frozen_gate_inputs(base, bindings, gate_result,
                 "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
             })
     if inference is not None:
-        gate_bindings = [binding for binding in bindings
+        gate_bindings = [binding for binding in (
+            bindings if executor_bindings is None else executor_bindings
+        )
                          if str(getattr(binding, "role", "")).split(":", 1)[0] == "gate"]
         if gate_bindings and hasattr(gate_bindings[0], "feature_order"):
             binding = gate_bindings[0]
@@ -660,7 +669,8 @@ def _frozen_release_id(results, release, request) -> str:
 
 def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
                           inference_requests, request, release,
-                          inference=None) -> tuple[NativeScoreInputs, dict[str, float]]:
+                          inference=None, executor_bindings=None
+                          ) -> tuple[NativeScoreInputs, dict[str, float]]:
     supplied = fields.get("_native_inputs")
     if not isinstance(supplied, NativeScoreInputs):
         # score_frozen is the acceptance/frozen path: its native inputs must
@@ -699,8 +709,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
                if key not in _RUNUP_DERIVED_FIELDS}
     features = {key: value for key, value in base.features.items()
                 if key not in _RUNUP_DERIVED_FIELDS}
-    features.update({key: fields[key] for key in ("model_inputs", "implied_move",
-                                                   "spot", "pre_iv30")
+    features.update({key: fields[key] for key in ("model_inputs", "implied_move", "spot", "pre_iv30")
                      if key in fields})
     if days is not None:
         features["days_before_print"] = days
@@ -720,9 +729,11 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     forecast = _frozen_forecast_inputs(
         base, bindings, outputs, artifact_hashes, required_roles,
         results, inference, release, days, context.get("strategy"),
+        executor_bindings,
     )
     gate = _frozen_gate_inputs(
         base, bindings, gate_result, artifact_hashes, inference, release,
+        executor_bindings,
     )
     return replace(
         base,
@@ -750,6 +761,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     )
     inputs, frozen_runup_interval = _frozen_native_inputs(
         fields, results, bindings, requests, request, release, inference,
+        executor_bindings=getattr(release, "bindings", ()),
     )
     record = score_one(request, inputs, observer=observer)
     missing_runup = {

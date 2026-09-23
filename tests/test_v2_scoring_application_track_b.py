@@ -84,6 +84,66 @@ def _override_native(strategy="STR-THRU"):
     )
 
 
+def test_source_model_inputs_are_not_reported_when_forecast_stage_has_no_model():
+    record = application.score_one(_request(), _native())
+    assert record.feature_values == {}
+    assert record.null_masks == {}
+
+
+def test_reached_forecast_model_reports_missing_inputs_on_refusal():
+    source = _native()
+    features = {**source.features, "model_inputs": {"x": None, "extra": 9.0}}
+    forecast = {
+        "driver_name": "abs_move",
+        "models": {"driver_prediction": {
+            "intercept": 0.0, "coefficients": {"x": 1.0},
+        }},
+    }
+    record = application.score_one(
+        _request(), replace(source, features=features, forecast=forecast),
+    )
+    assert record.feature_values == {"x": None}
+    assert record.null_masks == {"x": True}
+
+
+def test_reached_ordinary_forecast_model_reports_only_its_features():
+    source = _native()
+    features = {**source.features, "model_inputs": {"x": 2.5, "extra": 9.0}}
+    forecast = {
+        "driver_name": "abs_move",
+        "models": {"driver_prediction": {
+            "intercept": 0.0, "coefficients": {"x": 1.0},
+        }},
+    }
+    record = application.score_one(
+        _request(), replace(source, features=features, forecast=forecast),
+    )
+    assert record.feature_values == {"x": 2.5}
+    assert record.null_masks == {"x": False}
+
+
+def test_bad_quote_withholds_forecast_model_inputs():
+    source = _native()
+    features = {**source.features, "model_inputs": {"x": 2.5}}
+    forecast = {
+        "driver_name": "abs_move",
+        "models": {"driver_prediction": {
+            "intercept": 0.0, "coefficients": {"x": 1.0},
+        }},
+    }
+    legs = tuple(replace(leg, bid=20.0, ask=21.0)
+                 for leg in source.pricing.legs)
+    pricing = Pricing(source.pricing.strategy, source.pricing.spot,
+                      source.pricing.entry_cost, legs)
+    record = application.score_one(
+        _request(), replace(source, features=features, forecast=forecast,
+                            pricing=pricing),
+    )
+    assert "BAD_QUOTE" in record.reason_codes
+    assert record.feature_values == {}
+    assert record.null_masks == {}
+
+
 @pytest.mark.parametrize("override_field", ["contract_override", "geometry_override"])
 def test_request_overrides_regenerate_and_reprice_selected_contracts(override_field):
     request = replace(_request(), **{override_field: {"strike": 105.0}})

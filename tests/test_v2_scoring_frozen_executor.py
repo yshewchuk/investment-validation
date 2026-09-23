@@ -103,6 +103,28 @@ def test_missing_feature_refuses_before_inference(tmp_path):
     assert error.value.missing_features == ("alpha",)
 
 
+def test_per_role_vector_does_not_fall_back_to_cross_role_merged_features(tmp_path):
+    executor, _ = _executor(tmp_path)
+    facts = {
+        "alpha": 3.0, "beta": 2.0,
+        "role_model_inputs": {"size": {"alpha": 3.0}},
+    }
+    with pytest.raises(FrozenStageRefusal) as error:
+        executor.execute(facts)
+    assert error.value.reason_codes == ("MISSING_FEATURES",)
+    assert error.value.missing_features == ("beta",)
+
+
+def test_stage_owned_derived_features_override_role_primitives(tmp_path):
+    executor, _ = _executor(tmp_path)
+    result = executor.execute({
+        "alpha": 3.0, "beta": 2.0,
+        "role_model_inputs": {"size": {"alpha": 3.0, "beta": 2.0}},
+        "_native_stage_facts": {"beta": 8.0},
+    })
+    assert result.request.rows == ((8.0, 3.0),)
+
+
 def test_model_not_ready_preserves_inference_refusal(tmp_path):
     executor, _ = _executor(tmp_path)
     (tmp_path / "estimator.json").unlink()

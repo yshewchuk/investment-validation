@@ -12,6 +12,7 @@ features block (``role_model_inputs``) and the bridge reads them.
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -84,6 +85,137 @@ def test_replayed_execution_reproduces_the_captured_receipts(tmp_path, monkeypat
     phase4_real._verify_runtime_execution(verified, native)  # raises on drift
     # The per-role rows are inputs, never record fields.
     assert "role_model_inputs" not in native.resolved_request
+    assert native.feature_values == DRIVER
+    assert native.null_masks == {"x": False}
+
+
+def test_replay_model_inputs_do_not_depend_on_binding_order(tmp_path, monkeypatch):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    plan = verified["frozen_replay"]
+    native = application.score_frozen(
+        verified["request"], plan.inference, plan.release,
+        tuple(reversed(plan.requests)), {"_native_inputs": verified["inputs"]},
+    )
+    assert native.feature_values == DRIVER
+    assert native.null_masks == {"x": False}
+
+
+def test_missing_driver_request_is_reported_when_native_stage_refuses_it(
+    tmp_path, monkeypatch,
+):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    inputs = verified["inputs"]
+    features = dict(inputs.features)
+    role_rows = dict(features["role_model_inputs"])
+    role_rows["driver"] = {"x": None}
+    features["role_model_inputs"] = role_rows
+    missing = replace(inputs, features=features)
+    native = application.score_frozen(
+        verified["request"], verified["frozen_replay"].inference,
+        verified["frozen_replay"].release, (),
+        {"_native_inputs": missing},
+    )
+    assert native.feature_values == {"x": None}
+    assert native.null_masks == {"x": True}
+
+
+def test_empty_role_row_does_not_claim_shared_same_named_feature(
+    tmp_path, monkeypatch,
+):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    inputs = verified["inputs"]
+    features = dict(inputs.features)
+    features["role_model_inputs"] = {"driver": {}, "gate": GATE}
+    native_inputs = replace(inputs, features=features)
+    native = application.score_frozen(
+        verified["request"], verified["frozen_replay"].inference,
+        verified["frozen_replay"].release, (),
+        {"_native_inputs": native_inputs},
+    )
+    assert native.feature_values == {"x": None}
+    assert native.null_masks == {"x": True}
+
+
+def test_tagged_nonfinite_driver_input_is_missing_not_invalid(
+    tmp_path, monkeypatch,
+):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    inputs = verified["inputs"]
+    features = dict(inputs.features)
+    features["role_model_inputs"] = {
+        "driver": {"x": {"__nonfinite__": "nan"}}, "gate": GATE,
+    }
+    native_inputs = replace(inputs, features=features)
+    native = application.score_frozen(
+        verified["request"], verified["frozen_replay"].inference,
+        verified["frozen_replay"].release, (),
+        {"_native_inputs": native_inputs},
+    )
+    assert native.feature_values == {"x": {"__nonfinite__": "nan"}}
+    assert native.null_masks == {"x": True}
+    assert "MISSING_FEATURES" in native.reason_codes
+    assert "INVALID_FEATURE" not in native.reason_codes
+
+
+def test_gate_only_release_does_not_publish_gate_features_as_model_inputs(
+    tmp_path, monkeypatch,
+):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    plan = verified["frozen_replay"]
+    gate_bindings = tuple(binding for binding in plan.release.bindings
+                          if binding.role == "gate")
+    gate_requests = tuple(request for request in plan.requests
+                          if request.binding_id in {b.binding_id for b in gate_bindings})
+    release = replace(plan.release, bindings=gate_bindings)
+    native = application.score_frozen(
+        verified["request"], plan.inference, release, gate_requests,
+        {"_native_inputs": verified["inputs"]},
+    )
+    assert native.feature_values == {}
+    assert native.null_masks == {}
+
+
+def test_model_inputs_are_empty_when_no_model_binding_exists(
+    tmp_path, monkeypatch,
+):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+    plan = verified["frozen_replay"]
+    release = replace(plan.release, bindings=())
+    native = application.score_frozen(
+        verified["request"], plan.inference, release, (),
+        {"_native_inputs": verified["inputs"]},
+    )
+    assert native.feature_values == {}
+    assert native.null_masks == {}
+
+
+def test_unservable_model_refusal_does_not_claim_model_inputs(tmp_path, monkeypatch):
+    pair = _traced(tmp_path, monkeypatch)
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+
+    class Unavailable:
+        def infer(self, release, request):
+            return SimpleNamespace(
+                status="MODEL_NOT_READY", release_id=release.release_id,
+                binding_id=request.binding_id, model_id=None,
+                artifact_hashes=(), output_names=(), predictions=(),
+                reason_codes=("MODEL_NOT_READY",), detail="artifact unavailable",
+            )
+
+    plan = verified["frozen_replay"]
+    native = application.score_frozen(
+        verified["request"], Unavailable(), plan.release, plan.requests,
+        {"_native_inputs": verified["inputs"]},
+    )
+    assert native.feature_values == {}
+    assert native.null_masks == {}
+    assert native.readiness == "refused"
 
 
 def test_a_tampered_gate_row_breaks_the_trace_hashes(tmp_path, monkeypatch):
