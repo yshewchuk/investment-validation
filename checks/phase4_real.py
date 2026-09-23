@@ -1205,6 +1205,65 @@ _DECISION_KEY_FIELDS = frozenset(
     _FORECAST_FIELDS + _SIMULATION_FIELDS + _GATE_FIELDS + _ANALOG_FIELDS
 )
 
+#: A stage that never ran leaves every one of its legacy fields at the
+#: dataclass default (``engine/score.py`` ``ScoreResult``, ~1153-1295): every
+#: field in ``_SIMULATION_FIELDS``/``_GATE_FIELDS``/``_ANALOG_FIELDS``
+#: defaults to ``None`` EXCEPT ``n_analogs``, which is a typed ``int = 0``,
+#: never ``None``. That single exception is why "never ran" cannot be
+#: checked with a blanket ``is None`` -- a real analog run with
+#: ``n_analogs=0`` legitimately produces ``0``, but so does a legacy record
+#: whose analog stage was never entered, and only the field's own typed
+#: default tells the two apart at the field level (the per-dimension rule
+#: below resolves the rest: it also requires ``ci_low``/``ci_high`` to be
+#: ``None``, which a genuine ``n_analogs=0`` run would still set).
+_NEVER_RAN_PLACEHOLDER_DEFAULTS = {
+    name: None for name in _SIMULATION_FIELDS + _GATE_FIELDS + _ANALOG_FIELDS
+}
+_NEVER_RAN_PLACEHOLDER_DEFAULTS["n_analogs"] = 0
+
+#: Dimensions the "never ran" rule (USER DECISION, 2026-09-23) applies to.
+#: Forecasts are explicitly excluded -- the forecast band is being built
+#: separately and this rule must not touch ``_FORECAST_FIELDS`` handling.
+#: ``financial_diagnostics`` is also out of scope: both sides COMPUTE it
+#: from other fields rather than carrying it, so it has no notion of
+#: "stage never ran" independent of the fields this rule already covers.
+_NEVER_RAN_DIMENSIONS = {
+    "simulation": _SIMULATION_FIELDS,
+    "verdicts": _GATE_FIELDS,
+    "analogs": _ANALOG_FIELDS,
+}
+
+
+def _never_ran_dimensions(record: Mapping[str, Any], native) -> frozenset[str]:
+    """Dimensions where the stage never ran, on the evidence BOTH sides give
+    for it -- never a guess from one side alone.
+
+    D in ``_NEVER_RAN_DIMENSIONS`` counts as never-ran for this row iff:
+      (1) ``native.resolved_request`` holds NONE of D's field names as keys
+          (real key absence -- checked with ``in``/``set``, never
+          ``.get(name) is None``, so a native value that legitimately IS
+          ``None`` but was still written does not count); and
+      (2) every one of D's fields in the legacy ``record`` equals that
+          field's typed placeholder default (see
+          ``_NEVER_RAN_PLACEHOLDER_DEFAULTS``).
+    If legacy carries ANY real (non-placeholder) value for D, this returns
+    False for D even when native lacks every key for it -- that is a native
+    regression dropping a stage legacy actually ran, and the rule must let
+    the normal comparison fail it.
+    """
+    resolved_keys = set(native.resolved_request)
+    never_ran = set()
+    for dimension, fields in _NEVER_RAN_DIMENSIONS.items():
+        if not resolved_keys.isdisjoint(fields):
+            continue  # native carries at least one real key for D
+        if all(
+            record.get(name) == _NEVER_RAN_PLACEHOLDER_DEFAULTS[name]
+            for name in fields
+        ):
+            never_ran.add(dimension)
+    return frozenset(never_ran)
+
+
 #: Tri-state outcome of a numeric negative control (R4-15 fix, 2026-09-20).
 #: A dimension whose every field is ``None`` for every compared row has
 #: nothing for the control to corrupt -- that is a distinct fact from a
@@ -2277,7 +2336,18 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     # in that set present on only one side is a real finding: it either
     # never reached ``record`` or silently dropped out of
     # ``native.resolved_request``.
-    expected_keys = set(record) & _DECISION_KEY_FIELDS
+    #
+    # EXCEPTION (USER DECISION, 2026-09-23): when a whole dimension never
+    # ran (see ``_never_ran_dimensions``), the legacy side's placeholder
+    # values for that dimension's fields don't count as a "keys" finding --
+    # native's real key absence and legacy's typed default agree that the
+    # stage never ran, so this is not a decision-field vanishing, and must
+    # not read as one.
+    never_ran = _never_ran_dimensions(record, native)
+    never_ran_fields = frozenset(
+        name for dimension in never_ran for name in _NEVER_RAN_DIMENSIONS[dimension]
+    )
+    expected_keys = (set(record) & _DECISION_KEY_FIELDS) - never_ran_fields
     native_keys_for_comparison = set(native.resolved_request) & _DECISION_KEY_FIELDS
 
     keys_agree = expected_keys == native_keys_for_comparison
@@ -2329,6 +2399,24 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
         "null_masks": null_masks_agree,
     }
     numeric = _compare_numeric_outputs(record, native)
+    # EXCEPTION (USER DECISION, 2026-09-23): a dimension this row's evidence
+    # says never ran (both sides agree: native has no real key for it,
+    # legacy holds only typed placeholder defaults) is treated as
+    # agreement, not run through the numeric comparator's tolerance policy
+    # -- there is nothing for that policy to compare. This never applies to
+    # "forecasts" (excluded from ``_NEVER_RAN_DIMENSIONS``) or
+    # "financial_diagnostics" (not a member of it either), so a real
+    # comparator finding on those is untouched.
+    for dimension in never_ran:
+        numeric[dimension] = {
+            "agree": True,
+            "finding_fields": [],
+            "receipt": content_hash({
+                "dimension": dimension,
+                "verdict": "never_ran",
+                "findings": [],
+            }),
+        }
     checks.update({name: result["agree"] for name, result in numeric.items()})
 
     differences = {
@@ -2345,6 +2433,14 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
             "legacy_only": null_mask_legacy_only,
             "value_mismatch": null_mask_value_mismatch,
         } if not null_masks_agree else {},
+        # Auditable per-row record of the never-ran rule's own application
+        # (USER DECISION: "Record every application in the evidence per
+        # row"). An empty list when the rule did not fire for this row; the
+        # caller (``_native_parity``) omits the fixture entirely from the
+        # rolled-up ``row_never_ran_dimensions`` when this is empty, the
+        # same truthy-omission convention the other three difference dicts
+        # already use.
+        "never_ran_dimensions": sorted(never_ran),
     }
 
     return checks, numeric, differences
@@ -2679,6 +2775,10 @@ def _native_parity(corpus) -> tuple[dict, dict]:
                 member_differences[0].get("null_mask_differences") if not chooser_pair
                 else [d.get("null_mask_differences") for d in member_differences]
             ),
+            "never_ran_dimensions": (
+                member_differences[0].get("never_ran_dimensions") if not chooser_pair
+                else [d.get("never_ran_dimensions") for d in member_differences]
+            ),
             "advisory_flags": {
                 "legacy": sorted(set(record.get("flags") or ()) & _ADVISORY_FLAGS),
                 "native": sorted(set(native.reason_codes) & _ADVISORY_FLAGS),
@@ -2774,11 +2874,25 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     row_key_differences = {}
     row_flag_differences = {}
     row_null_mask_differences = {}
+    #: Every row/dimension where the "never ran" rule (USER DECISION,
+    #: 2026-09-23) actually fired -- auditable evidence of its own
+    #: application, distinct from ``row_key_differences``/
+    #: ``row_numeric_findings`` (which the rule suppresses for these
+    #: dimensions on these rows).
+    row_never_ran_dimensions = {}
     for row in compared_rows:
         fixture_id = row["fixture_id"]
         key_diff = row.get("key_differences")
         flag_diff = row.get("flag_differences")
         null_mask_diff = row.get("null_mask_differences")
+        never_ran_diff = row.get("never_ran_dimensions")
+        if isinstance(never_ran_diff, list) and never_ran_diff and isinstance(never_ran_diff[0], list):
+            # Multi-member (chooser): collect non-empty per-member lists.
+            non_empty_never_ran = [d for d in never_ran_diff if d]
+            if non_empty_never_ran:
+                row_never_ran_dimensions[fixture_id] = non_empty_never_ran
+        elif never_ran_diff:
+            row_never_ran_dimensions[fixture_id] = never_ran_diff
         # Handle both single and multi-member (chooser) cases
         if isinstance(key_diff, list):
             # Multi-member: collect non-empty differences
@@ -2864,6 +2978,7 @@ def _native_parity(corpus) -> tuple[dict, dict]:
         "row_key_differences": row_key_differences,
         "row_flag_differences": row_flag_differences,
         "row_null_mask_differences": row_null_mask_differences,
+        "row_never_ran_dimensions": row_never_ran_dimensions,
         "dimension_rollup": dimension_rollup,
         "dispositions": tuple({
             "fixture_id": row["fixture_id"],
