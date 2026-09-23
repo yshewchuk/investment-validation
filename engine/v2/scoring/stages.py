@@ -152,7 +152,7 @@ _ANALOG_OUTPUTS = frozenset({
     "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
 })
 #: engine/score.py:2210/2214-2216 -- the payoff-calibration/model layer.
-_MODEL_OUTPUTS = frozenset({"exp_pnl_model", "win_model"})
+_MODEL_OUTPUTS = frozenset({"exp_pnl_model", "win_model", "win_model_raw"})
 _FINANCIAL_OUTPUTS = frozenset({
     "entry_cost_pct", "model_vs_market", "fair_premium_pct",
     "premium_vs_fair", "cost_over_width", "terminal_payoff",
@@ -1580,6 +1580,7 @@ def _execute_runup_model(
     output = {
         "exp_pnl_model": float(np.mean(returns)),
         "win_model": float(np.mean(returns > 0.0)),
+        "win_model_raw": float(np.mean(returns > 0.0)),
         "payoff": _surface_payoff_document(fit),
     }
     values.update(output)
@@ -1679,6 +1680,7 @@ def _execute_model(
     output = {
         "exp_pnl_model": float(np.mean(returns)),
         "win_model": float(np.mean(returns > 0.0)),
+        "win_model_raw": float(np.mean(returns > 0.0)),
         "payoff": _line_payoff_document(fit),
     }
     output = _recalibrated_output(block, recipe, name, values, output, flags)

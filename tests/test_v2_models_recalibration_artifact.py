@@ -298,6 +298,20 @@ def test_scoring_applies_the_frozen_map_to_win_model_exactly_as_legacy():
     assert calibrated.validation_status == "scored"
 
 
+def test_win_model_raw_survives_recalibration_unchanged():
+    """win_model_raw is the pre-recalibration Monte Carlo win rate
+    (engine/score.py:3012's result.win_model_raw = raw_win) and must not
+    move when a recalibration artifact changes win_model."""
+    raw = _score()
+    recal = _map()
+    calibrated = _score(recalibration_artifact=recal)
+    # Undeclared recalibration: win_model_raw equals win_model exactly.
+    assert raw.resolved_request["win_model_raw"] == raw.resolved_request["win_model"]
+    # Declared, fitted recalibration: win_model moves, win_model_raw does not.
+    assert calibrated.resolved_request["win_model_raw"] == raw.resolved_request["win_model_raw"]
+    assert calibrated.resolved_request["win_model"] != calibrated.resolved_request["win_model_raw"]
+
+
 def test_undeclared_recalibration_leaves_the_record_unchanged():
     """Phase 4 captures declare nothing: their records must not move."""
     assert _score() == _score(recalibration_declared=False, recalibration_artifact=None)
