@@ -282,8 +282,12 @@ def test_default_native_runup_numbers_and_record_shape_are_unchanged():
     assert record.forecasts["runup_move_prediction"] == pytest.approx(8.0)
     assert "runup_move_raw_d14" not in record.forecasts
     assert "runup_move_provenance" not in record.forecasts
+    # No held-out forecast pool was declared, so the serialized interval
+    # contract is explicit: forecast_sd is present as None, never fabricated.
+    assert record.uncertainty["forecast_sd"] is None
     assert set(record.uncertainty) == {
         "model_p10", "model_p90", "forecast_p10", "forecast_p90",
+        "forecast_sd",
     }
 
 
