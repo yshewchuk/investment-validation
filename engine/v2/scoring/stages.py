@@ -152,7 +152,10 @@ _ANALOG_OUTPUTS = frozenset({
     "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
 })
 #: engine/score.py:2210/2214-2216 -- the payoff-calibration/model layer.
-_MODEL_OUTPUTS = frozenset({"exp_pnl_model", "win_model", "win_model_raw"})
+_MODEL_OUTPUTS = frozenset({
+    "exp_pnl_model", "win_model", "win_model_raw",
+    "driver_p10", "driver_p90", "runup_move_p10", "runup_move_p90",
+})
 _FINANCIAL_OUTPUTS = frozenset({
     "entry_cost_pct", "model_vs_market", "fair_premium_pct",
     "premium_vs_fair", "cost_over_width", "terminal_payoff",
@@ -1572,7 +1575,7 @@ def _execute_runup_model(
     draws = int(recipe.get("draw_count", native_payoff.MODEL_DRAWS))
     seed = recipe.get("seed")
     seed = int(seed) if seed is not None else _model_seed(inputs, values)
-    returns = native_payoff.simulate_runup_model_returns(
+    returns, implied_draws, move_draws = native_payoff.simulate_runup_model_returns(
         point_implied, point_move_d14, implied_pool, move_pool,
         fit["coefficients"], fit["residuals"], spot, strike, cost, days,
         draws, np.random.default_rng(seed),
@@ -1582,6 +1585,8 @@ def _execute_runup_model(
         "win_model": float(np.mean(returns > 0.0)),
         "win_model_raw": float(np.mean(returns > 0.0)),
         "payoff": _surface_payoff_document(fit),
+        **_quantile_band(implied_draws, "driver"),
+        **_quantile_band(move_draws, "runup_move"),
     }
     values.update(output)
     return output
@@ -1615,6 +1620,17 @@ def _surface_payoff_document(fit: Mapping[str, Any]) -> dict[str, Any]:
             name: round(float(value), 8)
             for name, value in zip(native_payoff.RUNUP_TERMS, fit["coefficients"])
         },
+    }
+
+
+def _quantile_band(draws: np.ndarray, prefix: str) -> dict[str, float]:
+    """10th/90th-percentile band of ``draws``, keyed ``{prefix}_p10``/
+    ``{prefix}_p90`` -- matches legacy's ``np.quantile(draws, 0.10/0.90)``
+    (engine/score.py). Shared by ``_execute_model`` (``prefix="driver"``)
+    and ``_execute_runup_model`` (``prefix="driver"``/``"runup_move"``)."""
+    return {
+        f"{prefix}_p10": float(np.quantile(draws, 0.10)),
+        f"{prefix}_p90": float(np.quantile(draws, 0.90)),
     }
 
 
@@ -1684,7 +1700,7 @@ def _execute_model(
     draws = int(recipe.get("draw_count", native_payoff.MODEL_DRAWS))
     seed = recipe.get("seed")
     seed = int(seed) if seed is not None else _model_seed(inputs, values)
-    returns = native_payoff.simulate_model_returns(
+    returns, model_draws = native_payoff.simulate_model_returns(
         driver, driver_pool, fit["residuals"], fit["intercept"], fit["slope"],
         spot, cost, draws, np.random.default_rng(seed),
     )
@@ -1693,6 +1709,7 @@ def _execute_model(
         "win_model": float(np.mean(returns > 0.0)),
         "win_model_raw": float(np.mean(returns > 0.0)),
         "payoff": _line_payoff_document(fit),
+        **_quantile_band(model_draws, "driver"),
     }
     output = _recalibrated_output(block, recipe, name, values, output, flags)
     values.update(output)

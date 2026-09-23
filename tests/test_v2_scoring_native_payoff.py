@@ -147,12 +147,13 @@ def test_simulate_model_returns_matches_legacy_draw_order_and_seed():
     legacy_returns = simulate_returns(legacy_draws, payoff, spot, cost, legacy_noise)
 
     native_rng = np.random.default_rng(seed)
-    native_returns = native_payoff.simulate_model_returns(
+    native_returns, native_model_draws = native_payoff.simulate_model_returns(
         point, driver_pool, payoff_residuals, intercept, slope, spot, cost,
         draws, native_rng,
     )
 
     np.testing.assert_array_equal(native_returns, legacy_returns)
+    np.testing.assert_array_equal(native_model_draws, legacy_draws)
 
     # Reordering the two draws (payoff first, model second) must NOT match --
     # otherwise this test could not tell a real order bug from an accident.
@@ -161,6 +162,28 @@ def test_simulate_model_returns_matches_legacy_draw_order_and_seed():
     reordered_draws = point + reordered_rng.choice(driver_pool, size=draws, replace=True)
     reordered_returns = simulate_returns(reordered_draws, payoff, spot, cost, reordered_noise)
     assert not np.array_equal(native_returns, reordered_returns)
+
+
+def test_simulate_model_returns_driver_draws_quantiles_match_np_quantile():
+    """driver_p10/driver_p90 are exactly np.quantile(.., 0.10/0.90) of the
+    SAME draws simulate_model_returns already computed internally --
+    engine/score.py's exact quantile call, no separate re-derivation."""
+    driver_pool = np.array([-3.0, -1.5, -0.5, 0.0, 0.2, 0.8, 1.5, 2.0, 3.0, -2.2])
+    payoff_residuals = np.array([-0.02, 0.0, 0.01, 0.03, -0.01, 0.02])
+    point, spot, cost, draws = 7.0, 100.0, 4.0, 500
+
+    _, model_draws = native_payoff.simulate_model_returns(
+        point, driver_pool, payoff_residuals, 0.02, 0.004, spot, cost,
+        draws, np.random.default_rng(99),
+    )
+    expected_rng = np.random.default_rng(99)
+    expected_draws = point + expected_rng.choice(driver_pool, size=draws, replace=True)
+
+    np.testing.assert_array_equal(model_draws, expected_draws)
+    assert float(np.quantile(model_draws, 0.10)) == pytest.approx(
+        float(np.quantile(expected_draws, 0.10)))
+    assert float(np.quantile(model_draws, 0.90)) == pytest.approx(
+        float(np.quantile(expected_draws, 0.90)))
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +285,8 @@ def test_model_number_computed_from_answer_free_inputs():
     assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
     assert record.resolved_request["win_model"] == pytest.approx(1.0)
     assert record.resolved_request["win_model_raw"] == pytest.approx(1.0)
+    assert record.resolved_request["driver_p10"] == pytest.approx(7.0)
+    assert record.resolved_request["driver_p90"] == pytest.approx(7.0)
     assert "NO_PAYOFF_MAP" not in record.reason_codes
     assert record.validation_status == "scored"
 
@@ -284,6 +309,8 @@ def test_no_payoff_map_for_a_strategy_without_a_driver():
 
     assert "NO_PAYOFF_MAP" in record.reason_codes
     assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.resolved_request.get("driver_p10") is None
+    assert record.resolved_request.get("driver_p90") is None
 
 
 def test_missing_payoff_rows_flags_no_payoff_map_without_a_number():
@@ -480,12 +507,14 @@ def test_simulate_runup_model_returns_matches_legacy_draw_order_and_seed():
     )
 
     native_rng = np.random.default_rng(seed)
-    native_returns = native_payoff.simulate_runup_model_returns(
+    native_returns, native_implied_draws, native_move_draws = native_payoff.simulate_runup_model_returns(
         point_implied, point_move_d14, implied_pool, move_pool, coefficients,
         payoff_residuals, spot, strike, cost, days, draws, native_rng,
     )
 
     np.testing.assert_array_equal(native_returns, legacy_returns)
+    np.testing.assert_array_equal(native_implied_draws, implied_draws)
+    np.testing.assert_array_equal(native_move_draws, move_draws)
 
     # Reordering the four draws must NOT match -- otherwise this test could
     # not tell a real order bug from an accident.
@@ -501,6 +530,37 @@ def test_simulate_runup_model_returns_matches_legacy_draw_order_and_seed():
         cost=cost, payoff_noise=reordered_noise,
     )
     assert not np.array_equal(native_returns, reordered_returns)
+
+
+def test_simulate_runup_model_returns_driver_and_move_draws_quantiles_match_np_quantile():
+    """driver_p10/p90 (from implied_draws) and runup_move_p10/p90 (from
+    move_draws) are exactly np.quantile(.., 0.10/0.90) of the SAME draws
+    simulate_runup_model_returns already computed internally."""
+    implied_pool = np.array([-3.0, -1.0, 0.0, 0.5, 1.0, 2.5, -0.8, 1.8])
+    move_pool = np.array([-0.6, -0.2, 0.0, 0.1, 0.3, 0.5, -0.4])
+    payoff_residuals = np.array([-0.02, 0.0, 0.01, 0.03, -0.01, 0.02])
+    coefficients = (0.02, 0.004, 0.001, 0.0005, 0.0007, 0.0003)
+    point_implied, point_move_d14 = 7.0, 3.0
+    spot, strike, cost, draws, days = 100.0, 100.0, 4.0, 500, 7.0
+
+    _, implied_draws, move_draws = native_payoff.simulate_runup_model_returns(
+        point_implied, point_move_d14, implied_pool, move_pool, coefficients,
+        payoff_residuals, spot, strike, cost, days, draws,
+        np.random.default_rng(99),
+    )
+
+    expected_rng = np.random.default_rng(99)
+    expected_implied = point_implied + expected_rng.choice(implied_pool, size=draws, replace=True)
+    expected_implied = np.maximum(expected_implied, 0.0)
+    expected_move_d14 = point_move_d14 + expected_rng.choice(move_pool, size=draws, replace=True)
+    expected_move = native_payoff.scale_runup_move(np.maximum(expected_move_d14, 0.0), days)
+
+    np.testing.assert_array_equal(implied_draws, expected_implied)
+    np.testing.assert_array_equal(move_draws, expected_move)
+    assert float(np.quantile(implied_draws, 0.10)) == pytest.approx(
+        float(np.quantile(expected_implied, 0.10)))
+    assert float(np.quantile(move_draws, 0.90)) == pytest.approx(
+        float(np.quantile(expected_move, 0.90)))
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +666,10 @@ def test_runup_model_number_computed_from_answer_free_inputs():
     assert record.resolved_request["exp_pnl_model"] == pytest.approx(0.2)
     assert record.resolved_request["win_model"] == pytest.approx(1.0)
     assert record.resolved_request["win_model_raw"] == pytest.approx(1.0)
+    assert record.resolved_request["driver_p10"] == pytest.approx(7.0)
+    assert record.resolved_request["driver_p90"] == pytest.approx(7.0)
+    assert record.resolved_request["runup_move_p10"] == pytest.approx(0.0)
+    assert record.resolved_request["runup_move_p90"] == pytest.approx(0.0)
     assert "NO_PAYOFF_MAP" not in record.reason_codes
     assert record.validation_status == "scored"
 
@@ -619,6 +683,10 @@ def test_runup_no_payoff_map_without_source_rows():
 
     assert "NO_PAYOFF_MAP" in record.reason_codes
     assert record.resolved_request.get("exp_pnl_model") is None
+    assert record.resolved_request.get("driver_p10") is None
+    assert record.resolved_request.get("driver_p90") is None
+    assert record.resolved_request.get("runup_move_p10") is None
+    assert record.resolved_request.get("runup_move_p90") is None
     assert record.validation_status == "refused"
 
 
@@ -1417,7 +1485,7 @@ _COEFFICIENTS = (0.02, 0.004, 0.001, 0.0005, 0.0007, 0.0003)
 
 @pytest.mark.parametrize("cost", [0.0, -1.0, 0.5])
 def test_simulated_returns_are_nan_for_non_positive_cost_like_legacy(cost):
-    thru = native_payoff.simulate_model_returns(
+    thru, thru_draws = native_payoff.simulate_model_returns(
         7.0, [-0.5, 0.5], [0.0, 0.01], 0.02, 0.004, 100.0, cost, 50,
         np.random.default_rng(1))
     payoff = PayoffMap(strategy="STR-THRU", driver="abs_move", alpha=0.5, intercept=0.02,
@@ -1430,7 +1498,7 @@ def test_simulated_returns_are_nan_for_non_positive_cost_like_legacy(cost):
     np.testing.assert_array_equal(thru, legacy)
     assert np.isnan(thru).all() == (cost <= 0)
 
-    runup = native_payoff.simulate_runup_model_returns(
+    runup, runup_implied_draws, runup_move_draws = native_payoff.simulate_runup_model_returns(
         7.0, 3.0, [-0.5, 0.5], [-0.2, 0.2], _COEFFICIENTS, [0.0, 0.01],
         100.0, 100.0, cost, 7.0, 50, np.random.default_rng(1))
     assert runup.shape == (50,)
@@ -1457,10 +1525,12 @@ def test_runup_draws_floor_implied_and_move_at_zero_like_legacy():
     signed = rng.choice((-1.0, 1.0), size=draws) * move
     legacy = simulate_runup_returns(implied, signed, payoff, spot=spot, strike=strike,
                                     cost=cost, payoff_noise=payoff.residual_draws(draws, rng))
-    native = native_payoff.simulate_runup_model_returns(
+    native, native_implied, native_move = native_payoff.simulate_runup_model_returns(
         point_implied, point_move, implied_pool, move_pool, _COEFFICIENTS, payoff_residuals,
         spot, strike, cost, days, draws, np.random.default_rng(21))
     np.testing.assert_array_equal(native, legacy)
+    np.testing.assert_array_equal(native_implied, implied)
+    np.testing.assert_array_equal(native_move, move)
 
 
 def test_line_payoff_document_rounds_intercept_and_slope_to_8dp():
