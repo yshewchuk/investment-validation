@@ -367,8 +367,19 @@ def test_native_observer_packages_a_trace_with_a_nonempty_model_block(tmp_path):
     # Mirrors the fix in `native_inputs_from_capture`: `shared_inputs` carries
     # the DOCUMENTED form of the model block, the native trace carries the
     # raw one that `NativeScoreInputs` executes against.
-    inputs = replace(inputs, model=model_block)
     shared["native_inputs"]["model"] = _model_document(model_block)
+    new_source_ref = content_hash(shared)
+    new_receipts = tuple(
+        receipt(stage, {"source_ref": new_source_ref}, {"execution": "native-runtime"})
+        for stage in (
+            "resolve_context", "features", "forecast", "geometry", "pricing",
+            "model", "analogs", "simulation", "gate", "chooser", "serialization",
+        )
+    )
+    inputs = replace(
+        inputs, model=model_block, source_ref=new_source_ref,
+        stage_receipts=new_receipts,
+    )
 
     trace, native = package_strict_trace(request, inputs, shared)
     assert trace["input_translation"]["mappings"]
