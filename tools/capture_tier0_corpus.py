@@ -91,6 +91,10 @@ from checks.phase4_frozen_bridge import (  # noqa: E402
     prepare_frozen_chooser,
     with_frozen_chooser,
 )
+from checks.phase4_stored_forecasts import (  # noqa: E402
+    resolve_stored_forecasts,
+    with_stored_forecasts,
+)
 from checks.tier0_corpus import derive_covers, priced  # noqa: E402
 from engine import replay as replay_mod  # noqa: E402
 from engine import score as score_mod  # noqa: E402
@@ -3136,6 +3140,18 @@ def strict_trace_one(
             release_root=Path(release_root), resource_rows=resources,
             verified_documents=documents, request=request, inputs=inputs,
         ))
+    # A declared stored-forecast REFERENCE (``native_inputs.forecast.
+    # stored_refs``) is resolved here, natively, from the table it
+    # addresses -- the same resolver replay uses
+    # (checks/phase4_stored_forecasts.py), so the two passes execute
+    # identically. This feeds ``execution_inputs`` (what capture's own
+    # ``score_one``/``score_frozen`` pass runs on) only. ``inputs`` --
+    # what ``package_strict_trace`` serializes as ``native_inputs`` --
+    # is never touched, so the pair still carries only the reference.
+    stored_base = execution_inputs if execution_inputs is not None else inputs
+    resolved_forecasts = resolve_stored_forecasts(stored_base)
+    if resolved_forecasts is not None:
+        execution_inputs = with_stored_forecasts(stored_base, resolved_forecasts)
     runtime = (
         _frozen_runtime(package, release_root, request, inputs, candidate)
         if package else None
