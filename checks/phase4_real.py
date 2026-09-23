@@ -62,6 +62,7 @@ from engine.v2.foundation import (  # noqa: E402
     content_hash,
     from_document,
     to_document,
+    untag_nonfinite,
 )
 from engine.v2.models import (  # noqa: E402
     FrozenInference,
@@ -1597,7 +1598,7 @@ def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
         cls = (PayoffLineArtifact if artifact_doc["kind"] == "line"
                else PayoffSurfaceArtifact)
         block["payoff_artifact"] = from_document(
-            cls, artifact_doc["value"],
+            cls, untag_nonfinite(artifact_doc["value"]),
             path="$.native_inputs.model.payoff_artifact.value")
     if "model_residual_artifact_recipe" in doc:
         recipe = doc["model_residual_artifact_recipe"]
@@ -1614,14 +1615,14 @@ def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
                 "must be an object")
         block["model_residual_artifacts"] = {
             str(slot): (None if artifact is None else from_document(
-                DriverResidualPoolArtifact, artifact,
+                DriverResidualPoolArtifact, untag_nonfinite(artifact),
                 path=f"$.native_inputs.model.model_residual_artifacts.{slot}"))
             for slot, artifact in residuals.items()
         }
     recal_doc = doc.get("recalibration_artifact")
     if recal_doc is not None:
         block["recalibration_artifact"] = from_document(
-            RecalibrationMapArtifact, recal_doc,
+            RecalibrationMapArtifact, untag_nonfinite(recal_doc),
             path="$.native_inputs.model.recalibration_artifact")
     return block
 
