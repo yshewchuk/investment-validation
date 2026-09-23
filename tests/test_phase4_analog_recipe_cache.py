@@ -200,10 +200,13 @@ def test_different_cutoff_or_alpha_gets_its_own_cache_entry():
     )
 
 
-def test_empty_source_rows_cached_and_still_skips_native_recipes():
-    """A causal block with no usable rows must be a no-op for BOTH the first
-    and a subsequent cache-hit candidate -- matching what two independent
-    (uncached) calls would each have done on their own.
+def test_empty_source_rows_still_captured_explicitly_and_shared_via_cache():
+    """A causal block with no usable rows (legacy's matcher ran and found an
+    empty causal population) must still write an explicit `analogs` recipe
+    with empty `source_rows` -- not be dropped the way `not_applicable` rows
+    (the analog layer never asked at all) are. The cache-hit candidate must
+    share the SAME (population_hash, empty documented rows) entry as the
+    first, exactly like the non-empty path.
     """
     malformed = [{"row_id": "x"}]  # no "values" -> filtered out entirely
     cache: dict = {}
@@ -213,8 +216,13 @@ def test_empty_source_rows_cached_and_still_skips_native_recipes():
     second = Phase4TraceCollector(content_hasher=content_hash)
     second.capture_analog_inputs(_evidence(malformed), recipe_cache=cache)
 
-    assert "analogs" not in first._source_bundle["native_recipes"]
-    assert "analogs" not in second._source_bundle["native_recipes"]
+    doc_first = _analogs_doc(first)
+    doc_second = _analogs_doc(second)
+    assert doc_first["source_rows"].value == []
+    assert doc_second["source_rows"].value == []
+    assert isinstance(doc_first["recipe"]["population_hash"], str)
+    assert doc_first["recipe"]["population_hash"]
+    assert doc_first["recipe"]["population_hash"] == doc_second["recipe"]["population_hash"]
     assert len(cache) == 1
 
 

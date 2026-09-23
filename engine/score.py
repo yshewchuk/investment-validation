@@ -711,16 +711,27 @@ class Phase4TraceCollector:
                     },
                     "realized_return": values.get("ret"),
                 })
-            if not source_rows:
-                if cache_key is not None:
-                    recipe_cache[cache_key] = (None, ())
-                return
+            # An empty `source_rows` here is a DOCUMENTED FACT, not a missing
+            # one: legacy's analog matcher ran (the `causal`/`query` guard
+            # above already passed) and found zero rows in the causal
+            # population -- legacy's own record for this candidate has
+            # `n_analogs` present, the analog numbers `None`, and
+            # THIN_ANALOGS set. Returning early here (the prior behavior)
+            # silently dropped `native_recipes["analogs"]`, which
+            # `tools/capture_tier0_corpus.py` then defaulted to
+            # `{"mode": "not_applicable"}` -- indistinguishable from a row
+            # where legacy never asked for analogs at all. Falling through
+            # instead writes the same recipe/query-feature shape as the
+            # non-empty path, just with an empty `source_rows`, so the
+            # capture can tell "ran, found nothing" apart from "never ran".
             normalized_rows = tuple(sorted(
                 source_rows, key=lambda row: row["row_id"],
             ))
             # Hashed on the RAW rows (matching the original, uncached
             # computation exactly) -- `content_hash`'s own canonicalization
             # handles sanitization for hashing, independent of `_document`.
+            # An empty `normalized_rows` still hashes to a real, deterministic
+            # "empty population" identity -- not a sentinel `None`.
             population_hash = self._hash({
                 "schema_version": "legacy_bucket_analog_population.v1.0",
                 "bucket_dimensions": legacy_bucket_dimensions,
@@ -737,8 +748,6 @@ class Phase4TraceCollector:
             documented_rows = self._document(normalized_rows)
             if cache_key is not None:
                 recipe_cache[cache_key] = (population_hash, documented_rows)
-        if not documented_rows:
-            return
 
         buckets = {
             name: query.get(name) for name in legacy_bucket_dimensions

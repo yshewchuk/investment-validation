@@ -570,14 +570,19 @@ def test_forecast_sized_entry_rule_run_ends_with_analogs_and_simulation_frozen(
     assert "simulation" in recipes and recipes["simulation"]["mode"] == "planned_exit"
 
 
-def test_analogs_that_genuinely_did_not_match_stay_absent_from_the_frozen_checkpoint() -> None:
-    """The other half of the ordering fix: a stage that finds nothing must
-    stay absent from the FROZEN checkpoint, not just the live bundle --
-    `_refresh_source_inputs` must never fabricate a recipe for a stage that
-    did not produce one. `capture_analog_inputs` returns early (no
-    ``source_rows``) when the causal population is empty, so it never
-    reaches the `native_recipes["analogs"]` assignment or the refresh call
-    after it; this pins that the frozen checkpoint reflects that absence."""
+def test_analogs_with_an_empty_causal_population_are_captured_as_empty_not_missing() -> None:
+    """An empty causal population is a DOCUMENTED FACT, not a missing stage.
+
+    When `causal`/`bucket_query` (or `effective_bucket_query`) are present,
+    legacy's analog matcher ran and reached a verdict: zero rows in the
+    causal population. Legacy's own record for that candidate has
+    `n_analogs` present, the analog numbers `None`, and THIN_ANALOGS set.
+    `capture_analog_inputs` must therefore still write
+    `native_recipes["analogs"]`, with an explicit empty `source_rows` and a
+    real `population_hash` for the empty population -- not skip the
+    assignment the way it does when the analog layer never ran at all (no
+    `causal`/`bucket_query` in evidence, left to
+    `tools/capture_tier0_corpus.py`'s `{"mode": "not_applicable"}` default)."""
     collector = Phase4TraceCollector(content_hasher=content_hash)
     collector.capture_source_bundle(context={"ticker": "ABC"})
     collector.capture_analog_inputs({
@@ -586,6 +591,32 @@ def test_analogs_that_genuinely_did_not_match_stay_absent_from_the_frozen_checkp
         "bucket_query": {"mcap_bucket": "large", "moneyness_band": "atm",
                         "dte_band": "short", "implied_tercile": "mid"},
         "causal": {"rows": []},
+    })
+
+    recipes = _checkpoint_value(collector, "source_inputs")["native_recipes"]
+    assert "analogs" in recipes
+    analogs_block = recipes["analogs"]
+    assert analogs_block["source_rows"] == []
+    assert isinstance(analogs_block["recipe"]["population_hash"], str)
+    assert analogs_block["recipe"]["population_hash"]
+    assert analogs_block["query_features"] == {
+        "mcap_bucket": "large", "moneyness_band": "atm",
+        "dte_band": "short", "implied_tercile": "mid",
+    }
+
+
+def test_analogs_never_asked_for_stay_absent_from_the_frozen_checkpoint() -> None:
+    """The other half: a candidate the analog layer never touched (no
+    `causal`/`bucket_query` in evidence at all) must stay absent from the
+    FROZEN checkpoint, not just the live bundle -- `_refresh_source_inputs`
+    must never fabricate a recipe for a stage that did not run. This is the
+    `not_applicable` case `tools/capture_tier0_corpus.py` defaults, distinct
+    from the "ran, found nothing" case pinned above."""
+    collector = Phase4TraceCollector(content_hasher=content_hash)
+    collector.capture_source_bundle(context={"ticker": "ABC"})
+    collector.capture_analog_inputs({
+        "strategy": "STR-THRU", "alpha": 0.5, "snapshot": "snap",
+        "cutoff": "2024-01-01T00:00:00", "request_key": "req",
     })
 
     recipes = _checkpoint_value(collector, "source_inputs")["native_recipes"]

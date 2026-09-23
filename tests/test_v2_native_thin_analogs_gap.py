@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from engine.v2.scoring.native_analog import (
+    LEGACY_BUCKET_DIMENSIONS,
+    LEGACY_WIDENING_ORDER,
+    LegacyBucketRecipe,
+    bucket_population_hash,
+    legacy_bucket_bootstrap_seed,
+)
 from engine.v2.scoring.stages import _execute_analogs, _execute_frozen_analogs
 
 
@@ -95,6 +102,49 @@ def test_execute_frozen_analogs_does_not_emit_thin_analogs_when_not_thin(monkeyp
     _execute_frozen_analogs(block, "STR-THRU", values, flags)
 
     assert "THIN_ANALOGS" not in flags
+
+
+def test_execute_analogs_on_a_real_empty_declared_population_is_thin_with_zero_analogs():
+    """End-to-end (no ``evaluate_analogs`` mock): an explicit empty-population
+    recipe -- what ``engine.score.Phase4TraceCollector.capture_analog_inputs``
+    now writes for a row where legacy's analog matcher ran and found an empty
+    causal population, instead of skipping the key -- must drive
+    ``_execute_analogs`` to ``n_analogs == 0`` and ``THIN_ANALOGS``, matching
+    legacy's own record for that row (``n_analogs`` present, the analog
+    numbers ``None``, THIN_ANALOGS set)."""
+    query = {
+        "mcap_bucket": "1-10B", "moneyness_band": "ATM",
+        "dte_band": "4-10", "implied_tercile": "mid",
+    }
+    recipe = LegacyBucketRecipe(
+        bucket_dimensions=LEGACY_BUCKET_DIMENSIONS,
+        widening_order=LEGACY_WIDENING_ORDER,
+        min_analogs=30,
+        alpha=0.5,
+        bootstrap_draws=2000,
+        bootstrap_seed=legacy_bucket_bootstrap_seed(
+            snapshot="snap", strategy="STR-THRU", alpha=0.5,
+            buckets=query, request_key="req",
+        ),
+        ci_quantiles=(0.05, 0.95),
+        population_hash=bucket_population_hash([], LEGACY_BUCKET_DIMENSIONS),
+    )
+    inputs = SimpleNamespace(analogs={
+        "recipe": vars(recipe),
+        "source_rows": [],
+        "query_features": query,
+    })
+    values: dict = {}
+    flags: list = []
+    output = _execute_analogs(inputs, values, flags, strategy="STR-THRU")
+
+    assert output["n_analogs"] == 0
+    assert output["exp_pnl_analog"] is None
+    assert output["win_analog"] is None
+    assert output["ci_low"] is None
+    assert output["ci_high"] is None
+    assert "THIN_ANALOGS" in flags
+    assert values["n_analogs"] == 0
 
 
 def test_execute_frozen_analogs_still_returns_early_on_model_not_ready(monkeypatch):
