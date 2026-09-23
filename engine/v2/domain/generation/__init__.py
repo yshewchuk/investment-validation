@@ -17,10 +17,12 @@ from .structures import (
     Pricing,
     PricingRefusal,
     generate,
+    has_resolvable_expiry,
     price,
 )
 
 __all__ = [
     "DISABLED", "STRATEGIES", "Geometry", "GeometryRefusal", "NativeLeg",
-    "PricedLeg", "Pricing", "PricingRefusal", "generate", "price",
+    "PricedLeg", "Pricing", "PricingRefusal", "generate",
+    "has_resolvable_expiry", "price",
 ]

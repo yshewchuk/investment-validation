@@ -11,7 +11,14 @@ from typing import Any, Callable, Iterable, Mapping
 import numpy as np
 from scipy.stats import norm
 
-from engine.v2.domain.generation import DISABLED, Geometry, Pricing, generate, price
+from engine.v2.domain.generation import (
+    DISABLED,
+    Geometry,
+    Pricing,
+    generate,
+    has_resolvable_expiry,
+    price,
+)
 from engine.v2.domain.valuation import terminal_payoff
 from engine.v2.foundation import content_hash, to_document
 
@@ -777,7 +784,14 @@ def _resolve_geometry(inputs: NativeScoreInputs, name: str,
         if spot is None or spot <= 0.0:
             return geometry_inputs, Geometry(name, 0.0, 0.0, (), "MISSING_SPOT")
         if (geometry_inputs.get("expiry") is None
-                and geometry_inputs.get("post_event_expiry") is None):
+                and geometry_inputs.get("post_event_expiry") is None
+                and not has_resolvable_expiry(name, geometry_inputs, spot)):
+            # A row legacy never priced (NO_CHAIN, COARSE_LADDER, NO_FORECAST
+            # at sizing) carries no captured `expiry`, but every such row
+            # still carries `quotes`/`event_date`/`exit_date`/`session` --
+            # `has_resolvable_expiry` is the same native selection `generate`
+            # performs below, so this refuses only when that selection also
+            # finds nothing, not merely because legacy never priced the row.
             return geometry_inputs, Geometry(name, spot, 0.0, (), "MISSING_EXPIRY")
     if inputs.geometry is not None:
         geometry_inputs["resolved_legs"] = tuple(vars(leg) for leg in inputs.geometry.legs)

@@ -109,6 +109,16 @@ def _quote_contracts(inputs: Mapping[str, Any]) -> tuple[tuple[str, float, str],
 def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> str:
     """Resolve the expiry to trade, mirroring legacy ``ExpirySelector``.
 
+    Despite the name (kept to avoid touching call sites unnecessarily), this
+    takes no straddle-specific input -- like legacy's own
+    ``ExpirySelector.select`` (``engine/structures.py``), which chooses from
+    the full chain's expiries regardless of the leg's ``right``. It is
+    shared by the put-ladder expiry selection below (:func:`generate`'s
+    non-straddle branch), which supplies put-only ``expiries`` from
+    :func:`_listed_put_expiries` -- every enabled put-ladder strategy
+    (TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5) uses legacy's
+    ``first_post_event`` kind, the same one this implements.
+
     - A caller-supplied ``expiry`` is legacy's ``fixed`` rule: it must match
       a listed expiry exactly (by calendar date), or this refuses via
       ``GeometryRefusal`` rather than silently substituting another expiry.
@@ -176,6 +186,58 @@ def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[flo
     pool = [(strike, expiry) for strike, expiry in common if expiry == resolved_expiry]
     strike, expiry = min(pool, key=lambda row: (abs(row[0] - spot), row[0]))
     return strike, expiry
+
+
+def _listed_put_expiries(inputs: Mapping[str, Any]) -> list[str]:
+    """Sorted distinct expiries with at least one listed put.
+
+    The put-ladder counterpart to :func:`_select_listed_straddle`'s expiry
+    candidates. Unlike that function this does not require a matching call
+    at the same strike: every enabled put-ladder strategy (TWIN-P, TWIN-P5,
+    CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5) trades puts alone, and legacy's own
+    ``ExpirySelector.select`` (``engine/structures.py``) never filters by
+    right either -- the per-leg *strike* selection that follows is what
+    actually requires the right to be listed at the chosen expiry.
+    """
+    contracts = _quote_contracts(inputs)
+    return sorted({expiry for right, _, expiry in contracts if right == "P"})
+
+
+def has_resolvable_expiry(strategy: str, inputs: Mapping[str, Any], spot: float) -> bool:
+    """Whether :func:`generate` can resolve an expiry for ``strategy``.
+
+    True when ``inputs`` carries an explicit ``expiry``/``post_event_expiry``
+    field, or -- when neither is captured -- a native selection off listed
+    ``quotes`` finds a candidate (mirrors legacy ``ExpirySelector``'s
+    ``first_post_event``/``fixed`` kinds via :func:`_resolve_straddle_expiry`,
+    the only kinds any enabled strategy here uses).
+
+    Used by the geometry gate (``engine/v2/scoring/stages.py``
+    ``_resolve_geometry``) to decide whether ``MISSING_EXPIRY`` is a genuine
+    refusal or only a captured-field gap that a chain already present in
+    ``quotes`` can still resolve -- a row legacy failed to price (``NO_CHAIN``,
+    ``COARSE_LADDER``, ``NO_FORECAST`` at sizing) never gets ``context
+    ["expiry"]`` written (``engine/score.py`` ~2349-2358), even though the
+    same row still carries ``quotes``, ``event_date``, ``exit_date`` and
+    ``session``.
+
+    This is deliberately an EXISTENCE check (is there any contract domain to
+    try at all), not a full resolution: whether the date filter (e.g. no
+    listed expiry survives an AMC print) then leaves a survivor is
+    :func:`generate`'s job, and its refusal (``NO_EXPIRY_ON_OR_AFTER``,
+    ``EXPIRY_NOT_LISTED``, ``COARSE_LADDER``, ``MISSING_CONTRACTS``) is more
+    specific than a blanket ``MISSING_EXPIRY`` and is reported as such rather
+    than collapsed into it -- the gate only short-circuits the case where
+    there is nothing listed for native to even attempt.
+    """
+    if inputs.get("expiry") is not None or inputs.get("post_event_expiry") is not None:
+        return True
+    if strategy in {"STR-THRU", "STR-RUNUP"}:
+        contracts = _quote_contracts(inputs)
+        calls = {(strike, expiry) for right, strike, expiry in contracts if right == "C"}
+        puts = {(strike, expiry) for right, strike, expiry in contracts if right == "P"}
+        return bool(calls & puts)
+    return bool(_listed_put_expiries(inputs))
 
 
 def _grid_for_right(inputs: Mapping[str, Any], right: str, expiry: str) -> tuple[float, ...]:
@@ -417,6 +479,28 @@ def _put_ladder(strategy: str, spot: float, width: float, expiry: str,
     return tuple(legs)
 
 
+def _resolve_generate_expiry(strategy: str, inputs: Mapping[str, Any]) -> str:
+    """Expiry for a non-straddle (put-ladder) leg, or a straddle leg whose
+    caller supplied both ``strike`` and ``expiry`` already (``generate``
+    handles the straddle quote-selection case itself, before calling this).
+
+    A captured ``expiry``/``post_event_expiry`` is used as before
+    (``_expiry``). Otherwise -- the state every row legacy failed to price
+    arrives in -- falls back to a native selection off the listed puts
+    (``_listed_put_expiries`` + ``_resolve_straddle_expiry``, the same
+    ``first_post_event``/``fixed`` port every enabled put-ladder strategy's
+    single expiry uses), or to ``_expiry``'s ``MISSING_EXPIRY`` refusal when
+    nothing is listed at all (the pre-existing degenerate unit-test case).
+    """
+    if (strategy not in {"STR-THRU", "STR-RUNUP"}
+            and inputs.get("expiry") is None
+            and inputs.get("post_event_expiry") is None):
+        put_expiries = _listed_put_expiries(inputs)
+        if put_expiries:
+            return _resolve_straddle_expiry(inputs, put_expiries)
+    return _expiry(inputs)
+
+
 def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
     """Generate one strategy from explicit spot, forecast and expiry inputs."""
     if strategy not in STRATEGIES:
@@ -431,12 +515,12 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
     width = _finite_float(inputs.get("width", forecast / divisor / 100.0 * spot), "width")
     if width <= 0 and strategy not in {"STR-THRU", "STR-RUNUP"}:
         raise GeometryRefusal("ZERO_WIDTH")
-    selected = None
-    if strategy in {"STR-THRU", "STR-RUNUP"} and (
-        inputs.get("strike") is None or inputs.get("expiry") is None
-    ):
-        selected = _select_listed_straddle(inputs, spot)
-    expiry = str(selected[1]) if selected is not None else _expiry(inputs)
+    selected = (_select_listed_straddle(inputs, spot)
+                if strategy in {"STR-THRU", "STR-RUNUP"}
+                and (inputs.get("strike") is None or inputs.get("expiry") is None)
+                else None)
+    expiry = (str(selected[1]) if selected is not None
+              else _resolve_generate_expiry(strategy, inputs))
     resolved = inputs.get("resolved_legs")
     if resolved:
         legs = tuple(NativeLeg(
