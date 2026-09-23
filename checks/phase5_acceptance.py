@@ -180,10 +180,10 @@ def _load_model_release(release_root: Path, release_id: str, findings: _Findings
     if manifest is None:
         findings.add(MODEL_RELEASE_INVALID, release_id, "no staged manifest")
         return None
-    # The staged manifest records its own member hash; recompute it with the
-    # deployment module's own function so a hand-edited manifest is caught.
-    if deployment._release_hash(manifest.release) != manifest.release_hash:
-        findings.add(MODEL_RELEASE_INVALID, release_id, "release_hash disagrees with members")
+    # Verify the declared hash version. This accepts verified historical
+    # member-only manifests while requiring semantic hashes for new releases.
+    if not deployment._manifest_hash_matches(manifest):
+        findings.add(MODEL_RELEASE_INVALID, release_id, "release_hash disagrees with manifest")
         return None
     return manifest.release
 

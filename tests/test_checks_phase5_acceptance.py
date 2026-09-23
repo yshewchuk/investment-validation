@@ -6,6 +6,7 @@ layer-6 builders from synthetic rows). No real data is read.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -330,6 +331,55 @@ def test_tampered_model_object_fails_hash_and_consumer(tmp_path):
 
     assert {"P5_MEMBER_HASH_MISMATCH", "P5_CONSUMER_UNRESOLVED"} <= set(
         evidence["finding_codes"])
+
+
+def test_model_release_loader_and_restage_support_versioned_hashes(tmp_path):
+    legacy_root = tmp_path / "legacy"
+    legacy_store = layout.deployment_root(legacy_root)
+    legacy_release, legacy_inventory, legacy_payloads = _models("rel-legacy")
+    deployment = gate.deployment
+    deployment.stage_release(legacy_store, legacy_release, legacy_inventory, legacy_payloads)
+    manifest_path = deployment._manifest_path(legacy_store, "rel-legacy")
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = deployment._legacy_release_hash(legacy_release)
+    document.pop("release_hash_version", None)
+    manifest_path.write_text(json.dumps(document))
+
+    findings = gate._Findings()
+    loaded = gate._load_model_release(legacy_root, "rel-legacy", findings)
+    assert findings.rows == []
+    assert loaded.release_id == legacy_release.release_id
+
+    # Identical legacy content remains an idempotent restage and keeps its
+    # original manifest bytes/version instead of silently upgrading in place.
+    legacy_bytes = manifest_path.read_bytes()
+    restaged = deployment.stage_release(
+        legacy_store, legacy_release, legacy_inventory, legacy_payloads,
+    )
+    assert restaged.release_hash_version == deployment.RELEASE_HASH_MEMBER_V1
+    assert manifest_path.read_bytes() == legacy_bytes
+
+    conflicting_binding = dataclasses.replace(legacy_release.bindings[0], adapter="other.v1")
+    conflicting_release = dataclasses.replace(
+        legacy_release, bindings=(conflicting_binding,) + legacy_release.bindings[1:],
+    )
+    with pytest.raises(deployment.StagingRefused) as error:
+        deployment.stage_release(
+            legacy_store, conflicting_release, legacy_inventory, legacy_payloads,
+        )
+    assert error.value.issues[0].code == "RELEASE_ID_REUSED"
+
+    modern_root = tmp_path / "modern"
+    modern_store = layout.deployment_root(modern_root)
+    modern_release, modern_inventory, modern_payloads = _models("rel-modern")
+    modern = deployment.stage_release(
+        modern_store, modern_release, modern_inventory, modern_payloads,
+    )
+    assert modern.release_hash_version == deployment.RELEASE_HASH_SEMANTIC_V2
+    findings = gate._Findings()
+    loaded = gate._load_model_release(modern_root, "rel-modern", findings)
+    assert loaded.release_id == modern_release.release_id
+    assert findings.rows == []
 
 
 def test_tampered_manifest_row_fails_layout(tmp_path):

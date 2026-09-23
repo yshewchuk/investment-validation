@@ -74,6 +74,8 @@ __all__ = [
 STAGED_MANIFEST_V1 = "staged_release_manifest.v1.0"
 POINTER_STATE_V1 = "deployment_pointer_state.v1.0"
 DEPLOYMENT_REFUSAL = "MODEL_DEPLOYMENT_REFUSED"
+RELEASE_HASH_MEMBER_V1 = "member_only.v1"
+RELEASE_HASH_SEMANTIC_V2 = "semantic_manifest.v2"
 
 
 class DeploymentError(Exception):
@@ -105,6 +107,8 @@ class StagedManifest:
     release_hash: str
     staged_at: str
     schema_version: str = STAGED_MANIFEST_V1
+    # Missing in historical manifests; from_document supplies this legacy default.
+    release_hash_version: str = RELEASE_HASH_MEMBER_V1
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -226,12 +230,59 @@ def _compatibility_issues(
 
 
 def _release_hash(release: ModelRelease) -> str:
+    """Hash the complete inference meaning of a release, independent of storage paths.
+
+    Member paths are rewritten when staged, so they describe storage layout
+    rather than inference semantics. Every other release, binding and member
+    field is part of the identity: the same bytes wired to a different adapter,
+    feature order, role, output or clock are different releases.
+    """
+    bindings = []
+    for binding in sorted(release.bindings, key=lambda item: item.binding_id):
+        bindings.append({
+            "binding_id": binding.binding_id,
+            "model_id": binding.model_id,
+            "role": binding.role,
+            "strategy_id": binding.strategy_id,
+            "decision_clock_id": binding.decision_clock_id,
+            "adapter": binding.adapter,
+            "feature_order": binding.feature_order,
+            "output_names": binding.output_names,
+            "schema_version": binding.schema_version,
+            "members": [
+                {
+                    "name": member.name,
+                    "content_hash": member.content_hash,
+                    "schema_version": member.schema_version,
+                }
+                for member in sorted(binding.members, key=lambda item: item.name)
+            ],
+        })
+    return content_hash({
+        "release_id": release.release_id,
+        "deployment_id": release.deployment_id,
+        "schema_version": release.schema_version,
+        "bindings": bindings,
+    })
+
+
+def _legacy_release_hash(release: ModelRelease) -> str:
+    """The member-only hash used by manifests staged before semantic v2."""
     members = [
-        {"binding_id": binding.binding_id, "member": member.name, "content_hash": member.content_hash}
-        for binding in sorted(release.bindings, key=lambda b: b.binding_id)
-        for member in sorted(binding.members, key=lambda m: m.name)
+        {"binding_id": binding.binding_id, "member": member.name,
+         "content_hash": member.content_hash}
+        for binding in sorted(release.bindings, key=lambda item: item.binding_id)
+        for member in sorted(binding.members, key=lambda item: item.name)
     ]
     return content_hash({"release_id": release.release_id, "members": members})
+
+
+def _manifest_hash_matches(manifest: StagedManifest) -> bool:
+    if manifest.release_hash_version == RELEASE_HASH_MEMBER_V1:
+        return _legacy_release_hash(manifest.release) == manifest.release_hash
+    if manifest.release_hash_version == RELEASE_HASH_SEMANTIC_V2:
+        return _release_hash(manifest.release) == manifest.release_hash
+    return False
 
 
 def _write_object(root: Path, member: ArtifactMember, payload: bytes) -> None:
@@ -285,10 +336,19 @@ def stage_release(
     manifest = StagedManifest(
         release=staged_release, release_hash=_release_hash(staged_release),
         staged_at=format_timestamp(clock.now()),
+        release_hash_version=RELEASE_HASH_SEMANTIC_V2,
     )
     existing = _read_manifest(root, release.release_id)
     if existing is not None:
-        if existing.release_hash != manifest.release_hash:
+        if not _manifest_hash_matches(existing):
+            raise StagingRefused((ReleaseIssue(
+                path=f"$.releases[{release.release_id}]", code="RELEASE_ID_REUSED",
+                detail="the existing staged manifest has an invalid release hash",
+            ),))
+        # Compare semantic content even for a verified legacy manifest. This
+        # keeps old ids idempotent without allowing their weaker byte-only hash
+        # to mask a changed inference binding.
+        if _release_hash(existing.release) != manifest.release_hash:
             raise StagingRefused((ReleaseIssue(
                 path=f"$.releases[{release.release_id}]", code="RELEASE_ID_REUSED",
                 detail="a different release is already staged under this id",
