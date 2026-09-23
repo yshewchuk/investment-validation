@@ -67,6 +67,7 @@ def _native_inputs(request):
         },
         "geometry": None,
         "pricing": None,
+        "model": {},
         "analogs": {},
         "simulation": {},
         "gate": {},
