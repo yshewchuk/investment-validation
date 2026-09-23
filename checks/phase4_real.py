@@ -1597,9 +1597,12 @@ def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
                 "input_trace.native_inputs.model.payoff_artifact: malformed")
         cls = (PayoffLineArtifact if artifact_doc["kind"] == "line"
                else PayoffSurfaceArtifact)
-        block["payoff_artifact"] = from_document(
-            cls, untag_nonfinite(artifact_doc["value"]),
-            path="$.native_inputs.model.payoff_artifact.value")
+        payoff_artifact = _payoff_artifact_from_document(artifact_doc["value"])
+        if not isinstance(payoff_artifact, cls):
+            raise _TraceError(
+                "input_trace.native_inputs.model.payoff_artifact: "
+                "kind tag does not match its own schema_version")
+        block["payoff_artifact"] = payoff_artifact
     if "model_residual_artifact_recipe" in doc:
         recipe = doc["model_residual_artifact_recipe"]
         if not isinstance(recipe, Mapping):
@@ -1614,17 +1617,54 @@ def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
                 "input_trace.native_inputs.model.model_residual_artifacts: "
                 "must be an object")
         block["model_residual_artifacts"] = {
-            str(slot): (None if artifact is None else from_document(
-                DriverResidualPoolArtifact, untag_nonfinite(artifact),
-                path=f"$.native_inputs.model.model_residual_artifacts.{slot}"))
+            str(slot): (None if artifact is None
+                        else _residual_pool_from_document(artifact, slot))
             for slot, artifact in residuals.items()
         }
     recal_doc = doc.get("recalibration_artifact")
     if recal_doc is not None:
-        block["recalibration_artifact"] = from_document(
-            RecalibrationMapArtifact, untag_nonfinite(recal_doc),
-            path="$.native_inputs.model.recalibration_artifact")
+        block["recalibration_artifact"] = _recalibration_artifact_from_document(recal_doc)
     return block
+
+
+def _residual_pool_from_document(doc: Mapping[str, Any], slot: str) -> DriverResidualPoolArtifact:
+    """Rebuild a captured driver residual pool via the same production path
+    ``engine.v2.models.residual_artifact.residual_artifact_from_document`` uses
+    for a release read -- so a legitimate ``+/-inf`` decile edge (the pool's
+    outermost buckets) is accepted the same way it is in production, rather
+    than refused by ``from_document``'s strict-JSON float check.
+
+    Capture serializes this artifact field-for-field
+    (``tools.capture_tier0_corpus._model_document`` -> ``to_document``), but
+    ``residual_artifact_from_document`` reads the artifact's OTHER document
+    shape -- the one its own ``.payload()`` writes for a release, with a
+    nested ``buckets: {edges, pools}`` in place of the flat
+    ``bucket_edges``/``bucket_pools`` fields. The two shapes carry the same
+    values under different keys, so this only renames them before handing
+    off; ``residual_artifact_from_document`` still does the real work
+    (``untag_nonfinite``, rebuilding, and re-deriving ``content_hash`` --
+    never trusting the stored one).
+    """
+    if not isinstance(doc, Mapping):
+        raise _TraceError(
+            f"input_trace.native_inputs.model.model_residual_artifacts.{slot}: "
+            "must be an object")
+    reshaped = dict(doc)
+    edges = reshaped.pop("bucket_edges", None)
+    pools = reshaped.pop("bucket_pools", None)
+    if edges is not None:
+        reshaped["buckets"] = {"edges": edges, "pools": pools}
+    try:
+        artifact = residual_artifact_from_document(reshaped)
+    except ResidualArtifactError as exc:
+        raise _TraceError(
+            f"input_trace.native_inputs.model.model_residual_artifacts.{slot}: {exc}"
+        ) from exc
+    if not isinstance(artifact, DriverResidualPoolArtifact):
+        raise _TraceError(
+            f"input_trace.native_inputs.model.model_residual_artifacts.{slot}: "
+            "not a driver residual pool")
+    return artifact
 
 
 class _TraceError(ValueError):
