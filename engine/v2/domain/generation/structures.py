@@ -314,7 +314,7 @@ def _resolve_twin_peak_on_grid(spot: float, width: float, expiry: str,
     Mirrors legacy's ``twin_peak`` (``engine/structures.py`` ~1024) exactly:
     ``offset_from`` picks ONLY up1; every other strike is a chained exact
     ``mirror`` off already-resolved strikes (``up2 = mirror(atm, up1)``,
-    ``up3 = mirror(atm, up2)``, ``dn{i} = mirror(up{i}, atm)``). This is NOT
+    ``up4 = mirror(atm, up2)``, ``dn{i} = mirror(up{i}, atm)``). This is NOT
     the independent-offset ladder shape above -- multiplying width by the
     multiple independently would not reproduce this chain on a coarse grid,
     only on a dense one where the two happen to agree.
@@ -334,20 +334,20 @@ def _resolve_twin_peak_on_grid(spot: float, width: float, expiry: str,
     dn2 = _ladder_mirror(grid, up2, atm)
     if dn2 is None:
         raise GeometryRefusal("NO_LISTED_STRIKE:dn2")
-    up3 = _ladder_mirror(grid, atm, up2)
-    if up3 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up3")
-    dn3 = _ladder_mirror(grid, up3, atm)
-    if dn3 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn3")
+    up4_local = _ladder_mirror(grid, atm, up2)
+    if up4_local is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:up4")
+    dn4 = _ladder_mirror(grid, up4_local, atm)
+    if dn4 is None:
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn4")
     legs = (
         NativeLeg("atm", "P", "buy", 2.0, atm, expiry),
         NativeLeg("up1", "P", "sell", 1.0, up1, expiry),
-        NativeLeg("dn1", "P", "sell", 1.0, dn1, expiry),
         NativeLeg("up2", "P", "sell", 1.0, up2, expiry),
+        NativeLeg("up4", "P", "buy", 1.0, up4_local, expiry),
+        NativeLeg("dn1", "P", "sell", 1.0, dn1, expiry),
         NativeLeg("dn2", "P", "sell", 1.0, dn2, expiry),
-        NativeLeg("up3", "P", "buy", 1.0, up3, expiry),
-        NativeLeg("dn3", "P", "buy", 1.0, dn3, expiry),
+        NativeLeg("dn4", "P", "buy", 1.0, dn4, expiry),
     )
     _check_ladder_collisions(legs)
     return legs
@@ -372,16 +372,16 @@ def _resolve_twin_peak_5_on_grid(spot: float, width: float, expiry: str,
         raise GeometryRefusal("NO_LISTED_STRIKE:dn1")
     up_wing = _ladder_mirror(grid, dn1, up1)
     if up_wing is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up2")
+        raise GeometryRefusal("NO_LISTED_STRIKE:up_wing")
     dn_wing = _ladder_mirror(grid, up1, dn1)
     if dn_wing is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn2")
+        raise GeometryRefusal("NO_LISTED_STRIKE:dn_wing")
     legs = (
         NativeLeg("atm", "P", "buy", 2.0, atm, expiry),
         NativeLeg("up1", "P", "sell", 2.0, up1, expiry),
         NativeLeg("dn1", "P", "sell", 2.0, dn1, expiry),
-        NativeLeg("up2", "P", "buy", 1.0, up_wing, expiry),
-        NativeLeg("dn2", "P", "buy", 1.0, dn_wing, expiry),
+        NativeLeg("up_wing", "P", "buy", 1.0, up_wing, expiry),
+        NativeLeg("dn_wing", "P", "buy", 1.0, dn_wing, expiry),
     )
     _check_ladder_collisions(legs)
     return legs

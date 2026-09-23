@@ -1,6 +1,7 @@
 import pytest
 
 from engine.v2.domain.generation import GeometryRefusal, generate, price
+from engine.structures import twin_peak, twin_peak_5
 
 
 def _inputs():
@@ -297,11 +298,56 @@ def test_twin_p_chained_mirror_matches_legacy_on_a_coarse_grid_that_would_diverg
     assert by_name["up2"] != naive_up2
 
     assert by_name == {
-        "atm": 100.0, "up1": 106.0, "dn1": 94.0,
-        "up2": 112.0, "dn2": 88.0, "up3": 124.0, "dn3": 76.0,
+        "atm": 100.0, "up1": 106.0, "up2": 112.0, "up4": 124.0,
+        "dn1": 94.0, "dn2": 88.0, "dn4": 76.0,
     }
     priced = price(geometry, quotes, 0.5)
     assert priced.refusal is None
+
+
+def test_twin_p_leg_names_and_order_match_legacy():
+    """Native TWIN-P legs must use legacy's exact names and order.
+
+    Legacy order: atm, up1, up2, up4, dn1, dn2, dn4
+    """
+    grid = (76.0, 88.0, 94.0, 100.0, 106.0, 109.0, 112.0, 124.0)
+    expiry = "2026-10-01"
+    spot = 101.0
+    width = 5.0
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+
+    legacy_twin_p = twin_peak(steps=1)
+    native_twin_p = generate("TWIN-P", {
+        "spot": spot, "width": width, "expiry": expiry, "quotes": quotes
+    })
+    legacy_names = [leg.name for leg in legacy_twin_p.legs]
+    native_names = [leg.name for leg in native_twin_p.legs]
+    assert native_names == legacy_names, (
+        f"TWIN-P leg names/order mismatch: native={native_names}, legacy={legacy_names}"
+    )
+
+
+def test_twin_p5_leg_names_and_order_match_legacy():
+    """Native TWIN-P5 legs must use legacy's exact names and order.
+
+    Legacy order: atm, up1, dn1, up_wing, dn_wing
+    """
+    # Use a dense grid to ensure all strikes resolve.
+    grid = tuple(float(k) for k in range(80, 121, 2))
+    expiry = "2026-10-01"
+    spot = 100.0
+    width = 4.0
+    quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
+
+    legacy_twin_p5 = twin_peak_5(wing_multiple=3, steps=1)
+    native_twin_p5 = generate("TWIN-P5", {
+        "spot": spot, "width": width, "expiry": expiry, "quotes": quotes
+    })
+    legacy_names_p5 = [leg.name for leg in legacy_twin_p5.legs]
+    native_names_p5 = [leg.name for leg in native_twin_p5.legs]
+    assert native_names_p5 == legacy_names_p5, (
+        f"TWIN-P5 leg names/order mismatch: native={native_names_p5}, legacy={legacy_names_p5}"
+    )
 
 
 def test_condor_wings_are_exactly_evenly_spaced_in_dollars():
