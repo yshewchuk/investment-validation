@@ -29,8 +29,8 @@ REQUIRED_STAGES = (
 #: with the exact same hash/owner checks as every other stage below.
 OPTIONAL_STAGES = ("model",)
 NATIVE_INPUT_KEYS = frozenset({
-    "context", "features", "forecast", "geometry", "pricing", "analogs",
-    "simulation", "gate", "chooser", "diagnostics", "source_ref",
+    "context", "features", "forecast", "geometry", "pricing", "model",
+    "analogs", "simulation", "gate", "chooser", "diagnostics", "source_ref",
 })
 #: Containers under ``native_inputs.forecast`` whose KEYS are output names,
 #: exempt from :func:`_reject_answers` for that reason and no other.
