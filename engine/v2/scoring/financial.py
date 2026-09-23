@@ -6,9 +6,23 @@ from typing import Any, Mapping
 
 from engine.v2.domain.valuation import multi_expiry_refusal, planned_exit_label
 
-__all__ = ["financial_diagnostics"]
+__all__ = ["entry_cost_pct", "financial_diagnostics"]
 
 ORATS_EMOVE_FACTOR = 0.645
+
+
+def entry_cost_pct(cost: Any, spot: Any) -> float | None:
+    """``entry_cost / spot * 100`` -- legacy's exact definition
+    (``engine/score.py`` ``Scorer._features``, ~2562-2564: ``built[
+    "entry_cost_pct"] = entry_cost / spot_entry * 100``). ``None`` when
+    either input is missing or spot is zero: the same non-finite outcome a
+    gate's frozen feature check treats as MISSING_FEATURES either way, so
+    this stays the single source of the formula for both the pricing-time
+    gate feature (R4-20 gap) and the post-hoc display diagnostic below.
+    """
+    if cost is None or spot is None or float(spot) == 0.0:
+        return None
+    return float(cost) / float(spot) * 100.0
 
 
 def _base(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -26,10 +40,9 @@ def _base(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _entry_cost(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> None:
-    spot = record.get("spot")
-    cost = record.get("entry_cost")
-    if spot is not None and cost is not None and float(spot) != 0.0:
-        diagnostics["entry_cost_pct"] = float(cost) / float(spot) * 100.0
+    value = entry_cost_pct(record.get("entry_cost"), record.get("spot"))
+    if value is not None:
+        diagnostics["entry_cost_pct"] = value
 def _model_vs_market(record: Mapping[str, Any], diagnostics: dict[str, Any]) -> None:
     driver = record.get("driver_prediction")
     implied = record.get("implied_move")
