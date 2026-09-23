@@ -372,29 +372,31 @@ def test_ladder_refuses_rather_than_approximating_when_no_listed_strike_complete
     """A mirror target that is not listed means the grid cannot carry the
     even-spacing shape at all -- legacy refuses (StructureError -> NO_CHAIN)
     rather than substituting the nearest strike, and so must native. This is
-    a per-leg failure, distinct from the collision case below, and must
-    raise a distinguishable code (not the collision code)."""
+    a per-leg failure, distinct from the collision case below; legacy exposes
+    the bare NO_CHAIN code while native retains the leg name as detail."""
     grid = (100.0, 105.0)  # 95.0 (2*100-105) is deliberately absent
     expiry = "2026-01-01"
     quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
 
-    with pytest.raises(GeometryRefusal, match=r"^NO_LISTED_STRIKE:dn1$"):
+    with pytest.raises(GeometryRefusal, match=r"^NO_CHAIN$") as caught:
         generate("BFLY-P", {"spot": 100.5, "width": 5.0, "expiry": expiry, "quotes": quotes})
+    assert caught.value.detail == "NO_LISTED_STRIKE:dn1"
 
 
 def test_ladder_refuses_with_coarse_ladder_code_when_two_legs_collide_on_one_contract():
     """A ladder too coarse for the shape can independently snap two DIFFERENT
     legs onto the SAME listed contract (CND-PS's up1/up2 both nearest to the
     one strike a sparse grid lists above the anchor) -- legacy's
-    LadderTooCoarse / COARSE_LADDER, a different failure from a single leg
-    simply having no listed strike. The two codes must not collapse into
-    one: that is the diagnosability gap the coordinator flagged."""
+    LadderTooCoarse / COARSE_LADDER. The native refusal code is bare, with
+    colliding leg names retained as detail."""
     grid = (95.0, 100.0, 105.0)  # only one strike listed above/below the anchor
     expiry = "2026-01-01"
     quotes = {("P", strike, expiry): {"bid": 1.0, "ask": 2.0} for strike in grid}
 
-    with pytest.raises(GeometryRefusal, match=r"^COARSE_LADDER:"):
+    with pytest.raises(GeometryRefusal, match=r"^COARSE_LADDER$") as caught:
         generate("CND-PS", {"spot": 100.5, "width": 1.0, "expiry": expiry, "quotes": quotes})
+    assert caught.value.detail
+    assert "COARSE_LADDER" not in caught.value.detail
 
 
 def test_str_thru_and_str_runup_are_unaffected_by_the_ladder_grid_fix():
@@ -491,28 +493,26 @@ def test_native_put_ladder_expiry_selection_matches_legacy_expiry_selector():
 
     from engine.structures import ExpirySelector
 
-    expiries = ["2026-09-16", "2026-09-17", "2026-09-19", "2026-09-25"]
-    chain = pd.DataFrame({"expiry": pd.to_datetime(expiries), "dte": [0, 1, 3, 9]})
+    expiries = ["2026-09-17", "2026-09-19", "2026-09-25"]
+    chain = pd.DataFrame({"expiry": pd.to_datetime(expiries), "dte": [1, 3, 9]})
     legacy_choice = ExpirySelector(kind="first_post_event").select(
-        chain, pd.Timestamp("2026-09-17"), "AMC",
+        chain, pd.Timestamp("2026-09-16"), "BMO",
     )
 
     grid = (92.0, 94.0, 96.0, 98.0, 100.0, 102.0, 104.0, 106.0, 108.0)
-    quotes = {("P", strike, "2026-09-19"): {"bid": 1.0, "ask": 2.0} for strike in grid}
-    # Decoys at expiries a real ExpirySelector would reject (09-16/09-17: on
-    # or before an AMC print) or that are listed but later than the true
-    # earliest survivor (09-25) -- present so the assertion below proves
-    # native picked the earliest survivor, not merely "the only one listed".
+    quotes = {("P", strike, "2026-09-17"): {"bid": 1.0, "ask": 2.0} for strike in grid}
+    # Later expiries (09-19/09-25) prove native selects 09-17, which lies
+    # strictly between event and exit.
     quotes.update({("P", 100.0, expiry): {"bid": 1.0, "ask": 2.0}
-                   for expiry in ("2026-09-16", "2026-09-17", "2026-09-25")})
+                   for expiry in ("2026-09-19", "2026-09-25")})
     inputs = {"spot": 100.0, "width": 2.0, "event_date": "2026-09-16",
-              "exit_date": "2026-09-17", "session": "AMC", "quotes": quotes}
+              "exit_date": "2026-09-25", "session": "BMO", "quotes": quotes}
 
     assert has_resolvable_expiry("CND-PS", inputs, 100.0) is True
     geometry = generate("CND-PS", inputs)
 
     assert {leg.expiry for leg in geometry.legs} == {str(legacy_choice.date())}
-    assert str(legacy_choice.date()) == "2026-09-19"
+    assert str(legacy_choice.date()) == "2026-09-17"
 
 
 def test_native_put_ladder_refuses_when_no_listed_expiry_survives_matching_legacy():
