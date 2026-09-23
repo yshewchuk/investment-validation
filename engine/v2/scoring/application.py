@@ -531,6 +531,18 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
         "binding_ids": tuple(binding.binding_id for binding in bindings),
         "model_id": getattr(results[0], "model_id", None) if results else None,
         "required_roles": tuple(dict.fromkeys(required_roles)),
+        # ``_without_frozen_recipes`` already lets ``driver_name`` pass
+        # through from ``base.forecast`` (it is not in ``_FROZEN_OUTPUTS`` or
+        # ``_RUNUP_DERIVED_FIELDS``), but a ``NativeScoreInputs`` assembled
+        # directly for a frozen/acceptance control -- rather than via
+        # ``build_native_score_inputs`` -- can supply ``forecast`` with no
+        # ``driver_name`` key at all. Restate it explicitly here so the
+        # frozen path always has the carrier stages.py:_execute_forecast
+        # reads (block.get("driver_name")), falling back to "abs_move" --
+        # the SAME default ``SourceBundle.driver_name`` uses
+        # (source_inputs.py:220) -- only when the frozen bundle truly has no
+        # carrier of its own.
+        "driver_name": base.forecast.get("driver_name", "abs_move"),
     })
     if inference is not None:
         executors, executor_owned = _frozen_stage_executors(
