@@ -338,3 +338,19 @@ def test_captured_runup_binding_names_are_raw_not_final():
     assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
     assert record.forecasts["runup_move_scale"] == pytest.approx(0.5)
     assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
+
+
+def test_score_frozen_str_runup_empty_forecast_publishes_im_t1_driver_name():
+    # STR-RUNUP with forecast={} (no driver_name carrier at all): the
+    # frozen path must source driver_name "im_t1" from PAYOFF_DRIVER, and
+    # because model_vs_market is gated on driver_name == "abs_move" in
+    # financial.py, it must stay None for this strategy no matter what
+    # driver_prediction/implied_move are.
+    inputs = replace(_inputs(), analogs=_analog_block(), forecast={})
+    record = application.score_frozen(
+        _request(), _Frozen(), _release(), _inference_requests(),
+        {"_native_inputs": inputs},
+    )
+
+    assert record.resolved_request["driver_name"] == "im_t1"
+    assert record.financial_diagnostics["model_vs_market"] is None

@@ -1591,8 +1591,16 @@ def _line_payoff_document(fit: Mapping[str, Any]) -> dict[str, Any]:
     """engine/payoff.py:157-167 (``PayoffLine.as_dict``) -- the shape
     ``financial.py::_fair_premium`` reads for the single-driver line case.
     Publishes the fit the model stage already produced instead of a
-    separately captured legacy number."""
-    return {"intercept": fit["intercept"], "slope": fit["slope"]}
+    separately captured legacy number. Rounded to 8 dp to match
+    ``PayoffLine.as_dict`` (engine/payoff.py:157-165): the score record's
+    ``fair_premium_pct``/``premium_vs_fair`` are computed from legacy's
+    ROUNDED intercept/slope, and the Phase 4 comparator policy
+    SCORE_RECORD_V1 is exact, so publishing full precision here would drift
+    from legacy's own recorded numbers."""
+    return {
+        "intercept": round(float(fit["intercept"]), 8),
+        "slope": round(float(fit["slope"]), 8),
+    }
 
 
 def _surface_payoff_document(fit: Mapping[str, Any]) -> dict[str, Any]:
@@ -1603,7 +1611,10 @@ def _surface_payoff_document(fit: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "kind": "runup_payoff_surface",
-        "coefficients": dict(zip(native_payoff.RUNUP_TERMS, fit["coefficients"])),
+        "coefficients": {
+            name: round(float(value), 8)
+            for name, value in zip(native_payoff.RUNUP_TERMS, fit["coefficients"])
+        },
     }
 
 

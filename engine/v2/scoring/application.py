@@ -517,8 +517,44 @@ def _frozen_stage_executors(bindings, inference, release, days):
     return executors, owned
 
 
+# engine/payoff.py:81-84 PAYOFF_DRIVER, mirrored locally rather than
+# imported -- this module stays in the v2 layer (checks/legacy_adapters.json
+# confines engine.payoff imports to one adapter module, and this is not it).
+# Same mapping stages.py:219-220 already mirrors for the same reason.
+_PAYOFF_DRIVER = {"STR-THRU": "abs_move", "STR-RUNUP": "im_t1"}
+
+
+def _frozen_driver_name(base, strategy):
+    """The same fact legacy reads: ``PAYOFF_DRIVER.get(strategy)``
+    (engine/payoff.py:81-84), not a carrier field or a blind default.
+
+    Legacy never stores/reads a ``driver_name`` anywhere -- it recomputes it
+    fresh from the strategy on every score (engine/score.py:2950's
+    ``result.driver_name = driver`` where ``driver = PAYOFF_DRIVER.get(
+    strategy)``, and engine/score.py:3119's hardcoded ``"im_t1"`` for
+    STR-RUNUP, itself equal to ``PAYOFF_DRIVER["STR-RUNUP"]``). A hardcoded
+    "abs_move" fallback here previously made financial.py's
+    ``_model_vs_market`` (gated on ``driver_name == "abs_move"``) compute
+    for STR-RUNUP rows, where legacy always yields ``None``.
+
+    ``strategy`` is the same resolved fact the frozen path already computes
+    for this row (``_frozen_native_inputs``'s merged context, itself
+    ``fields["strategy"]`` or ``request.strategy_version`` -- the identical
+    value legacy's ``request.strategy`` would be). When that strategy is one
+    PAYOFF_DRIVER knows, its answer wins over any carrier value, since
+    legacy is never doing anything else. When it is not (no payoff map for
+    this strategy, or the strategy could not be resolved), there is no fact
+    to source a value from -- keep whatever the bundle's own forecast
+    carried (frequently ``None``) rather than guess.
+    """
+    if strategy in _PAYOFF_DRIVER:
+        return _PAYOFF_DRIVER[strategy]
+    return base.forecast.get("driver_name")
+
+
 def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
-                            required_roles, results, inference, release, days):
+                            required_roles, results, inference, release, days,
+                            strategy):
     forecast = _without_frozen_recipes(base.forecast, bindings)
     forecast.update({
         "frozen_outputs": outputs,
@@ -531,6 +567,7 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
         "binding_ids": tuple(binding.binding_id for binding in bindings),
         "model_id": getattr(results[0], "model_id", None) if results else None,
         "required_roles": tuple(dict.fromkeys(required_roles)),
+        "driver_name": _frozen_driver_name(base, strategy),
     })
     if inference is not None:
         executors, executor_owned = _frozen_stage_executors(
@@ -657,7 +694,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     source = f"frozen:{release_id}:{','.join(binding_ids)}"
     forecast = _frozen_forecast_inputs(
         base, bindings, outputs, artifact_hashes, required_roles,
-        results, inference, release, days,
+        results, inference, release, days, context.get("strategy"),
     )
     gate = _frozen_gate_inputs(
         base, bindings, gate_result, artifact_hashes, inference, release,

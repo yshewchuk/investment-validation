@@ -305,6 +305,47 @@ def test_typed_frozen_gate_uses_calculated_price_and_existing_threshold():
     assert record.gate_terms["gate_threshold"] == pytest.approx(1.0)
 
 
+def test_score_frozen_str_thru_empty_forecast_publishes_abs_move_driver_name():
+    # STR-THRU with forecast={} (no driver_name carrier at all): the frozen
+    # path must source driver_name from the strategy's PAYOFF_DRIVER fact
+    # (application._frozen_driver_name), not from any carrier, and that
+    # published "abs_move" must make financial.py's model_vs_market fire.
+    request = _request()
+    release = SimpleNamespace(
+        release_id="release-1",
+        bindings=(SimpleNamespace(
+            binding_id="driver-binding", role="driver",
+            output_names=("driver_prediction",),
+        ),),
+    )
+    inference_requests = (SimpleNamespace(binding_id="driver-binding"),)
+
+    class _DriverFrozen:
+        def infer(self, release, inference_request):
+            return SimpleNamespace(
+                status="READY", release_id=release.release_id,
+                binding_id="driver-binding", model_id="model-driver-binding",
+                output_names=("driver_prediction",), predictions=((7.0,),),
+                artifact_hashes=("sha256:driver-binding",), reason_codes=(),
+            )
+
+    base = _override_inputs()
+    inputs = replace(
+        base,
+        context={**base.context, "implied_move": 6.0},
+        forecast={},
+    )
+    record = application.score_frozen(
+        request, _DriverFrozen(), release, inference_requests,
+        {"_native_inputs": inputs},
+    )
+
+    assert record.resolved_request["driver_name"] == "abs_move"
+    assert record.financial_diagnostics["model_vs_market"] == pytest.approx(
+        7.0 / (6.0 * 0.645)
+    )
+
+
 def test_typed_frozen_gate_ignores_caller_supplied_gate_threshold():
     """gate_threshold is answer-bearing (source_inputs._ANSWER_FIELDS); the
     frozen path must take it only from the native bundle's own gate block,
