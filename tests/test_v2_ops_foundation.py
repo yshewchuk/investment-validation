@@ -461,12 +461,20 @@ def test_deep_nesting_round_trips_without_recursion_error():
     for _ in range(300):
         value = [value]
 
-    expected_text = _old_batch_canonical(value)
-    assert canonical_json(value) == expected_text
-    assert "".join(iter_canonical_json(value)) == expected_text
-    assert content_hash(value) == (
-        "sha256:" + __import__("hashlib").sha256(expected_text.encode("utf-8")).hexdigest()
-    )
+    # Mutation-test runners add enough Python frames to make the interpreter's
+    # default limit an environmental variable. This test is about the data
+    # depth, so give it a fixed stack budget and restore the process setting.
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old_limit, 5000))
+    try:
+        expected_text = _old_batch_canonical(value)
+        assert canonical_json(value) == expected_text
+        assert "".join(iter_canonical_json(value)) == expected_text
+        assert content_hash(value) == (
+            "sha256:" + __import__("hashlib").sha256(expected_text.encode("utf-8")).hexdigest()
+        )
+    finally:
+        sys.setrecursionlimit(old_limit)
 
 
 def test_large_row_list_matches_the_pre_refactor_oracle():
