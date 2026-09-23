@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 import os
@@ -264,4 +265,67 @@ def test_staging_same_release_id_with_different_content_refuses(tmp_path):
     other, other_inv, other_pay = _fixture("r1", intercept=42.0, coefficient=42.0)
     with pytest.raises(StagingRefused) as error:
         stage_release(tmp_path, other, other_inv, other_pay)
+    assert error.value.issues[0].code == "RELEASE_ID_REUSED"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("binding_id", "b2"),
+        ("model_id", "m2"),
+        ("role", "gate"),
+        ("strategy_id", "STR-THRU"),
+        ("decision_clock_id", "next-open"),
+        ("adapter", "other-adapter.v1"),
+        ("feature_order", ("y",)),
+        ("output_names", ("other-output",)),
+        ("schema_version", "model_binding.v2.0"),
+    ],
+)
+def test_release_hash_includes_every_binding_semantic(field, value):
+    release, _, _ = _fixture("r1")
+    original = release.bindings[0]
+    changed = dataclasses.replace(original, **{field: value})
+    changed_release = dataclasses.replace(release, bindings=(changed,))
+
+    assert deployment_module._release_hash(changed_release) != deployment_module._release_hash(release)
+
+
+def test_release_hash_includes_member_identity_but_not_staged_storage_path():
+    release, _, _ = _fixture("r1")
+    binding = release.bindings[0]
+    member = binding.members[0]
+    renamed = dataclasses.replace(member, name="transform")
+    changed_member_release = dataclasses.replace(
+        release, bindings=(dataclasses.replace(binding, members=(renamed,)),),
+    )
+    stored_member = dataclasses.replace(member, path="objects/sha256-object")
+    stored_release = dataclasses.replace(
+        release, bindings=(dataclasses.replace(binding, members=(stored_member,)),),
+    )
+
+    assert deployment_module._release_hash(changed_member_release) != deployment_module._release_hash(release)
+    assert deployment_module._release_hash(stored_release) == deployment_module._release_hash(release)
+
+
+def test_release_hash_preserves_ordered_feature_semantics():
+    release, _, _ = _fixture("r1")
+    binding = dataclasses.replace(release.bindings[0], feature_order=("x", "y"))
+    ordered = dataclasses.replace(release, bindings=(binding,))
+    permuted = dataclasses.replace(
+        release, bindings=(dataclasses.replace(binding, feature_order=("y", "x")),),
+    )
+
+    assert deployment_module._release_hash(ordered) != deployment_module._release_hash(permuted)
+
+
+def test_reused_explicit_id_with_same_bytes_but_different_binding_refuses(tmp_path):
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    changed_binding = dataclasses.replace(release.bindings[0], model_id="other-model")
+    conflicting_release = dataclasses.replace(release, bindings=(changed_binding,))
+
+    with pytest.raises(StagingRefused) as error:
+        stage_release(tmp_path, conflicting_release, inventory, payloads)
+
     assert error.value.issues[0].code == "RELEASE_ID_REUSED"
