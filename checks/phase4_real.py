@@ -70,6 +70,12 @@ from engine.v2.models import (  # noqa: E402
     ModelRelease,
 )
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
+from engine.v2.models.payoff_artifact import (  # noqa: E402
+    PayoffLineArtifact,
+    PayoffSurfaceArtifact,
+)
+from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact  # noqa: E402
+from engine.v2.models.residual_artifact import DriverResidualPoolArtifact  # noqa: E402
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash, score_id, with_score_id  # noqa: E402
@@ -1545,9 +1551,79 @@ _TRACE_KEYS = frozenset({
     "trace_hash", "metadata",
 })
 _NATIVE_INPUT_KEYS = frozenset({
-    "context", "features", "forecast", "geometry", "pricing", "analogs",
-    "simulation", "gate", "chooser", "diagnostics", "source_ref",
+    "context", "features", "forecast", "geometry", "pricing", "model",
+    "analogs", "simulation", "gate", "chooser", "diagnostics", "source_ref",
 })
+#: Fields a captured ``model`` block may carry (``_model_block_from_frozen``
+#: / ``engine.v2.scoring.source_inputs._model_block`` shape). An empty block
+#: (``{}``) is the not-applicable case -- a strategy capture never declared
+#: a payoff -- and needs no further checks.
+_MODEL_BLOCK_FIELDS = frozenset({
+    "payoff_recipe", "payoff_artifact", "model_residual_artifact_recipe",
+    "model_residual_artifacts", "recalibration_artifact",
+})
+
+
+def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the captured model block's artifacts from their documents.
+
+    ``payoff_artifact`` is tagged ``{"kind": "line"|"surface", "value": ...}``
+    at capture time (``tools.capture_tier0_corpus.package_strict_trace``)
+    because ``from_document`` needs an explicit target dataclass and the two
+    payoff artifact classes are not distinguishable from their document
+    shape alone. Every other artifact field has exactly one target class, so
+    it decodes directly.
+    """
+    if not doc:
+        return {}
+    unknown = sorted(set(doc) - _MODEL_BLOCK_FIELDS)
+    if unknown:
+        raise _TraceError(
+            f"input_trace.native_inputs.model: unknown fields {unknown}")
+    block: dict[str, Any] = {}
+    if "payoff_recipe" in doc:
+        recipe = doc["payoff_recipe"]
+        if not isinstance(recipe, Mapping):
+            raise _TraceError(
+                "input_trace.native_inputs.model.payoff_recipe: must be an object")
+        block["payoff_recipe"] = dict(recipe)
+    artifact_doc = doc.get("payoff_artifact")
+    if artifact_doc is not None:
+        if (not isinstance(artifact_doc, Mapping)
+                or set(artifact_doc) != {"kind", "value"}
+                or artifact_doc["kind"] not in ("line", "surface")):
+            raise _TraceError(
+                "input_trace.native_inputs.model.payoff_artifact: malformed")
+        cls = (PayoffLineArtifact if artifact_doc["kind"] == "line"
+               else PayoffSurfaceArtifact)
+        block["payoff_artifact"] = from_document(
+            cls, artifact_doc["value"],
+            path="$.native_inputs.model.payoff_artifact.value")
+    if "model_residual_artifact_recipe" in doc:
+        recipe = doc["model_residual_artifact_recipe"]
+        if not isinstance(recipe, Mapping):
+            raise _TraceError(
+                "input_trace.native_inputs.model.model_residual_artifact_recipe: "
+                "must be an object")
+        block["model_residual_artifact_recipe"] = dict(recipe)
+    residuals = doc.get("model_residual_artifacts")
+    if residuals is not None:
+        if not isinstance(residuals, Mapping):
+            raise _TraceError(
+                "input_trace.native_inputs.model.model_residual_artifacts: "
+                "must be an object")
+        block["model_residual_artifacts"] = {
+            str(slot): (None if artifact is None else from_document(
+                DriverResidualPoolArtifact, artifact,
+                path=f"$.native_inputs.model.model_residual_artifacts.{slot}"))
+            for slot, artifact in residuals.items()
+        }
+    recal_doc = doc.get("recalibration_artifact")
+    if recal_doc is not None:
+        block["recalibration_artifact"] = from_document(
+            RecalibrationMapArtifact, recal_doc,
+            path="$.native_inputs.model.recalibration_artifact")
+    return block
 
 
 class _TraceError(ValueError):
@@ -2036,6 +2112,10 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     }
     if any(not isinstance(value, Mapping) for value in blocks.values()):
         raise _TraceError("input_trace.native_inputs: stage blocks must be objects")
+    model_doc = resolved_inputs["model"]
+    if not isinstance(model_doc, Mapping):
+        raise _TraceError("input_trace.native_inputs.model: must be an object")
+    blocks["model"] = _decode_model_block(model_doc)
     if resolved_inputs["source_ref"] != shared_hash:
         raise _TraceError("input_trace.native_inputs.source_ref: mismatch")
     inputs = NativeScoreInputs(
