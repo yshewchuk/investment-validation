@@ -931,6 +931,104 @@ def _with_stored_crush(forecast_recipe: dict[str, Any],
     return forecast_recipe
 
 
+def _model_block_from_frozen(source: Mapping[str, Any]) -> dict[str, Any]:
+    """The captured model block (payoff fit + residual pools), from a row's
+    ``source_inputs.frozen`` declarations -- ``blocks["model"]`` for a
+    strict trace. Mirrors the "model layer" section of
+    :func:`frozen_source_declarations` (which needs ``release_root``/
+    ``deployment_id`` only for the binding-packaging code above that
+    section, not this one), minus the release match -- capture has no
+    release yet, so it always freezes the inline artifact legacy actually
+    used -- and reshaped to :func:`engine.v2.scoring.source_inputs._model_block`'s
+    target shape (``payoff_recipe``, not ``payoff_artifact_recipe``).
+
+    Returns ``{}`` when the row's capture declared no payoff (a strategy
+    outside PAYOFF_DRIVER, or too few trades for legacy to have fit one) --
+    matching ``_model_block``'s own not-applicable case.
+    """
+    from engine.v2.foundation.canonical import untag_nonfinite
+    from engine.v2.models.lineage import DataDependency, Lineage
+
+    frozen = untag_nonfinite(dict(source.get("frozen") or {}))
+    states = dict(frozen.get("states") or {})
+    declared = dict(frozen.get("declarations") or {})
+    payoff = declared.get("payoff")
+    if payoff is None:
+        return {}
+
+    def state(name: Any) -> dict[str, Any]:
+        if name not in states:
+            raise StrictTraceCaptureError(f"declared state {name} was not recorded")
+        return dict(states[name])
+
+    fit = state(payoff["state"])
+    block: dict[str, Any] = {
+        "payoff_recipe": {"before": payoff["before"], "seed": payoff["seed"],
+                          "draw_count": payoff["draw_count"]},
+        "payoff_artifact": _inline_payoff_artifact(fit),
+    }
+    lineage = Lineage(data=(DataDependency(table="phase4.capture.legacy_served"),))
+    residual_recipe: dict[str, Any] = {}
+    residual_artifacts: dict[str, Any] = {}
+    for key, entry in sorted(declared.items()):
+        if not key.startswith("model_residual:"):
+            continue
+        slot = key.split(":", 1)[1]
+        recorded = state(entry["state"])
+        pool_artifact = _inline_driver_pool(recorded, lineage)
+        residual_artifacts[slot] = pool_artifact
+        residual_recipe[slot] = {
+            "role": pool_artifact.role, "model_id": pool_artifact.model_id,
+            "fold": pool_artifact.fold, "content_hash": pool_artifact.content_hash,
+        }
+    block["model_residual_artifact_recipe"] = residual_recipe
+    block["model_residual_artifacts"] = residual_artifacts
+
+    recal = declared.get("recalibration")
+    if recal is not None:
+        from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
+
+        recal_fit = None if not recal["fitted"] else {
+            "n": recal["n"], "base_rate": recal["base_rate"],
+            "x_thresholds": recal["x_thresholds"], "y_thresholds": recal["y_thresholds"],
+        }
+        block["recalibration_artifact"] = make_recalibration_map_artifact(
+            recal_fit, strategy=recal["strategy"], alpha=recal["alpha"],
+            cutoff=recal["cutoff"], min_pairs=recal["min_pairs"])
+    return block
+
+
+def _model_document(block: Mapping[str, Any]) -> dict[str, Any]:
+    """``blocks["model"]`` as plain JSON-shaped values for the trace.
+
+    ``payoff_artifact`` is tagged with its kind (Line vs Surface) because
+    ``from_document`` (the checker's reader) needs an explicit target
+    dataclass and the two classes are not distinguishable from their
+    document shape alone. Every other artifact field has exactly one
+    possible class, so it needs no tag.
+    """
+    if not block:
+        return {}
+    from engine.v2.models.payoff_artifact import PayoffLineArtifact
+
+    doc: dict[str, Any] = {"payoff_recipe": dict(block.get("payoff_recipe") or {})}
+    artifact = block.get("payoff_artifact")
+    if artifact is not None:
+        kind = "line" if isinstance(artifact, PayoffLineArtifact) else "surface"
+        doc["payoff_artifact"] = {"kind": kind, "value": to_document(artifact)}
+    doc["model_residual_artifact_recipe"] = dict(
+        block.get("model_residual_artifact_recipe") or {})
+    residuals = block.get("model_residual_artifacts") or {}
+    doc["model_residual_artifacts"] = {
+        slot: (None if artifact is None else to_document(artifact))
+        for slot, artifact in residuals.items()
+    }
+    recal = block.get("recalibration_artifact")
+    if recal is not None:
+        doc["recalibration_artifact"] = to_document(recal)
+    return doc
+
+
 def _captured_blocks(candidate: Mapping[str, Any],
                      request: V2ScoreRequest,
                      frozen_chooser: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -1002,6 +1100,7 @@ def _captured_blocks(candidate: Mapping[str, Any],
         "analogs": dict(recipes["analogs"]),
         "simulation": dict(recipes["simulation"]),
         "gate": dict(recipes["gate"]),
+        "model": _model_block_from_frozen(source),
         "chooser": (
             {FROZEN_CHOOSER_FIELD: dict(frozen_chooser)} if frozen_chooser is not None
             else dict(recipes.get("chooser") or {})
@@ -1061,6 +1160,7 @@ def package_strict_trace(
         "forecast": dict(inputs.forecast),
         "geometry": None if inputs.geometry is None else to_document(inputs.geometry),
         "pricing": None if inputs.pricing is None else to_document(inputs.pricing),
+        "model": _model_document(inputs.model),
         "analogs": dict(inputs.analogs),
         "simulation": dict(inputs.simulation),
         "gate": dict(inputs.gate),
