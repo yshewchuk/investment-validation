@@ -17,8 +17,8 @@ def _payload():
                         "decision_clock_id": "entry-close", "requested_decision_at": "2026-09-16",
                         "snapshot_id": "s", "mode": "replay", "fill_model": {}},
             "native_inputs": {"context": {}, "features": {}, "forecast": {}, "geometry": None,
-                              "pricing": None, "analogs": {}, "simulation": {}, "gate": {},
-                              "chooser": {}, "diagnostics": {}, "source_ref": "s",
+                              "pricing": None, "model": {}, "analogs": {}, "simulation": {},
+                              "gate": {}, "chooser": {}, "diagnostics": {}, "source_ref": "s",
                               "stage_receipts": []}}
 
 

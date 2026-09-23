@@ -116,6 +116,7 @@ def _pair(tmp_path, *, extra_model_inputs=None):
         "forecast": {},
         "geometry": None,
         "pricing": None,
+        "model": {},
         "analogs": {},
         "simulation": {"residuals": residuals},
         "gate": {},
