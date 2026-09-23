@@ -853,7 +853,8 @@ def _resolve_geometry(inputs: NativeScoreInputs, name: str,
     except Exception as exc:
         if inputs.geometry is not None or geometry_inputs.get("resolved_legs"):
             raise
-        geometry = Geometry(name, 0.0, 0.0, (), str(exc))
+        geometry = Geometry(name, 0.0, 0.0, (), str(exc),
+                            getattr(exc, "detail", None))
     if geometry.refusal is None and not geometry.legs:
         geometry = Geometry(
             name, geometry.spot, geometry.width, (), "MISSING_CONTRACTS",
@@ -2280,6 +2281,10 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
         observer,
     )
+    if geometry.detail:
+        prior_detail = str(values.get("detail") or "").strip()
+        details = [item for item in (prior_detail, geometry.detail) if item]
+        values["detail"] = "; ".join(details)
     for refusal in (geometry.refusal, pricing.refusal):
         if refusal:
             _add_flag(flags, refusal)

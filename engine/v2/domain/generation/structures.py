@@ -15,6 +15,11 @@ DISABLED = {"CAL-P": "UNVALIDATED_STRUCTURE", "CND-P": "UNVALIDATED_STRUCTURE"}
 class GeometryRefusal(ValueError):
     """A strategy cannot be generated from the supplied contract domain."""
 
+    def __init__(self, code: str, detail: str | None = None):
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
 
 class PricingRefusal(ValueError):
     """A generated structure cannot be priced from the supplied quotes."""
@@ -37,6 +42,7 @@ class Geometry:
     width: float
     legs: tuple[NativeLeg, ...]
     refusal: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,7 +128,7 @@ def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> 
     - A caller-supplied ``expiry`` is legacy's ``fixed`` rule: it must match
       a listed expiry exactly (by calendar date), or this refuses via
       ``GeometryRefusal`` rather than silently substituting another expiry.
-    - Otherwise, when an ``exit_date``/``event_date`` is known, this mirrors
+    - Otherwise, when an ``event_date`` is known, this mirrors
       legacy's ``first_post_event``: the earliest listed expiry on/after that
       date, with the AMC/BMO distinction applied when ``session`` is known
       (AMC excludes an expiry landing exactly on the event date, since it
@@ -140,7 +146,7 @@ def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> 
             raise GeometryRefusal(f"EXPIRY_NOT_LISTED:{target}")
         return matches[0]
 
-    target_source = inputs.get("exit_date") or inputs.get("event_date")
+    target_source = inputs.get("event_date")
     if target_source is None:
         return expiries[0]
 
@@ -325,7 +331,7 @@ def _check_ladder_collisions(legs: tuple[NativeLeg, ...]) -> None:
     )
     if collided:
         detail = "+".join(name for _, names in collided for name in names)
-        raise GeometryRefusal(f"COARSE_LADDER:{detail}")
+        raise GeometryRefusal("COARSE_LADDER", detail=detail)
 
 
 #: family -> (anchor_qty, tail) for the shared independent-offset ladder
@@ -349,7 +355,7 @@ def _resolve_ladder_on_grid(strategy: str, spot: float, width: float, expiry: st
     anchor_qty, tail = _LADDER_SPECS[strategy]
     atm_strike = _bracket_below(grid, spot)
     if atm_strike is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:atm")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:atm")
     legs: list[NativeLeg] = [NativeLeg(
         "atm", "P", "buy" if anchor_qty >= 0 else "sell",
         abs(anchor_qty), atm_strike, expiry,
@@ -357,10 +363,10 @@ def _resolve_ladder_on_grid(strategy: str, spot: float, width: float, expiry: st
     for i, (mult, qty) in enumerate(tail, start=1):
         up = _ladder_offset_from(grid, atm_strike, width * mult)
         if up is None:
-            raise GeometryRefusal(f"NO_LISTED_STRIKE:up{i}")
+            raise GeometryRefusal("NO_CHAIN", detail=f"NO_LISTED_STRIKE:up{i}")
         dn = _ladder_mirror(grid, up, atm_strike)
         if dn is None:
-            raise GeometryRefusal(f"NO_LISTED_STRIKE:dn{i}")
+            raise GeometryRefusal("NO_CHAIN", detail=f"NO_LISTED_STRIKE:dn{i}")
         side = "buy" if qty > 0 else "sell"
         legs.append(NativeLeg(f"up{i}", "P", side, abs(qty), up, expiry))
         legs.append(NativeLeg(f"dn{i}", "P", side, abs(qty), dn, expiry))
@@ -383,25 +389,25 @@ def _resolve_twin_peak_on_grid(spot: float, width: float, expiry: str,
     """
     atm = _bracket_below(grid, spot)
     if atm is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:atm")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:atm")
     up1 = _ladder_offset_from(grid, atm, width)
     if up1 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up1")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:up1")
     dn1 = _ladder_mirror(grid, up1, atm)
     if dn1 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn1")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:dn1")
     up2 = _ladder_mirror(grid, atm, up1)
     if up2 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up2")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:up2")
     dn2 = _ladder_mirror(grid, up2, atm)
     if dn2 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn2")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:dn2")
     up4_local = _ladder_mirror(grid, atm, up2)
     if up4_local is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up4")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:up4")
     dn4 = _ladder_mirror(grid, up4_local, atm)
     if dn4 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn4")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:dn4")
     legs = (
         NativeLeg("atm", "P", "buy", 2.0, atm, expiry),
         NativeLeg("up1", "P", "sell", 1.0, up1, expiry),
@@ -425,19 +431,19 @@ def _resolve_twin_peak_5_on_grid(spot: float, width: float, expiry: str,
     """
     atm = _bracket_below(grid, spot)
     if atm is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:atm")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:atm")
     up1 = _ladder_offset_from(grid, atm, width)
     if up1 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up1")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:up1")
     dn1 = _ladder_mirror(grid, up1, atm)
     if dn1 is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn1")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:dn1")
     up_wing = _ladder_mirror(grid, dn1, up1)
     if up_wing is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:up_wing")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:up_wing")
     dn_wing = _ladder_mirror(grid, up1, dn1)
     if dn_wing is None:
-        raise GeometryRefusal("NO_LISTED_STRIKE:dn_wing")
+        raise GeometryRefusal("NO_CHAIN", detail="NO_LISTED_STRIKE:dn_wing")
     legs = (
         NativeLeg("atm", "P", "buy", 2.0, atm, expiry),
         NativeLeg("up1", "P", "sell", 2.0, up1, expiry),

@@ -18,11 +18,11 @@ from engine.v2.scoring.stages import (
 )
 
 
-def _request() -> ScoreRequest:
+def _request(strategy="STR-THRU") -> ScoreRequest:
     return ScoreRequest(
         event_id="evt-flags",
         calendar_revision="cal-1",
-        strategy_version="STR-THRU",
+        strategy_version=strategy,
         deployment_id="dep-1",
         decision_clock_id="entry-close",
         requested_decision_at="2026-09-16",
@@ -172,6 +172,35 @@ def test_extrapolated_fires_far_from_atm():
 def test_extrapolated_does_not_fire_at_the_money():
     values = assemble_native_values(_inputs())
     assert "EXTRAPOLATED" not in values["flags"]
+
+
+def test_geometry_refusal_codes_and_details_reach_score_record_without_clobbering_detail():
+    cases = (
+        ("CND-PS", (95.0, 100.0, 105.0), 1.0, "COARSE_LADDER"),
+        ("BFLY-P", (100.0, 105.0), 5.0, "NO_CHAIN"),
+    )
+    for strategy, strikes, width, expected_code in cases:
+        expiry = "2026-09-18"
+        quotes = {
+            ("P", strike, expiry): {"bid": 1.0, "ask": 2.0}
+            for strike in strikes
+        }
+        native = _inputs(
+            context_overrides={
+                "strategy": strategy, "expiry": expiry, "width": width,
+            },
+            quotes=quotes,
+            diagnostics={"detail": "prior diagnostic"},
+        )
+        record = application.score_one(_request(strategy), native)
+        assert expected_code in record.reason_codes
+        if expected_code == "COARSE_LADDER":
+            assert "NO_CHAIN" not in record.reason_codes
+            assert record.warnings[1] == "dn1+dn2+up1+up2"
+        else:
+            assert record.warnings[1] == "NO_LISTED_STRIKE:dn1"
+        assert record.warnings[0] == "prior diagnostic"
+        assert len(record.warnings) == 2
 
 
 # -- R4-9 follow-up: annotation-only flags must not refuse the row ----------
