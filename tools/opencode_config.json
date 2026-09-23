@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/deepseek/deepseek-v4.1-flash",
+  "model": "openrouter/qwen/qwen3.8-flash",
   "permission": {
     "bash": {
       "*": "deny",
