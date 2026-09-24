@@ -521,20 +521,120 @@ tests = [
     "tests/test_v2_ops_worker_typed_failures.py",
 ]
 
-[modules.ops_catalog]
-why = "Job lifecycle, submission, scheduler, catalog schema/migrations and checkpoints: the job state machine."
+# ops_catalog was one 12-file matrix job and exceeded the mutmut step's
+# 330-minute cap (CI run 35950291319). It is split here into four role shards
+# so the job-state-machine mutants run as four parallel matrix jobs. Every
+# pool test opens its catalog through tests/ops_support.py::catalog(), which
+# executes bootstrap.open_catalog (-> catalog, migrations, schema) and builds a
+# scheduler.Supervisor, and nearly all drive submit/claim/commit loops: no pool
+# test is demonstrably irrelevant to any shard, so all four keep the SAME full
+# 22-file pool rather than trading coverage for wall time. mutmut's per-mutant
+# stats still narrow each mutant to the tests that executed its function.
+# Sharding changes this file's hash, so every module's incremental cache key
+# restarts once (a full pass); the old "ops_catalog-" caches are unreachable
+# under the new names.
+[modules.ops_catalog_store]
+why = "The connection's verified pragmas, the one BEGIN IMMEDIATE transaction shape, online backup and the checksummed versioned migrations: loosen any one and two writers corrupt the catalog, a half-applied schema is accepted, or a backup silently drops the committed WAL rows."
 mutate = [
     "engine/v2/ops/__init__.py",
-    "engine/v2/ops/lifecycle.py",
-    "engine/v2/ops/submission.py",
-    "engine/v2/ops/scheduler.py",
     "engine/v2/ops/catalog.py",
     "engine/v2/ops/bootstrap.py",
     "engine/v2/ops/migrations.py",
-    "engine/v2/ops/schema*.py",
-    "engine/v2/ops/checkpoints.py",
-    "engine/v2/ops/store_barrier.py",
+    "engine/v2/ops/schema.py",
+    "engine/v2/ops/schema_runtime.py",
+]
+tests = [
+    "tests/test_v2_dashboard_publish.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_incremental_data.py",
+    "tests/test_v2_ops_incremental_registration.py",
+    "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/test_v2_ops_parity.py",
+    "tests/test_v2_ops_provider_admission.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_recovery_reboot.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_catalog_state]
+why = "The job/attempt state machine and the Problem envelope of every refusal: fence checks inside the committing transaction, cancellation ordering, retry history. A flipped guard lets a superseded attempt overwrite committed work after a takeover."
+mutate = [
+    "engine/v2/ops/lifecycle.py",
     "engine/v2/ops/errors.py",
+]
+tests = [
+    "tests/test_v2_dashboard_publish.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_incremental_data.py",
+    "tests/test_v2_ops_incremental_registration.py",
+    "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/test_v2_ops_parity.py",
+    "tests/test_v2_ops_provider_admission.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_recovery_reboot.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_catalog_sched]
+why = "claim_next and the legacy store barrier: dependency readiness, admission numbers, deterministic priority ties, the heavy-slot starvation rule and content-hash-pinned read/write leases. A slip double-books a CPU, strands a job queued forever, or lets a reader mix legacy store versions."
+mutate = [
+    "engine/v2/ops/scheduler.py",
+    "engine/v2/ops/store_barrier.py",
+]
+tests = [
+    "tests/test_v2_dashboard_publish.py",
+    "tests/test_v2_ops_authority.py",
+    "tests/test_v2_ops_catalog.py",
+    "tests/test_v2_ops_checkpoint_output_names.py",
+    "tests/test_v2_ops_coordinator_lease.py",
+    "tests/test_v2_ops_critical_review.py",
+    "tests/test_v2_ops_engineering_history.py",
+    "tests/test_v2_ops_executor_faults.py",
+    "tests/test_v2_ops_explain_from_logs.py",
+    "tests/test_v2_ops_health.py",
+    "tests/test_v2_ops_incremental_data.py",
+    "tests/test_v2_ops_incremental_registration.py",
+    "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_outcome_session_backfill_wiring.py",
+    "tests/test_v2_ops_parity.py",
+    "tests/test_v2_ops_provider_admission.py",
+    "tests/test_v2_ops_recovery_ownership.py",
+    "tests/test_v2_ops_recovery_reboot.py",
+    "tests/test_v2_ops_resolved_session.py",
+    "tests/test_v2_ops_same_session_replan.py",
+    "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_store_barrier.py",
+]
+
+[modules.ops_catalog_submit]
+why = "Submission identity and checkpoint reuse: idempotency by (namespace, key, canonical digest) against the server-owned kind registry, cycle-safe graph inserts, and the cache_identity/verified-reuse that decide whether an attempt recomputes or adopts a stored artifact. A weakened comparison returns the wrong job for a second submit or reuses a stale checkpoint."
+mutate = [
+    "engine/v2/ops/submission.py",
+    "engine/v2/ops/checkpoints.py",
 ]
 tests = [
     "tests/test_v2_dashboard_publish.py",

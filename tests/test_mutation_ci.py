@@ -362,6 +362,26 @@ def test_every_v2_file_is_in_exactly_one_module():
     assert legacy == ["engine/models/no_fit.py", "engine/pnl_sim.py"]  # the pilot's only
 
 
+def test_ops_catalog_is_split_into_disjoint_role_shards():
+    """ops_catalog was one 12-file job and exceeded the 330-minute mutmut step
+    cap (CI run 35950291319). Its shards must stay split (small, disjoint, and
+    collectively exactly its original files) or the timeout comes back."""
+    tracked = _tracked("engine")
+    assert "ops_catalog" not in CFG["modules"]
+    shards = [n for n in pilot.enabled_modules(CFG) if n.startswith("ops_catalog")]
+    assert len(shards) >= 3
+    owned = [pilot.mutate_files(CFG, s, tracked) for s in shards]
+    flat = [f for files in owned for f in files]
+    assert len(flat) == len(set(flat))  # mutate sets are disjoint
+    assert max(len(files) for files in owned) <= 6
+    assert set(flat) == {f"engine/v2/ops/{n}" for n in [
+        "__init__.py", "bootstrap.py", "catalog.py", "checkpoints.py", "errors.py",
+        "lifecycle.py", "migrations.py", "scheduler.py", "schema.py", "schema_runtime.py",
+        "store_barrier.py", "submission.py"]}
+    for s in shards:  # each shard keeps the job-stack pool it was timed out with
+        assert pilot.test_files(CFG, s)
+
+
 def test_modules_are_well_formed():
     tracked_tests = _tracked("tests")
     for name, mod in CFG["modules"].items():
