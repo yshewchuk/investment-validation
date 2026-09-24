@@ -186,10 +186,11 @@ class FrozenStageExecutor:
         if isinstance(role_rows, Mapping):
             role = str(binding.role)
             vector = role_rows.get(role, role_rows.get(role.split(":", 1)[0]))
-            stage_facts = features.get("_native_stage_facts", {})
-            stage_facts = stage_facts if isinstance(stage_facts, Mapping) else {}
-            role_facts = vector if isinstance(vector, Mapping) else {}
-            features = {**role_facts, **stage_facts}
+            if isinstance(vector, Mapping):
+                stage_facts = features.get("_native_stage_facts", {})
+                stage_facts = (stage_facts if isinstance(stage_facts, Mapping)
+                               else {})
+                features = {**vector, **stage_facts}
         row = self._row(binding, features)
         request = InferenceRequest(
             release_id=self.release.release_id,

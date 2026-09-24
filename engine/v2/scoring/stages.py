@@ -679,8 +679,9 @@ def _record_model_inputs(output, facts, names, role):
     if isinstance(role_rows, Mapping):
         base_role = str(role).split(":", 1)[0]
         candidate = role_rows.get(role, role_rows.get(base_role))
-        selected_role = True
-        row = candidate if isinstance(candidate, Mapping) else {}
+        if isinstance(candidate, Mapping):
+            selected_role = True
+            row = candidate
     for name in names:
         if name in stage_facts:
             inputs[name] = stage_facts[name]

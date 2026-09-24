@@ -301,6 +301,28 @@ def test_missing_feature_refuses_without_a_number(frozen):
     assert forecast.get("forecast_abs_move") is None
 
 
+def test_model_inputs_report_the_row_the_frozen_binding_actually_ran(frozen):
+    """A strict capture's ``role_model_inputs`` carries rows only for the
+    roles the row itself served; a binding whose role is absent there (e.g.
+    only ``{"chooser": {}}`` is selected) runs from the runtime feature row,
+    so the reporting view of a reporting role must name THAT row -- never
+    ``None``s from a role that was never selected. Execution
+    (``FrozenStageExecutor.execute``) and ``model_inputs`` reporting share
+    the one predicate: a captured row is used exactly when it is a mapping.
+    """
+    root, _ = frozen
+    inputs = build_native_score_inputs(_bundle(frozen, ROWS[0], strategy="STR-RUNUP"))
+    inputs.features["role_model_inputs"] = {"chooser": {}}
+    seen: dict = {}
+    record = application.score_one(
+        _request("STR-RUNUP"), inputs,
+        observer=lambda item: seen.setdefault(item.receipt.stage, item.output_document))
+    assert "MISSING_FEATURES" not in record.reason_codes, record.reason_codes
+    forecast = seen["forecast"]
+    assert forecast["driver_prediction"] == _legacy(root, "implied_t1", ROWS[0])
+    assert forecast["model_inputs"] == {name: ROWS[0][name] for name in FEATURES}
+
+
 def test_malformed_frozen_recipes_are_refused_at_build(frozen):
     with pytest.raises(ValueError, match="role"):
         build_native_score_inputs(_bundle(frozen, ROWS[0], recipes={
