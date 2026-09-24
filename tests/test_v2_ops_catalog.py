@@ -7,7 +7,7 @@ import pytest
 
 from engine.v2.contracts import CapacitySample
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.ops.catalog import backup_to, transaction
+from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.lifecycle import Outcome, commit_attempt, complete_cancel, request_cancel
 from engine.v2.ops.migrations import Migration, migrate
@@ -281,3 +281,59 @@ def test_o32_migration_fault_and_backup(tmp_path):
         assert restored.execute("SELECT value FROM planted").fetchone()[0] == 17
     with pytest.raises(OpsError, match="newer"):
         migrate(conn, "test", [], clock=clock)
+
+
+#: What ``integrity_errors`` must report for one orphaned
+#: ``job_dependencies`` row: the finding names the CHILD table holding the
+#: orphan (first element of the ``foreign_key_check`` row); the parent table
+#: ``jobs`` is the third element, so the exact string pins that apart.
+_ORPHAN_FINDING = "foreign key violation in job_dependencies"
+
+
+def _plant_orphaned_dependency(conn, child_job_id):
+    """A dependency row naming a parent that does not exist, written with
+    enforcement off -- the state a catalog that lost a job row is found in."""
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO job_dependencies (child_job_id, parent_job_id,"
+                 " required_output_contract) VALUES (?, 'ghost', 'rows.v1.0')",
+                 (child_job_id,))
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
+def test_backup_to_carries_rows_committed_while_only_in_wal(tmp_path):
+    """§6.1: the backup is made through the online backup API, so rows that
+    were committed while still living only in the WAL are present in the
+    copy, and a sound copy reports no integrity findings."""
+    conn, clock, _ = catalog(tmp_path)
+    ids = {submit(conn, REGISTRY, POLICY, request(key), clock=clock).job_id
+           for key in ("one", "two")}
+    backup_to(conn, tmp_path / "backup-copy.sqlite")
+    with sqlite3.connect(tmp_path / "backup-copy.sqlite") as restored:
+        assert integrity_errors(restored) == []
+        assert {row[0] for row in restored.execute("SELECT job_id FROM jobs")} == ids
+
+
+def test_integrity_errors_is_empty_when_sound_and_names_the_offending_table(tmp_path):
+    """Empty when the catalog is sound; one finding per foreign-key
+    violation, keyed by the child table that holds the orphaned row."""
+    conn, clock, _ = catalog(tmp_path)
+    assert integrity_errors(conn) == []
+    child = submit(conn, REGISTRY, POLICY, request("one"), clock=clock).job_id
+    _plant_orphaned_dependency(conn, child)
+    assert integrity_errors(conn) == [_ORPHAN_FINDING]
+
+
+def test_backup_to_refuses_a_catalog_with_an_orphaned_dependency(tmp_path):
+    """Corruption is refused, not blessed: the refusal's check ran over the
+    copy (which is left behind, orphan included, for an operator to
+    inspect), and the failure carries INTEGRITY_FAILED with the first
+    finding in structured details."""
+    conn, clock, _ = catalog(tmp_path)
+    child = submit(conn, REGISTRY, POLICY, request("one"), clock=clock).job_id
+    _plant_orphaned_dependency(conn, child)
+    with pytest.raises(OpsError) as err:
+        backup_to(conn, tmp_path / "refused.sqlite")
+    assert err.value.code == "INTEGRITY_FAILED"
+    assert err.value.problem.details == {"first_problem": _ORPHAN_FINDING}
+    with sqlite3.connect(tmp_path / "refused.sqlite") as refused:
+        assert integrity_errors(refused) == [_ORPHAN_FINDING]
