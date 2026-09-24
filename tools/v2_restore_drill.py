@@ -19,9 +19,28 @@ Three real production entrypoints, composed, nothing re-implemented:
   restored from the backup's ``artifacts/``) into a ``ScoreRecord``.
 * ``engine.v2.ledger.export.export_generation`` -- the same projection the
   nightly ``ledger_export`` effect runs, over the RESTORED catalog, compared
-  byte-for-byte against a generation already exported from the live catalog
-  before the backup was taken (this is the "report" side of the drill; the
-  "ledger" side is the restored ``decisions`` row count).
+  file-set- and byte-for-byte against a generation already exported from the
+  live catalog before the backup was taken, IN BOTH DIRECTIONS (this is the
+  "report" side of the drill; the "ledger" side is the restored ``decisions``
+  row count). A matching decision count never excuses absent, extra or
+  differing export files.
+
+Original-export baseline policy (review C6)::
+
+* a missing, symlinked or otherwise unusable ``--original-export`` is
+  REFUSED (exit 2) before anything is restored;
+* symlinks and other non-regular entries inside either tree are reported
+  as ``files_untrusted`` and never followed or read as evidence;
+* an empty (or otherwise file-less) baseline directory is affirmative
+  zero-decision evidence ONLY when the operator passes
+  ``--expected-decisions-count 0``, the parent export root carries the
+  ``CURRENT`` pointer ``export_generation`` wrote naming this generation,
+  the baseline directory is itself the ``<root>/<generation>`` that pointer
+  names, and the restored side is genuinely empty and zero-decision too; an
+  arbitrary empty directory never passes;
+* ``verdict`` is PASS only when every shared file matched bytes, no file
+  is missing/extra/untrusted, no baseline problem stands, and -- when
+  given -- the expected decision count matches.
 
 Usage::
 
@@ -34,13 +53,15 @@ Usage::
         [--artifact-root evidence/]
 
 Exits 0 and prints the receipt on PASS; exits 1 and prints the receipt (to
-stderr's twin on stdout) on FAIL. Never mutates the backup or the original
-export directory.
+stderr's twin on stdout) on FAIL; exits 2 with a refusal line when the
+backup cannot be restored or the original-export baseline is unusable.
+Never mutates the backup or the original export directory.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -62,7 +83,9 @@ SCHEMA_VERSION = "restore_drill_receipt.v1.0"
 
 
 class RestoreDrillError(RuntimeError):
-    """The backup could not be restored at all (not a reconciliation mismatch)."""
+    """The backup could not be restored at all, or the original-export
+    baseline is unusable (missing, symlinked, not a directory, unreadable)
+    -- either way, not a reconciliation mismatch."""
 
 
 def _replay_score(restored_root: Path, score_request_name: str, native_inputs_name: str) -> dict:
@@ -85,24 +108,123 @@ def _replay_score(restored_root: Path, score_request_name: str, native_inputs_na
     return {"score_id": getattr(record, "score_id", None), "content_hash": content_hash(document)}
 
 
+def _classify_tree(root: Path) -> dict[str, str]:
+    """Relative posix path -> entry kind ('file', 'dir', 'symlink', 'other').
+
+    Gathered with lstat semantics: NO symlink under ``root`` is ever
+    followed, and a symlink never contributes file bytes as evidence.
+    """
+    kinds: dict[str, str] = {}
+    stack: list[tuple[Path, str]] = [(root, "")]
+    while stack:
+        base, prefix = stack.pop()
+        try:
+            with os.scandir(base) as entries:
+                for entry in entries:
+                    relative = prefix + entry.name
+                    if entry.is_symlink():
+                        kinds[relative] = "symlink"
+                    elif entry.is_dir(follow_symlinks=False):
+                        kinds[relative] = "dir"
+                        stack.append((Path(entry.path), relative + "/"))
+                    elif entry.is_file(follow_symlinks=False):
+                        kinds[relative] = "file"
+                    else:
+                        kinds[relative] = "other"
+        except OSError as exc:
+            raise RestoreDrillError(f"cannot read export tree {base}: {exc}") from exc
+    return kinds
+
+
+def _unattested_file_less_baseline(original_export_dir: Path, generation: str,
+                                   expected_decisions_count: int | None) -> str | None:
+    """Explicit policy for a file-less baseline directory (documented in the
+    module docstring): a legitimate zero-decision ``export_generation`` run
+    leaves an EMPTY generation directory plus a ``CURRENT`` pointer naming
+    it, so accept one only on affirmative expected-zero evidence --
+    ``expected_decisions_count == 0`` AND a ``CURRENT`` in the parent export
+    root that is a regular file containing exactly ``generation + "\\n"`` AND
+    the baseline directory itself being the ``<root>/<generation>`` that
+    pointer names -- an empty sibling of a genuine export root is no
+    attestation. The name is compared lexically; no symlink is followed or
+    resolved. Returns the refusal reason, or None when the baseline IS
+    attested."""
+    if expected_decisions_count != 0:
+        return ("original export baseline holds no files and no affirmative "
+                "expected_decisions_count of 0 was given; an empty directory is "
+                "not proof of a legitimate zero-decision export")
+    pointer = original_export_dir.parent / "CURRENT"
+    if pointer.is_symlink() or not pointer.is_file():
+        return ("original export baseline holds no files and its parent export "
+                "root carries no CURRENT pointer file; this is not a generation "
+                "export_generation produced")
+    try:
+        named = pointer.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"original export baseline's CURRENT pointer is unreadable: {exc}"
+    expected_pointer = generation + "\n"
+    if named != expected_pointer:
+        return (f"original export baseline holds no files and its CURRENT pointer "
+                f"names {named!r}, not the expected {expected_pointer!r}")
+    if original_export_dir.name != generation:
+        return (f"original export baseline holds no files and {original_export_dir} "
+                f"is not the directory CURRENT names ({pointer.parent / generation!r}); "
+                "an empty sibling of a genuine export root is not attested evidence")
+    return None
+
+
 def _reconcile_ledger(restored_conn, export_root: Path, generation: str,
-                      original_export_dir: Path) -> dict:
-    """The restored catalog's own export, diffed byte-for-byte against a
-    generation already exported from the LIVE catalog before the backup."""
+                      original_export_dir: Path,
+                      expected_decisions_count: int | None) -> dict:
+    """The restored catalog's own export, reconciled against a generation
+    already exported from the LIVE catalog before the backup: complete
+    relative file sets in BOTH directions (missing and extra both fail),
+    every shared regular file byte-compared, path kinds compared without
+    ever following a symlink. A matching decision count never excuses an
+    absent, extra, untrusted or byte-differing file, and a file-less
+    baseline must pass the affirmative-zero attestation above."""
     restored_export_dir = export_generation(restored_conn, export_root, generation=generation)
-    original_files = sorted(p for p in original_export_dir.rglob("*") if p.is_file())
-    mismatched = []
-    for path in original_files:
-        relative = path.relative_to(original_export_dir)
-        twin = restored_export_dir / relative
-        if not twin.is_file() or twin.read_bytes() != path.read_bytes():
-            mismatched.append(str(relative))
+    original = _classify_tree(original_export_dir)
+    restored = _classify_tree(restored_export_dir)
+
+    shared = set(original) & set(restored)
+    files_missing_in_restored = sorted(set(original) - set(restored))
+    files_extra_in_restored = sorted(set(restored) - set(original))
+    files_type_mismatched = sorted(p for p in shared if original[p] != restored[p])
+    byte_compared = sorted(p for p in shared if original[p] == restored[p] == "file")
+    files_mismatched = []
+    for relative in byte_compared:
+        if ((original_export_dir / relative).read_bytes()
+                != (restored_export_dir / relative).read_bytes()):
+            files_mismatched.append(relative)
+    entries_untrusted = (
+        [f"original/{p} ({kind})" for p, kind in sorted(original.items())
+         if kind not in ("file", "dir")]
+        + [f"restored/{p} ({kind})" for p, kind in sorted(restored.items())
+           if kind not in ("file", "dir")])
+    baseline_problem = None
+    if "file" not in original.values():
+        baseline_problem = _unattested_file_less_baseline(original_export_dir, generation,
+                                                          expected_decisions_count)
     count = len(decision_rows(restored_conn))
+    files_ok = not (files_missing_in_restored or files_extra_in_restored
+                    or files_type_mismatched or files_mismatched or entries_untrusted
+                    or baseline_problem)
     return {
         "generation": generation,
-        "files_compared": len(original_files),
-        "files_mismatched": mismatched,
+        "original_export_dir": str(original_export_dir),
+        "restored_export_dir": str(restored_export_dir),
+        "files_compared": len(byte_compared),
+        "files_mismatched": files_mismatched,
+        "files_missing_in_restored": files_missing_in_restored,
+        "files_extra_in_restored": files_extra_in_restored,
+        "files_type_mismatched": files_type_mismatched,
+        "entries_untrusted": entries_untrusted,
+        "baseline_problem": baseline_problem,
         "decisions_count": count,
+        "expected_decisions_count": expected_decisions_count,
+        "match": files_ok and (expected_decisions_count is None
+                               or count == expected_decisions_count),
     }
 
 
@@ -113,6 +235,13 @@ def run_drill(*, backup_dir: Path | str, restore_root: Path | str,
              artifact_root: Path | str | None = None) -> dict:
     backup_dir, restore_root = Path(backup_dir), Path(restore_root)
     original_export_dir = Path(original_export_dir)
+    if original_export_dir.is_symlink():
+        raise RestoreDrillError(f"original export directory {original_export_dir} is a "
+                                "symlink; a symlinked baseline is never trusted evidence")
+    if not original_export_dir.is_dir():
+        raise RestoreDrillError(f"original export directory {original_export_dir} does not "
+                                "exist or is not a directory; the drill would reconcile zero "
+                                "baseline files, which can never yield PASS")
     try:
         restored_root = restore_backup(backup_dir, restore_root)
     except Exception as exc:  # restore_backup raises engine.v2.ops.errors.OpsError subclasses
@@ -125,10 +254,8 @@ def run_drill(*, backup_dir: Path | str, restore_root: Path | str,
         score_replay["expected_hash"] = expected_score_hash
         score_replay["match"] = score_replay["content_hash"] == expected_score_hash
 
-        ledger = _reconcile_ledger(conn, restored_root / "export", generation, original_export_dir)
-        ledger["expected_decisions_count"] = expected_decisions_count
-        ledger["match"] = not ledger["files_mismatched"] and (
-            expected_decisions_count is None or ledger["decisions_count"] == expected_decisions_count)
+        ledger = _reconcile_ledger(conn, restored_root / "export", generation,
+                                   original_export_dir, expected_decisions_count)
     finally:
         conn.close()
 
