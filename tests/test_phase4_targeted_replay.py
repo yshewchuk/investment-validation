@@ -363,8 +363,8 @@ def test_agreeing_row_fails_nothing_and_records_no_differences(tmp_path, monkeyp
     row = targeted.run_targeted(root, ["a"], progress_stream=_Sink())["rows"][0]
     assert row["disposition"] == "compared"
     assert row["checks_failed"] == []
-    assert not ({"key_differences", "flag_differences", "null_mask_differences",
-                 "contract_differences"} & set(row))
+    assert not ({"key_differences", "flag_differences", "null_mask_differences"} & set(row))
+    assert "contract_differences" not in row
 
 
 # ---------------------------------------------------------------------------

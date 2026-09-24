@@ -78,7 +78,7 @@ from engine.v2.foundation import content_hash  # noqa: E402
 
 __all__ = ["run_targeted", "main", "BASELINE_SECONDS_PER_ROW", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = "phase4_targeted_replay.v1.1"
+SCHEMA_VERSION = "phase4_targeted_replay.v1.0"
 
 #: The prior native-parity run took ~32 minutes for 20 rows. Until this run has
 #: observed completed rows of its own, the provisional ETA is extrapolated from
