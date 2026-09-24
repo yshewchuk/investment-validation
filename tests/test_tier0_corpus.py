@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from checks import tier0_corpus as t0  # noqa: E402
 from engine.v2.diagnosis import AGREE, DIFFER, INCOMPARABLE, content_hash  # noqa: E402
+from engine.v2.foundation.canonical import iter_canonical_json  # noqa: E402
 
 MENU = ["TWIN-P5", "BFLY-P", "CND-PS"]
 AXIS_INPUTS = {
@@ -1456,3 +1457,256 @@ def test_an_old_format_plain_mappings_list_loads_unchanged(tmp_path):
     corpus = t0.load(root)
     loaded = corpus.pairs["206_plain_mappings"]["payload"]["record"]["extra_field"]["mappings"]
     assert loaded == mappings
+
+
+# --------------------------------------------------------------------------
+# bounded fragment cache (Phase 4 full-gate memory fix): only whole shared
+# documents are candidates, each one's cached text is bounded, and the
+# unbounded `render` callback is never used -- the identical bytes reach
+# SHA-256 through `iter_canonical_json` instead.
+# --------------------------------------------------------------------------
+
+
+def _render_must_not_be_called(node):
+    raise AssertionError("fragments.canonical must render through "
+                         "iter_canonical_json, never the unbounded callback")
+
+
+def test_identity_fragments_caches_one_shared_document_by_identity():
+    doc = {"predictions": [0.11, 0.22, 0.33], "tag": "pool"}
+    frag = t0._IdentityFragments((doc,), per_fragment_max=100_000,
+                                 total_max=100_000)
+    text = frag.canonical(doc, _render_must_not_be_called)
+    # Byte-identical to the plain path, and built without touching `render`.
+    assert text == "".join(iter_canonical_json(doc))
+    assert len(frag._texts) == 1 and frag._total_chars == len(text)
+    # A repeat occurrence returns the SAME cached string, re-collecting nothing
+    # (render stays forbidden, the budget is not double-counted).
+    assert frag.canonical(doc, _render_must_not_be_called) is text
+    assert len(frag._texts) == 1 and frag._total_chars == len(text)
+    # A node that is not held (even content-identical, different identity) is
+    # never a candidate: None, not cached, render untouched.
+    assert frag.canonical({"predictions": [0.11], "tag": "pool"},
+                          _render_must_not_be_called) is None
+    assert len(frag._texts) == 1
+
+
+def test_identity_fragments_declines_over_per_fragment_budget_without_retry(monkeypatch):
+    doc = {"blob": "x" * 2000}
+    frag = t0._IdentityFragments((doc,), per_fragment_max=1000, total_max=1_000_000)
+
+    # Instrument the EXACT generator the bounded cache collects through, so a
+    # decline can be PROVEN to stop at the budget boundary rather than drain
+    # the subtree, and to leave the generator uncalled on a repeat of the same
+    # rejected identity. ``_IdentityFragments.canonical`` reads the module
+    # global ``iter_canonical_json`` (checks.tier0_corpus's own binding), so
+    # patching that name is what the collect loop actually calls.
+    real_iter = t0.iter_canonical_json
+    invocations: list[dict] = []
+
+    def counting_iter(node, *args, **kwargs):
+        record = {"pulled": [], "drained": False}
+        invocations.append(record)
+
+        def gen():
+            for chunk in real_iter(node, *args, **kwargs):
+                record["pulled"].append(len(chunk))
+                yield chunk
+            record["drained"] = True  # only reached on a full, unbroken drain
+        return gen()
+
+    monkeypatch.setattr(t0, "iter_canonical_json", counting_iter)
+
+    limit = 1000
+    assert frag.canonical(doc, _render_must_not_be_called) is None
+    # Rejection state: declined, remembered, nothing cached, no budget spent.
+    assert id(doc) in frag._rejected
+    assert not frag._texts and frag._total_chars == 0
+
+    # The generator stopped EARLY: it consumed whole chunks only until the
+    # running byte total crossed the per-fragment limit, then returned. It never
+    # drained the subtree (the closing `}` chunk was never pulled), and the last
+    # chunk pulled is exactly the one that tipped it over the boundary.
+    assert len(invocations) == 1
+    first = invocations[0]
+    assert not first["drained"]
+    assert first["pulled"], "the collector must have pulled at least one chunk"
+    assert sum(first["pulled"]) > limit
+    assert sum(first["pulled"][:-1]) <= limit
+    # And it did not consume the whole document: a full drain yields more chunks.
+    assert len(first["pulled"]) < sum(1 for _ in real_iter(doc))
+
+    # A repeat of the same rejected identity is declined straight from the
+    # reject set -- no re-collection, so the generator is never called again and
+    # zero further chunks are consumed. The unbounded `render` callback is never
+    # invoked on either pass (it would raise); nothing is cached either way.
+    assert frag.canonical(doc, _render_must_not_be_called) is None
+    assert len(invocations) == 1  # second call collected nothing
+    assert not first["drained"]
+    assert id(doc) not in frag._texts and not frag._texts
+
+
+def test_identity_fragments_aggregate_total_budget_bounds_later_documents():
+    first = {"data": "a" * 400}
+    second = {"data": "b" * 400}
+    # Each text is under the per-fragment cap; only the aggregate is tight.
+    frag = t0._IdentityFragments((first, second), per_fragment_max=1000,
+                                 total_max=500)
+    assert frag.canonical(first, _render_must_not_be_called) is not None
+    assert frag._total_chars == len("".join(iter_canonical_json(first)))
+    assert frag.canonical(second, _render_must_not_be_called) is None
+    assert id(second) in frag._rejected
+    # The aggregate counter reflects only what is actually cached (just first).
+    assert id(second) not in frag._texts
+
+
+def test_fragments_cache_never_calls_the_render_callback(tmp_path, monkeypatch):
+    """The strongest form: patch canonical.py's own ``_plain`` (the ``render``
+    every ``content_hash`` passes to ``fragments.canonical``) to a raiser, then
+    hash a shared-subtree document through the corpus fragments. A hash that
+    completes proves ``render`` was never invoked -- and it equals the plain
+    hash, proving the bounded cache kept the exact bytes."""
+    import engine.v2.foundation.canonical as canonical_module
+
+    corpus, _pool = _shared_fragment_corpus(tmp_path)
+    assert corpus.fragments is not None
+
+    def _forbidden(node):
+        raise AssertionError("_plain/render must not be called by the bounded cache")
+
+    monkeypatch.setattr(canonical_module, "_plain", _forbidden)
+    for fixture_id in corpus.ordered_ids:
+        payload = corpus.pairs[fixture_id]["payload"]
+        assert (content_hash(payload, fragments=corpus.fragments)
+                == content_hash(payload))
+
+
+def test_translation_tables_are_not_direct_fragments_but_stay_shared(tmp_path):
+    pool = {"tag": "shared-pool", "predictions": [0.1, 0.2]}
+    digest = write_shared(tmp_path / "tier0", pool)
+    table_rows = [translation_row(["p", i], ["p", i], i) for i in range(50, 0, -1)]
+    table_digest = write_translation_table(tmp_path / "tier0", table_rows)
+    shared_ref = {t0.SHARED_REF_KEY: digest}
+    rows_ref = {t0.ROWS_REF_KEY: table_digest, "order": t0.ROWS_ORDER_IDENTITY}
+    p = pair("300_no_table_frag", request("STR-THRU"),
+             priced("STR-THRU", extra_field={"s": shared_ref, "r": rows_ref,
+                                             "r2": rows_ref}))
+    root = build(tmp_path / "tier0", [p])
+    corpus = t0.load(root)
+    frag = corpus.fragments
+    assert frag is not None
+
+    rec = corpus.pairs["300_no_table_frag"]["payload"]["record"]["extra_field"]
+    # Loader behavior unchanged: one table object, aliased at every occurrence,
+    # in the exact stored (reversed) order.
+    assert rec["r"] is rec["r2"]
+    assert rec["r"] == table_rows
+    assert [row["shared_path"] for row in rec["r"]] == [["p", i] for i in range(50, 0, -1)]
+    # But the table is NOT a cached fragment: None, never collected.
+    assert frag.canonical(rec["r"], _render_must_not_be_called) is None
+    assert id(rec["r"]) not in frag._held
+    # The whole shared DOCUMENT, however small, IS a candidate (under budget).
+    assert frag.canonical(rec["s"], _render_must_not_be_called) is not None
+
+
+def test_fragments_match_plain_hashing_on_nested_unicode_nonfinite(tmp_path):
+    """A shared document that embeds a RESOLVED translation table plus Unicode
+    keys/strings and a frozen nonfinite value must hash identically with and
+    without the corpus's bounded fragments, and `case_digest`/`case_addressing`
+    must AGREE both ways -- the patch changes only how identical bytes reach
+    SHA-256."""
+    inner_rows = [translation_row(["\u00e9", i], ["p", i], i) for i in range(4)]
+    inner_rows.append(translation_row(["nan-path"], ["p", 99], float("nan")))
+    table_digest = write_translation_table(tmp_path / "tier0", inner_rows)
+    rows_ref = {t0.ROWS_REF_KEY: table_digest, "order": t0.ROWS_ORDER_IDENTITY}
+    # The stored (on-disk) form references the table; the expanded (logical,
+    # digest-bearing) form carries the resolved rows plus unicode/nonfinite
+    # leaves that appear IDENTICALLY in both, so the loader's digest check is
+    # the one under test -- not a hand-matched value.
+    stored = {"\u00fcber": rows_ref, "note": "caf\u00e9", "loss": {t0.NONFINITE: "nan"}}
+    expanded = {"\u00fcber": inner_rows, "note": "caf\u00e9", "loss": {t0.NONFINITE: "nan"}}
+    digest = write_shared(tmp_path / "tier0", stored, expanded=expanded)
+    shared_ref = {t0.SHARED_REF_KEY: digest}
+
+    req = request("STR-THRU")
+    rec_ref = priced("STR-THRU", extra_field=shared_ref)
+    rec_exp = priced("STR-THRU", extra_field=expanded)
+    p = _pair_with_shared_ref("400_nested", req, rec_ref, rec_exp)
+    root = build(tmp_path / "tier0", [p])
+    corpus = t0.load(root)
+    assert corpus.fragments is not None
+
+    resolved = corpus.pairs["400_nested"]["payload"]["record"]["extra_field"]
+    assert resolved["\u00fcber"] == inner_rows            # nested table resolved
+    assert resolved["note"] == "caf\u00e9"               # unicode preserved
+    assert resolved["loss"] == {t0.NONFINITE: "nan"}      # nonfinite preserved
+
+    for fixture_id in corpus.ordered_ids:
+        payload = corpus.pairs[fixture_id]["payload"]
+        assert (content_hash(payload, fragments=corpus.fragments)
+                == content_hash(payload))
+
+    plain = t0.Corpus(root=corpus.root, index=corpus.index, pairs=corpus.pairs,
+                      fragments=None)
+    assert all(r.verdict == AGREE for r in t0.case_digest(corpus))
+    assert all(r.verdict == AGREE for r in t0.case_digest(plain))
+    assert all(r.verdict == AGREE for r in t0.case_addressing(corpus))
+
+
+def test_nested_table_shared_document_streams_when_over_tiny_fragment_budget(tmp_path):
+    """The nested-table case above caches a small document under the real
+    1 Mi budget; this is its mirror under a tiny budget. A shared document that
+    embeds a RESOLVED ``$rows`` translation table, given a fragment budget so
+    small the document is DECLINED (``canonical`` returns ``None``, the reject
+    set remembers it, nothing is cached): the payload must still stream to the
+    exact same content hash as ``fragments=None``, so ``case_digest``/
+    ``case_addressing`` still AGREE, and the loaded table's object identity and
+    exact (reversed) order are untouched by the decline. The cache only ever
+    saves work -- a decline changes nothing observable. Tiny fixture: the decline
+    is forced by the budget, not by allocating a large table."""
+    inner_rows = [translation_row(["p", i], ["p", i], i) for i in range(6, 0, -1)]
+    table_digest = write_translation_table(tmp_path / "tier0", inner_rows)
+    rows_ref = {t0.ROWS_REF_KEY: table_digest, "order": t0.ROWS_ORDER_IDENTITY}
+    stored = {"table_a": rows_ref, "table_b": rows_ref, "tag": "nested"}
+    expanded = {"table_a": inner_rows, "table_b": inner_rows, "tag": "nested"}
+    digest = write_shared(tmp_path / "tier0", stored, expanded=expanded)
+    shared_ref = {t0.SHARED_REF_KEY: digest}
+
+    req = request("STR-THRU")
+    rec_ref = priced("STR-THRU", extra_field=shared_ref)
+    rec_exp = priced("STR-THRU", extra_field=expanded)
+    p = _pair_with_shared_ref("420_nested_over_budget", req, rec_ref, rec_exp)
+    root = build(tmp_path / "tier0", [p])
+    corpus = t0.load(root)
+    assert corpus.fragments is not None
+    resolved = corpus.pairs["420_nested_over_budget"]["payload"]["record"]["extra_field"]
+
+    # Loaded identity + order come from the loader (fixed before any hashing):
+    # the two table references alias ONE row-list object, in the table's exact
+    # stored (reversed) order -- never re-sorted.
+    assert resolved["table_a"] is resolved["table_b"]
+    assert resolved["table_a"] == inner_rows
+    assert [row["shared_path"] for row in resolved["table_a"]] == [
+        ["p", i] for i in range(6, 0, -1)]
+
+    # A budget the table-containing document blows straight through: declined to
+    # None, remembered, nothing cached, and the unbounded `render` never runs.
+    tiny = t0._IdentityFragments((resolved,), per_fragment_max=48, total_max=48)
+    assert tiny.canonical(resolved, _render_must_not_be_called) is None
+    assert id(resolved) in tiny._rejected
+    assert not tiny._texts and tiny._total_chars == 0
+
+    # Declined, the whole payload streams -- byte-for-byte the fragments-disabled
+    # hash, so the cache's refusal leaves the digest unchanged (and still caches
+    # nothing, having only met identities it was told to refuse).
+    payload = corpus.pairs["420_nested_over_budget"]["payload"]
+    assert content_hash(payload, fragments=tiny) == content_hash(payload)
+    assert not tiny._texts and tiny._total_chars == 0
+
+    # The full battery cases still AGREE with the fragment declined, and the
+    # loaded table identity/order are still exactly what the loader produced.
+    corpus.fragments = tiny
+    assert all(r.verdict == AGREE for r in t0.case_digest(corpus))
+    assert all(r.verdict == AGREE for r in t0.case_addressing(corpus))
+    after = corpus.pairs["420_nested_over_budget"]["payload"]["record"]["extra_field"]
+    assert after is resolved and after["table_a"] is after["table_b"] == inner_rows
