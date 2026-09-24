@@ -123,6 +123,7 @@ from engine.v2.scoring.stages import (  # noqa: E402
     StageObservation,
     receipt,
 )
+from tools.capture_heartbeat import CaptureHeartbeat  # noqa: E402
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 from tools.phase4_frozen_resources import (  # noqa: E402
     FrozenResourcePackage,
@@ -2658,6 +2659,10 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
         keys = _forward_chain_keys(scorer, events, as_of, strategies)
         index = replay_mod.load_chain_index(keys, progress_every=0) if keys else None
 
+    # One request-scorable unit per (event, strategy): the count is exact
+    # here, so a blocked SINGLE long candidate still shows its
+    # completed/total while the heartbeat thread beats through it.
+    heartbeat().phase("score-forward", total=len(events) * len(strategy_names))
     out: list[dict] = []
     for row in events.itertuples(index=False):
         for strategy in strategy_names:
@@ -2672,6 +2677,7 @@ def forward_pass(scorer, events: pd.DataFrame, as_of: pd.Timestamp,
             )
             candidate["event_id"] = str(row.event_id)
             out.append(candidate)
+            heartbeat().advance()
     return out
 
 
@@ -2745,6 +2751,7 @@ def boundary_pass(scorer, events: pd.DataFrame,
             )
             candidate["event_id"] = str(row["event_id"])
             out.append(candidate)
+            heartbeat().advance()
     return out
 
 
@@ -3434,8 +3441,12 @@ def attach_strict_probe(
     whole capture only refuses when NOT ONE row produced a verified trace —
     that is a wiring failure (nothing works at all), not a per-case gap.
     """
+    hb = heartbeat()
     gaps: dict[str, str] = {}
     attached = []
+    hb.phase("attach-strict-trace",
+             total=sum(1 for cand in chosen
+                       if cand.get("kind") in ("score_result", "dyn_sv_choice")))
     for candidate in chosen:
         kind = candidate.get("kind")
         if kind not in ("score_result", "dyn_sv_choice"):
@@ -3463,6 +3474,7 @@ def attach_strict_probe(
                 candidate["native_score_id"] = native_score_id
             attached.append(fixture_id)
         print(f"[corpus] strict trace {fixture_id}: rss {_rss_gb():.2f}G", flush=True)
+        hb.advance()  # one attach unit (trace or typed gap) resolved for this row
     if not attached:
         detail = "; ".join(f"{k}: {v}" for k, v in list(gaps.items())[:3])
         detail = detail or "no score_result candidate was selected"
@@ -3961,6 +3973,13 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     pairs_dir.mkdir(parents=True)
     strict_gaps: dict[str, str] = {}
     if strict_trace:
+        # Prior-run stage "attach": its unit total is the count the probe
+        # itself will walk (``attach_strict_probe`` labels + ticks it).
+        heartbeat().begin_stage(
+            "attach",
+            units_total=sum(1 for cand in chosen
+                            if cand.get("kind") in ("score_result", "dyn_sv_choice")),
+        )
         strict_ids, strict_gaps = attach_strict_probe(chosen, snapshot, tmp)
         print(f"[corpus] strict Phase 4 traces: {len(strict_ids)} attached "
               f"({', '.join(strict_ids)})", flush=True)
@@ -4008,6 +4027,14 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     # one writer spanning every candidate lets the SECOND occurrence onward
     # pay only for its own handful of differing rows.
     translation_writer = _TranslationTableWriter(tmp / "shared")
+    # Prior-run stage "write": one unit per pair file PLUS one final unit
+    # for the outstanding checkpoint-bundle finalization and the atomic
+    # publication rename -- so "all pairs counted" never reads as "capture
+    # done" while a blocked final checkpoint write or the rename is still
+    # pending. Each pair's unit completes only after that candidate's
+    # ENTIRE work (pair file AND its Phase 4 checkpoint case) is durable.
+    heartbeat().begin_stage("write", units_total=len(chosen) + 1)
+    heartbeat().phase("write-pairs", total=len(chosen))
     for cand in chosen:
         # A +/-inf residual (legacy ResidualPool keeps it, R4-20 gap 1) is
         # written in the repo's canonical non-finite form,
@@ -4092,6 +4119,11 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         # so nothing else needs releasing.
         del pair, checkpoint, input_trace, prep_cache, storage_pair, storage_payload
         gc.collect()
+        # The candidate's unit completes only NOW: pair file AND its
+        # checkpoint case are durable (or deliberately skipped). A blocked
+        # final `write_case` therefore keeps the count and the whole-
+        # capture ETA honest (done < total, eta non-zero).
+        heartbeat().advance()
 
     phase4_total_written = (
         phase4_cases_compared + phase4_cases_refused_as_expected
@@ -4141,6 +4173,11 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
         # Same, for the row tables under shared/translations/.
         "shared_translation_tables": sorted(translation_writer.digests()),
     }
+    # The last outstanding unit: bundle verification, INDEX write and the
+    # atomic rename. Until it completes, every heartbeat line keeps a
+    # non-zero whole-capture ETA and an honest completed/total (this is what
+    # a blocked final checkpoint write used to erase by counting too early).
+    heartbeat().phase("finalize-publish", total=1)
     checkpoint_sink.finalize({
         "release_id": out_dir.name,
         "source_snapshot": snapshot,
@@ -4160,6 +4197,7 @@ def write(out_dir: Path, chosen: list[dict], index: dict[str, list[str]],
     if out_dir.exists():
         shutil.rmtree(out_dir)
     os.rename(tmp, out_dir)
+    heartbeat().advance()  # the corpus is published: the final write unit is done
     return doc
 
 
@@ -4178,8 +4216,11 @@ def _gather_candidates(
     (the panel + replayed trades) the moment this returns, well before the
     strict-trace attach step that measured the RSS growth.
     """
+    hb = heartbeat()
+    hb.phase("read-events")
     forward = _events(as_of, args.forward_days, args.max_events)
     print(f"[corpus] forward events: {len(forward)}", flush=True)
+    hb.phase("boundary-events")
     boundaries = _boundary_events(as_of, args.boundary_events, scorer.calendar)
     print(f"[corpus] boundary events: {len(boundaries)}", flush=True)
 
@@ -4203,28 +4244,40 @@ def _gather_candidates(
     chain_keys = _forward_chain_keys(scorer, forward, as_of, strategies)
     chain_keys |= _boundary_chain_keys(scorer, boundaries, strategies)
     chain_keys |= _research_replay_chain_keys(scorer, boundaries, strategies)
+    # The one streamed ChainIndex load is a long, silent unit (up to
+    # hundreds of MB, table scan): label it so the heartbeat thread names
+    # the phase it is beating through.
+    hb.phase("load-chain-index")
     chain_index = (
         replay_mod.load_chain_index(chain_keys, progress_every=0)
         if chain_keys else None
     )
+    hb.advance()
 
+    hb.phase("score-forward")
     candidates = forward_pass(
         scorer, forward, as_of, args.quote_max_age, strategies,
         index=chain_index,
     )
     print(f"[corpus] forward scores: {len(candidates)}", flush=True)
 
+    hb.phase("score-boundary")
     candidates += boundary_pass(scorer, boundaries, strategies, index=chain_index)
 
+    hb.phase("rescore-variants")
     candidates += pinned_and_strike_pass(scorer, candidates, index=chain_index)
     candidates += coarse_ladder_pass(scorer, candidates, index=chain_index)
     if strategies is None or score_mod.DYNAMIC_STRATEGY in strategies:
+        hb.phase("chooser-dyn-sv")
         candidates += dyn_sv_pass(candidates)
+    hb.phase("research-replay")
     candidates += research_replay_pass(
         scorer, boundaries, strategies=strategies, index=chain_index,
     )
     print(f"[corpus] candidates: {len(candidates)}", flush=True)
+    hb.advance()
 
+    hb.phase("select-coverage")
     chosen, index = select(candidates)
     # Audited over the WHOLE candidate population, before `select()` drops
     # any of it: the claim is about every choice legacy made in this
@@ -4263,6 +4316,40 @@ def _dump_selected(path: Path, chosen: list[dict], index: dict[str, list[str]],
           f"candidates to {path}", flush=True)
 
 
+_HEARTBEAT: CaptureHeartbeat | None = None
+
+
+def heartbeat() -> CaptureHeartbeat:
+    """The run's single heartbeat, created on first use.
+
+    Module-level because the slow, silent phases live in different
+    functions (``main`` builds the scorer, ``_gather_candidates`` loads
+    the chain index, ``write``/``attach_strict_probe`` attach and write);
+    they all report into the one thread. Started only for a full run —
+    ``main`` or the offline ``tools/capture_attach_probe.py`` replay (which
+    installs its own attach/write-only-profiled instance) — and an
+    un-started heartbeat is INERT, so every other entry point (``select``,
+    ``make_pair``, a bare ``write``) is byte-for-byte what it was -- see
+    ``tools.capture_heartbeat``.
+    """
+    global _HEARTBEAT
+    if _HEARTBEAT is None:
+        _HEARTBEAT = CaptureHeartbeat()
+    return _HEARTBEAT
+
+
+def set_heartbeat(instance: CaptureHeartbeat | None) -> CaptureHeartbeat | None:
+    """Install (or clear, with ``None``) the singleton; returns the previous.
+
+    Tests/diagnostics replace the singleton to capture the lines with a
+    fake clock and fake emitter; every capture call site reads through
+    :func:`heartbeat`, so an installed instance takes effect at once.
+    """
+    global _HEARTBEAT
+    previous, _HEARTBEAT = _HEARTBEAT, instance
+    return previous
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default=None,
@@ -4297,60 +4384,75 @@ def main(argv: Iterable[str] | None = None) -> int:
     as_of = (pd.Timestamp(args.as_of).normalize() if args.as_of
              else pd.Timestamp.today().normalize())
     started = time.time()
-    print("[corpus] building the scorer (panel + replayed trades)...", flush=True)
-    scorer = score_mod.Scorer()
-    print(f"[corpus] scorer ready in {time.time()-started:.0f}s", flush=True)
-
-    # `_candidate()` spills every candidate's `legacy_trace` to disk the
-    # moment it is produced (see the module note above `_score`) rather than
-    # holding it in `candidates` for the rest of this function; the `finally`
-    # below removes that spill directory whether the run finishes or raises.
+    # One lifecycle-managed heartbeat for the whole run (see
+    # tools/capture_heartbeat): a daemon thread emits phase/elapsed/
+    # done/ETA at least once per minute THROUGH the silently-slow units --
+    # the Scorer build below, the ChainIndex load, one long candidate's
+    # scoring, one strict-trace attach, one large pair write -- where the
+    # between-units milestone prints above provably cannot. The `finally`
+    # joins it on the failure path too: a raised capture never leaves an
+    # orphan thread behind.
+    hb = heartbeat()
+    hb.start()
     try:
-        chosen, index, snapshot, audit = _gather_candidates(
-            scorer, as_of, args, strategies)
-        dump_path = os.environ.get("CAPTURE_DUMP_SELECTED")
-        if dump_path:
-            _dump_selected(Path(dump_path), chosen, index, as_of, snapshot)
-        # Goal 1 (RSS): nothing from here on needs the scorer (panel +
-        # replayed trades) -- `write`/`attach_strict_probe`/`chooser_trace`/
-        # `strict_trace_one` take only `chosen`, `index`, `as_of` and this
-        # plain snapshot string, never the Scorer itself (verified by
-        # reading every one of their signatures). Drop it explicitly: a bare
-        # `del` alone does not shrink RSS, `gc.collect()` frees reference
-        # cycles a plain refcount drop would miss, and glibc keeps freed
-        # arenas resident until something calls `malloc_trim`.
-        del scorer
-        gc.collect()
-        _malloc_trim()
-        if args.out:
-            out_dir = Path(args.out)
-        else:
-            version = args.version or datetime.now(
-                timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            out_dir = DEFAULT_OUT / version
-        out_dir.parent.mkdir(parents=True, exist_ok=True)
-        doc = write(
-            out_dir, chosen, index, as_of, snapshot,
-            replace_existing=args.replace,
-            strict_trace=args.strict_phase4_trace,
-            tie_audit_result=audit,
-        )
-    finally:
-        _cleanup_trace_spill()
-    if not args.out and out_dir.parent == DEFAULT_OUT:
-        _publish_current(DEFAULT_OUT, out_dir.name)
-        print(f"[corpus] CURRENT -> {out_dir.name}")
+        hb.begin_stage("gather")
+        hb.phase("build-scorer")
+        print("[corpus] building the scorer (panel + replayed trades)...", flush=True)
+        scorer = score_mod.Scorer()
+        print(f"[corpus] scorer ready in {time.time()-started:.0f}s", flush=True)
 
-    print(f"[corpus] wrote {len(chosen)} pairs to {out_dir}")
-    print(f"[corpus] corpus hash {doc['corpus_hash']}")
-    total = len(doc["required_axes"])
-    print(f"[corpus] coverage {total - len(doc['uncovered_axes'])}/{total} required axes")
-    if doc["uncovered_axes"]:
-        print("[corpus] UNCOVERED (recorded as gaps, not faked):")
-        for axis in doc["uncovered_axes"]:
-            print(f"    {axis}")
-    print(f"[corpus] total {time.time()-started:.0f}s")
-    return 0
+        # `_candidate()` spills every candidate's `legacy_trace` to disk the
+        # moment it is produced (see the module note above `_score`) rather than
+        # holding it in `candidates` for the rest of this function; the `finally`
+        # below removes that spill directory whether the run finishes or raises.
+        try:
+            chosen, index, snapshot, audit = _gather_candidates(
+                scorer, as_of, args, strategies)
+            dump_path = os.environ.get("CAPTURE_DUMP_SELECTED")
+            if dump_path:
+                _dump_selected(Path(dump_path), chosen, index, as_of, snapshot)
+            # Goal 1 (RSS): nothing from here on needs the scorer (panel +
+            # replayed trades) -- `write`/`attach_strict_probe`/`chooser_trace`/
+            # `strict_trace_one` take only `chosen`, `index`, `as_of` and this
+            # plain snapshot string, never the Scorer itself (verified by
+            # reading every one of their signatures). Drop it explicitly: a bare
+            # `del` alone does not shrink RSS, `gc.collect()` frees reference
+            # cycles a plain refcount drop would miss, and glibc keeps freed
+            # arenas resident until something calls `malloc_trim`.
+            del scorer
+            gc.collect()
+            _malloc_trim()
+            if args.out:
+                out_dir = Path(args.out)
+            else:
+                version = args.version or datetime.now(
+                    timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                out_dir = DEFAULT_OUT / version
+            out_dir.parent.mkdir(parents=True, exist_ok=True)
+            doc = write(
+                out_dir, chosen, index, as_of, snapshot,
+                replace_existing=args.replace,
+                strict_trace=args.strict_phase4_trace,
+                tie_audit_result=audit,
+            )
+        finally:
+            _cleanup_trace_spill()
+        if not args.out and out_dir.parent == DEFAULT_OUT:
+            _publish_current(DEFAULT_OUT, out_dir.name)
+            print(f"[corpus] CURRENT -> {out_dir.name}")
+
+        print(f"[corpus] wrote {len(chosen)} pairs to {out_dir}")
+        print(f"[corpus] corpus hash {doc['corpus_hash']}")
+        total = len(doc["required_axes"])
+        print(f"[corpus] coverage {total - len(doc['uncovered_axes'])}/{total} required axes")
+        if doc["uncovered_axes"]:
+            print("[corpus] UNCOVERED (recorded as gaps, not faked):")
+            for axis in doc["uncovered_axes"]:
+                print(f"    {axis}")
+        print(f"[corpus] total {time.time()-started:.0f}s")
+        return 0
+    finally:
+        hb.stop()
 
 
 if __name__ == "__main__":
