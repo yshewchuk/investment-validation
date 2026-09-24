@@ -688,8 +688,57 @@ def _missing_feature_refusal(exc: Exception) -> bool:
     return "MISSING_FEATURES" in tuple(getattr(exc, "reason_codes", ()) or ())
 
 
+def _account_forecast_refusal(
+    exc, executor, field, facts, output, invalid_fields, flags, undetermined,
+    role, report, names, deferred,
+) -> None:
+    """Fold one forecast-executor exception into ``flags`` / ``invalid_fields``.
+
+    Extracted from ``_execute_forecast_executor`` to keep that stage inside the
+    complexity budget (see ``_refuse_unbuilt_geometry``'s precedent in
+    ``_resolve_geometry``).
+
+    A missing/non-finite model feature is legacy's ``MISSING_FEATURES`` for a
+    champion model (``_score_model``) and a silent NaN for a Tier-4 fold (see
+    :data:`TIER4_FOLD_ADAPTER`); either way the output is accounted for, never a
+    second ``MISSING_FORECAST_OUTPUT`` refusal legacy never raises.
+
+    A REPORTING-role (driver/implied_t1/runup_move) MISSING_FEATURES is served
+    at legacy's MODEL layer (``_score_model``/``_score_runup_model``), which runs
+    AFTER ``_price_entry`` and the context advisory flags -- legacy stamps
+    PROJECTED_CALENDAR, then the pricing refusal, then the champion
+    MISSING_FEATURES. The native forecast stage runs the same executor BEFORE
+    both, so stamping its refusal inline puts MISSING_FEATURES at the front of
+    the tuple (the 002 member-2 divergence). Defer exactly that one refusal to
+    ``deferred`` (flushed at the model boundary by ``assemble_native_values``).
+    A size fold (``report`` False), a Tier-4 fold (a silent NaN), an engineering
+    invariant (no reason codes) or a ``None`` deferral target is a genuine
+    pre-pricing failure and is stamped inline unchanged.
+    """
+    missing_feature = _missing_feature_refusal(exc)
+    if report and missing_feature and deferred is not None:
+        if getattr(executor, "adapter", None) != TIER4_FOLD_ADAPTER:
+            _record_model_inputs(output, facts, names, role)
+            invalid_fields.add(field)
+            _add_executor_refusal(
+                deferred, exc, f"INVALID_FORECAST_EXECUTOR:{field}",
+            )
+            return
+    if missing_feature:
+        if report:
+            _record_model_inputs(output, facts, names, role)
+        invalid_fields.add(field)
+        if getattr(executor, "adapter", None) == TIER4_FOLD_ADAPTER:
+            undetermined.add(field)
+            return
+    elif not tuple(getattr(exc, "reason_codes", ()) or ()):
+        invalid_fields.add(field)
+    _add_executor_refusal(flags, exc, f"INVALID_FORECAST_EXECUTOR:{field}")
+
+
 def _execute_forecast_executor(
     executor, field, facts, output, invalid_fields, flags, undetermined,
+    deferred=None,
 ) -> None:
     role = str(getattr(executor, "role", ""))
     report = (role.split(":", 1)[0] in _REPORTING_MODEL_ROLES)
@@ -712,21 +761,10 @@ def _execute_forecast_executor(
             return
         output[field] = value
     except (TypeError, ValueError, KeyError) as exc:
-        if _missing_feature_refusal(exc):
-            if report:
-                _record_model_inputs(output, facts, names, role)
-            # R4-20 gap 4: a missing/non-finite model feature is legacy's
-            # MISSING_FEATURES for a champion model (``_score_model``), and a
-            # silent NaN for a Tier-4 fold (see TIER4_FOLD_ADAPTER). Either
-            # way the output is accounted for, not a second
-            # MISSING_FORECAST_OUTPUT refusal legacy never raises.
-            invalid_fields.add(field)
-            if getattr(executor, "adapter", None) == TIER4_FOLD_ADAPTER:
-                undetermined.add(field)
-                return
-        elif not tuple(getattr(exc, "reason_codes", ()) or ()):
-            invalid_fields.add(field)
-        _add_executor_refusal(flags, exc, f"INVALID_FORECAST_EXECUTOR:{field}")
+        _account_forecast_refusal(
+            exc, executor, field, facts, output, invalid_fields, flags,
+            undetermined, role, report, names, deferred,
+        )
 
 
 def _record_model_inputs(output, facts, names, role):
@@ -778,6 +816,7 @@ def _execute_local_forecast(
     invalid_fields: set[str],
     flags: list[str],
     undetermined: set[str],
+    deferred: list[str] | None = None,
 ) -> bool:
     models = block.get("models", {})
     if not isinstance(models, Mapping):
@@ -814,7 +853,7 @@ def _execute_local_forecast(
             declared = True
             _execute_forecast_executor(
                 executor, field, facts, output, invalid_fields, flags,
-                undetermined,
+                undetermined, deferred,
             )
             continue
         spec = models.get(field, block.get(field))
@@ -926,7 +965,8 @@ def _forecast_sizing_declines(
 
 
 def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
-                      flags: list[str], strategy: str | None) -> dict[str, Any]:
+                      flags: list[str], strategy: str | None,
+                      deferred: list[str] | None = None) -> dict[str, Any]:
     block = inputs.forecast
     output: dict[str, Any] = {}
     invalid_fields: set[str] = set()
@@ -938,6 +978,7 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     )
     local_declared = _execute_local_forecast(
         inputs, block, values, output, invalid_fields, flags, undetermined,
+        deferred,
     )
     _execute_forecast_band(block, output)
     _validate_forecast_roles(
@@ -985,6 +1026,7 @@ def _initial_values(
     compatibility: bool,
     strategy: str | None,
     observer: StageObserver | None,
+    deferred: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[StageReceipt], Any]:
     values: dict[str, Any] = {}
     blocks = (inputs.context, inputs.features, inputs.forecast, inputs.analogs,
@@ -1017,7 +1059,7 @@ def _initial_values(
         forecast_output = dict(inputs.forecast)
     else:
         forecast_output = _execute_forecast(
-            inputs, values, flags, strategy,
+            inputs, values, flags, strategy, deferred,
         )
     _emit_stage(executed, "forecast", prior, forecast_output, observer)
     return values, executed, legacy_cost
@@ -2562,6 +2604,7 @@ def _append_late_stages(
     compatibility: bool,
     flags: list[str],
     observer: StageObserver | None,
+    deferred: list[str] | None = None,
 ) -> None:
     blocks = (inputs.context, inputs.features, inputs.forecast, inputs.model,
               inputs.analogs, inputs.simulation, inputs.gate, inputs.chooser,
@@ -2581,57 +2624,118 @@ def _append_late_stages(
     elif "BAD_QUOTE" in flags:
         _withhold_bad_quote_stages(inputs, values, executed, observer)
     else:
-        model_output = _execute_model(inputs, geometry.strategy, values, flags)
-        _emit_stage(
-            executed, "model", {"prior": executed[-1].output_hash},
-            model_output, observer,
-        )
-        analog_output = _execute_analogs(inputs, values, flags, geometry.strategy)
-        analog_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
-        analog_identity = _analog_identity(inputs.analogs)
-        if analog_identity is not None:
-            analog_inputs["inputs"] = analog_identity
-        _emit_stage(executed, "analogs", analog_inputs, analog_output, observer)
-        simulation = _execute_simulation(
-            inputs, values, geometry, pricing, flags,
-        )
-        _emit_stage(
-            executed, "simulation",
-            {"prior": executed[-1].output_hash,
-             "inputs": _simulation_identity(inputs.simulation),
-             "entry_cost": pricing.entry_cost},
-            simulation, observer,
-        )
-        gate = _execute_gate(inputs, geometry.strategy, values, flags)
-        _emit_stage(
-            executed, "gate",
-            {"prior": executed[-1].output_hash,
-             "inputs": {key: value for key, value in inputs.gate.items()
-                        if key not in _INTERNAL_STAGE_FIELDS},
-             "simulation": simulation},
-            gate, observer,
-        )
-        chooser = _execute_chooser(inputs, geometry.strategy, values, flags)
-        chooser_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
-        if isinstance(inputs.chooser.get("executors"), Mapping):
-            # A frozen chooser recipe is identified by its binding (the
-            # executor's str()), exactly like the gate's.
-            from engine.v2.scoring.native_chooser import identity_view
-
-            chooser_inputs["inputs"] = {
-                "binding_id": inputs.chooser.get("binding_id"),
-                "executors": {key: str(value) for key, value
-                              in inputs.chooser["executors"].items()},
-                **identity_view(inputs.chooser),
-            }
-        _emit_stage(executed, "chooser", chooser_inputs, chooser, observer)
-        _emit_stage(
-            executed, "diagnostics", {"prior": executed[-1].output_hash},
-            _merge_diagnostics(values, inputs.diagnostics), observer,
+        _append_normal_late_stages(
+            inputs, values, executed, geometry, pricing, flags, observer,
+            deferred,
         )
     for block in blocks:
         for item in block.get("flags") or ():
             _add_flag(flags, item)
+
+
+def _append_normal_late_stages(
+    inputs: NativeScoreInputs,
+    values: dict[str, Any],
+    executed: list[StageReceipt],
+    geometry: Geometry,
+    pricing: Pricing,
+    flags: list[str],
+    observer: StageObserver | None,
+    deferred: list[str] | None = None,
+) -> None:
+    """The late stages on a row that actually reached legacy's model layer.
+
+    A champion driver/runup forecast refusal was deferred here (see
+    ``_execute_forecast_executor``) so it lands AFTER the context and pricing
+    flags, exactly where legacy's ``_score_model`` stamps it. This point is
+    never reached on a BAD_QUOTE row (the champion model is unreachable there,
+    so its refusal is never published) or a forecast-sizing decline.
+    """
+    for refusal in deferred or ():
+        _add_flag(flags, refusal)
+    model_output = _execute_model(inputs, geometry.strategy, values, flags)
+    _emit_stage(
+        executed, "model", {"prior": executed[-1].output_hash},
+        model_output, observer,
+    )
+    analog_output = _execute_analogs(inputs, values, flags, geometry.strategy)
+    analog_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
+    analog_identity = _analog_identity(inputs.analogs)
+    if analog_identity is not None:
+        analog_inputs["inputs"] = analog_identity
+    _emit_stage(executed, "analogs", analog_inputs, analog_output, observer)
+    simulation = _execute_simulation(
+        inputs, values, geometry, pricing, flags,
+    )
+    _emit_stage(
+        executed, "simulation",
+        {"prior": executed[-1].output_hash,
+         "inputs": _simulation_identity(inputs.simulation),
+         "entry_cost": pricing.entry_cost},
+        simulation, observer,
+    )
+    gate = _execute_gate(inputs, geometry.strategy, values, flags)
+    _emit_stage(
+        executed, "gate",
+        {"prior": executed[-1].output_hash,
+         "inputs": {key: value for key, value in inputs.gate.items()
+                     if key not in _INTERNAL_STAGE_FIELDS},
+         "simulation": simulation},
+        gate, observer,
+    )
+    chooser = _execute_chooser(inputs, geometry.strategy, values, flags)
+    chooser_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
+    if isinstance(inputs.chooser.get("executors"), Mapping):
+        # A frozen chooser recipe is identified by its binding (the
+        # executor's str()), exactly like the gate's.
+        from engine.v2.scoring.native_chooser import identity_view
+
+        chooser_inputs["inputs"] = {
+            "binding_id": inputs.chooser.get("binding_id"),
+            "executors": {key: str(value) for key, value
+                          in inputs.chooser["executors"].items()},
+            **identity_view(inputs.chooser),
+        }
+    _emit_stage(executed, "chooser", chooser_inputs, chooser, observer)
+    _emit_stage(
+        executed, "diagnostics", {"prior": executed[-1].output_hash},
+        _merge_diagnostics(values, inputs.diagnostics), observer,
+    )
+
+
+def _check_pricing_boundary(
+    values: dict[str, Any], geometry: Geometry, pricing: Pricing,
+    flags: list[str],
+) -> None:
+    """The advisory flags ``_price_entry`` emits once pricing succeeds, plus the
+    Phase 4 ordered-flag hoist.
+
+    R4-20 gap 2 first: the STR-THRU/STR-RUNUP gate champions name
+    ``entry_cost_pct`` in their frozen ``feature_order``, but legacy computes it
+    in ``Scorer._features`` (engine/score.py:1934, ~2562-2564) BEFORE
+    ``Scorer._score_gate`` (engine/score.py:2030). Native used to only produce
+    it post-hoc in ``financial.financial_diagnostics`` (application.py:174),
+    long after the gate stage in ``_append_late_stages`` had run -- so the gate's
+    frozen executor always raised MISSING_FEATURES. Publish it here, from the
+    shared formula ``financial.entry_cost_pct`` uses, so it is in ``values`` (and
+    so ``_facts``) before the gate executes.
+
+    Then the ordering parity: legacy stamps a pricing-boundary refusal
+    (COARSE_LADDER / NO_CHAIN) in ``_price_entry`` and only afterwards reaches
+    the model/analog/gate/chooser layers, so the refusal precedes their flags in
+    ``result.flags``. Stamp it here -- before the late stages -- to match that
+    ordered position. ``_add_flag`` dedups, so the identical block after the late
+    stages stays a no-op on this path.
+    """
+    values["entry_cost_pct"] = financial.entry_cost_pct(
+        values.get("entry_cost"), values.get("spot"),
+    )
+    _check_wide_market(pricing, flags)
+    _check_bad_quote(pricing, flags)
+    _check_extrapolated(geometry, pricing, flags)
+    for refusal in (geometry.refusal, pricing.refusal):
+        if refusal:
+            _add_flag(flags, refusal)
 
 
 def _finalize_native_values(
@@ -2683,8 +2787,14 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
         raise TypeError("native stage assembly requires NativeScoreInputs")
     is_compatibility = inputs.source_ref == "compatibility-input"
     flags: list[str] = []
+    #: A champion driver/runup forecast refusal (see ``_execute_forecast_executor``)
+    #: is collected here instead of stamped during the forecast stage, then
+    #: flushed at the legacy model boundary in ``_append_late_stages`` so its
+    #: position matches legacy (context flags, then the pricing refusal, then the
+    #: model's own MISSING_FEATURES). Never reaches ``values``/receipts.
+    deferred: list[str] = []
     values, executed, legacy_cost = _initial_values(
-        inputs, flags, is_compatibility, strategy, observer,
+        inputs, flags, is_compatibility, strategy, observer, deferred,
     )
     _check_projected_calendar(values, flags)
     _check_stale_quote(values, flags)
@@ -2715,34 +2825,14 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
         pricing, observer,
     )
     _publish_pricing(values, geometry, pricing, alpha)
-    # R4-20 gap 2: the STR-THRU/STR-RUNUP gate champions name
-    # ``entry_cost_pct`` in their frozen ``feature_order``, but legacy
-    # computes it in ``Scorer._features`` (engine/score.py:1934,
-    # ~2562-2564) BEFORE ``Scorer._score_gate`` (engine/score.py:2030).
-    # Native used to only produce it post-hoc in
-    # ``financial.financial_diagnostics`` (application.py:174), long after
-    # the gate stage in ``_append_late_stages`` has already run -- so the
-    # gate's frozen executor always raised MISSING_FEATURES. Publish it here,
-    # from the same shared formula ``financial.entry_cost_pct`` uses, so it
-    # is in ``values`` (and therefore ``_facts``) before the gate executes.
-    values["entry_cost_pct"] = financial.entry_cost_pct(
-        values.get("entry_cost"), values.get("spot"),
-    )
-    _check_wide_market(pricing, flags)
-    _check_bad_quote(pricing, flags)
-    _check_extrapolated(geometry, pricing, flags)
-    # Phase 4 ordered-flag parity: legacy stamps a pricing-boundary refusal
-    # (COARSE_LADDER / NO_CHAIN) in ``_price_entry`` and only afterwards
-    # reaches the model/analog/gate/chooser layers, so the refusal precedes
-    # their flags in ``result.flags``. Publish it here -- before the late
-    # stages -- to match that ordered position. ``_add_flag`` dedups, so the
-    # identical block below stays a no-op on this path.
-    for refusal in (geometry.refusal, pricing.refusal):
-        if refusal:
-            _add_flag(flags, refusal)
+    # The pricing-boundary advisory flags (WIDE_MARKET / BAD_QUOTE /
+    # EXTRAPOLATED), the ``entry_cost_pct`` the gate champions read, and the
+    # Phase 4 ordered-flag hoist that puts a COARSE_LADDER / NO_CHAIN refusal
+    # at legacy's ``_price_entry`` position -- BEFORE the late stages.
+    _check_pricing_boundary(values, geometry, pricing, flags)
     _append_late_stages(
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
-        observer,
+        observer, deferred,
     )
     if geometry.detail:
         prior_detail = str(values.get("detail") or "").strip()
