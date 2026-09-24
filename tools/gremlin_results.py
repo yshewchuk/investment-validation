@@ -10,7 +10,8 @@ for audit, and merges per-module artifacts into one report::
     python3 tools/gremlin_results.py export MODULE --raw PATH --out DIR
             [--mode M] [--changed-base SHA] [--run-exit-code N] [--elapsed S]
             [--source-root DIR]
-    python3 tools/gremlin_results.py merge --out DIR IN_DIR [IN_DIR ...]
+    python3 tools/gremlin_results.py merge --out DIR [--expected-modules JSON]
+            [IN_DIR ...]
 
 Schema version 2 rows carry the backend explicitly: ``schema_version`` 2,
 ``backend`` "pytest-gremlins", ``backend_version`` "1.9.0" and a stable
@@ -33,7 +34,11 @@ failure -- it never produces a 100% score or a fabricated empty measurement
 ``--run-exit-code`` (including the runner's timeout ``-1``) still writes an
 honest partial artifact when the raw parses, flagged ``complete: false`` /
 ``tool_error: true`` with machine-detectable ``failure_reasons``. Survivors
-never fail anything; only the tool does.
+never fail anything; only the tool does. And a merge is only complete when the
+module reports that arrived are EXACTLY the set the plan said would run
+(``--expected-modules``): a missing, extra or duplicated module report yields an
+incomplete tool-error diagnostic naming the gap, never a valid-looking subset
+that a downstream reader would take for a full run.
 """
 from __future__ import annotations
 
@@ -482,8 +487,36 @@ def read_artifact(d: Path) -> tuple[list[dict], dict]:
     return rows, summary
 
 
-def merge_dirs(inputs: list[Path], out: Path) -> dict:
+def parse_expected_modules(raw: str | None) -> list[str] | None:
+    """The plan's module contract -> a list of distinct module names, or ``None``
+    when no contract was given.
+
+    The value is exactly the ``plan`` job's ``modules`` output (the JSON array
+    ``gremlin_pilot.py matrix`` prints). Anything that is not such an array is a
+    broken contract and a refusal, never a silent "expected nothing": an empty
+    list would make every arriving report unexpected, and a truncated one would
+    invent missing modules out of a shell quoting mistake."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        raise MergeError("--expected-modules is empty: the plan published no module list")
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MergeError(f"--expected-modules is not valid JSON: {exc}") from exc
+    if not isinstance(doc, list) or not all(isinstance(m, str) and m for m in doc):
+        raise MergeError(f"--expected-modules must be a JSON array of module names, "
+                         f"got {text!r}")
+    if (dup := [m for m, n in Counter(doc).items() if n > 1]):
+        raise MergeError(f"--expected-modules lists duplicate module(s): {sorted(dup)}")
+    return doc
+
+
+def merge_dirs(inputs: list[Path], out: Path,
+               expected: list[str] | None = None) -> dict:
     seen: dict[str, Path] = {}
+    duplicates: dict[str, list[Path]] = {}
     identities: dict[str, None] = {}
     versions: set = set()
     run_ids: set = set()
@@ -494,8 +527,17 @@ def merge_dirs(inputs: list[Path], out: Path) -> dict:
         rs, s = read_artifact(d)
         name = s["module"]
         if name in seen:
-            raise MergeError(f"module {name!r} appears in both {seen[name]} and {d}")
-        seen[name] = d
+            # Without a contract, two reports for one module is an unusable
+            # input set: refuse wholesale. With one, the contract is precisely
+            # what catches it -- so the duplicate is recorded and the merged
+            # artifact becomes an incomplete diagnostic naming both
+            # directories. Silently keeping one and dropping the other would
+            # fabricate a module set out of an ambiguous input.
+            if expected is None:
+                raise MergeError(f"module {name!r} appears in both {seen[name]} and {d}")
+            duplicates.setdefault(name, [seen[name]]).append(d)
+        else:
+            seen[name] = d
         # The merged report is emitted under THIS adapter's identity, so every
         # input must already carry exactly that identity: merging a different
         # backend_version, or a timeout/score that differs from the pinned one,
@@ -530,20 +572,54 @@ def merge_dirs(inputs: list[Path], out: Path) -> dict:
         mismatch.append(f"run ids {sorted(map(str, run_ids))}")
     provenance_ok = not mismatch
 
-    if all(s["total"] is not None for s in summaries):
+    # The expected-module contract (the plan's module list, published by the
+    # workflow's plan job). The merged report claims to describe that run, so a
+    # report set that is not exactly the expected set -- a module whose job died
+    # before it exported/uploaded, an artifact from a module the plan never
+    # scheduled, one module reported twice, or nothing downloaded at all -- is
+    # NOT a valid full run. It is written as an incomplete tool-error
+    # diagnostic naming the gap, so no consumer can read a subset as latest
+    # completed. Without --expected-modules the contract is simply not asserted
+    # (historical/local merges keep working).
+    present = sorted(seen)
+    missing = [m for m in (expected or []) if m not in seen]
+    unexpected = [m for m in present if expected is not None and m not in set(expected)]
+    complete_set = bool(summaries) and not (missing or unexpected or duplicates)
+    contract_violated = (not complete_set) if expected is not None else not summaries
+
+    if not summaries or duplicates:
+        # Nothing arrived, or one module arrived twice: there is no honest
+        # aggregate to state, so every count is null (never a fabricated zero
+        # over an empty set, never a total that silently double-counts).
+        merged_block = null_block()
+    elif all(s["total"] is not None for s in summaries):
         merged_block = score_block(Counter(r["status"] for r in rows))
         if (any(s["score"] is None and s["checked"] != 0 for s in summaries)
-                or not provenance_ok):
-            # A module withheld its score (inconsistent raw), or the inputs are
-            # not one run/mode: the merged artifact must not recompute a number
-            # no input measurement actually made.
+                or not provenance_ok or contract_violated):
+            # A module withheld its score (inconsistent raw), the inputs are not
+            # one run/mode, or the module set is not the expected one: the
+            # merged artifact must not recompute a number no input measurement
+            # actually made. Counts stay auditable for what really arrived.
             merged_block = {**merged_block, "score": None}
     else:
         merged_block = null_block()
-    complete = (all(s["complete"] for s in summaries) if summaries else False) and provenance_ok
+    complete = (all(s["complete"] for s in summaries) if summaries else False) \
+        and provenance_ok and not contract_violated
     reasons = [f"{s['module']}: {r}" for s in summaries for r in s["failure_reasons"]]
     if not provenance_ok:
         reasons.append("RUN_PROVENANCE_MISMATCH: " + "; ".join(mismatch))
+    if not inputs:
+        reasons.insert(0, "NO_MODULE_REPORTS: no module artifact directory was downloaded")
+    for name, dirs in sorted(duplicates.items()):
+        reasons.append(f"DUPLICATE_MODULES: {name} reported by "
+                       + " + ".join(str(d) for d in sorted(dirs, key=str))
+                       + "; no single report to attribute")
+    if missing:
+        reasons.append(f"MISSING_MODULES: expected {len(expected)} module(s), "
+                       f"{len(seen)} reported; no report for {', '.join(missing)}")
+    if unexpected:
+        reasons.append(f"UNEXPECTED_MODULES: report(s) outside the expected set: "
+                       f"{', '.join(unexpected)}")
     merged = {
         "schema_version": SCHEMA_VERSION, "backend": BACKEND,
         "backend_version": BACKEND_VERSION,
@@ -555,12 +631,25 @@ def merge_dirs(inputs: list[Path], out: Path) -> dict:
         "mode": summaries[0]["mode"] if summaries else None,
         **merged_block,
         "complete": complete,
-        "tool_error": any(s["tool_error"] for s in summaries) or not provenance_ok,
+        "tool_error": any(s["tool_error"] for s in summaries) or not provenance_ok
+                      or contract_violated,
         "failure_reasons": reasons,
+        "expected_modules": list(expected) if expected is not None else None,
+        "module_contract": None if expected is None else {
+            "expected": list(expected), "present": present, "missing": missing,
+            "unexpected": unexpected,
+            "duplicate": {n: sorted(str(d) for d in ds)
+                          for n, ds in sorted(duplicates.items())},
+            "complete_set": complete_set},
+        # A module that reported more than once has no honest entry here: the
+        # map describes one report per module, so the ambiguity lives in
+        # ``module_contract.duplicate`` and the name is left out rather than
+        # resolved to whichever directory happened to be read first.
         "modules": {s["module"]: {k: v for k, v in s.items() if k not in
                                   ("run_id", "sha", "ref", "trigger", "schema_version",
                                    "backend", "backend_version")}
-                    for s in sorted(summaries, key=lambda s: s["module"])},
+                    for s in sorted(summaries, key=lambda s: s["module"])
+                    if s["module"] not in duplicates},
     }
     merged["policy_fingerprint"] = policy_fingerprint(merged["policy"])
     rows.sort(key=lambda r: (r["module"], r["file"], r["mutant_name"]))
@@ -586,6 +675,17 @@ def merge_dirs(inputs: list[Path], out: Path) -> dict:
     if not provenance_ok:
         lines += ["", "**Inputs are not one run/mode/source SHA -- this is not a single "
                   "measurement. Score withheld, artifact marked INCOMPLETE (tool failure).**"]
+    if expected is not None:
+        lines += ["", f"Expected modules ({len(expected)}): {', '.join(expected) or '(none)'}",
+                  f"Reported modules ({len(seen)}): {', '.join(present) or '(none)'}"]
+    if contract_violated:
+        lines += ["", "**The module reports that arrived are NOT the set the plan expected "
+                  "-- this is not a valid full run. Score withheld, counts cover only what "
+                  "really arrived, and the artifact is marked INCOMPLETE (tool failure) so "
+                  "no consumer can read it as the latest completed run.**"]
+        lines += [f"- {r}" for r in reasons
+                  if r.startswith(("NO_MODULE_REPORTS", "MISSING_MODULES",
+                                   "UNEXPECTED_MODULES", "DUPLICATE_MODULES"))]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     return merged
 
@@ -619,18 +719,29 @@ def main(argv: list[str] | None = None) -> int:
                    help="root the raw file_path values are relative to (function lookup)")
     p = sub.add_parser("merge", help="merge per-module gremlins artifacts into one report")
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("inputs", nargs="+", type=Path)
+    p.add_argument("--expected-modules", default=None,
+                   help="JSON array of the module names the plan expects; a report set "
+                        "that is not exactly this list is an incomplete tool error")
+    # nargs="*": the report job calls merge even when the download found no
+    # module directory at all, so the expected-module contract can write the
+    # incomplete diagnostic instead of the job passing on an empty set.
+    p.add_argument("inputs", nargs="*", type=Path)
     args = parser.parse_args(argv)
 
     if args.cmd == "merge":
         try:
-            merged = merge_dirs(args.inputs, args.out)
+            merged = merge_dirs(args.inputs, args.out, parse_expected_modules(
+                args.expected_modules))
         except MergeError as exc:
             print(f"gremlin_results: refusing to merge: {exc}", file=sys.stderr)
             return 2
         print(f"merged {len(merged['modules'])} modules, {_num(merged['total'])} gremlins "
               f"(score {_pct(merged['score'])}, "
               f"{'TOOL FAILURE' if merged['tool_error'] else 'clean'}) -> {args.out}")
+        for reason in merged["failure_reasons"]:
+            if reason.startswith(("NO_MODULE_REPORTS", "MISSING_MODULES", "UNEXPECTED_MODULES",
+                                  "DUPLICATE_MODULES")):
+                print(f"gremlin_results: {reason}", file=sys.stderr)
         return 1 if merged["tool_error"] else 0
 
     summary = export_module(args.module, args.raw, args.out, mode=args.mode,

@@ -315,7 +315,15 @@ run per module writes the raw report `coverage/gremlins/gremlins.json`
 converts it into the same `results.jsonl` / `summary.json` / `summary.md`
 files, plus an untouched copy of the raw report (`gremlins.json`) in the
 module directory for audit, and `merge` combines the module artifacts
-(refusing mixed backend/version/policy and mixed schema 1/2).
+(refusing mixed backend/version/policy and mixed schema 1/2). `merge
+--expected-modules JSON` (the plan job's module list) additionally gates
+*completeness*: a missing, extra or duplicated module report — or no module
+directory at all — yields an artifact marked `complete: false` /
+`tool_error: true` with a `MISSING_MODULES` / `UNEXPECTED_MODULES` /
+`DUPLICATE_MODULES` / `NO_MODULE_REPORTS` reason, its score withheld (counts
+null when nothing arrived or one module reported twice), and a nonzero exit, so
+a subset can never be published as the latest completed run. Only the exact
+expected set merges clean.
 
 Schema version 2 rows carry `schema_version: 2`, `backend: pytest-gremlins`,
 `backend_version: 1.9.0` and a stable `policy` fingerprint (operator set as
