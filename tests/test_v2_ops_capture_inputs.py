@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -478,6 +479,21 @@ def _check(path):
     if not real.startswith(staged_root):
         escaped.append(real)
 
+# MUTSTATS-BOOTSTRAP-BEGIN
+# mutmut 3.8.0 stats-collection bootstrap: the child pytest inherits
+# MUTANT_UNDER_TEST=stats, so the FIRST instrumented call runs
+# mutation/trampoline.py:record_trampoline_hit -> stats.py:config() ->
+# configuration.py lazily reading "setup.cfg" from mutmut's mutants/ workdir
+# -- outside staging. That is harness bootstrap I/O, not a staged source
+# read, so pre-warm the lazy load HERE, BEFORE the audit hooks install
+# (CI run 36025664817, job 10772494330: left lazy, the harness's own
+# setup.cfg was the entirety of escaped_reads). Production imports and
+# the action below stay under the audit.
+if os.environ.get("MUTANT_UNDER_TEST") == "stats":
+    from mutmut.configuration import config as _mutmut_stats_config
+    _mutmut_stats_config()
+# MUTSTATS-BOOTSTRAP-END
+
 _orig_open = builtins.open
 def _open(file, *a, **k):
     _check(file)
@@ -525,9 +541,9 @@ print(json.dumps(outcome))
 """
 
 
-def _run_finality_subprocess(staging: Path, *, tickers=(TICKER,)):
+def _run_finality_subprocess(staging: Path):
     result = subprocess.run(
-        [sys.executable, "-c", _FINALITY_SCRIPT, str(staging), SESSION, json.dumps(list(tickers))],
+        [sys.executable, "-c", _FINALITY_SCRIPT, str(staging), SESSION, json.dumps([TICKER])],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr[-4000:]
     return json.loads(result.stdout.strip().splitlines()[-1])
@@ -579,6 +595,194 @@ def test_legacy_finality_fails_without_the_raw_fetch_family(tmp_path):
     outcome = _run_finality_subprocess(staging)
     assert not outcome["ok"]
     assert outcome["code"] == "SOURCE_NOT_FINAL"
+
+
+# --------------------------------------------------------------------------
+# mutmut stats bootstrap ordering (CI run 36025664817 job 10772494330)
+#
+# Astra's trace of installed mutmut 3.8.0: the child pytest inherits
+# MUTANT_UNDER_TEST=stats, so the first instrumented call runs
+# mutation/trampoline.py:record_trampoline_hit -> stats.py:config() ->
+# configuration.py lazily reading setup.cfg from mutmut's mutants/ workdir
+# (outside staging). With the audit hooks already installed, that harness
+# bootstrap read was reported as the job's only escaped read; _FINALITY_SCRIPT
+# now pre-warms config() before the hooks. These ORDINARY tests pin the
+# ordering in an ISOLATED harness that imports no engine module at all --
+# the fake mutmut exists only in the harness subprocess's PYTHONPATH, so a
+# mutation shard's instrumented legacy_adapter.py keeps importing the REAL
+# mutmut.mutation.trampoline in the parent process -- and the bootstrap
+# block is lifted VERBATIM from _FINALITY_SCRIPT, so the tests track any
+# edit to the production script: (1) pre-audit bootstrap reads never
+# escape, (2) the same read post-audit still registers as an escape (no
+# setup.cfg whitelist; the ordering mutant must not pass silently), (3) the
+# guard keeps the non-mutmut path free of any mutmut config read.
+# --------------------------------------------------------------------------
+
+_BOOTSTRAP_BEGIN = "# MUTSTATS-BOOTSTRAP-BEGIN"
+_BOOTSTRAP_END = "# MUTSTATS-BOOTSTRAP-END"
+
+_FAKE_MUTMUT_CONFIGURATION = r'''
+import configparser
+import os
+
+_CACHED = None
+
+
+def config():
+    """3.8.0 shape: reads this package's setup.cfg ONCE through open(), then
+    caches -- the cache is what makes a pre-audited call silence every
+    later trampoline read."""
+    global _CACHED
+    if _CACHED is None:
+        parser = configparser.ConfigParser()
+        parser.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.cfg"))
+        log = os.environ.get("FAKE_MUTUT_CONFIG_LOG")
+        if log:  # os.open, not open(): the log write must not read as escape
+            fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+            try:
+                os.write(fd, b"config_read\n")
+            finally:
+                os.close(fd)
+        _CACHED = parser
+    return _CACHED
+'''
+
+_FAKE_MUTMUT_TRAMPOLINE = r'''
+import os
+
+
+def record_trampoline_hit(key):
+    if os.environ.get("MUTANT_UNDER_TEST") == "stats":
+        from mutmut.configuration import config
+        config()
+'''
+
+
+def _build_fake_mutmut(base: Path) -> tuple[Path, Path]:
+    """Returns (harness-subprocess-only PYTHONPATH entry, the setup.cfg its
+    config() reads) -- the setup.cfg sits OUTSIDE any staging root, exactly
+    like mutmut's own <mutants>/setup.cfg did in the failed CI job. The
+    package provides only what the bootstrap block and the simulated
+    trampoline touch; it never shadows the real mutmut for engine imports."""
+    pkg = base / "fake_mutmut" / "mutmut"
+    (pkg / "mutation").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mutation" / "__init__.py").write_text("")
+    (pkg / "configuration.py").write_text(_FAKE_MUTMUT_CONFIGURATION)
+    (pkg / "mutation" / "trampoline.py").write_text(_FAKE_MUTMUT_TRAMPOLINE)
+    setup_cfg = pkg / "setup.cfg"
+    setup_cfg.write_text("[mutmut]\n")
+    return base / "fake_mutmut", setup_cfg
+
+
+def _bootstrap_block() -> str:
+    """The fix, verbatim from _FINALITY_SCRIPT between its markers; keep the
+    markers in sync with this extraction."""
+    begin = _FINALITY_SCRIPT.index(_BOOTSTRAP_BEGIN)
+    end = _FINALITY_SCRIPT.index(_BOOTSTRAP_END) + len(_BOOTSTRAP_END) + 1
+    block = _FINALITY_SCRIPT[begin:end]
+    assert 'if os.environ.get("MUTANT_UNDER_TEST") == "stats":' in block
+    assert "_mutmut_stats_config()" in block
+    assert begin < _FINALITY_SCRIPT.index("builtins.open = _open")  # pre-audit
+    return block
+
+
+_HARNESS_HEAD = r"""
+import builtins, json, os, sys
+from pathlib import Path as _Path
+staged_root = os.path.realpath(sys.argv[1])
+escaped = []
+def _check(path):
+    try:
+        real = os.path.realpath(str(path))
+    except OSError:
+        return
+    if not real.startswith(staged_root):
+        escaped.append(real)
+"""
+
+_HARNESS_AUDIT = r"""
+_orig_open = builtins.open
+def _open(file, *a, **k):
+    _check(file)
+    return _orig_open(file, *a, **k)
+builtins.open = _open
+_orig_path_open = _Path.open
+def _path_open(self, *a, **k):
+    _check(self)
+    return _orig_path_open(self, *a, **k)
+_Path.open = _path_open
+"""
+
+_HARNESS_TRAMPOLINE = r"""
+import mutmut.mutation.trampoline as _trampoline
+_trampoline.record_trampoline_hit("legacy_finality__mutmut_1")
+_trampoline.record_trampoline_hit("legacy_finality__mutmut_1")
+print(json.dumps({"escaped_reads": sorted(set(escaped))}))
+"""
+
+
+def _bootstrap_harness(*, pre_audit: bool) -> str:
+    """head + [bootstrap] + audit hooks + [bootstrap] + simulated first
+    instrumented calls -- the production block exactly where _FINALITY_SCRIPT
+    installs it (pre_audit) or one step later, already inside the audit."""
+    block = _bootstrap_block()
+    early, late = (block, "") if pre_audit else ("", block)
+    return _HARNESS_HEAD + early + _HARNESS_AUDIT + late + _HARNESS_TRAMPOLINE
+
+
+def _run_bootstrap_harness(tmp_path: Path, script: str, fake_dir: Path, log: Path,
+                           *, stats_env: bool) -> dict:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(fake_dir)
+    env["FAKE_MUTUT_CONFIG_LOG"] = str(log)
+    if stats_env:
+        env["MUTANT_UNDER_TEST"] = "stats"
+    else:
+        env.pop("MUTANT_UNDER_TEST", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "staging")],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=60, env=env)
+    assert result.returncode == 0, result.stderr[-4000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_stats_bootstrap_config_read_happens_before_the_read_audit(tmp_path):
+    """The fix: config() resolves once while the hooks are still off, the
+    two simulated instrumented calls hit the cached parser post-audit, and
+    the untouched audit records nothing -- no whitelist, no env clearing."""
+    fake_dir, _ = _build_fake_mutmut(tmp_path)
+    log = tmp_path / "config_reads.log"
+    outcome = _run_bootstrap_harness(tmp_path, _bootstrap_harness(pre_audit=True),
+                                     fake_dir, log, stats_env=True)
+    assert log.read_text().splitlines() == ["config_read"]  # bootstrap ran, once
+    assert outcome["escaped_reads"] == []  # ... and was not misreported
+
+
+def test_config_read_after_the_audit_still_escapes_including_setup_cfg(tmp_path):
+    """Negative control keeping the audit honest: the SAME block installed
+    AFTER the hooks -- the ordering the CI job hit once config() resolved
+    lazily inside the first instrumented call -- and the out-of-staging
+    setup.cfg read is recorded as the escape. A future edit moving the
+    block in _FINALITY_SCRIPT must not pass silently."""
+    fake_dir, setup_cfg = _build_fake_mutmut(tmp_path)
+    log = tmp_path / "config_reads.log"
+    outcome = _run_bootstrap_harness(tmp_path, _bootstrap_harness(pre_audit=False),
+                                     fake_dir, log, stats_env=True)
+    assert log.read_text().splitlines() == ["config_read"]
+    assert outcome["escaped_reads"] == [str(setup_cfg.resolve())]
+
+
+def test_finality_script_never_imports_mutmut_without_the_stats_environment(tmp_path):
+    """The ordinary path is unchanged: the extracted block's guard stays
+    false -- no config() call, no mutmut bootstrap read -- even with the
+    fake on the subprocess path and the same audit installed."""
+    fake_dir, _ = _build_fake_mutmut(tmp_path)
+    log = tmp_path / "config_reads.log"
+    outcome = _run_bootstrap_harness(tmp_path, _bootstrap_harness(pre_audit=True),
+                                     fake_dir, log, stats_env=False)
+    assert not log.exists()
+    assert outcome["escaped_reads"] == []
 
 
 # --------------------------------------------------------------------------
