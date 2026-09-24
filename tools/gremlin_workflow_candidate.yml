@@ -1,0 +1,282 @@
+# Mutation testing (pytest-gremlins), report only. This is the full gremlins
+# workflow DRAFT: editing .github/* is blocked in this environment, so the
+# supervisor applies these exact bytes to .github/workflows/mutation.yml after
+# Astra review. It replaces the mutmut runner; the mutmut tools and historical
+# artifacts stay available for now, but the ACTIVE workflow runs gremlins.
+#
+# Behavior preserved from the mutmut workflow it replaces:
+# - push to main: incremental. Each module restores its newest .gremlins_cache
+#   and gremlins reuses cached results; only what the cache can't reuse is run.
+#   The cache NAMESPACE is an outer fingerprint of EVERY tracked repository input
+#   (git ls-files in the checkout) -- everything a module's outcome depends on but
+#   gremlins' own cache keys do not hash (conftest.py, shared tests/ helpers,
+#   imported production modules, experiment run.py fixtures, the dependency locks,
+#   the mutation/workflow config) -- not a hand list that can drift. Over-
+#   invalidating is the intent -- a stale hit would publish a wrong mutation
+#   outcome, a needless restart only costs one re-run -- so even a docs-only push
+#   may restart a module. The namespace is computed BEFORE the cache is restored/
+#   saved and any fingerprint failure aborts the key step under set -e, so a broken
+#   digest can never restore or write a cache under a wrong key.
+# - weekly schedule, and workflow_dispatch by default: full, from scratch
+#   (no restore, --fresh clears the cache). Dispatch with fresh=false for an
+#   incremental run, and `modules` for a subset.
+# - Scores never fail a job. A job fails ONLY when the tool does: a nonzero
+#   pytest/gremlins exit code, a missing/malformed current-run raw report, or an
+#   ERROR gremlin result. Survivors/score are report-only. Every module job
+#   uploads results.jsonl + summary.json + the raw gremlins.json; the `report`
+#   job merges the module reports into one `mutation-report` artifact, and it
+#   does so even when merge exits nonzero on an ERROR/incomplete module: merge's
+#   rc is captured, the summary it did write is appended, the artifact is
+#   uploaded with always(), and only then does the job fail on that rc.
+#
+# Why a new concurrency group: `mutation-gremlins-...` (not `mutation-...`) so
+# an in-flight old mutmut workflow run cannot block the first gremlins run.
+name: mutation
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 0"  # Sundays 05:23 UTC: full run
+  workflow_dispatch:
+    inputs:
+      fresh:
+        description: "Full run from scratch (clear the gremlins cache). Untick for incremental."
+        type: boolean
+        default: true
+      modules:
+        description: "Comma-separated module subset (empty: every enabled module)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-gremlins-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The phase-0 environment lock (requirements.txt header: "python 3.14.4").
+  # pytest-gremlins 1.9.0 supports Python 3.14.
+  PYTHON_VERSION: "3.14.4"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # gremlins' incremental cache directory, relative to the repo checkout the
+  # plugin runs in. Cached only for incremental runs; the CI cache key pins the
+  # backend version AND the per-module invalidation fingerprint (see the `key`
+  # step), so a backend bump -- or any change to the shared source/test/helper/
+  # lock/config inputs -- restarts the module from scratch.
+  GREMLINS_CACHE: .gremlins_cache
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.plan.outputs.modules }}
+      mode: ${{ steps.plan.outputs.mode }}
+      gremlins: ${{ steps.plan.outputs.gremlins }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          FRESH: ${{ inputs.fresh }}
+          ONLY: ${{ inputs.modules }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
+            mode=incremental
+          else
+            mode=full
+          fi
+          gremlins=$(sed -n 's/^pytest-gremlins==\([^ ]*\).*/\1/p' requirements-dev.txt)
+          test -n "$gremlins"
+          # Assign in its own command, never inside the echo: the exit status of
+          # `echo "modules=$(...)"` is echo's, so a failing matrix command would
+          # write an empty module list and the step would still pass. Under
+          # `set -e` a command substitution in a plain assignment does abort, and
+          # `gremlin_pilot.py matrix --only ,` now refuses instead of emitting
+          # the empty matrix that would silently skip the whole matrix job.
+          modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY")
+          {
+            echo "modules=$modules"
+            echo "mode=$mode"
+            echo "gremlins=$gremlins"
+          } >> "$GITHUB_OUTPUT"
+
+  mutate:
+    needs: plan
+    if: needs.plan.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.plan.outputs.modules) }}
+    env:
+      MODULE: ${{ matrix.module }}
+      MODE: ${{ needs.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the push's base commit, for the report adapter's change window
+      - id: py
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - id: key
+        run: |
+          set -euo pipefail
+          # Assign the fingerprint, never interpolate it inside the echo: the
+          # exit status of `echo "...=$(...)"` is echo's, so a failing digest
+          # would write a truncated prefix and the step would still pass.
+          fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE")
+          echo "prefix=mutation-gremlins${{ needs.plan.outputs.gremlins }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('tools/mutation_pilot.toml') }}-${{ matrix.module }}-${fp}-" >> "$GITHUB_OUTPUT"
+      # Only the gremlins cache is restored, and only for incremental runs: a
+      # full run starts fresh (--fresh clears .gremlins_cache and the workflow
+      # skips the restore). The backend version is pinned in the key, so a
+       # pytest-gremlins bump restarts every module, and ${fp} is the outer
+       # invalidation fingerprint: gremlins' own cache keys only see a mutated
+       # source file's hash and the hashes of the test files it directly selected,
+       # so every OTHER input -- conftest.py, the shared tests/ helpers, the
+       # production modules and experiment run.py fixtures those imports pull in,
+       # the dependency locks and the mutation config -- is folded in here by
+       # hashing ALL tracked repository inputs (git ls-files), not a hand list that
+       # could drift. Over-invalidation is the point (a helper-only or even
+       # docs-only push starts a new namespace; a stale hit would publish a wrong
+       # mutation outcome), while an unchanged tree keeps the same namespace and
+       # restores the newest entry. matrix.module keeps the per-module separation,
+       # so one module's cache never answers for another's.
+      - name: Restore gremlins cache
+        if: needs.plan.outputs.mode == 'incremental'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.GREMLINS_CACHE }}
+          key: ${{ steps.key.outputs.prefix }}${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
+      - name: Run pytest-gremlins
+        id: run
+        timeout-minutes: 330
+        run: |
+          set -euo pipefail
+          date +%s > "$RUNNER_TEMP/gremlin-start"
+          # --fresh only for a full run: it clears .gremlins_cache. Incremental
+          # keeps the cache this job restored above. A plain string (not an
+          # array) so it never trips `set -u` when empty.
+          FRESH=""
+          if [ "$MODE" = "full" ]; then FRESH="--fresh"; fi
+          set +e
+          python -u tools/gremlin_pilot.py run "$MODULE" $FRESH
+          echo "$?" > "$RUNNER_TEMP/gremlin-rc"
+          set -e
+      # Uploaded even if the run failed or the report step below errors, so the
+      # raw result of the current run is always retrievable for triage. The
+      # gremlin_pilot run deleted any older raw report before starting, so this
+      # file -- if present -- is from THIS run.
+      - name: Upload raw gremlins report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gremlin-raw-${{ matrix.module }}
+          path: coverage/gremlins/gremlins.json
+          retention-days: 90
+          if-no-files-found: warn
+      - name: Export report
+        if: always() && steps.key.outcome == 'success'
+        env:
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          rc=$(cat "$RUNNER_TEMP/gremlin-rc" 2>/dev/null || echo -1)  # -1: killed by the step timeout
+          start=$(cat "$RUNNER_TEMP/gremlin-start" 2>/dev/null || date +%s)
+          # set -e: gremlin_results.py export is the gate for a missing/malformed
+          # current-run raw report and for ERROR gremlin results -- a nonzero
+          # exit here must fail the job. Survivors/score never exit nonzero.
+          python tools/gremlin_results.py export "$MODULE" --out "report/$MODULE" --mode "$MODE" \
+            ${BEFORE:+--changed-base "$BEFORE"} --run-exit-code "$rc" --elapsed "$(( $(date +%s) - start ))"
+          cat "report/$MODULE/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.key.outcome == 'success'
+        with:
+          name: mutation-module-${{ matrix.module }}
+          path: report/${{ matrix.module }}/
+          retention-days: 90
+          if-no-files-found: warn
+      # Saved even after a failure, so the next incremental run resumes the cache.
+      - name: Save gremlins cache
+        if: always() && steps.key.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.GREMLINS_CACHE }}
+          key: ${{ steps.key.outputs.prefix }}${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Fail only on a tool error, never on scores
+        if: always() && steps.key.outcome == 'success'
+        run: |
+          rc=$(cat "$RUNNER_TEMP/gremlin-rc" 2>/dev/null || echo -1)
+          if [ "$rc" != 0 ]; then echo "::error::pytest-gremlins run exited $rc"; exit 1; fi
+
+  report:
+    needs: [plan, mutate]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-module-*
+          path: modules
+      - name: Merge module reports
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dirs=(modules/mutation-module-*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "::warning::no module reports to merge"
+            echo 0 > "$RUNNER_TEMP/gremlin-merge-rc"
+            exit 0
+          fi
+          # Capture merge's rc, do NOT let `set -e` skip the rest: merge writes a
+          # diagnostic summary and then exits nonzero when a module came back
+          # ERROR/incomplete. The consolidated artifact and that summary are the
+          # whole point of the report job, so they must survive the nonzero rc;
+          # the job fails on it only in the gate step below.
+          set +e
+          python tools/gremlin_results.py merge --out merged "${dirs[@]}"
+          echo "$?" > "$RUNNER_TEMP/gremlin-merge-rc"
+          set -e
+          if [ -f merged/summary.md ]; then
+            cat merged/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc")
+            # No summary means nothing was consolidated: that is a failure even
+            # when merge's own exit code said otherwise.
+            if [ "$rc" = 0 ]; then
+              echo "::error::merge exited 0 but wrote no merged/summary.md"
+              echo 1 > "$RUNNER_TEMP/gremlin-merge-rc"
+            fi
+          fi
+      # always(): the partial/failed merge output is exactly what triage needs,
+      # so the artifact goes up whether or not the merge succeeded.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: merged/
+          retention-days: 90
+          if-no-files-found: warn
+      - name: Fail only on a merge error, never on scores
+        if: always()
+        run: |
+          rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc" 2>/dev/null || echo -1)
+          if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi

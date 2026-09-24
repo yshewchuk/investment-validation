@@ -20,6 +20,18 @@
 # ~/.cache/investing-plan-mutation-pilot/<name>/. The tool refuses a home
 # inside the repo or under data/.
 
+# Shared module map: the pytest-gremlins runner (tools/gremlin_pilot.py, and the
+# gremlins workflow draft in tools/gremlin_workflow_candidate.yml that the
+# supervisor applies to .github/workflows/mutation.yml) reads THIS file's
+# partition, exclusions, `mutate`/`skip`/`tests` expansion and `[defaults]
+# deselect` unchanged -- it only changes how the mutants are executed (parallel
+# gremlin workers in the repo checkout, not mutmut in a work copy). Keeping one
+# map means the exhaustive module-ownership test (tests/test_mutation_ci.py:
+# every engine/v2 file in exactly one module) governs both backends. The gremlins
+# CI cache key also hashes this file, so an edit here restarts every module --
+# the same as for mutmut. mutmut's own settings and its historical triage and
+# baselines below are unchanged: the gremlins note is additive.
+
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
 #   ceil((est_test_seconds + timeout_constant) * timeout_multiplier * 2)
