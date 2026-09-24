@@ -2183,7 +2183,19 @@ def _execute_chooser(inputs: NativeScoreInputs, name: str,
         _add_flag(flags, "INVALID_CHOOSER_EXECUTOR")
         return {}
     facts = _facts(inputs, values)
-    base = inputs.features.get("model_inputs")
+    # A strict capture serves the champion from the role vector plus the
+    # freshly derived stage columns (``FrozenStageExecutor.execute`` never
+    # reads the merged ``model_inputs`` when ``role_model_inputs`` carries the
+    # chooser's row). The compatibility path, which DOES read ``model_inputs``,
+    # is the only place a declared feature-vector column may shadow a derived
+    # one; shadowing derived columns against ``model_inputs`` on the role-vector
+    # path would hide them from the champion and decline the row with
+    # CHOOSER_MISSING_FEATURES. So the merged vector is only consulted as an
+    # override source when it is actually the one being served.
+    role_rows = inputs.features.get("role_model_inputs")
+    served_from_role = isinstance(role_rows, Mapping) and isinstance(
+        role_rows.get("chooser"), Mapping)
+    base = {} if served_from_role else inputs.features.get("model_inputs")
     base = base if isinstance(base, Mapping) else {}
     derived = derive_chooser_columns(block, facts, name, values,
                                      _quote_map(inputs, name), flags)
