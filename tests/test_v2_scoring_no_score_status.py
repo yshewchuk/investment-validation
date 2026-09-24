@@ -114,12 +114,15 @@ def test_a_refusing_flag_with_numbers_still_refuses():
     assert "NO_SCORE" not in record.reason_codes
 
 
-def test_quote_date_present_iff_pricing_ran():
-    # ``stages._publish_pricing`` leaves ``entry_cost`` None exactly when
-    # pricing did not run (or refused), and ``quote_date`` is a fact about
-    # the quote a price came from: with no price there is no quote date, so
-    # the key must be ABSENT from entry_exit_plan/quote_provenance, not
-    # present-with-None (the entry_cost convention _record_payload follows).
+def test_quote_date_present_iff_genuinely_observed():
+    # Legacy stamps ``result.quote_date`` on the first line of
+    # ``_price_entry`` (engine/score.py:2287), before any chain lookup, so
+    # an unpriced row that REACHED pricing keeps its observed quote date
+    # (Phase 4 parity gap: the projection used to pop it whenever
+    # ``entry_cost`` was None). It must stay ABSENT -- never
+    # present-as-None -- exactly where nothing was observed: no date in
+    # the row's own values, or a pricing stage that never ran (see the
+    # sizing-withhold control in tests/test_v2_scoring_unpriced_quote_date.py).
     fields = {**_fields(), "quote_date": "2026-09-16"}
     # Compatibility input with no quotes: _resolve_pricing returns the
     # fields' own entry_cost (5.0) with refusal=None, so pricing ran.
@@ -130,10 +133,20 @@ def test_quote_date_present_iff_pricing_ran():
     assert priced.quote_provenance.get("quote_date") == "2026-09-16"
 
     # spot=None is the missing essential _resolve_geometry refuses on
-    # (MISSING_SPOT) before pricing: entry_cost ends up None and the
-    # quote_date key must not appear in either dict at all.
+    # (MISSING_SPOT) before pricing: entry_cost ends up None -- but the
+    # pricing stage RAN and the date was genuinely observed, so it is
+    # preserved in both dicts, exactly as the legacy record retains it.
     refused = _score({**fields, "spot": None})
 
     assert refused.resolved_request["entry_cost"] is None
-    assert "quote_date" not in refused.entry_exit_plan
-    assert "quote_date" not in refused.quote_provenance
+    assert refused.entry_exit_plan.get("quote_date") == "2026-09-16"
+    assert refused.quote_provenance.get("quote_date") == "2026-09-16"
+
+    # Same refused row with NO observed date: the key must not appear in
+    # either dict at all (the entry_cost convention's present-as-None
+    # ban), and no date may be synthesized from entry_date.
+    undated = _score({**fields, "spot": None, "quote_date": None})
+
+    assert undated.resolved_request["entry_cost"] is None
+    assert "quote_date" not in undated.entry_exit_plan
+    assert "quote_date" not in undated.quote_provenance
