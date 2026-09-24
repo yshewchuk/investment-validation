@@ -57,7 +57,7 @@ and the engine cannot drift.
     engine/dashboard/nightly.py     the orchestrator (below)
     dashboard/earnings/             the bundle: index.html, assets/, data/
     dashboard/published/            local publish target (releases/ + current)
-    dashboard/earnings_app.py       FastAPI, 0.0.0.0:8711
+    dashboard/earnings_app.py       FastAPI, 127.0.0.1:8711 (loopback by default)
 
 Every datum in `data/` travels twice — as `.json` (what the self-check, the API
 and any other consumer read) and as a `.js` wrapper generated from the same
@@ -74,11 +74,11 @@ every value on screen, including derived ones like rank and premium-vs-fair.
     # the real thing (spends ORATS quota from the 3k/month live reserve)
     python3 -m engine.dashboard.nightly
 
-    # serve it on all interfaces at port 8711
+    # serve it on loopback (127.0.0.1) at port 8711 — the default
     python3 dashboard/earnings_app.py
 
-    # optionally restrict it to the local machine
-    DASHBOARD_HOST=127.0.0.1 python3 dashboard/earnings_app.py
+    # deliberately expose it on every interface (protect that bind yourself)
+    DASHBOARD_HOST=0.0.0.0 python3 dashboard/earnings_app.py
 
     # verify a bundle against the engine by hand
     python3 -m engine.dashboard.selfcheck --bundle dashboard/earnings
@@ -244,11 +244,15 @@ the 3,000-call live reserve.
 
 ### Two things that bite when running it locally
 
-**The server listens on every interface by default.** This supports published
-container ports and direct access through the host network. The board discloses
-position intent and redistributes licensed ORATS-derived quotes, so protect
-port 8711 with the host firewall, container publish rules, or the configured
-access proxy. Set `DASHBOARD_HOST=127.0.0.1` to restore a local-only bind.
+**The server binds loopback (`127.0.0.1`) by default.** That keeps the
+quota-spending `POST /api/refresh` local *by default*, not local-only: a named
+tunnel or a local reverse proxy running on the same host can reach the loopback
+listener and expose the app without any `DASHBOARD_HOST` change, and setting
+`DASHBOARD_HOST=0.0.0.0` binds it to every interface outright. Either way
+exposure is an operator decision — the board discloses position intent and
+redistributes licensed ORATS-derived quotes, so whatever fronts it (the host
+firewall, container publish rules, the access proxy, or the tunnel's own access
+policy) must gate the unauthenticated refresh route.
 
 **Do not leave the desk server warm while the nightly runs.** A `Scorer` is
 held for the process's life, and two at once exceeded a 7 GB box: the nightly
@@ -331,10 +335,18 @@ hand: it backfills the missed nights and marks them LATE.
 ## Remote access
 
 Primary channel: the published static snapshot. Secondary (optional): a named
-cloudflared tunnel to :8711 for desk-time interactive use. The server listens
-on every interface, so host or container network policy controls direct access.
-The published bundle has no mutating endpoint by construction — `POST
-/api/refresh` and anything else that spends quota exists only on the app.
+cloudflared tunnel to :8711 for desk-time interactive use. Loopback blocks
+direct remote connections by default, so another host cannot reach the port
+unless you deliberately set `DASHBOARD_HOST=0.0.0.0` and protect that interface
+with host or container network policy. But a wide bind is not the only way to
+expose it: a `cloudflared` tunnel runs on the same host and connects to the
+`127.0.0.1` listener, offering remote access *without* setting
+`DASHBOARD_HOST=0.0.0.0` (a local reverse proxy behaves the same way). So the
+default is local and exposure is an operator decision — whichever route you
+take, its access policy (Cloudflare Access, or the proxy's own auth) must
+protect the unauthenticated `POST /api/refresh`. The published bundle has no
+mutating endpoint by construction — `POST /api/refresh` and anything else that
+spends quota exists only on the app.
 
 ### Checklist — steps only the account holder can do
 
