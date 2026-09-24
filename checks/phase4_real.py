@@ -96,6 +96,7 @@ from engine.v2.scoring.source_inputs import (  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
     StageReceipt,
+    flags_refuse,
     receipt,
 )
 from engine.v2.serving.score_projection import legacy_score_projection  # noqa: E402
@@ -2364,6 +2365,26 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     legacy_flags = _semantic_flags(record)
     if record.get("strategy") in {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in legacy_flags:
         legacy_flags = legacy_flags + ("UNVALIDATED_STRUCTURE",)
+    # NO_SCORE parity translation (user decision 2026-09-23): native stamps
+    # the native-only NO_SCORE when neither score number is finite and no
+    # flag already refuses (engine/v2/scoring/application.py:183-190);
+    # legacy has no such code, so on the SAME conditions evaluated against
+    # the LEGACY record alone -- unscored by legacy's own rule
+    # (engine/score.py:1335: exp_pnl_model/exp_pnl_analog only, never
+    # exp_pnl_sim) and refusing nothing (flags_refuse) -- expect exactly one
+    # appended NO_SCORE before comparing, decided against the flag tuple
+    # AFTER the CAL-P/CND-P UNVALIDATED_STRUCTURE translation so a synthetic
+    # refusal suppresses the expectation the same way a real one does. Never
+    # derived from the native record, and NO_SCORE stays refusing in
+    # production: a native NO_SCORE on a scored or already-refused legacy
+    # row remains a real finding.
+    legacy_expects_no_score = (
+        record.get("exp_pnl_model") is None
+        and record.get("exp_pnl_analog") is None
+        and not flags_refuse(legacy_flags)
+    )
+    if legacy_expects_no_score:
+        legacy_flags = legacy_flags + ("NO_SCORE",)
 
     flags_agree = native_flags == legacy_flags
     flags_in_native_only = sorted(set(native_flags) - set(legacy_flags))
